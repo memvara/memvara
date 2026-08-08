@@ -18,10 +18,12 @@ neither scans the table three times nor holds the write lock for its own duratio
 from __future__ import annotations
 
 from datetime import datetime
+from time import perf_counter
 
 from ..embed.base import Embedder
 from ..schema import PredicateRegistry
 from ..store.base import Store
+from ..telemetry import CONSOLIDATE_LATENCY_MS, Recorder
 from .decay import BASE_KEY, SALIENCE_FLOOR
 from .decay import decay as _decay
 from .decay import decay_pass
@@ -41,25 +43,33 @@ class Consolidator:
     """
 
     def __init__(self, store: Store, embedder: Embedder, registry: PredicateRegistry,
-                 *, window: int = DEFAULT_WINDOW) -> None:
+                 *, window: int = DEFAULT_WINDOW,
+                 telemetry: Recorder | None = None) -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
         #: Rows per transaction. Lower it on a store with heavy concurrent write
         #: traffic; the sweep gets slower and the writers wait less.
         self.window = window
+        #: Aggregate metrics sink, or `None` (the default and the fast path). This is
+        #: the subsystem whose numbers matter most over a year - see
+        #: `Sweep._observe_slots` - and the one nobody watches, because a scheduled pass
+        #: that has silently stopped running looks exactly like a settled store.
+        self.telemetry = telemetry
 
     def decay(self, tenant: str | None = None, now: datetime | None = None) -> int:
-        return _decay(self.store, self.registry, tenant, now, self.window)
+        return _decay(self.store, self.registry, tenant, now, self.window,
+                      telemetry=self.telemetry)
 
     def merge_duplicates(self, tenant: str | None = None, threshold: float = 0.97,
                          *, neighbourhood: int = NEIGHBOURHOOD) -> int:
         return _merge_duplicates(self.store, self.embedder, self.registry, tenant,
                                  threshold, neighbourhood=neighbourhood,
-                                 window=self.window)
+                                 window=self.window, telemetry=self.telemetry)
 
     def promote(self, tenant: str | None = None, min_observations: int = 3) -> int:
-        return _promote(self.store, tenant, min_observations, window=self.window)
+        return _promote(self.store, tenant, min_observations, window=self.window,
+                        telemetry=self.telemetry)
 
     def run(self, tenant: str | None = None) -> dict[str, int]:
         """All three stages, in the order their outputs feed each other.
@@ -76,11 +86,14 @@ class Consolidator:
         every other connection, measured as a hard `database is locked` at 5.2 s rather
         than as backpressure.
         """
-        sweep = Sweep(self.store, tenant, window=self.window)
+        t0 = perf_counter() if self.telemetry is not None else 0.0
+        sweep = Sweep(self.store, tenant, window=self.window, telemetry=self.telemetry)
         counts = {
             "decayed": decay_pass(sweep, self.registry),
             "merged": merge_pass(sweep, self.embedder, self.registry),
             "promoted": promote_pass(sweep),
         }
         sweep.flush()
+        if self.telemetry is not None:
+            self.telemetry.timing(CONSOLIDATE_LATENCY_MS, (perf_counter() - t0) * 1000.0)
         return counts

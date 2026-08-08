@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, ClassVar
 
+from .entities import OWNER_SEP, entity_key
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -41,6 +43,26 @@ def as_utc(dt: datetime) -> datetime:
 SALIENCE_BASE = "salience_base"
 #: Epoch seconds of the last independent re-observation. See `Claim.last_observed`.
 LAST_OBSERVED = "last_observed_at"
+
+# --- entity identity ------------------------------------------------------------
+# Two more `meta` keys, holding the entity a claim's subject and object resolved to when
+# it was written. `Reconciler` stamps them; `fact_key` and `value_key` read them.
+#
+# They are *frozen at write time* on purpose. Without a stamp these keys would be a pure
+# function of the current alias table, so learning in month six that "Big Blue" is IBM
+# would retroactively restructure month one: claims that had coexisted would start
+# retiring each other and `slot_history()` would return a differently-shaped past.
+# Nothing would be deleted, but "append-only *and* stable" would quietly become
+# "append-only". With the stamp, a claim keeps the identity it was written with, and
+# applying a late alias to existing rows is an explicit, dated, dry-run-first operation —
+# see `engram.write.reconcile.backfill_entities`.
+
+#: Resolved entity of `Claim.subject`. See `engram/entities.py`.
+SUBJECT_ENTITY = "subject_entity"
+#: Resolved entity of `Claim.object`.
+OBJECT_ENTITY = "object_entity"
+#: Timestamped record of every backfill that changed a claim's place in history.
+ENTITY_REKEY = "entity_rekey"
 
 #: Decimal places kept on a stored salience. Salience is a ranking weight, not an
 #: accounting figure, and quantizing kills the sub-nanosecond drift between two
@@ -94,7 +116,34 @@ def owner_key(scope: "Scope") -> str:
     fact no matter which agent or session observed it, so learning "I moved to Lisbon" in
     a fresh session must still retire the old city.
     """
-    return f"{scope.tenant}\x1f{scope.user or ''}"
+    return f"{scope.tenant}{OWNER_SEP}{scope.user or ''}"
+
+
+def default_entity(surface: str) -> str:
+    """The identity a surface form has when nothing has been learned about it.
+
+    A pure function of the text, which is what keeps `Engram.history("user",
+    "works_at")` working: that call builds a probe `Claim` with no meta and no registry
+    in reach, and it still lands on the same key as the stored claims, because they were
+    resolved by this same fold.
+
+    An unfoldable surface ("...", an emoji, a bare separator) keeps its raw text rather
+    than collapsing to the empty string, which would make every such value one value.
+    """
+    return entity_key(surface) or surface
+
+
+def resolved_entity(meta: dict[str, Any], meta_key: str, surface: str) -> str:
+    """Identity of one end of a claim: its stamp if it has one, else the fold.
+
+    Only an *alias* produces a stamp — see `Reconciler._stamp`. Everything the
+    deterministic fold resolves is unstamped, so the common claim carries no entity
+    bookkeeping in its `meta` at all, and a probe built without one agrees with it.
+    """
+    stamped = meta.get(meta_key)
+    if isinstance(stamped, str) and stamped:
+        return stamped
+    return default_entity(surface)
 
 
 def fact_key_for(scope: "Scope", subject: str, predicate: str) -> str:
@@ -104,8 +153,12 @@ def fact_key_for(scope: "Scope", subject: str, predicate: str) -> str:
     cross-predicate supersession, where asserting `unemployed` must retire `works_at` —
     must go through here. Recomputing the hash by hand is how the two silently drift
     apart and a lookup starts matching nothing.
+
+    The subject is folded to its entity identity on the way in, so no caller can derive
+    a key from a raw surface form by forgetting to. `entity_key` is idempotent, so
+    passing an already-resolved identity (as `Claim.fact_key` does) is safe.
     """
-    return content_hash(owner_key(scope), subject, predicate)
+    return content_hash(owner_key(scope), entity_key(subject) or subject, predicate)
 
 
 class MemoryType(str, Enum):
@@ -352,6 +405,23 @@ class Claim:
         if seen is None or seen < moment:
             self.meta[LAST_OBSERVED] = moment.timestamp()
 
+    # --- identity ------------------------------------------------------------
+    # Both keys hash *entity identities*, not the strings the user typed. Hashing the
+    # raw strings made "Acme", "Acme Corp", "acme inc" and "ACME" four different
+    # employers, so a single-valued predicate reported three job changes that never
+    # happened — each one retiring the last, each one explained in full by `why()`.
+    # `subject`/`object` still hold what was actually said; only identity changed.
+
+    @property
+    def subject_key(self) -> str:
+        """Entity this claim is about. See `engram/entities.py`."""
+        return resolved_entity(self.meta, SUBJECT_ENTITY, self.subject)
+
+    @property
+    def object_key(self) -> str:
+        """Entity this claim asserts as the value."""
+        return resolved_entity(self.meta, OBJECT_ENTITY, self.object)
+
     @property
     def fact_key(self) -> str:
         """Identity of the *slot* this claim occupies.
@@ -359,13 +429,19 @@ class Claim:
         Two claims sharing a fact_key are competing answers to the same question.
         For single-valued predicates that is exactly the contradiction condition.
         """
-        return fact_key_for(self.scope, self.subject, self.predicate)
+        return fact_key_for(self.scope, self.subject_key, self.predicate)
 
     @property
     def value_key(self) -> str:
-        """Identity of this exact assertion, for exact-duplicate detection."""
+        """Identity of this exact assertion, for exact-duplicate detection.
+
+        Keyed on the object's *entity*, so a respelling is a re-observation rather than
+        a new value — which is the difference between reinforcing an employer and
+        inventing a job change.
+        """
         return content_hash(
-            self._owner, self.subject, self.predicate, self.object, str(self.polarity)
+            self._owner, self.subject_key, self.predicate, self.object_key,
+            str(self.polarity),
         )
 
     def __repr__(self) -> str:

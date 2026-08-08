@@ -11,6 +11,13 @@ from engram.consolidate import Consolidator
 from engram.embed.base import HashingEmbedder
 from engram.schema import PredicateRegistry
 from engram.store.sqlite import SQLiteStore
+from engram.telemetry import (
+    CONSOLIDATE_CLAIMS_PER_SLOT,
+    CONSOLIDATE_MERGED,
+    CONSOLIDATE_PROMOTED,
+    CONSOLIDATE_ROWS_WRITTEN,
+    MemoryRecorder,
+)
 from engram.types import Claim, Derivation, MemoryType, Scope, utcnow
 
 NOW = utcnow()
@@ -428,3 +435,49 @@ def test_merge_folds_counts_so_a_split_pattern_can_promote(consolidator):
     assert counts["merged"] == 1 and counts["promoted"] == 1
     assert store.get_claim("cl_goal_a").memory_type is MemoryType.SEMANTIC
     assert store.get_claim("cl_goal_a").observation_count == 4
+
+
+# -- telemetry ---------------------------------------------------------------
+
+
+def test_merge_reporting_zero_while_slots_grow_is_the_flip_flop_signature(
+    consolidator,
+) -> None:
+    """The two series have to be read together, which is why both are emitted on every
+    pass. Duplicate rows piling into one slot faster than anything folds them has no
+    symptom until a prompt is half restatements of one fact - and `merged` alone cannot
+    show it, because 0 is also what a healthy settled store reports."""
+    rec = MemoryRecorder()
+    store = consolidator.store
+    for i in range(5):
+        # Distinct enough not to merge, same slot: rows accumulating with nothing to fold.
+        add(store, f"cl_{i}", f"employer number {i}")
+    con = Consolidator(store, consolidator.embedder, consolidator.registry,
+                       telemetry=rec)
+
+    assert con.run() == {"decayed": 5, "merged": 0, "promoted": 0}
+    assert rec.total(CONSOLIDATE_MERGED) == 0
+    assert rec.values(CONSOLIDATE_CLAIMS_PER_SLOT) == [5.0]
+
+
+def test_a_merge_that_actually_folds_something_is_counted(consolidator):
+    rec = MemoryRecorder()
+    store = consolidator.store
+    add(store, "cl_a", "Acme Corp", obs=3)
+    add(store, "cl_b", "acme corp", obs=1)
+    con = Consolidator(store, consolidator.embedder, consolidator.registry,
+                       telemetry=rec)
+    assert con.merge_duplicates() == 1
+    assert rec.total(CONSOLIDATE_MERGED) == 1
+    assert rec.total(CONSOLIDATE_ROWS_WRITTEN) == 2      # survivor and loser
+
+
+def test_promotion_is_counted(consolidator):
+    rec = MemoryRecorder()
+    store = consolidator.store
+    add(store, "cl_goal", "ship v2", predicate="goal", obs=4,
+        memory_type=MemoryType.EPISODIC)
+    con = Consolidator(store, consolidator.embedder, consolidator.registry,
+                       telemetry=rec)
+    assert con.promote() == 1
+    assert rec.total(CONSOLIDATE_PROMOTED) == 1

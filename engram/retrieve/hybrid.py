@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import ClassVar, Sequence
 
 import numpy as np
@@ -42,6 +43,16 @@ import numpy as np
 from ..embed.base import Embedder
 from ..schema import PredicateRegistry
 from ..store.base import Store
+from ..telemetry import (
+    RETRIEVAL_LATENCY_MS,
+    RETRIEVAL_OBSERVATION_RANK_CORR,
+    RETRIEVAL_QUALITY_FACTOR,
+    RETRIEVAL_QUERY,
+    RETRIEVAL_RESULTS,
+    Recorder,
+    rank_correlation,
+    script_of,
+)
 from ..types import (
     CLAIM,
     EPISODE,
@@ -59,6 +70,7 @@ from .scoring import (
     final_score,
     lexical_relevance,
     normalized_score,
+    quality_boost,
     recency_factor,
     relevance,
     vector_relevance,
@@ -178,10 +190,16 @@ class HybridRetriever:
         filter_retry_multiplier: int = 10,
         w_episode: float = 0.5,
         max_episodes: int = 3,
+        telemetry: Recorder | None = None,
     ) -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
+        #: Aggregate metrics sink, or `None` (the default and the fast path). See
+        #: `engram.telemetry`: every emission is guarded, and the two numbers that cost
+        #: something to produce - the rank correlation and the quality factors - are
+        #: computed inside the guard.
+        self.telemetry = telemetry
         self.w_vector = w_vector
         self.w_lexical = w_lexical
         self.rrf_k = rrf_k
@@ -236,6 +254,8 @@ class HybridRetriever:
         """
         if k <= 0:
             return []
+        rec = self.telemetry
+        t0 = perf_counter() if rec is not None else 0.0
 
         # A narrow scope inherits everything above it, so a session-level question can
         # still answer from what the user told us months ago in another session. The
@@ -269,12 +289,64 @@ class HybridRetriever:
                 include_invalidated, wanted, now, min_score)
 
         ranked: list[Retrieved] = list(self._rank(results, k))
-        if not include_episodes or wanted is not None:
-            return ranked
-        return self._interleave(
-            ranked, self._episodes(query, scopes, limit, as_of, min_score), k)
+        if include_episodes and wanted is None:
+            ranked = self._interleave(
+                ranked, self._episodes(query, scopes, limit, as_of, min_score), k)
+        if rec is not None:
+            self._observe(query, ranked, (perf_counter() - t0) * 1000.0)
+        return ranked
 
     # -- internals -----------------------------------------------------------
+
+    def _observe(self, query: str, results: Sequence[Retrieved],
+                 elapsed_ms: float) -> None:
+        """Emit the aggregate view of one search. Never reached with telemetry unset.
+
+        The per-call view is already `Explanation`, and this deliberately does not
+        duplicate it: what is emitted here are the two *distributions* an explanation
+        cannot show, because each of them is a property of many searches rather than of
+        one.
+        """
+        rec = self.telemetry
+        # Sliced by script for the same reason the gate is: query volume from a script
+        # with no corresponding `gate.pass` is a population whose writes are being
+        # dropped and whose reads therefore find nothing.
+        rec.counter(RETRIEVAL_QUERY, script=script_of(query))
+        rec.gauge(RETRIEVAL_RESULTS, float(len(results)))
+        rec.timing(RETRIEVAL_LATENCY_MS, elapsed_ms)
+
+        span = 1.0 + self.w_recency + self.w_confidence + self.w_salience
+        counts: list[float] = []
+        for r in results:
+            if not isinstance(r, Result):
+                # An episode's quality fields sit at their neutral 1.0 meaning "not
+                # applicable" (see `EpisodeResult`), so including them would report a
+                # perfect quality factor for something quality never scored, and an
+                # `observation_count` for something nothing observed.
+                continue
+            counts.append(float(r.claim.observation_count))
+            # Unclamped on purpose. Quality is *supposed* to be able only to pull a
+            # result down from its evidence, and the single way past 1.0 is a salience
+            # reinforced beyond 1.0 - so a value above 1.0 is the direct evidence that
+            # freshness and salience are promoting rather than demoting, which is the
+            # failure this series exists to catch. Clamping would hide it.
+            rec.gauge(RETRIEVAL_QUALITY_FACTOR, quality_boost(
+                recency=r.explain.recency,
+                confidence=r.explain.confidence,
+                salience=r.explain.salience,
+                w_recency=self.w_recency,
+                w_confidence=self.w_confidence,
+                w_salience=self.w_salience,
+            ) / span)
+
+        correlation = rank_correlation(counts)
+        if correlation is not None:
+            # Positive is correct: a fact restated many times should rank above one
+            # mentioned once. This went negative when reinforcement was written onto the
+            # decayed `salience` rather than the storage base and the nightly pass then
+            # erased it — a failure with no exception and no log line anywhere in it,
+            # and one that only a trend across searches can show.
+            rec.gauge(RETRIEVAL_OBSERVATION_RANK_CORR, correlation)
 
     def _gather(
         self,

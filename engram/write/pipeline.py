@@ -23,12 +23,33 @@ holding 31 live claims and answering "where do you work?" with four employers at
 `PredicateRegistry.resolve` now folds surface forms deterministically before anything is
 billed, and the model is asked only about what falls out of that, once, after which the
 answer is recorded as an alias and persisted.
+
+**Where the transaction starts.** The tiers used to run inside one `store.batch()`,
+which on `SQLiteStore` holds a process-wide lock for the length of the block - so tier
+2's `llm.extract()` put an Anthropic round trip inside the lock and one slow extraction
+stalled every read and every write for every tenant in the process. Under a server that
+is not slowness, it is an outage. Candidate production now runs outside every
+transaction and only reconciliation and the embedding writes are inside one.
+
+Measured with a 1.0 s fake extraction and a reader thread searching a 200-claim store
+throughout: **1 completed search in the whole window at p50 1,006 ms, against 516
+completed searches at p50 1.91 ms and p95 2.23 ms.** The write itself takes the same
+1.01 s either way - the point is not that the writer got faster, it is that it stopped
+being everyone else's problem.
+
+The trade that buys, accepted deliberately: episodes commit before claims do, so a crash
+in between leaves an episode with no claims extracted from it. That is the recoverable
+direction. Episodes are the source of truth every provenance guarantee rests on, the
+content hash makes a retry converge on the same rows rather than duplicating them, and
+an unextracted episode is retrievable in its own right (`include_episodes`). The other
+ordering loses raw text to a provider timeout, and nothing can reconstruct that.
 """
 
 from __future__ import annotations
 
 import warnings
 from contextlib import nullcontext
+from datetime import datetime
 from time import perf_counter
 from typing import Any, Mapping, Sequence
 
@@ -36,6 +57,24 @@ from ..embed.base import Embedder
 from ..llm.base import LLM
 from ..schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
 from ..store.base import Store
+from ..telemetry import (
+    FAST_HIT,
+    FAST_MISS,
+    GATE_DROP,
+    GATE_PASS,
+    PREDICATE_ALIAS,
+    PREDICATE_CAPPED,
+    PREDICATE_LEARNED,
+    WRITE_EMBEDDING_REJECTED,
+    WRITE_LATENCY_MS,
+    WRITE_LLM_CALLS,
+    WRITE_LOCK_HELD_MS,
+    WRITE_RECONCILE,
+    WRITE_RETRACTION,
+    WRITE_TURNS,
+    Recorder,
+    script_of,
+)
 from ..types import Claim, Derivation, Episode, MemoryType, WriteReceipt, utcnow
 from .fast import FastExtractor
 from .gate import SalienceGate
@@ -43,18 +82,30 @@ from .reconcile import ReconcileResult, Reconciler
 
 _EXAMPLE_CHARS = 400
 
+#: A re-observation identified outside the transaction and applied inside it: the claim
+#: to bump, the episodes that evidence it, and when the evidence was uttered. Deferred
+#: rather than applied on the spot because the identification is a read and the bump is
+#: a write, and only the write belongs in the transaction.
+_Reinforcement = tuple[Claim, list[str], datetime]
+
 
 class WritePipeline:
     """Runs the tiers in order and reports what each one cost."""
 
     def __init__(self, store: Store, embedder: Embedder, registry: PredicateRegistry,
                  llm: LLM, *, near_dup_threshold: float = 0.97,
-                 reinforce_bump: float = 0.25) -> None:
+                 reinforce_bump: float = 0.25,
+                 telemetry: Recorder | None = None) -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
         self.llm = llm
         self.near_dup_threshold = near_dup_threshold
+        #: Aggregate metrics sink, or `None`. `None` is the fast path and the default:
+        #: every emission below is guarded by an `is not None` test and everything a
+        #: metric needs computed - a script classification, a tag dict - is computed
+        #: inside that guard. See `engram.telemetry`.
+        self.telemetry = telemetry
         self.gate = SalienceGate()
         self.fast = FastExtractor(registry)
         self.reconciler = Reconciler(store, registry)
@@ -80,31 +131,58 @@ class WritePipeline:
         if not episodes:
             receipt.latency_ms = (perf_counter() - t0) * 1000.0
             return receipt
+        rec = self.telemetry
 
-        # One transaction for the whole batch. Ingesting a transcript writes an episode
-        # row, a claim row and an FTS row per turn, plus reconciliation updates; a
-        # durability round-trip on each of those costs far more than the work itself,
-        # and a half-applied transcript is not a state any caller wants to recover from.
+        # -- candidate production, with no transaction open ----------------------
+        # Everything slow lives here: `_tier2` makes a network round trip to a model and
+        # `_tier0_near_dupes` may make one to a hosted embedder. Holding the store's
+        # write lock across either is the difference between a memory layer and an
+        # outage, and nothing in this stretch writes a claim.
+        fresh, pending = self._tier0_partition(episodes, receipt, now)
+
+        # Episodes commit on their own, first. See the module docstring for the trade.
+        if fresh:
+            with self._transaction():
+                for ep in fresh:
+                    self.store.add_episode(ep)
+
+        kept = self._tier0_near_dupes(fresh, receipt, now, pending)
+        gated, fast_claims = self._tier1(kept, receipt)
+        llm_claims = self._tier2(gated, receipt, now)
+
+        # Reconcile in input order so a batch containing two claims for the same slot
+        # resolves the same way every run.
+        candidates: list[Claim] = []
+        for ep in kept:
+            candidates.extend(fast_claims.get(ep.id, ()))
+            candidates.extend(llm_claims.get(ep.id, ()))
+
+        # -- the one transaction that spans claim state --------------------------
+        # Still one transaction rather than one per claim: a transcript writes a claim
+        # row, an FTS row and a vector per turn plus reconciliation updates, and a
+        # durability round trip on each costs far more than the work. What changed is
+        # that nothing inside it can block on a network.
+        lock_t0 = perf_counter() if rec is not None else 0.0
         with self._transaction():
-            fresh = self._tier0_store(episodes, receipt, now)
-            kept = self._tier0_near_dupes(fresh, receipt, now)
-            gated, fast_claims = self._tier1(kept, receipt)
-            llm_claims = self._tier2(gated, receipt, now)
-
-            # Reconcile in input order so a batch containing two claims for the same slot
-            # resolves the same way every run.
-            candidates: list[Claim] = []
-            for ep in kept:
-                candidates.extend(fast_claims.get(ep.id, ()))
-                candidates.extend(llm_claims.get(ep.id, ()))
-
+            for claim, sources, observed_at in pending:
+                receipt.reinforced.append(
+                    self.reconciler.reinforce(claim, sources, observed_at))
             to_embed: list[Claim] = []
             for claim in candidates:
                 claim.recorded_at = now
-                self._absorb(self.reconciler.apply(claim, now=now), receipt, to_embed)
+                self._absorb(claim, self.reconciler.apply(claim, now=now),
+                             receipt, to_embed)
             self._write_embeddings(to_embed)
 
         receipt.latency_ms = (perf_counter() - t0) * 1000.0
+        if rec is not None:
+            # `lock_held_ms` against `latency_ms` is the measurement this restructure
+            # exists to move: the gap between them is work the rest of the process was
+            # not blocked by, and it used to be zero.
+            rec.timing(WRITE_LOCK_HELD_MS, (perf_counter() - lock_t0) * 1000.0)
+            rec.timing(WRITE_LATENCY_MS, receipt.latency_ms)
+            rec.counter(WRITE_TURNS, len(episodes))
+            rec.counter(WRITE_LLM_CALLS, receipt.llm_calls)
         return receipt
 
     def _transaction(self):
@@ -128,53 +206,75 @@ class WritePipeline:
             claim.extractor = "api/assert"
 
         to_embed: list[Claim] = []
-        self._absorb(self.reconciler.apply(claim, now=now), receipt, to_embed)
+        self._absorb(claim, self.reconciler.apply(claim, now=now), receipt, to_embed)
         self._write_embeddings(to_embed)
         receipt.latency_ms = (perf_counter() - t0) * 1000.0
+        if self.telemetry is not None:
+            # No `lock_held_ms` counterpart: this path opens no transaction of its own,
+            # so there is no window to report and inventing one would make the write
+            # path's two entry points look comparable when they are not.
+            self.telemetry.timing(WRITE_LATENCY_MS, receipt.latency_ms)
         return receipt
 
     # -- tier 0 ---------------------------------------------------------------
 
-    def _tier0_store(self, episodes: Sequence[Episode], receipt: WriteReceipt,
-                     now) -> list[Episode]:
+    def _tier0_partition(self, episodes: Sequence[Episode], receipt: WriteReceipt,
+                         now) -> tuple[list[Episode], list[_Reinforcement]]:
+        """Split the batch into genuinely new turns and exact repeats. Reads only.
+
+        Nothing is written here. The episode rows are inserted by the caller, in a
+        transaction of their own, and the reinforcements this identifies are applied in
+        the claim transaction at the end - so a lookup that used to sit behind the write
+        lock now costs nothing but a read.
+        """
         fresh: list[Episode] = []
+        pending: list[_Reinforcement] = []
+        # Hash-identical turns *within one batch* used to be caught by the lookup seeing
+        # an insert made earlier in the same transaction. Every lookup now happens before
+        # every insert, so the batch has to remember its own turns or a transcript that
+        # repeats a line would store it twice and hand back two different episode ids.
+        seen: dict[tuple[str, str], Episode] = {}
         for ep in episodes:
-            existing = self.store.find_episode_by_hash(ep.scope.tenant, ep.hash)
+            key = (ep.scope.tenant, ep.hash)
+            existing = seen.get(key)
+            if existing is None:
+                existing = self.store.find_episode_by_hash(ep.scope.tenant, ep.hash)
             if existing is not None:
                 # Byte-identical text we have already extracted from. Re-running any
                 # extractor on it can only reproduce what it produced the first time, so
                 # we reinforce those claims directly and pay nothing.
                 receipt.episode_ids.append(existing.id)
                 receipt.skipped += 1
-                receipt.reinforced.extend(self._reinforce_from_source(existing, now))
+                pending.extend(self._reinforcements_from_source(existing, now))
                 continue
-            self.store.add_episode(ep)
+            seen[key] = ep
             receipt.episode_ids.append(ep.id)
             fresh.append(ep)
-        return fresh
+        return fresh, pending
 
-    def _reinforce_from_source(self, ep: Episode, now) -> list[Claim]:
-        """Bump every claim that already cites this episode.
+    def _reinforcements_from_source(self, ep: Episode, now) -> list[_Reinforcement]:
+        """Every claim that already cites this episode, queued for a bump.
 
         Linear in the tenant's claim count: the Store protocol carries no reverse
         provenance index and inventing one is outside this subsystem's ownership. It runs
         only on exact repeats, which is the cheap case to begin with.
         """
-        out: list[Claim] = []
-        for c in self.store.iter_claims(ep.scope.tenant):
-            if ep.id in c.sources:
-                # `ep.ts`, not `now`: the observation happened when the turn was
-                # uttered. Stamping wall-clock time here would mark every turn of a
-                # replayed historical transcript as observed today, which is exactly
-                # the recency signal an import exists to reconstruct. Clamped so a
-                # turn dated in the future cannot push the trace clock ahead.
-                out.append(self.reconciler.reinforce(c, [ep.id], min(ep.ts, now)))
-        return out
+        # `ep.ts`, not `now`: the observation happened when the turn was uttered.
+        # Stamping wall-clock time here would mark every turn of a replayed historical
+        # transcript as observed today, which is exactly the recency signal an import
+        # exists to reconstruct. Clamped so a turn dated in the future cannot push the
+        # trace clock ahead.
+        at = min(ep.ts, now)
+        return [(c, [ep.id], at) for c in self.store.iter_claims(ep.scope.tenant)
+                if ep.id in c.sources]
 
     def _tier0_near_dupes(self, episodes: Sequence[Episode], receipt: WriteReceipt,
-                          now) -> list[Episode]:
+                          now, pending: list[_Reinforcement]) -> list[Episode]:
         if not episodes:
             return []
+        # Outside the transaction on purpose: `encode` is a local hash for the shipped
+        # embedder and a network round trip for a hosted one, and the write lock must
+        # not depend on which was configured.
         vecs = self.embedder.encode([ep.content for ep in episodes])
         kept: list[Episode] = []
         for ep, vec in zip(episodes, vecs):
@@ -182,13 +282,15 @@ class WritePipeline:
             if hit is None:
                 kept.append(ep)
                 continue
-            # A restatement of something we already believe. Reinforce and move on
-            # rather than extracting a claim that would immediately dedupe anyway.
-            receipt.reinforced.append(hit)
+            # A restatement of something we already believe. Queue a reinforcement and
+            # move on rather than extracting a claim that would immediately dedupe.
+            claim, at = hit
+            pending.append((claim, [ep.id], at))
             receipt.skipped += 1
         return kept
 
-    def _near_duplicate(self, vec, ep: Episode, now) -> Claim | None:
+    def _near_duplicate(self, vec, ep: Episode, now) -> tuple[Claim, datetime] | None:
+        """The claim this turn merely restates, and when the restatement was uttered."""
         try:
             hits = self.store.vector_search(vec, ep.scope.ancestors(), 1, now, False)
         except ValueError:
@@ -205,26 +307,42 @@ class WritePipeline:
         claim = self.store.get_claim(claim_id)
         if claim is None:
             return None
-        # Same reasoning as `_reinforce_from_source`: a near-duplicate restatement is
-        # evidence dated to the turn that carried it, not to when we processed it.
-        return self.reconciler.reinforce(claim, [ep.id], min(ep.ts, now))
+        # Same reasoning as `_reinforcements_from_source`: a near-duplicate restatement
+        # is evidence dated to the turn that carried it, not to when we processed it.
+        return claim, min(ep.ts, now)
 
     # -- tier 1 ---------------------------------------------------------------
 
     def _tier1(self, episodes: Sequence[Episode],
                receipt: WriteReceipt) -> tuple[list[Episode], dict[str, list[Claim]]]:
+        rec = self.telemetry
         gated: list[Episode] = []
         fast_claims: dict[str, list[Claim]] = {}
         for ep in episodes:
-            ok, _reason = self.gate.carries_fact(ep)
+            ok, reason = self.gate.carries_fact(ep)
+            # Both tier-1 stages are English by construction - a filler vocabulary and a
+            # set of English sentence patterns - and both fail *quietly* on text they
+            # were not built for: the gate drops the turn, the fast path misses and the
+            # turn costs a model call. Neither is visible without the script slice, so
+            # "the write path is cheap" stays an unqualified claim when it may only be
+            # true for Latin-script users.
+            script = script_of(ep.content) if rec is not None else ""
             if not ok:
                 receipt.skipped += 1
+                if rec is not None:
+                    rec.counter(GATE_DROP, reason=reason, script=script)
                 continue
+            if rec is not None:
+                rec.counter(GATE_PASS, reason=reason, script=script)
             claims = self.fast.extract(ep)
             if claims:
                 fast_claims[ep.id] = claims
+                if rec is not None:
+                    rec.counter(FAST_HIT, script=script)
             else:
                 gated.append(ep)
+                if rec is not None:
+                    rec.counter(FAST_MISS, script=script)
         return gated, fast_claims
 
     # -- tier 2 ---------------------------------------------------------------
@@ -248,12 +366,13 @@ class WritePipeline:
         try:
             raw = self.llm.extract(episodes, self.registry.prompt_vocabulary())
         except Exception:
-            # Episodes are the source of truth that every provenance guarantee rests on,
-            # and they are already written. Letting an extraction failure propagate rolls
-            # back the enclosing transaction and destroys them — so a provider 429 during
-            # a long transcript silently loses the raw text it was derived from. The same
-            # guard already wraps predicate acquisition; it was missing on the expensive
-            # call, which is the one that actually fails.
+            # A provider 429 is not a reason to lose a transcript. Episodes are already
+            # committed and are the source of truth every provenance guarantee rests on,
+            # and the same batch's fast-path claims are still in hand and still correct —
+            # letting the failure propagate would discard those too and leave the caller
+            # with an exception instead of a receipt saying what was lost. The same guard
+            # already wraps predicate acquisition; it was missing on the expensive call,
+            # which is the one that actually fails.
             receipt.llm_calls += 1
             receipt.deferred = True
             receipt.unextracted = len(episodes)
@@ -307,6 +426,13 @@ class WritePipeline:
             near = self.registry.nearest(surface)
             if near is not None:
                 self._register_alias(near, surface, tenant)
+            if self.telemetry is not None:
+                # Any of this at all means the ceiling is now load-bearing rather than a
+                # backstop, and `folded=no` means a surface form is live and unregistered
+                # - multi-valued, retiring nothing, which is where duplicate slots come
+                # from.
+                self.telemetry.counter(
+                    PREDICATE_CAPPED, folded="yes" if near is not None else "no")
             return 0
 
         resolve = getattr(self.llm, "resolve_predicate", None)
@@ -333,6 +459,8 @@ class WritePipeline:
             # predicate we are not creating, so it is discarded rather than applied to
             # the target — the canonical predicate's own spec is authoritative.
             self._register_alias(canonical, surface, tenant)
+            if self.telemetry is not None:
+                self.telemetry.counter(PREDICATE_ALIAS)
             return 1
         # Either genuinely new, or the model named something that does not exist. Both
         # land here: a canonical we cannot look up is indistinguishable from a
@@ -348,6 +476,13 @@ class WritePipeline:
             # Persisting that one would resurrect it at the next open and raise the
             # ceiling a process at a time, which is the failure the cap exists to stop.
             self._persist(learned, tenant)
+            if self.telemetry is not None:
+                # Novel registrations per day. A simulation of 10,000 extractions over
+                # six concepts produced 41 predicates; this is the rate that did it, and
+                # it should fall toward zero as a tenant's vocabulary settles. Rising
+                # steadily is predicate explosion, and it has no other symptom until
+                # `recall()` starts answering with four employers at once.
+                self.telemetry.counter(PREDICATE_LEARNED)
         return 1
 
     def _register_alias(self, canonical: str, surface: str, tenant: str) -> None:
@@ -435,8 +570,8 @@ class WritePipeline:
 
     # -- shared ---------------------------------------------------------------
 
-    @staticmethod
-    def _absorb(res: ReconcileResult, receipt: WriteReceipt, to_embed: list[Claim]) -> None:
+    def _absorb(self, candidate: Claim, res: ReconcileResult, receipt: WriteReceipt,
+                to_embed: list[Claim]) -> None:
         if res.action in ("add", "supersede") and res.claim is not None:
             receipt.added.append(res.claim)
             to_embed.append(res.claim)
@@ -448,6 +583,22 @@ class WritePipeline:
             to_embed.append(res.claim)
         receipt.invalidated.extend(res.invalidated)
 
+        rec = self.telemetry
+        if rec is None:
+            return
+        rec.counter(WRITE_RECONCILE, action=res.action)
+        if candidate.polarity < 0:
+            # **A retraction that retires nothing is an anomaly**, and the API cannot
+            # tell you so: `forget()` returns an ordinary receipt whether it cleared the
+            # slot or matched no claim at all. Two things produce it and both matter -
+            # a user trying and failing to take back something poisoned into their
+            # memory, and a `forget()` whose predicate or object does not match what is
+            # actually on record. The second is the ordinary bug; the first is the one
+            # that has to be caught from outside, because the adversary's whole aim is
+            # that it leave no trace.
+            rec.counter(WRITE_RETRACTION,
+                        outcome="retired" if res.invalidated else "noop")
+
     def _write_embeddings(self, claims: Sequence[Claim]) -> None:
         if not claims:
             return
@@ -457,11 +608,16 @@ class WritePipeline:
                 self.store.set_embedding(claim.id, vec)
             except ValueError as e:
                 # The store is the source of truth; the vector index is derived from it.
-                # Losing a derived entry must never lose the claim — and since `add()`
-                # now runs inside one transaction, raising here would roll back an
+                # Losing a derived entry must never lose the claim — and since the claim
+                # write runs inside one transaction, raising here would roll back an
                 # entire transcript over a single bad vector. Warn once, because a
                 # misconfigured embedder that silently produced an unsearchable store
                 # would be far worse than a noisy one.
+                if self.telemetry is not None:
+                    # Warn-*once* is right for a human reading stderr and useless for
+                    # anyone asking six months later how big the hole is. The counter is
+                    # per-claim and is the only thing that answers that.
+                    self.telemetry.counter(WRITE_EMBEDDING_REJECTED)
                 if not self._warned_embedding:
                     self._warned_embedding = True
                     warnings.warn(

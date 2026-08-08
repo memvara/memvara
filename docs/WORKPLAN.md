@@ -246,3 +246,73 @@ A needs a per-claim "when was this last observed". **Prefer `Claim.meta`** — i
 persisted as JSON and needs no schema change, so A can land without waiting on B. If you
 conclude a real column is required, say so in your report and I will schedule it; do not
 edit `engram/store/*` (B owns it this wave).
+
+---
+
+# Wave 3 — contracts
+
+Wave 2 merged: 1,414 tests, 100% coverage. Same rules — exclusive ownership, whole suite
+green and coverage at 100% before reporting, and if you break a test in a file you do not
+own, **report the name rather than editing it**.
+
+| workstream | owns |
+|---|---|
+| **E — entity resolution** | `engram/entities.py` (new), `engram/types.py`, `engram/write/reconcile.py`, `tests/test_entities.py` (new), `tests/test_reconcile.py`, `tests/test_types.py` |
+| **F — store + API completeness + async** | `engram/store/*`, `engram/core.py`, `engram/aio.py` (new), `tests/test_store.py`, `tests/test_api.py`, `tests/test_aio.py` (new) |
+| **G — observability + lock hoisting** | `engram/telemetry.py` (new), `engram/write/pipeline.py`, `engram/consolidate/*`, `engram/retrieve/hybrid.py`, `tests/test_telemetry.py` (new), `tests/test_pipeline.py`, `tests/test_hybrid.py`, `tests/test_decay.py`, `tests/test_merge.py` |
+
+Mine: `engram/__init__.py`, `engram/compat/*`, `engram/server/*`, `README.md`, `docs/*`,
+`bench/*`, `tests/test_edges.py`, `tests/test_internals.py`, `tests/test_integration.py`,
+`tests/test_compat.py`, `tests/test_server.py`, `tests/test_vecindex.py`.
+
+## Pinned interfaces
+
+### E-1. Entity persistence (F implements, E calls)
+
+Mirrors the predicate-spec pattern that already works:
+
+```python
+store.put_entity(entity_id: str, canonical: str, aliases: Sequence[str], tenant: str) -> None
+store.all_entities(tenant: str) -> list[tuple[str, str, tuple[str, ...]]]
+```
+
+Tenant-scoped for the same reason predicates are: one tenant deciding that "Acme" and
+"Acme Corp" are one entity must not decide it for another. Bump `SCHEMA_VERSION` and
+migrate.
+
+### E-2. `fact_key` / `value_key` may key on entity ids (E owns `types.py`)
+
+No signature changes — `Claim.fact_key` stays a property. F's indexes are on the value,
+so nothing in the store changes shape. **`fact_key_for()` remains the only supported way
+to derive a key for a predicate other than a claim's own.**
+
+### F-1. Per-claim erasure (C's highest-value gap)
+
+```python
+store.erase_claim(claim_id: str) -> bool      # irreversible; claim + FTS + vector
+Engram.erase(claim_id, *, tenant=, user=, ...) -> bool   # scope-checked like why()
+```
+
+Distinct from `delete()`, which retires. The mem0 shim currently warns that it cannot
+honour `delete(memory_id)` because retirement leaves the text readable — that warning
+should become unnecessary.
+
+### F-2. Provenance-preserving writes (C had to bypass the facade for these)
+
+```python
+Engram.remember(..., sources=Sequence[str] | None, text: str | None)
+Engram.supersede(old_claim_id, new_claim) -> WriteReceipt   # sets invalidated_by
+```
+
+C currently reaches `store.add_episode()` + `writer.assert_claim()` + `store.invalidate()`
+directly — public objects, but below the facade, so a refactor breaks compat silently.
+
+### G-1. Telemetry (G owns the module, F wires it)
+
+```python
+Engram(..., telemetry=Recorder | None)
+```
+
+A `Recorder` protocol with a no-op default. **Must impose no measurable cost when unset** —
+this library's whole argument is about cost, so an always-on hook would be self-defeating.
+G defines the protocol and the emission points; F adds the one constructor parameter.

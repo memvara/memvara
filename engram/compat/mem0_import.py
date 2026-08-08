@@ -55,7 +55,7 @@ from ..core import Engram
 from ..llm.base import LLM
 from ..types import Claim, Derivation, Episode, Scope
 from ._notes import NOTE_PREDICATE, build_note, ensure_note_predicate, note_subject
-from ._notes import SUBJECT_PREFIX, supersede, write_note
+from ._notes import SUBJECT_PREFIX, write_note
 
 #: Payload keys mem0 has used for the memory text across versions.
 _TEXT_KEYS = ("memory", "data", "text")
@@ -397,8 +397,10 @@ def import_mem0(
                 receipt.ignored += 1
                 continue
             # Transaction time closes here: mem0 stopped believing it at this instant,
-            # and that is the fact being imported.
-            supersede(mem, current, event.ts, None)
+            # and that is the fact being imported. `delete` closes both axes in one
+            # transaction and is scope-checked, which costs nothing — the claim was
+            # written by this import, into this event's scope.
+            mem.delete(current.id, at=event.ts, **_scope_kw(event.scope))
             receipt.deleted += 1
             continue
 
@@ -414,12 +416,12 @@ def import_mem0(
         )
         previous = live.get(event.memory_id)
         if previous is not None:
-            # Retired *before* the new value is written, and with the new id recorded, so
-            # `why()` reports what replaced what and the reconciler does not stamp the
-            # retirement with today's clock instead of mem0's.
-            supersede(mem, previous, event.ts, claim.id)
             receipt.updated += 1
-        written = write_note(mem, claim, episode)
+        # Retirement and assertion in one transaction, the retirement first and carrying
+        # the new id — so `why()` reports what replaced what, the reconciler does not
+        # stamp today's clock over mem0's, and a crash mid-import cannot leave the slot
+        # empty rather than updated.
+        written = write_note(mem, claim, episode, retire=previous, at=event.ts)
         imported.add(event.memory_id)
         if written.added:
             receipt.claims += 1

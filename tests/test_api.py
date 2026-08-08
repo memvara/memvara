@@ -21,10 +21,12 @@ import pytest
 
 from engram import (
     CachedEmbedder,
+    Claim,
     DegradedExtractionWarning,
     EmbedderChangedWarning,
     EmbedderMismatchError,
     Engram,
+    Episode,
     HashingEmbedder,
     NullLLM,
     Scope,
@@ -981,3 +983,343 @@ def test_purging_a_user_takes_their_transcript_out_of_the_index(mem):
     bob = mem.scope(user="bob").search("kafka", include_episodes=True)
     carol = mem.scope(user="carol").search("kafka", include_episodes=True)
     assert bob == [] and len(carol) == 1
+
+
+# =============================================================================
+# Per-claim erasure: the other reading of "delete this memory"
+# =============================================================================
+
+def test_erase_removes_the_claim_the_index_and_the_vector(mem):
+    """`delete()` retires, which is right for correcting a belief and wrong for an
+    erasure request: the text, its source turn and its embedding all stay on disk and
+    `history()` keeps returning them."""
+    mem.remember("user", "lives_in", "Berlin")
+    claim = mem.get_all()[0]
+
+    assert mem.erase(claim.id) is True
+
+    assert mem.get(claim.id) is None
+    assert mem.get_all(include_invalidated=True) == []
+    assert mem.history("user", "lives_in") == [], "erasure has to defeat history()"
+    assert mem.search("berlin") == []
+    assert mem.store.get_embedding(claim.id) is None
+
+
+def test_delete_and_erase_are_different_operations(mem):
+    """Both are reasonable readings of "delete this memory" and they disagree about the
+    thing that matters, so they are two methods rather than a flag."""
+    mem.remember("user", "lives_in", "Berlin")
+    retired = mem.get_all()[0]
+    mem.remember("user", "likes", "coffee")
+    erased = [c for c in mem.get_all() if c.predicate == "likes"][0]
+
+    assert mem.delete(retired.id) is True
+    assert mem.erase(erased.id) is True
+
+    assert len(mem.history("user", "lives_in")) == 1, "retired, and still on the record"
+    assert mem.history("user", "likes") == [], "erased, and off it"
+
+
+def test_erase_is_silently_false_rather_than_an_existence_oracle(mem):
+    """Scope-checked like `why()`: claim ids leak through receipts, `invalidated_by`
+    pointers, results and logs, so an error confirming that one exists is a disclosure
+    in itself."""
+    mem.scope(user="bob").remember("user", "lives_in", "Berlin")
+    theirs = mem.get_all(user="bob")[0]
+
+    assert mem.erase(theirs.id, user="carol") is False
+    assert mem.erase("cl_never_existed") is False
+    assert mem.get(theirs.id, user="bob") is not None, "and nothing was erased"
+
+
+def test_erase_leaves_the_source_turn_unless_asked(mem):
+    """A turn can be the origin of several claims and can hold a great deal no claim
+    was extracted from, so erasing it as a side effect deletes data nobody named."""
+    mem.add("I live in Berlin, which we settled at the offsite")
+    claim = mem.get_all()[0]
+    (episode,) = list(mem.store.iter_episodes())
+
+    mem.erase(claim.id)
+    assert mem.store.get_episode(episode.id) is not None
+    assert len(mem.search("offsite", include_episodes=True)) == 1
+
+    # The same fact again, this time asked for with its source.
+    mem.remember("user", "lives_in", "Berlin", sources=[episode.id])
+    mem.erase(mem.get_all()[0].id, sources=True)
+    assert mem.store.get_episode(episode.id) is None
+    assert mem.search("offsite", include_episodes=True) == [], \
+        "sources=True is what a memory that *is* its source text needs"
+
+
+def test_erase_refuses_to_fake_itself_on_a_store_that_cannot_do_it():
+    """A caller told "erased" whose text is still readable is the failure this method
+    exists to remove, so degrading to `delete()` would be worse than not having it."""
+    class NoEraseStore(SQLiteStore):
+        erase_claim = None
+
+    with Engram(store=NoEraseStore(":memory:"), embedder=HashingEmbedder(dim=32),
+                llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+        with pytest.raises(NotImplementedError, match="cannot be faked with retirement"):
+            mem.erase(mem.get_all()[0].id)
+
+
+# =============================================================================
+# Provenance-preserving writes
+# =============================================================================
+
+def test_remember_can_cite_turns_that_are_already_stored(mem):
+    mem.add("I live in Berlin")
+    episode_id = next(iter(mem.store.iter_episodes())).id
+
+    mem.remember("user", "works_at", "Acme", sources=[episode_id])
+
+    provenance = mem.why([c for c in mem.get_all() if c.predicate == "works_at"][0].id)
+    assert [e.id for e in provenance.episodes] == [episode_id]
+
+
+def test_remember_can_store_the_turn_it_cites_in_the_same_transaction(mem):
+    """Written separately, a crash between the two leaves a claim citing a turn that
+    does not exist — a dangling `why()` in the one library whose pitch is that
+    provenance always resolves."""
+    source = Episode(content="Likes pizza", scope=mem.default_scope)
+    mem.remember("note:9f2c", "note", "Likes pizza", sources=[source])
+
+    claim = mem.get_all()[0]
+    assert claim.sources == [source.id]
+    assert [e.content for e in mem.why(claim.id).episodes] == ["Likes pizza"]
+    assert mem.store.get_episode_embedding(source.id) is not None, \
+        "indexed on the same terms add() indexes its turns, or it is text-only"
+
+
+def test_remember_indexes_the_text_it_was_given_not_the_slot_address(mem):
+    """`remember()` renders "<subject> <predicate> <object>", so for an opaque imported
+    memory the embedded and BM25-indexed string is the slot address and the sentence is
+    nowhere in the index."""
+    mem.remember("mem0:9f2c", "note", "the kafka pipeline is being sunset",
+                 text="the kafka pipeline is being sunset")
+
+    claim = mem.get_all()[0]
+    assert claim.text == "the kafka pipeline is being sunset"
+    assert [r.claim.id for r in mem.search("kafka")] == [claim.id]
+
+
+def test_remember_still_renders_the_triple_when_no_text_is_given(mem):
+    mem.remember("user", "lives_in", "Berlin")
+    assert mem.get_all()[0].text == "user lives in Berlin"
+
+
+def test_remember_records_who_asserted_the_fact(mem):
+    """An integration writing on someone else's behalf has to be able to say so, or a
+    later audit cannot tell an imported memory from one this application asserted."""
+    mem.remember("user", "lives_in", "Berlin", extractor="mem0-import")
+    claim = mem.get_all()[0]
+    assert claim.extractor == "mem0-import"
+    assert mem.why(claim.id).extractor == "mem0-import"
+    assert claim.derivation is core_module.Derivation.USER
+
+
+def test_supersede_records_what_replaced_what(mem):
+    """Neither `delete()` nor asserting the new value writes `invalidated_by`, and
+    without that pointer `why()` on the new claim reports nothing superseded — which is
+    exactly the history an import of somebody else's mutation log exists to rebuild."""
+    mem.remember("mem0:9f2c", "note", "Likes pizza", text="Likes pizza")
+    old = mem.get_all()[0]
+
+    replacement = Claim(subject="mem0:9f2c", predicate="note", object="Likes calzone",
+                        text="Likes calzone", scope=mem.default_scope)
+    receipt = mem.supersede(old.id, replacement)
+
+    assert [c.id for c in receipt.added] == [replacement.id]
+    assert mem.get(old.id).invalidated_by == replacement.id
+    assert [c.id for c in mem.why(replacement.id).superseded] == [old.id]
+
+
+def test_supersede_closes_both_time_axes_at_the_new_claims_instant(mem):
+    """Retiring after the new claim is written lets the reconciler get there first and
+    stamp the retirement with the wall clock, which silently turns a backdated import
+    into a pile of things that all changed today."""
+    then = utcnow() - timedelta(days=400)
+    mem.remember("mem0:9f2c", "note", "Likes pizza", text="Likes pizza",
+                 valid_from=then, recorded_at=then)
+    old = mem.get_all()[0]
+
+    at = utcnow() - timedelta(days=200)
+    mem.supersede(old.id, Claim(subject="mem0:9f2c", predicate="note",
+                                object="Likes calzone", text="Likes calzone",
+                                scope=mem.default_scope, valid_from=at, recorded_at=at))
+
+    retired = mem.get(old.id)
+    assert retired.invalidated_at == at and retired.valid_to == at
+    as_of = mem.get_all(as_of=at - timedelta(days=1))
+    assert [c.object for c in as_of] == ["Likes pizza"], "the past still reads correctly"
+
+
+def test_supersede_takes_an_explicit_instant_when_the_two_differ(mem):
+    mem.remember("user", "lives_in", "Berlin")
+    old = mem.get_all()[0]
+    at = utcnow() - timedelta(days=5)
+
+    mem.supersede(old.id, Claim(subject="user", predicate="lives_in", object="Lisbon",
+                                scope=mem.default_scope), at=at)
+    assert mem.get(old.id).invalidated_at == at
+
+
+def test_supersede_refuses_an_id_this_scope_cannot_see(mem):
+    """All-or-nothing: a supersession that lost its predecessor is not a partial
+    success, it is two live answers to one question. The same error for "no such claim"
+    as for "not yours", so it cannot be used to test whether an id exists elsewhere."""
+    mem.scope(user="bob").remember("user", "lives_in", "Berlin")
+    theirs = mem.get_all(user="bob")[0]
+    replacement = Claim(subject="user", predicate="lives_in", object="Lisbon",
+                        scope=Scope("default", "carol"))
+
+    with pytest.raises(KeyError):
+        mem.supersede(theirs.id, replacement, user="carol")
+    with pytest.raises(KeyError):
+        mem.supersede("cl_never_existed", replacement)
+
+    assert mem.get(theirs.id, user="bob").invalidated_by is None
+    assert mem.get_all(user="carol") == [], "and nothing was written"
+
+
+def test_a_scope_view_covers_erasure_and_supersession(mem):
+    view = mem.scope(user="ivan")
+    view.remember("user", "lives_in", "Berlin")
+    old = view.get_all()[0]
+
+    view.supersede(old.id, Claim(subject="user", predicate="lives_in", object="Lisbon",
+                                 scope=view.scope))
+    assert view.get(old.id).invalidated_by is not None
+
+    assert view.erase(view.get_all()[0].id) is True
+    assert view.get_all() == []
+
+
+# =============================================================================
+# Telemetry wiring
+# =============================================================================
+
+class Sink:
+    """Records what it is handed. The protocol is three methods; this is all of it."""
+
+    def __init__(self):
+        self.seen = []
+
+    def counter(self, name, value=1, /, **tags):
+        self.seen.append(name)
+
+    def gauge(self, name, value, /, **tags):
+        self.seen.append(name)
+
+    def timing(self, name, ms, /, **tags):
+        self.seen.append(name)
+
+
+def test_one_constructor_argument_reaches_all_three_subsystems():
+    """A caller should not have to know that writing, reading and consolidation are
+    separately constructible objects to get one set of numbers out of them."""
+    sink = Sink()
+    with Engram(embedder=HashingEmbedder(dim=32), llm=NullLLM(), user="alice",
+                telemetry=sink) as mem:
+        assert mem.telemetry is sink
+        assert mem.writer.telemetry is sink
+        assert mem.reader.telemetry is sink
+        assert mem.consolidator.telemetry is sink
+        mem.add("I live in Berlin")
+        # `include_episodes` because a wired reader has to be exercised on both kinds of
+        # result: a turn carries no quality fields to report, and the emission path has
+        # to skip it rather than report a perfect score for something never scored.
+        mem.search("where do they live", include_episodes=True)
+        assert sink.seen
+
+
+def test_telemetry_is_off_by_default_rather_than_a_no_op_object():
+    """The library's whole argument is about cost, so the unset path has to be an
+    `is not None` check rather than a call into a do-nothing recorder."""
+    with Engram(embedder=HashingEmbedder(dim=32), llm=NullLLM()) as mem:
+        assert mem.telemetry is None
+        assert mem.writer.telemetry is None
+        assert mem.reader.telemetry is None
+        assert mem.consolidator.telemetry is None
+
+
+def test_a_subsystem_can_still_be_pointed_somewhere_else():
+    sink, other = Sink(), Sink()
+    with Engram(embedder=HashingEmbedder(dim=32), llm=NullLLM(), telemetry=sink,
+                read_telemetry=other) as mem:
+        assert mem.writer.telemetry is sink
+        assert mem.reader.telemetry is other
+
+
+def test_supersede_stores_the_turn_the_new_value_came_from(mem):
+    """A replayed update arrives as a new turn *and* a new value, so the two have to
+    land together — which is the last thing that made an integration reach past the
+    facade to `store.add_episode()`."""
+    first = Episode(content="Likes pizza", scope=mem.default_scope)
+    mem.remember("mem0:9f2c", "note", "Likes pizza", text="Likes pizza", sources=[first])
+    old = mem.get_all()[0]
+
+    second = Episode(content="Likes calzone", scope=mem.default_scope)
+    replacement = Claim(subject="mem0:9f2c", predicate="note", object="Likes calzone",
+                        text="Likes calzone", scope=mem.default_scope)
+    mem.supersede(old.id, replacement, sources=[second])
+
+    assert [e.content for e in mem.why(replacement.id).episodes] == ["Likes calzone"]
+    assert [c.id for c in mem.why(replacement.id).superseded] == [old.id]
+    assert mem.store.get_episode(second.id) is not None
+
+
+def test_citing_a_turn_adds_to_the_claims_own_sources(mem):
+    """`sources=` on the call and `Claim.sources` on the object are the same list, so a
+    caller-built claim that already names a turn keeps it."""
+    known = Episode(content="Likes pizza", scope=mem.default_scope)
+    mem.store.add_episode(known)
+    extra = Episode(content="Also likes calzone", scope=mem.default_scope)
+
+    claim = Claim(subject="user", predicate="likes", object="pizza",
+                  scope=mem.default_scope, sources=[known.id])
+    mem.supersede(mem.remember("user", "likes", "anchovies").added[0].id, claim,
+                  sources=[extra, known.id])
+
+    assert claim.sources == [known.id, extra.id], "de-duplicated, order preserved"
+
+
+def test_a_crash_before_indexing_leaves_the_turn_durable_and_findable(mem):
+    """The trade `add()` accepts by not holding one transaction over the whole write.
+
+    Wrapping the pipeline in an outer batch made this state unreachable, and cost every
+    concurrent reader the length of an extraction call — the store's write lock was held
+    across encode and the model round-trip. So the window is real now: a crash between
+    the pipeline's commit and the vector write leaves a turn with no vector. It is the
+    recoverable direction, and this pins both halves of why.
+    """
+    def explode(*a, **kw):
+        raise RuntimeError("crash before the vector is written")
+
+    mem._index_episodes = explode
+    with pytest.raises(RuntimeError):
+        mem.add("I live in Berlin")
+
+    # Durable, and still findable — the store indexes text on write, so only the
+    # *vector* is missing. A turn that vanished, or one that no retriever could reach,
+    # would make this trade a bad one.
+    assert mem.store.stats()["episodes"] == 1
+    assert mem.search("Berlin")
+    assert mem.get_all(), "the claim committed with its turn"
+
+
+def test_a_retry_after_that_crash_converges_on_one_vector(mem):
+    """`_index_episodes` skips turns that already have a vector, so the retry is what
+    closes the window rather than leaving it open forever."""
+    original = mem._index_episodes
+    mem._index_episodes = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom"))
+    with pytest.raises(RuntimeError):
+        mem.add("I live in Berlin")
+    before = mem.store.stats()
+
+    mem._index_episodes = original
+    mem.add("I live in Berlin")
+    after = mem.store.stats()
+    assert after["episodes"] == before["episodes"] == 1
+    assert after["claims"] == before["claims"] == 1

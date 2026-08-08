@@ -31,6 +31,14 @@ from engram.retrieve import (
 )
 from engram.schema import PredicateRegistry
 from engram.store import SQLiteStore
+from engram.telemetry import (
+    RETRIEVAL_LATENCY_MS,
+    RETRIEVAL_OBSERVATION_RANK_CORR,
+    RETRIEVAL_QUALITY_FACTOR,
+    RETRIEVAL_QUERY,
+    RETRIEVAL_RESULTS,
+    MemoryRecorder,
+)
 from engram.types import Claim, Episode, MemoryType, Scope
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -1705,3 +1713,149 @@ def test_a_weak_turn_never_costs_a_claim_its_slot(
 
     found = retriever.search("alice rated kafka", EP_SCOPE, k=5, include_episodes=True)
     assert {r.claim.id for r in found} == {c.id for c in claims}
+
+
+# ===========================================================================
+# Telemetry: the aggregate view an Explanation cannot give
+# ===========================================================================
+#
+# `Explanation` already answers "why did this one result surface?" precisely. What it
+# cannot answer is whether the ranking is drifting, because both of the silent
+# retrieval failures are properties of a *distribution* across many searches: quality
+# signals quietly outranking evidence, and reinforcement failing to reach the ranking
+# at all.
+
+
+def test_a_search_reports_volume_shape_and_latency(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    rec = MemoryRecorder()
+    scope = Scope("acme", "alice")
+    add(store, embedder, "alice works at acme", scope, predicate="works_at")
+    reader = HybridRetriever(store, embedder, PredicateRegistry(), telemetry=rec)
+
+    reader.search("where does alice work", scope)
+    assert rec.total(RETRIEVAL_QUERY, script="latin") == 1
+    assert rec.values(RETRIEVAL_RESULTS) == [1.0]
+    assert len(rec.values(RETRIEVAL_LATENCY_MS)) == 1
+
+
+def test_query_volume_is_sliced_by_script_so_it_pairs_with_the_gate(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """A script with query volume and no `gate.pass` is a population whose writes are
+    being dropped, and whose reads therefore find nothing. Neither half says that
+    alone."""
+    rec = MemoryRecorder()
+    scope = Scope("acme", "alice")
+    reader = HybridRetriever(store, embedder, PredicateRegistry(), telemetry=rec)
+    reader.search("where does alice live", scope)
+    reader.search("我住在哪里", scope)
+    assert rec.total(RETRIEVAL_QUERY, script="latin") == 1
+    assert rec.total(RETRIEVAL_QUERY, script="han") == 1
+
+
+def test_an_empty_result_set_is_reported_rather_than_omitted(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """Zero is the interesting value: it is `min_score` working, or the corpus not
+    answering, and a series that simply goes quiet cannot show either."""
+    rec = MemoryRecorder()
+    scope = Scope("acme", "alice")
+    add(store, embedder, "alice works at acme", scope, predicate="works_at")
+    reader = HybridRetriever(store, embedder, PredicateRegistry(), telemetry=rec)
+    reader.search("where does alice work", scope, min_score=0.99)
+    assert rec.values(RETRIEVAL_RESULTS) == [0.0]
+    assert rec.values(RETRIEVAL_QUALITY_FACTOR) == []
+
+
+def test_the_quality_factor_is_bounded_by_the_normalization_it_reports_on(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """Salience overriding relevance was the failure. The design intent is that quality
+    can only pull a result *down* from its evidence, by at most `1/span` — and the one
+    way past 1.0 is a salience reinforced beyond 1.0, which `quality_boost` deliberately
+    does not clamp. So above 1.0 is the alarm, and the series has to be able to report
+    it: the claim below is pinned at the top of the range reported from a production
+    store, and its factor must come back greater than one rather than clipped to it."""
+    rec = MemoryRecorder()
+    scope = Scope("acme", "alice")
+    now = datetime.now(timezone.utc)
+    add(store, embedder, "alice works at acme", scope, predicate="works_at",
+        valid_from=now, salience=2.6)
+    add(store, embedder, "alice worked at initech", scope, predicate="worked_at",
+        valid_from=now - timedelta(days=4000), salience=0.05, confidence=0.2)
+    reader = HybridRetriever(store, embedder, PredicateRegistry(), telemetry=rec)
+    reader.search("where does alice work", scope, k=5)
+
+    span = 1.0 + reader.w_recency + reader.w_confidence + reader.w_salience
+    factors = sorted(rec.values(RETRIEVAL_QUALITY_FACTOR))
+    assert len(factors) == 2
+    assert all(f >= 1.0 / span for f in factors)
+    assert factors[0] < 1.0 < factors[1], (
+        "the over-reinforced claim's factor was clipped, which is the one value worth "
+        "seeing")
+    # Fresh, confident and heavily reinforced against stale, unconfident and faded:
+    # the spread is what makes the distribution worth plotting.
+    assert factors[1] - factors[0] > 0.1
+
+
+def test_an_episode_is_left_out_of_the_claim_distributions(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """An episode's quality fields sit at their neutral 1.0 meaning "not applicable",
+    so counting one would report a perfect quality factor for something quality never
+    scored, and an observation count for something nothing observed."""
+    rec = MemoryRecorder()
+    turn(store, embedder, KAFKA, EP_SCOPE)
+    add(store, embedder, "alice owns the kafka pipeline", EP_SCOPE, predicate="owns")
+    reader = HybridRetriever(store, embedder, PredicateRegistry(), telemetry=rec)
+
+    found = reader.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True)
+    assert any(isinstance(r, EpisodeResult) for r in found)
+    assert rec.values(RETRIEVAL_RESULTS) == [float(len(found))]
+    assert len(rec.values(RETRIEVAL_QUALITY_FACTOR)) == 1
+
+
+def test_the_observation_rank_correlation_is_emitted_with_the_sign_that_matters(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """Positive is correct: a fact restated many times should rank above one mentioned
+    once. It went negative when reinforcement was written onto the decayed `salience`
+    rather than the storage base and the nightly pass then erased it — no exception, no
+    log line, and no way to see it except as a trend across searches."""
+    rec = MemoryRecorder()
+    scope = Scope("acme", "alice")
+    now = datetime.now(timezone.utc)
+    add(store, embedder, "alice commutes to the office by bicycle", scope,
+        predicate="commutes_by", valid_from=now, observation_count=12, salience=2.0)
+    add(store, embedder, "alice mentioned a scooter", scope,
+        predicate="mentioned", valid_from=now, observation_count=1)
+    reader = HybridRetriever(store, embedder, PredicateRegistry(), telemetry=rec)
+
+    reader.search("how does alice commute by bicycle", scope, k=5)
+    values = rec.values(RETRIEVAL_OBSERVATION_RANK_CORR)
+    assert len(values) == 1 and values[0] > 0.0
+
+
+def test_no_correlation_is_reported_when_there_is_nothing_to_correlate(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """Every claim seen once is an absence of evidence, not a correlation of zero, and
+    reporting 0.0 would drag the average toward "broken" on every young store."""
+    rec = MemoryRecorder()
+    scope = Scope("acme", "alice")
+    add(store, embedder, "alice works at acme", scope, predicate="works_at")
+    add(store, embedder, "alice lives in berlin", scope, predicate="lives_in")
+    reader = HybridRetriever(store, embedder, PredicateRegistry(), telemetry=rec)
+    reader.search("alice", scope, k=5)
+    assert rec.values(RETRIEVAL_OBSERVATION_RANK_CORR) == []
+
+
+def test_a_degenerate_search_emits_nothing_because_it_ran_nothing(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    rec = MemoryRecorder()
+    reader = HybridRetriever(store, embedder, PredicateRegistry(), telemetry=rec)
+    assert reader.search("anything", Scope("acme", "alice"), k=0) == []
+    assert rec.names() == []

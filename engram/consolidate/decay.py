@@ -26,6 +26,7 @@ from datetime import datetime
 
 from ..schema import PredicateRegistry
 from ..store.base import Store
+from ..telemetry import CONSOLIDATE_DECAYED, Recorder
 from ..types import (
     SALIENCE_BASE,
     SALIENCE_PRECISION,
@@ -90,6 +91,11 @@ def decay_pass(sweep: Sweep, registry: PredicateRegistry) -> int:
         claim.salience = value
         sweep.touch(claim)
         changed += 1
+    if sweep.telemetry is not None:
+        # Emitted even at zero. "Decay has reported 0 for three months" is a settled
+        # store; "no decay series at all" is a scheduler nobody noticed had stopped, and
+        # only reporting the zero tells those two apart.
+        sweep.telemetry.counter(CONSOLIDATE_DECAYED, changed)
     return changed
 
 
@@ -99,13 +105,14 @@ def decay(
     tenant: str | None = None,
     now: datetime | None = None,
     window: int | None = None,
+    telemetry: Recorder | None = None,
 ) -> int:
     """Recompute salience for every live claim. Returns the number actually changed.
 
     A second consecutive call returns 0: the target is a function of stored state and
     `now`, so once written there is nothing left to write.
     """
-    sweep = Sweep(store, tenant, now=now, window=window)
+    sweep = Sweep(store, tenant, now=now, window=window, telemetry=telemetry)
     changed = decay_pass(sweep, registry)
     sweep.flush()
     return changed

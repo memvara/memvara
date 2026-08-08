@@ -24,8 +24,27 @@ Design notes:
   file extension instead of an `np.vstack` that transiently holds four times the old
   matrix.
 
-The whole thing runs in WAL mode behind a lock so the consolidation worker can write
-while readers are live.
+The whole thing runs in WAL mode, with **one connection per writer and one per reading
+thread**. That second half is what makes the first half true. WAL lets any number of
+readers run against a consistent snapshot while a writer holds the write lock — but only
+across *different connections*, because a connection is where SQLite's transaction state
+lives. Behind a single connection and a single mutex, which is what this was, a reader
+waited out the whole consolidation sweep. Measured, one reader thread against a
+20k-claim pass:
+
+    reads completed   1,470  ->  13,728      p95   3.44 ms  ->  0.31 ms
+    mean               1.48 ms  ->  0.20 ms  p99  40.4  ms  ->  2.08 ms
+
+An idle read is unchanged at 13 us and a sweep with nobody reading is unchanged at
+1.81 s, so none of that was bought from the write path; the sweep does take ~25% longer
+*while* a reader is running, because the reader is now doing nine times as much work
+next to it instead of waiting. The cost is one file handle per reading thread.
+
+Reads taken that way see the snapshot as of their own statement, so a reader observes a
+sweep's windows as they commit rather than waiting for the end of one. The exception is
+a thread inside `batch()`, which must see its own uncommitted rows — `competing_claims`
+during a write is what makes contradiction detection exact — so it stays on the writer's
+connection. See `_read`.
 """
 
 from __future__ import annotations
@@ -59,7 +78,12 @@ if TYPE_CHECKING:  # pragma: no cover
 #    sharing the claims' matrix. The DDL below is `IF NOT EXISTS`, so it does appear on
 #    an old file; what does not appear is the *content* of an index for episodes that
 #    were written before it existed, and backfilling that is what the stamp gates.
-SCHEMA_VERSION = 3
+# 4: resolved entities became durable (`entities`). Nothing to backfill — no earlier
+#    version wrote an entity anywhere — so here the DDL genuinely is the whole
+#    migration. The stamp still earns its place: it is what tells version 5 whether the
+#    table it is looking at was built by 4 or invented on the spot by its own
+#    `IF NOT EXISTS`, which is the distinction every backfill after this one rests on.
+SCHEMA_VERSION = 4
 
 # Kept separate because the v1 -> v2 migration has to recreate this table: SQLite
 # cannot add a column to an existing primary key, and (tenant, name) is now the key.
@@ -164,6 +188,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts
 -- decision, and BM25 over raw turns is the only thing that can return those verbatim.
 CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts
     USING fts5(episode_id UNINDEXED, content, tokenize='porter unicode61');
+
+-- Resolved entities: which surface strings name the same thing. Durable and
+-- tenant-scoped for exactly the reason the predicate table is — one tenant deciding
+-- that "Acme" and "Acme Corp" are one entity must not decide it for another — and with
+-- the same failure mode if it were not persisted: a fresh process would re-derive the
+-- mapping, disagree with the ids already baked into stored `fact_key`s, and silently
+-- stop recognising a contradiction between two spellings of one subject.
+CREATE TABLE IF NOT EXISTS entities (
+    tenant    TEXT NOT NULL,
+    id        TEXT NOT NULL,
+    canonical TEXT NOT NULL,
+    aliases   TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (tenant, id)
+);
 
 -- Learned predicate schema. This has to be durable: cardinality is what makes a
 -- contradiction detectable, so a registry that evaporates on restart means a fresh
@@ -635,7 +673,18 @@ class SQLiteStore:
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._lock = threading.RLock()
-        self._batch_depth = 0
+        # Per-thread: the snapshot connection this thread reads through, how deep it is
+        # inside `batch()`, and the last `data_version` it saw. Each of those three is a
+        # property of a *connection* rather than of the store, so keeping them store-wide
+        # is how one reader's bookkeeping corrupts another's. See `_read`.
+        self._local = threading.local()
+        # Store-wide, because closing is: every connection handed out, so `close()` can
+        # take them all back.
+        self._readers: list[sqlite3.Connection] = []
+        # Its own lock, and the innermost one: opening a connection must not queue behind
+        # a consolidation sweep, which is precisely the wait this exists to remove.
+        self._readers_lock = threading.Lock()
+        self._closed = False
         # Rows of the matrix this transaction touched, as (table, id), so a rollback can
         # put the index back in step with the database.
         self._touched: set[tuple[_VecTable, str]] = set()
@@ -645,6 +694,11 @@ class SQLiteStore:
         # One write watermark per vector table: `_read_map` folds in everything written
         # past it, and the two tables count independently.
         self._seq = {t.name: -1 for t in _VEC_TABLES}
+        # Guards the name-to-row map's bookkeeping. Always taken *inside* `_lock` when
+        # both are wanted, never the other way round: a reader holds only this one, so
+        # that ordering is what keeps a refreshing reader and a committing writer from
+        # deadlocking on each other.
+        self._index_lock = threading.RLock()
         self._data_version = -1
         with self._lock:
             self._db.executescript(SCHEMA)
@@ -652,6 +706,96 @@ class SQLiteStore:
             self._db.executescript(_LATE_INDEXES)
             self._db.commit()
             self._attach_vectors()
+
+    # -- connections ---------------------------------------------------------
+
+    @property
+    def _batch_depth(self) -> int:
+        """How deep the *calling thread* is inside `batch()`.
+
+        Per thread rather than per store because it now routes reads as well as gating
+        commits: a thread mid-transaction must read its own uncommitted rows, and no
+        other connection can see them. It is the same number the commit gate always
+        used — `batch()` holds the write lock for its whole body, so while a batch is
+        open no other thread can be writing.
+        """
+        return getattr(self._local, "depth", 0)
+
+    @_batch_depth.setter
+    def _batch_depth(self, value: int) -> None:
+        self._local.depth = value
+
+    @property
+    def _data_version(self) -> int:
+        """The `PRAGMA data_version` this *thread* last saw.
+
+        Per thread for the same reason the connection is: the pragma counts commits made
+        by *other* connections, so its value means nothing across two of them. Compared
+        against a number another thread's connection produced, the check either fires
+        forever or never fires again — and "never again" is the silent one, because BM25
+        still finds the claim and fusion merely ranks it worse.
+
+        The name-to-row map it guards stays shared, and that is not an inconsistency:
+        whichever thread notices a commit first folds the new rows in for everybody, and
+        a thread arriving later re-reads a tail that is already empty.
+        """
+        return getattr(self._local, "version", -1)
+
+    @_data_version.setter
+    def _data_version(self, value: int) -> None:
+        self._local.version = value
+
+    @contextmanager
+    def _read(self) -> Iterator[sqlite3.Connection]:
+        """A connection to run one read-only statement against.
+
+        The thread's own connection when there is one, and then no lock is taken at all:
+        that is the entire point, and it is what lets a `search()` complete while a
+        consolidation sweep holds the write lock. Otherwise the writer's connection,
+        under the write lock, exactly as every read here used to work.
+
+        Two cases fall back, and both are correctness rather than caution:
+
+        * **Inside `batch()`.** A reader on another connection sees the last commit, not
+          the open transaction — so the reconciler asking `competing_claims` mid-write
+          would miss the claim written two statements ago and let a contradiction
+          through. That is the one bug this whole mechanism could plausibly introduce,
+          so the thread that opened the transaction never leaves it.
+        * **A database with no file.** `:memory:` (and `""`, a private temporary file)
+          is scoped to its connection: a second one is a second, empty database, not a
+          second view of this one.
+        """
+        conn = self._reader()
+        if conn is None:
+            with self._lock:
+                yield self._db
+        else:
+            yield conn
+
+    def _reader(self) -> sqlite3.Connection | None:
+        """This thread's snapshot connection, opening it on first use, or None."""
+        if self._batch_depth or self.path in (":memory:", ""):
+            return None
+        conn = getattr(self._local, "db", None)
+        if conn is None:
+            conn = sqlite3.connect(self.path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            # `_readers_lock`, emphatically not `_lock`: a thread taking its very first
+            # read while a sweep holds the write lock would otherwise wait out the sweep
+            # to open the connection that exists so it does not have to.
+            with self._readers_lock:
+                if self._closed:
+                    # Racing a `close()`. Hand back the writer's connection instead, so
+                    # the caller gets sqlite's "closed database" error rather than a
+                    # working read against a store that is supposed to be shut.
+                    conn.close()
+                    return None
+                # Tracked so `close()` can close them: a connection left open holds a
+                # WAL read mark, which stops checkpointing and grows the -wal file
+                # without bound.
+                self._readers.append(conn)
+            self._local.db = conn
+        return conn
 
     def _migrate(self) -> None:
         """Stamp or upgrade the schema version.
@@ -730,25 +874,29 @@ class SQLiteStore:
         matrix — which is what made a large store take seconds to open and, past a
         point, impossible to open at all.
         """
-        row = self._db.execute(_VEC_CENSUS).fetchone()
-        if not row["n"]:
-            return  # dimension stays unknown until something is written
-        if row["lo"] != row["hi"]:
-            raise ValueError(
-                f"{self.path}: embeddings have mixed dimensions ({row['lo']} and "
-                f"{row['hi']}). This store was written with more than one embedder; "
-                "re-embed it with a single one."
-            )
-        top, base = row["top"], None
-        if row["loose"]:
-            base, top = self._assign_slots()
-        if not self._vec.attach(int(row["lo"]), int(top) + 1):
-            self._rebuild_matrix()
-        elif base is not None:
-            # The mapping was usable but says nothing about rows that had no address a
-            # moment ago, and a row of zeros is not the vector that was written.
-            for t in _VEC_TABLES:
-                self._fill(t, "WHERE slot >= ?", (base,))
+        # Every caller already holds the write lock; `_index_lock` on top of it, in that
+        # order, is what keeps this from rewriting the watermarks under a reader that is
+        # halfway through folding in another process's writes.
+        with self._index_lock:
+            row = self._db.execute(_VEC_CENSUS).fetchone()
+            if not row["n"]:
+                return  # dimension stays unknown until something is written
+            if row["lo"] != row["hi"]:
+                raise ValueError(
+                    f"{self.path}: embeddings have mixed dimensions ({row['lo']} and "
+                    f"{row['hi']}). This store was written with more than one embedder; "
+                    "re-embed it with a single one."
+                )
+            top, base = row["top"], None
+            if row["loose"]:
+                base, top = self._assign_slots()
+            if not self._vec.attach(int(row["lo"]), int(top) + 1):
+                self._rebuild_matrix()
+            elif base is not None:
+                # The mapping was usable but says nothing about rows that had no address
+                # a moment ago, and a row of zeros is not the vector that was written.
+                for t in _VEC_TABLES:
+                    self._fill(t, "WHERE slot >= ?", (base,))
 
     def _assign_slots(self) -> tuple[int, int]:
         """Give a row to every vector that has none; return the first and the last.
@@ -811,12 +959,13 @@ class SQLiteStore:
     def _count_vectors(self, t: _VecTable | None = None) -> int:
         """How many vectors the store holds, in one table or across the matrix."""
         tables = (t,) if t is not None else _VEC_TABLES
-        with self._lock:
-            return sum(int(self._db.execute(f"SELECT COUNT(*) FROM {x.name}").fetchone()[0])
+        with self._read() as conn:
+            return sum(int(conn.execute(f"SELECT COUNT(*) FROM {x.name}").fetchone()[0])
                        for x in tables)
 
     def _version(self) -> int:
-        return int(self._db.execute("PRAGMA data_version").fetchone()[0])
+        with self._read() as conn:
+            return int(conn.execute("PRAGMA data_version").fetchone()[0])
 
     def _max_seq(self, t: _VecTable) -> int:
         return int(self._db.execute(
@@ -829,14 +978,15 @@ class SQLiteStore:
         makes SQLite answer from `emb_seq`, which carries all three columns — without
         it the scan walks the table itself and reads a page per 3 KB blob.
         """
-        cur = self._db.cursor()
-        cur.row_factory = None  # 100k Row objects cost more than the query does
-        for t in _VEC_TABLES:
-            cur.execute(f"SELECT {t.key}, slot, seq FROM {t.name} WHERE seq > ? "
-                        "ORDER BY seq", (self._seq[t.name],))
-            for item_id, slot, seq in cur.fetchall():
-                self._vec.map(item_id, slot)
-                self._seq[t.name] = seq
+        with self._read() as conn:
+            cur = conn.cursor()
+            cur.row_factory = None  # 100k Row objects cost more than the query does
+            for t in _VEC_TABLES:
+                cur.execute(f"SELECT {t.key}, slot, seq FROM {t.name} WHERE seq > ? "
+                            "ORDER BY seq", (self._seq[t.name],))
+                for item_id, slot, seq in cur.fetchall():
+                    self._vec.map(item_id, slot)
+                    self._seq[t.name] = seq
 
     def _ensure_index(self) -> None:
         """Make the map usable and current before a read resolves through it.
@@ -847,17 +997,32 @@ class SQLiteStore:
         and silent, because BM25 still finds it and fusion merely ranks it worse.
         `PRAGMA data_version` moves only when a *different* connection commits, so the
         common case costs one pragma.
+
+        The first load is the only part that takes the write lock, and it has to: with
+        no vectors mapped yet, `_ensure_dim` may have to *assign* slots to rows that
+        have none, which is a write. Every refresh afterwards runs on the reading
+        thread's own connection, so a sweep in progress does not hold it up.
         """
         if not self._index_loaded:
-            self._ensure_dim()
-            self._read_map()
-            self._index_loaded = True
-            self._data_version = self._version()
+            # No second check inside the lock. Two threads arriving together both load,
+            # and the loser's pass costs one empty tail query — cheaper than a branch
+            # that only ever runs under a race and can therefore never be tested.
+            with self._lock, self._index_lock:
+                self._ensure_dim()
+                self._read_map()
+                self._index_loaded = True
+                self._data_version = self._version()
             return
-        version = self._version()
-        if version != self._data_version:
-            self._data_version = version
-            self._read_map()
+        # `_read()` outside `_index_lock`, never the other way round. On a store with no
+        # snapshot connection `_read()` takes the *write* lock, and the branch above takes
+        # those same two in that order — reversed here, a refreshing reader and a thread
+        # loading the index cold deadlock on each other. Nothing is read through the
+        # context manager directly; it is entered for the ordering.
+        with self._read(), self._index_lock:
+            version = self._version()
+            if version != self._data_version:
+                self._data_version = version
+                self._read_map()
 
     def _ensure_dim(self) -> None:
         """Learn the store's dimension if another process wrote the first vector."""
@@ -1024,13 +1189,13 @@ class SQLiteStore:
         )
 
     def get_episode(self, episode_id: str) -> Episode | None:
-        with self._lock:
-            r = self._db.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+        with self._read() as conn:
+            r = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
         return self._row_to_episode(r) if r else None
 
     def find_episode_by_hash(self, tenant: str, ep_hash: str) -> Episode | None:
-        with self._lock:
-            r = self._db.execute(
+        with self._read() as conn:
+            r = conn.execute(
                 "SELECT * FROM episodes WHERE tenant=? AND hash=? LIMIT 1", (tenant, ep_hash)
             ).fetchone()
         return self._row_to_episode(r) if r else None
@@ -1042,11 +1207,11 @@ class SQLiteStore:
         if not episode_ids:
             return out
         ids = list(dict.fromkeys(episode_ids))
-        with self._lock:
+        with self._read() as conn:
             for i in range(0, len(ids), _MAX_SQL_PARAMS):
                 chunk = ids[i:i + _MAX_SQL_PARAMS]
                 q = f"SELECT * FROM episodes WHERE id IN ({','.join('?' * len(chunk))})"
-                for r in self._db.execute(q, chunk):
+                for r in conn.execute(q, chunk):
                     out[r["id"]] = self._row_to_episode(r)
         return out
 
@@ -1057,8 +1222,8 @@ class SQLiteStore:
         if tenant is not None:
             sql += " WHERE tenant=?"
             params.append(tenant)
-        with self._lock:
-            rows = self._db.execute(sql, params).fetchall()
+        with self._read() as conn:
+            rows = conn.execute(sql, params).fetchall()
         for r in rows:
             yield self._row_to_episode(r)
 
@@ -1113,8 +1278,8 @@ class SQLiteStore:
         )
 
     def get_claim(self, claim_id: str) -> Claim | None:
-        with self._lock:
-            r = self._db.execute("SELECT * FROM claims WHERE id=?", (claim_id,)).fetchone()
+        with self._read() as conn:
+            r = conn.execute("SELECT * FROM claims WHERE id=?", (claim_id,)).fetchone()
         return self._row_to_claim(r) if r else None
 
     def get_claims(self, claim_ids: Sequence[str]) -> dict[str, Claim]:
@@ -1129,11 +1294,11 @@ class SQLiteStore:
         if not claim_ids:
             return out
         ids = list(dict.fromkeys(claim_ids))
-        with self._lock:
+        with self._read() as conn:
             for i in range(0, len(ids), _MAX_SQL_PARAMS):
                 chunk = ids[i:i + _MAX_SQL_PARAMS]
                 q = f"SELECT * FROM claims WHERE id IN ({','.join('?' * len(chunk))})"
-                for r in self._db.execute(q, chunk):
+                for r in conn.execute(q, chunk):
                     out[r["id"]] = self._row_to_claim(r)
         return out
 
@@ -1145,12 +1310,101 @@ class SQLiteStore:
         below a similarity cutoff the way it can in a vector-search-based updater.
         """
         live, lp = self._live_clause(as_of, include_invalidated=False)
-        with self._lock:
-            rows = self._db.execute(
+        # `_read` keeps a thread inside `batch()` on the writer's connection, which this
+        # method depends on absolutely: the reconciler asks it mid-transaction, and a
+        # snapshot that predates the claim written two statements ago would report the
+        # slot empty and let the contradiction through.
+        with self._read() as conn:
+            rows = conn.execute(
                 f"SELECT * FROM claims WHERE tenant=? AND fact_key=? AND {live}",
                 [tenant, fact_key] + lp,
             ).fetchall()
         return [self._row_to_claim(r) for r in rows]
+
+    def _erase_row(self, table: str, fts: str, t: _VecTable, item_id: str) -> bool:
+        """Erase one row and everything derived from its text. Caller holds the lock.
+
+        The order is the whole content of this method, and it is not recoverable if it
+        is wrong. The FTS entry is keyed on the row's *rowid* — `claim_id` is UNINDEXED —
+        so once the row is gone there is no way to find the index entry that describes
+        it, and the erased text stays in the index: matchable by search, unhydratable,
+        and undeletable except by rebuilding the whole index. So: FTS first, by rowid,
+        then the vector (which leaks the text back under inversion), then the row.
+        """
+        row = self._db.execute(
+            f"SELECT rowid FROM {table} WHERE id=?", (item_id,)).fetchone()
+        if row is None:
+            return False
+        self._db.execute(f"DELETE FROM {fts} WHERE rowid=?", (row["rowid"],))
+        self._db.execute(
+            f"INSERT OR IGNORE INTO vec_free (slot) SELECT slot FROM {t.name} "
+            f"WHERE {t.key}=? AND slot IS NOT NULL", (item_id,))
+        self._db.execute(f"DELETE FROM {t.name} WHERE {t.key}=?", (item_id,))
+        # Zeroes the matrix row as well as unmapping it: the file outlives the process,
+        # and a vector left behind is the text left behind.
+        self._vec.forget(item_id)
+        self._mark(t, item_id)
+        self._db.execute(f"DELETE FROM {table} WHERE id=?", (item_id,))
+        return True
+
+    def _orphan(self, episode_id: str) -> bool:
+        """Whether no surviving claim still cites this turn as a source.
+
+        `sources` is stored as a JSON array, so the needle is what `json.dumps` would
+        have written for this one id — quotes and escaping included — which makes the
+        substring match exact without needing the JSON1 extension, and that matters
+        because it is not compiled into every SQLite build this library runs on.
+
+        The LIKE metacharacters in the needle are escaped rather than trusted. Ids
+        generated here are hex and could not collide, but `sources` accepts whatever the
+        caller passed, and an unescaped `%` matches other claims' citations — which
+        would leave an orphaned turn *un*erased. Under-erasing is the failure direction
+        that matters here.
+
+        A table scan, deliberately: there is no reverse provenance index, an erasure
+        request is rare, and being right about it is not negotiable.
+        """
+        needle = json.dumps(episode_id)
+        for char in ("\\", "%", "_"):
+            needle = needle.replace(char, "\\" + char)
+        hit = self._db.execute(
+            "SELECT 1 FROM claims WHERE sources LIKE ? ESCAPE '\\' LIMIT 1",
+            (f"%{needle}%",)).fetchone()
+        return hit is None
+
+    def erase_claim(self, claim_id: str, *, sources: bool = False) -> bool:
+        """Irreversibly erase one claim. Returns whether it existed.
+
+        The per-claim counterpart to `purge`, and the reason it has to exist: `purge`
+        erases a whole scope, `invalidate` retires without deleting anything, and an
+        erasure request naming one memory had no honest answer between the two. The
+        claim row goes, its FTS entry goes, and its vector is zeroed and its slot
+        returned to `vec_free` for reuse.
+
+        **The source turn does not go by default, and that is a decision, not an
+        oversight.** An `Episode` is a whole conversation turn: it can be the origin of
+        several claims and can hold a great deal the extractor never turned into one, so
+        erasing it as a side effect of erasing one derived claim deletes data the caller
+        did not name. `sources=True` erases the turns behind this claim that no
+        surviving claim still cites — which is exactly right for a memory that *is* its
+        source text (an imported note, a verbatim `add(infer=False)`) and wrong for a
+        fact extracted from a conversation. The caller knows which it has; this cannot.
+
+        Nothing here is undoable and nothing is audited: `history()` will show a gap
+        where the claim was, because that is what erasure means.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT sources FROM claims WHERE id=?", (claim_id,)).fetchone()
+            cited = json.loads(row["sources"]) if row is not None and sources else []
+            if not self._erase_row("claims", "claims_fts", _CLAIM_VECS, claim_id):
+                return False
+            # Orphan-checked after the claim is gone, so it cannot count itself a citer.
+            for episode_id in cited:
+                if self._orphan(episode_id):
+                    self._erase_row("episodes", "episodes_fts", _EPISODE_VECS, episode_id)
+            self._maybe_commit()
+        return True
 
     def purge(self, scope: Scope) -> dict[str, int]:
         """Irreversibly erase everything at `scope` and beneath it.
@@ -1244,8 +1498,8 @@ class SQLiteStore:
     def all_specs(self, tenant: str = "default") -> list["PredicateSpec"]:
         from ..schema import Cardinality, PredicateSpec, Volatility
 
-        with self._lock:
-            rows = self._db.execute(
+        with self._read() as conn:
+            rows = conn.execute(
                 "SELECT * FROM predicates WHERE tenant=?", (tenant,)).fetchall()
         return [
             PredicateSpec(
@@ -1260,14 +1514,52 @@ class SQLiteStore:
             for r in rows
         ]
 
+    # -- resolved entities ---------------------------------------------------
+
+    def put_entity(self, entity_id: str, canonical: str, aliases: Sequence[str],
+                   tenant: str = "default") -> None:
+        """Persist "these spellings are one thing", for one tenant.
+
+        Durable for the same reason the predicate schema is, and with a sharper failure
+        if it were not: entity ids are baked into the `fact_key`s already on disk, so a
+        process that re-derived the mapping and disagreed by one id would not merely
+        forget a synonym — it would address a different slot, stop seeing the
+        contradiction between two spellings of one subject, and leave both live.
+
+        Tenant-scoped because deciding that "Acme" and "Acme Corp" are one entity is a
+        judgement about one customer's data, and the default matches the tenant `Engram`
+        uses when the caller names none.
+        """
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO entities (tenant, id, canonical, aliases) VALUES (?,?,?,?) "
+                "ON CONFLICT(tenant, id) DO UPDATE SET "
+                "canonical=excluded.canonical, aliases=excluded.aliases",
+                (tenant, entity_id, canonical, json.dumps(list(aliases))),
+            )
+            self._maybe_commit()
+
+    def all_entities(self, tenant: str = "default") -> list[tuple[str, str, tuple[str, ...]]]:
+        """Every resolved entity for one tenant, as (id, canonical, aliases).
+
+        Ordered by id so two processes rebuilding the same resolver agree on which
+        alias wins when two entities claim one — an ordering that comes out of the data
+        rather than out of SQLite's page layout.
+        """
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT id, canonical, aliases FROM entities WHERE tenant=? ORDER BY id",
+                (tenant,)).fetchall()
+        return [(r["id"], r["canonical"], tuple(json.loads(r["aliases"]))) for r in rows]
+
     def slot_history(self, tenant: str, fact_key: str) -> list[Claim]:
         """Every claim ever recorded in one (subject, predicate) slot, oldest first.
 
         This is the audit trail for a single fact: what we believed, when we believed it,
         and what replaced it. Free here only because invalidation never deletes.
         """
-        with self._lock:
-            rows = self._db.execute(
+        with self._read() as conn:
+            rows = conn.execute(
                 "SELECT * FROM claims WHERE tenant=? AND fact_key=? "
                 "ORDER BY recorded_at ASC, id ASC",
                 (tenant, fact_key),
@@ -1275,8 +1567,8 @@ class SQLiteStore:
         return [self._row_to_claim(r) for r in rows]
 
     def find_by_value(self, tenant: str, value_key: str) -> list[Claim]:
-        with self._lock:
-            rows = self._db.execute(
+        with self._read() as conn:
+            rows = conn.execute(
                 "SELECT * FROM claims WHERE tenant=? AND value_key=?", (tenant, value_key)
             ).fetchall()
         return [self._row_to_claim(r) for r in rows]
@@ -1382,8 +1674,8 @@ class SQLiteStore:
         return dropped
 
     def _get_vector(self, t: _VecTable, item_id: str) -> np.ndarray | None:
-        with self._lock:
-            r = self._db.execute(
+        with self._read() as conn:
+            r = conn.execute(
                 f"SELECT vec FROM {t.name} WHERE {t.key}=?", (item_id,)
             ).fetchone()
         return np.frombuffer(r["vec"], dtype=np.float32).copy() if r else None
@@ -1414,8 +1706,8 @@ class SQLiteStore:
                       include_invalidated: bool = False) -> list[str]:
         sc, sp = self._scope_clause(scopes)
         lv, lp = self._live_clause(as_of, include_invalidated)
-        with self._lock:
-            cur = self._db.cursor()
+        with self._read() as conn:
+            cur = conn.cursor()
             # A whole-tenant scope returns every claim id; building a `Row` object for
             # each of them costs more than the query.
             cur.row_factory = None
@@ -1434,8 +1726,8 @@ class SQLiteStore:
         """
         sc, sp = self._scope_clause(scopes)
         hp, hpp = self._happened_clause(as_of)
-        with self._lock:
-            cur = self._db.cursor()
+        with self._read() as conn:
+            cur = conn.cursor()
             cur.row_factory = None
             cur.execute(f"SELECT id FROM episodes WHERE {sc} AND {hp}", sp + hpp)
             return [r[0] for r in cur.fetchall()]
@@ -1454,8 +1746,8 @@ class SQLiteStore:
             f"WHERE claims_fts MATCH ? AND {sc} AND {lv} "
             "ORDER BY s ASC LIMIT ?"
         )
-        with self._lock:
-            rows = self._db.execute(sql, [m] + sp + lp + [limit]).fetchall()
+        with self._read() as conn:
+            rows = conn.execute(sql, [m] + sp + lp + [limit]).fetchall()
         # bm25() is negative-is-better; flip it so callers see a normal ascending score.
         return [(r["cid"], -float(r["s"])) for r in rows]
 
@@ -1478,8 +1770,8 @@ class SQLiteStore:
             f"WHERE episodes_fts MATCH ? AND {sc} AND {hp} "
             "ORDER BY s ASC LIMIT ?"
         )
-        with self._lock:
-            rows = self._db.execute(sql, [m] + sp + hpp + [limit]).fetchall()
+        with self._read() as conn:
+            rows = conn.execute(sql, [m] + sp + hpp + [limit]).fetchall()
         return [(r["eid"], -float(r["s"])) for r in rows]
 
     def vector_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int,
@@ -1488,8 +1780,7 @@ class SQLiteStore:
         allowed = self.candidate_ids(scopes, as_of, include_invalidated)
         if not allowed:
             return []
-        with self._lock:
-            self._ensure_index()
+        self._ensure_index()
         return self._vec.search(qvec, allowed, limit)
 
     def vector_search_episodes(self, qvec: np.ndarray, scopes: Sequence[Scope],
@@ -1504,8 +1795,7 @@ class SQLiteStore:
         allowed = self.episode_candidate_ids(scopes, as_of)
         if not allowed:
             return []
-        with self._lock:
-            self._ensure_index()
+        self._ensure_index()
         return self._vec.search(qvec, allowed, limit)
 
     # -- maintenance ---------------------------------------------------------
@@ -1522,8 +1812,8 @@ class SQLiteStore:
             conds.append("invalidated_at IS NULL")
         if conds:
             sql += " WHERE " + " AND ".join(conds)
-        with self._lock:
-            rows = self._db.execute(sql, params).fetchall()
+        with self._read() as conn:
+            rows = conn.execute(sql, params).fetchall()
         for r in rows:
             yield self._row_to_claim(r)
 
@@ -1542,9 +1832,9 @@ class SQLiteStore:
         params: tuple = (tenant,) if tenant is not None else ()
         and_ = " AND" if tenant is not None else " WHERE"
 
-        with self._lock:
+        with self._read() as conn:
             def q(sql: str) -> int:
-                return int(self._db.execute(sql, params).fetchone()[0])
+                return int(conn.execute(sql, params).fetchone()[0])
 
             return {
                 "episodes": q(f"SELECT COUNT(*) FROM episodes{where}"),
@@ -1561,6 +1851,17 @@ class SQLiteStore:
             # Commit unconditionally: closing inside an open batch would otherwise
             # discard it, and an explicit close is a stronger signal than the batch.
             self._db.commit()
+            with self._readers_lock:
+                # Flag and drain together, so a thread that has just opened a connection
+                # either lands in this list or is told the store is shut, never neither.
+                self._closed = True
+                readers, self._readers = self._readers, []
+            # Every reading thread's connection, closed from here rather than left to
+            # each thread: an open one holds a WAL read mark, which pins the log at the
+            # oldest live snapshot and stops checkpointing — so a forgotten reader shows
+            # up as a `-wal` file that grows without bound rather than as an error.
+            for conn in readers:
+                conn.close()
             self._db.close()
             self._vec.close()
 

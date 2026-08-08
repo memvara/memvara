@@ -311,6 +311,23 @@ def test_retraction_is_visible_in_history(rec, store):
     assert live_objects(store, acme, as_of=t0 + timedelta(days=1)) == ["Acme"]
 
 
+def test_retraction_and_deduplication_use_one_notion_of_identity(rec, store):
+    """The asymmetry this closes: `_retract` matched objects casefolded while
+    `value_key` hashed them case-*sensitively*, so retraction folded case and
+    deduplication did not. Whichever end you read it from, one of the two was wrong."""
+    acme = rec.apply(claim("works_at", "Acme Corp")).claim
+    res = rec.apply(claim("works_at", "acme, inc.", polarity=-1))
+    assert res.action == "retract"
+    assert [c.id for c in res.invalidated] == [acme.id]
+    assert live_objects(store, acme) == []
+
+
+def test_a_retraction_naming_a_different_entity_still_hits_nothing(rec, store):
+    globex = rec.apply(claim("works_at", "Globex Ltd")).claim
+    assert rec.apply(claim("works_at", "Globex Labs", polarity=-1)).invalidated == []
+    assert live_objects(store, globex) == ["Globex Ltd"]
+
+
 # --- cross-predicate supersession -------------------------------------------
 
 @pytest.fixture()

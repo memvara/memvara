@@ -44,6 +44,7 @@ from .llm import LLM, NullLLM
 from .retrieve import EpisodeResult, HybridRetriever, Retrieved
 from .schema import PredicateRegistry
 from .store import SQLiteStore, Store
+from .telemetry import Recorder
 from .types import (
     Claim,
     Derivation,
@@ -208,6 +209,7 @@ class Engram:
         user: str | None = None,
         agent: str | None = None,
         session: str | None = None,
+        telemetry: Recorder | None = None,
         reembed: bool = False,
         **tuning: Any,
     ) -> None:
@@ -220,6 +222,16 @@ class Engram:
         scope_kw: dict[str, str | None] = {"user": user, "agent": agent, "session": session}
         self._absorb_scope_aliases(tuning, scope_kw)
         write_kw, read_kw = self._split_tuning(tuning)
+        #: Where aggregate measurements go, or `None` — the default, and a fast path
+        #: rather than a no-op object: every emission point is inside an `is not None`
+        #: guard, because a library arguing about cost cannot ship an always-on hook.
+        self.telemetry = telemetry
+        # One parameter, three subsystems. A caller should not have to know that writing,
+        # reading and consolidation are separately constructible objects in order to get
+        # one set of numbers out of them — but `write_telemetry=`/`read_telemetry=` still
+        # win where they are given, which is how one subsystem gets sent somewhere else.
+        write_kw.setdefault("telemetry", telemetry)
+        read_kw.setdefault("telemetry", telemetry)
 
         self.store = store if store is not None else SQLiteStore(path or ":memory:")
         self.embedder = embedder if embedder is not None else default_embedder()
@@ -243,7 +255,8 @@ class Engram:
         self.reader = HybridRetriever(
             self.store, self.embedder, self.registry, **read_kw
         )
-        self.consolidator = Consolidator(self.store, self.embedder, self.registry)
+        self.consolidator = Consolidator(self.store, self.embedder, self.registry,
+                                         telemetry=telemetry)
         # See `_index_episodes`: warned once per instance, not once per rejected turn.
         self._warned_episode_vectors = False
 
@@ -441,13 +454,21 @@ class Engram:
         """
         scope = self._scope(tenant, user, agent, session)
         episodes = self._to_episodes(messages, scope, role, ts)
-        # One transaction over both halves. `batch()` is reentrant, so the pipeline's
-        # own batch nests inside this one and the turns plus their index entries commit
-        # together — a turn that is durable but unindexed is exactly the state this
-        # method exists to stop producing.
+        # Deliberately *not* one transaction over both halves. Wrapping the pipeline in
+        # an outer batch made its own transaction nest inside this one, which held the
+        # store's write lock for the whole call — encode, extraction and all — and put
+        # concurrent readers behind a model round-trip: p50 1006 ms against a 1 s fake
+        # extractor, versus 1.9 ms once the pipeline hoisted its slow work out. Keeping
+        # the outer batch would have thrown that away at the only layer callers use.
+        #
+        # The cost is that a crash between the two leaves a turn durable but unvectored.
+        # That state used to be unreachable here, and is now briefly possible: it is
+        # survivable because the store indexes text on write, so the turn is still
+        # findable by BM25 and by `why()` — only its *vector* is missing — and because
+        # `_index_episodes` skips turns that already have one, so a retry converges.
+        receipt = self.writer.add(episodes)
         batch = getattr(self.store, "batch", None)
         with (batch() if batch is not None else nullcontext()):
-            receipt = self.writer.add(episodes)
             self._index_episodes(receipt.episode_ids)
         return receipt
 
@@ -500,7 +521,10 @@ class Engram:
                  agent=None, session=None, confidence: float = 1.0,
                  memory_type: MemoryType | None = None, polarity: int = 1,
                  valid_from: datetime | None = None, valid_to: datetime | None = None,
-                 recorded_at: datetime | None = None, **meta: Any) -> WriteReceipt:
+                 recorded_at: datetime | None = None,
+                 sources: Sequence[str | Episode] | None = None,
+                 text: str | None = None, extractor: str = "api",
+                 **meta: Any) -> WriteReceipt:
         """Assert a structured fact directly, bypassing extraction.
 
         Use this when the application already knows something as structured data — there
@@ -510,6 +534,26 @@ class Engram:
         be backfilled honestly: a fact that was true from 2019 but only imported today has
         a 2019 valid time and a today transaction time, and `as_of` queries stay correct
         for both axes.
+
+        `sources` are the turns this fact came from: ids of turns already stored, or
+        `Episode` objects to store *with* the claim, in one transaction. Without them
+        `why()` on the result has nothing to show, which for an imported or
+        application-supplied memory is the difference between a provenance store and a
+        dictionary. Passing the `Episode` rather than storing it first is what makes the
+        two atomic; see `_write_claim`.
+
+        `text` overrides the rendered `"<subject> <predicate> <object>"`. It matters far
+        more than it looks: that rendering is what gets embedded and BM25-indexed, so for
+        a memory whose subject is a synthetic slot address ("mem0:9f2c…"), the default
+        puts the address into the index and leaves the sentence out of it. Pass the
+        sentence.
+
+        `extractor` is recorded on the claim and reported by `why()`. It defaults to
+        `"api"`; an integration writing on someone else's behalf should name itself, so
+        that a later audit can tell an imported memory from one this application
+        asserted. Note that it is a real parameter rather than `**meta`, so a `meta` key
+        of that name is no longer reachable here — it never meant anything anyway, since
+        `Claim.extractor` is the field provenance actually reads.
         """
         scope = self._scope(tenant, user, agent, session)
         pred = self.registry.normalize(predicate)
@@ -521,9 +565,88 @@ class Engram:
             valid_from=valid_from or recorded_at or now,
             valid_to=valid_to,
             recorded_at=recorded_at or now,
-            derivation=Derivation.USER, extractor="api", meta=meta,
+            text=text or "",   # empty means "render the triple"; see `Claim.__post_init__`
+            derivation=Derivation.USER, extractor=extractor, meta=meta,
         )
-        return self.writer.assert_claim(claim)
+        return self._write_claim(claim, sources)
+
+    @staticmethod
+    def _cite(claim: Claim, sources: Sequence[str | Episode] | None) -> list[Episode]:
+        """Point `claim` at its sources; return the turns that still need storing."""
+        if not sources:
+            return []
+        claim.sources = list(dict.fromkeys(
+            list(claim.sources)
+            + [s.id if isinstance(s, Episode) else s for s in sources]))
+        return [s for s in sources if isinstance(s, Episode)]
+
+    def _write_claim(self, claim: Claim, sources: Sequence[str | Episode] | None,
+                     retire: Claim | None = None,
+                     at: datetime | None = None) -> WriteReceipt:
+        """Store new source turns, optionally retire a predecessor, assert the claim.
+
+        One transaction over all of it. Separately committed, a crash between the turn
+        and the claim leaves a claim citing a turn that does not exist — a dangling
+        `why()` in the one library whose pitch is that provenance always resolves — and
+        a crash between the retirement and the assertion leaves the slot empty.
+
+        The retirement goes **before** the assertion. Order matters: afterwards, the
+        reconciler gets there first and stamps it with the wall clock rather than `at`,
+        which silently turns a backdated import into a pile of things that all changed
+        today.
+        """
+        episodes = self._cite(claim, sources)
+        batch = getattr(self.store, "batch", None)
+        with (batch() if batch is not None else nullcontext()):
+            for ep in episodes:
+                self.store.add_episode(ep)
+            if retire is not None:
+                self.store.invalidate(retire.id, at, claim.id)
+                self.store.set_valid_to(retire.id, at)
+            receipt = self.writer.assert_claim(claim)
+            # Indexed on the same terms `add()` indexes its turns. Costs one encode per
+            # turn, and skipping it would make a turn stored this way findable by text
+            # and not by meaning — an asymmetry nothing at the call site could explain.
+            self._index_episodes([ep.id for ep in episodes])
+        return receipt
+
+    def supersede(self, old_claim_id: str, new_claim: Claim, *,
+                  at: datetime | None = None,
+                  sources: Sequence[str | Episode] | None = None,
+                  tenant=None, user=None, agent=None,
+                  session=None) -> WriteReceipt:
+        """Replace a claim with a new one, recording that that is what happened.
+
+        `delete()` retires a claim and leaves the reason blank; asserting the new value
+        on its own retires the old one only when the two share a slot and the predicate
+        is single-valued. Neither writes `invalidated_by`, and without that pointer
+        `why()` on the new claim reports nothing superseded — which is exactly the
+        history an import of somebody else's mutation log exists to reconstruct.
+
+        The old claim is retired on both time axes, before the new one is written, all
+        inside one transaction — see `_write_claim` for why that order is the whole
+        point.
+
+        `at` defaults to the new claim's `recorded_at`, so a replay of historical events
+        needs to state its instant once rather than twice. `sources` means what it means
+        on `remember`, and is here for the same reason: a replayed update arrives as a
+        new turn *and* a new value, and the two have to land together.
+
+        Raises `KeyError` if `old_claim_id` names nothing this scope can see — the same
+        error for "no such claim" as for "not yours", so it cannot be used to test
+        whether an id exists somewhere else. Raising rather than quietly asserting the
+        new value keeps the call all-or-nothing: a supersession that lost its predecessor
+        is not a partial success, it is two live answers to one question.
+        """
+        old = self.get(old_claim_id, tenant=tenant, user=user, agent=agent,
+                       session=session)
+        if old is None:
+            raise KeyError(
+                f"no claim {old_claim_id!r} in scope "
+                f"{self._scope(tenant, user, agent, session).key()}"
+            )
+        return self._write_claim(new_claim, sources, retire=old,
+                                 at=at or new_claim.recorded_at)
 
     def forget(self, subject: str, predicate: str, *, tenant=None, user=None, agent=None,
                session=None, at: datetime | None = None) -> list[Claim]:
@@ -647,6 +770,46 @@ class Engram:
             self.store.invalidate(claim.id, now, None)
             self.store.set_valid_to(claim.id, now)
         return True
+
+    def erase(self, claim_id: str, *, sources: bool = False, tenant=None, user=None,
+              agent=None, session=None) -> bool:
+        """Irreversibly erase one claim. Returns whether anything was erased.
+
+        The other reading of "delete this memory", and the one `delete()` cannot give:
+        `delete()` retires, which is right for correcting a belief and wrong for an
+        erasure request, because the text, its source turn and its embedding all stay on
+        disk and `history()` and `as_of` keep returning them. Here the claim row, its
+        entry in the text index and its vector all go, and nothing records that they
+        existed — `history()` shows a gap.
+
+        `purge()` remains the call for erasing a *scope*. This one exists because an
+        erasure request naming a single memory had no honest answer between the two, and
+        the dishonest answer — retire it and report success — is the worst outcome the
+        library can produce.
+
+        `sources=True` also erases the turns behind this claim that no surviving claim
+        still cites. Right for a memory that *is* its source text, wrong for a fact
+        extracted from a conversation turn holding much else besides, so the caller
+        chooses; see `Store.erase_claim`.
+
+        Scope-checked like `why()`, and `False` rather than an exception for an unknown
+        or out-of-scope id, so the method cannot be used to test whether an id exists in
+        somebody else's tenant.
+        """
+        if self.get(claim_id, tenant=tenant, user=user, agent=agent,
+                    session=session) is None:
+            return False
+        erase = getattr(self.store, "erase_claim", None)
+        if erase is None:
+            # Deliberately not falling back to `delete()`. A caller who asked to erase
+            # and was told it happened, while the text is still readable, is the failure
+            # this method was added to remove — re-introducing it as a graceful
+            # degradation would be worse than the missing feature.
+            raise NotImplementedError(
+                f"{type(self.store).__name__} does not implement erase_claim(); "
+                "erasure cannot be faked with retirement"
+            )
+        return erase(claim_id, sources=sources)
 
     def count(self, *, tenant=None, user=None, agent=None, session=None,
               as_of: datetime | None = None, include_invalidated: bool = False) -> int:
@@ -998,6 +1161,15 @@ class ScopedEngram:
 
     def delete(self, claim_id: str, *, at: datetime | None = None) -> bool:
         return self._mem.delete(claim_id, at=at, **self._kw)
+
+    def erase(self, claim_id: str, *, sources: bool = False) -> bool:
+        return self._mem.erase(claim_id, sources=sources, **self._kw)
+
+    def supersede(self, old_claim_id: str, new_claim: Claim, *,
+                  at: datetime | None = None,
+                  sources: Sequence[str | Episode] | None = None) -> WriteReceipt:
+        return self._mem.supersede(old_claim_id, new_claim, at=at, sources=sources,
+                                   **self._kw)
 
     def purge(self) -> dict[str, int]:
         return self._mem.purge(**self._kw)

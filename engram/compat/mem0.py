@@ -5,19 +5,10 @@ runs against engram without being rewritten. Written against mem0 2.x, where ent
 moved into a `filters=` dict (a top-level `user_id=` is rejected), `limit` became
 `top_k`, and `search` grew `threshold`, `rerank` and `explain`.
 
-Three calls do **not** have an honest translation, and this module refuses each of them
+Two calls do **not** have an honest translation, and this module refuses each of them
 loudly rather than guessing. That refusal is the useful part: a shim that silently means
 something else is worse than no shim, because the difference shows up as data loss
 months later.
-
-``delete()``
-    mem0's erases. Engram's `delete()` *retires*: the claim stops answering `search()`,
-    `get()` and `get_all()`, and its text, its source episode and its embedding stay on
-    disk, still returned by `history()` and by `search(as_of=…)`. For a GDPR deletion
-    that is the worst possible outcome — the caller believes the data is gone. Engram has
-    no per-claim erasure at all (only `purge()`, which erases a whole scope), so this
-    shim retires and says so once, and `on_delete="erase"` turns the gap into an
-    exception at the call site instead of a quiet under-delete.
 
 ``update()``
     A claim is immutable; that immutability is what `history()` and `as_of` are built
@@ -35,6 +26,14 @@ Two behavioural differences are worth knowing before the first surprise:
   a new id and retires the old one. mem0 code that caches an id and re-`get()`s it after
   an update gets `None`; `history(old_id)` still walks the whole slot, which is the
   recovery path.
+* **`delete()` retires by default, and mem0's erases.** A retired claim stops answering
+  `search()`, `get()` and `get_all()`, but its text, its source turn and its embedding
+  stay on disk and `history()` and `search(as_of=…)` still return it — so for a GDPR
+  request the default is the worst outcome, a caller who believes the data is gone. It
+  is still the default because it is engram's semantics and the divergence should be
+  noticed, not absorbed; the warning fires once and names the fix. `on_delete="erase"`
+  matches mem0, erasing the memory and the source turn outright, and `"retire"` keeps
+  retirement and silences the warning once you have decided.
 * **`add()` reports a supersession as two rows** — an ADD for the new value and a DELETE
   for the one it retired — because that is what happened. mem0 emits a single UPDATE.
 """
@@ -46,8 +45,25 @@ import warnings
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..core import Engram
-from ..types import Claim, Episode, MemoryType, Result, Scope
+from ..types import (
+    ENTITY_REKEY,
+    LAST_OBSERVED,
+    OBJECT_ENTITY,
+    SALIENCE_BASE,
+    SUBJECT_ENTITY,
+    Claim,
+    Episode,
+    MemoryType,
+    Result,
+    Scope,
+)
 from ._notes import NOTE_PREDICATE, build_note, ensure_note_predicate, write_note
+
+#: `Claim.meta` keys engram owns. Filtered out of the mem0 `metadata` field so a
+#: compatibility surface never hands back internal bookkeeping as user data.
+_RESERVED_META = frozenset({
+    SALIENCE_BASE, LAST_OBSERVED, SUBJECT_ENTITY, OBJECT_ENTITY, ENTITY_REKEY,
+})
 
 
 class Mem0CompatError(NotImplementedError):
@@ -79,17 +95,13 @@ RENAMED_ARGS = {"limit": "top_k"}
 
 _ON_DELETE = ("warn", "retire", "erase")
 
-_NO_ERASURE = (
-    "mem0's delete() erases a memory; engram's retires it. The claim stops answering "
-    "search(), get() and get_all(), and its text, its source episode and its embedding "
-    "remain on disk — still returned by history() and by search(as_of=...).\n\n"
-    "If this call is a GDPR/CCPA erasure, retirement does not satisfy it. Engram "
-    "exposes no per-claim erasure; the calls that really erase are scope-wide:\n"
-    "    Memory.delete_all(filters={'user_id': 'alice'})   # -> Engram.purge()\n"
-    "    Memory.reset()                                     # -> the whole tenant\n\n"
-    "Memory(on_delete=...) picks what this method does: 'warn' (default) retires and "
-    "says so once, 'retire' retires silently once you have decided, 'erase' raises here "
-    "rather than letting an erasure quietly under-delete."
+_RETIRED_NOT_ERASED = (
+    "mem0's delete() erases a memory; this call retired it instead. The claim stops "
+    "answering search(), get() and get_all(), and its text, its source episode and its "
+    "embedding remain on disk — still returned by history() and by search(as_of=...).\n\n"
+    "If this call is a GDPR/CCPA erasure, retirement does not satisfy it. Pass "
+    "Memory(on_delete='erase') to erase the memory and its source turn outright, or "
+    "'retire' to keep this behaviour and silence this warning once you have decided."
 )
 
 _NO_UPDATE = (
@@ -304,21 +316,30 @@ class Memory:
         raise Mem0CompatError(_NO_UPDATE)
 
     def delete(self, memory_id: str) -> dict[str, str]:
-        """Retire one memory. **Does not erase it** — see the module docstring.
+        """Retire one memory, or erase it under `on_delete="erase"`.
+
+        The default retires and warns once, because retirement is *not* what mem0's
+        `delete()` does and silently doing the weaker thing is how a GDPR request gets
+        quietly under-served. `on_delete="erase"` matches mem0.
 
         Raises `KeyError` for an id this scope cannot see, rather than reporting a
         success that deleted nothing.
         """
-        if self.on_delete == "erase":
-            raise Mem0CompatError(_NO_ERASURE)
         if self.engram.get(memory_id) is None:
             raise KeyError(
                 f"no memory {memory_id!r} in scope {self.engram.default_scope.key()}"
             )
+        if self.on_delete == "erase":
+            # Now a real erasure rather than a refusal. `sources=True` is right here and
+            # would be wrong for an extracted fact: a note *is* its source turn, holding
+            # the same text and nothing else, so leaving the episode behind would erase
+            # the memory and keep the sentence.
+            self.engram.erase(memory_id, sources=True)
+            return {"message": "Memory erased"}
         self.engram.delete(memory_id)
         if self.on_delete == "warn" and not self._warned_delete:
             self._warned_delete = True
-            warnings.warn(_NO_ERASURE, Mem0DeletionWarning, stacklevel=2)
+            warnings.warn(_RETIRED_NOT_ERASED, Mem0DeletionWarning, stacklevel=2)
         return {"message": "Memory retired (not erased); see Mem0DeletionWarning"}
 
     def delete_all(self, *, filters: Mapping[str, Any] | None = None,
@@ -453,6 +474,18 @@ class Memory:
     # -- rendering --------------------------------------------------------------
 
     @staticmethod
+    def _user_metadata(claim: Claim) -> dict[str, Any]:
+        """Only what the caller put there.
+
+        Engram keeps its own bookkeeping in `Claim.meta` — storage strength, the last
+        observation instant, resolved entity identities. That is internal state, not
+        something the caller attached, and mem0 documents `metadata` as the caller's own
+        dict. Echoing ours back would leak implementation detail through a compatibility
+        surface and invite someone to depend on it.
+        """
+        return {k: v for k, v in claim.meta.items() if k not in _RESERVED_META}
+
+    @staticmethod
     def _row(claim: Claim, *, result: Result | None = None,
              explain: bool = False) -> dict[str, Any]:
         """One claim in mem0's memory shape, with engram's extra structure alongside.
@@ -465,7 +498,7 @@ class Memory:
             "id": claim.id,
             "memory": claim.text,
             "hash": claim.value_key,
-            "metadata": dict(claim.meta),
+            "metadata": Memory._user_metadata(claim),
             "created_at": claim.recorded_at.isoformat(),
             # Engram never edits a claim, so a live one has never been updated; a retired
             # one was last touched when it was retired.

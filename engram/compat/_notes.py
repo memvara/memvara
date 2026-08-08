@@ -18,11 +18,11 @@ Putting the id in the *subject* rather than in the predicate is what makes
 `history(memory_id)` returns, and it keeps the predicate registry at one entry instead
 of one per imported memory — which matters, because learned predicates are capped.
 
-Nothing here is reachable from the `Engram` facade: writing a claim with its own
-`sources`, `meta` and backdated timestamps needs `Engram.writer.assert_claim`, and
-storing the source turn without running extraction over it needs `Engram.store`. Both
-are public objects (`WritePipeline` and `Store` are exported from `engram`), but the
-facade has no equivalent — see the workstream report.
+`write_note` goes below the `Engram` facade on purpose. `Engram.remember(sources=…)` and
+`Engram.supersede` now cover everything it does *except* that they also embed each source
+turn — and a note's turn is a byte-identical copy of the claim's own text, so the facade
+would store two identical vectors per note and charge an import twice for the second one.
+`WritePipeline` and `Store` are both public, and the write is still one transaction.
 """
 
 from __future__ import annotations
@@ -126,29 +126,35 @@ def build_note(
     return claim, episode
 
 
-def write_note(mem: Engram, claim: Claim, episode: Episode) -> WriteReceipt:
-    """Persist the source turn and the claim derived from it, in one transaction.
+def write_note(mem: Engram, claim: Claim, episode: Episode, *,
+               retire: Claim | None = None, at: datetime | None = None) -> WriteReceipt:
+    """Persist the source turn, retire the value it replaces, assert the claim — atomic.
 
-    Separately committed, a crash between the two leaves a claim citing an episode that
-    does not exist — a dangling `why()` in the one library whose pitch is that provenance
-    always resolves.
+    Separately committed, a crash between the turn and the claim leaves a claim citing an
+    episode that does not exist — a dangling `why()` in the one library whose pitch is
+    that provenance always resolves — and a crash between the retirement and the
+    assertion leaves the slot empty, which is worse: an import that drops a memory rather
+    than updating it.
+
+    `retire` is the value this note replaces, and `at` the instant it stopped being
+    believed. The retirement records `claim.id` as what replaced it, which is the pointer
+    `Engram.delete` cannot write and the whole reason an import reconstructs history
+    rather than just replaying its final state. It goes **before** the assertion, so the
+    reconciler cannot get there first and stamp the wall clock over `at` — which would
+    silently turn a backdated import into a pile of things that all changed today.
+
+    This is `Engram._write_claim` minus one step, and the missing step is deliberate:
+    the facade also *embeds* each source turn, and a note's episode is a byte-identical
+    copy of the claim's own text. Going through the facade would put two identical
+    vectors in the index for every note, return the same sentence twice under
+    `include_episodes=True`, and double the encode bill of an import for no recall
+    anyone can name. The turn is still stored and still BM25-indexed by `add_episode`.
     """
     with mem.store.batch():
         mem.store.add_episode(episode)
+        if retire is not None:
+            mem.store.invalidate(retire.id, at, claim.id)
+            # Both axes together: committed separately, an `as_of` query between the two
+            # sees a claim that is retracted and still in force.
+            mem.store.set_valid_to(retire.id, at)
         return mem.writer.assert_claim(claim)
-
-
-def supersede(mem: Engram, old: Claim, at: datetime, by: str | None) -> None:
-    """Retire `old` as of `at`, recording what replaced it.
-
-    `Engram.delete` does the same thing and is scope-checked, but it cannot record
-    `invalidated_by` — and without that pointer `why()` on the new claim reports nothing
-    superseded, which is exactly the history an import exists to reconstruct. Callers
-    here own the claim they are retiring (they wrote it moments ago), so the scope check
-    it forgoes has nothing to protect.
-    """
-    with mem.store.batch():
-        mem.store.invalidate(old.id, at, by)
-        # Both axes together: committed separately, an `as_of` query between the two
-        # sees a claim that is retracted and still in force.
-        mem.store.set_valid_to(old.id, at)

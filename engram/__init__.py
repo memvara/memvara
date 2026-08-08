@@ -29,7 +29,9 @@ What it does differently from mem0 and friends:
     mem.history("user", "lives_in")     # -> Berlin (retired), Lisbon (current)
 """
 
+from .aio import AsyncEngram
 from .consolidate import Consolidator
+from .entities import EntityRegistry, EntityResolution, EntitySpec, entity_key
 from .core import (
     DegradedExtractionWarning,
     EmbedderChangedWarning,
@@ -60,12 +62,14 @@ from .types import (
     WriteReceipt,
     utcnow,
 )
+from .telemetry import MemoryRecorder, NullRecorder, Recorder
 from .write import FastExtractor, Reconciler, SalienceGate, WritePipeline
+from .write.reconcile import backfill_entities
 
 __version__ = "0.1.0"
 
 __all__ = [
-    "Engram", "ScopedEngram",
+    "Engram", "ScopedEngram", "AsyncEngram",
     # data model
     "Claim", "Episode", "Scope", "Result", "Explanation", "Provenance",
     "WriteReceipt", "MemoryType", "Derivation", "utcnow",
@@ -80,7 +84,10 @@ __all__ = [
     "DegradedExtractionWarning", "EmbedderChangedWarning", "EmbedderMismatchError",
     # subsystems
     "WritePipeline", "SalienceGate", "FastExtractor", "Reconciler",
-    "HybridRetriever", "Consolidator",
+    "HybridRetriever",
+    "EntityRegistry", "EntityResolution", "EntitySpec", "entity_key",
+    "backfill_entities",
+    "Recorder", "NullRecorder", "MemoryRecorder", "Consolidator",
     # relevance floors are measured per deployment, never assumed
     "calibrate_min_score", "FloorReport",
     "__version__",

@@ -24,13 +24,26 @@ Two invariants the implementation is built around:
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Sequence
+from typing import Callable, Sequence
 
+from ..entities import EntityRegistry
 from ..schema import PredicateRegistry
 from ..store.base import Store
-from ..types import MAX_SALIENCE, Claim, as_utc, fact_key_for, owner_key, utcnow
+from ..types import (
+    ENTITY_REKEY,
+    MAX_SALIENCE,
+    OBJECT_ENTITY,
+    SUBJECT_ENTITY,
+    Claim,
+    as_utc,
+    default_entity,
+    fact_key_for,
+    owner_key,
+    utcnow,
+)
 
 #: The share of a reinforcement bump that a *massed* repetition earns — one that arrives
 #: while the trace is still fully available, e.g. the same fact stated twice in one
@@ -63,13 +76,26 @@ class ReconcileResult:
 class Reconciler:
     """Decides what a candidate claim does to the claims already on record."""
 
-    def __init__(self, store: Store, registry: PredicateRegistry) -> None:
+    def __init__(self, store: Store, registry: PredicateRegistry,
+                 entities: EntityRegistry | None = None) -> None:
         self.store = store
         self.registry = registry
+        #: Entity identity for subjects and objects — the right-hand-side twin of
+        #: `registry`. Owned here rather than passed down from `WritePipeline` because
+        #: `_canonicalize` is the single chokepoint where a stored string is normalized
+        #: before any key is derived from it, and identity has to be decided there or
+        #: not at all.
+        self.entities = entities if entities is not None else EntityRegistry(store)
         # Set by `WritePipeline` from its own `reinforce_bump`; kept as an attribute
         # rather than a constructor argument so the documented signature stays exact.
         self.reinforce_bump = 0.25
         self.max_salience = MAX_SALIENCE
+        #: Optional model hook for merging two spellings the deterministic fold cannot
+        #: see are one thing ("Big Blue" / "IBM"). `None` means the write path is
+        #: exactly as free as it was — which is the default, because the fold already
+        #: decides identity for everything and a merge only refines it. Called at most
+        #: once per (owner, novel fold), ever; see `EntityRegistry.acquire`.
+        self.resolve_entity: Callable[[str, Sequence[str]], str | None] | None = None
 
     # -- public ---------------------------------------------------------------
 
@@ -206,11 +232,18 @@ class Reconciler:
         return began if began < t else t
 
     def _canonicalize(self, claim: Claim) -> None:
-        """Fold the predicate onto its canonical name before any key is derived.
+        """Fold all three parts onto their canonical identities before any key exists.
 
         `fact_key` and `value_key` hash the predicate, so `resides_in` and `lives_in`
         would otherwise land in different slots and their contradiction would be
-        invisible — the exact failure the registry exists to prevent.
+        invisible — the exact failure the registry exists to prevent. They hash the
+        subject and object too, and until this method resolved those as well the same
+        hole was wide open on the other side: "Acme", "Acme Corp", "acme inc" and "ACME"
+        were four employers, so a single-valued predicate manufactured three job changes
+        out of one job.
+
+        This is the only place it can happen. Every write path lands here, and it runs
+        before the first key is derived.
         """
         auto_rendered = claim.render()
         claim.subject = claim.subject.strip()
@@ -218,10 +251,49 @@ class Reconciler:
         canonical = self.registry.normalize(claim.predicate)
         if canonical:
             claim.predicate = canonical
+        self._stamp(claim)
         # Only re-render text the Claim generated for itself; a caller-supplied
         # natural-language rendering is theirs to keep.
         if not claim.text.strip() or claim.text.strip() == auto_rendered.strip():
             claim.text = claim.render()
+
+    def _stamp(self, claim: Claim, *, learn: bool = True) -> None:
+        """Pin each end of this claim to the entity it resolved to, where that matters.
+
+        A stamp is written only when resolution landed somewhere the deterministic fold
+        would not have — that is, only for an alias. Two reasons, and both are load
+        bearing:
+
+        * `entity_key` is a pure function, so a fold needs no stamp to be stable; a
+          stamp for it would be a copy of a value that cannot change, written into every
+          claim in the store and surfaced to anyone reading `Claim.meta` as if it were
+          their own metadata.
+        * The alias table *can* change, and a stamp is exactly what stops it changing
+          the past. A claim written before "Big Blue" was known to be IBM keeps the
+          identity it was written with, so `history()` does not silently restructure
+          itself the day the alias is learned. Applying it to existing rows is a
+          separate, dated, dry-run-first operation — see `backfill_entities`.
+
+        `learn=False` re-reads today's answer without teaching the registry or asking a
+        model anything. That is what a migration pass wants: it is applying aliases that
+        already exist, and a scan of an entire store must not import every value ever
+        written into the entity table, nor turn a dry run into a spending decision.
+        """
+        owner = owner_key(claim.scope)
+        for meta_key, surface in ((SUBJECT_ENTITY, claim.subject),
+                                  (OBJECT_ENTITY, claim.object)):
+            resolution = self.entities.resolve(owner, surface, register=learn)
+            novel = learn and bool(resolution.key) and not resolution.resolved
+            if novel and self.resolve_entity is not None:
+                # A fold nobody has seen here before. The identity we already have is
+                # correct and free; a model is asked only whether it is a *second* name
+                # for something we hold, and only once per form, ever.
+                if self.entities.acquire(owner, surface, self.resolve_entity):
+                    resolution = self.entities.resolve(owner, surface)
+            if resolution.key and resolution.key != default_entity(surface):
+                claim.meta[meta_key] = resolution.key
+            else:
+                claim.meta.pop(meta_key, None)
 
     @staticmethod
     def _live(claims: Sequence[Claim], t: datetime, owner: str) -> list[Claim]:
@@ -241,7 +313,8 @@ class Reconciler:
         # order coming back from the store.
         return min(claims, key=lambda c: (c.recorded_at, c.id))
 
-    def _victims(self, claim: Claim, t: datetime, owner: str) -> list[Claim]:
+    def _victims(self, claim: Claim, t: datetime,
+                 owner: str) -> tuple[list[Claim], list[Claim]]:
         spec = self.registry.spec(claim.predicate)
         victims: dict[str, Claim] = {}
 
@@ -258,7 +331,8 @@ class Reconciler:
             # predicate other than the claim's own; hashing it by hand here is how this
             # lookup silently drifts out of sync with what the store indexed and starts
             # matching nothing.
-            fk = fact_key_for(claim.scope, claim.subject, self.registry.normalize(other))
+            fk = fact_key_for(claim.scope, claim.subject_key,
+                              self.registry.normalize(other))
             for c in self.store.competing_claims(claim.scope.tenant, fk, t):
                 if owner_key(c.scope) == owner:
                     victims[c.id] = c
@@ -289,11 +363,16 @@ class Reconciler:
         slot = [c for c in self.store.competing_claims(tenant, claim.fact_key, t)
                 if owner_key(c.scope) == owner]
 
-        target = claim.object.strip().casefold()
+        # Entity identity, the same notion `value_key` uses. It used to be a plain
+        # casefold here and a case-*sensitive* hash there, so retraction matched
+        # "ACME" against "Acme" while deduplication did not — one operation folding
+        # case and its inverse not folding it is a bug in whichever direction you read
+        # it from.
+        target = claim.object_key
         if target:
             # "I no longer work at Acme" says nothing about an employer we recorded as
             # Globex, so only the named value is retired.
-            matches = [c for c in slot if c.object.strip().casefold() == target]
+            matches = [c for c in slot if c.object_key == target]
         else:
             matches = list(slot)
         matches.sort(key=lambda c: (c.recorded_at, c.id))
@@ -311,8 +390,8 @@ class Reconciler:
                     [])
             if target and slot:
                 # A named retraction that hit nothing. Object matching is exact (modulo
-                # case), so "peanut" does not retract "Peanuts" — and writing a tombstone
-                # here would leave a record that looks exactly like a retraction that
+                # entity identity), so "peanut" does not retract "Peanuts" — and writing
+                # a tombstone here would leave a record that looks exactly like one that
                 # worked. For a safety-critical retraction ("I'm not allergic to X") that
                 # is the worst possible outcome: the claim stays live and the audit trail
                 # says it was withdrawn. Record nothing and report a no-op, so the empty
@@ -331,3 +410,135 @@ class Reconciler:
         if matches:
             self._retire(matches, t, claim.id)
         return ReconcileResult("retract", claim, matches)
+
+
+# --- late-alias backfill --------------------------------------------------------
+
+
+@dataclass(slots=True)
+class RekeyReport:
+    """What a `backfill_entities` pass did, or would do."""
+
+    scanned: int = 0
+    written: int = 0     # claims whose stored key columns were rewritten
+    merged: int = 0      # claims folded into an earlier claim of the same value
+    retired: int = 0     # claims superseded by the rebuilt chain
+    dry_run: bool = True
+
+    def __str__(self) -> str:
+        return (f"<RekeyReport scanned={self.scanned} written={self.written} "
+                f"merged={self.merged} retired={self.retired}"
+                f"{' dry-run' if self.dry_run else ''}>")
+
+    __repr__ = __str__
+
+
+def backfill_entities(reconciler: Reconciler, tenant: str, *, dry_run: bool = True,
+                      now: datetime | None = None) -> RekeyReport:
+    """Apply the current entity resolution to claims that were written before it.
+
+    Two situations need this and there is no third. A store written by a build whose
+    keys hashed raw strings holds rows whose `fact_key` and `value_key` columns no longer
+    match what the code derives, so the old claims are invisible to reconciliation. And
+    an alias learned in month six (`EntityRegistry.learn_alias`) applies from month six
+    onward, because claims carry a stamp of the identity they were written with.
+
+    **This rewrites history, and that is the entire reason it is a separate function
+    with `dry_run=True` as its default.** Claims that coexisted start retiring each
+    other, and `slot_history()` returns a differently-shaped past afterwards. Nothing is
+    deleted — every id survives, every source episode still resolves — but the shape
+    changes, so it happens when an operator asks for it and never as a side effect of a
+    write. Run it dry, read the report, then run it for real.
+
+    The procedure, in the order it has to happen:
+
+    1. Re-stamp every claim, retired ones included, and rewrite its key columns. Retired
+       claims must move too or `history()` loses the past it is there to show.
+    2. Replay each slot's *live* claims in `(recorded_at, id)` order — the same total
+       order `Reconciler` uses — so the supersession chain rebuilds identically on every
+       run and on every replica. Exact duplicates under the new identity fold into the
+       earliest of them; for a single-valued predicate the rest form a chain.
+    3. Stamp each touched claim with a dated `ENTITY_REKEY` record, so `why()` can say
+       why history changed and not merely that it did.
+
+    Claim ids are preserved throughout. Replaying through `Reconciler.apply` would have
+    been less code and would have minted new ids for claims that receipts, logs and
+    `invalidated_by` pointers already reference.
+    """
+    t = now or utcnow()
+    report = RekeyReport(dry_run=dry_run)
+    claims = sorted(
+        reconciler.store.iter_claims(tenant, include_invalidated=True),
+        key=lambda c: (as_utc(c.recorded_at), c.id),
+    )
+
+    slots: dict[str, list[Claim]] = {}
+    for claim in claims:
+        report.scanned += 1
+        # `learn=False`: this pass applies the aliases that already exist. Registering
+        # every value it walks past would import the store into the entity table, and a
+        # dry run would stop being dry.
+        reconciler._stamp(claim, learn=False)                       # noqa: SLF001
+        if claim.is_live(t):
+            slots.setdefault(claim.fact_key, []).append(claim)
+
+    for group in slots.values():
+        functional = reconciler.registry.spec(group[0].predicate).functional
+        by_value: dict[str, Claim] = {}
+        current: Claim | None = None
+        for claim in group:
+            keeper = by_value.get(claim.value_key)
+            if keeper is not None:
+                _fold_into(keeper, claim, t)
+                report.merged += 1
+                continue
+            if functional and current is not None:
+                # Transaction *and* valid time move to the newer claim's recording
+                # instant, which is when we would have retired it had the identities
+                # been right at the time. Dating it `now` instead would claim we
+                # believed two employers simultaneously for however long the store is old.
+                _supersede(current, claim, as_utc(claim.recorded_at))
+                report.retired += 1
+                # No longer a live occupant, so a *later* claim of that same value is a
+                # return to a previous employer and must supersede in its turn — not
+                # fold into a claim we stopped believing two steps ago.
+                by_value.pop(current.value_key, None)
+            by_value[claim.value_key] = claim
+            current = claim
+
+    if not dry_run:
+        batch = getattr(reconciler.store, "batch", None)
+        with (batch() if batch is not None else nullcontext()):
+            for claim in claims:
+                reconciler.store.put_claim(claim)
+                report.written += 1
+    return report
+
+
+def _note(claim: Claim, at: datetime, reason: str, other: str) -> None:
+    """Record that a backfill moved this claim, and what it was moved against."""
+    claim.meta.setdefault(ENTITY_REKEY, []).append(
+        {"at": at.timestamp(), "reason": reason, "claim": other})
+
+
+def _fold_into(keeper: Claim, loser: Claim, at: datetime) -> None:
+    """Two claims that turn out to assert the same thing become one.
+
+    Invalidated in *transaction* time only, exactly as consolidation's merge does:
+    we stopped believing it separately, but it was never false, so `valid_to` stays
+    unset and an `as_of` query from before the backfill still returns the old world.
+    """
+    keeper.sources = list(dict.fromkeys(keeper.sources + loser.sources))
+    keeper.observation_count += loser.observation_count
+    loser.invalidated_at = at
+    loser.invalidated_by = keeper.id
+    _note(loser, at, "merged", keeper.id)
+    _note(keeper, at, "absorbed", loser.id)
+
+
+def _supersede(older: Claim, newer: Claim, at: datetime) -> None:
+    older.invalidated_at = at
+    older.invalidated_by = newer.id
+    if older.valid_to is None or older.valid_to > at:
+        older.valid_to = at
+    _note(older, at, "superseded", newer.id)

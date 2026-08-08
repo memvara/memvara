@@ -30,6 +30,7 @@ import numpy as np
 from ..embed.base import Embedder
 from ..schema import PredicateRegistry
 from ..store.base import Store
+from ..telemetry import CONSOLIDATE_MERGED, CONSOLIDATE_PROMOTED, Recorder
 from ..types import MAX_SALIENCE, Claim, Derivation, MemoryType, as_utc
 from .decay import BASE_KEY, decayed_salience
 from .sweep import Sweep
@@ -167,6 +168,13 @@ def merge_pass(sweep: Sweep, embedder: Embedder, registry: PredicateRegistry, *,
                 sweep.touch(group[j])
                 retired += 1
             sweep.touch(keeper)
+    if sweep.telemetry is not None:
+        # Emitted at zero on purpose, and this is the stage where that matters most.
+        # Merge reporting 0 forever while `consolidate.claims_per_slot` climbs is the
+        # exact signature of duplicate rows accumulating in a slot faster than anything
+        # folds them - flip-flop growth, which has no other symptom until a prompt is
+        # half restatements of one fact.
+        sweep.telemetry.counter(CONSOLIDATE_MERGED, retired)
     return retired
 
 
@@ -183,6 +191,8 @@ def promote_pass(sweep: Sweep, min_observations: int = 3) -> int:
         claim.derivation = Derivation.CONSOLIDATION
         sweep.touch(claim)
         promoted += 1
+    if sweep.telemetry is not None:
+        sweep.telemetry.counter(CONSOLIDATE_PROMOTED, promoted)
     return promoted
 
 
@@ -196,13 +206,14 @@ def merge_duplicates(
     *,
     neighbourhood: int = NEIGHBOURHOOD,
     window: int | None = None,
+    telemetry: Recorder | None = None,
 ) -> int:
     """Fold near-identical live claims in the same slot into one. Returns claims retired.
 
     Only claims sharing a `fact_key` are ever compared - two claims answering different
     questions are not duplicates however similar their text reads.
     """
-    sweep = Sweep(store, tenant, now=now, window=window)
+    sweep = Sweep(store, tenant, now=now, window=window, telemetry=telemetry)
     retired = merge_pass(sweep, embedder, registry, threshold=threshold,
                          neighbourhood=neighbourhood)
     sweep.flush()
@@ -215,6 +226,7 @@ def promote(
     min_observations: int = 3,
     now: datetime | None = None,
     window: int | None = None,
+    telemetry: Recorder | None = None,
 ) -> int:
     """Reclassify repeatedly-observed EPISODIC claims as SEMANTIC. Returns count promoted.
 
@@ -225,7 +237,7 @@ def promote(
     Promotion is in place: the claim's identity has not changed, only our reading of what
     kind of thing it is.
     """
-    sweep = Sweep(store, tenant, now=now, window=window)
+    sweep = Sweep(store, tenant, now=now, window=window, telemetry=telemetry)
     promoted = promote_pass(sweep, min_observations)
     sweep.flush()
     return promoted

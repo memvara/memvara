@@ -273,13 +273,36 @@ def test_on_delete_retire_is_the_informed_silent_choice(mem):
         assert "retired" in api.delete(memory_id)["message"]
 
 
-def test_on_delete_erase_refuses_rather_than_under_deleting(mem):
+def test_on_delete_erase_actually_erases_the_memory_and_its_source_turn(mem):
     api = Memory(mem, on_delete="erase")
     memory_id = api.add("I live in Berlin")["results"][0]["id"]
-    with pytest.raises(Mem0CompatError, match="delete_all"):
-        api.delete(memory_id)
-    # And it refused *before* touching anything, so the caller can fall back.
-    assert api.get(memory_id) is not None
+    source = mem.get(memory_id).sources[0]
+    assert mem.store.get_episode(source) is not None
+
+    with warnings.catch_warnings():
+        # Nothing to warn about: this is what mem0's delete() means.
+        warnings.simplefilter("error")
+        assert api.delete(memory_id)["message"] == "Memory erased"
+
+    # Gone from both readings of "deleted" — the present tense *and* the past. This is
+    # the distinction the warning on the default path exists to draw.
+    assert api.get(memory_id) is None
+    assert mem.get(memory_id) is None
+    assert mem.get_all(include_invalidated=True) == []
+    assert mem.store.get_claim(memory_id) is None
+    # And the sentence itself is gone, not just the claim pointing at it. A note *is*
+    # its source turn; leaving the episode would erase the memory and keep the text.
+    assert mem.store.get_episode(source) is None
+    assert not mem.search("Berlin", include_episodes=True, include_invalidated=True)
+
+
+def test_erase_leaves_other_memories_untouched(mem):
+    api = Memory(mem, on_delete="erase")
+    doomed = api.add("I live in Berlin")["results"][0]["id"]
+    kept = api.add("My name is Mira")["results"][0]["id"]
+    api.delete(doomed)
+    assert api.get(kept) is not None
+    assert [r["id"] for r in api.get_all()["results"]] == [kept]
 
 
 def test_deleting_an_unknown_id_raises_rather_than_reporting_success(api):
@@ -683,3 +706,30 @@ def test_the_receipt_reads_as_a_summary(mem, history_db):
 def test_a_declared_contested_slot_says_so():
     slot = ContestedSlot("user", "likes", ("coffee", "tea"), declared=True)
     assert "declared" in str(slot) and "UNDECLARED" not in str(slot)
+
+
+def test_an_import_crash_cannot_leave_a_note_slot_empty(mem):
+    """Retirement and assertion are one transaction, so a crash rolls back both.
+
+    The failure this prevents is the one that matters in a migration: the old value
+    retired, the new one never written, and a memory that mem0 merely *updated* arriving
+    as a memory engram no longer holds. Separate transactions made that reachable.
+    """
+    from engram.compat._notes import build_note, write_note
+
+    ensure_note_predicate(mem, NOTE_PREDICATE, "default")
+    first, ep1 = build_note(memory_id="m1", text="Likes pizza",
+                            scope=mem.default_scope, ts=at(0))
+    live = write_note(mem, first, ep1).added[0]
+
+    second, ep2 = build_note(memory_id="m1", text="Likes calzone",
+                             scope=mem.default_scope, ts=at(1))
+    mem.writer.assert_claim = lambda *a, **kw: (_ for _ in ()).throw(
+        RuntimeError("crash between the retirement and the assertion"))
+    with pytest.raises(RuntimeError):
+        write_note(mem, second, ep2, retire=live, at=at(1))
+
+    # The slot still holds exactly what it held before — not nothing.
+    still = mem.history(note_subject("m1"), NOTE_PREDICATE)
+    assert [c.object for c in still] == ["Likes pizza"]
+    assert still[0].invalidated_at is None and still[0].valid_to is None

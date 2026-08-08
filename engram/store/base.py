@@ -150,6 +150,22 @@ class Store(Protocol):
         """
         ...
 
+    def erase_claim(self, claim_id: str, *, sources: bool = False) -> bool:
+        """Irreversibly erase one claim — row, text index, vector. Returns whether it
+        existed.
+
+        In the protocol rather than left to `purge` because the gap between the two was
+        an erasure request naming a single memory, which retirement cannot satisfy (the
+        text stays readable) and a scope-wide purge over-answers. An implementation that
+        cannot really erase must raise rather than retire: a caller told "deleted" who
+        still has the text on disk is the worst outcome this interface can produce.
+
+        `sources=True` also erases the source turns no surviving claim still cites —
+        correct for a memory that *is* its source text, wrong for a fact extracted from
+        a conversation turn that holds much else besides.
+        """
+        ...
+
     # --- learned schema ---------------------------------------------------
     def put_spec(self, spec, tenant: str = "default") -> None:
         """Persist a learned predicate specification. Must survive restart: cardinality
@@ -164,6 +180,25 @@ class Store(Protocol):
 
     def all_specs(self, tenant: str = "default") -> list:
         """Every persisted predicate specification for one tenant."""
+        ...
+
+    # --- resolved entities ------------------------------------------------
+    def put_entity(self, entity_id: str, canonical: str, aliases: Sequence[str],
+                   tenant: str = "default") -> None:
+        """Persist "these spellings name one thing".
+
+        Must survive restart, and for a harder reason than the predicate schema: entity
+        ids are baked into the `fact_key`s already on disk, so a process that re-derived
+        the mapping and disagreed by one id would address a different slot and stop
+        seeing the contradiction between two spellings of one subject.
+
+        Tenant-scoped, because one tenant deciding "Acme" and "Acme Corp" are one entity
+        must not decide it for another.
+        """
+        ...
+
+    def all_entities(self, tenant: str = "default") -> list[tuple[str, str, tuple[str, ...]]]:
+        """Every resolved entity for one tenant, as (id, canonical, aliases)."""
         ...
 
     # --- maintenance ------------------------------------------------------

@@ -11,14 +11,34 @@ Runs fully offline: SQLiteStore(":memory:"), HashingEmbedder, and the local fake
 
 from __future__ import annotations
 
+import threading
+import time
+from contextlib import contextmanager
 from datetime import timedelta
+from time import perf_counter
 from typing import Any, Sequence
 
 import pytest
 
 from engram.embed import HashingEmbedder
+from engram.retrieve import HybridRetriever
 from engram.schema import Cardinality, PredicateRegistry
 from engram.store import SQLiteStore
+from engram.telemetry import (
+    FAST_HIT,
+    FAST_MISS,
+    GATE_DROP,
+    GATE_PASS,
+    PREDICATE_ALIAS,
+    PREDICATE_CAPPED,
+    PREDICATE_LEARNED,
+    WRITE_EMBEDDING_REJECTED,
+    WRITE_LATENCY_MS,
+    WRITE_LOCK_HELD_MS,
+    WRITE_RECONCILE,
+    WRITE_RETRACTION,
+    MemoryRecorder,
+)
 from engram.types import Claim, Derivation, Episode, Scope, utcnow
 from engram.write import WritePipeline
 
@@ -729,3 +749,350 @@ def test_the_whole_pipeline_is_deterministic():
     assert sum(t[0] for t in first[0]) == 0        # not one model call in the whole run
     assert first[1] == [("likes", "coffee"), ("likes", "tea"), ("lives_in", "Lisbon"),
                         ("name", "Goldy")]
+
+
+# =============================================================================
+# Where the transaction starts
+#
+# `add()` used to run every tier inside one `store.batch()`, and `SQLiteStore.batch`
+# holds a process-wide RLock for the block. Tier 2 calls `llm.extract()`, so one slow
+# extraction stalled every read and every write for every tenant in the process for the
+# length of a provider round trip. Measured with a 1.0 s fake extraction and a reader
+# thread searching a 200-claim store throughout: 1 completed search in the whole window
+# at p50 1,006 ms, against 516 completed searches at p50 1.91 ms and p95 2.23 ms after
+# the hoist. The write takes 1.01 s either way — it stopped being everyone else's
+# problem, it did not get faster.
+# =============================================================================
+
+class _BatchWatcher:
+    """A Store proxy that reports whether a transaction is open right now."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.depth = 0
+        self.opened = 0
+
+    @contextmanager
+    def batch(self):
+        self.depth += 1
+        self.opened += 1
+        try:
+            with self._inner.batch():
+                yield self
+        finally:
+            self.depth -= 1
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_the_extraction_call_does_not_happen_inside_the_transaction():
+    """The whole point of the hoist, asserted structurally rather than by a stopwatch.
+
+    A model round trip inside the store's transaction is a write outage for every other
+    tenant in the process, so "was a transaction open when the model was called" is the
+    property, and it is a boolean rather than a latency."""
+    watcher = _BatchWatcher(SQLiteStore(":memory:"))
+    seen: list[int] = []
+
+    class Observing(CountingLLM):
+        def extract(self, episodes, known_predicates):
+            seen.append(watcher.depth)
+            return super().extract(episodes, known_predicates)
+
+    pipe = WritePipeline(watcher, HashingEmbedder(), PredicateRegistry(), Observing())
+    pipe.add([ep("The offsite moved to the Lisbon office.")])
+    assert seen == [0], "llm.extract() ran with a transaction open"
+    watcher.close()
+
+
+def test_the_near_duplicate_encode_does_not_happen_inside_the_transaction():
+    """Same argument, one tier earlier: `Embedder.encode` is a local hash for the
+    shipped embedder and a network round trip for a hosted one, and which of those was
+    configured must not decide how long the store's lock is held."""
+    watcher = _BatchWatcher(SQLiteStore(":memory:"))
+    seen: list[int] = []
+
+    class Observing(HashingEmbedder):
+        def encode(self, texts):
+            seen.append(watcher.depth)
+            return super().encode(texts)
+
+    pipe = WritePipeline(watcher, Observing(), PredicateRegistry(), CountingLLM())
+    pipe.add([ep("I live in Berlin.")])
+    # First encode is the near-duplicate check and must be outside; the last is the
+    # claim vectors, which are written inside the transaction by design.
+    assert seen[0] == 0
+    watcher.close()
+
+
+def test_a_reader_is_not_blocked_by_a_slow_extraction():
+    """The behaviour the structural test stands in for, with a real second thread.
+
+    The margin is three orders of magnitude - a 0.4 s extraction against reads that take
+    single-digit milliseconds - so the bound below is loose enough to survive a busy CI
+    box and would still fail outright on the old single-transaction shape, where the
+    reader completed one search in the entire window."""
+    store = SQLiteStore(":memory:")
+    embedder = HashingEmbedder()
+    registry = PredicateRegistry()
+    pipe = WritePipeline(store, embedder, registry, CountingLLM())
+    pipe.add([ep("I live in Berlin.")])
+
+    class Slow(CountingLLM):
+        def extract(self, episodes, known_predicates):
+            time.sleep(0.4)
+            return super().extract(episodes, known_predicates)
+
+    pipe.llm = Slow()
+    reader = HybridRetriever(store, embedder, registry)
+    latencies: list[float] = []
+    stop = threading.Event()
+
+    def read_loop():
+        while not stop.is_set():
+            t0 = perf_counter()
+            reader.search("where do I live", Scope("acme", "alice"))
+            latencies.append((perf_counter() - t0) * 1000.0)
+
+    thread = threading.Thread(target=read_loop, daemon=True)
+    thread.start()
+    try:
+        pipe.add([ep("The offsite moved to the Lisbon office.")])
+    finally:
+        stop.set()
+        thread.join()
+
+    assert len(latencies) > 10, (
+        f"only {len(latencies)} reads completed during a 0.4 s extraction; the write "
+        "path is holding the store lock across the model call")
+    assert max(latencies) < 200.0
+    store.close()
+
+
+def test_episodes_are_durable_before_claims_are_written():
+    """The trade the hoist accepts, stated as a test rather than as a comment.
+
+    A crash between the episode commit and the claim write leaves an episode with no
+    claims. That is the recoverable direction: episodes are the source of truth, and a
+    retry converges on the same rows because the content hash matches."""
+    pipe, store, _ = build()
+    episode = ep("My name is Goldy.")
+
+    def explode(*a, **kw):
+        raise RuntimeError("crash between the two writes")
+
+    pipe.reconciler.apply = explode
+    with pytest.raises(RuntimeError):
+        pipe.add([episode])
+    assert store.get_episode(episode.id) is not None, "the raw turn was lost"
+    assert list(store.iter_claims("acme")) == []
+    store.close()
+
+
+def test_a_retry_after_that_crash_converges_instead_of_duplicating():
+    """The other half of the trade, stated exactly rather than optimistically.
+
+    The content hash makes the retry converge on the *turn*: it is stored once, not
+    twice, and the caller gets back the id it already has. It does not re-extract - an
+    exact repeat is precisely the case tier 0 exists to charge nothing for - so the
+    orphaned turn keeps no claims. That is survivable only because wave 2 made
+    unextracted turns retrievable in their own right, which is asserted here so the
+    dependency is visible if it ever goes away."""
+    pipe, store, _ = build()
+    text = "My name is Goldy."
+    broken = ep(text)
+
+    original = pipe.reconciler.apply
+    pipe.reconciler.apply = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom"))
+    with pytest.raises(RuntimeError):
+        pipe.add([broken])
+
+    pipe.reconciler.apply = original
+    receipt = pipe.add([ep(text)])
+    assert receipt.episode_ids == [broken.id]
+    assert receipt.skipped == 1
+    assert store.stats()["episodes"] == 1
+    assert live(store) == []
+    # Still findable, as a turn rather than as a fact.
+    hits = store.lexical_search("Goldy", [SCOPE], 5, None)
+    assert [eid for eid, _ in store.lexical_search_episodes("Goldy", [SCOPE], 5, None)] \
+        == [broken.id]
+    assert hits == []
+    store.close()
+
+
+def test_a_line_repeated_inside_one_batch_is_still_stored_once():
+    """Hash-identical turns in one batch used to be caught by the lookup seeing an
+    insert made earlier in the same transaction. Every lookup now happens before every
+    insert, so the batch has to remember its own turns."""
+    pipe, store, _ = build()
+    first, second = ep("My name is Goldy."), ep("My name is Goldy.")
+    receipt = pipe.add([first, second, ep("I live in Berlin.")])
+    assert receipt.episode_ids == [first.id, first.id, receipt.episode_ids[2]]
+    assert receipt.skipped == 1
+    assert store.stats()["episodes"] == 2
+    store.close()
+
+
+# =============================================================================
+# Telemetry emission points
+# =============================================================================
+
+def test_the_gate_and_the_fast_path_are_sliced_by_script():
+    """Both tier-1 stages are English by construction - a filler vocabulary and a set of
+    English sentence patterns - and both fail quietly on text they were not built for.
+    Without the slice, "the write path is cheap" is an unqualified claim that may only
+    hold for Latin-script users."""
+    rec = MemoryRecorder()
+    pipe, store, _ = build(telemetry=rec)
+    pipe.add([ep("My name is Goldy."), ep("ok thanks"), ep("我住在北京"),
+              ep("Anything else?")])
+    assert rec.total(GATE_PASS, script="latin") == 1
+    assert rec.total(GATE_PASS, script="han") == 1
+    assert rec.total(GATE_DROP, reason="ack_only", script="latin") == 1
+    assert rec.total(GATE_DROP, reason="question", script="latin") == 1
+    assert rec.total(FAST_HIT, script="latin") == 1
+    assert rec.total(FAST_MISS, script="han") == 1
+    store.close()
+
+
+def test_novel_predicate_registrations_are_counted():
+    """The rate that ran away in the simulation that produced 41 predicates for six
+    concepts. It should fall toward zero as a tenant's vocabulary settles; rising
+    steadily is predicate explosion, which has no other symptom until `recall()` starts
+    answering with four employers at once."""
+    rec = MemoryRecorder()
+    llm = ResolvingLLM(claims=[
+        {"subject": "user", "predicate": "commutes_by", "object": "bicycle",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
+         "source_index": 0},
+    ], canonical=None)
+    pipe, store, _ = build(llm, telemetry=rec)
+    pipe.add([ep("I get around town somehow or other.")])
+    assert rec.total(PREDICATE_LEARNED) == 1
+    assert rec.total(PREDICATE_ALIAS) == 0
+    store.close()
+
+
+def test_a_folded_surface_form_is_counted_as_an_alias_not_a_registration():
+    """A form the deterministic pre-pass cannot guess at, which the model then merges.
+    The two counters have to move separately: a healthy tenant's alias rate keeps
+    climbing while its registration rate goes to zero, and one counter cannot say
+    that."""
+    rec = MemoryRecorder()
+    llm = ResolvingLLM(claims=[
+        {"subject": "user", "predicate": "paycheck_source", "object": "Acme",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
+         "source_index": 0},
+    ], canonical="works_at")
+    pipe, store, _ = build(llm, telemetry=rec)
+    pipe.add([ep("Payroll switched over to the new provider this quarter.")])
+    assert rec.total(PREDICATE_ALIAS) == 1
+    assert rec.total(PREDICATE_LEARNED) == 0
+    store.close()
+
+
+def test_the_registry_cap_firing_is_counted_and_says_whether_it_folded():
+    """Any of this at all means the ceiling is load-bearing rather than a backstop, and
+    `folded=no` means a surface form is live and unregistered - multi-valued, retiring
+    nothing, which is where duplicate slots come from."""
+    rec = MemoryRecorder()
+    predicates = iter(["prior_employer", "zzz_qqq_unrelated"])
+
+    def responder(episodes):
+        return [{"subject": "user", "predicate": next(predicates), "object": "Acme",
+                 "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
+                 "source_index": 0}]
+
+    store = SQLiteStore(":memory:")
+    registry = PredicateRegistry(max_learned=0)
+    pipe = WritePipeline(store, HashingEmbedder(), registry,
+                         ResolvingLLM(responder=responder), telemetry=rec)
+    pipe.add([ep("Payroll switched over to the new provider this quarter.")])
+    pipe.add([ep("Payroll moved again after the acquisition closed.")])
+    assert rec.total(PREDICATE_CAPPED, folded="yes") == 1
+    assert rec.total(PREDICATE_CAPPED, folded="no") == 1
+    store.close()
+
+
+def test_a_retraction_that_retires_nothing_is_recorded_as_an_anomaly():
+    """`forget()` returns an ordinary receipt whether it cleared the slot or matched no
+    claim at all. Two things produce the empty case and both matter: a user failing to
+    take back something poisoned into their memory, and a retraction whose object does
+    not match what is on record."""
+    rec = MemoryRecorder()
+    pipe, store, _ = build(telemetry=rec)
+    pipe.add([ep("I work at Acme.")])
+
+    pipe.assert_claim(Claim(subject="user", predicate="works_at", object="Globex",
+                            polarity=-1, scope=SCOPE))
+    assert rec.total(WRITE_RETRACTION, outcome="noop") == 1
+
+    pipe.assert_claim(Claim(subject="user", predicate="works_at", object="Acme",
+                            polarity=-1, scope=SCOPE))
+    assert rec.total(WRITE_RETRACTION, outcome="retired") == 1
+    store.close()
+
+
+def test_reconciliation_outcomes_are_counted_by_action():
+    rec = MemoryRecorder()
+    pipe, store, _ = build(telemetry=rec)
+    pipe.add([ep("I live in Berlin.")])
+    pipe.add([ep("I live in Lisbon.")])
+    assert rec.total(WRITE_RECONCILE, action="add") == 1
+    assert rec.total(WRITE_RECONCILE, action="supersede") == 1
+    store.close()
+
+
+def test_a_rejected_embedding_is_counted_every_time_not_only_warned_once():
+    """Warn-once is right for a human reading stderr and useless for anyone asking six
+    months later how big the hole is."""
+    rec = MemoryRecorder()
+    pipe, store, _ = build(telemetry=rec)
+    pipe.add([ep("I live in Berlin.")])
+    pipe.embedder = HashingEmbedder(dim=8)          # wrong dimension for this index
+    with pytest.warns(RuntimeWarning):
+        pipe.add([ep("My name is Goldy.")])
+    pipe.add([ep("I work at Acme.")])                # warns no more; still counted
+    assert rec.total(WRITE_EMBEDDING_REJECTED) == 2
+    store.close()
+
+
+def test_the_write_reports_how_long_it_held_the_lock_separately_from_its_own_latency():
+    """The gap between the two is the work the rest of the process was not blocked by,
+    and before the hoist it was zero."""
+    rec = MemoryRecorder()
+
+    class Slow(CountingLLM):
+        def extract(self, episodes, known_predicates):
+            time.sleep(0.05)
+            return super().extract(episodes, known_predicates)
+
+    pipe, store, _ = build(Slow(), telemetry=rec)
+    pipe.add([ep("The offsite moved to the Lisbon office.")])
+    held = rec.values(WRITE_LOCK_HELD_MS)[0]
+    total = rec.values(WRITE_LATENCY_MS)[0]
+    assert total >= 50.0, "the fake extraction did not run"
+    assert held < total / 2.0, (
+        f"held the transaction for {held:.1f}ms of a {total:.1f}ms write")
+    store.close()
+
+
+def test_assert_claim_reports_latency_without_inventing_a_lock_window():
+    rec = MemoryRecorder()
+    pipe, store, _ = build(telemetry=rec)
+    pipe.assert_claim(Claim(subject="user", predicate="likes", object="tea",
+                            scope=SCOPE))
+    assert len(rec.values(WRITE_LATENCY_MS)) == 1
+    # This path opens no transaction of its own, so there is no window to report.
+    assert rec.values(WRITE_LOCK_HELD_MS) == []
+    store.close()
+
+
+def test_an_empty_batch_emits_nothing():
+    rec = MemoryRecorder()
+    pipe, store, _ = build(telemetry=rec)
+    assert pipe.add([]).episode_ids == []
+    assert rec.names() == []
+    store.close()

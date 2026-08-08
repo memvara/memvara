@@ -895,3 +895,323 @@ def test_claims_and_turns_written_at_once_never_collide_on_a_row(tmp_path, emb):
     assert len(slots) == 160
     assert len(set(slots)) == 160, "one row per vector, across both tables"
     store.close()
+
+
+# --- Per-claim erasure ------------------------------------------------------
+#
+# `purge` erases a scope and `invalidate` retires without deleting anything. Between the
+# two sat an erasure request naming one memory, whose only available answer was to retire
+# it and report success — with the text, its source turn and its embedding all still on
+# disk. These pin that the gap is closed and closed completely.
+
+def test_erase_claim_reports_whether_there_was_anything_to_erase(store):
+    c = put(store)
+    assert store.erase_claim(c.id) is True
+    assert store.erase_claim(c.id) is False, "erasing twice is not two erasures"
+    assert store.erase_claim("cl_never_existed") is False
+
+
+def test_erase_claim_takes_the_row_the_index_and_the_vector(store, emb):
+    c = put(store, emb, object="Berlin")
+    survivor = put(store, emb, object="Lisbon", predicate="visited")
+
+    assert store.erase_claim(c.id) is True
+
+    assert store.get_claim(c.id) is None
+    assert store.lexical_search("berlin", [SCOPE], limit=10) == []
+    assert store.get_embedding(c.id) is None
+    assert store._vec.get(c.id) is None, "the matrix row must be blanked, not just unmapped"
+    assert store.stats() == {"episodes": 0, "claims": 1, "live_claims": 1,
+                             "invalidated": 0, "embeddings": 1}
+    assert [h[0] for h in store.lexical_search("lisbon", [SCOPE], limit=10)] \
+        == [survivor.id], "the neighbouring claim is untouched"
+
+
+def test_erase_takes_the_fts_row_by_rowid_before_the_claim(store):
+    """The one ordering in the method that cannot be recovered from. `claim_id` is
+    UNINDEXED, so the entry is reachable only through the claim's rowid — delete the
+    claim first and the text stays in the index forever: matchable, unhydratable, and
+    removable only by rebuilding the whole thing."""
+    c = put(store, text="the kafka pipeline is being sunset")
+    store.erase_claim(c.id)
+    assert store._db.execute("SELECT COUNT(*) FROM claims_fts").fetchone()[0] == 0
+
+
+def test_an_erased_claims_row_is_handed_back_to_the_free_list(store, emb):
+    a = put(store, emb, object="Berlin")
+    put(store, emb, object="Lisbon", predicate="visited")
+    store.erase_claim(a.id)
+
+    assert [r[0] for r in store._db.execute("SELECT slot FROM vec_free")] == [0]
+    reused = put(store, emb, object="Porto", predicate="dreams_of")
+    assert store._db.execute(
+        "SELECT slot FROM embeddings WHERE claim_id=?", (reused.id,)).fetchone()[0] == 0
+
+
+def test_an_erased_claim_is_gone_from_history_not_marked_retired(store):
+    """Erasure is not a louder retirement: `history()` and `as_of` are exactly what it
+    has to defeat, since both are built to keep returning what `delete()` hides."""
+    c = put(store, object="Berlin")
+    later = put(store, object="Lisbon", recorded_at=T1, valid_from=T1)
+    store.erase_claim(c.id)
+    assert [h.id for h in store.slot_history("acme", later.fact_key)] == [later.id]
+
+
+def test_erase_leaves_the_source_turn_alone_by_default(store, emb):
+    """A turn is not the claim's private property: it can be the origin of several, and
+    can hold a great deal the extractor never turned into one. Deleting it as a side
+    effect erases data the caller did not name."""
+    ep = turn(store, emb, content="I moved to Berlin last spring, before the merger")
+    c = put(store, emb, sources=[ep.id])
+    store.erase_claim(c.id)
+    assert store.get_episode(ep.id) is not None
+    assert len(store.lexical_search_episodes("merger", [SCOPE], limit=5)) == 1
+
+
+def test_erase_with_sources_takes_the_turn_its_index_and_its_vector(store, emb):
+    """The other half, and the one a note or an imported memory needs: there the claim
+    *is* its source text, so an erasure that left the episode behind would leave the
+    whole memory readable and searchable."""
+    ep = turn(store, emb, content="the kafka pipeline is being sunset")
+    c = put(store, emb, object="the kafka pipeline is being sunset",
+            predicate="note", sources=[ep.id])
+
+    assert store.erase_claim(c.id, sources=True) is True
+
+    assert store.get_episode(ep.id) is None
+    assert store.lexical_search_episodes("kafka", [SCOPE], limit=5) == []
+    assert store.get_episode_embedding(ep.id) is None
+    assert store._vec.get(ep.id) is None
+    assert store.stats()["embeddings"] == 0
+
+
+def test_erase_with_sources_keeps_a_turn_another_claim_still_cites(store, emb):
+    """The check that makes `sources=True` safe to offer at all: shared provenance is
+    the normal case for anything extracted, and a dangling `why()` is the failure this
+    library is least allowed to have."""
+    ep = turn(store, emb, content="I moved to Berlin, and I work at Acme")
+    a = put(store, emb, object="Berlin", sources=[ep.id])
+    b = put(store, emb, predicate="works_at", object="Acme", sources=[ep.id])
+
+    store.erase_claim(a.id, sources=True)
+    assert store.get_episode(ep.id) is not None
+
+    store.erase_claim(b.id, sources=True)
+    assert store.get_episode(ep.id) is None, "the last citer takes it with them"
+
+
+def test_erase_rolls_back_with_its_batch(store, emb):
+    """The matrix is a mapped file and takes no part in SQLite's transaction, so an
+    erasure inside an abandoned batch has to put the vector back or the claim survives
+    with nothing to find it by."""
+    c = put(store, emb, object="Berlin")
+    with pytest.raises(RuntimeError):
+        with store.batch():
+            store.erase_claim(c.id)
+            raise RuntimeError("abandoned")
+    assert store.get_claim(c.id) is not None
+    assert store._vec.get(c.id) is not None
+    assert [h[0] for h in store.vector_search(
+        emb.encode(["user lives in Berlin"])[0], [SCOPE], limit=1)] == [c.id]
+
+
+# --- Resolved entities ------------------------------------------------------
+
+def test_entities_round_trip_with_their_aliases(store):
+    store.put_entity("en_acme", "Acme Corp", ["Acme", "ACME Corporation"], "acme")
+    assert store.all_entities("acme") == [
+        ("en_acme", "Acme Corp", ("Acme", "ACME Corporation"))]
+
+
+def test_putting_an_entity_twice_updates_rather_than_duplicates(store):
+    store.put_entity("en_acme", "Acme", [], "acme")
+    store.put_entity("en_acme", "Acme Corp", ["Acme"], "acme")
+    assert store.all_entities("acme") == [("en_acme", "Acme Corp", ("Acme",))]
+
+
+def test_entities_are_ordered_by_id_not_by_insertion(store):
+    """Two processes rebuilding the same resolver must agree on which alias wins when
+    two entities claim one, and that ordering has to come out of the data rather than
+    out of SQLite's page layout."""
+    for name in ("en_c", "en_a", "en_b"):
+        store.put_entity(name, name.upper(), [], "acme")
+    assert [e[0] for e in store.all_entities("acme")] == ["en_a", "en_b", "en_c"]
+
+
+def test_one_tenants_entity_resolution_is_not_anothers(store):
+    """The whole reason this is scoped: deciding that "Acme" and "Acme Corp" name one
+    company is a judgement about one customer's data."""
+    store.put_entity("en_acme", "Acme Corp", ["Acme"], "acme")
+    assert store.all_entities("other") == []
+    assert store.all_entities() == [], "and the default tenant is just another tenant"
+
+
+def test_entities_survive_a_reopen(tmp_path):
+    """Entity ids are baked into the `fact_key`s already on disk, so a mapping that
+    evaporated on restart would not merely forget a synonym — it would address a
+    different slot and stop seeing the contradiction between two spellings."""
+    path = str(tmp_path / "e.db")
+    with SQLiteStore(path) as s:
+        s.put_entity("en_acme", "Acme Corp", ["Acme"], "acme")
+    with SQLiteStore(path) as s2:
+        assert s2.all_entities("acme") == [("en_acme", "Acme Corp", ("Acme",))]
+
+
+def write_v3(path: str) -> None:
+    """A store as the previous release left it: no entities table, stamped at 3."""
+    with SQLiteStore(path) as s:
+        turn(s, content="the kafka pipeline is being sunset")
+    raw = sqlite3.connect(path)
+    raw.execute("DROP TABLE entities")
+    raw.execute("PRAGMA user_version = 3")
+    raw.commit()
+    raw.close()
+
+
+def test_a_v3_file_gains_entity_storage_and_is_restamped(tmp_path):
+    path = str(tmp_path / "v3.db")
+    write_v3(path)
+    with SQLiteStore(path) as s:
+        assert int(s._db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
+        s.put_entity("en_acme", "Acme Corp", ["Acme"], "acme")
+        assert s.all_entities("acme") == [("en_acme", "Acme Corp", ("Acme",))]
+        assert len(s.lexical_search_episodes("kafka", [SCOPE], limit=5)) == 1, \
+            "and the v3 backfill is idempotent under a second upgrade"
+
+
+# --- Read concurrency -------------------------------------------------------
+#
+# WAL lets readers run against a snapshot while a writer holds the write lock, but only
+# across separate connections — a connection is where SQLite keeps transaction state.
+# Behind one connection and one mutex, which is what this was, a reader waited out the
+# whole consolidation sweep.
+
+def test_a_reader_is_not_blocked_by_a_writers_open_transaction(tmp_path, emb):
+    path = str(tmp_path / "c.db")
+    store = SQLiteStore(path)
+    kept = put(store, emb, object="Berlin")
+
+    started, reads_done = threading.Event(), threading.Event()
+    seen: list = []
+
+    def reader() -> None:
+        started.wait(5)
+        seen.append(store.get_claim(kept.id))
+        seen.append(store.lexical_search("berlin", [SCOPE], limit=5))
+        seen.append(store.stats()["claims"])
+        reads_done.set()
+
+    th = threading.Thread(target=reader)
+    th.start()
+    with store.batch():
+        put(store, emb, predicate="uncommitted", object="Lisbon")
+        started.set()
+        # The assertion is that this returns at all: before, it blocked until the batch
+        # committed, which on a real sweep is the whole sweep.
+        assert reads_done.wait(5), "a read waited on an open write transaction"
+    th.join()
+
+    assert seen[0].id == kept.id
+    assert [h[0] for h in seen[1]] == [kept.id]
+    assert seen[2] == 1, "and it saw the snapshot, not the half-written transaction"
+    store.close()
+
+
+def test_a_thread_inside_a_batch_reads_its_own_uncommitted_writes(tmp_path, emb):
+    """The one bug the snapshot connection could plausibly introduce, and the reason a
+    writing thread never uses one: the reconciler asks `competing_claims` mid-write, and
+    a snapshot predating the claim written two statements ago reports the slot empty and
+    lets the contradiction through."""
+    store = SQLiteStore(str(tmp_path / "c.db"))
+    with store.batch():
+        c = put(store, emb, object="Berlin")
+        assert [x.id for x in store.competing_claims("acme", c.fact_key)] == [c.id]
+        assert store.get_claim(c.id) is not None
+        assert store.stats()["claims"] == 1
+    store.close()
+
+
+def test_an_in_memory_store_shares_its_one_connection(store, emb):
+    """`:memory:` is scoped to its connection: a second one would be a second, empty
+    database rather than a second view of this one."""
+    c = put(store, emb, object="Berlin")
+    assert store._reader() is None
+    assert store.get_claim(c.id).id == c.id
+
+
+def test_reader_connections_are_closed_with_the_store(tmp_path, emb):
+    """An open reader holds a WAL read mark, which pins the log at the oldest live
+    snapshot and stops checkpointing — a forgotten one shows up as a `-wal` file that
+    grows without bound rather than as an error."""
+    store = SQLiteStore(str(tmp_path / "c.db"))
+    c = put(store, emb, object="Berlin")
+    store.get_claim(c.id)
+    (reader,) = store._readers
+
+    store.close()
+    assert store._readers == []
+    with pytest.raises(sqlite3.ProgrammingError):
+        reader.execute("SELECT 1")
+    with pytest.raises(sqlite3.ProgrammingError):
+        store.get_claim(c.id)
+
+
+def test_a_thread_that_arrives_after_close_does_not_get_a_working_reader(tmp_path):
+    """Racing a `close()`. The caller must get sqlite's "closed database" error rather
+    than a working read against a store that is supposed to be shut."""
+    store = SQLiteStore(str(tmp_path / "c.db"))
+    store.close()
+    assert store._reader() is None
+    assert store._readers == []
+
+
+def test_erase_with_sources_tolerates_a_turn_that_is_already_gone(store, emb):
+    """Provenance can dangle: a scope-wide `purge` takes the turn and leaves a claim in
+    another scope citing it, and an import can arrive with source ids for turns nobody
+    kept. Erasure is the wrong moment to discover that by raising."""
+    c = put(store, emb, sources=["ep_never_stored"])
+    assert store.erase_claim(c.id, sources=True) is True
+    assert store.get_claim(c.id) is None
+
+
+def test_readers_and_writers_interleave_without_deadlocking(tmp_path, emb):
+    """Three locks now — the write lock, the index lock and the reader registry — and a
+    reader takes them in the opposite direction to a writer unless the ordering is
+    respected. A deadlock here is a hung process, not a failed assertion, so the join
+    has a timeout and the timeout is the test."""
+    store = SQLiteStore(str(tmp_path / "c.db"))
+    errors: list[BaseException] = []
+    stop = threading.Event()
+
+    def writer(n: int) -> None:
+        try:
+            for i in range(40):
+                with store.batch():
+                    c = put(store, emb, predicate=f"p_{n}_{i}", object=f"v{i}")
+                    store.set_embedding(c.id, emb.encode([c.text])[0])
+        except BaseException as e:  # noqa: BLE001 - surfaced via assert below
+            errors.append(e)
+        finally:
+            stop.set()
+
+    def reader() -> None:
+        try:
+            while not stop.is_set():
+                store.candidate_ids([SCOPE])
+                store.lexical_search("v1", [SCOPE], limit=5)
+                store.vector_search(emb.encode(["v1"])[0], [SCOPE], limit=5)
+                store.stats()
+        except BaseException as e:  # noqa: BLE001 - surfaced via assert below
+            errors.append(e)
+
+    threads = ([threading.Thread(target=writer, args=(n,)) for n in range(3)]
+               + [threading.Thread(target=reader) for _ in range(3)])
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+        assert not t.is_alive(), "a thread never came back: lock ordering"
+
+    assert not errors, errors
+    assert store.stats()["claims"] == 120
+    store.close()

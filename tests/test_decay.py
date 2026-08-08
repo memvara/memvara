@@ -13,6 +13,17 @@ from engram.embed.base import HashingEmbedder
 from engram.retrieve.scoring import recency_factor
 from engram.schema import PredicateRegistry
 from engram.store.sqlite import SQLiteStore
+from engram.telemetry import (
+    CONSOLIDATE_CLAIMS_PER_SLOT,
+    CONSOLIDATE_CROWDED_SLOTS,
+    CONSOLIDATE_DECAYED,
+    CONSOLIDATE_LATENCY_MS,
+    CONSOLIDATE_MERGED,
+    CONSOLIDATE_PROMOTED,
+    CONSOLIDATE_ROWS_WRITTEN,
+    CROWDED_SLOT,
+    MemoryRecorder,
+)
 from engram.types import Claim, MemoryType, Scope, utcnow
 from engram.write.reconcile import Reconciler
 
@@ -407,3 +418,87 @@ def test_a_settled_store_opens_no_transaction_at_all(consolidator):
     con = Consolidator(counted, consolidator.embedder, consolidator.registry)
     assert con.run("acme") == {"decayed": 0, "merged": 0, "promoted": 0}
     assert counted.transactions == 0
+
+
+# -- telemetry ---------------------------------------------------------------
+#
+# Consolidation is the subsystem whose numbers matter most over a year and the one
+# nobody watches, because a scheduled pass that has silently stopped running looks
+# exactly like a settled store.
+
+
+def test_the_snapshot_reports_how_crowded_the_slots_are(consolidator):
+    """Live claims per concept: the metric to build if only one gets built.
+
+    Thirteen simultaneously-live answers to "where does the user work?", four of them
+    different employers, produced no error and no log line across a 10,000-write
+    simulation. This is the number that would have shown it in week one."""
+    rec = MemoryRecorder()
+    store = consolidator.store
+    for employer in ("acme", "globex", "initech", "hooli"):
+        # `worked_for` is unregistered, so it is MANY-cardinality and nothing retires
+        # anything - exactly how thirteen live employers happened.
+        add(store, "worked_for", employer)
+    add(store, "lives_in", "berlin")
+    Consolidator(store, consolidator.embedder, consolidator.registry,
+                 telemetry=rec).decay(now=NOW)
+
+    assert rec.values(CONSOLIDATE_CLAIMS_PER_SLOT) == [4.0]
+    assert rec.values(CONSOLIDATE_CROWDED_SLOTS) == [1.0]   # only the employer slot
+    assert 4 > CROWDED_SLOT
+
+
+def test_an_empty_store_reports_a_maximum_of_zero_rather_than_nothing(consolidator):
+    rec = MemoryRecorder()
+    Consolidator(consolidator.store, consolidator.embedder, consolidator.registry,
+                 telemetry=rec).decay(now=NOW)
+    assert rec.values(CONSOLIDATE_CLAIMS_PER_SLOT) == [0.0]
+
+
+def test_a_settled_pass_reports_zeroes_instead_of_going_quiet(consolidator):
+    """"Decay has reported 0 for three months" is a settled store; "no decay series at
+    all" is a scheduler nobody noticed had stopped. Only reporting the zero tells those
+    two apart, so every stage emits even when it changed nothing."""
+    rec = MemoryRecorder()
+    store = consolidator.store
+    add(store, "works_at", "acme", age_days=365)
+    consolidator.run()
+
+    con = Consolidator(store, consolidator.embedder, consolidator.registry,
+                       telemetry=rec)
+    assert con.run("acme") == {"decayed": 0, "merged": 0, "promoted": 0}
+    assert con.store is store
+    assert rec.total(CONSOLIDATE_DECAYED) == 0
+    assert rec.total(CONSOLIDATE_MERGED) == 0
+    assert rec.total(CONSOLIDATE_PROMOTED) == 0
+    assert rec.total(CONSOLIDATE_ROWS_WRITTEN) == 0
+    assert len(rec.values(CONSOLIDATE_LATENCY_MS)) == 1
+
+
+def test_a_working_pass_reports_what_it_changed_and_what_it_wrote(consolidator):
+    rec = MemoryRecorder()
+    store = consolidator.store
+    for i in range(3):
+        add(store, "working_on", f"task {i}", age_days=30)
+    con = Consolidator(store, consolidator.embedder, consolidator.registry,
+                       telemetry=rec)
+    assert con.decay(now=NOW) == 3
+    assert rec.total(CONSOLIDATE_DECAYED) == 3
+    assert rec.total(CONSOLIDATE_ROWS_WRITTEN) == 3
+
+
+def test_each_stage_entry_point_carries_the_recorder_on_its_own(consolidator):
+    """`run()` is the scheduled path, but a deployment that only calls one stage needs
+    the slot metric just as much - so the recorder rides on the `Sweep`, which every
+    entry point builds."""
+    rec = MemoryRecorder()
+    add(consolidator.store, "works_at", "acme")
+    con = Consolidator(consolidator.store, consolidator.embedder,
+                       consolidator.registry, telemetry=rec)
+    con.decay(now=NOW)
+    con.merge_duplicates("acme")
+    con.promote("acme")
+    assert len(rec.values(CONSOLIDATE_CLAIMS_PER_SLOT)) == 3
+    assert rec.total(CONSOLIDATE_DECAYED) == 1
+    assert rec.total(CONSOLIDATE_MERGED) == 0
+    assert rec.total(CONSOLIDATE_PROMOTED) == 0
