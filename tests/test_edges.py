@@ -1149,14 +1149,16 @@ def test_a_failed_extraction_is_still_billed_and_reported():
         assert receipt.added == []
 
 
-def test_reingesting_after_a_failure_is_not_blocked_by_episode_dedupe():
-    """The episodes survived, so a retry must still be able to extract from them."""
-    turns = ["A durable sentence the rules will not touch, at length."]
+def test_the_surviving_episodes_remain_queryable_for_a_retry():
+    """The episodes survived, so their text is still there for a later re-extraction."""
     store = SQLiteStore(":memory:")
-    with Engram(store=store, embedder=HashingEmbedder(dim=64),
-                llm=_FailingExtractor(), user="alice") as failing:
-        failing.add(turns)
+    failing = Engram(store=store, embedder=HashingEmbedder(dim=64),
+                     llm=_FailingExtractor(), user="alice")
+    receipt = failing.add(["A durable sentence the rules will not touch, at length."])
     assert store.stats()["episodes"] == 1
+    ep = store.get_episode(receipt.episode_ids[0])
+    assert ep is not None and "durable sentence" in ep.content
+    store.close()
 
 
 def test_a_near_miss_retraction_leaves_no_misleading_tombstone():
