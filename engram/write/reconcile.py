@@ -223,6 +223,16 @@ class Reconciler:
                 # accumulate tombstones. Provenance still merges.
                 keep = self._canonical_of(prior)
                 return ReconcileResult("noop", self.reinforce(keep, claim.sources, t), [])
+            if target and slot:
+                # A named retraction that hit nothing. Object matching is exact (modulo
+                # case), so "peanut" does not retract "Peanuts" — and writing a tombstone
+                # here would leave a record that looks exactly like a retraction that
+                # worked. For a safety-critical retraction ("I'm not allergic to X") that
+                # is the worst possible outcome: the claim stays live and the audit trail
+                # says it was withdrawn. Record nothing and report a no-op, so the empty
+                # `receipt.invalidated` is the caller's unambiguous signal to re-check
+                # the value they meant.
+                return ReconcileResult("noop", None, [])
 
         # The retraction is stored as a tombstone: born already invalidated, so it can
         # never be live and never answers a query, but "why did you stop believing that?"

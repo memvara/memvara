@@ -31,6 +31,12 @@ from ..types import Claim, Derivation, Episode, MemoryType, Scope
 if TYPE_CHECKING:  # pragma: no cover
     from ..schema import PredicateSpec
 
+# Bump when the schema changes in a way that needs a migration. `CREATE TABLE IF NOT
+# EXISTS` silently does nothing on an existing file, so without a stamped version an
+# upgrade that adds a column deploys green, passes health checks, and then fails every
+# write with "no such column" — forever, until someone rolls back.
+SCHEMA_VERSION = 1
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -264,8 +270,26 @@ class SQLiteStore:
         self._vec = _VecIndex()
         with self._lock:
             self._db.executescript(SCHEMA)
+            self._migrate()
             self._db.commit()
         self._load_vectors()
+
+    def _migrate(self) -> None:
+        """Stamp or upgrade the schema version.
+
+        Refuses to open a file written by a newer Engram rather than corrupting it: a
+        rollback that silently half-works is worse than one that refuses to start.
+        """
+        found = int(self._db.execute("PRAGMA user_version").fetchone()[0])
+        if found > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"{self.path}: schema version {found} was written by a newer Engram "
+                f"(this build understands {SCHEMA_VERSION}). Upgrade rather than "
+                "downgrade — opening it here could write rows the newer build cannot read."
+            )
+        # No migrations to run yet; future ones go here, ordered, before the stamp.
+        if found < SCHEMA_VERSION:
+            self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # -- transaction batching ------------------------------------------------
 
@@ -277,10 +301,16 @@ class SQLiteStore:
     def batch(self) -> Iterator["SQLiteStore"]:
         """Defer commits until the block exits, then commit once.
 
-        Per-statement commits are the right default for a memory store — a crash must
-        not lose an acknowledged write — but bulk paths (ingesting a transcript, a
-        consolidation sweep) pay a durability round-trip per claim for no benefit, since
-        the whole sweep is one logical operation. Reentrant, so nesting is harmless.
+        Per-statement commits are the right default for a memory store, but bulk paths
+        (ingesting a transcript, a consolidation sweep) pay a commit per claim for no
+        benefit, since the whole sweep is one logical operation. Reentrant, so nesting
+        is harmless.
+
+        Durability caveat, stated precisely because it is easy to assume otherwise: this
+        store runs `synchronous=NORMAL` in WAL mode, so a commit survives a *process*
+        crash but not a machine or power loss until the next checkpoint. Set
+        `synchronous=FULL` if acknowledged writes must survive power loss; it costs an
+        fsync per commit.
         """
         with self._lock:
             self._batch_depth += 1
@@ -513,7 +543,9 @@ class SQLiteStore:
             episodes = self._db.execute(
                 f"DELETE FROM episodes WHERE {where}", params
             ).rowcount
-            self._db.commit()
+            # `_maybe_commit`, not `commit`: an unconditional commit here would end an
+            # enclosing `batch()` early and silently void its rollback guarantee.
+            self._maybe_commit()
         return {"claims": claims, "episodes": episodes, "embeddings": len(rows)}
 
     # -- learned schema ------------------------------------------------------

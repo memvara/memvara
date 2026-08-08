@@ -1047,3 +1047,141 @@ def test_forward_supersession_is_unchanged_by_the_valid_time_rule():
         assert [c.object for c in mem.get_all()] == ["Lisbon"]
         berlin = [c for c in mem.history("user", "lives_in") if c.object == "Berlin"][0]
         assert berlin.invalidated_at is not None
+
+
+# =============================================================================
+# Schema versioning and transaction integrity
+# =============================================================================
+
+def test_a_new_store_is_stamped_with_the_schema_version(tmp_path):
+    import sqlite3 as _sq
+    from engram.store.sqlite import SCHEMA_VERSION
+
+    path = str(tmp_path / "v.db")
+    with SQLiteStore(path):
+        pass
+    raw = _sq.connect(path)
+    assert int(raw.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
+    raw.close()
+
+
+def test_a_file_from_a_newer_build_is_refused_rather_than_corrupted(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` silently no-ops on an existing file, so opening a
+    future schema would deploy green and then fail every write. Refuse instead."""
+    import sqlite3 as _sq
+    from engram.store.sqlite import SCHEMA_VERSION
+
+    path = str(tmp_path / "future.db")
+    with SQLiteStore(path):
+        pass
+    raw = _sq.connect(path)
+    raw.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 5}")
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(RuntimeError, match="newer Engram"):
+        SQLiteStore(path)
+
+
+def test_reopening_a_current_store_is_not_treated_as_a_migration(tmp_path):
+    path = str(tmp_path / "same.db")
+    with SQLiteStore(path) as s:
+        s.put_claim(claim())
+    with SQLiteStore(path) as s2:
+        assert s2.stats()["claims"] == 1
+
+
+def test_purge_inside_a_batch_does_not_commit_the_enclosing_transaction():
+    """An unconditional commit in purge() would silently void the batch's rollback."""
+    store = SQLiteStore(":memory:")
+    store.put_claim(claim(predicate="keep"))
+    with pytest.raises(RuntimeError):
+        with store.batch():
+            store.put_claim(claim(predicate="alsokeep"))
+            store.purge(SCOPE)
+            raise RuntimeError("boom")
+    # the pre-batch claim must survive: purge was part of the rolled-back transaction
+    assert store.stats()["claims"] == 1
+    store.close()
+
+
+def test_set_valid_to_is_part_of_the_store_protocol():
+    """Engram.forget() calls it directly, so a third-party backend that implements only
+    the declared protocol would AttributeError."""
+    from engram.store import Store
+
+    assert hasattr(Store, "set_valid_to")
+    missing = {m for m in dir(SQLiteStore) if not m.startswith("_")} - \
+              {m for m in dir(Store) if not m.startswith("_")}
+    assert missing == set(), f"undeclared public store methods: {missing}"
+
+
+# =============================================================================
+# Failure containment
+# =============================================================================
+
+class _FailingExtractor:
+    name = "failing"
+
+    def extract(self, episodes, known_predicates):
+        raise RuntimeError("429 rate limited")
+
+    def classify_predicate(self, predicate, example):
+        return {"cardinality": "many", "volatility": "slow", "memory_type": "semantic"}
+
+
+def test_an_extraction_failure_does_not_destroy_the_source_episodes():
+    """Episodes are what every provenance guarantee rests on, and they are already
+    written when extraction runs. A provider 429 must not roll them back."""
+    turns = [f"Durable fact number {i} stated at some length here." for i in range(20)]
+    with Engram(embedder=HashingEmbedder(dim=64), llm=_FailingExtractor(),
+                user="alice") as mem:
+        receipt = mem.add(turns)
+        assert mem.stats()["episodes"] == 20, "source text must survive a failed extract"
+        assert receipt.deferred, "the receipt must say extraction did not happen"
+
+
+def test_a_failed_extraction_is_still_billed_and_reported():
+    with Engram(embedder=HashingEmbedder(dim=64), llm=_FailingExtractor(),
+                user="alice") as mem:
+        receipt = mem.add("A durable sentence the rules will not touch, at length.")
+        assert receipt.llm_calls == 1, "a failed call still cost money"
+        assert receipt.added == []
+
+
+def test_reingesting_after_a_failure_is_not_blocked_by_episode_dedupe():
+    """The episodes survived, so a retry must still be able to extract from them."""
+    turns = ["A durable sentence the rules will not touch, at length."]
+    store = SQLiteStore(":memory:")
+    with Engram(store=store, embedder=HashingEmbedder(dim=64),
+                llm=_FailingExtractor(), user="alice") as failing:
+        failing.add(turns)
+    assert store.stats()["episodes"] == 1
+
+
+def test_a_near_miss_retraction_leaves_no_misleading_tombstone():
+    """Object matching is exact modulo case, so "peanut" does not retract "Peanuts".
+    Writing a tombstone anyway would leave an audit trail saying the claim was
+    withdrawn while it is still live — the worst outcome for a safety-critical fact."""
+    with Engram(embedder=HashingEmbedder(dim=64), user="alice") as mem:
+        mem.remember("user", "allergic_to", "Peanuts")
+        receipt = mem.remember("user", "allergic_to", "peanut", polarity=-1)
+        assert receipt.invalidated == [], "the caller's signal that nothing was retracted"
+        assert mem.stats()["claims"] == 1, "no tombstone for a retraction that missed"
+        assert [c.object for c in mem.get_all()] == ["Peanuts"]
+
+
+def test_an_exact_retraction_still_works_and_is_recorded():
+    with Engram(embedder=HashingEmbedder(dim=64), user="alice") as mem:
+        mem.remember("user", "allergic_to", "Peanuts")
+        receipt = mem.remember("user", "allergic_to", "peanuts", polarity=-1)
+        assert len(receipt.invalidated) == 1
+        assert mem.get_all() == []
+
+
+def test_retracting_a_whole_slot_still_works_with_no_named_value():
+    with Engram(embedder=HashingEmbedder(dim=64), user="alice") as mem:
+        mem.remember("user", "works_at", "Acme")
+        receipt = mem.remember("user", "works_at", "", polarity=-1)
+        assert len(receipt.invalidated) == 1
+        assert mem.get_all() == []

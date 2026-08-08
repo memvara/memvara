@@ -220,7 +220,18 @@ class WritePipeline:
         known = [s.name for s in self.registry.all_specs()]
         # One call for the whole batch, not one per turn. Turns share context, and the
         # per-request overhead dominates at this size.
-        raw = self.llm.extract(episodes, known)
+        try:
+            raw = self.llm.extract(episodes, known)
+        except Exception:
+            # Episodes are the source of truth that every provenance guarantee rests on,
+            # and they are already written. Letting an extraction failure propagate rolls
+            # back the enclosing transaction and destroys them — so a provider 429 during
+            # a long transcript silently loses the raw text it was derived from. The same
+            # guard already wraps `classify_predicate`; it was missing on the expensive
+            # call, which is the one that actually fails.
+            receipt.llm_calls += 1
+            receipt.deferred = True
+            return out
         receipt.llm_calls += 1
         receipt.llm_calls += self._learn_predicates(raw, episodes)
 

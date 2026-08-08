@@ -51,6 +51,15 @@ class Store(Protocol):
 
     def invalidate(self, claim_id: str, at: datetime, by: str | None) -> None: ...
 
+    def set_valid_to(self, claim_id: str, valid_to: datetime | None) -> None:
+        """Close (or reopen) a claim's valid-time interval.
+
+        Part of the protocol because `Engram.forget` calls it directly: both time axes
+        must move together or an `as_of` query lands between them and sees an
+        inconsistent world.
+        """
+        ...
+
     def reinforce(self, claim_id: str, salience: float, observation_count: int,
                   sources: Sequence[str]) -> None:
         """Record that we saw an already-known fact again."""
