@@ -193,6 +193,36 @@ Aliases collapse too, so `lives_in` / `resides_in` / `based_in` / `moved_to` are
 Without that, the contradiction between them is invisible — which is exactly how free-text
 stores end up holding two cities for one person.
 
+### Entities are folded before they are keyed
+
+A keyed lookup only works if both facts land on the same key, and `Acme`, `Acme Corp` and
+`acme, inc.` are the same employer written three ways. So the key is computed from a pure
+fold — Unicode NFKD, casefold, punctuation and legal-suffix stripping — applied to subject
+and object *before* the `(subject, predicate)` key exists:
+
+```python
+from engram import entity_key
+entity_key("Acme Corp.") == entity_key("ACME, Inc.") == entity_key("acme")   # True
+```
+
+Over a 258-write simulation across 6 employers and 3 drinks: 516 resolutions, **98.1%
+settled by the fold alone, zero model calls**, and 41 distinct surface forms collapsed to
+exactly the 9 real entities. `history("user", "works_at")` went from 22 rows to 6 — five
+retirements and one live value, which is what actually happened.
+
+The fold is *total*, so it needs no acquisition step and no cache: an entity seen for the
+first time still gets a correct, stable identity for free. That is why `resolve_entity`
+(the LLM path, for genuine aliases like `Big Blue` → `IBM`) ships **opt-in and unset** —
+unlike predicates, entity surface forms never saturate, so acquisition would be a
+per-entity tax forever rather than a one-time cost. The honest limit is that
+`Stark` and `Stark Industries` are indistinguishable from two different companies without
+one.
+
+Learning an alias later does **not** rewrite history. A claim keeps the identity it was
+written with, so `history()` doesn't silently restructure itself the day the model learns
+something; applying an alias retroactively is `backfill_entities()`, dry-run by default,
+which stamps every touched claim so `why()` can explain why history changed.
+
 ### The write path avoids the model
 
 Four tiers, in order, each cheaper than the next one down:
@@ -257,13 +287,11 @@ prov.superseded    # what it replaced
 prov.extractor     # which model/rule version produced it
 ```
 
-The one deliberate exception is `purge()`. Retirement is the right default and the wrong
-answer to "delete my data" — the text stays readable, which does not satisfy a GDPR
-Article 17 request. So erasure is a separate, explicit, irreversible call rather than a
-flag on `forget`, and it removes everything derived from the text: claims, source
-episodes, embeddings (which leak content under inversion) and the FTS index (which stores
-the tokens directly). Purging a user takes their agents and sessions with them, and
-returns per-table counts as evidence.
+The deliberate exceptions are `erase()` and `purge()` — one claim and one scope. Erasure
+is a separate, explicit, irreversible call rather than a flag on `forget`, and it removes
+everything derived from the text. Purging a user takes their agents and sessions with
+them, and both return per-table counts as evidence. See
+[Two meanings of "delete"](#two-meanings-of-delete-kept-apart).
 
 ### The learned schema is durable
 
@@ -285,43 +313,130 @@ seeing it five times is a pattern.
 mem.consolidate()   # {'decayed': 128, 'merged': 4, 'promoted': 2}
 ```
 
-It is idempotent, which matters because it runs on a schedule.
+It is idempotent, which matters because it runs on a schedule. It also runs **windowed** —
+committing every 500 rows rather than holding one transaction over the whole sweep, which
+is what stops a large store's maintenance pass from locking out its own writes.
+
+Salience follows Bjork & Bjork's new theory of disuse: storage strength (`salience_base`,
+which never decays) is kept separate from retrieval strength (`salience`, derived from it).
+A reinforcement bumps storage *inversely* to current retrievability, so re-encountering a
+fact you were about to forget is worth more than re-encountering one that's already top of
+mind — the spacing effect, which an exponential-decay-plus-flat-bump scheme gets backwards.
+
+### It says when it is failing
+
+Six things can go wrong here without raising anything: predicate explosion, reinforcement
+that never refreshes recency, flip-flop growth, salience overriding relevance, a gate
+tuned for English silently dropping other scripts, and a retraction that quietly no-ops.
+Each now has a metric series.
+
+```python
+from engram import Engram, MemoryRecorder
+
+rec = MemoryRecorder()
+mem = Engram("memory.db", telemetry=rec)
+mem.add(["I live in Berlin", "你好，我住在北京", "ok thanks"])
+
+rec.total("fast.hit",  script="latin")   # 1  — extracted by rule, no model
+rec.total("fast.miss", script="han")     # 1  — fell through to the model
+rec.total("gate.drop", reason="ack_only")  # 1  — "ok thanks" carried nothing
+```
+
+Tags filter by subset, so `total("fast.miss")` is the whole series and
+`total("fast.miss", script="han")` is one slice of it. The example above is the
+English-centrism limitation showing up as a number: the Latin sentence is free, the Han
+one costs a model call.
+
+Two design choices make it honest. `retrieval.quality_factor` is emitted **unclamped**,
+because a value above 1.0 is the alarm — only an over-reinforced salience can produce one,
+and clamping it before recording would hide exactly the failure it exists to catch. And
+`consolidate.merged` is emitted **at zero**, so "nothing to merge" is distinguishable from
+"the scheduler stopped running."
+
+The default is `None`, not a no-op recorder, and every metric that requires *computing*
+something sits inside the `is not None` guard. Measured against a control built from this
+tree with the emission points deleted: unset costs **+0.8% on write and −0.4% on read** —
+inside the launch-to-launch spread rather than merely small.
 
 ---
 
 ## API
 
+Every method takes `tenant=`/`user=`/`agent=`/`session=` to override the default scope,
+omitted below for readability.
+
 ```python
-mem = Engram(path=":memory:", *, store=, embedder=, llm=, registry=,
+mem = Engram(path=":memory:", *, store=, embedder=, llm=, registry=, telemetry=,
              tenant=, user=, agent=, session=)
 
 # write
-mem.add(messages, *, user=, session=, ...)        -> WriteReceipt
-mem.remember(subject, predicate, obj, ...)        -> WriteReceipt   # structured, no LLM
-mem.forget(subject, predicate)                    -> list[Claim]    # retire, keep history
-mem.purge(user=...)                               -> dict[str, int] # erase, irreversible
+mem.add(messages, *, role="user", ts=None)        -> WriteReceipt
+mem.remember(subject, predicate, obj, *, valid_from=, recorded_at=, sources=,
+             text=, confidence=, memory_type=, polarity=, **meta)  -> WriteReceipt
+mem.supersede(old_claim_id, new_claim, *, at=, sources=)   -> WriteReceipt
+
+# retire — reversible, keeps history
+mem.forget(subject, predicate, *, at=None)        -> list[Claim]    # a whole slot
+mem.delete(claim_id, *, at=None)                  -> bool           # one claim
+
+# erase — irreversible, removes the text itself
+mem.erase(claim_id, *, sources=False)             -> bool           # one claim
+mem.purge()                                       -> dict[str, int] # a whole scope
+mem.reset()                                       -> dict[str, int] # scope + schema
 
 # read
-mem.search(query, *, k=10, as_of=None, memory_types=None)  -> list[Result]
-mem.recall(query)                                 -> str            # prompt-ready block
+mem.search(query, *, k=10, min_score=0.0, as_of=None, memory_types=None,
+           include_invalidated=False, include_episodes=False)  -> list[Retrieved]
+mem.recall(query, *, k=8, header=None, include_episodes=False)  -> str
+mem.get(claim_id)                                 -> Claim | None
 mem.get_all(*, as_of=None, include_invalidated=False)      -> list[Claim]
+mem.count(*, as_of=None, include_invalidated=False)        -> int
 mem.history(subject, predicate)                   -> list[Claim]    # timeline of one slot
-mem.why(claim_id)                                 -> Provenance
+mem.why(claim_id)                                 -> Provenance | None
 
 # maintenance
 mem.consolidate()                                 -> dict[str, int]
+mem.reembed(embedder=None)                        -> int            # after a model change
 mem.stats()                                       -> dict[str, int]
+mem.scope(user="bob")                             -> ScopedEngram   # same API, scope bound
+mem.close()                                       -> None           # or use as a context manager
 ```
 
 `add()` takes a string, a list of strings, pre-built `Episode`s, or OpenAI/mem0-style
 `{"role": ..., "content": ...}` transcripts, so an existing agent loop can pass its
 messages straight through.
 
+`recall()` is the one you put in a prompt. It returns a framed block that labels itself as
+retrieved data rather than instructions, and flattens each claim to a single line — a
+memory whose text contains newlines and a fake section header cannot forge prompt
+structure around itself.
+
+### Two meanings of "delete", kept apart
+
+`forget`/`delete` **retire**: the claim stops answering present-tense queries, and
+`history()` and `as_of` still see it. That is the right default for correcting a belief,
+and the wrong answer to "delete my data" — the text stays readable, which does not satisfy
+a GDPR Article 17 request.
+
+`erase`/`purge` **erase**, irreversibly, including everything derived from the text:
+the claim, the FTS entry (which stores the tokens directly), the embedding (which leaks
+content under inversion) and — with `sources=True`, or always for `purge` — the source
+turns. `erase(sources=True)` only removes turns that no surviving claim still cites,
+because one turn can source several claims.
+
 ### Scoping
 
 `tenant > user > agent > session`, with inheritance. A query at session scope also sees
 that user's durable memory, but never a sibling session's scratch space or another user's
 anything. mem0's flat `user_id`/`agent_id`/`run_id` triple can't express that.
+
+```python
+bob = mem.scope(user="bob")     # the whole API, with the scope bound
+bob.add("I live in Oslo")
+```
+
+Scope filters fail **closed**: a scope that resolves to nothing matches nothing, rather
+than degrading into an unfiltered query across every user.
 
 ### Swapping backends
 
@@ -343,6 +458,92 @@ from engram.llm.anthropic import AnthropicLLM      # pip install 'engram[anthrop
 mem = Engram("memory.db", llm=AnthropicLLM(model="claude-opus-5"))
 ```
 
+### Concurrency
+
+The library is synchronous, and reads no longer queue behind writes. Read statements use a
+per-thread connection, and the slow half of a write — the near-duplicate encode and the
+model call — runs with no transaction open, so the store's write lock is held for the
+database work and nothing else.
+
+One reader thread against a 20,000-claim consolidation sweep:
+
+| | before | after |
+|---|---:|---:|
+| reads completed during the sweep | 1,470 | **13,728** |
+| p95 | 3.44 ms | **0.31 ms** |
+| p99 | 30.4 ms | **2.01 ms** |
+
+Idle read latency is unchanged (12.7 µs → 13.0 µs), so this was not taken from the write
+path. The sweep itself goes 2.2 s → 2.8 s *with a reader beside it*, because the reader is
+now doing about 9× the work instead of waiting.
+
+For an asyncio application, `AsyncEngram` wraps each method over `asyncio.to_thread`:
+
+```python
+from engram import AsyncEngram, Engram
+
+mem = AsyncEngram(Engram("memory.db", user="alice"))
+await mem.add("I live in Berlin")
+[r.text for r in await mem.search("where do they live?")]
+```
+
+It wraps an `Engram` rather than constructing one, so the sync object stays available for
+setup and for the calls that have no async form.
+
+It is a thread-pool wrapper, not an async rewrite, and says so: SQLite has no async
+driver worth the name, and the work here is CPU and disk rather than network.
+
+---
+
+## Beyond the library
+
+### MCP server
+
+```bash
+ENGRAM_DB=/path/to/memory.db python3 -m engram.server    # JSON-RPC 2.0 over stdio
+```
+
+Eight tools — `memory_add`, `memory_remember`, `memory_recall`, `memory_search`,
+`memory_history`, `memory_why`, `memory_forget`, `memory_stats`. Hand-rolled against the
+MCP wire format rather than taking an SDK dependency, so the library's "numpy and nothing
+else" claim survives. It refuses to start without `ENGRAM_DB` and prints the client config
+block, rather than silently remembering into a store that vanishes on exit.
+
+`consolidate`, `purge`, `reset` and `erase` are deliberately **absent**, and a test
+asserts their absence: a model that can be talked into calling a tool should not be able
+to reach one that irreversibly erases a scope. Run those from the library, on a schedule
+you control. `memory_forget` is present because retirement is recoverable.
+
+### Running an existing mem0 app
+
+```python
+from engram.compat import Memory          # mem0's method surface, backed by engram
+api = Memory(user_id="alice")
+api.add("I live in Berlin")
+api.search("where do they live?")
+```
+
+Written against mem0 2.x. Calls with no honest translation — `update()`, `from_config()` —
+raise and explain why, rather than returning something plausible. A shim that quietly means
+something else is worse than no shim, because the difference surfaces as data loss months
+later.
+
+### Importing a mem0 store
+
+```python
+from engram.compat import import_mem0
+receipt = import_mem0(mem, history_db="~/.mem0/history.db")
+```
+
+The interesting part is that `history.db` — mem0's own mutation log — is a complete
+transaction-time history that mem0 itself cannot query. Replaying it through a bitemporal
+store turns it into `search(as_of=…)`, `history()` and `why()`. **Phase 1 is lossless and
+costs zero tokens**; extraction into real triples is opt-in.
+
+The receipt names every slot left holding more than one live value, undeclared predicates
+first. mem0 cannot produce that list — its conflicts are settled per-write by a model
+looking at a top-k, and nothing ever looks again.
+
 ---
 
 ## Honest limitations
@@ -360,23 +561,40 @@ mem = Engram("memory.db", llm=AnthropicLLM(model="claude-opus-5"))
 - **The vector index is exact and in-process.** A numpy matmul over the candidate set —
   correct and fast to roughly a million claims, at which point the `Store` protocol is
   where pgvector or Qdrant goes.
-- **Predicate schema is English-centric** and seeded for the personal-assistant domain. It
-  grows by learning, but the built-in seed set is small on purpose.
+- **Predicate schema, the salience gate and the fast extractor are English-centric.** The
+  schema grows by learning, but the seed set is small on purpose, and the gate's and
+  extractor's rules are English sentence forms. On other scripts they fall through to the
+  model — which is correct behavior and a real cost. This is the one limitation the
+  telemetry measures directly: `gate.drop` and `fast.miss` are tagged by script, so the
+  gap is visible rather than assumed.
+- **Entity resolution folds surface forms, it does not know the world.** `Acme Corp` and
+  `acme, inc.` collapse; `Big Blue` and `IBM` do not, unless you enable the opt-in model
+  path or declare the alias. `Stark` versus `Stark Industries` is genuinely ambiguous and
+  is left that way.
+- **`AsyncEngram` is a thread-pool wrapper, not an async rewrite.** It keeps an asyncio
+  event loop unblocked, which is what it is for; it does not make the store itself async.
+- **No REST server yet** — MCP over stdio is the shipped remote surface. The library is
+  the supported integration point, and framework adapters (LangChain, LlamaIndex, CrewAI)
+  are not written.
+- **No encryption at rest and no PII redaction hook.** `purge()` and `erase()` cover the
+  deletion half of a privacy story; the storage half is the deployment's problem today.
 
 ---
 
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 775 tests, offline, no API key
+python3 -m pytest -q                              # 1,657 tests, offline, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison
 PYTHONPATH=. python3 bench/perf.py                # throughput and scaling
 ```
 
-**100% statement coverage, enforced** (`fail_under = 100`). The suite runs in under two
-seconds with no network, no API key, and no sleeping — time is controlled by passing
-explicit `datetime` values rather than patching the clock.
+**100% statement coverage, enforced** (`fail_under = 100`). The suite runs in about 17
+seconds with no network, no API key, and almost no sleeping — time is controlled by
+passing explicit `datetime` values rather than patching the clock, and the handful of
+tests that do sleep are measuring concurrency, where the wall clock is the thing under
+test.
 
 Coverage of the *lines* is the floor, not the goal. What the suite actually pins down:
 
@@ -395,9 +613,10 @@ Coverage of the *lines* is the floor, not the goal. What the suite actually pins
 - **Executable docs** — the README walkthrough and the `Engram` docstring run as tests, so
   the examples can't drift from the code.
 
-The seven remaining *branch* partials are verified-unreachable defensive guards (for
-example: a live claim always has `valid_to` unset or in the future, so that check can
-never be false). They are kept as guards rather than deleted, and documented as such.
+The ten remaining *branch* partials are verified-unreachable defensive guards — mostly
+`if valid_to is None or valid_to > t`, where a live claim always satisfies the first
+disjunct, so the second can never decide the branch. They are kept as guards rather than
+deleted, and documented as such.
 
 Design notes and the module-by-module contract live in [docs/INTERNALS.md](docs/INTERNALS.md).
 

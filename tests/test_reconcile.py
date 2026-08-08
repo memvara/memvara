@@ -479,3 +479,65 @@ def test_episode_scoped_claim_round_trips(rec, store):
     e = Episode(content="I live in Berlin.", scope=SCOPE)
     res = rec.apply(claim("lives_in", "Berlin", sources=[e.id]))
     assert store.get_claim(res.claim.id).sources == [e.id]
+
+
+# --- the two time axes are not one axis ----------------------------------------
+
+def test_a_backdated_supersession_closes_valid_time_where_the_new_value_begins(rec, store):
+    """The bug this pins: `_retire` used to stamp transaction time on *both* axes.
+
+    Learning today that someone moved in July has to close the old value in July. Stamped
+    with today instead, Berlin stays "true" through a window in which Lisbon is also true
+    — two live answers to a single-valued question, which is the precise failure this
+    whole design exists to make impossible. It is invisible unless a write is backdated,
+    because `valid_from` otherwise defaults to now and the two axes coincide.
+    """
+    now = utcnow()
+    moved = now - timedelta(days=30)
+    first = rec.apply(claim("lives_in", "Berlin",
+                            valid_from=now - timedelta(days=800),
+                            recorded_at=now - timedelta(days=800)),
+                      now=now - timedelta(days=800))
+    rec.apply(claim("lives_in", "Lisbon", valid_from=moved, recorded_at=now), now=now)
+
+    berlin = store.get_claim(first.claim.id)
+    assert berlin.valid_to == moved, "valid time closed at the wrong instant"
+    # Transaction time is a different question with a different answer: we believed
+    # Berlin right up until today, and the record has to keep saying so.
+    assert berlin.invalidated_at == now
+
+    # The intervals abut rather than overlap: Berlin ends exactly where Lisbon starts,
+    # so no instant on the valid-time axis has two answers to a single-valued question.
+    lisbon = next(c for c in store.iter_claims("acme") if c.object == "Lisbon")
+    assert berlin.valid_to == lisbon.valid_from
+    assert lisbon.valid_to is None
+
+
+def test_a_retraction_backdated_before_the_fact_collapses_rather_than_inverting(rec, store):
+    """`valid_to` can meet `valid_from` but must never precede it: an interval that ends
+    before it starts is not a shorter fact, it is a corrupt row that no `as_of` window
+    can return consistently."""
+    now = utcnow()
+    first = rec.apply(claim("lives_in", "Berlin", valid_from=now, recorded_at=now), now=now)
+    rec.apply(claim("lives_in", "Berlin", polarity=-1,
+                    valid_from=now - timedelta(days=500), recorded_at=now), now=now)
+
+    berlin = store.get_claim(first.claim.id)
+    assert berlin.valid_to == berlin.valid_from
+    assert berlin.valid_to >= berlin.valid_from
+
+
+def test_the_two_axes_stay_distinct_even_without_explicit_backdating(rec, store):
+    """The general contract, stated once: valid time follows the *new value*, and
+    transaction time follows the *apply instant*. They coincide only when a claim is
+    applied the moment it is built, which is the common case and precisely why stamping
+    one onto the other went unnoticed."""
+    now = utcnow()
+    first = rec.apply(claim("lives_in", "Berlin"), now=now)
+    later = now + timedelta(minutes=5)
+    second = rec.apply(claim("lives_in", "Lisbon"), now=later)
+
+    berlin = store.get_claim(first.claim.id)
+    assert berlin.valid_to == second.claim.valid_from   # when it stopped being true
+    assert berlin.invalidated_at == later               # when we stopped believing it
+    assert berlin.valid_to < berlin.invalidated_at

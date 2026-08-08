@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from engram import Engram, HashingEmbedder, MemoryType, SQLiteStore
+from engram import Engram, HashingEmbedder, MemoryType, NullLLM, SQLiteStore, utcnow
 
 TZ = timezone.utc
 T_2023 = datetime(2023, 1, 1, tzinfo=TZ)
@@ -487,3 +487,78 @@ def test_a_store_survives_an_embedder_upgrade_across_a_restart(tmp_path):
 
     with Engram(path, embedder=HashingEmbedder(dim=256), user="alice") as week_three:
         assert [r.claim.object for r in week_three.search("lives")][:1] == ["Lisbon"]
+
+
+# --- the README's newer examples, mirrored so they cannot drift -----------------
+
+
+def test_readme_entity_fold_example(mem):
+    """README: `entity_key("Acme Corp.") == entity_key("ACME, Inc.") == entity_key("acme")`."""
+    from engram import entity_key
+    assert entity_key("Acme Corp.") == entity_key("ACME, Inc.") == entity_key("acme")
+    # And the claim right after it: folding is what makes the keyed lookup fire.
+    mem.remember("user", "works_at", "Acme Corp.")
+    mem.remember("user", "works_at", "ACME, Inc.")
+    assert len(mem.get_all()) == 1, "two spellings of one employer stayed two facts"
+
+
+def test_readme_scope_example(mem):
+    """README: `bob = mem.scope(user="bob")` gets the whole API, scope bound."""
+    bob = mem.scope(user="bob")
+    bob.add("I live in Oslo")
+    assert [c.object for c in bob.get_all()] == ["Oslo"]
+    assert mem.get_all() == [], "bob's memory leaked into alice's scope"
+
+
+def test_readme_telemetry_example():
+    """README prints three specific counter totals. If the tags or series names change,
+    the example silently becomes fiction — so it is asserted rather than trusted."""
+    from engram import MemoryRecorder
+
+    rec = MemoryRecorder()
+    with Engram(embedder=HashingEmbedder(dim=128), llm=NullLLM(), user="alice",
+                telemetry=rec) as mem:
+        mem.add(["I live in Berlin", "你好，我住在北京", "ok thanks"])
+    assert rec.total("fast.hit", script="latin") == 1
+    assert rec.total("fast.miss", script="han") == 1
+    assert rec.total("gate.drop", reason="ack_only") == 1
+
+
+def test_readme_async_example():
+    """README: `AsyncEngram(Engram(...))` — it wraps, it does not construct."""
+    import asyncio
+
+    from engram import AsyncEngram, Engram, HashingEmbedder, NullLLM
+
+    async def main():
+        mem = AsyncEngram(
+            Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice"))
+        await mem.add("I live in Berlin")
+        found = [r.text for r in await mem.search("where do they live?")]
+        await mem.close()
+        return found
+
+    assert asyncio.run(main()) == ["user lives in Berlin"]
+
+
+def test_readme_headline_time_travel_example(mem):
+    """The README's opening block, including the `valid_to` it prints.
+
+    That value was wrong until a backdated supersession stopped stamping transaction
+    time on the valid-time axis, and the README was the thing that caught it: the
+    printed history said Berlin ended 30 days ago and the code said it ended today.
+    """
+    now = utcnow()
+    old, moved = now - timedelta(days=800), now - timedelta(days=30)
+    mem.remember("user", "lives_in", "Berlin", valid_from=old, recorded_at=old)
+    mem.remember("user", "lives_in", "Lisbon", valid_from=moved, recorded_at=moved)
+
+    assert [r.text for r in mem.search("where do they live?")] == ["user lives in Lisbon"]
+    assert [(c.object, c.valid_to) for c in mem.history("user", "lives_in")] == [
+        ("Berlin", moved), ("Lisbon", None)
+    ]
+    assert [c.object for c in mem.get_all(as_of=now - timedelta(days=365))] == ["Berlin"]
+    # Every instant has exactly one answer, which is the property the whole design is for.
+    for days in (700, 365, 31, 29, 1, 0):
+        answers = mem.get_all(as_of=now - timedelta(days=days))
+        assert len(answers) == 1, f"{len(answers)} live values {days} days ago"

@@ -150,7 +150,9 @@ class Reconciler:
                 claim.valid_to = boundary
         self.store.put_claim(claim)
         if superseded:
-            self._retire(superseded, t, claim.id)
+            # The new value's `valid_from` is when the old one stopped being true — not
+            # `t`, which is merely when we found out.
+            self._retire(superseded, t, claim.id, claim.valid_from)
             return ReconcileResult("supersede", claim, superseded)
         return ReconcileResult("add", claim, [])
 
@@ -347,12 +349,30 @@ class Reconciler:
             (newer if c.valid_from > claim.valid_from else older).append(c)
         return older, newer
 
-    def _retire(self, victims: Sequence[Claim], t: datetime, by: str | None) -> None:
+    def _retire(self, victims: Sequence[Claim], t: datetime, by: str | None,
+                valid_to: datetime | None = None) -> None:
+        """Close out superseded claims on both time axes — which are not the same axis.
+
+        `t` is transaction time: when we stopped believing it. `valid_to` is valid time:
+        when it stopped being *true*. Collapsing the two is the mistake this signature
+        exists to prevent. A fact learned today about a move that happened in July has
+        `valid_to` in July and `invalidated_at` today, and stamping today on both leaves
+        the old value overlapping its own replacement — two live answers to a
+        single-valued question, which is the exact failure engram is built to make
+        impossible. It shows up only on backdated writes, which is why it survived: with
+        `valid_from` defaulting to now, the two are equal and nothing looks wrong.
+
+        `valid_to` defaults to `t` for callers where the distinction is genuinely absent.
+        """
+        boundary = t if valid_to is None else valid_to
         for v in victims:
-            v.invalidated_at = t          # transaction time: we stopped believing it now
+            v.invalidated_at = t
             v.invalidated_by = by
-            if v.valid_to is None or v.valid_to > t:
-                v.valid_to = t            # valid time: it stopped being true now
+            # Never before the claim's own start: a retraction backdated past the fact it
+            # retracts collapses the interval to zero length rather than inverting it.
+            edge = max(boundary, v.valid_from)
+            if v.valid_to is None or v.valid_to > edge:
+                v.valid_to = edge
             # `put_claim` rather than `store.invalidate`, because the Store protocol has
             # no way to set `valid_to` and both axes must move together or an `as_of`
             # query lands between them and sees an inconsistent world.
@@ -408,7 +428,9 @@ class Reconciler:
         self.store.put_claim(claim)
 
         if matches:
-            self._retire(matches, t, claim.id)
+            # A retraction dated in the past ("I stopped working there in March") closes
+            # the interval in March, not today — same distinction as a supersession.
+            self._retire(matches, t, claim.id, claim.valid_from)
         return ReconcileResult("retract", claim, matches)
 
 
