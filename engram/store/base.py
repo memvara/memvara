@@ -75,6 +75,24 @@ class Store(Protocol):
                       as_of: datetime | None = None,
                       include_invalidated: bool = False) -> list[tuple[str, float]]: ...
 
+    def purge(self, scope: Scope) -> dict[str, int]:
+        """Irreversibly erase a scope: claims, episodes, embeddings and text index.
+
+        The one place deletion is correct. Retirement cannot satisfy a legal erasure
+        request, because the text stays readable.
+        """
+        ...
+
+    # --- learned schema ---------------------------------------------------
+    def put_spec(self, spec) -> None:
+        """Persist a learned predicate specification. Must survive restart: cardinality
+        is what makes a contradiction detectable."""
+        ...
+
+    def all_specs(self) -> list:
+        """Every persisted predicate specification."""
+        ...
+
     # --- maintenance ------------------------------------------------------
     def iter_claims(self, tenant: str | None = None,
                     include_invalidated: bool = False) -> Iterable[Claim]: ...

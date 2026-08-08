@@ -69,6 +69,12 @@ class Engram:
         # library must be fully usable with no API key.
         self.llm = llm if llm is not None else NullLLM()
         self.registry = registry if registry is not None else PredicateRegistry()
+        # Rehydrate anything a previous process paid a model to classify. Without this
+        # the schema is process-local, so every restart re-pays classification and, worse,
+        # treats learned predicates as multi-valued until it does — silently disabling
+        # contradiction detection for those writes.
+        for spec in getattr(self.store, "all_specs", list)():
+            self.registry.register(spec)
         self.default_scope = Scope(tenant, user, agent, session)
 
         write_kw = {k[6:]: v for k, v in tuning.items() if k.startswith("write_")}
@@ -183,6 +189,27 @@ class Engram:
             self.store.invalidate(c.id, now, None)
             self.store.set_valid_to(c.id, now)
         return retired
+
+    def purge(self, *, tenant=None, user=None, agent=None, session=None) -> dict[str, int]:
+        """Irreversibly erase a scope. The opposite of `forget`, and not undoable.
+
+        `forget` retires: the claim stops answering queries but its text, sources and
+        embedding remain, which is what makes the audit trail worth having. That is the
+        right default and the wrong answer to "delete my data" — so erasure is a separate,
+        explicit call rather than a flag, because the two are not variations of one
+        operation.
+
+        Purging a user takes their agents and sessions with them. Returns per-table counts
+        as evidence the erasure happened.
+        """
+        scope = self._scope(tenant, user, agent, session)
+        purge = getattr(self.store, "purge", None)
+        if purge is None:
+            raise NotImplementedError(
+                f"{type(self.store).__name__} does not implement purge(); erasure "
+                "cannot be faked with retirement"
+            )
+        return purge(scope)
 
     # -- reading -------------------------------------------------------------
 

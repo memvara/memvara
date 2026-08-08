@@ -22,11 +22,14 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from contextlib import contextmanager
-from typing import Iterable, Iterator, Sequence
+from typing import TYPE_CHECKING, Iterable, Iterator, Sequence
 
 import numpy as np
 
 from ..types import Claim, Derivation, Episode, MemoryType, Scope
+
+if TYPE_CHECKING:  # pragma: no cover
+    from ..schema import PredicateSpec
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -87,6 +90,20 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
 CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts
     USING fts5(claim_id UNINDEXED, text, tokenize='porter unicode61');
+
+-- Learned predicate schema. This has to be durable: cardinality is what makes a
+-- contradiction detectable, so a registry that evaporates on restart means a fresh
+-- process treats every learned predicate as multi-valued until it re-pays the
+-- classification — and silently stops retiring superseded facts in the meantime.
+CREATE TABLE IF NOT EXISTS predicates (
+    name        TEXT PRIMARY KEY,
+    cardinality TEXT NOT NULL,
+    volatility  TEXT NOT NULL,
+    memory_type TEXT NOT NULL,
+    aliases     TEXT NOT NULL DEFAULT '[]',
+    supersedes  TEXT NOT NULL DEFAULT '[]',
+    learned     INTEGER NOT NULL DEFAULT 1
+);
 """
 
 _CLAIM_FIELDS = (
@@ -215,8 +232,24 @@ class _VecIndex:
             return None
         return self._mat[row].copy()
 
+    def remove(self, claim_id: str) -> bool:
+        """Drop a vector. Required for erasure — without it, purged text stays
+        reconstructible from the embedding in memory.
+
+        The row is zeroed rather than compacted: a zero vector has no direction and so
+        scores 0.0 against every query, and compacting would invalidate every other
+        row index. Search resolves through `_row`, so an unmapped id is unreachable.
+        """
+        row = self._row.pop(claim_id, None)
+        if row is None:
+            return False
+        if self._mat is not None:
+            self._mat[row] = 0.0
+        return True
+
     def __len__(self) -> int:
-        return self._n
+        # Live entries, not the high-water mark: removed rows are still allocated.
+        return len(self._row)
 
 
 class SQLiteStore:
@@ -435,6 +468,83 @@ class SQLiteStore:
                 [tenant, fact_key] + lp,
             ).fetchall()
         return [self._row_to_claim(r) for r in rows]
+
+    def purge(self, scope: Scope) -> dict[str, int]:
+        """Irreversibly erase everything at `scope` and beneath it.
+
+        This is the deliberate exception to "nothing is ever deleted". Retirement is the
+        right default — it is what makes the audit trail and `as_of` work — but a GDPR
+        Article 17 or CCPA erasure request is a legal obligation that retirement does not
+        satisfy, because the text remains readable. Purging a user therefore also takes
+        their agents and sessions.
+
+        Everything derived from the text goes too: the claims, the source episodes, the
+        embeddings (which leak content under inversion), and the FTS index (which stores
+        the tokens directly). Returns per-table counts so the caller can evidence the
+        erasure.
+        """
+        conds = ["tenant = ?"]
+        params: list = [scope.tenant]
+        for col, val in (("usr", scope.user), ("agent", scope.agent),
+                         ("session", scope.session)):
+            if val is not None:
+                conds.append(f"{col} = ?")
+                params.append(val)
+        where = " AND ".join(conds)
+
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT id, rowid FROM claims WHERE {where}", params
+            ).fetchall()
+            for r in rows:
+                # FTS entries are keyed on the claim's rowid, so they must go before the
+                # claim row does — afterwards the rowid is gone and the text is orphaned
+                # but still searchable.
+                self._db.execute("DELETE FROM claims_fts WHERE rowid=?", (r["rowid"],))
+                self._db.execute("DELETE FROM embeddings WHERE claim_id=?", (r["id"],))
+                self._vec.remove(r["id"])
+            claims = self._db.execute(f"DELETE FROM claims WHERE {where}", params).rowcount
+            episodes = self._db.execute(
+                f"DELETE FROM episodes WHERE {where}", params
+            ).rowcount
+            self._db.commit()
+        return {"claims": claims, "episodes": episodes, "embeddings": len(rows)}
+
+    # -- learned schema ------------------------------------------------------
+
+    def put_spec(self, spec: "PredicateSpec") -> None:
+        """Persist a predicate specification, usually one just learned from a model."""
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO predicates "
+                "(name, cardinality, volatility, memory_type, aliases, supersedes, learned) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+                "cardinality=excluded.cardinality, volatility=excluded.volatility, "
+                "memory_type=excluded.memory_type, aliases=excluded.aliases, "
+                "supersedes=excluded.supersedes, learned=excluded.learned",
+                (spec.name, spec.cardinality.value, spec.volatility.value,
+                 spec.memory_type.value, json.dumps(list(spec.aliases)),
+                 json.dumps(list(spec.supersedes)), int(spec.learned)),
+            )
+            self._maybe_commit()
+
+    def all_specs(self) -> list["PredicateSpec"]:
+        from ..schema import Cardinality, PredicateSpec, Volatility
+
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM predicates").fetchall()
+        return [
+            PredicateSpec(
+                name=r["name"],
+                cardinality=Cardinality(r["cardinality"]),
+                volatility=Volatility(r["volatility"]),
+                memory_type=MemoryType(r["memory_type"]),
+                aliases=tuple(json.loads(r["aliases"])),
+                supersedes=tuple(json.loads(r["supersedes"])),
+                learned=bool(r["learned"]),
+            )
+            for r in rows
+        ]
 
     def slot_history(self, tenant: str, fact_key: str) -> list[Claim]:
         """Every claim ever recorded in one (subject, predicate) slot, oldest first.

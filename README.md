@@ -218,6 +218,23 @@ prov.superseded    # what it replaced
 prov.extractor     # which model/rule version produced it
 ```
 
+The one deliberate exception is `purge()`. Retirement is the right default and the wrong
+answer to "delete my data" — the text stays readable, which does not satisfy a GDPR
+Article 17 request. So erasure is a separate, explicit, irreversible call rather than a
+flag on `forget`, and it removes everything derived from the text: claims, source
+episodes, embeddings (which leak content under inversion) and the FTS index (which stores
+the tokens directly). Purging a user takes their agents and sessions with them, and
+returns per-table counts as evidence.
+
+### The learned schema is durable
+
+Predicate classifications are persisted, not held in process memory. This matters more
+than it sounds: a serverless or CLI agent is a fresh process per invocation, so a
+process-local registry would re-pay the model on *every* run — and, worse, treat every
+learned predicate as multi-valued until it did, silently disabling contradiction
+detection for anything written in that window. "Classified once, ever" has to mean across
+processes to mean anything.
+
 ### Consolidation
 
 Runs off the write path: decays salience toward a floor, merges near-duplicate claims into
@@ -243,6 +260,7 @@ mem = Engram(path=":memory:", *, store=, embedder=, llm=, registry=,
 mem.add(messages, *, user=, session=, ...)        -> WriteReceipt
 mem.remember(subject, predicate, obj, ...)        -> WriteReceipt   # structured, no LLM
 mem.forget(subject, predicate)                    -> list[Claim]    # retire, keep history
+mem.purge(user=...)                               -> dict[str, int] # erase, irreversible
 
 # read
 mem.search(query, *, k=10, as_of=None, memory_types=None)  -> list[Result]

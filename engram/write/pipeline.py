@@ -257,12 +257,18 @@ class WritePipeline:
                 calls += 1
                 continue
             calls += 1
-            self.registry.learn(
+            learned = self.registry.learn(
                 predicate,
                 _coerce(Cardinality, spec.get("cardinality"), Cardinality.MANY),
                 _coerce(Volatility, spec.get("volatility"), Volatility.SLOW),
                 _coerce(MemoryType, spec.get("memory_type"), MemoryType.SEMANTIC),
             )
+            # Durably record what we just paid for. The in-memory registry is a cache;
+            # the store is the thing that makes "classified once, ever" true across
+            # processes rather than only within one.
+            put_spec = getattr(self.store, "put_spec", None)
+            if put_spec is not None:
+                put_spec(learned)
         return calls
 
     @staticmethod

@@ -743,3 +743,157 @@ def test_random_transcripts_never_corrupt_the_store(tmp_path):
         assert c.subject and c.predicate
         assert c.invalidated_at is None
     mem.close()
+
+
+# =============================================================================
+# Durable schema and erasure
+# =============================================================================
+
+class _ClassifyingLLM:
+    name = "classifying"
+
+    def __init__(self):
+        self.classify_calls = 0
+
+    def extract(self, episodes, known_predicates):
+        return [{"subject": "user", "predicate": "collects_stamps",
+                 "object": "penny black", "polarity": 1, "memory_type": "semantic",
+                 "confidence": 0.9, "source_index": 0}]
+
+    def classify_predicate(self, predicate, example):
+        self.classify_calls += 1
+        return {"cardinality": "one", "volatility": "slow", "memory_type": "semantic"}
+
+
+LONG_TURN = "A long sentence the deterministic rules will not touch at all here."
+
+
+def test_a_learned_predicate_survives_a_restart(tmp_path):
+    """'Classified once, ever' has to mean across processes. A serverless or CLI agent
+    is a fresh process per invocation, so a process-local schema would re-pay the model
+    every single time."""
+    path = str(tmp_path / "s.db")
+    first = _ClassifyingLLM()
+    with Engram(path, embedder=HashingEmbedder(dim=64), llm=first, user="alice") as m1:
+        m1.add(LONG_TURN)
+    assert first.classify_calls == 1
+
+    second = _ClassifyingLLM()
+    with Engram(path, embedder=HashingEmbedder(dim=64), llm=second, user="alice") as m2:
+        m2.add("A different long sentence the rules will also not touch at all.")
+    assert second.classify_calls == 0, "the schema must be read back, not re-derived"
+
+
+def test_learned_cardinality_is_in_force_before_the_first_write_after_restart(tmp_path):
+    """The subtler half: until a predicate is re-classified it defaults to multi-valued,
+    which silently disables contradiction detection for anything written in that window."""
+    path = str(tmp_path / "s.db")
+    with Engram(path, embedder=HashingEmbedder(dim=64), llm=_ClassifyingLLM(),
+                user="alice") as m1:
+        m1.add(LONG_TURN)
+
+    with Engram(path, embedder=HashingEmbedder(dim=64), user="alice") as m2:
+        assert m2.registry.known("collects_stamps")
+        assert m2.registry.functional("collects_stamps")
+
+
+def test_an_explicit_registry_still_gains_the_persisted_schema(tmp_path):
+    path = str(tmp_path / "s.db")
+    with Engram(path, embedder=HashingEmbedder(dim=64), llm=_ClassifyingLLM(),
+                user="alice") as m1:
+        m1.add(LONG_TURN)
+    with Engram(path, embedder=HashingEmbedder(dim=64),
+                registry=PredicateRegistry(), user="alice") as m2:
+        assert m2.registry.functional("collects_stamps")
+
+
+def test_purge_erases_every_trace_of_a_user(tmp_path):
+    path = str(tmp_path / "p.db")
+    mem = Engram(path, embedder=HashingEmbedder(dim=64))
+    mem.remember("user", "lives_in", "Berlin", user="alice")
+    mem.remember("user", "works_at", "Acme", user="alice", session="s1")
+    mem.add("I live in Lisbon", user="bob")
+    before = mem.stats()
+
+    receipt = mem.purge(user="alice")
+    assert receipt["claims"] >= 2, receipt
+    after = mem.stats()
+
+    assert mem.get_all(user="alice") == []
+    assert mem.get_all(user="alice", include_invalidated=True) == []
+    assert mem.history("user", "lives_in", user="alice") == []
+    assert mem.search("berlin", user="alice") == []
+    assert after["claims"] < before["claims"]
+    assert mem.get_all(user="bob"), "purging one user must not touch another"
+    mem.close()
+
+
+def test_purge_removes_the_text_index_and_embeddings_not_just_the_rows(tmp_path):
+    """Retirement leaves the text readable; erasure must not. The FTS index and the
+    embedding are both reconstructible surfaces."""
+    path = str(tmp_path / "p.db")
+    mem = Engram(path, embedder=HashingEmbedder(dim=64), user="alice")
+    mem.remember("user", "lives_in", "Timbuktu")
+    claim_id = mem.get_all()[0].id
+
+    mem.purge(user="alice")
+    assert mem.store.lexical_search("timbuktu", [Scope("default", "alice")], 10) == []
+    assert mem.store.get_embedding(claim_id) is None
+    assert mem.stats()["embeddings"] == 0
+    mem.close()
+
+
+def test_purge_survives_a_restart(tmp_path):
+    path = str(tmp_path / "p.db")
+    with Engram(path, embedder=HashingEmbedder(dim=64), user="alice") as m1:
+        m1.remember("user", "lives_in", "Timbuktu")
+        m1.purge(user="alice")
+    with Engram(path, embedder=HashingEmbedder(dim=64), user="alice") as m2:
+        assert m2.get_all(include_invalidated=True) == []
+        assert m2.stats()["claims"] == 0
+
+
+def test_purge_scoped_to_a_session_leaves_the_users_durable_memory(tmp_path):
+    mem = Engram(str(tmp_path / "p.db"), embedder=HashingEmbedder(dim=64), user="alice")
+    mem.remember("user", "lives_in", "Berlin")
+    mem.remember("user", "working_on", "auth refactor", session="s1")
+    mem.purge(session="s1")
+    assert [c.object for c in mem.get_all()] == ["Berlin"]
+    mem.close()
+
+
+def test_purge_on_a_store_that_cannot_erase_refuses_rather_than_pretending():
+    class NoPurgeStore(SQLiteStore):
+        purge = None
+
+    mem = Engram(store=NoPurgeStore(":memory:"), embedder=HashingEmbedder(dim=64),
+                 user="alice")
+    mem.remember("user", "lives_in", "Berlin")
+    with pytest.raises(NotImplementedError, match="purge"):
+        mem.purge(user="alice")
+    mem.close()
+
+
+def test_removing_an_unknown_vector_reports_that_nothing_was_removed():
+    """purge() calls remove() for every claim it deletes, including ones that were never
+    embedded — that must be a no-op, not an error."""
+    from engram.store.sqlite import _VecIndex
+
+    idx = _VecIndex()
+    idx.add("a", np.ones(4, dtype=np.float32))
+    assert idx.remove("a") is True
+    assert idx.remove("a") is False, "removing twice is harmless"
+    assert idx.remove("never-existed") is False
+    assert len(idx) == 0
+    assert idx.get("a") is None
+
+
+def test_a_removed_vector_is_unreachable_by_search():
+    from engram.store.sqlite import _VecIndex
+
+    idx = _VecIndex()
+    idx.add("keep", np.array([1.0, 0.0], dtype=np.float32))
+    idx.add("drop", np.array([0.0, 1.0], dtype=np.float32))
+    idx.remove("drop")
+    hits = idx.search(np.array([0.0, 1.0], dtype=np.float32), ["keep", "drop"], 5)
+    assert [h[0] for h in hits] == ["keep"], "an erased vector must not be retrievable"
