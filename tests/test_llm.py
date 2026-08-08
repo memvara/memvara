@@ -12,7 +12,14 @@ from types import SimpleNamespace
 import pytest
 
 from engram.llm import LLM, AnthropicLLM, NullLLM
-from engram.llm.base import CLAIM_SCHEMA, EXTRACT_SYSTEM, PREDICATE_SCHEMA, PREDICATE_SYSTEM
+from engram.llm.base import (
+    CLAIM_SCHEMA,
+    EXTRACT_SYSTEM,
+    PREDICATE_SCHEMA,
+    PREDICATE_SYSTEM,
+    RESOLVE_SCHEMA,
+    RESOLVE_SYSTEM,
+)
 from engram.types import Episode, Scope
 
 
@@ -76,6 +83,21 @@ def test_satisfies_the_llm_protocol():
     assert AnthropicLLM(client=FakeClient(), model="claude-opus-5").name == (
         "anthropic/claude-opus-5"
     )
+
+
+def test_only_the_null_backend_advertises_itself_as_a_no_op():
+    """`llm_calls` is billed off this flag, so a real backend claiming it would report
+    a write path that costs nothing while spending money on every turn."""
+    assert NullLLM.is_noop is True
+    assert AnthropicLLM(client=FakeClient()).is_noop is False
+
+
+def test_the_null_backend_merges_nothing():
+    """No model means no evidence that two spellings are the same question."""
+    assert NullLLM().resolve_predicate("employer_name", ["works_at"]) == {
+        "canonical": None, "cardinality": "many", "volatility": "slow",
+        "memory_type": "semantic",
+    }
 
 
 def test_exported_from_the_package_without_the_sdk_installed():
@@ -149,14 +171,35 @@ def test_prompt_numbers_the_turns_and_lists_known_predicates_deterministically()
     llm = AnthropicLLM(client=client)
     eps = episodes("I live in Lisbon", "I work at Acme")
     llm.extract(eps, ["works_at", "lives_in", "works_at"])
-    llm.extract(eps, ["lives_in", "works_at"])
+    llm.extract(eps, ["works_at", "lives_in"])
 
     prompt = client.calls[0]["messages"][0]["content"]
     assert "[0] user: I live in Lisbon" in prompt
     assert "[1] user: I work at Acme" in prompt
-    assert "lives_in, works_at" in prompt
+    # Deduped, and in the order the registry supplied rather than re-sorted: sorting
+    # would slot each newly learned predicate into the middle of the cacheable prefix.
+    assert "works_at, lives_in" in prompt
     # Same predicate set, same bytes - the prompt prefix has to stay cacheable.
     assert client.calls[1]["messages"][0]["content"] == prompt
+
+
+def test_the_known_predicate_list_is_bounded():
+    """Sending the whole vocabulary is an unbounded per-write token tax, and it grows
+    fastest exactly when the vocabulary is growing fastest."""
+    client = FakeClient({"claims": []})
+    vocabulary = [f"predicate_{i:03d}" for i in range(500)]
+    AnthropicLLM(client=client).extract(episodes("hi"), vocabulary)
+
+    listed = client.calls[0]["messages"][0]["content"].split("\n")[1].split(", ")
+    assert len(listed) == 64
+    # The head is preserved, so the prefix a growing vocabulary shares stays identical.
+    assert listed == vocabulary[:64]
+
+
+def test_an_empty_vocabulary_is_stated_rather_than_left_blank():
+    client = FakeClient({"claims": []})
+    AnthropicLLM(client=client).extract(episodes("hi"), ["", None])
+    assert "(none yet)" in client.calls[0]["messages"][0]["content"]
 
 
 def test_empty_episode_batch_costs_no_call():
@@ -297,6 +340,94 @@ def test_text_is_found_past_a_leading_thinking_block():
         messages=SimpleNamespace(create=lambda **kw: SimpleNamespace(content=blocks))
     )
     assert AnthropicLLM(client=client).extract(episodes("hi"), []) == [claim()]
+
+
+# -- resolve_predicate: the acquisition call --------------------------------
+
+
+def resolve_once(payload, *, surface="employer_name", candidates=("works_at", "mood")):
+    client = FakeClient(payload)
+    return AnthropicLLM(client=client).resolve_predicate(surface, list(candidates)), client
+
+
+def test_resolve_predicate_request_shape():
+    out, client = resolve_once({"canonical": "works_at", "cardinality": "one",
+                                "volatility": "slow", "memory_type": "semantic"})
+    kwargs = client.calls[0]
+    assert kwargs["system"] is RESOLVE_SYSTEM
+    assert kwargs["output_config"]["format"]["schema"] == RESOLVE_SCHEMA
+    assert "effort" in kwargs["output_config"]
+    prompt = kwargs["messages"][0]["content"]
+    assert "employer_name" in prompt and "works_at, mood" in prompt
+    assert out["canonical"] == "works_at"
+
+
+def test_resolution_costs_exactly_one_call():
+    _, client = resolve_once({"canonical": None, "cardinality": "many",
+                              "volatility": "slow", "memory_type": "semantic"})
+    assert len(client.calls) == 1
+
+
+def test_a_surface_form_the_model_calls_new_stays_new():
+    out, _ = resolve_once({"canonical": None, "cardinality": "one",
+                           "volatility": "fast", "memory_type": "episodic"})
+    assert out == {"canonical": None, "cardinality": "one", "volatility": "fast",
+                   "memory_type": "episodic"}
+
+
+@pytest.mark.parametrize(
+    "given",
+    ["not_offered", "", None, 7, ["works_at"], {"name": "works_at"}, "   "],
+    ids=["invented", "empty", "null", "int", "list", "dict", "blank"],
+)
+def test_a_canonical_that_was_not_offered_is_read_as_new(given):
+    """The riskiest field in the file: `canonical` is echoed into `PredicateSpec.aliases`,
+    so a hallucinated name permanently reroutes a surface form into a slot nobody looks
+    up. Only a name we offered is accepted; anything else means "new", which is the
+    recoverable direction."""
+    out, _ = resolve_once({"canonical": given, "cardinality": "many",
+                           "volatility": "slow", "memory_type": "semantic"})
+    assert out["canonical"] is None
+
+
+@pytest.mark.parametrize(("given", "expected"),
+                         [("Works At", "works_at"), ("worksAt", "works_at"),
+                          ("WORKS-AT", "works_at")])
+def test_a_canonical_is_matched_after_snake_casing(given, expected):
+    out, _ = resolve_once({"canonical": given, "cardinality": "many",
+                           "volatility": "slow", "memory_type": "semantic"})
+    assert out["canonical"] == expected
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{}, "garbage", {"canonical": "works_at", "cardinality": "several"}, None],
+    ids=["empty", "unparseable", "bad_enum", "no_content"],
+)
+def test_an_unusable_resolution_falls_back_to_the_conservative_default(payload):
+    out, _ = resolve_once(payload)
+    assert out["cardinality"] == "many"
+    assert out["volatility"] == "slow"
+    assert out["memory_type"] == "semantic"
+
+
+def test_the_candidate_list_is_bounded():
+    """Same token tax as the extraction vocabulary, and a longer list measurably makes
+    the merge decision worse rather than better."""
+    candidates = [f"predicate_{i:03d}" for i in range(500)]
+    _, client = resolve_once({"canonical": None, "cardinality": "many",
+                              "volatility": "slow", "memory_type": "semantic"},
+                             candidates=candidates)
+    listed = client.calls[0]["messages"][0]["content"].split("\n")[-1].split(", ")
+    assert listed == candidates[:48]
+
+
+def test_resolving_against_an_empty_registry_still_asks():
+    out, client = resolve_once({"canonical": None, "cardinality": "many",
+                                "volatility": "slow", "memory_type": "semantic"},
+                               candidates=())
+    assert "(none yet)" in client.calls[0]["messages"][0]["content"]
+    assert out["canonical"] is None
 
 
 # -- classify_predicate -----------------------------------------------------

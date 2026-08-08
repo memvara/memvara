@@ -18,6 +18,13 @@ class LocalEmbedder:
 
         self._m = SentenceTransformer(model)
         self.dim = int(self._m.get_sentence_embedding_dimension())
+        # The model id, not the class, is the identity: two sentence-transformers
+        # models of the same width produce vectors that are not comparable, and that
+        # swap is invisible to a dimension check. See `embed/fingerprint.py`.
+        self.name = f"local:{model}"
+
+    def __repr__(self) -> str:
+        return f"<LocalEmbedder {self.name} dim={self.dim}>"
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         return np.asarray(

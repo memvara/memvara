@@ -12,6 +12,12 @@ out of that, and both are routine rather than exotic.
 2. **Time.** Cosine similarity has no opinion about whether a fact is current. A 2023
    employer that was superseded in 2026 scores identically to the one that replaced
    it. Rescoring by predicate-keyed decay fixes the ordering without deleting history.
+3. **Absence.** Top-k always returns k things. Asked "what is the capital of France?"
+   a memory store will hand back the user's city with the same confidence it hands
+   back their name, because rank 0 is rank 0 whether or not anything in the corpus
+   answers the question. Scoring on absolute retriever evidence rather than on fused
+   rank (see `scoring.normalized_score`) makes "nothing here is relevant" a number a
+   caller can act on, and `min_score` is how they act on it.
 
 Everything here is deterministic. No LLM sits on the read path, and identical inputs
 produce an identical ordering, ties included - unstable ranking makes retrieval
@@ -20,6 +26,7 @@ regressions impossible to bisect.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence
 
@@ -29,17 +36,58 @@ from ..embed.base import Embedder
 from ..schema import PredicateRegistry
 from ..store.base import Store
 from ..types import Claim, Explanation, MemoryType, Result, Scope, utcnow
+from .analyze import analyze
 from .fusion import reciprocal_rank_fusion
-from .scoring import final_score, recency_factor
+from .scoring import (
+    final_score,
+    lexical_relevance,
+    normalized_score,
+    recency_factor,
+    relevance,
+    vector_relevance,
+)
 
 # Retriever names. Shared between the fusion weights and the `Explanation` fields so
 # the two cannot drift apart under a rename.
 VECTOR = "vector"
 LEXICAL = "lexical"
 
+#: Suggested `min_score` for a caller that would rather answer "I don't know" than
+#: return the least bad thing in the store - `recall()` rendering a prompt block, or
+#: mem0's `threshold`. Measured, not guessed: on a 36-claim personal corpus with 17
+#: answerable and 6 unanswerable questions, a floor of 0.25 keeps every question that
+#: was answered correctly and silences 5 of the 6 unanswerable ones. The survivor is a
+#: porter-stemmer collision ("production" -> "product", matching "dairy products") at
+#: 0.28; raising the floor to 0.30 silences it too, at the cost of two correct but
+#: weakly-evidenced answers.
+#:
+#: Embedder-dependent, and honestly so: it is calibrated against the shipped lexical
+#: `HashingEmbedder`. A semantic embedder shifts the cosine distribution upward and the
+#: floor should be re-measured with the eval, not assumed to carry over.
+#:
+#: Not the default for `search`, which stays 0.0 - filtering is the caller's call, and
+#: a retriever that silently withheld results would be much harder to debug.
+RELEVANCE_FLOOR = 0.25
+
 
 def _as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+@dataclass(frozen=True, slots=True)
+class _Legs:
+    """One search's retriever output, in the shape scoring needs it.
+
+    `*_active` is the abstention flag, and it is not the same question as "did this
+    leg return this claim". A leg that never ran must be dropped from the relevance
+    average; a leg that ran and did not rank this claim contributes a real zero.
+    """
+
+    vector: dict[str, tuple[int, float]]
+    lexical: dict[str, tuple[int, float]]
+    vector_active: bool
+    lexical_active: bool
+    lexical_terms: int
 
 
 class HybridRetriever:
@@ -58,6 +106,8 @@ class HybridRetriever:
         w_confidence: float = 0.15,
         w_salience: float = 0.10,
         candidate_multiplier: int = 5,
+        max_per_slot: int = 2,
+        filter_retry_multiplier: int = 10,
     ) -> None:
         self.store = store
         self.embedder = embedder
@@ -69,6 +119,8 @@ class HybridRetriever:
         self.w_confidence = w_confidence
         self.w_salience = w_salience
         self.candidate_multiplier = candidate_multiplier
+        self.max_per_slot = max_per_slot
+        self.filter_retry_multiplier = filter_retry_multiplier
 
     def search(
         self,
@@ -79,6 +131,7 @@ class HybridRetriever:
         as_of: datetime | None = None,
         include_invalidated: bool = False,
         memory_types: Sequence[MemoryType] | None = None,
+        min_score: float = 0.0,
     ) -> list[Result]:
         """Return the top `k` claims for `query`, each with a populated `Explanation`.
 
@@ -86,6 +139,11 @@ class HybridRetriever:
         instant, including claims we have since retracted. `include_invalidated`
         additionally lifts the liveness filter, surfacing claims that were already
         dead at `as_of` - useful for auditing, wrong for answering a question.
+
+        `min_score` drops results below a normalized relevance (see
+        `scoring.normalized_score`); at the default 0.0 nothing is dropped, and
+        `RELEVANCE_FLOOR` is the suggested starting point for a caller that would
+        rather return nothing than return the least bad thing in the store.
         """
         if k <= 0:
             return []
@@ -105,29 +163,68 @@ class HybridRetriever:
         # that BM25 puts first is worthless if the vector list was cut before it and
         # the final k is small.
         limit = max(k * self.candidate_multiplier, k)
+        wanted = set(memory_types) if memory_types is not None else None
 
+        results, saturated = self._gather(
+            query, scopes, limit, as_of, include_invalidated, wanted, now, min_score)
+
+        # Filter starvation. `memory_types` is applied after fusion truncated the pool,
+        # so a rejected candidate has already consumed a slot and a narrow filter can
+        # come back empty while matches sit just past the cut. Pushing the filter into
+        # both retrievers would widen the `Store` protocol for a case that is rare;
+        # noticing that the pool was full and re-asking once is not. The retry is
+        # bounded and happens only when the shortfall could actually be an artefact.
+        if wanted is not None and saturated and len(results) < k:
+            results, _ = self._gather(
+                query, scopes, limit * self.filter_retry_multiplier, as_of,
+                include_invalidated, wanted, now, min_score)
+
+        return self._rank(results, k)
+
+    # -- internals -----------------------------------------------------------
+
+    def _gather(
+        self,
+        query: str,
+        scopes: Sequence[Scope],
+        limit: int,
+        as_of: datetime | None,
+        include_invalidated: bool,
+        wanted: set[MemoryType] | None,
+        now: datetime,
+        min_score: float,
+    ) -> tuple[list[Result], bool]:
+        """Run both legs at `limit` and return the surviving results, unsorted.
+
+        The second element reports whether either leg came back full, i.e. whether
+        there is any reason to believe candidates were cut off. It is the only honest
+        trigger for a retry: a short result set from a leg that returned fewer than
+        `limit` hits has nothing more to give, and re-asking would be pure cost.
+        """
         vector_hits = self._vector_search(query, scopes, limit, as_of, include_invalidated)
-        lexical_hits = list(
-            self.store.lexical_search(query, scopes, limit, as_of, include_invalidated)
-        )
+        lexical_hits, lexical_terms = self._lexical_search(
+            query, scopes, limit, as_of, include_invalidated)
 
         fused = reciprocal_rank_fusion(
             {VECTOR: vector_hits, LEXICAL: lexical_hits},
             k=self.rrf_k,
             weights={VECTOR: self.w_vector, LEXICAL: self.w_lexical},
         )
+        saturated = len(vector_hits) >= limit or len(lexical_hits) >= limit
         if not fused:
-            return []
+            return [], saturated
 
-        vector_pos = _positions(vector_hits)
-        lexical_pos = _positions(lexical_hits)
-        wanted = set(memory_types) if memory_types is not None else None
+        legs = _Legs(
+            vector=_positions(vector_hits),
+            lexical=_positions(lexical_hits),
+            # A leg that returned nothing is indistinguishable from one that never ran,
+            # and both must be dropped from the relevance average rather than counted
+            # as a zero vote - otherwise every result of a lexical-only query is halved.
+            vector_active=bool(vector_hits),
+            lexical_active=bool(lexical_hits),
+            lexical_terms=lexical_terms,
+        )
 
-        # These filters run after fusion, so a rejected candidate still consumed a slot
-        # in the pool the retrievers returned. That costs some recall when a filter is
-        # narrow, and the alternative - pushing memory_type into both retrievers - would
-        # widen the `Store` protocol for a case that is rare in practice. Raise
-        # `candidate_multiplier` if you filter hard.
         # Hydrate every fused candidate in one round trip. Fetching them individually
         # makes a search cost O(candidates) queries — the classic N+1 — so retrieval
         # would scale with how many results it considered rather than with the query.
@@ -148,15 +245,53 @@ class HybridRetriever:
             if not self._believed_by(claim, as_of):
                 continue
 
-            results.append(self._explain(claim, fusion, vector_pos, lexical_pos, now))
+            result = self._explain(claim, fusion, legs, now)
+            if result.score < min_score:
+                continue
+            results.append(result)
+        return results, saturated
 
-        # Sort on the claim id as a secondary key. Fusion ties are common - two claims
-        # each ranked first by one retriever score identically by construction - and
-        # dict order alone would let the answer depend on insertion history.
+    def _rank(self, results: list[Result], k: int) -> list[Result]:
+        """Order by score, then spread the head across fact slots, then cut to `k`.
+
+        Sorting takes the claim id as a secondary key. Ties are common - byte-identical
+        claims agree on every signal by construction - and dict order alone would let
+        the answer depend on insertion history.
+
+        The diversity pass demotes rather than drops. A cluster of near-identical
+        claims in one slot was measured taking 5 of 8 prompt slots, which is a wasted
+        prompt; but capping by deletion would make `k` mean something different
+        depending on how the corpus happened to cluster, and would silently hide the
+        cluster from anyone auditing it. Demotion costs nothing when there is nothing
+        else to show and everything to gain when there is.
+
+        Diversity is measured on `fact_key` - owner, subject, predicate - and
+        deliberately not on embedding distance. Greedy MMR over the shipped
+        `HashingEmbedder` measurably *reduced* topical coverage: 6.30 distinct
+        predicates per result set at lambda=0.7 against 6.78 with no diversity pass at
+        all, while still leaving 5 of 8 slots to the duplicate cluster. Those vectors
+        are lexical, so two claims about one subject in different words look far apart
+        and two claims about different subjects in similar words look close - MMR
+        diversifies the wrong axis. Slot identity is what it was trying to approximate,
+        and the store already knows it exactly: capping on it gives 7.04 with the
+        ranking otherwise untouched.
+        """
         results.sort(key=lambda r: (-r.score, r.claim.id))
-        return results[:k]
+        if self.max_per_slot <= 0:
+            return results[:k]
 
-    # -- internals -----------------------------------------------------------
+        head: list[Result] = []
+        overflow: list[Result] = []
+        used: dict[str, int] = {}
+        for r in results:
+            slot = r.claim.fact_key
+            seen = used.get(slot, 0)
+            if seen < self.max_per_slot:
+                used[slot] = seen + 1
+                head.append(r)
+            else:
+                overflow.append(r)
+        return (head + overflow)[:k]
 
     def _vector_search(
         self,
@@ -181,6 +316,32 @@ class HybridRetriever:
             return []
         return list(self.store.vector_search(qvec, scopes, limit, as_of, include_invalidated))
 
+    def _lexical_search(
+        self,
+        query: str,
+        scopes: Sequence[Scope],
+        limit: int,
+        as_of: datetime | None,
+        include_invalidated: bool,
+    ) -> tuple[list[tuple[str, float]], int]:
+        """Lexical leg, reduced to content terms and skipped when none survive.
+
+        The store ORs every alphanumeric token it is handed, and at personal-memory
+        scale the stopwords are the rare tokens - so `"what do you know about me?"`
+        ranks on the IDF of "do". Sending only the content terms is the same guard the
+        vector leg applies to a zero-norm query, expressed in the only place the
+        retriever controls: what it asks for. See `analyze`.
+
+        Returns the hits and the number of terms they were scored over, which is what
+        makes BM25 comparable across queries of different lengths.
+        """
+        reduced = analyze(query)
+        if reduced.abstains:
+            return [], 0
+        hits = self.store.lexical_search(
+            reduced.text, scopes, limit, as_of, include_invalidated)
+        return list(hits), len(reduced.terms)
+
     @staticmethod
     def _believed_by(claim: Claim, as_of: datetime | None) -> bool:
         """Transaction-time floor, enforced here rather than left to the store.
@@ -197,26 +358,29 @@ class HybridRetriever:
             return True
         return _as_utc(claim.recorded_at) <= _as_utc(as_of)
 
-    def _explain(
-        self,
-        claim: Claim,
-        fusion: float,
-        vector_pos: dict[str, tuple[int, float]],
-        lexical_pos: dict[str, tuple[int, float]],
-        now: datetime,
-    ) -> Result:
-        v = vector_pos.get(claim.id)
-        lx = lexical_pos.get(claim.id)
+    def _explain(self, claim: Claim, fusion: float, legs: _Legs, now: datetime) -> Result:
+        v = legs.vector.get(claim.id)
+        lx = legs.lexical.get(claim.id)
         recency = recency_factor(claim, self.registry, now)
-        score = final_score(
-            fusion,
-            recency=recency,
-            confidence=claim.confidence,
-            salience=claim.salience,
-            w_recency=self.w_recency,
-            w_confidence=self.w_confidence,
-            w_salience=self.w_salience,
+        quality = {
+            "recency": recency,
+            "confidence": claim.confidence,
+            "salience": claim.salience,
+            "w_recency": self.w_recency,
+            "w_confidence": self.w_confidence,
+            "w_salience": self.w_salience,
+        }
+        # A leg that ran scores an unlisted claim 0.0; a leg that abstained scores it
+        # `None`, which drops it from the average instead of voting against the claim.
+        evidence = relevance(
+            vector=(vector_relevance(0.0 if v is None else v[1])
+                    if legs.vector_active else None),
+            lexical=(lexical_relevance(0.0 if lx is None else lx[1], legs.lexical_terms)
+                     if legs.lexical_active else None),
+            w_vector=self.w_vector,
+            w_lexical=self.w_lexical,
         )
+        score = normalized_score(evidence, **quality)
         explain = Explanation(
             # `None` here is a finding, not a gap: it says this claim surfaced on one
             # retriever's evidence alone, which is exactly the signal you want when
@@ -232,6 +396,7 @@ class HybridRetriever:
             # No cross-encoder in this tier. Left None so a future reranker's absence
             # is distinguishable from a reranker that scored zero.
             rerank_score=None,
+            raw_score=final_score(fusion, **quality),
             final_score=score,
         )
         return Result(claim=claim, score=score, explain=explain)

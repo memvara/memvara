@@ -402,3 +402,88 @@ def test_stats_reports_store_contents(mem):
     mem.remember("user", "lives_in", "Lisbon")
     s = mem.stats()
     assert s["live_claims"] == 1 and s["claims"] == 1
+
+
+# --- What the default configuration actually does ---------------------------
+
+#: A realistic exchange: six durable facts, four of which no rule-based extractor is
+#: going to catch. This is the transcript that produced zero stored claims and the
+#: conclusion that the library was broken.
+CONVERSATION = [
+    "Hi there!",
+    "My name is Priya Raman.",
+    "Nice to meet you.",
+    "I work at Northwind Logistics.",
+    "We're on Postgres 14 in production, migrating to 16 next quarter.",
+    "Got it.",
+    "My timezone is Europe/Berlin, so mornings are best for calls.",
+    "Noted.",
+    "Honestly I can't stand Jira — please never suggest it.",
+    "Understood.",
+    "The build keeps failing with ERR_7734 after the auth refactor.",
+    "That sounds frustrating.",
+    "Anyway, thanks for the help.",
+    "Any time!",
+]
+
+
+def test_the_default_configuration_stores_what_it_can_and_is_findable_about_the_rest(mem):
+    """The default has no model, so the LLM tier is a no-op and most of this transcript
+    is not stored. That is a legitimate configuration and a terrible surprise, so the
+    facts that survive and the extractor that produced them both have to be visible."""
+    mem.add(CONVERSATION)
+    stored = {(c.predicate, c.object) for c in mem.get_all()}
+
+    assert ("name", "Priya Raman") in stored, "the fast path handles the fixed forms"
+    assert ("works_at", "Northwind Logistics") in stored
+    assert not any("Postgres" in obj for _, obj in stored), \
+        "and genuinely cannot handle the rest"
+    assert "extract=fast-path-only" in repr(mem), \
+        "so the configuration has to name itself when asked"
+
+
+def test_the_same_conversation_with_a_model_keeps_the_rest():
+    llm = FakeLLM({"postgres": [{"subject": "user", "predicate": "uses_database",
+                                 "object": "Postgres 14"}]})
+    with Engram(embedder=HashingEmbedder(dim=128), llm=llm, user="alice") as mem:
+        mem.add(CONVERSATION)
+        # The predicate is whatever schema resolution settles on; the point is that the
+        # fact survives at all, which under the default configuration it does not.
+        assert "Postgres 14" in {c.object for c in mem.get_all()}
+        assert "extract=fast-path+fake" in repr(mem)
+
+
+# --- The scoped view, end to end --------------------------------------------
+
+def test_a_bound_scope_behaves_exactly_like_the_keywords_it_replaces(mem):
+    """The point is that it is not a second memory: same store, same facts, one place
+    where the scope is written down."""
+    alice = mem.scope(user="alice")
+    alice.add("I live in Berlin and work at Acme")
+    alice.add("Actually, I moved to Lisbon last month")
+
+    assert [r.text for r in alice.search("where do they live?")][:1] == \
+        ["user lives in Lisbon"]
+    assert [(c.object, c.invalidated_at is not None)
+            for c in alice.history("user", "lives_in")] == [("Berlin", True),
+                                                            ("Lisbon", False)]
+    assert alice.get_all() == mem.get_all(user="alice")
+
+
+# --- Migrating a persisted store to a different embedder --------------------
+
+def test_a_store_survives_an_embedder_upgrade_across_a_restart(tmp_path):
+    """Week one writes with the offline embedder; week two installs a different one.
+    Without a migration every read raises and every write lands somewhere unsearchable."""
+    path = str(tmp_path / "m.db")
+    with Engram(path, embedder=HashingEmbedder(dim=128), user="alice") as week_one:
+        week_one.add("I live in Berlin and work at Acme")
+
+    with Engram(path, embedder=HashingEmbedder(dim=256), user="alice",
+                reembed=True) as week_two:
+        assert week_two.search("lives in berlin")[0].claim.object == "Berlin"
+        week_two.add("Actually, I moved to Lisbon last month")
+        assert [c.object for c in week_two.get_all()] == ["Lisbon", "Acme"]
+
+    with Engram(path, embedder=HashingEmbedder(dim=256), user="alice") as week_three:
+        assert [r.claim.object for r in week_three.search("lives")][:1] == ["Lisbon"]

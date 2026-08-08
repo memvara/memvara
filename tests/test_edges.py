@@ -513,23 +513,39 @@ def test_write_survives_an_embedder_that_changes_dimension_midway():
     mem.close()
 
 
-def test_embedding_rejection_warns_only_once():
-    class BadEmbedder:
-        dim = 4
-
-        def encode(self, texts):
-            return np.ones((len(texts), 4), dtype=np.float32)
+def test_an_embedder_that_disagrees_with_the_store_is_rejected_at_construction():
+    """Fail fast and loudly. Previously this constructed fine and then raised on every
+    read — the memory layer stayed up and returned nothing, which is the worse failure."""
+    from engram.core import EmbedderMismatchError
 
     store = SQLiteStore(":memory:")
-    store.put_claim(claim(predicate="seed"))
-    store.set_embedding(claim(predicate="seed").id, np.ones(9, dtype=np.float32))
-    mem = Engram(store=store, embedder=BadEmbedder(), user="alice")
-    with pytest.warns(RuntimeWarning):
+    seed = claim(predicate="seed")
+    store.put_claim(seed)
+    store.set_embedding(seed.id, np.ones(9, dtype=np.float32))
+
+    with pytest.raises(EmbedderMismatchError) as exc:
+        Engram(store=store, embedder=HashingEmbedder(dim=4), user="alice")
+    # The message has to be actionable — the old one named two integers and told the
+    # reader to re-embed via an API that did not exist.
+    assert "4" in str(exc.value) and "9" in str(exc.value)
+    store.close()
+
+
+def test_embedding_rejection_warns_only_once():
+    """If the embedder changes *after* construction the write must still land, and the
+    warning must fire once per pipeline rather than once per claim."""
+    store = SQLiteStore(":memory:")
+    mem = Engram(store=store, embedder=HashingEmbedder(dim=8), user="alice")
+    mem.remember("user", "seeded", "value")
+
+    mem.writer.embedder = HashingEmbedder(dim=4)  # now disagrees with the live index
+    with pytest.warns(RuntimeWarning, match="embedding rejected"):
         mem.remember("user", "lives_in", "Berlin")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         mem.remember("user", "works_at", "Acme")
     assert not [w for w in caught if "embedding rejected" in str(w.message)]
+    assert len(mem.get_all()) == 3, "claims must land even when their embedding is refused"
     mem.close()
 
 

@@ -16,7 +16,14 @@ import re
 from typing import Any, Sequence
 
 from ..types import Episode, MemoryType
-from .base import CLAIM_SCHEMA, EXTRACT_SYSTEM, PREDICATE_SCHEMA, PREDICATE_SYSTEM
+from .base import (
+    CLAIM_SCHEMA,
+    EXTRACT_SYSTEM,
+    PREDICATE_SCHEMA,
+    PREDICATE_SYSTEM,
+    RESOLVE_SCHEMA,
+    RESOLVE_SYSTEM,
+)
 
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -37,6 +44,17 @@ _PREDICATE_FALLBACK: dict[str, str] = {
 # is safe - 1.0 lets a malformed claim outrank well-formed ones, 0.0 makes it
 # unretrievable - so an unreadable confidence lands in the middle.
 _UNKNOWN_CONFIDENCE = 0.5
+
+# Ceiling on the known-predicate list sent with every extraction. Sending the whole
+# vocabulary is an unbounded per-write token tax that grows fastest exactly when the
+# vocabulary is growing fastest, and each new predicate shifts the bytes of the prompt
+# prefix and throws away the cache at the same moment. The list is a reuse hint, not an
+# enumeration, so a bounded head of it does the same job.
+_MAX_KNOWN_PREDICATES = 64
+
+# Ceiling on the candidate list sent when resolving a surface form. Same reasoning, and
+# a longer list measurably makes the merge decision worse rather than better.
+_MAX_CANDIDATES = 48
 
 
 def _snake_case(raw: str) -> str:
@@ -96,7 +114,10 @@ def _source_index(value: Any, n: int) -> int | None:
 
 
 class AnthropicLLM:
-    """Structured extraction and predicate classification via the Messages API."""
+    """Structured extraction and predicate resolution via the Messages API."""
+
+    #: A real backend, so every call it makes is billed to `WriteReceipt.llm_calls`.
+    is_noop = False
 
     def __init__(
         self,
@@ -153,13 +174,32 @@ class AnthropicLLM:
         )
 
     @staticmethod
-    def _extract_prompt(episodes: Sequence[Episode], known_predicates: Sequence[str]) -> str:
+    def _bounded(names: Sequence[str], limit: int) -> list[str]:
+        """Dedupe preserving order, then truncate.
+
+        Order is preserved rather than sorted on purpose. `PredicateRegistry` hands the
+        vocabulary over declared-first, which is a head that does not move as predicates
+        are learned; re-sorting would interleave every newly acquired predicate into the
+        middle and invalidate the cached prompt prefix on each acquisition - the one
+        moment the cache is worth the most, because that is when writes are busiest.
+        """
+        seen: set[str] = set()
+        out: list[str] = []
+        for name in names:
+            if name and name not in seen:
+                seen.add(name)
+                out.append(name)
+                if len(out) == limit:
+                    break
+        return out
+
+    @classmethod
+    def _extract_prompt(cls, episodes: Sequence[Episode],
+                        known_predicates: Sequence[str]) -> str:
         turns = "\n".join(f"[{i}] {ep.role}: {ep.content}" for i, ep in enumerate(episodes))
-        # Sorted, so the same predicate set always renders to the same bytes and the
-        # prompt prefix stays cacheable across calls.
-        known = ", ".join(sorted({p for p in known_predicates if p})) or "(none yet)"
+        known = ", ".join(cls._bounded(known_predicates, _MAX_KNOWN_PREDICATES))
         return (
-            f"Known predicates, reuse one whenever it fits:\n{known}\n\n"
+            f"Known predicates, reuse one whenever it fits:\n{known or '(none yet)'}\n\n"
             f"Turns:\n{turns}"
         )
 
@@ -209,11 +249,8 @@ class AnthropicLLM:
             )
         return out
 
-    def classify_predicate(self, predicate: str, example: str) -> dict[str, str]:
-        prompt = f"predicate: {_snake_case(predicate)}\nexample usage: {example}"
-        response = self._call(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA)
-        parsed = _parse_json_object(response)
-
+    @staticmethod
+    def _spec_fields(parsed: dict[str, Any]) -> dict[str, str]:
         # This answer is cached in the registry forever, so a bad field here is a
         # permanent mistake for that predicate. Any value outside the enum falls back to
         # the conservative default rather than being coerced into a neighbour.
@@ -227,3 +264,33 @@ class AnthropicLLM:
             if isinstance(value, str) and value in allowed:
                 result[field] = value
         return result
+
+    def resolve_predicate(self, surface: str, candidates: Sequence[str]) -> dict[str, Any]:
+        """Merge a novel surface form onto an existing predicate, or declare it new.
+
+        The most consequential validation in this file: `canonical` is echoed straight
+        into `PredicateSpec.aliases`, so a hallucinated name would permanently reroute
+        every claim using that surface form into a slot nobody looks up. Only a name the
+        caller actually offered is accepted - a model that invents one is treated as
+        having said "new", which is the recoverable direction.
+        """
+        offered = self._bounded(candidates, _MAX_CANDIDATES)
+        prompt = (
+            f"new predicate: {_snake_case(surface)}\n"
+            f"existing predicates:\n{', '.join(offered) or '(none yet)'}"
+        )
+        parsed = _parse_json_object(self._call(RESOLVE_SYSTEM, prompt, RESOLVE_SCHEMA))
+
+        canonical = parsed.get("canonical")
+        if not isinstance(canonical, str) or _snake_case(canonical) not in offered:
+            canonical = None
+        else:
+            canonical = _snake_case(canonical)
+        return {"canonical": canonical, **self._spec_fields(parsed)}
+
+    def classify_predicate(self, predicate: str, example: str) -> dict[str, str]:
+        """Legacy acquisition call, kept for backends and callers that still use it."""
+        prompt = f"predicate: {_snake_case(predicate)}\nexample usage: {example}"
+        return self._spec_fields(_parse_json_object(
+            self._call(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA)
+        ))

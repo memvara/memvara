@@ -1,18 +1,29 @@
 """LLM protocol.
 
-The interface is deliberately tiny — two methods — because the whole architecture is
-built to call an LLM as rarely as possible. Everything an LLM is genuinely needed for
-falls into two buckets:
+The interface is deliberately tiny because the whole architecture is built to call an
+LLM as rarely as possible. Everything an LLM is genuinely needed for falls into two
+buckets:
 
   extract()            - turn unstructured text into structured claims
-  classify_predicate() - answer "is this predicate single-valued?" once per predicate,
-                         ever, then cache the answer in the schema registry
+  resolve_predicate()  - answer "have we already got a predicate for this?" once per
+                         novel surface form, ever, then cache the answer in the registry
+
+`resolve_predicate` replaced `classify_predicate` as the acquisition call, and the
+difference is the point. Classification asked "how should this new predicate behave?",
+which quietly accepted the premise that every phrasing a model invents deserves a slot;
+a measured run produced 41 predicates for six questions and thirteen live answers to
+"where do you work?". Resolution asks the question that was actually load-bearing -
+"which existing predicate is this?" - and spends the same one-off call on *merging*.
+`classify_predicate` stays for backends that predate the change; the pipeline falls back
+to it and the conservative default keeps holding.
 
 Contradiction detection, deduplication, ranking, decay, and time travel are all
 deterministic and never call this interface. That is the design.
 
 `NullLLM` is the default. The library must be fully functional with no API key: you
-get the deterministic fast path, and `add()` tells you honestly what it did.
+get the deterministic fast path, and `add()` tells you honestly what it did - including
+that it cost nothing, which is why a no-op backend advertises itself via `is_noop`
+rather than being detected by class name.
 """
 
 from __future__ import annotations
@@ -25,14 +36,31 @@ from ..types import Episode
 @runtime_checkable
 class LLM(Protocol):
     name: str
+    #: True for a backend that consults no model. Suppresses `llm_calls` billing, which
+    #: must count model consultations rather than method invocations - otherwise the one
+    #: number the write path exists to minimize reports spend that never happened.
+    is_noop: bool = False
 
     def extract(self, episodes: Sequence[Episode], known_predicates: Sequence[str]) -> list[dict[str, Any]]:
         """Return claim dicts: subject, predicate, object, polarity, memory_type,
         confidence, source_index (index into `episodes`, for provenance)."""
         ...
 
+    def resolve_predicate(self, surface: str, candidates: Sequence[str]) -> dict[str, Any]:
+        """Decide whether `surface` is a new predicate or a spelling of an existing one.
+
+        Returns {'canonical': str | None, 'cardinality': 'one'|'many',
+        'volatility': 'static'|'slow'|'fast',
+        'memory_type': 'episodic'|'semantic'|'procedural'}, where `canonical` names one
+        of `candidates` the surface form is a synonym of, or None if it is genuinely
+        new. The cardinality fields describe the *new* predicate and are ignored when a
+        canonical is returned.
+        """
+        ...
+
     def classify_predicate(self, predicate: str, example: str) -> dict[str, str]:
-        """Return {'cardinality': 'one'|'many', 'volatility': 'static'|'slow'|'fast',
+        """Legacy acquisition call. Return {'cardinality': 'one'|'many',
+        'volatility': 'static'|'slow'|'fast',
         'memory_type': 'episodic'|'semantic'|'procedural'}."""
         ...
 
@@ -41,9 +69,17 @@ class NullLLM:
     """No-op backend. Deterministic paths still work; extraction simply yields nothing."""
 
     name = "null"
+    is_noop = True
 
     def extract(self, episodes: Sequence[Episode], known_predicates: Sequence[str]) -> list[dict[str, Any]]:
         return []
+
+    def resolve_predicate(self, surface: str, candidates: Sequence[str]) -> dict[str, Any]:
+        # With no model there is no evidence that two spellings mean the same thing, and
+        # guessing one would merge slots on nothing but a hunch. The deterministic
+        # pre-pass has already had its turn; whatever reaches here stays separate.
+        return {"canonical": None, "cardinality": "many", "volatility": "slow",
+                "memory_type": "semantic"}
 
     def classify_predicate(self, predicate: str, example: str) -> dict[str, str]:
         # Conservative default: multi-valued predicates never wrongly retire a fact.
@@ -117,6 +153,48 @@ provenance, so it must be exact.
 
 Return an empty list when a turn carries no durable fact. That is the common case, and \
 an empty list is a correct answer."""
+
+RESOLVE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        # Nullable rather than optional: "this is new" has to be sayable in one token,
+        # or a model with nothing to merge onto will reach for the nearest candidate.
+        "canonical": {"type": ["string", "null"]},
+        "cardinality": {"type": "string", "enum": ["one", "many"]},
+        "volatility": {"type": "string", "enum": ["static", "slow", "fast"]},
+        "memory_type": {"type": "string", "enum": ["episodic", "semantic", "procedural"]},
+    },
+    "required": ["canonical", "cardinality", "volatility", "memory_type"],
+    "additionalProperties": False,
+}
+
+RESOLVE_SYSTEM = """\
+You decide whether a predicate a memory system just saw is a new relation or another \
+spelling of one it already has.
+
+canonical: if the new predicate asks the same question about a subject as one of the \
+listed existing predicates - so that a new value should *replace* the old one rather \
+than sit beside it - return that existing predicate's name exactly. Otherwise return \
+null. Examples of the same question: employer_name / works_at, current_city / lives_in, \
+emotional_state / mood. Examples of different questions: works_at / working_on \
+(employer vs current task), born_in / lives_in (origin vs residence), job_title / \
+works_at (role vs company).
+
+Answer null when unsure. Two predicates that should have been merged only cost some \
+ranking quality; merging two that should not have been permanently destroys the \
+distinction between them and silently retires true facts.
+
+The remaining fields describe the new predicate and are used only when canonical is null.
+
+cardinality: "one" if a subject can only have one value at a time, so a new value \
+replaces the old (lives_in, works_at, date_of_birth). "many" if values accumulate \
+(likes, speaks, allergic_to). When genuinely unsure answer "many".
+
+volatility: "static" never changes (born_in). "slow" changes over years (works_at). \
+"fast" changes within days (current_task, mood).
+
+memory_type: "semantic" for facts, "episodic" for events, "procedural" for behavioral \
+preferences directed at an assistant."""
 
 PREDICATE_SYSTEM = """\
 You classify a relational predicate so a memory system knows how to store it.

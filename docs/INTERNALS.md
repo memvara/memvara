@@ -16,7 +16,7 @@ importable from the foundation modules:
 
 1. **Deterministic paths never call an LLM.** Deduplication, contradiction resolution,
    ranking, decay, and time travel are all pure functions of stored state. Only
-   `extract()` and `classify_predicate()` may touch a model.
+   `extract()` and `resolve_predicate()` may touch a model.
 2. **Unknown predicates default to `Cardinality.MANY`.** Wrongly retiring a true fact is
    worse than keeping two competing ones.
 3. **Nothing is ever hard-deleted by the engine.** Superseding a claim sets
@@ -110,8 +110,17 @@ including `llm_calls` (0 whenever the LLM is not consulted) and `latency_ms`:
 - **Tier 2 (LLM):** only the turns that survived both and produced no fast-path claim are
   batched into a single `llm.extract(...)` call. Map `source_index` back to the
   originating episode for provenance. Unknown predicates trigger one
-  `llm.classify_predicate(...)` per *new* predicate, cached via `registry.learn(...)` so
-  it is never asked again.
+  `llm.resolve_predicate(...)` per *new surface form*, cached via `registry.learn_alias`
+  / `registry.learn` and persisted through `store.put_spec(spec, tenant)` so it is never
+  asked again — including after a restart, and including by another process.
+
+  Resolution, not classification, is the point. Asking "what cardinality is this?" lets
+  `works_at`, `employed_by_company`, `job_employer` and `workplace` become four separate
+  slots that can never contradict each other; a red-team simulation of 10k extractions
+  over six concepts produced 41 predicates and four simultaneously-live employers that
+  way. Asking "which existing predicate is this?" spends the same one-per-form call on
+  merging instead, and a deterministic morphological pre-pass answers most of them for
+  free before any model is consulted.
 
 Every produced claim goes through `Reconciler.apply()`, and every stored claim gets its
 embedding written via `store.set_embedding()`.
@@ -204,7 +213,8 @@ class AnthropicLLM:
     def __init__(self, model: str = "claude-opus-5", client=None,
                  effort: str = "low", max_tokens: int = 8192) -> None
     def extract(self, episodes, known_predicates) -> list[dict]
-    def classify_predicate(self, predicate: str, example: str) -> dict
+    def resolve_predicate(self, surface: str, candidates: Sequence[str]) -> dict
+    def classify_predicate(self, predicate: str, example: str) -> dict  # legacy fallback
 ```
 
 Hard API requirements — these are current and getting them wrong is a 400:

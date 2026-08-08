@@ -60,6 +60,30 @@ class CountingLLM:
         return self.extract_calls + self.classify_calls
 
 
+class ResolvingLLM(CountingLLM):
+    """A backend that implements contract D, so acquisition can merge rather than
+    classify. Kept separate from `CountingLLM` because the pipeline has to keep working
+    with backends that predate `resolve_predicate`, and that fallback is worth testing
+    against a fake that genuinely lacks the method."""
+
+    name = "fake/resolving"
+
+    def __init__(self, *args, canonical: str | None = None, **kw) -> None:
+        super().__init__(*args, **kw)
+        self._canonical = canonical
+        self.resolve_calls = 0
+        self.offered: list[Sequence[str]] = []
+
+    def resolve_predicate(self, surface, candidates):
+        self.resolve_calls += 1
+        self.offered.append(list(candidates))
+        return {"canonical": self._canonical, **self._classification}
+
+    @property
+    def total_calls(self) -> int:
+        return self.extract_calls + self.classify_calls + self.resolve_calls
+
+
 def build(llm=None, **kw):
     store = SQLiteStore(":memory:")
     registry = PredicateRegistry()
@@ -389,6 +413,106 @@ def test_known_predicates_are_offered_to_the_extractor():
     # Reusing an existing predicate is how contradictions stay detectable, so the model
     # has to be told what already exists.
     assert "lives_in" in known and "works_at" in known
+    store.close()
+
+
+def test_a_novel_surface_form_costs_one_resolution_call_and_then_folds():
+    """`resolve_predicate` replaced `classify_predicate` as the acquisition call: the
+    same one-off spend, but bought a merge instead of a fourth slot for one question."""
+    objs = iter(["Acme", "Globex"])
+
+    def responder(episodes):
+        return [{"subject": "user", "predicate": "paycheck_source", "object": next(objs),
+                 "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
+                 "source_index": 0}]
+
+    llm = ResolvingLLM(responder=responder, canonical="works_at")
+    pipe, store, registry = build(llm)
+    pipe.add([ep("Payroll switched over to the new provider this quarter.")])
+    receipt = pipe.add([ep("Payroll moved again after the acquisition closed.")])
+
+    assert llm.resolve_calls == 1          # once for the surface form, ever
+    assert llm.classify_calls == 0
+    assert receipt.llm_calls == 1          # the second write pays for extraction only
+    assert registry.normalize("paycheck_source") == "works_at"
+    # And because it is the same slot now, the second employer retires the first.
+    assert live(store) == [("works_at", "Globex")]
+    store.close()
+
+
+def test_a_deterministically_foldable_form_never_reaches_the_model():
+    llm = ResolvingLLM(claims=[
+        {"subject": "user", "predicate": "employer_name", "object": "Acme", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ], canonical="works_at")
+    pipe, store, _ = build(llm)
+    receipt = pipe.add([ep("The payroll record was updated during the review.")])
+
+    assert llm.resolve_calls == 0, "morphology must run before anything is billed"
+    assert receipt.llm_calls == 1
+    assert live(store) == [("works_at", "Acme")]
+    store.close()
+
+
+def test_a_no_op_backend_is_not_billed_and_reports_the_loss():
+    from engram.llm import NullLLM
+
+    pipe, store, _ = build(NullLLM())
+    receipt = pipe.add([ep("The quarterly review is next Tuesday."),
+                        ep("The offsite moved to the Lisbon office.")])
+    assert receipt.llm_calls == 0, "a call that never left the process is not a cost"
+    assert receipt.unextracted == 2
+    store.close()
+
+
+def test_unextracted_counts_only_the_turns_that_yielded_nothing():
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "likes", "object": "tea", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    pipe, store, _ = build(llm)
+    receipt = pipe.add([ep("The quarterly review is next Tuesday."),
+                        ep("The offsite moved to the Lisbon office.")])
+    assert (receipt.llm_calls, receipt.unextracted) == (1, 1)
+    store.close()
+
+
+def test_a_failed_extraction_reports_every_turn_as_unextracted():
+    class Failing(CountingLLM):
+        def extract(self, episodes, known_predicates):
+            raise RuntimeError("429 rate limited")
+
+    pipe, store, _ = build(Failing())
+    receipt = pipe.add([ep("The quarterly review is next Tuesday."),
+                        ep("The offsite moved to the Lisbon office.")])
+    assert receipt.deferred and receipt.unextracted == 2
+    store.close()
+
+
+def test_the_learned_cap_folds_instead_of_growing_the_schema():
+    """The backstop: past the cap a novel form attaches to its nearest neighbour rather
+    than claiming a slot. Unbounded schema growth is what breaks contradiction
+    detection, so bounding it matters more than getting every fold right."""
+    predicates = iter(["previous_employer", "prior_employer", "old_employer"])
+
+    def responder(episodes):
+        return [{"subject": "user", "predicate": next(predicates), "object": "Acme",
+                 "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
+                 "source_index": 0}]
+
+    llm = ResolvingLLM(responder=responder, canonical=None)
+    store = SQLiteStore(":memory:")
+    registry = PredicateRegistry(max_learned=1)
+    pipe = WritePipeline(store, HashingEmbedder(), registry, llm)
+    for text in ["Payroll switched over to the new provider this quarter.",
+                 "Payroll moved again after the acquisition closed.",
+                 "Payroll changed hands a third time in the autumn."]:
+        pipe.add([ep(text)])
+
+    assert len([s for s in registry.all_specs() if s.learned]) == 1
+    # And the ones past the cap folded rather than being asked about at all.
+    assert llm.resolve_calls == 1
+    assert registry.normalize("prior_employer") == "works_at"
     store.close()
 
 

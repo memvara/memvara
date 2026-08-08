@@ -93,17 +93,28 @@ class Store(Protocol):
         ...
 
     # --- learned schema ---------------------------------------------------
-    def put_spec(self, spec) -> None:
+    def put_spec(self, spec, tenant: str = "default") -> None:
         """Persist a learned predicate specification. Must survive restart: cardinality
-        is what makes a contradiction detectable."""
+        is what makes a contradiction detectable.
+
+        Scoped to a tenant, because cardinality and volatility are what decide whether a
+        claim retires another and how fast it decays — decisions one tenant must not be
+        able to make on another's behalf. The default is the tenant `Engram` uses when
+        the caller names none, so a single-tenant caller need not think about it.
+        """
         ...
 
-    def all_specs(self) -> list:
-        """Every persisted predicate specification."""
+    def all_specs(self, tenant: str = "default") -> list:
+        """Every persisted predicate specification for one tenant."""
         ...
 
     # --- maintenance ------------------------------------------------------
     def iter_claims(self, tenant: str | None = None,
                     include_invalidated: bool = False) -> Iterable[Claim]: ...
-    def stats(self) -> dict[str, int]: ...
+
+    def stats(self, tenant: str | None = None) -> dict[str, int]:
+        """Row counts, optionally for one tenant. `embeddings` counts what the store
+        holds, not what any one process has mapped."""
+        ...
+
     def close(self) -> None: ...

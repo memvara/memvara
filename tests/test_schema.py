@@ -182,3 +182,95 @@ def test_custom_registry_is_isolated_from_builtins():
     custom = PredicateRegistry(specs=(PredicateSpec("owns", Cardinality.ONE),))
     assert custom.functional("owns")
     assert not custom.known("lives_in")
+
+
+# --- Resolution: the pre-pass that keeps the schema from exploding ----------
+# The full simulation lives in test_predicates.py; these are the individual rules.
+
+
+def test_derivational_matching_folds_a_word_family(reg):
+    """`employer`, `employed_by` and `employment` are one relation wearing three
+    suffixes. Only reached when nothing stricter matched, and only when exactly one
+    predicate claims the stem."""
+    assert reg.resolve("employment").method == "derivational"
+    assert reg.normalize("employment") == "works_at"
+
+
+def test_resolution_reports_how_it_decided(reg):
+    """The method is not decoration: "morphological" and "novel" are the difference
+    between a free fold and a model call, so it has to be inspectable."""
+    assert [reg.resolve(p).method for p in
+            ("", "works_at", "employer", "employer_name", "employment", "brand_new")] == [
+        "empty", "canonical", "alias", "morphological", "derivational", "novel"]
+
+
+def test_an_alias_that_slugifies_to_nothing_is_ignored():
+    """Punctuation-only aliases come from real model output, and indexing one would
+    make every unparseable predicate resolve to whichever spec declared it."""
+    reg = PredicateRegistry(specs=(
+        PredicateSpec("owns", Cardinality.ONE, aliases=("!!!", "possesses")),
+    ))
+    assert reg.normalize("!!!") == ""
+    assert reg.normalize("possesses") == "owns"
+
+
+def test_nearest_has_nothing_to_go_on_for_an_empty_surface(reg):
+    assert reg.nearest("") is None
+    assert reg.nearest("!!!") is None
+
+
+@pytest.mark.parametrize("surface", ["works_at", "employer", "", "!!!"])
+def test_aliasing_a_form_the_predicate_already_owns_is_a_no_op(reg, surface):
+    """Re-recording an alias must not grow the tuple every time it is seen."""
+    before = reg.spec("works_at")
+    assert reg.learn_alias("works_at", surface) is before
+
+
+def test_learn_alias_follows_an_alias_to_the_canonical(reg):
+    reg.learn_alias("employer", "paycheck_source")
+    assert reg.normalize("paycheck_source") == "works_at"
+
+
+def test_a_replaced_spec_does_not_leave_its_old_aliases_behind(reg):
+    """Specs are swapped wholesale, so an index patched in place would keep serving a
+    predecessor's aliases forever — silently routing claims into a dead slot."""
+    reg.learn("drives_car", Cardinality.ONE, aliases=("owns_vehicle",))
+    assert reg.normalize("owns_vehicle") == "drives_car"
+    reg.learn("drives_car", Cardinality.ONE, aliases=("car_is",))
+    assert reg.normalize("owns_vehicle") == "owns_vehicle"
+    assert reg.normalize("car_is") == "drives_car"
+
+
+def test_the_learned_cap_is_configurable_and_counts_only_learned_specs():
+    reg = PredicateRegistry(max_learned=2)
+    assert reg.learned_count == 0 and not reg.at_capacity
+    reg.learn("first_new", Cardinality.MANY)
+    reg.learn("second_new", Cardinality.MANY)
+    assert reg.at_capacity
+    reg.learn("third_new", Cardinality.MANY)
+    assert not reg.known("third_new")
+    # Re-learning something already installed is a correction, not growth.
+    reg.learn("first_new", Cardinality.ONE)
+    assert reg.functional("first_new")
+
+
+def test_the_prompt_vocabulary_puts_declared_predicates_first(reg):
+    reg.learn("aaa_learned_sorts_first_alphabetically", Cardinality.MANY)
+    vocabulary = reg.prompt_vocabulary()
+    assert vocabulary[0] == "allergic_to"
+    assert vocabulary[-1] == "aaa_learned_sorts_first_alphabetically"
+    assert reg.prompt_vocabulary(limit=3) == vocabulary[:3]
+
+
+def test_candidates_are_bounded_and_ranked_by_overlap(reg):
+    assert reg.candidates("previous_employer")[0] == "works_at"
+    assert len(reg.candidates("anything", limit=5)) == 5
+    assert reg.candidates("previous_employer") == reg.candidates("previous_employer")
+
+
+def test_a_declared_predicate_outranks_a_learned_one_on_a_tie(reg):
+    """Otherwise the first novel phrasing a deployment ever saw becomes the attractor
+    every later phrasing collapses into, purely because it sorts earlier."""
+    reg.learn("aa_employer_guess", Cardinality.ONE)
+    assert reg.nearest("previous_employer") == "works_at"
+    assert reg.candidates("previous_employer")[0] == "works_at"

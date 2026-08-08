@@ -10,10 +10,19 @@ needed it.
     Tier 1   SalienceGate drops factless turns, FastExtractor handles
              the unambiguous statement forms                          -- 0 calls
     Tier 2   whatever survived both, batched into one extract()       -- 1 call per add()
-             plus one classify_predicate() per *novel* predicate, ever
+             plus one resolve_predicate() per *novel surface form*, ever
 
 Reconciliation, deduplication and contradiction resolution sit below all of this and
 never call a model at all.
+
+The word doing the work in tier 2 is "novel". A model does not spell a predicate the
+same way twice, and `fact_key` hashes the predicate string, so `works_at`,
+`employed_by_company` and `employer_name` were three slots that could not contradict
+each other - which is how a measured 2,058-extraction run over six concepts ended up
+holding 31 live claims and answering "where do you work?" with four employers at once.
+`PredicateRegistry.resolve` now folds surface forms deterministically before anything is
+billed, and the model is asked only about what falls out of that, once, after which the
+answer is recorded as an alias and persisted.
 """
 
 from __future__ import annotations
@@ -25,7 +34,7 @@ from typing import Any, Mapping, Sequence
 
 from ..embed.base import Embedder
 from ..llm.base import LLM
-from ..schema import Cardinality, PredicateRegistry, Volatility
+from ..schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
 from ..store.base import Store
 from ..types import Claim, Derivation, Episode, MemoryType, WriteReceipt, utcnow
 from .fast import FastExtractor
@@ -50,10 +59,12 @@ class WritePipeline:
         self.fast = FastExtractor(registry)
         self.reconciler = Reconciler(store, registry)
         self.reconciler.reinforce_bump = reinforce_bump
-        # Predicates we have already paid to classify. The registry itself is the durable
-        # cache; this set additionally covers the case where a classification came back
-        # unusable, so a pathological predicate cannot bill us twice.
-        self._classified: set[str] = set()
+        # Surface forms we have already paid to resolve. The registry (and behind it the
+        # store) is the durable cache; this set additionally covers the cases the
+        # registry cannot record — a resolution that came back unusable, or one refused
+        # because the learned cap was reached — so a pathological surface form cannot
+        # bill us twice.
+        self._resolved: set[str] = set()
         # A rejected embedding is warned about once per pipeline, not once per claim —
         # a misconfigured embedder would otherwise emit one warning per write forever.
         self._warned_embedding = False
@@ -217,70 +228,149 @@ class WritePipeline:
         if not episodes:
             return out
 
-        known = [s.name for s in self.registry.all_specs()]
+        if getattr(self.llm, "is_noop", False):
+            # A backend that consults no model must not be billed for one. These turns
+            # genuinely reached tier 2 and yielded nothing, which is the honest thing to
+            # report — silently returning an empty receipt is how the default
+            # configuration reads as "your library is broken" instead of "no extractor".
+            receipt.unextracted = len(episodes)
+            return out
+
         # One call for the whole batch, not one per turn. Turns share context, and the
         # per-request overhead dominates at this size.
         try:
-            raw = self.llm.extract(episodes, known)
+            raw = self.llm.extract(episodes, self.registry.prompt_vocabulary())
         except Exception:
             # Episodes are the source of truth that every provenance guarantee rests on,
             # and they are already written. Letting an extraction failure propagate rolls
             # back the enclosing transaction and destroys them — so a provider 429 during
             # a long transcript silently loses the raw text it was derived from. The same
-            # guard already wraps `classify_predicate`; it was missing on the expensive
+            # guard already wraps predicate acquisition; it was missing on the expensive
             # call, which is the one that actually fails.
             receipt.llm_calls += 1
             receipt.deferred = True
+            receipt.unextracted = len(episodes)
             return out
         receipt.llm_calls += 1
-        receipt.llm_calls += self._learn_predicates(raw, episodes)
+        receipt.llm_calls += self._acquire_predicates(raw, episodes)
 
         for item in raw:
             claim = self._claim_from_dict(item, episodes, now)
             if claim is not None:
                 out.setdefault(claim.sources[0], []).append(claim)
+        receipt.unextracted = sum(1 for ep in episodes if ep.id not in out)
         return out
 
-    def _learn_predicates(self, raw: Sequence[Mapping[str, Any]],
-                          episodes: Sequence[Episode]) -> int:
-        """Acquire a spec for each predicate we have never seen. Once, ever.
+    # -- predicate identity ---------------------------------------------------
 
-        This is the whole trade: schema acquisition is a one-time cost per predicate,
-        after which contradiction resolution for it is free forever. mem0 pays the model
-        on every write instead, and gets a non-deterministic answer for the money.
+    def _acquire_predicates(self, raw: Sequence[Mapping[str, Any]],
+                            episodes: Sequence[Episode]) -> int:
+        """Give every novel surface form a canonical home. Once per form, ever.
+
+        The deterministic pre-pass runs first and answers for the large majority for
+        free; only what it declines to guess at reaches a model. That ordering is what
+        makes the call affordable — it is paid once per *spelling*, not once per write,
+        and never again in this process or any later one.
         """
         calls = 0
         for item in raw:
-            predicate = self.registry.normalize(str(item.get("predicate", "") or ""))
-            if not predicate or predicate in self._classified or self.registry.known(predicate):
+            resolution = self.registry.resolve(str(item.get("predicate", "") or ""))
+            if resolution.resolved or not resolution.name:
                 continue
-            # Marked before the call, not after: if the classifier raises or answers with
+            surface = resolution.name
+            if surface in self._resolved:
+                continue
+            # Marked before the call, not after: if the model raises or answers with
             # nonsense we still must not ask again.
-            self._classified.add(predicate)
-            try:
-                spec = self.llm.classify_predicate(predicate, self._example(item, episodes))
-            except Exception:
-                # Schema acquisition is an enrichment, not a precondition. A rate limit
-                # or a network blip must not cost the caller the whole batch of facts —
-                # the predicate simply stays unclassified (and therefore multi-valued,
-                # the safe default), and the claim's own memory_type carries the
-                # decision. Marked classified above, so we do not retry in a hot loop.
-                calls += 1
-                continue
-            calls += 1
-            learned = self.registry.learn(
-                predicate,
-                _coerce(Cardinality, spec.get("cardinality"), Cardinality.MANY),
-                _coerce(Volatility, spec.get("volatility"), Volatility.SLOW),
-                _coerce(MemoryType, spec.get("memory_type"), MemoryType.SEMANTIC),
-            )
-            # Durably record what we just paid for. The in-memory registry is a cache;
-            # the store is the thing that makes "classified once, ever" true across
-            # processes rather than only within one.
-            put_spec = getattr(self.store, "put_spec", None)
-            if put_spec is not None:
-                put_spec(learned)
+            self._resolved.add(surface)
+            calls += self._acquire(surface, item, episodes)
         return calls
+
+    def _acquire(self, surface: str, item: Mapping[str, Any],
+                 episodes: Sequence[Episode]) -> int:
+        tenant = self._tenant_of(item, episodes)
+        if self.registry.at_capacity:
+            # Unbounded schema growth is the root cause; this is the backstop for when
+            # resolution is wrong. Past the cap a novel form folds onto its nearest
+            # existing predicate instead of claiming a slot of its own — and folding is
+            # a deterministic token-overlap decision, so it costs nothing and stays
+            # reproducible. `nearest` returning None means not one content word is
+            # shared, and on that evidence the form is left unregistered (multi-valued,
+            # retiring nothing) rather than attached to a stranger.
+            near = self.registry.nearest(surface)
+            if near is not None:
+                self._register_alias(near, surface, tenant)
+            return 0
+
+        resolve = getattr(self.llm, "resolve_predicate", None)
+        try:
+            if resolve is not None:
+                answer = resolve(surface, self.registry.candidates(surface))
+            else:
+                # A backend predating contract D. It cannot merge, so the best it can do
+                # is describe the new predicate — the pre-existing behaviour, kept so a
+                # third-party LLM implementation does not silently stop working.
+                answer = {**self.llm.classify_predicate(
+                    surface, self._example(item, episodes)), "canonical": None}
+        except Exception:
+            # Acquisition is an enrichment, not a precondition. A rate limit or a network
+            # blip must not cost the caller the whole batch of facts — the predicate
+            # simply stays unresolved (and therefore multi-valued, the safe default), and
+            # the claim's own memory_type carries the decision. Marked resolved above, so
+            # we do not retry in a hot loop.
+            return 1
+
+        canonical = str(answer.get("canonical") or "")
+        if canonical and self.registry.known(canonical):
+            # A merge. Anything else the model said about cardinality describes a
+            # predicate we are not creating, so it is discarded rather than applied to
+            # the target — the canonical predicate's own spec is authoritative.
+            self._register_alias(canonical, surface, tenant)
+            return 1
+        # Either genuinely new, or the model named something that does not exist. Both
+        # land here: a canonical we cannot look up is indistinguishable from a
+        # hallucination, and inventing the slot it names would be worse than a duplicate.
+        learned = self.registry.learn(
+            surface,
+            _coerce(Cardinality, answer.get("cardinality"), Cardinality.MANY),
+            _coerce(Volatility, answer.get("volatility"), Volatility.SLOW),
+            _coerce(MemoryType, answer.get("memory_type"), MemoryType.SEMANTIC),
+        )
+        if learned.learned:
+            # `learn` refuses past the cap and hands back a synthesized spec instead.
+            # Persisting that one would resurrect it at the next open and raise the
+            # ceiling a process at a time, which is the failure the cap exists to stop.
+            self._persist(learned, tenant)
+        return 1
+
+    def _register_alias(self, canonical: str, surface: str, tenant: str) -> None:
+        self._persist(self.registry.learn_alias(canonical, surface), tenant)
+
+    def _persist(self, spec: PredicateSpec, tenant: str) -> None:
+        """Durably record what we just paid for.
+
+        The in-memory registry is a cache; the store is the thing that makes "asked
+        once, ever" true across processes rather than only within one. Specs are
+        tenant-scoped (contract A) because a global table lets one tenant's resolution
+        silently set another tenant's contradiction behaviour and decay half-life.
+        """
+        put_spec = getattr(self.store, "put_spec", None)
+        if put_spec is None:
+            return
+        try:
+            put_spec(spec, tenant)
+        except TypeError:
+            # A `Store` predating contract A. Its predicates table is global, which is
+            # the bug W2 is fixing; keeping the call working is still better than losing
+            # the acquisition entirely and re-paying for it every restart.
+            put_spec(spec)
+
+    @staticmethod
+    def _tenant_of(item: Mapping[str, Any], episodes: Sequence[Episode]) -> str:
+        idx = item.get("source_index")
+        if isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(episodes):
+            return episodes[idx].scope.tenant
+        return episodes[0].scope.tenant
 
     @staticmethod
     def _example(item: Mapping[str, Any], episodes: Sequence[Episode]) -> str:

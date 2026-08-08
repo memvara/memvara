@@ -18,6 +18,24 @@ import numpy as np
 _WORD = re.compile(r"[a-z0-9']+")
 
 
+def _name_of(embedder: object) -> str:
+    """Stable identity string for any embedder, including third-party ones.
+
+    Degrades rather than demands: an embedder that declares a `name` gets to define its
+    own identity, a wrapper delegates to what it wraps, and anything else falls back to
+    its class name. The fallback is weaker (two configurations of one class look
+    identical) but it is never wrong about the case that matters, which is two
+    *different* classes writing into one store.
+    """
+    name = getattr(embedder, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    inner = getattr(embedder, "inner", None)
+    if inner is not None:
+        return _name_of(inner)
+    return type(embedder).__name__
+
+
 @runtime_checkable
 class Embedder(Protocol):
     dim: int
@@ -25,6 +43,13 @@ class Embedder(Protocol):
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         """Return an (n, dim) float32 array. Rows need not be normalized."""
         ...
+
+    # A `name` is deliberately *not* part of this protocol even though everything in
+    # this package carries one, because vectors written by two different models are not
+    # comparable and a store needs to know which one wrote it (see `fingerprint.py`).
+    # Requiring it here would break every third-party embedder that already satisfies
+    # the protocol — including the two-line lambda wrappers people actually write — for
+    # a check that degrades gracefully to the class name instead.
 
 
 class HashingEmbedder:
@@ -42,6 +67,16 @@ class HashingEmbedder:
     def __init__(self, dim: int = 512, ngram: tuple[int, int] = (3, 5)) -> None:
         self.dim = dim
         self.ngram = ngram
+
+    @property
+    def name(self) -> str:
+        # The dimension is part of the identity: two HashingEmbedders with different
+        # dims produce incomparable vectors, and the n-gram range changes the feature
+        # space too, so both belong in the fingerprint a store is checked against.
+        return f"hashing:{self.dim}:{self.ngram[0]}-{self.ngram[1]}"
+
+    def __repr__(self) -> str:
+        return f"<HashingEmbedder {self.name}>"
 
     def _feat(self, text: str) -> dict[int, float]:
         t = text.lower().strip()
@@ -90,6 +125,17 @@ class CachedEmbedder:
         self._cache: dict[str, np.ndarray] = {}
         self.hits = 0
         self.misses = 0
+
+    @property
+    def name(self) -> str:
+        # A cache is not a different embedding space, so it must not change the
+        # identity a store is fingerprinted with — otherwise wrapping an embedder in
+        # `CachedEmbedder` would look like an embedder swap and demand a re-embed.
+        return _name_of(self.inner)
+
+    def __repr__(self) -> str:
+        return (f"<CachedEmbedder {self.name} cached={len(self._cache)} "
+                f"hits={self.hits} misses={self.misses}>")
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         keys = [hashlib.blake2b(t.encode(), digest_size=16).hexdigest() for t in texts]

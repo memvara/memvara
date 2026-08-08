@@ -16,11 +16,34 @@ free, and total. No embedding search, no LLM, no top-k cliff.
 
 The LLM's job moves off the write path and onto schema acquisition: when we meet an
 unfamiliar predicate we ask about it *once* and cache the answer forever.
+
+That leaves one hole, and it is the one that matters most in production: a model does
+not phrase a predicate the same way twice. `works_at`, `employed_by_company`,
+`job_employer`, `workplace` and `employer_name` are five spellings of one question, and
+because `fact_key` hashes the predicate *string*, five spellings are five slots.
+Cardinality never applies across them, so the contradiction engine above silently stops
+working — not by returning a wrong answer, but by never being asked. A measured run of
+2,058 extractions over six concepts ended with 31 live claims where six were true.
+
+So `normalize()` is not a dictionary lookup; it is a resolution pre-pass, tried in
+strictly increasing order of confidence-cost:
+
+    exact canonical -> known alias -> morphology -> derivation -> "genuinely new"
+
+Everything up to the last step is free, deterministic, and total. Only what falls out
+the bottom is worth a model call, and that call happens once per surface form, ever,
+after which the surface form is recorded as an alias and never asked about again.
+
+Two rules keep the pre-pass from doing damage. It never folds when a key is claimed by
+two different predicates (`works_at` and `working_on` both stem to "work"; merging an
+employer with a current task is worse than leaving them apart), and the number of
+*learned* predicates is capped, because unbounded schema growth is the actual failure
+mode and the cap is the backstop for the times resolution guesses wrong.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from .types import MemoryType
@@ -93,9 +116,11 @@ BUILTIN_PREDICATES: tuple[PredicateSpec, ...] = (
 
     # --- situation: single-valued but genuinely changes ---
     _p("lives_in", Cardinality.ONE, Volatility.SLOW,
-       "resides_in", "located_in", "based_in", "lives_at", "home_is", "moved_to"),
+       "resides_in", "located_in", "based_in", "lives_at", "home_is", "moved_to",
+       "city"),
     _p("works_at", Cardinality.ONE, Volatility.SLOW,
-       "employed_at", "employer", "employed_by", "company", "works_for", "joined"),
+       "employed_at", "employer", "employed_by", "company", "works_for", "joined",
+       "workplace"),
     _p("job_title", Cardinality.ONE, Volatility.SLOW, "role", "title", "position", "works_as"),
     _p("timezone", Cardinality.ONE, Volatility.SLOW, "tz", "in_timezone"),
     _p("relationship_status", Cardinality.ONE, Volatility.SLOW, "marital_status"),
@@ -129,34 +154,210 @@ BUILTIN_PREDICATES: tuple[PredicateSpec, ...] = (
 )
 
 
+# --- morphology --------------------------------------------------------------
+# Three tiers of tokens that modify how a predicate is *spelled* without changing which
+# question it answers. They are stripped in this order, and a tier is skipped entirely
+# when applying it would leave nothing behind - which is what keeps `name`, `company`
+# and `job` usable as predicates in their own right while still being strippable as
+# modifiers. `company_name` reaches ("company",) only because tier 1 runs before tier 3.
+
+#: Pure slot metadata. "the name of the employer" is still the employer.
+_SLOT_NOISE = frozenset({"name", "names", "value", "values", "field", "label", "info"})
+#: Grammatical glue and deixis. "current_city" and "city" are the same slot; a memory
+#: store has no use for a predicate that means "the non-current city".
+_PARTICLES = frozenset({
+    "is", "are", "was", "were", "be", "the", "a", "an",
+    "of", "by", "at", "in", "on", "to", "for", "with",
+    "my", "our", "your", "their", "user", "users",
+    "current", "currently", "present",
+})
+#: Domain heads a model reaches for when it wants to sound specific.
+_DOMAIN_NOISE = frozenset({"company", "job"})
+_NOISE_TIERS: tuple[frozenset[str], ...] = (_SLOT_NOISE, _PARTICLES, _DOMAIN_NOISE)
+
+#: Longest-first, so "occupation" reduces via "ation" rather than "ion".
+_SUFFIXES: tuple[str, ...] = ("ation", "ment", "ing", "ion", "ed", "er", "or", "al")
+#: Below this a "stem" is noise: stripping "al" off "goal" leaves "go", which would
+#: happily match half the vocabulary.
+_MIN_STEM = 3
+
+#: How many predicates to offer a model when asking it to resolve a surface form. The
+#: list is a hint, not an enumeration - sending an unbounded vocabulary is the token tax
+#: this workstream exists to remove.
+_CANDIDATE_LIMIT = 32
+
+#: Ceiling on predicates acquired at runtime, per registry (and therefore per tenant,
+#: since specs are loaded per tenant). 200 is far above what any real deployment needs
+#: and far below the point where the schema stops being a schema.
+DEFAULT_LEARNED_CAP = 200
+
+
+def _slugify(raw: str) -> str:
+    out: list[str] = []
+    prev_us = False
+    for ch in raw.strip().lower():
+        if ch.isalnum():
+            out.append(ch)
+            prev_us = False
+        elif not prev_us:
+            out.append("_")
+            prev_us = True
+    return "".join(out).strip("_")
+
+
+def _content_tokens(slug: str) -> list[str]:
+    tokens = [t for t in slug.split("_") if t]
+    for tier in _NOISE_TIERS:
+        kept = [t for t in tokens if t not in tier]
+        if kept:
+            tokens = kept
+    return tokens
+
+
+def _singular(token: str) -> str:
+    # Plural only. Stripping verb inflections here would collapse `works_at` into
+    # `working_on`, which is a different question with a different half-life.
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def _stem(token: str) -> str:
+    for suffix in _SUFFIXES:
+        if token.endswith(suffix) and len(token) - len(suffix) >= _MIN_STEM:
+            return token[: -len(suffix)]
+    return token
+
+
+def _strict_key(slug: str) -> tuple[str, ...]:
+    """Order-insensitive identity of a predicate's content words, singularized."""
+    return tuple(sorted(_singular(t) for t in _content_tokens(slug)))
+
+
+def _loose_key(slug: str) -> tuple[str, ...]:
+    """`_strict_key` with derivational suffixes stripped: employer ~ employed ~ employ."""
+    return tuple(sorted(_stem(t) for t in _strict_key(slug)))
+
+
+@dataclass(frozen=True, slots=True)
+class Resolution:
+    """The outcome of the deterministic pre-pass.
+
+    `resolved is False` is not a failure - it is the pre-pass declining to guess, which
+    is the only safe answer when nothing matched. The caller decides whether that is
+    worth a model call.
+    """
+
+    name: str      # the predicate to use: a canonical name, or the slug if unresolved
+    method: str    # "empty" | "canonical" | "alias" | "morphological" | "derivational" | "novel"
+    resolved: bool
+
+
 class PredicateRegistry:
     """Normalizes predicate names and answers the cardinality question.
 
     Unknown predicates default to MANY. That is the conservative direction: keeping two
     facts that turn out to conflict degrades ranking, while dropping one that turns out
     not to conflict destroys information. Errors should fall on the recoverable side.
+
+    The same asymmetry governs resolution: an uncertain surface form becomes its own
+    predicate rather than being folded onto a neighbour, because a wrong fold destroys a
+    distinction permanently while a missed fold only leaves two slots where one would
+    do - and the learned cap bounds how much of that we tolerate.
     """
 
-    def __init__(self, specs: tuple[PredicateSpec, ...] = BUILTIN_PREDICATES) -> None:
+    def __init__(self, specs: tuple[PredicateSpec, ...] = BUILTIN_PREDICATES, *,
+                 max_learned: int = DEFAULT_LEARNED_CAP) -> None:
         self._specs: dict[str, PredicateSpec] = {}
         self._alias: dict[str, str] = {}
+        # (key -> (tier, canonical)) where tier 0 is a canonical name and tier 1 an
+        # alias, and `canonical is None` marks the key as claimed by two predicates.
+        self._strict: dict[tuple[str, ...], tuple[int, str | None]] = {}
+        self._loose: dict[tuple[str, ...], tuple[int, str | None]] = {}
+        self._cache: dict[str, Resolution] = {}
+        self._stale = True
+        self.max_learned = max_learned
         for s in specs:
             self.register(s)
 
     # -- normalization -------------------------------------------------------
 
-    @staticmethod
-    def _slug(raw: str) -> str:
-        out = []
-        prev_us = False
-        for ch in raw.strip().lower():
-            if ch.isalnum():
-                out.append(ch)
-                prev_us = False
-            elif not prev_us:
-                out.append("_")
-                prev_us = True
-        return "".join(out).strip("_")
+    def _ensure_index(self) -> None:
+        if self._stale:
+            self._reindex()
+
+    def _reindex(self) -> None:
+        """Rebuild every derived index from `_specs`.
+
+        Rebuilt wholesale rather than patched incrementally because specs are replaced,
+        not just added - `learn_alias` swaps a spec for a copy carrying one more alias,
+        and an incrementally-maintained index would keep serving the old one's entries
+        forever. The registry is a few hundred rows and this runs on registration, not
+        on lookup.
+        """
+        self._alias = {}
+        self._strict = {}
+        self._loose = {}
+        for spec in self._specs.values():
+            self._add_keys(spec.name, spec.name, tier=0)
+            for alias in spec.aliases:
+                slug = _slugify(alias)
+                if slug and slug not in self._specs:
+                    self._alias[slug] = spec.name
+                self._add_keys(slug, spec.name, tier=1)
+        self._stale = False
+
+    def _add_keys(self, slug: str, canonical: str, *, tier: int) -> None:
+        if not slug:
+            return
+        # A non-empty slug always yields a non-empty key: `_content_tokens` only drops a
+        # noise tier when something survives it, so there is no empty-key case to guard.
+        for index, key in ((self._strict, _strict_key(slug)),
+                           (self._loose, _loose_key(slug))):
+            previous = index.get(key)
+            if previous is None or tier < previous[0]:
+                index[key] = (tier, canonical)
+            elif tier == previous[0] and previous[1] != canonical:
+                # Two predicates want the same key. Refuse to serve it at all: picking
+                # either one silently merges two distinct slots, and the registration
+                # order that decided it is not something a caller can see or control.
+                index[key] = (tier, None)
+
+    def _lookup(self, index: dict[tuple[str, ...], tuple[int, str | None]],
+                key: tuple[str, ...]) -> str | None:
+        found = index.get(key)
+        return None if found is None else found[1]
+
+    def resolve(self, raw: str) -> Resolution:
+        """Fold a surface predicate onto a canonical one, deterministically.
+
+        Deterministic given (registry state) alone - no embeddings, no thresholds, no
+        clock. Two processes holding the same specs resolve the same surface form the
+        same way, which is what makes `fact_key` a stable slot identity rather than a
+        function of whichever phrasing the model happened to pick that morning.
+        """
+        self._ensure_index()
+        hit = self._cache.get(raw)
+        if hit is not None:
+            return hit
+        self._cache[raw] = out = self._resolve(_slugify(raw))
+        return out
+
+    def _resolve(self, slug: str) -> Resolution:
+        if not slug:
+            return Resolution("", "empty", False)
+        if slug in self._specs:
+            return Resolution(slug, "canonical", True)
+        alias = self._alias.get(slug)
+        if alias is not None:
+            return Resolution(alias, "alias", True)
+        morphological = self._lookup(self._strict, _strict_key(slug))
+        if morphological is not None:
+            return Resolution(morphological, "morphological", True)
+        derivational = self._lookup(self._loose, _loose_key(slug))
+        if derivational is not None:
+            return Resolution(derivational, "derivational", True)
+        return Resolution(slug, "novel", False)
 
     def normalize(self, raw: str) -> str:
         """Map a surface predicate onto its canonical name.
@@ -165,20 +366,84 @@ class PredicateRegistry:
         contradiction between them is invisible - which is exactly how free-text memory
         stores end up holding two cities for one person.
         """
-        s = self._slug(raw)
-        if s in self._specs:
-            return s
-        if s in self._alias:
-            return self._alias[s]
-        return s
+        return self.resolve(raw).name
+
+    # -- resolution support --------------------------------------------------
+
+    def _overlap(self, tokens: frozenset[str], name: str) -> int:
+        spec = self._specs[name]
+        best = 0
+        for form in (spec.name, *spec.aliases):
+            best = max(best, len(tokens & frozenset(_strict_key(_slugify(form)))))
+        return best
+
+    def _affinity(self, tokens: frozenset[str], name: str) -> tuple[int, bool, str]:
+        """Sort key: most shared content words, then declared over learned, then name.
+
+        The middle term is the one worth explaining. A declared predicate was written
+        down by a person; a learned one was a model's guess that happened to arrive
+        first. On a tie those are not equal evidence, and preferring the guess would let
+        the first novel phrasing a deployment ever saw become the attractor every later
+        phrasing collapses into.
+        """
+        return (-self._overlap(tokens, name), self._specs[name].learned, name)
+
+    def candidates(self, surface: str, limit: int = _CANDIDATE_LIMIT) -> list[str]:
+        """A bounded, deterministic shortlist to offer a model resolving `surface`.
+
+        Bounded because the alternative - shipping the whole vocabulary on every call -
+        is an unbounded token tax that grows exactly when the vocabulary is growing
+        fastest, and it invalidates the cached prompt prefix at the same moment.
+        """
+        self._ensure_index()
+        tokens = frozenset(_strict_key(_slugify(surface)))
+        return sorted(self._specs, key=lambda n: self._affinity(tokens, n))[:limit]
+
+    def nearest(self, surface: str) -> str | None:
+        """The existing predicate a surface form is closest to, or None if nothing is.
+
+        Used only once the learned cap is reached, where the choice is "fold onto
+        something" or "grow the schema forever". `None` means not even one content word
+        is shared, and inventing a relationship on that evidence is worse than leaving
+        the predicate unregistered (and therefore multi-valued, which retires nothing).
+        """
+        self._ensure_index()
+        tokens = frozenset(_strict_key(_slugify(surface)))
+        if not tokens:
+            return None
+        best = min(self._specs, key=lambda n: self._affinity(tokens, n), default=None)
+        if best is None or self._overlap(tokens, best) == 0:
+            return None
+        return best
+
+    def prompt_vocabulary(self, limit: int = 64) -> list[str]:
+        """Predicate names to show an extractor, builtins first.
+
+        Declared predicates come first and in a fixed order, so the cacheable head of
+        the prompt does not move when a predicate is learned; learned ones fill whatever
+        budget is left. Sorting the whole thing instead would interleave each new
+        predicate into the middle and invalidate the cached prefix on every acquisition.
+        """
+        self._ensure_index()
+        declared = sorted(n for n, s in self._specs.items() if not s.learned)
+        learned = sorted(n for n, s in self._specs.items() if s.learned)
+        return (declared + learned)[:limit]
 
     # -- registry ------------------------------------------------------------
 
     def register(self, spec: PredicateSpec) -> PredicateSpec:
         self._specs[spec.name] = spec
-        for a in spec.aliases:
-            self._alias[self._slug(a)] = spec.name
+        self._cache.clear()
+        self._stale = True
         return spec
+
+    @property
+    def learned_count(self) -> int:
+        return sum(1 for s in self._specs.values() if s.learned)
+
+    @property
+    def at_capacity(self) -> bool:
+        return self.learned_count >= self.max_learned
 
     def spec(self, predicate: str) -> PredicateSpec:
         name = self.normalize(predicate)
@@ -204,10 +469,18 @@ class PredicateRegistry:
 
         This is the amortization that keeps the write path cheap: the Nth occurrence of
         a predicate costs nothing, because the 1st one paid for the schema.
+
+        Refused past `max_learned`, and refused silently: the caller is a write path
+        with a claim in hand, and failing the write over a schema-growth ceiling would
+        trade a ranking problem for data loss. The predicate stays unregistered, which
+        means multi-valued, which retires nothing.
         """
+        name = self.normalize(predicate)
+        if name not in self._specs and self.at_capacity:
+            return self.spec(name)
         return self.register(
             PredicateSpec(
-                name=self.normalize(predicate),
+                name=name,
                 cardinality=cardinality,
                 volatility=volatility,
                 memory_type=memory_type,
@@ -215,6 +488,27 @@ class PredicateRegistry:
                 learned=True,
             )
         )
+
+    def learn_alias(self, canonical: str, surface: str) -> PredicateSpec:
+        """Record that `surface` is another spelling of an existing predicate.
+
+        This is what a model call on the write path buys: not a classification, a
+        *merge*. The surface form stops being a slot of its own from here on, for this
+        process and - once the caller persists the returned spec - for every process
+        after it. Aliases do not count against `max_learned`, because folding a form
+        onto an existing predicate is the behaviour the cap exists to encourage.
+        """
+        target = self.normalize(canonical)
+        spec = self._specs.get(target)
+        if spec is None:
+            raise KeyError(
+                f"cannot alias {surface!r} onto unknown predicate {canonical!r}; "
+                "register it first"
+            )
+        slug = _slugify(surface)
+        if not slug or slug in spec.aliases or slug == spec.name:
+            return spec
+        return self.register(replace(spec, aliases=spec.aliases + (slug,)))
 
     def functional(self, predicate: str) -> bool:
         return self.spec(predicate).functional

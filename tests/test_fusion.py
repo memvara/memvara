@@ -117,6 +117,26 @@ def test_k_damps_the_head_of_the_curve() -> None:
     assert small["a"] / small["b"] > large["a"] / large["b"]
 
 
+def test_the_default_k_makes_the_head_of_the_curve_almost_flat() -> None:
+    """The measurement behind a design decision elsewhere, pinned here so it cannot
+    quietly stop being true.
+
+    At k=60 the whole of first place is worth 1.6% over second place, while the
+    post-fusion quality multiplier spans up to 1.66x - so multiplying the two lets
+    freshness outrank relevance by about 41 positions. The resolution was not to retune
+    k, which would trade that pathology for over-trusting each retriever's own
+    ordering, but to stop deriving the caller-facing score from rank at all: `k` still
+    sets the candidate union and the agreement signal, where flatness is a virtue.
+    """
+    fused = reciprocal_rank_fusion({"v": [(f"id{i}", 1.0) for i in range(64)]})
+    values = list(fused.values())
+
+    assert values[0] / values[1] == pytest.approx(1.016, abs=0.001)
+    # A 1.66x quality multiplier buys exactly this many rank positions: the ratio
+    # crosses 1.66 between rank 40 and rank 41.
+    assert values[0] / values[40] < 1.66 < values[0] / values[41]
+
+
 def test_negative_k_is_rejected() -> None:
     with pytest.raises(ValueError, match="non-negative"):
         reciprocal_rank_fusion({"v": [("a", 1.0)]}, k=-1)

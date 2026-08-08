@@ -15,7 +15,16 @@ import numpy as np
 import pytest
 
 from engram.embed import HashingEmbedder
-from engram.retrieve import HybridRetriever
+from engram.retrieve import (
+    RELEVANCE_FLOOR,
+    STOPWORDS,
+    HybridRetriever,
+    analyze,
+    lexical_relevance,
+    relevance,
+    tokenize,
+    vector_relevance,
+)
 from engram.schema import PredicateRegistry
 from engram.store import SQLiteStore
 from engram.types import Claim, MemoryType, Scope
@@ -491,7 +500,12 @@ def test_every_result_carries_a_populated_explanation(
 def test_explanation_ranks_match_the_underlying_retrievers(
     store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever
 ) -> None:
-    """The explanation must be the real thing, not a plausible reconstruction."""
+    """The explanation must be the real thing, not a plausible reconstruction.
+
+    The lexical leg is asked about the *analyzed* query - "in" never reaches the store
+    - so that is what the expectation is built from. Comparing against the raw string
+    would be reconstructing a query the retriever never issued.
+    """
     scope = Scope("acme", "alice")
     for text in ("alice lives in Lisbon", "alice moved to Lisbon last year",
                  "alice visits Lisbon often", "bob lives in Berlin"):
@@ -503,7 +517,7 @@ def test_explanation_ranks_match_the_underlying_retrievers(
                        enumerate(store.vector_search(
                            embedder.encode(["lives in Lisbon"])[0], scope.ancestors(), 50))}
     expected_lexical = {cid: (i, s) for i, (cid, s) in
-                        enumerate(store.lexical_search("lives in Lisbon",
+                        enumerate(store.lexical_search(analyze("lives in Lisbon").text,
                                                        scope.ancestors(), 50))}
     for r in results:
         v = expected_vector.get(r.claim.id)
@@ -670,16 +684,26 @@ def test_results_are_sorted_by_descending_final_score(
 def test_tuning_weights_change_the_ranking(
     store: SQLiteStore, embedder: HashingEmbedder
 ) -> None:
-    """The knobs are real. Zeroing every quality weight must reduce the score to the
-    bare fusion value."""
+    """The knobs are real. Zeroing every quality weight must leave the score equal to
+    the retrievers' own evidence, with nothing rescaling it."""
     scope = Scope("acme", "alice")
     add(store, embedder, "alice lives in Lisbon", scope, confidence=0.4, salience=0.2)
 
     plain = HybridRetriever(store, embedder, PredicateRegistry(),
                             w_recency=0.0, w_confidence=0.0, w_salience=0.0)
+    weighted = HybridRetriever(store, embedder, PredicateRegistry())
     result = plain.search("Lisbon", scope, k=1)[0]
+    quality_scaled = weighted.search("Lisbon", scope, k=1)[0]
 
-    assert result.score == pytest.approx(result.explain.fusion_score)
+    evidence = relevance(
+        vector=vector_relevance(result.explain.vector_score),
+        lexical=lexical_relevance(result.explain.lexical_score,
+                                  len(analyze("Lisbon").terms)),
+        w_vector=1.0, w_lexical=1.0,
+    )
+    assert result.score == pytest.approx(evidence)
+    # A low-confidence, low-salience claim is penalised once the weights are live.
+    assert quality_scaled.score < result.score
 
 
 def test_lexical_only_retriever_ignores_the_vector_leg(
@@ -692,6 +716,391 @@ def test_lexical_only_retriever_ignores_the_vector_leg(
 
     # Reachable only through the vector leg, which is now switched off.
     assert lexical_only.search("lisbon", scope, k=5) == []
+
+
+# ===========================================================================
+# Stopword-aware lexical retrieval
+# ===========================================================================
+
+
+def test_the_analyzer_tokenizes_exactly_as_the_store_does() -> None:
+    """The two must agree about what a term is. If they disagree, the per-term BM25
+    normalization divides by a count the store never used, and every score built on it
+    is quietly wrong."""
+    from engram.store.sqlite import _fts_query
+
+    for query in ("ERR_7734 in prod", "what's my mother's maiden name?",
+                  "PLAT-2291", "東京 に 住んでいる", "a b cd", "!!! ???"):
+        expected = [t.strip('"') for t in _fts_query(query).split(" OR ") if t]
+        assert tokenize(query) == expected, query
+
+
+def test_only_closed_class_words_are_stopwords() -> None:
+    """The list is defensible only because membership of these classes is fixed by the
+    grammar. Anything that could be the content of a memory has to stay out - "never"
+    is a whole predicate, and "name", "live" and "work" are half the corpus."""
+    for content in ("name", "names", "never", "live", "lives", "work", "know",
+                    "like", "call", "called", "own", "owns", "prefer", "allergic"):
+        assert content not in STOPWORDS, content
+
+    for function_word in ("the", "of", "is", "do", "what", "my", "any", "about"):
+        assert function_word in STOPWORDS, function_word
+
+
+def test_single_characters_are_dropped_and_case_is_folded() -> None:
+    assert tokenize("A b Cd EF") == ["cd", "ef"]
+    assert analyze("Lisbon LISBON lisbon").terms == ("lisbon",)
+
+
+@pytest.fixture
+def personal(store: SQLiteStore, embedder: HashingEmbedder) -> dict[str, Claim]:
+    """A small personal store, of the shape that makes stopwords dangerous.
+
+    Note what is *not* here: the word "do" appears in exactly one claim. At this scale
+    a stopword is the rarest token in the corpus, so BM25 hands it the largest IDF -
+    the pathology gets worse as the store gets smaller, not better.
+    """
+    scope = Scope("acme", "alice")
+    return {
+        "chore": add(store, embedder, "alice asked the agent to do the weekly rollup",
+                     scope, predicate="reported"),
+        "city": add(store, embedder, "alice lives in Lisbon", scope, predicate="lives_in"),
+        "employer": add(store, embedder, "alice works at Acme Robotics", scope,
+                        predicate="works_at"),
+        "allergy": add(store, embedder, "alice is allergic to shellfish", scope,
+                       predicate="allergic_to"),
+    }
+
+
+def test_a_query_of_pure_stopwords_makes_the_lexical_leg_abstain(
+    store: SQLiteStore, retriever: HybridRetriever, personal: dict[str, Claim]
+) -> None:
+    """The measured bug: `"what do you know about me?"` is six full-weight terms with
+    no content in them, and the one claim containing "do" came back as the confident
+    #1 answer to three unrelated questions.
+
+    The lexical leg must abstain outright rather than rank on stopword IDF, exactly as
+    the vector leg abstains on a zero-norm query. A fabricated ranking is worse than no
+    ranking, because fusion reads positions and cannot tell the two apart.
+    """
+    scope = Scope("acme", "alice")
+    # The store, asked the raw question, is happy to answer it - the guard cannot live
+    # there, and this is what it is guarding against.
+    raw = store.lexical_search("what do you know about me?", scope.ancestors(), 10)
+    assert raw and raw[0][0] == personal["chore"].id
+
+    results = retriever.search("what do you know about me?", scope, k=5)
+
+    assert all(r.explain.lexical_rank is None for r in results)
+    # The vector leg still has an opinion - cosine is defined for every pair - but with
+    # no lexical corroboration behind it the whole result set falls under the floor,
+    # which is the honest answer to a question the store cannot answer.
+    assert all(r.score < RELEVANCE_FLOOR for r in results)
+    assert retriever.search("what do you know about me?", scope, k=5,
+                            min_score=RELEVANCE_FLOOR) == []
+
+
+def test_content_terms_survive_and_stopwords_are_dropped(
+    store: SQLiteStore, retriever: HybridRetriever, personal: dict[str, Claim]
+) -> None:
+    """Reduction, not abstention, when the query does carry content."""
+    scope = Scope("acme", "alice")
+
+    assert analyze("where does she live?").terms == ("live",)
+    results = retriever.search("where does she live?", scope, k=5)
+
+    assert ids(results)[0] == personal["city"].id
+    assert results[0].explain.lexical_rank == 0
+
+
+def test_stopwords_no_longer_drag_an_unrelated_claim_to_first_place(
+    store: SQLiteStore, retriever: HybridRetriever, personal: dict[str, Claim]
+) -> None:
+    """Three unrelated questions, none of which is about the weekly rollup."""
+    scope = Scope("acme", "alice")
+
+    for query, expected in (
+        ("what do you do about the shellfish?", personal["allergy"]),
+        ("where is it that they do work?", personal["employer"]),
+        ("do you know what city she is in? Lisbon?", personal["city"]),
+    ):
+        assert ids(retriever.search(query, scope, k=5))[0] == expected.id, query
+
+
+def test_repeated_terms_do_not_inflate_the_query(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever
+) -> None:
+    """A pasted document repeats its words; BM25 would weight them once per repeat and
+    the per-term normalization would divide by a count that means nothing."""
+    scope = Scope("acme", "alice")
+    add(store, embedder, "alice lives in Lisbon", scope)
+
+    assert analyze("lisbon lisbon lisbon lisbon").terms == ("lisbon",)
+    once = retriever.search("lisbon", scope, k=1)[0]
+    repeated = retriever.search("lisbon lisbon lisbon lisbon", scope, k=1)[0]
+
+    assert repeated.explain.lexical_score == pytest.approx(once.explain.lexical_score)
+
+
+def test_a_cjk_query_still_reaches_the_lexical_leg(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever
+) -> None:
+    """The stopword list is English, and the tokenizer is unicode-aware, so a script
+    the analyzer knows nothing about must pass through untouched rather than being
+    filtered into silence."""
+    scope = Scope("acme", "alice")
+    jp = add(store, embedder, "ユーザー は 東京 に 住んでいる", scope, predicate="lives_in")
+
+    assert analyze("東京").terms == ("東京",)
+    assert ids(retriever.search("東京", scope, k=5)) == [jp.id]
+
+
+# ===========================================================================
+# Normalized scores, and being able to say "nothing relevant"
+# ===========================================================================
+
+
+def test_every_score_is_a_normalized_relevance_in_the_unit_interval(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever,
+    personal: dict[str, Claim]
+) -> None:
+    scope = Scope("acme", "alice")
+
+    for query in ("shellfish", "where does alice live", "acme robotics", "rollup"):
+        for r in retriever.search(query, scope, k=5):
+            assert 0.0 <= r.score <= 1.0
+            assert r.score == pytest.approx(r.explain.final_score)
+
+
+def test_the_raw_fusion_product_is_preserved_for_debugging(
+    store: SQLiteStore, retriever: HybridRetriever, personal: dict[str, Claim]
+) -> None:
+    """Contract B: the normalized number is what callers threshold on, the raw one is
+    what you read when a ranking changes and you need to know which half moved."""
+    scope = Scope("acme", "alice")
+
+    top = retriever.search("shellfish allergy", scope, k=5)[0]
+
+    assert top.explain.raw_score == pytest.approx(
+        top.explain.fusion_score * (1 + 0.25 * top.explain.recency
+                                    + 0.15 * top.claim.confidence
+                                    + 0.10 * top.claim.salience))
+    # The raw product is the one that cannot be thresholded - two orders of magnitude
+    # below the normalized score, and capped by `rrf_k` rather than by relevance.
+    assert top.explain.raw_score < 0.05 < top.score
+
+
+def test_an_unanswerable_question_scores_below_the_floor(
+    store: SQLiteStore, retriever: HybridRetriever, personal: dict[str, Claim]
+) -> None:
+    """The headline: 6 of 6 unanswerable queries used to come back confident, and
+    `"what is my mother's maiden name?"` scored *identically* to the best answerable
+    query. The absolute evidence for it is near zero and now the score says so."""
+    scope = Scope("acme", "alice")
+
+    unanswerable = retriever.search("what is the capital of France?", scope, k=5)
+    answerable = retriever.search("what is alice allergic to?", scope, k=5)
+
+    assert unanswerable  # still returned, with an honest score attached
+    assert unanswerable[0].score < RELEVANCE_FLOOR <= answerable[0].score
+    assert retriever.search("what is the capital of France?", scope, k=5,
+                            min_score=RELEVANCE_FLOOR) == []
+    assert retriever.search("what is alice allergic to?", scope, k=5,
+                            min_score=RELEVANCE_FLOOR)
+
+
+def test_min_score_filters_on_the_normalized_value(
+    store: SQLiteStore, retriever: HybridRetriever, personal: dict[str, Claim]
+) -> None:
+    scope = Scope("acme", "alice")
+
+    everything = retriever.search("alice lisbon shellfish", scope, k=10)
+    assert len(everything) > 1
+
+    for floor in (0.0, 0.1, 0.3, 0.5):
+        kept = retriever.search("alice lisbon shellfish", scope, k=10, min_score=floor)
+        assert ids(kept) == [r.claim.id for r in everything if r.score >= floor]
+
+    assert retriever.search("alice lisbon shellfish", scope, k=10, min_score=1.01) == []
+
+
+def test_the_floor_is_applied_before_k_not_after(
+    store: SQLiteStore, retriever: HybridRetriever, personal: dict[str, Claim]
+) -> None:
+    """Otherwise a floor that rejects the top result would return k-1 things and look
+    like a bug in `k`."""
+    scope = Scope("acme", "alice")
+
+    unfiltered = retriever.search("alice", scope, k=2)
+    floor = min(r.score for r in unfiltered) + 1e-9
+    filtered = retriever.search("alice", scope, k=2, min_score=floor)
+
+    assert len(filtered) < len(unfiltered)
+    assert all(r.score >= floor for r in filtered)
+
+
+# ===========================================================================
+# Filter starvation
+# ===========================================================================
+
+
+def test_a_narrow_filter_is_retried_against_a_wider_candidate_pool(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever
+) -> None:
+    """`memory_types` is applied after fusion truncated the pool, so the filter can
+    starve: matches exist, but every slot in the pool was spent on claims the filter
+    then rejected. Measured as returning 0 of 3 with a pool of 10.
+    """
+    scope = Scope("acme", "alice")
+    for i in range(60):
+        add(store, embedder, f"alice noted release detail number {i}", scope,
+            memory_type=MemoryType.SEMANTIC)
+    procedural = [
+        add(store, embedder, "alice wants the release checklist followed", scope,
+            memory_type=MemoryType.PROCEDURAL),
+        add(store, embedder, "alice wants release notes written first", scope,
+            memory_type=MemoryType.PROCEDURAL),
+        add(store, embedder, "alice wants release tags signed", scope,
+            memory_type=MemoryType.PROCEDURAL),
+    ]
+
+    starved = HybridRetriever(store, embedder, PredicateRegistry(),
+                              filter_retry_multiplier=1)
+    query = "release detail"
+
+    # Without the retry the pool of 10 is spent entirely on semantic claims, and a
+    # filter with three live matches behind it returns nothing at all.
+    assert starved.search(query, scope, k=2, memory_types=[MemoryType.PROCEDURAL]) == []
+
+    found = retriever.search(query, scope, k=2, memory_types=[MemoryType.PROCEDURAL])
+    assert len(found) == 2
+    assert {r.claim.id for r in found} <= {c.id for c in procedural}
+    assert len(retriever.search(query, scope, k=3,
+                                memory_types=[MemoryType.PROCEDURAL])) == 3
+
+
+def test_the_retry_does_not_fire_when_the_pool_was_never_full(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """A short result set from a leg that returned fewer hits than it was allowed has
+    nothing more to give, and re-asking is pure cost."""
+    scope = Scope("acme", "alice")
+    add(store, embedder, "alice lives in Lisbon", scope, memory_type=MemoryType.SEMANTIC)
+
+    calls: list[int] = []
+
+    class CountingStore(SQLiteStore):
+        def lexical_search(self, query, scopes, limit, as_of=None,
+                           include_invalidated=False):
+            calls.append(limit)
+            return super().lexical_search(query, scopes, limit, as_of,
+                                          include_invalidated)
+
+    counting = CountingStore(":memory:")
+    add(counting, embedder, "alice lives in Lisbon", scope)
+    retriever = HybridRetriever(counting, embedder, PredicateRegistry())
+
+    assert retriever.search("lisbon", scope, k=5,
+                            memory_types=[MemoryType.PROCEDURAL]) == []
+    assert calls == [25], "one pass only: the pool was never truncated"
+    counting.close()
+
+
+# ===========================================================================
+# Per-slot diversity
+# ===========================================================================
+
+
+@pytest.fixture
+def cluster(store: SQLiteStore, embedder: HashingEmbedder) -> dict[str, list[Claim]]:
+    """One slot holding five near-identical claims, plus four other topics."""
+    scope = Scope("acme", "alice")
+    dupes = [
+        add(store, embedder, f"alice rated the standup format four out of five{tail}",
+            scope, predicate="rated")
+        for tail in ("", " today", " last week", " again", " as always")
+    ]
+    others = [
+        add(store, embedder, "alice wants the standup moved to eleven", scope,
+            predicate="prefers"),
+        add(store, embedder, "alice finds the standup format too rigid", scope,
+            predicate="dislikes"),
+        add(store, embedder, "the standup rating survey closes on friday", scope,
+            predicate="reported"),
+        add(store, embedder, "alice skipped standup twice this format cycle", scope,
+            predicate="attended"),
+    ]
+    return {"dupes": dupes, "others": others}
+
+
+def test_one_slot_cannot_take_the_whole_result_set(
+    retriever: HybridRetriever, cluster: dict[str, list[Claim]]
+) -> None:
+    """Measured: a cluster of near-identical claims took 5 of 8 prompt slots. Every one
+    of them is the same answer, so four of those slots bought nothing."""
+    scope = Scope("acme", "alice")
+
+    results = retriever.search("standup format rating", scope, k=6)
+    dupe_ids = {c.id for c in cluster["dupes"]}
+
+    assert sum(1 for r in results if r.claim.id in dupe_ids) == 2
+    assert len({r.claim.fact_key for r in results}) == 5
+
+
+def test_diversity_demotes_rather_than_drops(
+    retriever: HybridRetriever, cluster: dict[str, list[Claim]]
+) -> None:
+    """`k` must keep meaning "at most k results". Dropping the overflow would make the
+    result count depend on how the corpus happened to cluster, and would hide the
+    cluster from anyone auditing it."""
+    scope = Scope("acme", "alice")
+
+    wide = retriever.search("standup format rating", scope, k=9)
+    dupe_ids = {c.id for c in cluster["dupes"]}
+
+    assert len(wide) == 9
+    assert dupe_ids <= set(ids(wide)), "every duplicate is still reachable"
+    # Two keep their earned place in the head; the other three sit at the very back,
+    # behind the topics they were crowding out.
+    positions = [i for i, r in enumerate(wide) if r.claim.id in dupe_ids]
+    assert len(positions) == 5
+    assert positions[1] < 6
+    assert positions[2:] == [6, 7, 8]
+
+
+def test_the_slot_cap_is_tunable_and_switchable(
+    store: SQLiteStore, embedder: HashingEmbedder, cluster: dict[str, list[Claim]]
+) -> None:
+    scope = Scope("acme", "alice")
+    dupe_ids = {c.id for c in cluster["dupes"]}
+
+    def dupes_in_head(max_per_slot: int) -> int:
+        r = HybridRetriever(store, embedder, PredicateRegistry(),
+                            max_per_slot=max_per_slot)
+        return sum(1 for x in r.search("standup format rating", scope, k=5)
+                   if x.claim.id in dupe_ids)
+
+    assert dupes_in_head(1) == 1
+    assert dupes_in_head(2) == 2
+    # 0 disables the cap, and the cluster immediately takes almost the whole set back.
+    assert dupes_in_head(0) == 4
+
+
+def test_diversity_does_not_reorder_within_a_slot(
+    retriever: HybridRetriever, cluster: dict[str, list[Claim]]
+) -> None:
+    """Demotion preserves relative order, so the best duplicate is still the one that
+    represents the slot and the audit trail reads the same way."""
+    scope = Scope("acme", "alice")
+    dupe_ids = {c.id for c in cluster["dupes"]}
+
+    capped = [r for r in retriever.search("standup format rating", scope, k=9)
+              if r.claim.id in dupe_ids]
+    uncapped = [r for r in HybridRetriever(
+        retriever.store, retriever.embedder, PredicateRegistry(), max_per_slot=0
+    ).search("standup format rating", scope, k=9) if r.claim.id in dupe_ids]
+
+    assert ids(capped) == ids(uncapped)
 
 
 # ===========================================================================

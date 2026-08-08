@@ -364,6 +364,27 @@ def test_iter_claims_filters_by_tenant_and_liveness(store):
     assert len(list(store.iter_claims())) == 1
 
 
+def test_purge_reports_what_it_actually_erased(store, emb):
+    put(store, emb, object="Berlin")
+    put(store, object="Lisbon", predicate="likes")  # never embedded
+    store.add_episode(Episode(content="hello", scope=SCOPE))
+    assert store.purge(SCOPE) == {"claims": 2, "episodes": 1, "embeddings": 1}
+
+
+def test_purge_erases_a_large_scope_in_one_pass(store, emb):
+    """Set-based rather than a statement pair per claim: erasing a user is one request,
+    and the counts must not depend on how many claims that turned out to be."""
+    with store.batch():
+        for i in range(1500):
+            put(store, emb, predicate=f"p{i}")
+    counts = store.purge(SCOPE)
+    assert counts["claims"] == 1500
+    assert counts["embeddings"] == 1500
+    assert store.stats() == {"episodes": 0, "claims": 0, "live_claims": 0,
+                             "invalidated": 0, "embeddings": 0}
+    assert store.lexical_search("berlin", [SCOPE], limit=10) == []
+
+
 def test_stats_counts_live_and_invalidated_separately(store, emb):
     a = put(store, emb, object="Berlin")
     put(store, emb, object="Lisbon")

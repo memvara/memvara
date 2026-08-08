@@ -11,6 +11,9 @@ What it does differently from mem0 and friends:
 * **The write path avoids the LLM.** Hash dedupe, near-duplicate detection, a salience
   gate, and rule-based extraction run first; the model is consulted only for turns that
   survive all of them, batched. `WriteReceipt.llm_calls` reports the cost every time.
+  With no `llm=` there is no fourth tier at all, so turns the rules do not recognise are
+  not stored — `Engram()` warns once about that, and `WriteReceipt.unextracted` counts
+  it per write.
 * **Retrieval is hybrid and time-aware.** BM25 fused with vector search, reranked by
   recency decay tuned per predicate, and every result explains why it surfaced.
 * **Nothing is silently lost.** Superseded facts are retired, never deleted, and every
@@ -27,8 +30,20 @@ What it does differently from mem0 and friends:
 """
 
 from .consolidate import Consolidator
-from .core import Engram
-from .embed import CachedEmbedder, Embedder, HashingEmbedder, default_embedder
+from .core import (
+    DegradedExtractionWarning,
+    EmbedderChangedWarning,
+    EmbedderMismatchError,
+    Engram,
+    ScopedEngram,
+)
+from .embed import (
+    CachedEmbedder,
+    Embedder,
+    EmbedderFingerprint,
+    HashingEmbedder,
+    default_embedder,
+)
 from .llm import LLM, NullLLM
 from .retrieve import HybridRetriever
 from .schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
@@ -50,7 +65,7 @@ from .write import FastExtractor, Reconciler, SalienceGate, WritePipeline
 __version__ = "0.1.0"
 
 __all__ = [
-    "Engram",
+    "Engram", "ScopedEngram",
     # data model
     "Claim", "Episode", "Scope", "Result", "Explanation", "Provenance",
     "WriteReceipt", "MemoryType", "Derivation", "utcnow",
@@ -59,7 +74,10 @@ __all__ = [
     # pluggable backends
     "Store", "SQLiteStore",
     "Embedder", "HashingEmbedder", "CachedEmbedder", "default_embedder",
+    "EmbedderFingerprint",
     "LLM", "NullLLM",
+    # diagnostics: importable so they can be filtered or caught by category
+    "DegradedExtractionWarning", "EmbedderChangedWarning", "EmbedderMismatchError",
     # subsystems
     "WritePipeline", "SalienceGate", "FastExtractor", "Reconciler",
     "HybridRetriever", "Consolidator",

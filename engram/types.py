@@ -24,6 +24,17 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:20]}"
 
 
+def _short(text: str, limit: int = 48) -> str:
+    """One-line, length-capped rendering of arbitrary stored text.
+
+    Everything in this module can hold user-supplied text of any length containing
+    newlines, so a `__repr__` that interpolates it raw is exactly as unreadable as the
+    dataclass repr it replaces — worse, it can span the terminal.
+    """
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
 def content_hash(*parts: str) -> str:
     h = hashlib.blake2b(digest_size=16)
     for p in parts:
@@ -119,6 +130,9 @@ class Scope:
                 uniq.append(s)
         return uniq
 
+    def __repr__(self) -> str:
+        return f"<Scope {self.key()}>"
+
     def contains(self, other: "Scope") -> bool:
         """True if `other` is at or beneath this scope."""
         if self.tenant != other.tenant:
@@ -152,6 +166,10 @@ class Episode:
     @property
     def hash(self) -> str:
         return content_hash(self.scope.key(), self.role, self.content)
+
+    def __repr__(self) -> str:
+        return (f"<Episode {self.id} {self.scope.key()} {self.role} "
+                f"{self.ts:%Y-%m-%d %H:%M}Z {_short(self.content)!r}>")
 
 
 @dataclass(slots=True)
@@ -240,6 +258,24 @@ class Claim:
             self._owner, self.subject, self.predicate, self.object, str(self.polarity)
         )
 
+    def __repr__(self) -> str:
+        # State, not raw timestamps: "is this claim still believed?" is the question
+        # anyone reading a list of claims at a REPL is actually asking, and the two
+        # timestamp pairs that answer it are four fields of eighteen.
+        if self.invalidated_at is not None:
+            state = "retired"
+        elif self.valid_to is not None:
+            state = "ended"
+        else:
+            state = "live"
+        neg = "not " if self.polarity < 0 else ""
+        return (
+            f"<Claim {self.id} {self.scope.key()} {self.subject} "
+            f"{neg}{self.predicate}={_short(self.object)!r} "
+            f"{self.memory_type.value} conf={self.confidence:.2f} "
+            f"sal={self.salience:.2f} {state}>"
+        )
+
     def is_live(self, as_of: datetime | None = None) -> bool:
         """Was this claim part of our believed, in-force knowledge at `as_of`?
 
@@ -268,6 +304,13 @@ class Provenance:
     extractor: str
     superseded: list["Claim"] = field(default_factory=list)
 
+    def __repr__(self) -> str:
+        return (
+            f"<Provenance {self.claim.id} {_short(self.claim.text)!r} "
+            f"via {self.extractor or '?'} ({self.derivation.value}) "
+            f"sources={len(self.episodes)} superseded={len(self.superseded)}>"
+        )
+
 
 @dataclass(slots=True)
 class Explanation:
@@ -286,7 +329,13 @@ class Explanation:
     confidence: float = 1.0
     salience: float = 1.0
     rerank_score: float | None = None
-    final_score: float = 0.0
+    #: The pre-normalization product of fusion and the quality multipliers. It is kept
+    #: because it is what the retriever actually computes and what a ranking change
+    #: should be diffed on; it is *not* comparable across queries, which is precisely
+    #: why `Result.score` is the normalized value instead. The retriever owns how the
+    #: two relate (see `engram/retrieve/scoring.py`).
+    raw_score: float = 0.0
+    final_score: float = 0.0        # == Result.score, i.e. normalized into [0, 1]
 
     def summary(self) -> str:
         bits = []
@@ -299,12 +348,27 @@ class Explanation:
         bits.append(f"sal={self.salience:.2f}")
         if self.rerank_score is not None:
             bits.append(f"rerank={self.rerank_score:.3f}")
+        if self.raw_score:
+            # Shown only once a retriever populates it, so the line stays readable for
+            # anything that scores without a normalization step.
+            bits.append(f"raw={self.raw_score:.4f}")
         return " ".join(bits) + f" -> {self.final_score:.4f}"
+
+    def __repr__(self) -> str:
+        return f"<Explanation {self.summary()}>"
 
 
 @dataclass(slots=True)
 class Result:
-    """A retrieved claim with its score and the reason it was retrieved."""
+    """A retrieved claim with its score and the reason it was retrieved.
+
+    `score` is a **normalized relevance in [0, 1]**, so it can be thresholded and
+    compared across queries — `min_score=0.3` means the same thing tomorrow as today,
+    and the integrations that expect a 0-1 relevance (mem0, CrewAI, LlamaIndex) get
+    what they expect. The retriever's raw internal value lives on
+    `explain.raw_score`; it is unbounded-ish and query-dependent, and thresholding on
+    it is the bug this split exists to prevent.
+    """
 
     claim: Claim
     score: float
@@ -313,6 +377,15 @@ class Result:
     @property
     def text(self) -> str:
         return self.claim.text
+
+    def __repr__(self) -> str:
+        legs = []
+        if self.explain.vector_rank is not None:
+            legs.append(f"vector#{self.explain.vector_rank}")
+        if self.explain.lexical_rank is not None:
+            legs.append(f"bm25#{self.explain.lexical_rank}")
+        return (f"<Result {self.score:.4f} {_short(self.text)!r} "
+                f"{'+'.join(legs) or 'no-retriever'} {self.claim.id}>")
 
 
 @dataclass(slots=True)
@@ -329,14 +402,27 @@ class WriteReceipt:
     invalidated: list[Claim] = field(default_factory=list)
     reinforced: list[Claim] = field(default_factory=list)  # already known, salience bumped
     skipped: int = 0                                       # turns that carried no durable fact
+    #: Turns that got all the way to the extraction tier and yielded nothing. Distinct
+    #: from `skipped`, which is the write path working as designed (an acknowledgement
+    #: carries no fact). This one is the honest count of *lost* content: with no model
+    #: configured it is where a conversation's facts go, and without it the default
+    #: configuration reports a clean, successful, empty write.
+    unextracted: int = 0
+    #: Model calls actually made. Must stay 0 for a backend that advertises itself as a
+    #: no-op (`llm.is_noop`): billing for a call that never left the process makes the
+    #: one number this design exists to minimize into a lie.
     llm_calls: int = 0
     latency_ms: float = 0.0
     deferred: bool = False                                 # extraction queued, not yet run
 
     def __str__(self) -> str:
+        # `unextracted` appears only when it is non-zero, so it reads as an event rather
+        # than as noise on the writes that lost nothing.
+        lost = f" unextracted={self.unextracted}" if self.unextracted else ""
         return (
             f"<WriteReceipt +{len(self.added)} ~{len(self.reinforced)} "
-            f"-{len(self.invalidated)} skip={self.skipped} llm={self.llm_calls} "
+            f"-{len(self.invalidated)} skip={self.skipped}{lost} "
+            f"llm={self.llm_calls} "
             f"{self.latency_ms:.1f}ms{' deferred' if self.deferred else ''}>"
         )
 

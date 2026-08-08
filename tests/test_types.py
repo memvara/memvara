@@ -8,7 +8,10 @@ from engram.types import (
     Claim,
     Derivation,
     Episode,
+    Explanation,
     MemoryType,
+    Provenance,
+    Result,
     Scope,
     WriteReceipt,
     content_hash,
@@ -198,3 +201,96 @@ def test_receipt_summary_surfaces_llm_call_count():
     r = WriteReceipt(added=[mk()], skipped=3, llm_calls=0, latency_ms=1.5)
     text = str(r)
     assert "+1" in text and "skip=3" in text and "llm=0" in text
+
+
+def test_receipt_reports_turns_that_reached_extraction_and_yielded_nothing():
+    """`skipped` is the write path working as designed; `unextracted` is content that
+    was lost. Collapsing the two is how a configuration that stores nothing reports a
+    clean, successful write."""
+    assert "unextracted=4" in str(WriteReceipt(skipped=1, unextracted=4))
+
+
+def test_receipt_stays_quiet_when_nothing_was_lost():
+    assert "unextracted" not in str(WriteReceipt(added=[mk()]))
+
+
+# --- Reprs ------------------------------------------------------------------
+# The bar is `WriteReceipt.__str__`: one line, the fields you would actually ask for,
+# and nothing that forces a REPL to scroll. The dataclass default prints every field of
+# every nested object, which made `history()` output unreadable in the README's own
+# example.
+
+def test_scope_repr_is_the_scope_key():
+    assert repr(Scope("acme", "alice")) == "<Scope acme/alice/*/*>"
+
+
+def test_episode_repr_fits_on_one_line():
+    ep = Episode(content="I live in Berlin", scope=Scope("acme", "alice"),
+                 ts=datetime(2025, 3, 4, 9, 30, tzinfo=timezone.utc))
+    text = repr(ep)
+    assert text.startswith(f"<Episode {ep.id} acme/alice/*/* user 2025-03-04 09:30Z")
+    assert "'I live in Berlin'" in text
+    assert "\n" not in text
+
+
+def test_episode_repr_flattens_and_truncates_hostile_content():
+    ep = Episode(content="line one\nline two " + "x" * 200)
+    text = repr(ep)
+    assert "\n" not in text and len(text) < 160
+
+
+def test_claim_repr_names_the_slot_the_value_and_the_state():
+    c = mk()
+    text = repr(c)
+    assert text == (f"<Claim {c.id} acme/alice/*/* user lives_in='Berlin' semantic "
+                    "conf=1.00 sal=1.00 live>")
+
+
+def test_claim_repr_distinguishes_the_two_ways_a_claim_stops_counting():
+    """Retired (we stopped believing it) and ended (it stopped being true) are different
+    facts about a claim, and the whole point of two time axes is not to conflate them."""
+    assert "retired" in repr(mk(invalidated_at=T2))
+    assert "ended" in repr(mk(valid_to=T2))
+
+
+def test_claim_repr_marks_negation():
+    assert "not lives_in=" in repr(mk(polarity=-1))
+
+
+def test_result_repr_shows_the_score_and_which_retrievers_fired():
+    r = Result(claim=mk(), score=0.4231,
+               explain=Explanation(vector_rank=0, vector_score=0.8, lexical_rank=2,
+                                   lexical_score=1.4, final_score=0.4231))
+    text = repr(r)
+    assert "<Result 0.4231 'user lives in Berlin' vector#0+bm25#2" in text
+    assert r.claim.id in text, "the id is what you paste into why()"
+
+
+def test_result_repr_says_so_when_neither_retriever_ranked_it():
+    assert "no-retriever" in repr(Result(claim=mk(), score=0.0, explain=Explanation()))
+
+
+def test_explanation_repr_is_its_summary():
+    e = Explanation(lexical_rank=1, lexical_score=2.0, final_score=0.5)
+    assert repr(e) == f"<Explanation {e.summary()}>"
+
+
+def test_explanation_summary_shows_the_raw_score_once_a_retriever_sets_one():
+    """`raw_score` is the pre-normalization value. It is only meaningful next to the
+    normalized one, and only present once something computes it."""
+    assert "raw=" not in Explanation(final_score=0.5).summary()
+    assert "raw=0.0310" in Explanation(raw_score=0.031, final_score=0.5).summary()
+
+
+def test_provenance_repr_summarises_the_trail_without_dumping_it():
+    c = mk()
+    p = Provenance(claim=c, episodes=[Episode(content="I live in Berlin")],
+                   derivation=Derivation.FAST_PATH, extractor="fast/v1",
+                   superseded=[mk(object="Lisbon")])
+    assert repr(p) == (f"<Provenance {c.id} 'user lives in Berlin' via fast/v1 "
+                       "(fast_path) sources=1 superseded=1>")
+
+
+def test_provenance_repr_survives_an_unattributed_claim():
+    p = Provenance(claim=mk(), episodes=[], derivation=Derivation.USER, extractor="")
+    assert "via ? (user)" in repr(p)
