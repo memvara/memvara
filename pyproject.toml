@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "engram"
+version = "0.1.0"
+description = "Bitemporal memory for AI agents. Hybrid retrieval, deterministic contradiction resolution, LLM-free write path."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+
+# Core has exactly one hard dependency. Everything else is opt-in.
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=1.40"]
+local-embed = ["sentence-transformers>=3.0"]
+server = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2.6"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["engram"]
+
+[tool.pytest.ini_options]
+# `engram` is in testpaths so the docstring examples run as tests. Documentation that
+# isn't executed drifts from the code silently.
+testpaths = ["tests", "engram"]
+addopts = "--doctest-modules"
+filterwarnings = ["error::DeprecationWarning"]

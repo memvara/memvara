@@ -1,0 +1,271 @@
+"""The public surface: `Engram`.
+
+Everything below is a thin wiring layer. The interesting behavior lives in the
+subsystems — the point of this file is that a caller should never have to know that
+`Reconciler`, `HybridRetriever`, or `Consolidator` exist.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Iterable, Mapping, Sequence
+
+from .consolidate import Consolidator
+from .embed import Embedder, default_embedder
+from .llm import LLM, NullLLM
+from .retrieve import HybridRetriever
+from .schema import PredicateRegistry
+from .store import SQLiteStore, Store
+from .types import (
+    Claim,
+    Derivation,
+    Episode,
+    MemoryType,
+    Provenance,
+    Result,
+    Scope,
+    WriteReceipt,
+    utcnow,
+)
+from .write import WritePipeline
+
+# What `add()` accepts. The dict form matches the OpenAI/mem0 message shape so an
+# existing agent loop can pass its transcript straight through.
+Messages = str | Episode | Mapping[str, Any] | Sequence[str | Episode | Mapping[str, Any]]
+
+
+class Engram:
+    """Bitemporal memory for agents.
+
+    >>> mem = Engram()
+    >>> mem.add("I live in Berlin", user="alice")           # doctest: +ELLIPSIS
+    <WriteReceipt ...>
+    >>> mem.add("Actually I moved to Lisbon", user="alice")  # doctest: +ELLIPSIS
+    <WriteReceipt ...>
+    >>> [r.text for r in mem.search("where do they live?", user="alice")][:1]
+    ['user lives in Lisbon']
+
+    Berlin is not deleted by that second write — it is retired with an end timestamp, so
+    `search(..., as_of=<before the move>)` still returns it.
+    """
+
+    def __init__(
+        self,
+        path: str = ":memory:",
+        *,
+        store: Store | None = None,
+        embedder: Embedder | None = None,
+        llm: LLM | None = None,
+        registry: PredicateRegistry | None = None,
+        tenant: str = "default",
+        user: str | None = None,
+        agent: str | None = None,
+        session: str | None = None,
+        **tuning: Any,
+    ) -> None:
+        self.store = store if store is not None else SQLiteStore(path)
+        self.embedder = embedder if embedder is not None else default_embedder()
+        # Default to no LLM on purpose: the deterministic path is the product, and the
+        # library must be fully usable with no API key.
+        self.llm = llm if llm is not None else NullLLM()
+        self.registry = registry if registry is not None else PredicateRegistry()
+        self.default_scope = Scope(tenant, user, agent, session)
+
+        write_kw = {k[6:]: v for k, v in tuning.items() if k.startswith("write_")}
+        read_kw = {k[5:]: v for k, v in tuning.items() if k.startswith("read_")}
+        unknown = [k for k in tuning if not k.startswith(("write_", "read_"))]
+        if unknown:
+            raise TypeError(f"unknown tuning options: {unknown}")
+
+        self.writer = WritePipeline(
+            self.store, self.embedder, self.registry, self.llm, **write_kw
+        )
+        self.reader = HybridRetriever(
+            self.store, self.embedder, self.registry, **read_kw
+        )
+        self.consolidator = Consolidator(self.store, self.embedder, self.registry)
+
+    # -- scope helpers -------------------------------------------------------
+
+    def _scope(self, tenant=None, user=None, agent=None, session=None) -> Scope:
+        d = self.default_scope
+        return Scope(
+            tenant if tenant is not None else d.tenant,
+            user if user is not None else d.user,
+            agent if agent is not None else d.agent,
+            session if session is not None else d.session,
+        )
+
+    @staticmethod
+    def _to_episodes(messages: Messages, scope: Scope, role: str,
+                     ts: datetime | None) -> list[Episode]:
+        """Accept a string, a transcript, or pre-built Episodes without ceremony."""
+        if isinstance(messages, (str, Episode, Mapping)):
+            items: Sequence[Any] = [messages]
+        else:
+            items = list(messages)
+
+        out: list[Episode] = []
+        for item in items:
+            if isinstance(item, Episode):
+                out.append(item)
+            elif isinstance(item, Mapping):
+                content = item.get("content", "")
+                if not isinstance(content, str):
+                    content = str(content)
+                out.append(Episode(
+                    content=content,
+                    scope=scope,
+                    role=str(item.get("role", role)),
+                    ts=item.get("ts") or ts or utcnow(),
+                    meta={k: v for k, v in item.items()
+                          if k not in {"content", "role", "ts"}},
+                ))
+            else:
+                out.append(Episode(content=str(item), scope=scope, role=role,
+                                   ts=ts or utcnow()))
+        return out
+
+    # -- writing -------------------------------------------------------------
+
+    def add(self, messages: Messages, *, tenant=None, user=None, agent=None,
+            session=None, role: str = "user", ts: datetime | None = None) -> WriteReceipt:
+        """Ingest conversation turns or documents.
+
+        Returns a receipt describing exactly what happened, including how many LLM calls
+        it cost — usually zero.
+        """
+        scope = self._scope(tenant, user, agent, session)
+        return self.writer.add(self._to_episodes(messages, scope, role, ts))
+
+    def remember(self, subject: str, predicate: str, obj: str, *, tenant=None, user=None,
+                 agent=None, session=None, confidence: float = 1.0,
+                 memory_type: MemoryType | None = None, polarity: int = 1,
+                 valid_from: datetime | None = None,
+                 recorded_at: datetime | None = None, **meta: Any) -> WriteReceipt:
+        """Assert a structured fact directly, bypassing extraction.
+
+        Use this when the application already knows something as structured data — there
+        is no reason to launder a known fact through an LLM.
+
+        `valid_from` and `recorded_at` are separately settable so historical records can
+        be backfilled honestly: a fact that was true from 2019 but only imported today has
+        a 2019 valid time and a today transaction time, and `as_of` queries stay correct
+        for both axes.
+        """
+        scope = self._scope(tenant, user, agent, session)
+        pred = self.registry.normalize(predicate)
+        now = utcnow()
+        claim = Claim(
+            subject=subject, predicate=pred, object=obj, scope=scope,
+            polarity=polarity, confidence=confidence,
+            memory_type=memory_type or self.registry.spec(pred).memory_type,
+            valid_from=valid_from or recorded_at or now,
+            recorded_at=recorded_at or now,
+            derivation=Derivation.USER, extractor="api", meta=meta,
+        )
+        return self.writer.assert_claim(claim)
+
+    def forget(self, subject: str, predicate: str, *, tenant=None, user=None, agent=None,
+               session=None, at: datetime | None = None) -> list[Claim]:
+        """Retire everything currently believed in one slot.
+
+        Retires rather than erases: the claims stop being returned by present-tense
+        queries but remain visible to `as_of` and `history`. For true erasure (a GDPR
+        deletion, say), use `purge`.
+        """
+        scope = self._scope(tenant, user, agent, session)
+        now = at or utcnow()
+        probe = Claim(subject=subject, predicate=self.registry.normalize(predicate),
+                      object="", scope=scope)
+        retired = self.store.competing_claims(scope.tenant, probe.fact_key)
+        for c in retired:
+            self.store.invalidate(c.id, now, None)
+            self.store.set_valid_to(c.id, now)
+        return retired
+
+    # -- reading -------------------------------------------------------------
+
+    def search(self, query: str, *, k: int = 10, tenant=None, user=None, agent=None,
+               session=None, as_of: datetime | None = None,
+               include_invalidated: bool = False,
+               memory_types: Sequence[MemoryType] | None = None) -> list[Result]:
+        """Hybrid retrieval over current belief, or over belief as of a past instant."""
+        scope = self._scope(tenant, user, agent, session)
+        return self.reader.search(
+            query, scope, k=k, as_of=as_of,
+            include_invalidated=include_invalidated, memory_types=memory_types,
+        )
+
+    def recall(self, query: str, *, k: int = 8, header: str = "Known about the user:",
+               **kw: Any) -> str:
+        """Retrieval formatted for dropping straight into a system prompt.
+
+        The output is deliberately plain — numbered facts, no scores, no JSON. Retrieval
+        metadata in a prompt is noise the model has to ignore.
+        """
+        results = self.search(query, k=k, **kw)
+        if not results:
+            return ""
+        lines = [header] + [f"- {r.text}" for r in results]
+        return "\n".join(lines)
+
+    def get_all(self, *, tenant=None, user=None, agent=None, session=None,
+                include_invalidated: bool = False,
+                as_of: datetime | None = None) -> list[Claim]:
+        """Every claim in scope, newest first."""
+        scope = self._scope(tenant, user, agent, session)
+        ids = self.store.candidate_ids(
+            scope.ancestors(), as_of=as_of, include_invalidated=include_invalidated)
+        claims = list(self.store.get_claims(ids).values())
+        # Sort id-ascending first; the stable sort below then breaks timestamp ties
+        # deterministically instead of exposing whatever order SQLite returned.
+        claims.sort(key=lambda c: c.id)
+        claims.sort(key=lambda c: c.recorded_at, reverse=True)
+        return claims
+
+    def history(self, subject: str, predicate: str, *, tenant=None, user=None,
+                agent=None, session=None) -> list[Claim]:
+        """The full timeline of one fact slot, oldest first.
+
+        Every value ever believed, when it was recorded, and what superseded it.
+        """
+        scope = self._scope(tenant, user, agent, session)
+        probe = Claim(subject=subject, predicate=self.registry.normalize(predicate),
+                      object="", scope=scope)
+        return self.store.slot_history(scope.tenant, probe.fact_key)
+
+    def why(self, claim_id: str) -> Provenance | None:
+        """Trace a claim back to the source turns it was derived from."""
+        claim = self.store.get_claim(claim_id)
+        if claim is None:
+            return None
+        episodes = [e for e in (self.store.get_episode(s) for s in claim.sources)
+                    if e is not None]
+        superseded = [c for c in self.store.slot_history(claim.scope.tenant, claim.fact_key)
+                      if c.invalidated_by == claim.id]
+        return Provenance(claim=claim, episodes=episodes, derivation=claim.derivation,
+                          extractor=claim.extractor, superseded=superseded)
+
+    # -- maintenance ---------------------------------------------------------
+
+    def consolidate(self, *, tenant: str | None = None) -> dict[str, int]:
+        """Decay salience, merge near-duplicates, promote repeated events to facts."""
+        return self.consolidator.run(tenant if tenant is not None else self.default_scope.tenant)
+
+    def stats(self) -> dict[str, int]:
+        return self.store.stats()
+
+    def close(self) -> None:
+        self.store.close()
+
+    def __enter__(self) -> "Engram":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        s = self.stats()
+        return (f"<Engram {self.default_scope.key()} claims={s['live_claims']}"
+                f"/{s['claims']} llm={getattr(self.llm, 'name', '?')}>")
