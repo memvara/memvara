@@ -1,0 +1,103 @@
+# The suite enforces `fail_under = 100`. Until this workflow existed it enforced it on
+# exactly one developer machine running one Python — which is not enforcement, it is a
+# local habit. The matrix is the point: `requires-python = ">=3.10"` is a promise, and
+# 3.10 through 3.12 had never executed a line of this library.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A second push to the same branch makes the first run's answer irrelevant.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: py${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Never cancel siblings: "3.10 fails and 3.13 passes" is the single most useful
+      # thing this matrix can tell us, and fail-fast throws it away.
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        os: [ubuntu-latest]
+        include:
+          # Two more OSes on one version each. The store touches mmap, file locking and
+          # path handling — all three differ on Windows, and none of it is exercised by
+          # running Linux four times.
+          - python: "3.13"
+            os: macos-latest
+          - python: "3.13"
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Test
+        run: python -m pytest -q
+
+  coverage:
+    # Separate job, one version. Coverage is a property of the suite, not of the
+    # interpreter, so measuring it four times would just be four chances to flake.
+    name: coverage (gated at 100%)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      # `coverage report` exits non-zero below fail_under, so this step is the gate.
+      - run: |
+          python -m coverage run -m pytest -q
+          python -m coverage report
+
+  offline:
+    # The headline claim is "numpy and nothing else, runs offline with no API key". That
+    # is worth testing rather than asserting: install the bare package with no extras and
+    # import every module, so an accidental top-level `import anthropic` in some adapter
+    # cannot pass CI.
+    name: core imports with no extras
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+      - name: Import every module from a directory that is not the repo
+        run: |
+          cd /tmp
+          python -c "
+          import importlib, pkgutil, engram
+          failed = []
+          for m in pkgutil.walk_packages(engram.__path__, 'engram.'):
+              try:
+                  importlib.import_module(m.name)
+              except ImportError as e:
+                  # Optional adapters may import their provider lazily; a hard failure
+                  # here means a top-level dependency leaked into the core install.
+                  failed.append((m.name, str(e)))
+          assert not failed, failed
+          print('all modules import with numpy alone')
+          "

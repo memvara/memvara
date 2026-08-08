@@ -89,15 +89,19 @@ __all__ = [
     "backfill_entities",
     "Recorder", "NullRecorder", "MemoryRecorder", "Consolidator",
     # relevance floors are measured per deployment, never assumed
-    "calibrate_min_score", "FloorReport",
+    "calibrate_min_score", "FloorReport", "OpenAILLM",
     "__version__",
 ]
 
 
 def __getattr__(name: str):
-    # Kept out of the eager imports so `import engram` works without the anthropic SDK.
+    # Kept out of the eager imports so `import engram` works with neither hosted SDK.
     if name == "AnthropicLLM":
         from .llm.anthropic import AnthropicLLM
 
         return AnthropicLLM
+    if name == "OpenAILLM":
+        from .llm.openai import OpenAILLM
+
+        return OpenAILLM
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -1,0 +1,209 @@
+"""Validation shared by every model backend. The trust boundary lives here.
+
+Everything downstream — the reconciler, the ranker, the schema registry — treats the
+dicts a backend returns as structured facts and acts on them without re-checking. So a
+hallucinated `source_index` becomes a claim attributed to the wrong conversation, and a
+`confidence` of 5.0 silently outranks every honest claim in the store. Constrained
+decoding makes malformed output rare, not impossible; validation is what makes it
+harmless.
+
+None of that reasoning is provider-specific, which is why it is here rather than in
+`anthropic.py`. A second backend that reimplemented these rules would drift from the
+first, and the drift would show up as *data* — differently-shaped claims in one store,
+depending on which model happened to be configured the day a turn was written. Backends
+own their transport and their response shape. They do not own what counts as a valid
+claim.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+from typing import Any, Sequence
+
+from ..types import Episode, MemoryType
+
+_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+CARDINALITY = ("one", "many")
+VOLATILITY = ("static", "slow", "fast")
+MEMORY_TYPES = tuple(m.value for m in MemoryType)
+
+# Matches NullLLM: unknown predicates default to multi-valued, because wrongly retiring a
+# true fact is worse than keeping two competing ones.
+PREDICATE_FALLBACK: dict[str, str] = {
+    "cardinality": "many",
+    "volatility": "slow",
+    "memory_type": "semantic",
+}
+
+# A model that ignored the schema tells us nothing about how sure it is. Neither extreme
+# is safe - 1.0 lets a malformed claim outrank well-formed ones, 0.0 makes it
+# unretrievable - so an unreadable confidence lands in the middle.
+UNKNOWN_CONFIDENCE = 0.5
+
+# Ceiling on the known-predicate list sent with every extraction. Sending the whole
+# vocabulary is an unbounded per-write token tax that grows fastest exactly when the
+# vocabulary is growing fastest, and each new predicate shifts the bytes of the prompt
+# prefix and throws away the cache at the same moment. The list is a reuse hint, not an
+# enumeration, so a bounded head of it does the same job.
+MAX_KNOWN_PREDICATES = 64
+
+# Ceiling on the candidate list sent when resolving a surface form. Same reasoning, and
+# a longer list measurably makes the merge decision worse rather than better.
+MAX_CANDIDATES = 48
+
+
+def snake_case(raw: str) -> str:
+    """`Lives In` / `livesIn` / `LIVES-IN` -> `lives_in`.
+
+    Predicate identity *is* slot identity: `lives_in` and `livesIn` arriving as different
+    predicates means the contradiction between them is invisible and the store quietly
+    holds two cities for one person. `PredicateRegistry.normalize()` still runs
+    downstream to resolve aliases onto canonical names - this only guarantees it receives
+    a well-formed key to look up.
+    """
+    return _NON_ALNUM.sub("_", _CAMEL.sub("_", raw).strip().lower()).strip("_")
+
+
+def parse_json_object(text: str) -> dict[str, Any]:
+    """A JSON object, or `{}` for anything else.
+
+    Backends hand over already-extracted text, because "where is the text in this
+    response" is the one part that really is provider-specific.
+    """
+    text = (text or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def clamp_confidence(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return UNKNOWN_CONFIDENCE
+    # NaN loses every comparison, so clamping it silently yields 0.0 and buries the claim
+    # at the bottom of the ranking rather than admitting we could not read the field.
+    if not math.isfinite(value):
+        return UNKNOWN_CONFIDENCE
+    return min(1.0, max(0.0, float(value)))
+
+
+def source_index(value: Any, n: int) -> int | None:
+    # `isinstance(True, int)` is True in Python, and a claim sourced from episode `True`
+    # would be attributed to episode 1 - a real provenance bug from a one-character slip.
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 <= value < n else None
+
+
+def bounded(names: Sequence[str], limit: int) -> list[str]:
+    """Dedupe preserving order, then truncate.
+
+    Order is preserved rather than sorted on purpose. `PredicateRegistry` hands the
+    vocabulary over declared-first, which is a head that does not move as predicates
+    are learned; re-sorting would interleave every newly acquired predicate into the
+    middle and invalidate the cached prompt prefix on each acquisition - the one
+    moment the cache is worth the most, because that is when writes are busiest.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+            if len(out) == limit:
+                break
+    return out
+
+
+def extract_prompt(episodes: Sequence[Episode], known_predicates: Sequence[str]) -> str:
+    turns = "\n".join(f"[{i}] {ep.role}: {ep.content}" for i, ep in enumerate(episodes))
+    known = ", ".join(bounded(known_predicates, MAX_KNOWN_PREDICATES))
+    return (
+        f"Known predicates, reuse one whenever it fits:\n{known or '(none yet)'}\n\n"
+        f"Turns:\n{turns}"
+    )
+
+
+def resolve_prompt(surface: str, offered: Sequence[str]) -> str:
+    return (
+        f"new predicate: {snake_case(surface)}\n"
+        f"existing predicates:\n{', '.join(offered) or '(none yet)'}"
+    )
+
+
+def shape_claims(parsed: dict[str, Any], n_episodes: int) -> list[dict[str, Any]]:
+    """Validated claim dicts from a parsed model response. Anything doubtful is dropped."""
+    raw = parsed.get("claims")
+    if not isinstance(raw, list):
+        return []
+
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        # Provenance first: a claim we cannot trace back to a turn is unusable, and
+        # guessing an episode for it would corrupt `why()` for every reader after us.
+        index = source_index(item.get("source_index"), n_episodes)
+        if index is None:
+            continue
+        subject = str(item.get("subject") or "").strip()
+        predicate = snake_case(str(item.get("predicate") or ""))
+        obj = str(item.get("object") or "").strip()
+        if not (subject and predicate and obj):
+            continue
+        memory_type = str(item.get("memory_type") or "")
+        out.append(
+            {
+                "subject": subject,
+                "predicate": predicate,
+                "object": obj,
+                # Anything other than an explicit -1 is an assertion. A garbled value
+                # must not be read as a retraction, which would invalidate a live fact.
+                "polarity": -1 if item.get("polarity") == -1 else 1,
+                "memory_type": (
+                    memory_type if memory_type in MEMORY_TYPES else MemoryType.SEMANTIC.value
+                ),
+                "confidence": clamp_confidence(item.get("confidence")),
+                "source_index": index,
+            }
+        )
+    return out
+
+
+def spec_fields(parsed: dict[str, Any]) -> dict[str, str]:
+    # This answer is cached in the registry forever, so a bad field here is a
+    # permanent mistake for that predicate. Any value outside the enum falls back to
+    # the conservative default rather than being coerced into a neighbour.
+    result = dict(PREDICATE_FALLBACK)
+    for field, allowed in (
+        ("cardinality", CARDINALITY),
+        ("volatility", VOLATILITY),
+        ("memory_type", MEMORY_TYPES),
+    ):
+        value = parsed.get(field)
+        if isinstance(value, str) and value in allowed:
+            result[field] = value
+    return result
+
+
+def shape_resolution(parsed: dict[str, Any], offered: Sequence[str]) -> dict[str, Any]:
+    """The most consequential validation here.
+
+    `canonical` is echoed straight into `PredicateSpec.aliases`, so a hallucinated name
+    would permanently reroute every claim using that surface form into a slot nobody
+    looks up. Only a name the caller actually offered is accepted - a model that invents
+    one is treated as having said "new", which is the recoverable direction.
+    """
+    canonical = parsed.get("canonical")
+    if not isinstance(canonical, str) or snake_case(canonical) not in offered:
+        canonical = None
+    else:
+        canonical = snake_case(canonical)
+    return {"canonical": canonical, **spec_fields(parsed)}

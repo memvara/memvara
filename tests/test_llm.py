@@ -104,7 +104,7 @@ def test_exported_from_the_package_without_the_sdk_installed():
     import engram.llm as pkg
 
     assert pkg.NullLLM is NullLLM
-    assert set(pkg.__all__) == {"LLM", "NullLLM", "AnthropicLLM"}
+    assert set(pkg.__all__) == {"LLM", "NullLLM", "AnthropicLLM", "OpenAILLM"}
     with pytest.raises(AttributeError):
         pkg.NotAThing
 

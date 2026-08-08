@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "Bitemporal memory for AI agents. Hybrid retrieval, deterministic contradiction resolution, LLM-free write path."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 
 # Core has exactly one hard dependency. Everything else is opt-in.
 dependencies = ["numpy>=1.24"]

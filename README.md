@@ -452,11 +452,18 @@ Defaults are `HashingEmbedder` + `NullLLM` + `SQLiteStore` — so `Engram()` con
 works with zero configuration. To use a real model:
 
 ```python
-from engram import Engram
-from engram.llm.anthropic import AnthropicLLM      # pip install 'engram[anthropic]'
-
+from engram import AnthropicLLM, Engram          # pip install 'engram[anthropic]'
 mem = Engram("memory.db", llm=AnthropicLLM(model="claude-opus-5"))
+
+from engram import OpenAILLM                     # pip install 'engram[openai]'
+mem = Engram("memory.db", llm=OpenAILLM(model="gpt-4.1"))
 ```
+
+Both are lazy attributes: naming one does not import its SDK, so the default offline
+install stays a two-package install (`engram` and `numpy`, verified in CI). Each backend
+is transport and response-shape only — every rule about what counts as a valid claim is
+shared in `engram/llm/_shape.py`, so the same turn produces the same claim regardless of
+which model wrote it.
 
 ### Concurrency
 
@@ -584,7 +591,7 @@ looking at a top-k, and nothing ever looks again.
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 1,657 tests, offline, no API key
+python3 -m pytest -q                              # 1,680 tests, offline, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison
 PYTHONPATH=. python3 bench/perf.py                # throughput and scaling
