@@ -40,7 +40,7 @@ from engram.telemetry import (
     MemoryRecorder,
 )
 from engram.types import Claim, Derivation, Episode, Scope, utcnow
-from engram.write import WritePipeline
+from engram.write import SalienceGate, WritePipeline
 
 
 class CountingLLM:
@@ -1095,4 +1095,17 @@ def test_an_empty_batch_emits_nothing():
     pipe, store, _ = build(telemetry=rec)
     assert pipe.add([]).episode_ids == []
     assert rec.names() == []
+    store.close()
+
+
+def test_evidence_roles_reaches_the_gate_from_the_pipeline_constructor():
+    """`write_evidence_roles=` on `Engram` works because this parameter is keyword-only
+    here — the facade forwards `write_*` by reading this signature. Pinned so the
+    passthrough cannot be broken by making it positional."""
+    pipe, store, _ = build(evidence_roles=None)
+    assert pipe.gate.evidence_roles is None
+    assert pipe.gate.carries_fact(ep("I just started at Acme", role="melanie"))[0]
+
+    default, _, _ = build()
+    assert default.gate.evidence_roles == SalienceGate.DEFAULT_EVIDENCE_ROLES
     store.close()

@@ -99,8 +99,17 @@ is unusual and worth saying out loud.
 
 ## Phase 8 — Release
 
-- `CHANGELOG.md`, a version policy, and a `1.0` that means the `Store` and `Embedder`
-  protocols are stable.
+- `CHANGELOG.md`, a version policy, and a `1.0` that means the `Store`, `Embedder` and
+  `LLM` protocols are stable. All three, because all three are extension points a closed
+  layer and third-party backends build against — an earlier version of this line said two
+  and disagreed with `CHANGELOG.md`.
+- **The PyPI name `engram` is already taken.** `pip download --no-deps engram` resolves
+  today to an unrelated MIT-licensed rendering/vision library at `0.1.0a1`, so
+  `pip install engram` currently installs someone else's package and `twine upload` under
+  that name will be rejected. This has to be settled before anything else in this phase,
+  and it is the same decision as the commercial brand — see the trademark note above,
+  which this makes concrete rather than hypothetical. `docs/RELEASING.md` lists the
+  options and their costs.
 - **PyPI publish.** Outward-facing and effectively irreversible — a name, once taken and
   published against, cannot be quietly un-published. Requires an explicit decision.
 

@@ -567,7 +567,11 @@ def test_purge_reports_what_it_actually_erased(store, emb):
     put(store, emb, object="Berlin")
     put(store, object="Lisbon", predicate="likes")  # never embedded
     store.add_episode(Episode(content="hello", scope=SCOPE))
-    assert store.purge(SCOPE) == {"claims": 2, "episodes": 1, "embeddings": 1}
+    # `entities` is in the receipt because it is part of the erasure: the entity row
+    # holds a subject's and object's first-seen spelling verbatim. These claims were
+    # written through the store directly, so no entity was ever resolved for them.
+    assert store.purge(SCOPE) == {"claims": 2, "episodes": 1, "embeddings": 1,
+                                  "entities": 0}
 
 
 def test_purge_erases_a_large_scope_in_one_pass(store, emb):
@@ -591,7 +595,7 @@ def test_purge_erases_the_episode_indexes_not_only_the_rows(store, emb):
     ep = turn(store, emb, content="the kafka pipeline is being sunset")
     counts = store.purge(SCOPE)
 
-    assert counts == {"claims": 0, "episodes": 1, "embeddings": 1}
+    assert counts == {"claims": 0, "episodes": 1, "embeddings": 1, "entities": 0}
     assert store.lexical_search_episodes("kafka", [SCOPE], limit=10) == []
     assert store.get_episode_embedding(ep.id) is None
     assert store._db.execute("SELECT COUNT(*) FROM episodes_fts").fetchone()[0] == 0

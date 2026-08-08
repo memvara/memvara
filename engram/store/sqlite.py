@@ -1395,7 +1395,8 @@ class SQLiteStore:
         """
         with self._lock:
             row = self._db.execute(
-                "SELECT sources FROM claims WHERE id=?", (claim_id,)).fetchone()
+                "SELECT tenant, sources FROM claims WHERE id=?", (claim_id,)).fetchone()
+            tenant = row["tenant"] if row is not None else None
             cited = json.loads(row["sources"]) if row is not None and sources else []
             if not self._erase_row("claims", "claims_fts", _CLAIM_VECS, claim_id):
                 return False
@@ -1403,6 +1404,10 @@ class SQLiteStore:
             for episode_id in cited:
                 if self._orphan(episode_id):
                     self._erase_row("episodes", "episodes_fts", _EPISODE_VECS, episode_id)
+            # Same reason as `purge`: the entity row holds the subject's and object's
+            # first-seen spelling verbatim, so leaving it behind erases the claim and
+            # keeps the text. Reference-counted, because one entity is usually shared.
+            self._gc_entities(tenant)
             self._maybe_commit()
         return True
 
@@ -1465,10 +1470,63 @@ class SQLiteStore:
             episodes = self._db.execute(
                 f"DELETE FROM episodes WHERE {where}", params
             ).rowcount
+            entities = self._gc_entities(scope.tenant)
             # `_maybe_commit`, not `commit`: an unconditional commit here would end an
             # enclosing `batch()` early and silently void its rollback guarantee.
             self._maybe_commit()
-        return {"claims": claims, "episodes": episodes, "embeddings": gone}
+        return {"claims": claims, "episodes": episodes, "embeddings": gone,
+                "entities": entities}
+
+    def _gc_entities(self, tenant: str) -> int:
+        """Drop entity rows in `tenant` that no surviving claim refers to.
+
+        Called after an erasure, and it is not housekeeping — it is part of the erasure.
+        `entities.canonical` holds the **first spelling we ever saw** of every subject and
+        object, so a store that erased claims, episodes, vectors and both FTS indexes
+        still had "14 Rue de la Paix, Paris" and "Grüner & Sohn Bestattungen GmbH" sitting
+        in a live row, while `purge()` returned per-table counts as evidence of the
+        erasure and `stats()` reported zero. That is the worst shape a privacy bug can
+        take: the caller is told the data is gone. It survives `VACUUM` and
+        `secure_delete`, because it is a live row rather than freelist residue.
+
+        Reference counting rather than a prefix match on the owner, because the two
+        disagree exactly where it matters. Entity ids are *owner*-scoped (tenant + user)
+        while a purge may be narrower — `purge(session=…)` deleting every entity its owner
+        holds would take rows the user's surviving sessions still use. Counting references
+        is right in all three cases at once: after a tenant purge nothing survives so
+        everything goes, after a user purge only other owners' rows are referenced, and
+        after a session purge the shared rows stay and the session-only ones go.
+
+        The reference is derived from the surviving claim rather than read from its
+        `meta`: `subject_entity`/`object_entity` are only stamped when resolution has
+        something to record, so a claim whose surface form was already canonical carries
+        no key at all and would look like a claim referring to nothing.
+        """
+        from ..entities import entity_id, entity_key
+        from ..types import owner_key
+
+        rows = self._db.execute("SELECT id FROM entities WHERE tenant=?",
+                                (tenant,)).fetchall()
+        if not rows:
+            return 0
+
+        live: set[str] = set()
+        for c in self._db.execute(
+            "SELECT usr, agent, session, subject, object FROM claims WHERE tenant=?",
+            (tenant,),
+        ):
+            owner = owner_key(Scope(tenant, c["usr"], c["agent"], c["session"]))
+            for surface in (c["subject"], c["object"]):
+                if surface:
+                    live.add(entity_id(owner, entity_key(surface)))
+
+        doomed = [r["id"] for r in rows if r["id"] not in live]
+        if doomed:
+            self._db.executemany(
+                "DELETE FROM entities WHERE tenant=? AND id=?",
+                [(tenant, eid) for eid in doomed],
+            )
+        return len(doomed)
 
     # -- learned schema ------------------------------------------------------
 

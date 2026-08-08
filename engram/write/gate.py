@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import re
 
+from typing import Iterable
+
 from ..types import Episode
 
 # `[^\W_]` is "word character but not underscore", which keeps accented and non-Latin
@@ -91,11 +93,28 @@ class SalienceGate:
     asserted in tests, so a gate decision is never a black box.
     """
 
-    def __init__(self, *, min_tokens: int = 2) -> None:
+    #: Roles whose turns count as evidence by default. Just the user, because assistant
+    #: text restates and speculates — see `carries_fact`.
+    DEFAULT_EVIDENCE_ROLES = frozenset({"user"})
+
+    def __init__(self, *, min_tokens: int = 2,
+                 evidence_roles: Iterable[str] | None = DEFAULT_EVIDENCE_ROLES) -> None:
         # A single bare token has no predicate structure to extract; it is almost always
         # an answer fragment that only means something with the preceding question, which
         # we do not have here.
         self.min_tokens = min_tokens
+        # `None` means "every role is evidence", which is the multi-party human case:
+        # a transcript between two named people has no assistant in it, and the default
+        # silently drops literally every turn. That is not a tuning inconvenience — a
+        # LOCOMO-shaped conversation extracts *zero* claims and makes *zero* model calls
+        # no matter which LLM is configured, because a gate failure skips tier 2 as well.
+        # It stays opt-in rather than becoming a heuristic on the role string, because
+        # "is this speaker a person" is a property of the transcript that only the caller
+        # knows: `role="assistant"` and `role="melanie"` are indistinguishable here.
+        self.evidence_roles = (
+            None if evidence_roles is None
+            else frozenset(r.strip().lower() for r in evidence_roles)
+        )
 
     def carries_fact(self, ep: Episode) -> tuple[bool, str]:
         content = (ep.content or "").strip()
@@ -103,9 +122,10 @@ class SalienceGate:
             return False, "no_content"
 
         role = (ep.role or "user").strip().lower()
-        if role != "user":
+        if self.evidence_roles is not None and role not in self.evidence_roles:
             # Assistant text restates or speculates; treating it as evidence is how a
-            # memory store ends up believing its own hallucinations.
+            # memory store ends up believing its own hallucinations. Widen with
+            # `evidence_roles=` for a transcript whose speakers are all people.
             return False, f"{_slug(role)}_turn"
 
         tokens = _normalize(content).split()

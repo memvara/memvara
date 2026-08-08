@@ -1,0 +1,342 @@
+# Deploying engram
+
+Three ways to run it, in increasing order of ceremony: as a library inside your process,
+as an MCP server your editor launches, and in a container. The library is the supported
+integration point — the other two are adapters over it — so start there and move outward
+only when something forces you to.
+
+Then read [Operations](#operations). Everything in that section is something a first
+deployment gets wrong, and most of it is silent when it goes wrong, which is the worst
+combination a memory layer can have.
+
+---
+
+## 1. As a library
+
+```bash
+pip install -e .                   # numpy, and nothing else
+```
+
+Not `pip install engram`. Nothing has been published yet, and the name `engram` on PyPI
+already belongs to an unrelated differentiable-rendering library — see
+[`RELEASING.md`](RELEASING.md#the-name-on-pypi-is-taken). Until that is resolved, install
+from this tree or from a wheel you built (`python3 -m build --wheel`).
+
+```python
+from engram import Engram
+
+mem = Engram("/var/lib/myapp/memory.db", user="alice")
+mem.add("I live in Berlin")
+print(mem.recall("where do they live?"))
+mem.close()                        # or use it as a context manager
+```
+
+`Engram()` with no path is an in-memory store that dies with the process. That is right
+for tests and wrong for everything else, and nothing will tell you which one you got.
+
+**The parent directory has to exist.** SQLite does not create it, and the error you get
+is `sqlite3.OperationalError: unable to open database file` — which reads like a
+permissions problem and is usually a missing `mkdir -p`.
+
+**One `Engram` per process is enough.** It is synchronous and thread-safe for reads (a
+per-thread read connection), so a web application should build one at startup and use
+`mem.scope(user=...)` per request rather than opening the store per request. For asyncio,
+wrap it once: `AsyncEngram(Engram(...))`.
+
+**With no `llm=`, most of a conversation is not stored.** The default `NullLLM` runs the
+deterministic fast path and nothing else, so `add()` keeps only the sentence forms the
+rule extractor recognises and drops the rest. It says so once, loudly, as a
+`DegradedExtractionWarning`, and `WriteReceipt.unextracted` counts the dropped turns on
+every write. `remember()` is unaffected — a structured write never needed a model.
+
+---
+
+## 2. As an MCP server
+
+```bash
+ENGRAM_DB=~/.engram/memory.db python3 -m engram.server
+```
+
+JSON-RPC 2.0 over stdio, eight tools, no SDK dependency. It refuses to start without
+`ENGRAM_DB` and prints the client configuration block instead — so if you have arrived
+here because your client said the server failed, run the command by hand and read what it
+says.
+
+### Claude Desktop
+
+`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS,
+`%APPDATA%\Claude\claude_desktop_config.json` on Windows. This is the block the server
+itself prints when `ENGRAM_DB` is unset, which makes it the one to trust if this document
+ever drifts from the code:
+
+```json
+{
+  "mcpServers": {
+    "engram": {
+      "command": "python3",
+      "args": ["-m", "engram.server"],
+      "env": {
+        "ENGRAM_DB": "/absolute/path/to/memory.db",
+        "ENGRAM_USER": "your-name"
+      }
+    }
+  }
+}
+```
+
+Two things about `command` that cost people an afternoon each. It is executed without a
+shell and without your login profile, so `python3` resolves against a `PATH` that is not
+your terminal's — if engram lives in a virtualenv, give the absolute interpreter path
+(`/path/to/venv/bin/python3`) rather than hoping. And `~` is expanded by the server for
+`ENGRAM_DB` specifically, because that is what people type in a JSON file; it is *not*
+expanded in `command`.
+
+### Claude Code
+
+```bash
+claude mcp add engram --env ENGRAM_DB=$HOME/.engram/memory.db --env ENGRAM_USER=alice \
+  -- python3 -m engram.server
+```
+
+or the same `mcpServers` object in a project-local `.mcp.json`. Any MCP client works; the
+transport is stdio and the configuration is entirely environment.
+
+### The environment
+
+| variable | meaning |
+|---|---|
+| `ENGRAM_DB` | **required.** Path to the SQLite file, created on first use. `:memory:` for a smoke test that forgets everything on exit. |
+| `ENGRAM_USER` | who this server remembers for. Unset means the whole tenant. |
+| `ENGRAM_TENANT` | isolation boundary above the user. Default `default`. |
+| `ENGRAM_AGENT`, `ENGRAM_SESSION` | narrow further. Leave unset for durable facts — memory written at session scope is invisible to the next session. |
+| `ENGRAM_LLM` | `none` (default, offline) or `anthropic` (needs `ANTHROPIC_API_KEY` and `engram[anthropic]`). |
+| `ENGRAM_READ_ONLY` | `1` hides every tool that writes. |
+
+The scope is bound at startup and **cannot be changed by a tool call**. That is the
+security property of the stdio transport: the process is the user, because the client
+launched it with the user's environment, so there is no caller-supplied scope string for
+a model to be talked into changing.
+
+`consolidate`, `purge`, `reset` and `erase` are deliberately not tools — see
+[Consolidation](#consolidation-is-a-job-you-have-to-schedule) for the half of that you
+still have to run.
+
+---
+
+## 3. In Docker
+
+```bash
+docker build -t engram-mcp:0.1.0 .
+docker volume create engram-data
+```
+
+```bash
+docker run --rm -i \
+  -v engram-data:/data \
+  -e ENGRAM_DB=/data/memory.db \
+  -e ENGRAM_USER=alice \
+  engram-mcp:0.1.0
+```
+
+**`-i`, never `-it`.** The container's stdin and stdout *are* the MCP transport. A TTY
+adds line discipline — input echo, and `\n` → `\r\n` on the way out — both of which
+corrupt a newline-framed JSON stream. Docker refuses the combination outright when stdin
+is a pipe (`cannot attach stdin to a TTY-enabled container because stdin is not a
+terminal`), which is the friendlier of the two ways to find out.
+
+There is no port, no `EXPOSE` and no `HEALTHCHECK`, and the reasoning for each is in the
+`Dockerfile`. The short version: a healthcheck runs a *second* process, and a second
+process cannot say anything about the one holding stdio. The pipe is the liveness signal.
+
+### From an MCP client
+
+```json
+{
+  "mcpServers": {
+    "engram": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-v", "engram-data:/data",
+        "-e", "ENGRAM_DB=/data/memory.db",
+        "-e", "ENGRAM_USER=alice",
+        "engram-mcp:0.1.0"
+      ]
+    }
+  }
+}
+```
+
+Note where the configuration went. An MCP client's `"env"` block sets variables for the
+process it launches — which here is the `docker` CLI, not the server. Variables have to
+cross into the container explicitly, either as `-e NAME=value` in `args` (above), or as a
+bare `-e NAME` which forwards the value from the client's own environment:
+
+```json
+"args": ["run", "--rm", "-i", "-v", "engram-data:/data", "-e", "ENGRAM_DB", "-e", "ENGRAM_USER", "engram-mcp:0.1.0"],
+"env": {"ENGRAM_DB": "/data/memory.db", "ENGRAM_USER": "alice"}
+```
+
+Both work. The first is easier to read six months later.
+
+### Hardening
+
+Verified working with a real write:
+
+```bash
+docker run --rm -i --read-only --cap-drop=ALL --security-opt no-new-privileges \
+  -v engram-data:/data -e ENGRAM_DB=/data/memory.db engram-mcp:0.1.0
+```
+
+The image runs as uid 10001 and has no `pip` on `PATH` — both the venv's and the base
+image's are removed at build time. Treat that as a speed bump rather than a boundary: it
+stops the image quietly acquiring a dependency, and it does not stop anyone with a shell
+in there from fetching a wheel by hand. A read-only root filesystem is compatible because
+the only thing that writes is the store, and the store is on the volume.
+
+### Image size
+
+`python:3.13-slim`, multi-stage, linux/arm64: **292 MB unpacked, 63.2 MB to pull.**
+linux/amd64 pulls 64.0 MB. That splits as ~150 MiB of official Python base image, 62 MiB
+of numpy (35 of numpy plus 27 of the OpenBLAS it bundles), and **1.4 MiB of engram**.
+There is no dependency tree to trim; the base image is the image. Dropping pip out of the
+venv before it is copied into the runtime stage is worth 17 MB unpacked and 3.7 MB
+compressed, and is the only trim here that measurably moved the number.
+
+An Alpine base is the one lever that moves it — 169 MB unpacked / 38.6 MB pulled, a 39%
+saving, by changing `slim` to `alpine` in both `FROM` lines and `useradd --create-home
+--uid 10001 engram` to `adduser -D -u 10001 engram`. It is not the default for two
+measured reasons. Musl was slower on a local write/search workload inside the image (400
+`remember()` 140 → 165 ms, 200 `search()` 618 → 659 ms, best of three on one loaded
+machine — treat as "a few percent", not as a benchmark). And musl closes doors: there are
+no musllinux wheels for torch, so `engram[local-embed]` cannot be installed on top of an
+Alpine image at all, while `engram[anthropic]` and `engram[openai]` can.
+
+---
+
+## Operations
+
+### Where the database goes
+
+The store is **more than one file**, and this is the single most common deployment
+mistake. After a write to `memory.db` the directory holds:
+
+| file | what it is | losing it costs |
+|---|---|---|
+| `memory.db` | claims, episodes, predicates, the FTS index | everything |
+| `memory.db.vecs` | the mmapped vector matrix | every embedding — search degrades to BM25 only, silently |
+| `memory.db.embedder.json` | which embedder wrote those vectors | the ability to detect a model swap, which then goes undetected |
+| `memory.db-wal`, `memory.db-shm` | SQLite write-ahead log, while open | recently committed writes |
+
+So **mount, back up and copy the directory, not the file.** A Docker bind mount of
+`memory.db` alone persists the rows and throws away the vectors on every restart, and
+nothing raises: the store re-opens, BM25 keeps working, and semantic recall quietly stops.
+
+Two further notes on volumes:
+
+- A **named volume** (`-v engram-data:/data`) is the recommended shape. It is owned by uid
+  10001 because the image pre-creates `/data` with that owner, and Docker seeds a new
+  named volume from the image.
+- A **bind mount** (`-v /host/path:/data`) inherits the host directory's ownership
+  instead, so the container's user usually cannot write it. Run with
+  `--user "$(id -u):$(id -g)"` or `chown` the host directory. On Docker Desktop for macOS
+  and Windows, be aware that SQLite's file locking crosses a virtualised filesystem here;
+  a named volume avoids the question entirely.
+
+**Backups.** `cp memory.db` while a process has it open can capture a torn database,
+because the committed tail is in the `-wal`. Either stop the writer, or use
+`sqlite3 memory.db ".backup out.db"` — and copy `memory.db.vecs` and
+`memory.db.embedder.json` alongside it either way. Copying the database without the
+vectors produces a restore that looks healthy and has lost its vector index.
+
+### Consolidation is a job you have to schedule
+
+```python
+mem.consolidate()   # {'decayed': 128, 'merged': 4, 'promoted': 2}
+```
+
+It decays salience toward a floor, merges near-duplicate claims into one deterministic
+survivor, and promotes repeatedly observed episodic claims to semantic ones. It is
+idempotent, and it runs windowed — committing every 500 rows rather than holding one
+transaction across the sweep — so it does not lock out the writes happening beside it.
+
+**It does not run itself, on purpose.** Three reasons, in the order they bite:
+
+1. It is a full sweep, so it is linear in store size — roughly 460 ms per 8,000 claims on
+   one developer machine. A library that fired that off on a timer inside your process
+   would be spending your CPU on a schedule you did not choose.
+2. It is a *scope-wide* operation. Deciding when a tenant's memory gets rewritten is an
+   operator's call, not a call site's.
+3. Nothing about it is required for correctness. Skipping it costs ranking quality, not
+   answers.
+
+So run it from cron, a Celery beat, a systemd timer — anything you control. Nightly is a
+reasonable default for a store that sees daily use; hourly if writes are heavy. It is
+deliberately **not** an MCP tool, because a model handed a tool will call it in a loop.
+
+```python
+# consolidate.py, run nightly
+from engram import Engram
+
+with Engram("/var/lib/myapp/memory.db") as mem:
+    print(mem.consolidate())
+```
+
+Watch `consolidate.merged` in telemetry if you have a recorder wired up: it is emitted
+**at zero**, so "nothing to merge" stays distinguishable from "the scheduler stopped
+running", which is the failure this whole paragraph exists to make visible.
+
+### Changing the embedder
+
+Vectors written by one embedder are meaningless to another, and there are two failure
+shapes depending on whether the widths happen to match.
+
+**Different width.** `Engram()` raises `EmbedderMismatchError` at construction, before
+anything writes. This is the case that used to be a disaster: installing
+`engram[local-embed]` changes what `default_embedder()` returns from a 512-dimensional
+hashing embedder to a 384-dimensional model, so following the README's own upgrade advice
+made every read raise while every write kept succeeding — a store that grows and cannot
+be searched.
+
+**Same width, different model.** Nothing can raise, because nothing is wrong
+dimensionally and every similarity is nonsense. You get an `EmbedderChangedWarning`,
+which is only possible because `memory.db.embedder.json` records the name.
+
+Either way the fix is one migration, which re-encodes every claim *and* every episode and
+rewrites the fingerprint:
+
+```python
+mem = Engram("memory.db", embedder=NewEmbedder(), reembed=True)   # at open
+n = mem.reembed(NewEmbedder())                                    # or later; returns claims re-encoded
+```
+
+Cost is one encode per claim, plus one per episode, and zero model calls unless your
+embedder makes them. Budget for it: against a hosted embedder this is a network round trip
+per batch across the whole store. It is not scoped and cannot be — the vector matrix is
+one index shared by every tenant, so a partial migration leaves exactly the mixed-width
+store the error exists to prevent.
+
+### Scope, and what a shared store isolates
+
+`tenant > user > agent > session`, with inheritance downward and no leakage sideways. A
+session-scoped query also sees that user's durable memory, and never a sibling session's,
+another agent's, or another tenant's. Scope filters fail **closed** — a scope that
+resolves to nothing matches nothing, rather than degrading into an unfiltered query across
+every user.
+
+For a server process, build one `Engram` and take `mem.scope(user=...)` per request. A
+`ScopedEngram` is a binding, not a second store, so making one per request is free.
+
+### Deletion, when someone asks for it
+
+`forget()` and `delete()` **retire**: the claim stops answering present-tense queries and
+`history()` still sees it. That is the right default for correcting a belief and the wrong
+answer to a GDPR Article 17 request, because the text is still on disk.
+
+`erase(claim_id, sources=True)` and `purge()` **erase**, irreversibly, including the FTS
+entry (which stores the tokens directly) and the embedding (which leaks content under
+inversion). Both return per-table counts as evidence. Neither is reachable from the MCP
+server, deliberately.
+
+Note that erasure removes rows; it does not shrink the file. Run `VACUUM` if the on-disk
+footprint of deleted data matters to you as well as its readability.

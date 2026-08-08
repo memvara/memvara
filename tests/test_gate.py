@@ -175,3 +175,55 @@ def test_scope_does_not_affect_the_decision(gate):
     a = ep("I live in Berlin.", scope=Scope("t", "u1"))
     b = ep("I live in Berlin.", scope=Scope("t", "u2", "agent", "sess"))
     assert gate.carries_fact(a) == gate.carries_fact(b)
+
+
+# --- who counts as evidence -----------------------------------------------------
+
+def test_the_default_still_treats_only_the_user_as_evidence():
+    """Unchanged, and the reason is unchanged: assistant text restates and speculates,
+    and believing it is how a store ends up believing its own hallucinations."""
+    gate = SalienceGate()
+    assert gate.carries_fact(ep("I live in Berlin", role="assistant")) == (
+        False, "assistant_turn")
+    assert gate.carries_fact(ep("I live in Berlin"))[0] is True
+
+
+def test_a_two_person_transcript_extracts_nothing_under_the_default():
+    """The failure this option exists for, pinned so it cannot be mistaken for a bug
+    later. LOCOMO and every other multi-party human dialogue has no "user" role in it —
+    every turn is a named person — so the default drops all of them. And because a gate
+    failure skips tier 2 as well, no model is consulted either: zero claims, zero calls,
+    whatever LLM is configured."""
+    gate = SalienceGate()
+    for speaker in ("caroline", "melanie"):
+        assert gate.carries_fact(ep("I just started at Acme", role=speaker)) == (
+            False, f"{speaker}_turn")
+
+
+def test_evidence_roles_none_admits_every_speaker():
+    gate = SalienceGate(evidence_roles=None)
+    for speaker in ("caroline", "melanie", "assistant", "user"):
+        assert gate.carries_fact(ep("I just started at Acme", role=speaker))[0] is True
+
+
+def test_evidence_roles_can_name_the_speakers_that_count():
+    """Naming them rather than opening the gate entirely is the useful middle: in a
+    transcript where an assistant is also present, only the humans are evidence."""
+    gate = SalienceGate(evidence_roles={"caroline", "melanie"})
+    assert gate.carries_fact(ep("I just started at Acme", role="caroline"))[0] is True
+    assert gate.carries_fact(ep("That sounds like a big change", role="assistant")) == (
+        False, "assistant_turn")
+
+
+def test_evidence_roles_are_matched_case_and_whitespace_insensitively():
+    """`role` comes off a transcript, not out of an enum."""
+    gate = SalienceGate(evidence_roles={"  Caroline "})
+    assert gate.carries_fact(ep("I just started at Acme", role="CAROLINE"))[0] is True
+
+
+def test_widening_the_gate_does_not_disable_the_other_rules():
+    """It decides *who* is evidence, not *what* counts as a fact. An acknowledgement
+    from a named human is still an acknowledgement."""
+    gate = SalienceGate(evidence_roles=None)
+    assert gate.carries_fact(ep("ok thanks", role="melanie")) == (False, "ack_only")
+    assert gate.carries_fact(ep("how are you?", role="melanie")) == (False, "question")

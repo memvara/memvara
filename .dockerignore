@@ -1,0 +1,19 @@
+# Deny everything, then name what the build actually needs. The allow-list direction is
+# deliberate: a deny-list forgets, and the things it forgets here are `.git` (the whole
+# history, in every layer that touches the context), `.coverage`, and — the one that
+# matters — any `memory.db` a developer left in the tree. A memory store is user data,
+# and shipping one inside a published image is a data leak that no later `RUN rm` undoes,
+# because the file is already in the layer beneath it.
+*
+
+# `pyproject.toml` names `readme` and `license-files`, so hatchling fails the build
+# without these two present; they are not optional niceties.
+!pyproject.toml
+!README.md
+!LICENSE
+!engram
+
+# Byte-compiled from the host, and possibly for a different interpreter than the image
+# runs. `pip install` compiles fresh inside the builder.
+engram/**/__pycache__
+engram/**/*.pyc

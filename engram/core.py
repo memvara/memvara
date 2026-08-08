@@ -41,6 +41,7 @@ from .embed.fingerprint import (
     write_fingerprint,
 )
 from .llm import LLM, NullLLM
+from .redact import Redactor, redact_episode
 from .retrieve import EpisodeResult, HybridRetriever, Retrieved
 from .schema import PredicateRegistry
 from .store import SQLiteStore, Store
@@ -210,6 +211,7 @@ class Engram:
         agent: str | None = None,
         session: str | None = None,
         telemetry: Recorder | None = None,
+        redactor: Redactor | None = None,
         reembed: bool = False,
         **tuning: Any,
     ) -> None:
@@ -232,6 +234,19 @@ class Engram:
         # win where they are given, which is how one subsystem gets sent somewhere else.
         write_kw.setdefault("telemetry", telemetry)
         read_kw.setdefault("telemetry", telemetry)
+        write_kw.setdefault("redactor", redactor)
+        #: Rewrites text on its way in, or `None` — the default, and again a fast path
+        #: rather than a no-op object. Held here as well as handed to the pipeline
+        #: because `_write_claim` stores source turns itself, without going through it.
+        #: See `engram.redact`.
+        #:
+        #: Read back out of `write_kw` rather than from the parameter, which is where it
+        #: differs from `telemetry` deliberately. Sending metrics to a second sink is a
+        #: reasonable thing to want; running two redaction policies in one `Engram` is
+        #: not, and `write_redactor=` setting the pipeline's and leaving this one `None`
+        #: would spell a privacy control that covers `add()` and silently skips the
+        #: `remember(sources=...)` door. One policy per instance, however it is spelled.
+        self.redactor = write_kw["redactor"]
 
         self.store = store if store is not None else SQLiteStore(path or ":memory:")
         self.embedder = embedder if embedder is not None else default_embedder()
@@ -596,6 +611,14 @@ class Engram:
         today.
         """
         episodes = self._cite(claim, sources)
+        if self.redactor is not None:
+            # The other door into `add_episode`. `remember(sources=[Episode(...)])`
+            # writes turns here rather than through `WritePipeline`, so without this the
+            # seam would hold for `add()` and leak for the call that exists to attach
+            # provenance to an imported memory. Before the store and before
+            # `_index_episodes` encodes it, for the reasons in `engram.redact`.
+            for ep in episodes:
+                redact_episode(self.redactor, ep)
         batch = getattr(self.store, "batch", None)
         with (batch() if batch is not None else nullcontext()):
             for ep in episodes:

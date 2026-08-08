@@ -415,7 +415,7 @@ omitted below for readability.
 
 ```python
 mem = Engram(path=":memory:", *, store=, embedder=, llm=, registry=, telemetry=,
-             tenant=, user=, agent=, session=)
+             redactor=, tenant=, user=, agent=, session=)
 
 # write
 mem.add(messages, *, role="user", ts=None)        -> WriteReceipt
@@ -613,8 +613,14 @@ looking at a top-k, and nothing ever looks again.
   parameters (top-k, threshold, chitchat ratio) that the real package does not expose.
   Both share one extraction oracle, so both isolate architecture from model quality — and
   neither says anything about end-to-end answer quality.
-- **No LOCOMo / LongMemEval numbers yet.** Those need network access and an API key.
-  The harness is the natural next step, not a completed result.
+- **No LOCOMO / LongMemEval numbers yet — the harness exists, the key does not.**
+  `bench/locomo.py` and `bench/longmemeval.py` load both datasets, and everything except
+  the model call is exercised offline. A full LOCOMO run is ~$17.50 on `claude-opus-5`;
+  LongMemEval is ~$5. Until those run, every comparative number here is self-authored.
+  The harness reports a `none` / `memory` / `full` triple on purpose: a memory score with
+  no reader-only floor and no whole-haystack ceiling beside it is uninterpretable, and
+  stuffing the transcript into the reader is measurable as `full`, which is labelled as a
+  reader ceiling rather than a result.
 - **The vector index is exact and in-process.** A numpy matmul over the candidate set —
   correct and fast to roughly a million claims, at which point the `Store` protocol is
   where pgvector or Qdrant goes.
@@ -633,8 +639,19 @@ looking at a top-k, and nothing ever looks again.
 - **No REST server yet** — MCP over stdio is the shipped remote surface. The library is
   the supported integration point, and framework adapters (LangChain, LlamaIndex, CrewAI)
   are not written.
-- **No encryption at rest and no PII redaction hook.** `purge()` and `erase()` cover the
-  deletion half of a privacy story; the storage half is the deployment's problem today.
+- **No encryption at rest.** `purge()`, `erase()` and the redaction hook cover the
+  deletion and ingestion halves of a privacy story; the storage half is the deployment's
+  problem, and full-disk encryption is the honest answer today. It is not laziness:
+  SQLCipher works here — measured, +43–48% on writes, search unchanged, and FTS5 keeps
+  working because page-level encryption sits *beneath* SQLite — but the mmap-backed
+  `.vecs` sidecar stays plaintext outside that boundary, and a plaintext vector is a
+  confirmation oracle. Encoding a guess and taking the cosine against that file returns
+  exactly 1.0000 for the right text and 0.87 for a one-digit-different phone number, so
+  it is not merely confirmable, it is hill-climbable. Encrypting the text and not the
+  vectors would be theatre.
+- **The built-in redactor is not compliance-grade** and says so in its own docstring. It
+  is a default, not a product: the seam is the deliverable, and a serious deployment
+  brings its own `Redactor`.
 
 ---
 

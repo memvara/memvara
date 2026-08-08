@@ -761,3 +761,79 @@ def test_simulation_costs_no_model_calls(mem):
             calls += mem.remember(
                 "user", "works_at", rng.choice(EMPLOYERS[employer])).llm_calls
     assert calls == 0
+
+
+# --- erasure reaches the entity table -------------------------------------------
+
+def test_purge_erases_the_verbatim_text_held_in_the_entity_table():
+    """The bug this pins was the worst shape a privacy bug can take: `purge()` returned
+    per-table counts as evidence of the erasure, `stats()` reported zero, and the
+    entity table still held the first-seen spelling of every subject and object —
+    a street address and a company name, in a live row that survives VACUUM."""
+    mem = Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+    mem.remember("user", "works_at", "Grüner & Sohn Bestattungen GmbH")
+    mem.remember("user", "lives_in", "14 Rue de la Paix, Paris")
+    assert mem.store.all_entities("default"), "nothing to erase; test is vacuous"
+
+    counts = mem.purge()
+
+    assert mem.store.all_entities("default") == []
+    # Counted, so the receipt evidences what it claims to.
+    assert counts["entities"] >= 2
+    mem.close()
+
+
+def test_purging_one_user_leaves_another_users_entities_alone():
+    """Entity ids are owner-scoped, so two users holding the same employer hold two
+    rows. Erasing one must not take the other — over-deleting here would silently
+    degrade a tenant every time one of its users exercised a deletion right."""
+    mem = Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM())
+    mem.remember("user", "works_at", "Acme Corp", user="alice")
+    mem.remember("user", "works_at", "Acme Corp", user="bob")
+
+    mem.purge(user="alice")
+
+    left = [i for i, _, _ in mem.store.all_entities("default")]
+    assert not any("\x1falice\x1f" in i for i in left)
+    assert any("\x1fbob\x1f" in i for i in left)
+    mem.close()
+
+
+def test_erasing_a_claim_takes_an_entity_no_surviving_claim_cites():
+    mem = Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+    written = mem.remember("user", "lives_in", "14 Rue de la Paix, Paris")
+
+    assert mem.erase(written.added[0].id, sources=True)
+
+    assert not any(c == "14 Rue de la Paix, Paris"
+                   for _, c, _ in mem.store.all_entities("default"))
+    mem.close()
+
+
+def test_erasing_a_claim_keeps_an_entity_another_claim_still_cites():
+    """Reference counting, not a prefix match. One entity is usually shared, and
+    erasing a row out from under a live claim would lose the identity that makes its
+    contradictions resolve."""
+    mem = Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+    doomed = mem.remember("user", "works_at", "Acme Corp")
+    mem.remember("colleague", "works_at", "Acme Corp")
+
+    mem.erase(doomed.added[0].id, sources=True)
+
+    assert any(c == "Acme Corp" for _, c, _ in mem.store.all_entities("default"))
+    mem.close()
+
+
+def test_a_session_scoped_purge_keeps_entities_the_user_still_uses():
+    """A purge narrower than the owner. Deleting every entity the owner holds would be
+    the easy implementation and would take rows the surviving sessions depend on."""
+    mem = Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+    mem.remember("user", "works_at", "Acme Corp", session="s1")
+    mem.remember("user", "lives_in", "Berlin", session="s2")
+
+    mem.purge(user="alice", session="s1")
+
+    canon = {c for _, c, _ in mem.store.all_entities("default")}
+    assert "Berlin" in canon, "s2's entity was collateral damage"
+    assert "Acme Corp" not in canon, "s1's entity outlived the purge"
+    mem.close()

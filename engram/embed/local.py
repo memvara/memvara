@@ -14,7 +14,18 @@ DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 class LocalEmbedder:
     def __init__(self, model: str = DEFAULT_MODEL) -> None:
-        from sentence_transformers import SentenceTransformer  # noqa: PLC0415
+        try:
+            from sentence_transformers import SentenceTransformer  # noqa: PLC0415
+        except ImportError as exc:
+            # Naming the extra matters more here than anywhere else it is done: this is
+            # the class a user reaches for after reading that the default embedder is a
+            # lexical fallback, so a bare ModuleNotFoundError lands on someone who has
+            # just been told to fix exactly this and is not told how.
+            raise ImportError(
+                "LocalEmbedder needs the `sentence-transformers` package: "
+                "pip install 'engram[local-embed]'. The default HashingEmbedder needs "
+                "nothing and works offline, at the cost of semantic recall."
+            ) from exc
 
         self._m = SentenceTransformer(model)
         self.dim = int(self._m.get_sentence_embedding_dimension())

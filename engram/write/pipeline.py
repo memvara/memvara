@@ -51,10 +51,11 @@ import warnings
 from contextlib import nullcontext
 from datetime import datetime
 from time import perf_counter
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from ..embed.base import Embedder
 from ..llm.base import LLM
+from ..redact import Redactor, redact_claim, redact_episode
 from ..schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
 from ..store.base import Store
 from ..telemetry import (
@@ -95,18 +96,25 @@ class WritePipeline:
     def __init__(self, store: Store, embedder: Embedder, registry: PredicateRegistry,
                  llm: LLM, *, near_dup_threshold: float = 0.97,
                  reinforce_bump: float = 0.25,
-                 telemetry: Recorder | None = None) -> None:
+                 evidence_roles: Iterable[str] | None = SalienceGate.DEFAULT_EVIDENCE_ROLES,
+                 telemetry: Recorder | None = None,
+                 redactor: Redactor | None = None) -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
         self.llm = llm
         self.near_dup_threshold = near_dup_threshold
+        #: Rewrites text before anything durable happens to it, or `None` — the default,
+        #: and a fast path rather than a no-op object on the same terms as `telemetry`:
+        #: one `is not None` test per call, not per turn. See `engram.redact` for why
+        #: this has to run ahead of the content hash and not merely ahead of the disk.
+        self.redactor = redactor
         #: Aggregate metrics sink, or `None`. `None` is the fast path and the default:
         #: every emission below is guarded by an `is not None` test and everything a
         #: metric needs computed - a script classification, a tag dict - is computed
         #: inside that guard. See `engram.telemetry`.
         self.telemetry = telemetry
-        self.gate = SalienceGate()
+        self.gate = SalienceGate(evidence_roles=evidence_roles)
         self.fast = FastExtractor(registry)
         self.reconciler = Reconciler(store, registry)
         self.reconciler.reinforce_bump = reinforce_bump
@@ -132,6 +140,14 @@ class WritePipeline:
             receipt.latency_ms = (perf_counter() - t0) * 1000.0
             return receipt
         rec = self.telemetry
+        if self.redactor is not None:
+            # First, ahead of everything, because everything else in this method is
+            # downstream of the text: `ep.hash` is a stored digest of it, `add_episode`
+            # writes it and indexes it for BM25, `encode` may post it to a hosted
+            # embedder and `extract` may post it to a model provider. Redacting after
+            # any one of those is not redacting.
+            for ep in episodes:
+                redact_episode(self.redactor, ep)
 
         # -- candidate production, with no transaction open ----------------------
         # Everything slow lives here: `_tier2` makes a network round trip to a model and
@@ -156,6 +172,15 @@ class WritePipeline:
         for ep in kept:
             candidates.extend(fast_claims.get(ep.id, ()))
             candidates.extend(llm_claims.get(ep.id, ()))
+        if self.redactor is not None:
+            # Belt and braces, and cheap: these were extracted from turns the hook
+            # already cleaned, so it should find nothing. It runs anyway so that "every
+            # claim in the store passed the redactor exactly once" holds for all four
+            # write paths rather than for three of them plus an argument about
+            # transitivity — and so a rule tightened for claim objects but not for prose
+            # still applies where the value actually lands.
+            for claim in candidates:
+                redact_claim(self.redactor, claim)
 
         # -- the one transaction that spans claim state --------------------------
         # Still one transaction rather than one per claim: a transcript writes a claim
@@ -199,6 +224,11 @@ class WritePipeline:
         t0 = perf_counter()
         now = utcnow()
         receipt = WriteReceipt()
+        if self.redactor is not None:
+            # The door `remember()`, `supersede()` and the importer come through, where
+            # the value arrives as a structured field and never was a conversation turn.
+            # Before `reconciler.apply`, which derives both keys from these strings.
+            redact_claim(self.redactor, claim)
         if claim.derivation is Derivation.LLM_EXTRACT and not claim.extractor:
             # Still at the dataclass default, so nobody claimed authorship: this came in
             # through the API and the provenance should say so.

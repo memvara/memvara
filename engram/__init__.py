@@ -32,6 +32,7 @@ What it does differently from mem0 and friends:
 from .aio import AsyncEngram
 from .consolidate import Consolidator
 from .entities import EntityRegistry, EntityResolution, EntitySpec, entity_key
+from .redact import PatternRedactor, Redactor
 from .core import (
     DegradedExtractionWarning,
     EmbedderChangedWarning,
@@ -47,7 +48,13 @@ from .embed import (
     default_embedder,
 )
 from .llm import LLM, NullLLM
-from .retrieve import FloorReport, HybridRetriever, calibrate_min_score
+from .retrieve import (
+    EpisodeResult,
+    FloorReport,
+    HybridRetriever,
+    Retrieved,
+    calibrate_min_score,
+)
 from .schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
 from .store import SQLiteStore, Store
 from .types import (
@@ -79,17 +86,18 @@ __all__ = [
     "Store", "SQLiteStore",
     "Embedder", "HashingEmbedder", "CachedEmbedder", "default_embedder",
     "EmbedderFingerprint",
-    "LLM", "NullLLM",
+    "LLM", "NullLLM", "AnthropicLLM", "OpenAILLM",
     # diagnostics: importable so they can be filtered or caught by category
     "DegradedExtractionWarning", "EmbedderChangedWarning", "EmbedderMismatchError",
     # subsystems
     "WritePipeline", "SalienceGate", "FastExtractor", "Reconciler",
-    "HybridRetriever",
+    "HybridRetriever", "Retrieved", "EpisodeResult",
     "EntityRegistry", "EntityResolution", "EntitySpec", "entity_key",
     "backfill_entities",
-    "Recorder", "NullRecorder", "MemoryRecorder", "Consolidator",
+    "Recorder", "NullRecorder", "MemoryRecorder",
+    "Redactor", "PatternRedactor", "Consolidator",
     # relevance floors are measured per deployment, never assumed
-    "calibrate_min_score", "FloorReport", "OpenAILLM",
+    "calibrate_min_score", "FloorReport",
     "__version__",
 ]
 

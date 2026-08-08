@@ -26,7 +26,9 @@ local-embed = ["sentence-transformers>=3.0"]
 http = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2.6"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "coverage>=7.0"]
 # Only for bench/mem0_real.py, the head-to-head against the real package.
-bench = ["mem0ai>=2.0"]
+# `nltk` only for `--stem`: published LOCOMO F1 uses Porter stemming, so an
+# unstemmed number is not comparable to the papers.
+bench = ["mem0ai>=2.0", "nltk>=3.8"]
 
 [project.scripts]
 engram-mcp = "engram.server.cli:main"
