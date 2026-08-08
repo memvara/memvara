@@ -18,6 +18,13 @@ out of that, and both are routine rather than exotic.
    answers the question. Scoring on absolute retriever evidence rather than on fused
    rank (see `scoring.normalized_score`) makes "nothing here is relevant" a number a
    caller can act on, and `min_score` is how they act on it.
+4. **Everything that was never a claim.** Extraction keeps facts and discards wording,
+   and most of a real transcript is not a fact: a decision and the reason behind it, a
+   constraint stated conditionally, an argument that was settled. Those turns were
+   stored and then unreachable, because the only indexes were over claims -
+   `WriteReceipt.skipped`, the number the write path is proudest of, meant "we kept
+   this and will never find it again". `include_episodes=True` adds a second, weaker
+   pair of legs over the raw turns; see `EpisodeResult` for why weaker.
 
 Everything here is deterministic. No LLM sits on the read path, and identical inputs
 produce an identical ordering, ties included - unstable ranking makes retrieval
@@ -26,16 +33,26 @@ regressions impossible to bisect.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Sequence
+from typing import ClassVar, Sequence
 
 import numpy as np
 
 from ..embed.base import Embedder
 from ..schema import PredicateRegistry
 from ..store.base import Store
-from ..types import Claim, Explanation, MemoryType, Result, Scope, utcnow
+from ..types import (
+    CLAIM,
+    EPISODE,
+    Claim,
+    Episode,
+    Explanation,
+    MemoryType,
+    Result,
+    Scope,
+    utcnow,
+)
 from .analyze import analyze
 from .fusion import reciprocal_rank_fusion
 from .scoring import (
@@ -52,6 +69,7 @@ from .scoring import (
 VECTOR = "vector"
 LEXICAL = "lexical"
 
+
 # There is deliberately no default relevance floor here. One was measured and shipped
 # (0.25, calibrated on a 36-claim corpus) and it is wrong at both ends: the window
 # between the weakest correct answer and the best wrong one moves with corpus size, and
@@ -62,6 +80,66 @@ LEXICAL = "lexical"
 
 def _as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+@dataclass(slots=True)
+class EpisodeResult:
+    """A raw conversation turn that matched, and how well.
+
+    Deliberately *not* a `Result`. The two look alike — a score, an `Explanation`, a
+    `.text` — and they are not interchangeable: a `Claim` has been extracted,
+    normalized, reconciled against what else is believed, and retired if something
+    superseded it, while an episode is a verbatim thing someone said once. Rendering
+    the second as though it were the first is how "I'm thinking of moving to Lisbon"
+    becomes a stored fact about where the user lives, so the type system is where the
+    distinction belongs and `isinstance` is the discriminator. `kind` carries the same
+    answer for callers that serialize.
+
+    The quality fields on `explain` sit at their neutral 1.0 and mean "not applicable"
+    rather than "perfect". Recency decay is keyed to a predicate's half-life and an
+    episode has no predicate; confidence is an extractor's self-report and nothing
+    extracted this; salience is earned by re-observation, which is a claim's
+    mechanism. `score` is therefore retriever evidence alone, times `w_episode`.
+    """
+
+    episode: Episode
+    score: float
+    explain: Explanation = field(default_factory=Explanation)
+
+    kind: ClassVar[str] = EPISODE
+
+    @property
+    def text(self) -> str:
+        return self.episode.content
+
+    def __repr__(self) -> str:
+        legs = []
+        if self.explain.vector_rank is not None:
+            legs.append(f"vector#{self.explain.vector_rank}")
+        if self.explain.lexical_rank is not None:
+            legs.append(f"bm25#{self.explain.lexical_rank}")
+        return (f"<EpisodeResult {self.score:.4f} {_short(self.text)!r} "
+                f"{'+'.join(legs) or 'no-retriever'} {self.episode.id}>")
+
+
+#: Anything `search()` can return.
+Retrieved = Result | EpisodeResult
+
+
+def kind_of(item: Retrieved) -> str:
+    """`"claim"` or `"episode"`, for callers that would rather branch on a string.
+
+    `isinstance(item, EpisodeResult)` says the same thing and is the better spelling in
+    Python; this exists because the distinction has to survive serialization into a
+    prompt, a JSON payload or an MCP tool result, where the class does not.
+    """
+    return item.kind
+
+
+def _short(text: str, limit: int = 48) -> str:
+    """One-line, length-capped rendering, for reprs over arbitrary turn text."""
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +176,8 @@ class HybridRetriever:
         candidate_multiplier: int = 5,
         max_per_slot: int = 2,
         filter_retry_multiplier: int = 10,
+        w_episode: float = 0.5,
+        max_episodes: int = 3,
     ) -> None:
         self.store = store
         self.embedder = embedder
@@ -111,6 +191,15 @@ class HybridRetriever:
         self.candidate_multiplier = candidate_multiplier
         self.max_per_slot = max_per_slot
         self.filter_retry_multiplier = filter_retry_multiplier
+        # An episode has to be *twice* as convincing as a claim to outrank it. Raw turn
+        # text beating a curated fact is the obvious way this feature makes retrieval
+        # worse, and it is easy to hit: an episode contains the query's words verbatim,
+        # while the claim extracted from it is a normalized triple that may share none
+        # of them. So the episode leg is discounted rather than trusted, and capped as
+        # well - a transcript has far more turns than facts, and an uncapped tail lets
+        # a single well-worded conversation crowd out everything the store knows.
+        self.w_episode = w_episode
+        self.max_episodes = max_episodes
 
     def search(
         self,
@@ -122,8 +211,9 @@ class HybridRetriever:
         include_invalidated: bool = False,
         memory_types: Sequence[MemoryType] | None = None,
         min_score: float = 0.0,
-    ) -> list[Result]:
-        """Return the top `k` claims for `query`, each with a populated `Explanation`.
+        include_episodes: bool = False,
+    ) -> list[Retrieved]:
+        """Return the top `k` results for `query`, each with a populated `Explanation`.
 
         `as_of` is transaction-time travel: the result is what we believed at that
         instant, including claims we have since retracted. `include_invalidated`
@@ -135,6 +225,14 @@ class HybridRetriever:
         value is a property of the store rather than of this library - it moves with
         corpus size and with the embedder - so measure it with
         `calibrate.calibrate_min_score` rather than picking one.
+
+        `include_episodes` widens the search to the raw turns behind the claims, and
+        returns `EpisodeResult` for those - so the caller can always tell a fact from
+        something someone said. It is opt-in rather than the default because the two
+        are not substitutes: existing callers ask this method for facts, and quietly
+        starting to answer with conversation would change what lands in every prompt
+        built on it. `memory_types` is a claim-only filter and, when given, suppresses
+        the episode leg entirely rather than pretending a turn has a memory type.
         """
         if k <= 0:
             return []
@@ -170,7 +268,11 @@ class HybridRetriever:
                 query, scopes, limit * self.filter_retry_multiplier, as_of,
                 include_invalidated, wanted, now, min_score)
 
-        return self._rank(results, k)
+        ranked: list[Retrieved] = list(self._rank(results, k))
+        if not include_episodes or wanted is not None:
+            return ranked
+        return self._interleave(
+            ranked, self._episodes(query, scopes, limit, as_of, min_score), k)
 
     # -- internals -----------------------------------------------------------
 
@@ -241,6 +343,138 @@ class HybridRetriever:
                 continue
             results.append(result)
         return results, saturated
+
+    def _episodes(
+        self,
+        query: str,
+        scopes: Sequence[Scope],
+        limit: int,
+        as_of: datetime | None,
+        min_score: float,
+    ) -> list[EpisodeResult]:
+        """The same two legs over raw turns, discounted and capped.
+
+        Structurally a copy of `_gather` minus everything episodes do not have. There
+        is no liveness filter because nothing retires a turn, no `memory_types` because
+        a turn has no type, and no quality rescoring because recency decay, confidence
+        and salience are all properties of an extracted claim. What is left is the part
+        that actually finds things: BM25 over the words that were used, and cosine over
+        what they meant.
+        """
+        vector_hits = self._episode_vector_search(query, scopes, limit, as_of)
+        lexical_hits, terms = self._episode_lexical_search(query, scopes, limit, as_of)
+
+        fused = reciprocal_rank_fusion(
+            {VECTOR: vector_hits, LEXICAL: lexical_hits},
+            k=self.rrf_k,
+            weights={VECTOR: self.w_vector, LEXICAL: self.w_lexical},
+        )
+        if not fused:
+            return []
+
+        vector_pos = _positions(vector_hits)
+        lexical_pos = _positions(lexical_hits)
+        episodes = self._hydrate_episodes(list(fused))
+
+        out: list[EpisodeResult] = []
+        for episode_id, fusion in fused.items():
+            episode = episodes.get(episode_id)
+            if episode is None:
+                continue  # raced with a purge; a missing row is not a ranking error
+            v = vector_pos.get(episode_id)
+            lx = lexical_pos.get(episode_id)
+            evidence = relevance(
+                vector=(vector_relevance(0.0 if v is None else v[1])
+                        if vector_hits else None),
+                lexical=(lexical_relevance(0.0 if lx is None else lx[1], terms)
+                         if lexical_hits else None),
+                w_vector=self.w_vector,
+                w_lexical=self.w_lexical,
+            )
+            score = evidence * self.w_episode
+            if score < min_score:
+                continue
+            out.append(EpisodeResult(
+                episode=episode,
+                score=score,
+                explain=Explanation(
+                    vector_rank=None if v is None else v[0],
+                    vector_score=None if v is None else v[1],
+                    lexical_rank=None if lx is None else lx[0],
+                    lexical_score=None if lx is None else lx[1],
+                    fusion_score=fusion,
+                    # No quality multiplier to divide back out, so the raw score is the
+                    # fusion term itself - which keeps `raw_score` meaning the same
+                    # thing it means for a claim: what fusion produced, before scoring.
+                    raw_score=fusion,
+                    final_score=score,
+                ),
+            ))
+        out.sort(key=lambda r: (-r.score, r.episode.id))
+        return out[:self.max_episodes]
+
+    def _hydrate_episodes(self, ids: Sequence[str]) -> dict[str, Episode]:
+        """One round trip if the store offers it, N if it is a third-party one."""
+        bulk = getattr(self.store, "get_episodes", None)
+        if bulk is not None:
+            return bulk(ids)
+        return {eid: e for eid in ids if (e := self.store.get_episode(eid)) is not None}
+
+    def _episode_vector_search(
+        self, query: str, scopes: Sequence[Scope], limit: int, as_of: datetime | None,
+    ) -> list[tuple[str, float]]:
+        """Vector leg over turns. Abstains on a zero-norm query, as the claim leg does.
+
+        Absent from a third-party `Store`, this leg simply does not run. Degrading to
+        the lexical half is right: it is the stronger of the two for verbatim recall
+        anyway, and refusing to search at all would be a worse answer than a narrower
+        one.
+        """
+        search = getattr(self.store, "vector_search_episodes", None)
+        if search is None:
+            return []
+        qvec = np.asarray(self.embedder.encode([query])[0], dtype=np.float32)
+        if float(np.linalg.norm(qvec)) <= 0.0:
+            return []
+        return list(search(qvec, scopes, limit, as_of))
+
+    def _episode_lexical_search(
+        self, query: str, scopes: Sequence[Scope], limit: int, as_of: datetime | None,
+    ) -> tuple[list[tuple[str, float]], int]:
+        """BM25 over turns, reduced to content terms exactly as the claim leg is.
+
+        The stopword guard matters more here, not less: turns are long and
+        conversational, so a query that survives as `"do"` and `"about"` matches
+        essentially every episode in the store.
+        """
+        search = getattr(self.store, "lexical_search_episodes", None)
+        if search is None:
+            return [], 0
+        reduced = analyze(query)
+        if reduced.abstains:
+            return [], 0
+        return list(search(reduced.text, scopes, limit, as_of)), len(reduced.terms)
+
+    @staticmethod
+    def _interleave(claims: list[Retrieved], episodes: list[EpisodeResult],
+                    k: int) -> list[Retrieved]:
+        """Merge the episode tail into the claim ranking without disturbing it.
+
+        A plain re-sort would undo the diversity pass in `_rank`, which deliberately
+        demotes rather than drops and therefore hands back a list that is *not* in
+        score order. So the claim order is taken as authoritative and each episode is
+        placed at the first point where it beats the next claim. Ties go to the claim,
+        which is the same tiebreak the weight expresses: equal evidence, prefer the
+        thing that was extracted and reconciled.
+        """
+        out: list[Retrieved] = []
+        pending = list(episodes)
+        for r in claims:
+            while pending and pending[0].score > r.score:
+                out.append(pending.pop(0))
+            out.append(r)
+        out.extend(pending)
+        return out[:k]
 
     def _rank(self, results: list[Result], k: int) -> list[Result]:
         """Order by score, then spread the head across fact slots, then cut to `k`.

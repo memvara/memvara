@@ -69,7 +69,11 @@ class Reconciler:
 The contradiction engine. For a candidate claim:
 
 1. **Exact duplicate** — a live claim with the same `value_key` exists: do not insert.
-   Bump `observation_count`, raise `salience`, merge `sources`, return `action="reinforce"`.
+   Bump `observation_count`, raise the *storage* strength (`Claim.salience_base`) and
+   stamp `last_observed`, merge `sources`, return `action="reinforce"`. The bump goes
+   on the base, not on `salience`: the nightly pass recomputes `salience` from the
+   base, so writing it there was erased once a claim aged past `0.415 * half_life`
+   — 2.9 days for a FAST predicate, and permanently, since age only grows.
 2. **Conflict** — the predicate is `Cardinality.ONE` and live claims share the candidate's
    `fact_key` with a different `value_key`: insert the new claim, and for each superseded
    claim set `invalidated_at=now`, `invalidated_by=<new id>`, and `valid_to=now`.
@@ -145,11 +149,14 @@ cosine similarities are not on comparable scales and normalizing them is guesswo
 
 ```python
 def recency_factor(claim: Claim, registry: PredicateRegistry, now: datetime) -> float
+def normalized_score(...) -> float   # Result.score, in [0, 1]
 def final_score(fusion: float, *, recency: float, confidence: float, salience: float,
                 w_recency: float, w_confidence: float, w_salience: float) -> float
 ```
 `recency_factor` is exponential decay on the predicate's half-life:
-`0.5 ** (age_days / half_life_days)`, age measured from `claim.valid_from`. A `STATIC`
+`0.5 ** (age_days / half_life_days)`, age measured from `claim.trace_from`
+(`max(valid_from, last_observed)`) — from `valid_from` alone, a fact restated daily
+for ninety days still scored as ninety days stale. A `STATIC`
 predicate's 100-year half-life keeps its factor at ~1.0, so birthplaces do not decay out
 of the ranking while "what I'm working on today" does.
 

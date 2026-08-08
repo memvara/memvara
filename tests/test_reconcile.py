@@ -110,11 +110,117 @@ def test_reinforce_does_not_duplicate_a_repeated_source(rec):
 
 
 def test_salience_is_capped(rec):
+    rec.reinforce_bump = 2.0            # a caller who wants repetition to count for a lot
     rec.apply(claim("lives_in", "Berlin"))
     last = None
     for _ in range(50):
         last = rec.apply(claim("lives_in", "Berlin"))
-    assert last.claim.salience <= rec.max_salience
+    assert last.claim.salience == pytest.approx(rec.max_salience)
+
+
+def test_a_bump_lands_on_storage_strength_and_stamps_the_observation(rec, store):
+    """Both halves, because either one alone reproduces a shipped bug.
+
+    Written onto `salience` instead of the base, a bump is erased by the next decay
+    pass. Written without the timestamp, it decays from the original `valid_from`, so
+    freshness never recovers however often the fact is restated.
+    """
+    now = utcnow().replace(microsecond=0)
+    first = rec.apply(claim("lives_in", "Berlin", valid_from=now), now=now)
+    assert first.claim.last_observed is None      # a first sighting is not a re-sighting
+
+    second = rec.apply(
+        claim("lives_in", "Berlin", valid_from=now, sources=["ep_2"]), now=now)
+    assert second.action == "reinforce"
+    stored = store.get_claim(second.claim.id)
+    assert stored.salience_base == pytest.approx(1.025)
+    assert stored.salience == pytest.approx(1.025)
+    assert stored.last_observed == now
+    assert stored.trace_from == now
+
+
+def test_a_weak_trace_earns_more_than_a_strong_one(rec, store):
+    """Bjork & Bjork: the gain from a successful retrieval is inversely related to how
+    available the memory already was. The shipped rule was a flat bump, which made
+    massed repetition the cheapest possible way to buy salience."""
+    fresh = rec.apply(claim("likes", "coffee")).claim
+    faded = rec.apply(claim("likes", "tea")).claim
+    faded.meta["salience_base"] = 1.0
+    faded.salience = 0.1                     # nine tenths of the trace has gone
+    store.put_claim(faded)
+
+    strong = rec.reinforce(store.get_claim(fresh.id), ["ep_2"])
+    weak = rec.reinforce(store.get_claim(faded.id), ["ep_2"])
+
+    assert strong.salience == pytest.approx(1.025)     # 1.0 + 0.25 * 0.1
+    assert weak.salience == pytest.approx(1.2275)      # 1.0 + 0.25 * (0.1 + 0.9 * 0.9)
+    assert weak.salience_base > strong.salience_base
+
+
+def test_a_replayed_observation_is_stamped_when_it_happened_not_today(rec, store):
+    """A replay's whole value is reconstructing real history.
+
+    Stamped with wall-clock now, every re-observation an importer replays claims to
+    have happened today - so the recency signal the import exists to rebuild is
+    destroyed at the moment it is written, and a fact last mentioned in 2024 ranks as
+    freshly restated.
+    """
+    t0 = utcnow() - timedelta(days=800)
+    t1 = utcnow() - timedelta(days=430)
+    rec.apply(claim("working_on", "auth refactor", valid_from=t0, recorded_at=t0))
+    res = rec.apply(claim("working_on", "auth refactor", valid_from=t1, recorded_at=t1,
+                          sources=["ep_2"]))
+
+    assert res.action == "reinforce"
+    assert res.claim.last_observed == t1
+    assert res.claim.trace_from == t1
+
+
+def test_the_observation_stamp_only_ever_moves_forward(rec, store):
+    """Replays do not arrive in order; recency must not depend on the order they do."""
+    t0 = utcnow() - timedelta(days=800)
+    recent = utcnow() - timedelta(days=10)
+    old = utcnow() - timedelta(days=400)
+    rec.apply(claim("working_on", "auth refactor", valid_from=t0, recorded_at=t0))
+    rec.apply(claim("working_on", "auth refactor", valid_from=recent, recorded_at=recent))
+
+    res = rec.apply(claim("working_on", "auth refactor", valid_from=old, recorded_at=old))
+    assert res.claim.last_observed == recent
+
+
+def test_a_future_dated_restatement_cannot_backdate_the_present(rec, store):
+    """The same clamp `recorded_at` gets: a fact asserted as true from next month is
+    not evidence about how fresh anything is today."""
+    now = utcnow().replace(microsecond=0)
+    rec.apply(claim("lives_in", "Berlin", valid_from=now), now=now)
+    res = rec.apply(claim("lives_in", "Berlin", valid_from=now + timedelta(days=30),
+                          sources=["ep_2"]), now=now)
+
+    assert res.action == "reinforce"
+    assert res.claim.last_observed == now
+
+
+def test_reinforcement_works_on_a_store_whose_decay_pass_never_ran(rec, store):
+    """No `salience_base` in `meta` means salience *is* the base - the honest reading
+    for a claim nothing has decayed, and the one that keeps a library used without the
+    consolidator from silently refusing to reinforce."""
+    added = rec.apply(claim("likes", "coffee")).claim
+    assert "salience_base" not in store.get_claim(added.id).meta
+
+    again = rec.reinforce(store.get_claim(added.id), ["ep_2"])
+    assert again.salience == pytest.approx(1.025)
+
+
+def test_reinforcement_survives_a_zero_salience_claim(rec, store):
+    """A third-party writer can leave a 0.0 in the column; dividing by it in the
+    retrievability ratio would take down the write path."""
+    added = rec.apply(claim("likes", "coffee")).claim
+    added.salience = 0.0
+    added.meta["salience_base"] = 0.0
+    store.put_claim(added)
+
+    again = rec.reinforce(store.get_claim(added.id), ["ep_2"])
+    assert again.salience == pytest.approx(0.025)
 
 
 # --- supersede ---------------------------------------------------------------

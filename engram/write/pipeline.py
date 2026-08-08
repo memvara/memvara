@@ -163,7 +163,12 @@ class WritePipeline:
         out: list[Claim] = []
         for c in self.store.iter_claims(ep.scope.tenant):
             if ep.id in c.sources:
-                out.append(self.reconciler.reinforce(c, [ep.id], now))
+                # `ep.ts`, not `now`: the observation happened when the turn was
+                # uttered. Stamping wall-clock time here would mark every turn of a
+                # replayed historical transcript as observed today, which is exactly
+                # the recency signal an import exists to reconstruct. Clamped so a
+                # turn dated in the future cannot push the trace clock ahead.
+                out.append(self.reconciler.reinforce(c, [ep.id], min(ep.ts, now)))
         return out
 
     def _tier0_near_dupes(self, episodes: Sequence[Episode], receipt: WriteReceipt,
@@ -200,7 +205,9 @@ class WritePipeline:
         claim = self.store.get_claim(claim_id)
         if claim is None:
             return None
-        return self.reconciler.reinforce(claim, [ep.id], now)
+        # Same reasoning as `_reinforce_from_source`: a near-duplicate restatement is
+        # evidence dated to the turn that carried it, not to when we processed it.
+        return self.reconciler.reinforce(claim, [ep.id], min(ep.ts, now))
 
     # -- tier 1 ---------------------------------------------------------------
 

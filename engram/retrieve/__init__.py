@@ -3,7 +3,7 @@
 from .analyze import STOPWORDS, LexicalQuery, analyze, tokenize
 from .calibrate import FloorReport, calibrate_min_score
 from .fusion import reciprocal_rank_fusion
-from .hybrid import HybridRetriever
+from .hybrid import CLAIM, EPISODE, EpisodeResult, HybridRetriever, Retrieved, kind_of
 from .scoring import (
     final_score,
     lexical_relevance,
@@ -30,4 +30,10 @@ __all__ = [
     "calibrate_min_score",
     "FloorReport",
     "HybridRetriever",
+    # retrieved episodes, and how to tell one from a claim
+    "EpisodeResult",
+    "Retrieved",
+    "kind_of",
+    "CLAIM",
+    "EPISODE",
 ]

@@ -1,6 +1,7 @@
 """SQLite store: persistence, the indexed conflict lookup, hybrid search primitives,
 and the bitemporal SQL that makes time travel work."""
 
+import sqlite3
 import threading
 from datetime import datetime, timezone
 
@@ -9,6 +10,7 @@ import pytest
 
 from engram.embed import HashingEmbedder
 from engram.store import SQLiteStore
+from engram.store.sqlite import SCHEMA_VERSION
 from engram.types import Claim, Derivation, Episode, MemoryType, Scope
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -44,6 +46,15 @@ def put(store, emb=None, **kw) -> Claim:
     if emb is not None:
         store.set_embedding(c.id, emb.encode([c.text])[0])
     return c
+
+
+def turn(store, emb=None, content="hello", scope=SCOPE, **kw) -> Episode:
+    """Store an episode, embedding it unless `emb` is None."""
+    ep = Episode(content=content, scope=scope, **kw)
+    store.add_episode(ep)
+    if emb is not None:
+        store.set_episode_embedding(ep.id, emb.encode([ep.content])[0])
+    return ep
 
 
 # --- Episodes ---------------------------------------------------------------
@@ -300,6 +311,194 @@ def test_mismatched_embedding_dim_is_rejected_before_the_write(store, emb):
     assert store.stats()["embeddings"] == 1, "rejected vector must not be persisted"
 
 
+# --- Episode retrieval ------------------------------------------------------
+#
+# Episodes used to be write-only: stored, counted in the receipt, and reachable only
+# through why() on a claim that happened to be extracted from them. Everything below
+# is the property that fixes — with the scope isolation asserted in all three
+# directions, exactly as it is for claims, because raw turn text is the more sensitive
+# of the two payloads.
+
+def test_episode_lexical_search_finds_a_turn_no_claim_was_extracted_from(store):
+    ep = turn(store, content="We decided at the offsite to sunset the Kafka pipeline "
+                             "because the ordering guarantees never held.")
+    assert store.stats()["claims"] == 0
+    hits = store.lexical_search_episodes("kafka pipeline", [SCOPE], limit=10)
+    assert [h[0] for h in hits] == [ep.id]
+
+
+def test_episode_lexical_search_is_case_insensitive(store):
+    ep = turn(store, content="Kafka ordering guarantees")
+    assert store.lexical_search_episodes("KAFKA", [SCOPE], limit=10)[0][0] == ep.id
+
+
+def test_episode_lexical_scores_are_ascending_better(store):
+    turn(store, content="kafka")
+    turn(store, content="kafka kafka kafka")
+    hits = store.lexical_search_episodes("kafka", [SCOPE], limit=10)
+    assert len(hits) == 2
+    assert hits[0][1] >= hits[1][1]
+
+
+@pytest.mark.parametrize(
+    "q", ["", "   ", "*", '"', "a AND (b", "NEAR/", "()", "-", "x" * 10_000,
+          "日本語", "'; DROP TABLE episodes; --"],
+)
+def test_adversarial_episode_queries_never_raise(store, q):
+    turn(store)
+    assert isinstance(store.lexical_search_episodes(q, [SCOPE], limit=5), list)
+    assert store.stats()["episodes"] == 1
+
+
+def test_readding_a_turn_does_not_orphan_its_index_entry(store):
+    """INSERT OR REPLACE assigns a new rowid, and the FTS row is keyed on the old one —
+    the text would stay searchable under a rowid nothing points at, and purge would
+    never find it."""
+    ep = Episode(content="kafka ordering", scope=SCOPE)
+    store.add_episode(ep)
+    store.add_episode(ep)
+    hits = store.lexical_search_episodes("kafka", [SCOPE], limit=10)
+    assert [h[0] for h in hits] == [ep.id], "one entry, still resolvable"
+
+
+def test_episode_lexical_search_reflects_edited_text(store):
+    ep = Episode(content="kafka ordering", scope=SCOPE)
+    store.add_episode(ep)
+    ep.content = "kinesis ordering"
+    store.add_episode(ep)
+    assert store.lexical_search_episodes("kafka", [SCOPE], limit=10) == []
+    assert store.lexical_search_episodes("kinesis", [SCOPE], limit=10)[0][0] == ep.id
+
+
+def test_episode_vector_search_ranks_by_cosine(store, emb):
+    kafka = turn(store, emb, content="the kafka pipeline is being sunset")
+    turn(store, emb, content="lunch is at one o'clock")
+    hits = store.vector_search_episodes(
+        emb.encode(["the kafka pipeline is being sunset"])[0], [SCOPE], limit=5)
+    assert hits[0][0] == kafka.id
+    assert hits[0][1] > 0.9
+
+
+def test_episode_vector_search_skips_turns_without_vectors(store, emb):
+    turn(store)  # never embedded
+    assert store.vector_search_episodes(emb.encode(["hello"])[0], [SCOPE], limit=5) == []
+
+
+def test_episode_and_claim_vectors_never_share_a_row(store, emb):
+    """One matrix, one slot space. Two allocators each computing 'one past my own
+    maximum' would hand row 0 to both, and each would read back the other's vector."""
+    c = put(store, emb, object="Berlin")
+    ep = turn(store, emb, content="a completely unrelated sentence about otters")
+
+    claim_slots = {r[0] for r in store._db.execute("SELECT slot FROM embeddings")}
+    ep_slots = {r[0] for r in store._db.execute("SELECT slot FROM episode_embeddings")}
+    assert claim_slots.isdisjoint(ep_slots)
+
+    assert np.allclose(store.get_embedding(c.id), store._vec.get(c.id))
+    assert np.allclose(store.get_episode_embedding(ep.id), store._vec.get(ep.id))
+
+
+def test_a_turn_that_was_never_embedded_has_no_vector(store):
+    assert store.get_episode_embedding(turn(store).id) is None
+
+
+def test_mismatched_episode_embedding_dim_is_rejected_before_the_write(store, emb):
+    put(store, emb)
+    ep = turn(store)
+    with pytest.raises(ValueError, match="dim"):
+        store.set_episode_embedding(ep.id, np.ones(999, dtype=np.float32))
+    assert store.stats()["embeddings"] == 1, "rejected vector must not be persisted"
+
+
+def test_get_episodes_bulk_fetches_and_ignores_unknown_ids(store):
+    a, b = turn(store, content="one"), turn(store, content="two")
+    got = store.get_episodes([a.id, b.id, "ep_nope", a.id])
+    assert set(got) == {a.id, b.id}
+    assert got[a.id].content == "one"
+    assert store.get_episodes([]) == {}
+
+
+def test_get_episodes_chunks_past_the_sql_parameter_limit(store):
+    ids = [turn(store, content=f"turn {i}").id for i in range(950)]
+    assert len(store.get_episodes(ids)) == 950
+
+
+def test_iter_episodes_filters_by_tenant(store):
+    turn(store, scope=Scope("acme", "alice"))
+    turn(store, scope=Scope("other", "bob"), content="elsewhere")
+    assert len(list(store.iter_episodes(tenant="acme"))) == 1
+    assert len(list(store.iter_episodes())) == 2
+
+
+# --- Episode scope isolation, all three directions --------------------------
+
+SIBLING_SESSION = Scope("acme", "alice", "bot", "s2")
+SIBLING_AGENT = Scope("acme", "alice", "other_bot")
+OTHER_TENANT = Scope("globex", "alice")
+MINE = Scope("acme", "alice", "bot", "s1")
+
+
+@pytest.fixture()
+def neighbours(store, emb) -> dict[str, Episode]:
+    """The same sentence stored at four scopes. Identical text on either side is what
+    would slip through if the filter were on content rather than on scope."""
+    text = "the kafka pipeline is being sunset"
+    return {
+        "mine": turn(store, emb, content=text, scope=MINE),
+        "sibling_session": turn(store, emb, content=text, scope=SIBLING_SESSION),
+        "sibling_agent": turn(store, emb, content=text, scope=SIBLING_AGENT),
+        "other_tenant": turn(store, emb, content=text, scope=OTHER_TENANT),
+    }
+
+
+@pytest.mark.parametrize("neighbour", ["sibling_session", "sibling_agent", "other_tenant"])
+def test_episode_search_never_reaches_sideways(store, emb, neighbours, neighbour):
+    q = emb.encode(["kafka pipeline"])[0]
+    for found in (
+        set(store.episode_candidate_ids([MINE])),
+        {h[0] for h in store.lexical_search_episodes("kafka", [MINE], limit=10)},
+        {h[0] for h in store.vector_search_episodes(q, [MINE], limit=10)},
+    ):
+        assert found == {neighbours["mine"].id}
+        assert neighbours[neighbour].id not in found
+
+
+def test_episode_search_fails_closed_on_an_empty_scope_list(store, emb):
+    """Same rule as claims: no scope resolved is a caller bug, and matching everything
+    would hand back every tenant's transcript."""
+    turn(store, emb, content="kafka")
+    assert store.episode_candidate_ids([]) == []
+    assert store.lexical_search_episodes("kafka", [], limit=10) == []
+    assert store.vector_search_episodes(emb.encode(["kafka"])[0], [], limit=10) == []
+
+
+def test_episode_search_inherits_upward_but_never_descends(store, emb):
+    broad = turn(store, emb, content="kafka at user scope", scope=Scope("acme", "alice"))
+    narrow = turn(store, emb, content="kafka in this session", scope=MINE)
+    from_session = set(store.episode_candidate_ids(MINE.ancestors()))
+    assert from_session == {broad.id, narrow.id}
+    assert set(store.episode_candidate_ids([Scope("acme", "alice")])) == {broad.id}
+
+
+def test_episode_search_respects_as_of(store, emb):
+    """A turn that had not happened yet is not something we could have recalled."""
+    old = turn(store, emb, content="kafka is fine", ts=T0)
+    new = turn(store, emb, content="kafka is being sunset", ts=T1)
+    q = emb.encode(["kafka"])[0]
+    assert set(store.episode_candidate_ids([SCOPE], as_of=TMID)) == {old.id}
+    assert [h[0] for h in store.lexical_search_episodes(
+        "kafka", [SCOPE], limit=10, as_of=TMID)] == [old.id]
+    assert [h[0] for h in store.vector_search_episodes(
+        q, [SCOPE], limit=10, as_of=TMID)] == [old.id]
+    assert len(store.episode_candidate_ids([SCOPE], as_of=T2)) == 2
+    assert new.id in store.episode_candidate_ids([SCOPE], as_of=T2)
+
+
+def test_a_future_turn_is_invisible_to_a_present_query(store):
+    turn(store, content="kafka next year", ts=datetime(2099, 1, 1, tzinfo=timezone.utc))
+    assert store.lexical_search_episodes("kafka", [SCOPE], limit=10) == []
+
+
 # --- Scope resolution -------------------------------------------------------
 
 def test_candidate_ids_matches_scopes_exactly(store):
@@ -385,6 +584,42 @@ def test_purge_erases_a_large_scope_in_one_pass(store, emb):
     assert store.lexical_search("berlin", [SCOPE], limit=10) == []
 
 
+def test_purge_erases_the_episode_indexes_not_only_the_rows(store, emb):
+    """An FTS row surviving the episode it describes is not a stale cache entry — it is
+    the purged text still being searchable, which is the compliance failure the whole
+    call exists to avoid."""
+    ep = turn(store, emb, content="the kafka pipeline is being sunset")
+    counts = store.purge(SCOPE)
+
+    assert counts == {"claims": 0, "episodes": 1, "embeddings": 1}
+    assert store.lexical_search_episodes("kafka", [SCOPE], limit=10) == []
+    assert store.get_episode_embedding(ep.id) is None
+    assert store._db.execute("SELECT COUNT(*) FROM episodes_fts").fetchone()[0] == 0
+    assert store._vec.get(ep.id) is None, "the matrix row must be blanked too"
+
+
+def test_purge_hands_episode_rows_back_to_the_free_list(store, emb):
+    turn(store, emb, content="one")
+    turn(store, emb, content="two")
+    store.purge(SCOPE)
+    assert [r[0] for r in
+            store._db.execute("SELECT slot FROM vec_free ORDER BY slot")] == [0, 1]
+    reused = turn(store, emb, content="three")
+    assert store._db.execute(
+        "SELECT slot FROM episode_embeddings WHERE episode_id=?", (reused.id,)
+    ).fetchone()[0] in (0, 1)
+
+
+def test_purge_leaves_a_sibling_scopes_turns_alone(store, emb):
+    mine = turn(store, emb, content="kafka", scope=MINE)
+    theirs = turn(store, emb, content="kafka", scope=SIBLING_SESSION)
+    store.purge(MINE)
+    assert store.get_episode(mine.id) is None
+    assert store.get_episode(theirs.id) is not None
+    assert [h[0] for h in store.lexical_search_episodes(
+        "kafka", [SIBLING_SESSION], limit=10)] == [theirs.id]
+
+
 def test_stats_counts_live_and_invalidated_separately(store, emb):
     a = put(store, emb, object="Berlin")
     put(store, emb, object="Lisbon")
@@ -410,6 +645,204 @@ def test_store_persists_across_reopen(tmp_path, emb):
     s2.close()
 
 
+def test_episode_indexes_survive_a_reopen(tmp_path, emb):
+    path = str(tmp_path / "m.db")
+    with SQLiteStore(path) as s1:
+        ep = turn(s1, emb, content="the kafka pipeline is being sunset")
+
+    with SQLiteStore(path) as s2:
+        assert [h[0] for h in s2.lexical_search_episodes(
+            "kafka", [SCOPE], limit=5)] == [ep.id]
+        hits = s2.vector_search_episodes(
+            emb.encode(["the kafka pipeline is being sunset"])[0], [SCOPE], limit=5)
+        assert hits[0][0] == ep.id, "the episode's matrix row must come back too"
+
+
+def test_a_deleted_matrix_file_is_rebuilt_for_episodes_as_well(tmp_path, emb):
+    """The matrix is derived data, so losing it must be recoverable — for both kinds of
+    vector, since they share the file."""
+    import os
+
+    path = str(tmp_path / "m.db")
+    with SQLiteStore(path) as s1:
+        c = put(s1, emb, object="Berlin")
+        ep = turn(s1, emb, content="the kafka pipeline is being sunset")
+    os.remove(path + ".vecs")
+
+    with SQLiteStore(path) as s2:
+        assert s2.vector_search(
+            emb.encode(["user lives in Berlin"])[0], [SCOPE], limit=1)[0][0] == c.id
+        assert s2.vector_search_episodes(
+            emb.encode(["kafka pipeline"])[0], [SCOPE], limit=1)[0][0] == ep.id
+
+
+# --- Cross-process coherence for episode vectors ----------------------------
+#
+# Claim vectors get this from `PRAGMA data_version` plus a monotonic `seq`: a reader
+# notices that some other connection committed and folds in only the rows past its
+# watermark. Episode vectors share the matrix, so they *should* inherit it — but
+# "should" is the wrong basis for a property whose failure is silent. A worker that
+# never sees another's turns on the vector leg looks completely healthy, because BM25
+# still finds them and fusion merely ranks them worse.
+
+
+def onehot(i: int, dim: int = 64) -> np.ndarray:
+    v = np.zeros(dim, dtype=np.float32)
+    v[i % dim] = 1.0
+    return v
+
+
+def test_a_turn_embedded_by_another_worker_becomes_visible(tmp_path):
+    path = str(tmp_path / "c.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    a.vector_search_episodes(onehot(0), [SCOPE], limit=1)  # A's index is now warm
+
+    ep = Episode(content="written by b", scope=SCOPE)
+    b.add_episode(ep)
+    b.set_episode_embedding(ep.id, onehot(5))
+
+    hits = a.vector_search_episodes(onehot(5), [SCOPE], limit=1)
+    assert [h[0] for h in hits] == [ep.id]
+    assert hits[0][1] == pytest.approx(1.0)
+    a.close()
+    b.close()
+
+
+def test_a_turn_re_embedded_by_another_worker_is_the_one_that_is_searched(tmp_path):
+    """Re-embedding keeps the row, so the update arrives through the shared mapping
+    with no re-read at all."""
+    path = str(tmp_path / "c.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    ep = turn(a)
+    a.set_episode_embedding(ep.id, onehot(1))
+    assert a.vector_search_episodes(onehot(1), [SCOPE], limit=1)[0][1] == pytest.approx(1.0)
+
+    b.set_episode_embedding(ep.id, onehot(6))
+
+    assert a.vector_search_episodes(onehot(1), [SCOPE], limit=1)[0][1] == pytest.approx(0.0)
+    assert a.vector_search_episodes(onehot(6), [SCOPE], limit=1)[0][1] == pytest.approx(1.0)
+    a.close()
+    b.close()
+
+
+def test_the_two_watermarks_advance_independently(tmp_path):
+    """The specific hazard of putting two tables behind one index. `seq` counts per
+    table, so both start at 1 — and a single shared watermark would read the claim row
+    at sequence 1, move past it, and then skip the *episode* at sequence 1 entirely.
+    That turn would be invisible to this worker's vector leg forever, silently, because
+    BM25 still finds it.
+    """
+    path = str(tmp_path / "c.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    a.vector_search(onehot(0), [SCOPE], limit=1)
+
+    turns = []
+    for i in range(3):
+        ep = Episode(content=f"turn {i}", scope=SCOPE)
+        b.add_episode(ep)
+        b.set_episode_embedding(ep.id, onehot(10 + i))
+        turns.append(ep)
+    c = claim(predicate="written_late")
+    b.put_claim(c)
+    b.set_embedding(c.id, onehot(20))
+
+    assert a._seq == {"embeddings": -1, "episode_embeddings": -1}, "A is still cold"
+    assert [h[0] for h in a.vector_search(onehot(20), [SCOPE], limit=1)] == [c.id]
+    # Every turn, not just the last: the ones a collapsed watermark would drop are the
+    # low-numbered ones, and they are the ones that look fine in a spot check.
+    for i, ep in enumerate(turns):
+        assert [h[0] for h in a.vector_search_episodes(
+            onehot(10 + i), [SCOPE], limit=1)] == [ep.id], f"turn {i} went missing"
+    assert a._seq == {"embeddings": 1, "episode_embeddings": 3}
+    a.close()
+    b.close()
+
+
+def test_an_unchanged_store_re_reads_neither_table(tmp_path, monkeypatch):
+    """Two tables means two queries per refresh, so the generation check has to
+    short-circuit before either of them — it runs on every read."""
+    path = str(tmp_path / "c.db")
+    with SQLiteStore(path) as s:
+        ep = turn(s)
+        s.set_episode_embedding(ep.id, onehot(1))
+        s.vector_search_episodes(onehot(1), [SCOPE], limit=1)
+
+        reads = []
+        real = SQLiteStore._read_map
+        monkeypatch.setattr(SQLiteStore, "_read_map",
+                            lambda self: (reads.append(1), real(self))[1])
+        for _ in range(5):
+            s.vector_search_episodes(onehot(1), [SCOPE], limit=1)
+            s.vector_search(onehot(1), [SCOPE], limit=1)
+        assert reads == [], "no other connection committed; there is nothing to re-read"
+
+
+def test_a_turn_indexed_by_another_worker_is_findable_by_text_immediately(tmp_path):
+    """The FTS half needs no coherence machinery at all — it is a SQLite table, read
+    inside the query — but that is worth pinning rather than assuming, since it is the
+    leg a reader falls back on when the vector one is stale."""
+    path = str(tmp_path / "c.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    assert a.lexical_search_episodes("kafka", [SCOPE], limit=5) == []
+
+    turn(b, content="the kafka pipeline is being sunset")
+
+    assert len(a.lexical_search_episodes("kafka", [SCOPE], limit=5)) == 1
+    a.close()
+    b.close()
+
+
+def write_v2(path: str) -> str:
+    """A store as the previous release left it: episodes, and no index over them.
+
+    Built with this code and then cut back, rather than spelled out: v2's DDL for every
+    other table is byte-identical to today's, and the only thing that distinguishes the
+    file is the absence of the two tables added here plus the stamp.
+    """
+    with SQLiteStore(path) as s:
+        ep = turn(s, content="the kafka pipeline is being sunset")
+    raw = sqlite3.connect(path)
+    raw.execute("DROP TABLE episodes_fts")
+    raw.execute("DROP TABLE episode_embeddings")
+    raw.execute("PRAGMA user_version = 2")
+    raw.commit()
+    raw.close()
+    return ep.id
+
+
+def test_a_v2_file_gets_its_existing_turns_indexed(tmp_path):
+    """`CREATE VIRTUAL TABLE IF NOT EXISTS` makes the table and leaves it empty, which
+    is indistinguishable from a store whose turns genuinely match nothing — so every
+    pre-v3 episode would stay exactly as unfindable as before the upgrade."""
+    path = str(tmp_path / "v2.db")
+    ep_id = write_v2(path)
+    with SQLiteStore(path) as s:
+        assert int(s._db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
+        assert [h[0] for h in s.lexical_search_episodes(
+            "kafka", [SCOPE], limit=5)] == [ep_id]
+
+
+def test_the_backfill_does_not_run_twice(tmp_path):
+    """It is stamped, and idempotent even if it were not: a doubled FTS row would
+    double-count the term and quietly reorder BM25."""
+    path = str(tmp_path / "v2.db")
+    write_v2(path)
+    for _ in range(2):
+        with SQLiteStore(path) as s:
+            assert len(s.lexical_search_episodes("kafka", [SCOPE], limit=5)) == 1
+
+
+def test_a_migrated_store_still_takes_new_turns(tmp_path, emb):
+    path = str(tmp_path / "v2.db")
+    old = write_v2(path)
+    with SQLiteStore(path) as s:
+        fresh = turn(s, emb, content="kafka replacement is kinesis")
+        assert {h[0] for h in s.lexical_search_episodes("kafka", [SCOPE], limit=5)} \
+            == {old, fresh.id}
+        assert s.vector_search_episodes(
+            emb.encode(["kinesis"])[0], [SCOPE], limit=1)[0][0] == fresh.id
+
+
 def test_concurrent_writers_do_not_corrupt_or_lose_rows(tmp_path, emb):
     store = SQLiteStore(str(tmp_path / "c.db"))
     errors: list[BaseException] = []
@@ -432,4 +865,33 @@ def test_concurrent_writers_do_not_corrupt_or_lose_rows(tmp_path, emb):
     assert not errors, errors
     assert store.stats()["claims"] == 200
     assert store.stats()["embeddings"] == 200
+    store.close()
+
+
+def test_claims_and_turns_written_at_once_never_collide_on_a_row(tmp_path, emb):
+    """The cross-table allocator under contention. If it were per-table, a claim and a
+    turn written concurrently would be handed the same row and each would read back the
+    other's vector — silently, since both searches would still return something."""
+    store = SQLiteStore(str(tmp_path / "mixed.db"))
+    errors: list[BaseException] = []
+
+    def worker(n: int) -> None:
+        try:
+            for i in range(20):
+                put(store, emb, predicate=f"p_{n}_{i}", object=f"v{i}")
+                turn(store, emb, content=f"turn {n} {i}")
+        except BaseException as e:  # noqa: BLE001 - surfaced via assert below
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    slots = [r[0] for r in store._db.execute(
+        "SELECT slot FROM embeddings UNION ALL SELECT slot FROM episode_embeddings")]
+    assert len(slots) == 160
+    assert len(set(slots)) == 160, "one row per vector, across both tables"
     store.close()

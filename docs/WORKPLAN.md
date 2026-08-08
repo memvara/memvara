@@ -220,3 +220,29 @@ justify, and fix the `final_score` docstring arithmetic (it says 1.25×; it is 1
 6. Constructor errors: accept `user_id`/`agent_id`/`run_id` as deprecated aliases with a
    `DeprecationWarning`, use `difflib.get_close_matches` on unknown kwargs, and raise
    rather than silently ignoring `path` when `store=` is also given.
+
+---
+
+# Wave 2 — contracts
+
+Wave 1 is merged: 1,124 tests, 100% coverage, `fail_under = 100`. Same rules — exclusive
+file ownership, whole suite green and coverage at 100% before reporting, and if you break
+a test in a file you do not own, **report the name rather than editing it**.
+
+| workstream | owns |
+|---|---|
+| **A — memory dynamics** (W5+W8) | `engram/consolidate/*`, `engram/write/reconcile.py`, `engram/retrieve/scoring.py`, `engram/types.py`, `tests/test_decay.py`, `tests/test_merge.py`, `tests/test_reconcile.py`, `tests/test_scoring.py` |
+| **B — retrievable episodes** (W7) | `engram/store/*`, `engram/retrieve/hybrid.py`, `engram/retrieve/__init__.py`, `engram/core.py`, `tests/test_store.py`, `tests/test_hybrid.py`, `tests/test_api.py` |
+| **C — mem0 compatibility** (W11) | `engram/compat/` (new), `tests/test_compat.py` (new). **Public API only** — do not edit any existing module. |
+| **D — MCP server** (W10) | `engram/server/` (new), `tests/test_server.py` (new). **Public API only** — do not edit any existing module. |
+
+`engram/__init__.py`, `README.md`, `docs/*`, `bench/*`, `tests/test_edges.py`,
+`tests/test_internals.py`, `tests/test_integration.py`, `tests/test_predicates.py` are
+mine; I will wire exports and reconcile.
+
+## Cross-workstream note (A and B)
+
+A needs a per-claim "when was this last observed". **Prefer `Claim.meta`** — it is already
+persisted as JSON and needs no schema change, so A can land without waiting on B. If you
+conclude a real column is required, say so in your report and I will schedule it; do not
+edit `engram/store/*` (B owns it this wave).

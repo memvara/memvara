@@ -30,7 +30,27 @@ from typing import Sequence
 
 from ..schema import PredicateRegistry
 from ..store.base import Store
-from ..types import Claim, fact_key_for, owner_key, utcnow
+from ..types import MAX_SALIENCE, Claim, as_utc, fact_key_for, owner_key, utcnow
+
+#: The share of a reinforcement bump that a *massed* repetition earns — one that arrives
+#: while the trace is still fully available, e.g. the same fact stated twice in one
+#: conversation. The rest is earned only in proportion to how much the trace had faded.
+#:
+#: Bjork & Bjork's new theory of disuse, applied literally: the gain in storage strength
+#: from a successful retrieval is inversely related to current retrieval strength. That
+#: is the mechanism behind the spacing effect (Ebbinghaus; Cepeda et al. 2006), and the
+#: shipped rule had it exactly backwards — a flat `+0.25` regardless of spacing, which
+#: made repeating something sixteen times inside one `add()` the cheapest way to pin a
+#: claim at the ceiling forever.
+#:
+#: Not zero, because a restatement is still evidence and `observation_count` is not the
+#: only place that should show it; small, because it is the number a poisoning loop gets
+#: to multiply.
+#:
+#: Measured on a FAST predicate, ten observations either way: massed went from 3.25 to
+#: 1.23 and distributed over ten months from 0.05 to 3.15 — a 65x inversion turned into
+#: a 2.6x ordering that points the right way.
+MASSED_SHARE = 0.1
 
 
 @dataclass(slots=True)
@@ -49,9 +69,7 @@ class Reconciler:
         # Set by `WritePipeline` from its own `reinforce_bump`; kept as an attribute
         # rather than a constructor argument so the documented signature stays exact.
         self.reinforce_bump = 0.25
-        # Salience is unbounded upward otherwise, and a fact repeated in a loop would
-        # eventually outrank everything else forever.
-        self.max_salience = 5.0
+        self.max_salience = MAX_SALIENCE
 
     # -- public ---------------------------------------------------------------
 
@@ -85,7 +103,10 @@ class Reconciler:
             live_same = self._live(self.store.find_by_value(tenant, claim.value_key), t, owner)
             if live_same:
                 keep = self._canonical_of(live_same)
-                return ReconcileResult("reinforce", self.reinforce(keep, claim.sources, t), [])
+                return ReconcileResult(
+                    "reinforce",
+                    self.reinforce(keep, claim.sources, self._observed_at(claim, t)),
+                    [])
 
         # 2. Retraction: the user is taking something back.
         if claim.polarity < 0:
@@ -108,19 +129,81 @@ class Reconciler:
         return ReconcileResult("add", claim, [])
 
     def reinforce(self, claim: Claim, sources: Sequence[str],
-                  now: datetime | None = None) -> Claim:
+                  observed_at: datetime | None = None) -> Claim:
         """Record an independent re-observation of a claim we already hold.
+
+        `observed_at` is when the *evidence was uttered*, not when this process is
+        running. They coincide during a live conversation and diverge in exactly the
+        case that matters: a replay of someone's existing memory store, whose whole
+        purpose is rebuilding real history. Stamped with wall-clock now, every replayed
+        observation claims to have happened today and the recency signal the import
+        exists to reconstruct is destroyed as it is written.
 
         `sources` are merged rather than replaced: provenance is cumulative, and a claim
         that three separate turns support is a different thing from one that has a single
         source that keeps getting overwritten.
+
+        Three things move, and the first two are what make repetition actually work.
+        The *storage* strength (`Claim.salience_base`) goes up — writing the bump onto
+        `salience` instead put it on the one variable the nightly pass recomputes from
+        scratch, so it was erased as soon as the claim was older than `0.415 * half_life`
+        (2.9 days for a FAST predicate) and, since age only grows, erased permanently.
+        The observation instant is stamped, so freshness is measured from the last time
+        anyone mentioned the fact rather than from the first. Together they are the
+        difference between a fact mentioned daily for 90 days settling at the salience
+        floor and settling at the ceiling.
         """
-        obs = claim.observation_count + 1
-        salience = min(self.max_salience, claim.salience + self.reinforce_bump)
-        self.store.reinforce(claim.id, salience, obs, list(sources))
+        t = observed_at or utcnow()
+        base = self._reinforced_base(claim)
+        claim.record_observation(t, base)
+        claim.salience = min(self.max_salience, base)
+        claim.observation_count += 1
+        # Merged in Python rather than left to `store.reinforce`, because the base and
+        # the observation instant live in `meta` and the protocol has no way to set it —
+        # so one `put_claim` writes all three coherently instead of a partial update
+        # followed by a second write that could be interleaved.
+        claim.sources = list(dict.fromkeys(list(claim.sources) + list(sources)))
+        self.store.put_claim(claim)
         return self.store.get_claim(claim.id) or claim
 
+    def _reinforced_base(self, claim: Claim) -> float:
+        """Storage strength after this observation. Bigger when the trace was weaker.
+
+        `retrievability` is how available the claim was *before* we saw it again: its
+        decayed salience over its undecayed base. At 1.0 nothing had faded, so the
+        repetition is massed and earns `MASSED_SHARE` of the bump; near 0 the trace was
+        nearly gone and a successful re-encounter is worth the whole of it.
+
+        Read off the claim rather than recomputed from the half-life on purpose: the
+        salience floor makes the ratio a slight *over*-estimate of true retrievability
+        for a very cold claim, which errs toward the smaller gain, and it keeps
+        reinforcement working for a store whose decay pass has never run.
+        """
+        base = claim.salience_base
+        retrievability = min(1.0, claim.salience / base) if base > 0.0 else 1.0
+        gain = self.reinforce_bump * (
+            MASSED_SHARE + (1.0 - MASSED_SHARE) * (1.0 - retrievability))
+        return min(self.max_salience, base + gain)
+
     # -- internals ------------------------------------------------------------
+
+    @staticmethod
+    def _observed_at(candidate: Claim, t: datetime) -> datetime:
+        """When the incoming assertion was made, as far as we can tell.
+
+        `valid_from` and not `t`, because every write path sets it to exactly that: the
+        episode's timestamp for extracted claims, and the caller's own `valid_from` for
+        `remember()`, which is documented as the way to backfill history honestly. Using
+        the reconciliation instant instead would stamp a replayed 2024 observation as
+        having happened today, which is the one thing an import must not do.
+
+        Clamped to `t` for the same reason `recorded_at` is: a claim asserted as true
+        from next month is not evidence about the freshness of anything today, and the
+        default `valid_from` is a clock read that can land microseconds past the batch
+        instant.
+        """
+        began = as_utc(candidate.valid_from)
+        return began if began < t else t
 
     def _canonicalize(self, claim: Claim) -> None:
         """Fold the predicate onto its canonical name before any key is derived.
@@ -222,7 +305,10 @@ class Reconciler:
                 # We have already processed this exact retraction; re-running it must not
                 # accumulate tombstones. Provenance still merges.
                 keep = self._canonical_of(prior)
-                return ReconcileResult("noop", self.reinforce(keep, claim.sources, t), [])
+                return ReconcileResult(
+                    "noop",
+                    self.reinforce(keep, claim.sources, self._observed_at(claim, t)),
+                    [])
             if target and slot:
                 # A named retraction that hit nothing. Object matching is exact (modulo
                 # case), so "peanut" does not retract "Peanuts" — and writing a tombstone

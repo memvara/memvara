@@ -7,6 +7,7 @@ reading a half-life in the wrong unit, both still produce a curve that decreases
 
 from __future__ import annotations
 
+from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -117,6 +118,45 @@ def test_age_is_measured_from_valid_from_not_recorded_at(registry: PredicateRegi
 
     assert recency_factor(backfilled, registry, NOW) < 0.01
     assert recency_factor(current, registry, NOW) == pytest.approx(1.0)
+
+
+def test_restating_a_fact_resets_the_decay_clock(registry: PredicateRegistry) -> None:
+    """Recency is staleness of the *fact*, and a fact the user brought up this morning
+    is not stale however long ago it first became true.
+
+    Measured against the shipped code: a claim observed 91 times over 90 days scored a
+    recency factor of 1.35e-04, because age ran from a `valid_from` that never moved.
+    """
+    stale = claim("working_on", age_days=90)
+    restated = claim("working_on", age_days=90)
+    restated.record_observation(NOW - timedelta(days=1), base=1.0)
+
+    assert recency_factor(stale, registry, NOW) == pytest.approx(0.5 ** (90 / 7))
+    assert recency_factor(stale, registry, NOW) < 2e-4
+    assert recency_factor(restated, registry, NOW) == pytest.approx(0.5 ** (1 / 7))
+
+
+def test_an_observation_older_than_the_fact_does_not_age_it(
+    registry: PredicateRegistry,
+) -> None:
+    """`valid_from` is the floor, so the trace origin can only ever move forward. A
+    replayed observation of something we later re-learned must not un-freshen it."""
+    c = claim("working_on", age_days=1)
+    c.record_observation(NOW - timedelta(days=60), base=1.0)
+
+    assert recency_factor(c, registry, NOW) == pytest.approx(0.5 ** (1 / 7))
+
+
+def test_a_junk_observation_stamp_is_ignored_rather_than_raising(
+    registry: PredicateRegistry,
+) -> None:
+    """`meta` is free-form JSON that a third-party writer also touches; a string where
+    a timestamp belongs must not raise from inside ranking."""
+    c = claim("working_on", age_days=7)
+    c.meta["last_observed_at"] = "yesterday"
+
+    assert c.last_observed is None
+    assert recency_factor(c, registry, NOW) == pytest.approx(0.5)
 
 
 def test_future_validity_is_clamped_rather_than_amplified(registry: PredicateRegistry) -> None:
@@ -456,6 +496,15 @@ def test_normalization_separates_an_answerable_query_from_an_unanswerable_one() 
     assert score(fusion, 1.0) == pytest.approx(fusion * 1.5)
     assert answerable > 0.5 > unanswerable
     assert answerable > 4 * unanswerable
+
+
+def test_a_result_says_what_kind_of_thing_it_is() -> None:
+    """`Result.score` is only half the caller-facing contract; a mixed result list also
+    has to survive serialization, where `isinstance` cannot follow it."""
+    result = Result(claim=claim("lives_in"), score=0.5, explain=Explanation())
+
+    assert result.kind == Result.kind == "claim"     # a class fact, not per-instance state
+    assert [f.name for f in fields(Result)] == ["claim", "score", "explain"]
 
 
 # --- calibrating a floor ----------------------------------------------------

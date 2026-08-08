@@ -9,45 +9,57 @@ means the write path reinforces the wrong ones.
 Everything here is deterministic and off the write path. No stage calls an LLM, and
 every stage is idempotent, because this runs on a schedule and a scheduler that fires
 twice must not leave a different store than one that fires once.
+
+Off the write path is not the same as out of the way, which is what `Sweep` exists to
+fix: the pass reads its snapshot once and writes it back in bounded transactions, so it
+neither scans the table three times nor holds the write lock for its own duration.
 """
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from datetime import datetime
 
 from ..embed.base import Embedder
 from ..schema import PredicateRegistry
 from ..store.base import Store
-from ..types import utcnow
 from .decay import BASE_KEY, SALIENCE_FLOOR
 from .decay import decay as _decay
+from .decay import decay_pass
+from .merge import NEIGHBOURHOOD, merge_pass, promote_pass
 from .merge import merge_duplicates as _merge_duplicates
 from .merge import promote as _promote
+from .sweep import DEFAULT_WINDOW, Sweep
 
-__all__ = ["Consolidator", "SALIENCE_FLOOR", "BASE_KEY"]
+__all__ = ["Consolidator", "SALIENCE_FLOOR", "BASE_KEY", "Sweep", "DEFAULT_WINDOW"]
 
 
 class Consolidator:
     """The scheduled maintenance pass over a store.
 
-    Stage counts are "claims affected": rows this pass actually wrote. On a settled
-    store every count is zero, which is the signal that consolidation has converged.
+    Stage counts are "claims affected": rows this pass changed. On a settled store every
+    count is zero, which is the signal that consolidation has converged.
     """
 
-    def __init__(self, store: Store, embedder: Embedder, registry: PredicateRegistry) -> None:
+    def __init__(self, store: Store, embedder: Embedder, registry: PredicateRegistry,
+                 *, window: int = DEFAULT_WINDOW) -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
+        #: Rows per transaction. Lower it on a store with heavy concurrent write
+        #: traffic; the sweep gets slower and the writers wait less.
+        self.window = window
 
     def decay(self, tenant: str | None = None, now: datetime | None = None) -> int:
-        return _decay(self.store, self.registry, tenant, now)
+        return _decay(self.store, self.registry, tenant, now, self.window)
 
-    def merge_duplicates(self, tenant: str | None = None, threshold: float = 0.97) -> int:
-        return _merge_duplicates(self.store, self.embedder, tenant, threshold)
+    def merge_duplicates(self, tenant: str | None = None, threshold: float = 0.97,
+                         *, neighbourhood: int = NEIGHBOURHOOD) -> int:
+        return _merge_duplicates(self.store, self.embedder, self.registry, tenant,
+                                 threshold, neighbourhood=neighbourhood,
+                                 window=self.window)
 
     def promote(self, tenant: str | None = None, min_observations: int = 3) -> int:
-        return _promote(self.store, tenant, min_observations)
+        return _promote(self.store, tenant, min_observations, window=self.window)
 
     def run(self, tenant: str | None = None) -> dict[str, int]:
         """All three stages, in the order their outputs feed each other.
@@ -55,16 +67,20 @@ class Consolidator:
         Merge runs before promote so a claim only crosses `min_observations` after its
         duplicates' counts have been folded in - otherwise the same evidence split across
         two rows would never promote either of them.
+
+        One snapshot serves all three, and one windowed flush writes the result. The
+        alternative - a scan and a transaction per stage - cost three full reads of the
+        table and up to three writes of any claim more than one stage touched, most of
+        it on stores where nothing had changed since the last pass. Holding a single
+        transaction across the whole thing was worse still: it is a write outage for
+        every other connection, measured as a hard `database is locked` at 5.2 s rather
+        than as backpressure.
         """
-        now = utcnow()
-        # One transaction for the whole sweep. Each stage rewrites many claims, and a
-        # durability round-trip per claim buys nothing here: the sweep is one logical
-        # operation, and a crash halfway through should leave the pre-sweep store rather
-        # than a half-decayed one. `nullcontext` keeps third-party stores working.
-        batch = getattr(self.store, "batch", None)
-        with (batch() if batch is not None else nullcontext()):
-            return {
-                "decayed": self.decay(tenant, now=now),
-                "merged": self.merge_duplicates(tenant),
-                "promoted": self.promote(tenant),
-            }
+        sweep = Sweep(self.store, tenant, window=self.window)
+        counts = {
+            "decayed": decay_pass(sweep, self.registry),
+            "merged": merge_pass(sweep, self.embedder, self.registry),
+            "promoted": promote_pass(sweep),
+        }
+        sweep.flush()
+        return counts

@@ -198,6 +198,89 @@ def test_already_invalidated_claims_are_not_merge_candidates(consolidator):
     assert store.get_claim("cl_dead").invalidated_by == "cl_win"
 
 
+def test_salience_is_pooled_into_the_survivor(consolidator):
+    """Finding more evidence for a fact must not lower its ranking weight.
+
+    `sources` and `observation_count` were folded in and salience was not, so merging
+    two claims at 1.0 left a survivor at 1.0 - consolidation *reduced* the total
+    ranking mass of a fact by discovering it was better attested than it looked.
+    """
+    store = consolidator.store
+    add(store, "cl_win", "acme", obs=5)
+    add(store, "cl_lose", "Acme", obs=1)
+
+    assert consolidator.merge_duplicates() == 1
+    survivor = store.get_claim("cl_win")
+    assert survivor.salience == pytest.approx(2.0)
+    assert survivor.salience_base == pytest.approx(2.0)
+
+
+def test_pooled_salience_is_capped(consolidator):
+    """Pooling evidence must not become a way to mint unbounded ranking weight."""
+    store = consolidator.store
+    for i in range(8):
+        add(store, f"cl_{i}", "acme", obs=8 - i)
+
+    consolidator.merge_duplicates()
+    assert store.get_claim("cl_0").salience == pytest.approx(5.0)
+
+
+def test_pooling_leaves_the_survivor_on_the_decay_curve(consolidator):
+    """Merge writes a *base*, not a raw salience, so the next pass finds nothing to do.
+
+    Folding the decayed values instead would leave the survivor above its own curve,
+    and the following night's decay would pull it back down - a sweep that changes
+    state on every run is not idempotent, whatever the merge stage reports.
+    """
+    store = consolidator.store
+    add(store, "cl_win", "acme", obs=5, age_days=730)   # one SLOW half-life
+    add(store, "cl_lose", "Acme", obs=1, age_days=730)
+
+    assert consolidator.run("acme") == {"decayed": 2, "merged": 1, "promoted": 0}
+    survivor = store.get_claim("cl_win")
+    assert survivor.salience_base == pytest.approx(2.0)
+    assert survivor.salience == pytest.approx(1.0)      # 2.0 * 0.5
+
+    assert consolidator.run("acme") == {"decayed": 0, "merged": 0, "promoted": 0}
+    assert store.get_claim("cl_win").salience == pytest.approx(1.0)
+
+
+# -- bounded comparison -----------------------------------------------------
+
+
+def test_the_blocking_key_decides_who_is_compared_not_who_survives(consolidator):
+    """Sorting the group by text is an optimisation; `survivor_rank` is the contract."""
+    store = consolidator.store
+    add(store, "cl_late_but_best", "banana", predicate="likes", obs=9)
+    add(store, "cl_early_but_thin", "apple", predicate="likes", obs=1)
+
+    # "apple" sorts first and is visited first; "banana" is still the survivor.
+    assert consolidator.merge_duplicates(threshold=0.0) == 1
+    assert live_ids(store) == {"cl_late_but_best"}
+    assert store.get_claim("cl_late_but_best").observation_count == 10
+
+
+def test_a_cluster_larger_than_the_window_converges_over_successive_sweeps(consolidator):
+    """The bound on comparisons defers merges; it never abandons them.
+
+    Comparing every pair in a slot is O(g²) in time and memory - 49 s and 289 MB on a
+    single 8,000-claim `likes` slot, which a MANY-cardinality predicate reaches on its
+    own. A flat "only look at the top N" cap would bound it too, and would then
+    re-examine the same N forever while the tail grew untouched. This bounds the same
+    work and still finishes, because each sweep's survivors are adjacent in the next.
+    """
+    store = consolidator.store
+    for name in "abcde":
+        add(store, f"cl_{name}", "acme", obs=1)
+
+    retired = [consolidator.merge_duplicates(neighbourhood=2) for _ in range(4)]
+
+    assert retired == [2, 1, 1, 0]
+    assert live_ids(store) == {"cl_a"}
+    # Every observation survived the staged merge; none was dropped on the way.
+    assert store.get_claim("cl_a").observation_count == 5
+
+
 def test_merge_is_scoped_to_one_tenant(consolidator):
     store = consolidator.store
     add(store, "cl_mine", "acme", obs=2)

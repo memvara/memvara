@@ -17,8 +17,16 @@ dependencies = ["numpy>=1.24"]
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.40"]
 local-embed = ["sentence-transformers>=3.0"]
-server = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2.6"]
+# The MCP server needs nothing beyond the core: it speaks JSON-RPC 2.0 over stdio in
+# ~100 lines rather than pulling the reference SDK's dozen-package tree (anyio, httpx,
+# starlette, uvicorn, pydantic, cryptography, jsonschema) to frame one JSON object per
+# line. `engram[server]` used to name those and imply they were required, which was
+# misleading; `http` is reserved for the REST layer that will actually need them.
+http = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2.6"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "coverage>=7.0"]
+
+[project.scripts]
+engram-mcp = "engram.server.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["engram"]

@@ -545,7 +545,13 @@ def test_a_v1_file_is_migrated_and_stamped(tmp_path):
     path = str(tmp_path / "v1.db")
     write_v1(path)
     with SQLiteStore(path) as s:
-        assert int(s._db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION == 2
+        stamped = int(s._db.execute("PRAGMA user_version").fetchone()[0])
+        # Compared against the constant, not a literal. What this test is for is that a
+        # v1 file gets migrated and re-stamped at all; pinning the number instead means
+        # every future schema change fails here for no reason, which trains people to
+        # bump the literal without reading what broke.
+        assert stamped == SCHEMA_VERSION
+        assert SCHEMA_VERSION > 1, "a v1 file must be migrated to something newer"
 
 
 def test_v1_predicate_specs_become_the_default_tenants(tmp_path):

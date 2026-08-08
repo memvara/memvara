@@ -13,11 +13,51 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def as_utc(dt: datetime) -> datetime:
+    """Treat a naive datetime as UTC rather than rejecting it.
+
+    Callers build these by hand at API edges and in tests, and the store round-trips
+    them through epoch floats, so both kinds arrive. A TypeError raised from inside
+    ranking or decay is a far worse outcome than assuming the convention every
+    persisted timestamp already follows.
+    """
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+# --- memory dynamics -----------------------------------------------------------
+# Two `meta` keys, named here rather than in the subsystems that write them, because
+# three of them read these: the write path (reinforcement), consolidation (decay and
+# merge) and retrieval (recency). They live in `meta` because it is already persisted
+# as JSON, so the model below needed no store migration to land.
+
+#: Undecayed *storage* strength. See `Claim.salience_base`.
+SALIENCE_BASE = "salience_base"
+#: Epoch seconds of the last independent re-observation. See `Claim.last_observed`.
+LAST_OBSERVED = "last_observed_at"
+
+#: Decimal places kept on a stored salience. Salience is a ranking weight, not an
+#: accounting figure, and quantizing kills the sub-nanosecond drift between two
+#: scheduler ticks that would otherwise make an idempotent pass look like a change.
+SALIENCE_PRECISION = 6
+
+#: Ceiling on salience, however it was earned. Reinforcement and merge both raise it and
+#: both have to stop at the same place: two ceilings that drift apart is how one path
+#: quietly becomes the way to outrank everything else forever.
+MAX_SALIENCE = 5.0
+
+#: `.kind` discriminators for the two things a search can return. A retrieved fact and
+#: a retrieved conversation turn are different types on purpose (see `Result` and
+#: `HybridRetriever.EpisodeResult`); these are how the distinction survives being
+#: serialized, where `isinstance` cannot follow it.
+CLAIM = "claim"
+EPISODE = "episode"
 
 
 def _new_id(prefix: str) -> str:
@@ -207,7 +247,10 @@ class Claim:
 
     # --- quality signals, used in ranking ---
     confidence: float = 1.0              # how sure the extractor was
-    salience: float = 1.0                # importance; decays over time, bumped on re-observation
+    #: *Retrieval* strength: how available this claim is right now. Decays with time
+    #: and is restored by re-observation. Derived — see `salience_base`, which is the
+    #: half of the pair that re-observation actually raises.
+    salience: float = 1.0
     observation_count: int = 1           # how many times we've independently seen this
 
     # --- provenance ---
@@ -241,6 +284,73 @@ class Claim:
         Lisbon" in a new session must still retire the old city.
         """
         return owner_key(self.scope)
+
+    # --- trace strength ------------------------------------------------------
+    # Bjork & Bjork's new theory of disuse, which the two properties below implement:
+    # a memory has *storage* strength (how well learned, never decreases) and
+    # *retrieval* strength (how available now, decays), and re-observation raises the
+    # first while restoring the second. Collapsing them into one number is what made
+    # reinforcement and decay fight over `salience`, with decay always winning.
+
+    @property
+    def salience_base(self) -> float:
+        """*Storage* strength: salience with the decay curve divided back out.
+
+        This is the number reinforcement raises and the number decay reads. It never
+        falls on its own, so a bump survives every later pass — whereas a bump written
+        straight onto `salience` is erased the moment the pass recomputes the curve.
+
+        Falls back to `salience` for a claim nothing has decayed yet, which is exactly
+        right: an undecayed claim's retrieval strength *is* its storage strength.
+        """
+        stored = self.meta.get(SALIENCE_BASE)
+        return float(stored) if isinstance(stored, (int, float)) else self.salience
+
+    @property
+    def last_observed(self) -> datetime | None:
+        """When this fact was last independently re-observed, or None if never."""
+        stored = self.meta.get(LAST_OBSERVED)
+        if not isinstance(stored, (int, float)):
+            return None
+        return datetime.fromtimestamp(float(stored), tz=timezone.utc)
+
+    @property
+    def trace_from(self) -> datetime:
+        """The instant staleness is measured from: the later of `valid_from` and the
+        last re-observation.
+
+        Age has to be able to *reset*, or repetition cannot beat forgetting. Keyed off
+        `valid_from` alone, a fact the user restated this morning is scored as stale as
+        one nobody has mentioned since it was first recorded — measured at a recency
+        factor of 1.35e-04 for something observed 91 times.
+
+        `valid_from` remains the floor, so nothing here weakens the promise that
+        back-dating a fact we learned late does not hand it artificial freshness: a
+        claim that was never re-observed has no observation timestamp to move it.
+        """
+        seen = self.last_observed
+        began = as_utc(self.valid_from)
+        return began if seen is None or seen < began else seen
+
+    def record_observation(self, at: datetime, base: float) -> None:
+        """Note a re-observation: pin storage strength and stamp the instant.
+
+        The two move together or not at all. A base raised without the timestamp still
+        decays from the original `valid_from`, so the gain evaporates on the next pass;
+        a timestamp moved without the base makes repetition free. Either half alone
+        reproduces one of the two bugs this pair exists to fix.
+
+        The stamp only ever moves *forward*, because "last observed" is a maximum by
+        definition. Replays do not arrive in order — an importer reconstructing a year
+        of history from someone's existing store hands us whatever order its table
+        happens to be in — and letting an old observation overwrite a newer one would
+        make the recency signal a function of that order.
+        """
+        self.meta[SALIENCE_BASE] = round(base, SALIENCE_PRECISION)
+        seen = self.last_observed
+        moment = as_utc(at)
+        if seen is None or seen < moment:
+            self.meta[LAST_OBSERVED] = moment.timestamp()
 
     @property
     def fact_key(self) -> str:
@@ -373,6 +483,13 @@ class Result:
     claim: Claim
     score: float
     explain: Explanation
+
+    #: Discriminator for callers that serialize a mixed result list. `isinstance` is
+    #: the in-process answer and stays the authoritative one - a `Claim` has been
+    #: extracted, reconciled and possibly retired, an `Episode` is a verbatim thing
+    #: someone said once, and the two are not interchangeable however alike their
+    #: fields look. This carries the same answer across a wire, where types do not go.
+    kind: ClassVar[str] = CLAIM
 
     @property
     def text(self) -> str:

@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import sqlite3
+from contextlib import contextmanager
 from datetime import timedelta
 
 import pytest
 
 from engram.consolidate import SALIENCE_FLOOR, Consolidator
 from engram.embed.base import HashingEmbedder
+from engram.retrieve.scoring import recency_factor
 from engram.schema import PredicateRegistry
 from engram.store.sqlite import SQLiteStore
 from engram.types import Claim, MemoryType, Scope, utcnow
+from engram.write.reconcile import Reconciler
 
 NOW = utcnow()
 
@@ -177,18 +181,99 @@ def test_decay_advances_when_time_actually_passes(consolidator):
 
 
 def test_reinforcement_between_passes_is_not_undone(consolidator):
-    """A write-path bump raises the baseline instead of being erased by the next pass."""
+    """A write-path bump raises the baseline instead of being erased by the next pass.
+
+    At the *production* parameters - a claim at the default salience 1.0 and the
+    pipeline's default bump of 0.25. The version of this test that used a bump of 0.5
+    on a base of 0.4 passed against code for which the property was false: a bump only
+    outran the recomputed curve while `age < 0.415 * half_life`, which is 2.9 days for
+    a FAST predicate and 303 for a SLOW one, and past that it was erased on the next
+    pass and every pass after it, because age only ever grows.
+    """
     store = consolidator.store
-    claim = add(store, "works_at", "acme", age_days=730, salience=0.4)
+    rec = Reconciler(store, consolidator.registry)
+    claim = add(store, "works_at", "acme", age_days=730)  # one SLOW half-life
 
     consolidator.decay(now=NOW)
-    assert salience_of(store, claim.id) == pytest.approx(0.2, abs=1e-6)
+    assert salience_of(store, claim.id) == pytest.approx(0.5, abs=1e-6)
 
-    store.reinforce(claim.id, salience=0.9, observation_count=3, sources=["ep_1"])
-    consolidator.decay(now=NOW)
-    # Re-anchored on the bumped value (0.9 * 0.5), not snapped back to the old base.
-    assert salience_of(store, claim.id) == pytest.approx(0.45, abs=1e-6)
+    rec.reinforce(store.get_claim(claim.id), ["ep_1"], NOW)
+    # Half the trace had faded, so the observation buys most of the bump: 0.25 * (0.1 +
+    # 0.9 * 0.5). It lands on the *base*, and the observation instant resets the clock.
+    assert salience_of(store, claim.id) == pytest.approx(1.1375, abs=1e-6)
+
     assert consolidator.decay(now=NOW) == 0
+    assert salience_of(store, claim.id) == pytest.approx(1.1375, abs=1e-6)
+
+
+def test_a_fact_mentioned_every_day_ends_up_salient_not_at_the_floor(consolidator):
+    """The headline failure, as one assertion.
+
+    Measured on the shipped code: `observation_count=91`, `salience=0.05` (the floor),
+    `recency_factor=1.35e-04`. Ninety days of daily reinforcement produced a claim
+    ranked below one nobody had mentioned since it was written.
+    """
+    store = consolidator.store
+    rec = Reconciler(store, consolidator.registry)
+    start = NOW - timedelta(days=90)
+    claim = add(store, "working_on", "the migration", age_days=90)  # FAST, 7d half-life
+
+    for day in range(1, 91):
+        at = start + timedelta(days=day)
+        consolidator.decay(now=at)                       # the nightly scheduler
+        rec.reinforce(store.get_claim(claim.id), [f"ep_{day}"], at)
+
+    stored = store.get_claim(claim.id)
+    assert stored.observation_count == 91
+    assert stored.salience == pytest.approx(5.0)         # the ceiling, not the floor
+    assert recency_factor(stored, consolidator.registry, NOW) == pytest.approx(1.0)
+
+
+def test_spacing_beats_massing(consolidator):
+    """Ten mentions spread over ten months must outrank ten in one conversation.
+
+    Ebbinghaus's spacing effect (Cepeda et al. 2006), which the shipped rule had
+    inverted: a flat bump on a value the next pass recomputed gave massed 3.25 and
+    distributed 0.05 - a factor of 65 the wrong way.
+    """
+    store = consolidator.store
+    rec = Reconciler(store, consolidator.registry)
+
+    massed = add(store, "working_on", "the massed thing", age_days=0)
+    for i in range(10):
+        rec.reinforce(store.get_claim(massed.id), [f"m_{i}"], NOW)
+
+    start = NOW - timedelta(days=300)
+    spaced = add(store, "working_on", "the spaced thing", age_days=300)
+    for i in range(10):
+        at = start + timedelta(days=30 * i)
+        consolidator.decay(now=at)
+        rec.reinforce(store.get_claim(spaced.id), [f"s_{i}"], at)
+
+    end = start + timedelta(days=270)
+    assert salience_of(store, spaced.id) > 2 * salience_of(store, massed.id)
+    assert recency_factor(store.get_claim(spaced.id), consolidator.registry, end) == \
+        pytest.approx(1.0)
+
+
+def test_massed_repetition_cannot_pin_a_claim_at_the_ceiling(consolidator):
+    """The cheap poisoning vector: repeat a fact N times inside one `add()`.
+
+    Under a flat bump, sixteen repetitions of one sentence pinned a claim at the cap
+    permanently. A massed repetition now earns a tenth of the bump, so buying the cap
+    costs 160 restatements of something nobody believes.
+    """
+    store = consolidator.store
+    rec = Reconciler(store, consolidator.registry)
+    claim = add(store, "likes", "the attacker's product")
+
+    for i in range(16):
+        rec.reinforce(store.get_claim(claim.id), [f"ep_{i}"], NOW)
+
+    stored = store.get_claim(claim.id)
+    assert stored.observation_count == 17
+    assert stored.salience == pytest.approx(1.4, abs=1e-6)   # 1.0 + 16 * 0.025
+    assert stored.salience < rec.max_salience
 
 
 # -- degenerate inputs ------------------------------------------------------
@@ -235,3 +320,90 @@ def test_unknown_predicate_decays_at_the_conservative_slow_rate(consolidator):
 
     consolidator.decay(now=NOW)
     assert salience_of(store, claim.id) == pytest.approx(0.5, abs=1e-6)
+
+
+def test_a_claim_nobody_restated_still_decays_from_valid_from(consolidator):
+    """Re-observation is what moves the clock, and nothing else does.
+
+    The counterweight to the tests above: an honest historical import must not become
+    fresh just because the trace-origin rule exists.
+    """
+    store = consolidator.store
+    backdated = add(store, "working_on", "the 2019 migration", age_days=28)
+    backdated.recorded_at = NOW
+    store.put_claim(backdated)
+
+    consolidator.decay(now=NOW)
+    assert salience_of(store, backdated.id) == pytest.approx(0.5**4, abs=1e-6)
+
+
+# -- bounded transactions ---------------------------------------------------
+
+
+class GappedStore:
+    """A store that reports its transactions and runs a probe in each gap between them.
+
+    The property under test is not "the sweep is fast", it is "the sweep is interruptible":
+    holding one transaction for the whole pass hands an external writer a hard
+    `database is locked` instead of backpressure, and the outage grows with the store.
+    """
+
+    def __init__(self, inner, probe):
+        self._inner = inner
+        self._probe = probe
+        self.transactions = 0
+
+    @contextmanager
+    def batch(self):
+        self.transactions += 1
+        with self._inner.batch():
+            yield
+        self._probe()   # after the commit, so this runs with the write lock released
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_a_sweep_writes_in_bounded_transactions_an_outsider_can_write_between(tmp_path):
+    path = str(tmp_path / "sweep.db")
+    store = SQLiteStore(path)
+    for i in range(10):
+        add(store, "working_on", f"task {i}", age_days=30)
+
+    outside = sqlite3.connect(path, timeout=0.25)
+    landed: list[bool] = []
+
+    def probe():
+        try:
+            outside.execute(
+                "INSERT INTO episodes (id, tenant, role, content, ts, hash) "
+                "VALUES (?,?,?,?,?,?)",
+                (f"ext_{len(landed)}", "acme", "user", "hi", 0.0, "h"))
+            outside.commit()
+            landed.append(True)
+        except sqlite3.OperationalError:  # pragma: no cover - the failure this prevents
+            landed.append(False)
+
+    gapped = GappedStore(store, probe)
+    con = Consolidator(gapped, HashingEmbedder(dim=64), PredicateRegistry(), window=3)
+
+    assert con.decay(now=NOW) == 10
+    # Ten dirty rows at three per transaction: four transactions, four gaps, and an
+    # outside writer that got the lock in every one of them.
+    assert gapped.transactions == 4
+    assert landed == [True] * 4
+
+    outside.close()
+    store.close()
+
+
+def test_a_settled_store_opens_no_transaction_at_all(consolidator):
+    """Nothing changed means nothing is written, so there is nothing to lock."""
+    store = consolidator.store
+    add(store, "works_at", "acme", age_days=365)
+    consolidator.run()
+
+    counted = GappedStore(store, lambda: None)
+    con = Consolidator(counted, consolidator.embedder, consolidator.registry)
+    assert con.run("acme") == {"decayed": 0, "merged": 0, "promoted": 0}
+    assert counted.transactions == 0

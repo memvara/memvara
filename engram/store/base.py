@@ -26,6 +26,14 @@ class Store(Protocol):
     def get_episode(self, episode_id: str) -> Episode | None: ...
     def find_episode_by_hash(self, tenant: str, ep_hash: str) -> Episode | None: ...
 
+    def get_episodes(self, episode_ids: Sequence[str]) -> dict[str, Episode]:
+        """Bulk fetch, so hydrating a result set is one query rather than one per hit."""
+        ...
+
+    def iter_episodes(self, tenant: str | None = None) -> Iterable[Episode]:
+        """Every stored turn, optionally for one tenant. What re-embedding walks."""
+        ...
+
     # --- claims -----------------------------------------------------------
     def put_claim(self, claim: Claim) -> None: ...
     def get_claim(self, claim_id: str) -> Claim | None: ...
@@ -73,6 +81,20 @@ class Store(Protocol):
         already been embedded."""
         ...
 
+    def set_episode_embedding(self, episode_id: str, vec: np.ndarray) -> None:
+        """Index a raw turn for semantic recall.
+
+        Its own method rather than an overload of `set_embedding`, because claims and
+        episodes are separate objects with separate lifecycles and inferring which one
+        an id names is exactly the guess that puts a turn in the claims index.
+        """
+        ...
+
+    def get_episode_embedding(self, episode_id: str) -> np.ndarray | None:
+        """A turn's vector, or None if it was never indexed. Also the cheap probe for
+        "has this already been embedded?"."""
+        ...
+
     def clear_embeddings(self) -> int:
         """Drop every stored vector and release the dimension they fixed; return how
         many went.
@@ -95,11 +117,36 @@ class Store(Protocol):
                       as_of: datetime | None = None,
                       include_invalidated: bool = False) -> list[tuple[str, float]]: ...
 
+    # --- episode retrieval ------------------------------------------------
+    #
+    # The same three primitives over raw turns. They take no `include_invalidated`:
+    # episodes are not bitemporal — nothing retires or supersedes them — so there is no
+    # end-of-life to lift. `as_of` still applies, and means the one thing it can mean
+    # for a turn: it had already happened.
+    #
+    # Scope filtering is *not* relaxed. It is the same question for raw text as for a
+    # derived belief, and raw text is the more sensitive of the two: an unfiltered
+    # episode search would hand one session's transcript to a sibling session and one
+    # tenant's to another.
+
+    def episode_candidate_ids(self, scopes: Sequence[Scope],
+                              as_of: datetime | None = None) -> list[str]: ...
+
+    def lexical_search_episodes(self, query: str, scopes: Sequence[Scope], limit: int,
+                                as_of: datetime | None = None
+                                ) -> list[tuple[str, float]]: ...
+
+    def vector_search_episodes(self, qvec: np.ndarray, scopes: Sequence[Scope],
+                               limit: int, as_of: datetime | None = None
+                               ) -> list[tuple[str, float]]: ...
+
     def purge(self, scope: Scope) -> dict[str, int]:
-        """Irreversibly erase a scope: claims, episodes, embeddings and text index.
+        """Irreversibly erase a scope: claims, episodes, every vector, both text indexes.
 
         The one place deletion is correct. Retirement cannot satisfy a legal erasure
-        request, because the text stays readable.
+        request, because the text stays readable — and an index entry outliving the row
+        it describes leaves the purged text searchable, which is the same failure with
+        an extra step.
         """
         ...
 

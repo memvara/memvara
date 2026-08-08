@@ -17,27 +17,22 @@ fused rank, however it is rescaled.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from ..schema import PredicateRegistry
-from ..types import Claim
-
-
-def _as_utc(dt: datetime) -> datetime:
-    """Naive datetimes are treated as UTC rather than rejected.
-
-    Callers construct these by hand in tests and at API edges; a TypeError deep inside
-    ranking is a worse outcome than assuming the convention the rest of the store uses.
-    """
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+from ..types import Claim, as_utc
 
 
 def recency_factor(claim: Claim, registry: PredicateRegistry, now: datetime) -> float:
     """Exponential decay on the predicate's half-life, in [0, 1].
 
-    Age is measured from `valid_from` - when the fact became true in the world - not
-    from `recorded_at`. Backfilling a 2019 fact today should not make it look fresh;
-    staleness is a property of the fact, not of our bookkeeping.
+    Age is measured from `Claim.trace_from` and never from `recorded_at`. That is
+    `valid_from` - when the fact became true in the world - except when the fact has
+    since been restated, in which case it is the last time we heard it. Both halves of
+    that matter: backfilling a 2019 fact today must not make it look fresh, and a fact
+    the user mentioned this morning must not be scored as stale as one nobody has
+    brought up since it was first recorded. Keyed off `valid_from` alone, a claim
+    observed 91 times over 90 days scored a recency factor of 1.35e-04.
 
     `now` is supplied rather than read from the clock so that a time-travel query
     decays relative to the moment being asked about. Asking "what did we believe in
@@ -49,7 +44,7 @@ def recency_factor(claim: Claim, registry: PredicateRegistry, now: datetime) -> 
         # and a ZeroDivisionError inside ranking is a terrible way to find out.
         return 0.0
 
-    age_days = (_as_utc(now) - _as_utc(claim.valid_from)).total_seconds() / 86400.0
+    age_days = (as_utc(now) - claim.trace_from).total_seconds() / 86400.0
     if age_days <= 0.0:
         # Not yet true, or true as of exactly now. Clamp instead of letting the
         # exponent go positive: a fact scheduled for next month must not outscore a

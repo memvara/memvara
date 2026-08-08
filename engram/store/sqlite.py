@@ -10,6 +10,13 @@ Design notes:
 * Vector search is a numpy matmul over a rowid-addressed float32 matrix, restricted to
   the candidate rows for the scope. Exact, not approximate: at the scale a local memory
   store actually operates at, ANN buys nothing and costs recall.
+* Episodes get both of those indexes too, on the same terms. They used to get neither,
+  which meant a stored turn was reachable only through `why()` on a claim that happened
+  to be extracted from it — so every turn the extractor declined (a decision, a reason,
+  a constraint stated conditionally: most of a real transcript) was retained and then
+  permanently unfindable. Their vectors share the matrix with the claims': one mapped
+  file, one slot space, one dimension, because the same embedder writes both and a
+  second matrix would double the coherence bookkeeping to no end.
 * That matrix lives in a mapped file (`<db>.vecs`), not on the heap. SQLite owns the
   vectors; the file is a derived, rebuildable view of them addressed by an integer
   slot. Opening therefore costs a header read instead of deserializing every blob, the
@@ -28,6 +35,7 @@ import os
 import sqlite3
 import struct
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Sequence
@@ -47,7 +55,11 @@ if TYPE_CHECKING:  # pragma: no cover
 # 2: predicate specs became tenant-scoped, and embeddings gained `slot` (their row in
 #    the mapped matrix) and `seq` (a monotonic write counter another process reads to
 #    find what it has not seen).
-SCHEMA_VERSION = 2
+# 3: episodes became retrievable — an FTS index over their text and a vector table
+#    sharing the claims' matrix. The DDL below is `IF NOT EXISTS`, so it does appear on
+#    an old file; what does not appear is the *content* of an index for episodes that
+#    were written before it existed, and backfilling that is what the stamp gates.
+SCHEMA_VERSION = 3
 
 # Kept separate because the v1 -> v2 migration has to recreate this table: SQLite
 # cannot add a column to an existing primary key, and (tenant, name) is now the key.
@@ -81,7 +93,10 @@ CREATE TABLE IF NOT EXISTS episodes (
     hash     TEXT NOT NULL,
     meta     TEXT NOT NULL DEFAULT '{}'
 );
-CREATE INDEX IF NOT EXISTS ep_hash ON episodes(tenant, hash);
+CREATE INDEX IF NOT EXISTS ep_hash  ON episodes(tenant, hash);
+-- `ts` last, so the same index serves both the scope filter and the as-of range scan
+-- that bounds an episode search to turns that had already happened.
+CREATE INDEX IF NOT EXISTS ep_scope ON episodes(tenant, usr, agent, session, ts);
 
 CREATE TABLE IF NOT EXISTS claims (
     id             TEXT PRIMARY KEY,
@@ -124,6 +139,18 @@ CREATE TABLE IF NOT EXISTS embeddings (
     vec      BLOB NOT NULL
 );
 
+-- Episode vectors. A separate table because the two are separate objects with separate
+-- lifecycles, but addressing *one* matrix: `slot` is drawn from the same allocator and
+-- freed into the same `vec_free`, so a row belongs to exactly one of the two tables and
+-- the mapped file needs neither a second header nor a second dimension.
+CREATE TABLE IF NOT EXISTS episode_embeddings (
+    episode_id TEXT PRIMARY KEY,
+    dim        INTEGER NOT NULL,
+    slot       INTEGER,
+    seq        INTEGER NOT NULL DEFAULT 0,
+    vec        BLOB NOT NULL
+);
+
 -- Slots freed by purge(), so a store that churns reuses rows instead of growing its
 -- matrix forever. Popped inside the same write transaction that consumes the slot,
 -- which is what keeps two processes from handing the same row to two claims.
@@ -131,6 +158,12 @@ CREATE TABLE IF NOT EXISTS vec_free (slot INTEGER PRIMARY KEY);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts
     USING fts5(claim_id UNINDEXED, text, tokenize='porter unicode61');
+
+-- The episode text index. Its absence was the larger half of "stored and never found
+-- again": a turn the extractor declined still holds the reason, the constraint and the
+-- decision, and BM25 over raw turns is the only thing that can return those verbatim.
+CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts
+    USING fts5(episode_id UNINDEXED, content, tokenize='porter unicode61');
 
 -- Learned predicate schema. This has to be durable: cardinality is what makes a
 -- contradiction detectable, so a registry that evaporates on restart means a fresh
@@ -148,6 +181,10 @@ _LATE_INDEXES = """
 CREATE UNIQUE INDEX IF NOT EXISTS emb_slot ON embeddings(slot);
 CREATE INDEX IF NOT EXISTS emb_seq  ON embeddings(seq, slot, claim_id);
 CREATE INDEX IF NOT EXISTS emb_dim  ON embeddings(dim, slot);
+
+CREATE UNIQUE INDEX IF NOT EXISTS epemb_slot ON episode_embeddings(slot);
+CREATE INDEX IF NOT EXISTS epemb_seq ON episode_embeddings(seq, slot, episode_id);
+CREATE INDEX IF NOT EXISTS epemb_dim ON episode_embeddings(dim, slot);
 """
 
 _CLAIM_FIELDS = (
@@ -166,24 +203,86 @@ _CLAIM_UPSERT = (
     "ON CONFLICT(id) DO UPDATE SET "
     + ", ".join(f"{f}=excluded.{f}" for f in _CLAIM_FIELDS if f != "id")
 )
+_EPISODE_FIELDS = (
+    "id", "tenant", "usr", "agent", "session", "role", "content", "ts", "hash", "meta",
+)
+# Upsert, not INSERT OR REPLACE, for the same reason `put_claim` uses one: REPLACE
+# deletes and re-inserts, which assigns a new rowid, and the FTS row is keyed on the old
+# one. Re-adding a turn would leave its text in the index under a rowid nothing points
+# at — searchable, unhydratable, and undeletable by purge.
+_EPISODE_UPSERT = (
+    f"INSERT INTO episodes ({', '.join(_EPISODE_FIELDS)}) "
+    f"VALUES ({', '.join('?' * len(_EPISODE_FIELDS))}) "
+    "ON CONFLICT(id) DO UPDATE SET "
+    + ", ".join(f"{f}=excluded.{f}" for f in _EPISODE_FIELDS if f != "id")
+)
+
 # SQLite's parameter limit is 999 on older builds; chunk bulk lookups below it.
 _MAX_SQL_PARAMS = 900
 
-# One statement, so slot allocation happens inside the write transaction and cannot
-# race another process. The slot subquery is evaluated even when the row already
-# exists, which is harmless: nothing consumes it, and the conflict branch deliberately
-# leaves `slot` alone so a re-embedded claim keeps its row.
-_EMBEDDING_UPSERT = """
-INSERT INTO embeddings (claim_id, dim, slot, seq, vec)
-VALUES (?, ?,
-        COALESCE((SELECT MIN(slot) FROM vec_free),
-                 (SELECT COALESCE(MAX(slot), -1) + 1 FROM embeddings)),
-        (SELECT COALESCE(MAX(seq), 0) + 1 FROM embeddings),
-        ?)
-ON CONFLICT(claim_id) DO UPDATE SET
-    dim = excluded.dim, seq = excluded.seq, vec = excluded.vec
-RETURNING slot
-"""
+_VEC_TABLE_NAMES = ("embeddings", "episode_embeddings")
+
+# The next row of the matrix to hand out. Both vector tables address one matrix, so the
+# allocator has to see both: computing "one past my own maximum" per table would give
+# the first episode and the first claim the same row, and each would read back the
+# other's vector.
+_NEXT_SLOT = (
+    "COALESCE((SELECT MIN(slot) FROM vec_free), (SELECT MAX(top) + 1 FROM ("
+    + " UNION ALL ".join(f"SELECT COALESCE(MAX(slot), -1) AS top FROM {n}"
+                         for n in _VEC_TABLE_NAMES)
+    + ")))"
+)
+
+
+def _vector_upsert(table: str, key: str) -> str:
+    """One statement, so slot allocation happens inside the write transaction and cannot
+    race another process. The slot subquery is evaluated even when the row already
+    exists, which is harmless: nothing consumes it, and the conflict branch deliberately
+    leaves `slot` alone so a re-embedded item keeps its row.
+    """
+    return (
+        f"INSERT INTO {table} ({key}, dim, slot, seq, vec) "
+        f"VALUES (?, ?, {_NEXT_SLOT}, "
+        f"(SELECT COALESCE(MAX(seq), 0) + 1 FROM {table}), ?) "
+        f"ON CONFLICT({key}) DO UPDATE SET "
+        "dim = excluded.dim, seq = excluded.seq, vec = excluded.vec "
+        "RETURNING slot"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _VecTable:
+    """Where one kind of vector is persisted, and under what key.
+
+    Claims and episodes are separate objects with separate lifecycles, so they get
+    separate tables — but every operation over them is identical, and writing it twice
+    is how the two silently diverge on the one thing that must not: which of them owns
+    a given row of the shared matrix.
+    """
+
+    name: str
+    key: str
+    upsert: str
+
+
+_CLAIM_VECS = _VecTable("embeddings", "claim_id",
+                        _vector_upsert("embeddings", "claim_id"))
+_EPISODE_VECS = _VecTable("episode_embeddings", "episode_id",
+                          _vector_upsert("episode_embeddings", "episode_id"))
+_VEC_TABLES = (_CLAIM_VECS, _EPISODE_VECS)
+
+# Everything the index needs to know about what is on disk, in one query per open:
+# how many vectors, whether they agree on a width, the highest row in use, and how many
+# rows have no address yet. `SUM(n)`, not `COUNT(*)` — the outer query counts the two
+# subquery rows, not the vectors they summarize.
+_VEC_CENSUS = (
+    "SELECT SUM(n) AS n, MIN(lo) AS lo, MAX(hi) AS hi, MAX(top) AS top, "
+    "SUM(loose) AS loose FROM ("
+    + " UNION ALL ".join(
+        f"SELECT COUNT(*) AS n, MIN(dim) AS lo, MAX(dim) AS hi, MAX(slot) AS top, "
+        f"COUNT(*) - COUNT(slot) AS loose FROM {n}" for n in _VEC_TABLE_NAMES)
+    + ")"
+)
 
 _VEC_MAGIC = b"ENGRMVEC"
 _VEC_FORMAT = 1
@@ -267,6 +366,12 @@ class _VecIndex:
     Slots are assigned by whoever owns durability. The store allocates them inside its
     write transaction (so two processes cannot claim one row) and calls `put`/`map`;
     a bare index, with no store behind it, allocates its own via `add`.
+
+    The keys are opaque strings, and the index does not care what kind of thing they
+    name. Claims and episodes share it: their ids are disjoint by construction, they
+    are written by the same embedder and therefore have one width, and a second matrix
+    would mean a second file, a second header and a second staleness question for no
+    benefit at all.
     """
 
     _INITIAL_ROWS = 256
@@ -365,18 +470,18 @@ class _VecIndex:
 
     # -- mutation ------------------------------------------------------------
 
-    def put(self, claim_id: str, slot: int, vec: np.ndarray) -> None:
-        """Write a unit vector into `slot` and point `claim_id` at it."""
+    def put(self, item_id: str, slot: int, vec: np.ndarray) -> None:
+        """Write a unit vector into `slot` and point `item_id` at it."""
         with self._lock:
             if self.dim is None:
                 self.attach(int(np.asarray(vec).reshape(-1).shape[0]), slot + 1)
             self._ensure_rows(slot + 1)
             self._mat[slot] = vec
-            self._row[claim_id] = slot
+            self._row[item_id] = slot
             self._high = max(self._high, slot + 1)
 
-    def map(self, claim_id: str, slot: int) -> None:
-        """Point `claim_id` at a row that already holds its vector.
+    def map(self, item_id: str, slot: int) -> None:
+        """Point `item_id` at a row that already holds its vector.
 
         This is the whole cost of learning about another process's writes: the bytes
         arrived through the shared mapping, only the name-to-row map is process-local.
@@ -384,10 +489,10 @@ class _VecIndex:
         with self._lock:
             if self.dim is not None:
                 self._ensure_rows(slot + 1)
-            self._row[claim_id] = slot
+            self._row[item_id] = slot
             self._high = max(self._high, slot + 1)
 
-    def add(self, claim_id: str, vec: np.ndarray) -> None:
+    def add(self, item_id: str, vec: np.ndarray) -> None:
         """Store a vector, allocating its slot. For an index with no store behind it."""
         v = _unit(vec)
         with self._lock:
@@ -398,21 +503,21 @@ class _VecIndex:
                     f"embedding dim {v.shape[0]} != index dim {self.dim}; "
                     "the store was built with a different embedder"
                 )
-            slot = self._row.get(claim_id)
+            slot = self._row.get(item_id)
             if slot is None:
                 slot = self._free.pop() if self._free else self._high
-            self.put(claim_id, slot, v)
+            self.put(item_id, slot, v)
 
-    def forget(self, claim_id: str) -> int | None:
-        """Unmap a claim and blank its row, returning the slot it held.
+    def forget(self, item_id: str) -> int | None:
+        """Unmap an item and blank its row, returning the slot it held.
 
-        Zeroing matters for erasure: a purged claim's text stays reconstructible from
+        Zeroing matters for erasure: purged text stays reconstructible from
         its embedding, and the file outlives the process. The slot is handed back to
         the caller rather than reused here, because when a store is present the free
         list has to be durable and shared.
         """
         with self._lock:
-            slot = self._row.pop(claim_id, None)
+            slot = self._row.pop(item_id, None)
             if slot is not None and self._mat is not None and slot < self._rows:
                 self._mat[slot] = 0.0
             return slot
@@ -439,14 +544,14 @@ class _VecIndex:
                 self._fh.close()
                 self._fh = None
 
-    def remove(self, claim_id: str) -> bool:
+    def remove(self, item_id: str) -> bool:
         """Drop a vector and keep its slot for reuse. Required for erasure — without
         it, purged text stays reconstructible from the embedding.
 
         Search resolves through the name-to-row map, so an unmapped id is unreachable
         even before the row is blanked.
         """
-        slot = self.forget(claim_id)
+        slot = self.forget(item_id)
         if slot is None:
             return False
         self._free.append(slot)
@@ -498,10 +603,10 @@ class _VecIndex:
         order = part[np.argsort(-scores[part])]
         return [(cids[int(i)], float(scores[int(i)])) for i in order]
 
-    def get(self, claim_id: str) -> np.ndarray | None:
-        """The stored unit vector, or None if this claim was never embedded."""
+    def get(self, item_id: str) -> np.ndarray | None:
+        """The stored unit vector, or None if this item was never embedded."""
         with self._lock:
-            row = self._row.get(claim_id)
+            row = self._row.get(item_id)
             if row is None or self._mat is None:
                 return None
             return np.array(self._mat[row])
@@ -531,13 +636,15 @@ class SQLiteStore:
         self._db.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._batch_depth = 0
-        # Claims whose matrix row this transaction touched, so a rollback can put the
-        # index back in step with the database.
-        self._touched: set[str] = set()
+        # Rows of the matrix this transaction touched, as (table, id), so a rollback can
+        # put the index back in step with the database.
+        self._touched: set[tuple[_VecTable, str]] = set()
         self._cleared = False
-        self._vec = _VecIndex(path=_vec_path(path), count=self._count_embeddings)
+        self._vec = _VecIndex(path=_vec_path(path), count=self._count_vectors)
         self._index_loaded = False
-        self._seq = -1
+        # One write watermark per vector table: `_read_map` folds in everything written
+        # past it, and the two tables count independently.
+        self._seq = {t.name: -1 for t in _VEC_TABLES}
         self._data_version = -1
         with self._lock:
             self._db.executescript(SCHEMA)
@@ -561,6 +668,7 @@ class SQLiteStore:
             )
         if found < SCHEMA_VERSION:
             self._migrate_to_v2()
+            self._migrate_to_v3()
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _migrate_to_v2(self) -> None:
@@ -592,6 +700,26 @@ class SQLiteStore:
             self._db.execute(
                 "ALTER TABLE embeddings ADD COLUMN seq INTEGER NOT NULL DEFAULT 0")
 
+    def _migrate_to_v3(self) -> None:
+        """Index the episodes an older file already holds.
+
+        The DDL is not the migration here. `CREATE VIRTUAL TABLE IF NOT EXISTS` does
+        create `episodes_fts` on an old file — and leaves it empty, which is
+        indistinguishable from a store whose turns genuinely match nothing. Every
+        pre-v3 episode would therefore stay exactly as unfindable as it was before the
+        upgrade, silently, which is the bug this version exists to fix rather than to
+        re-ship. Vectors need no equivalent pass: none were ever written, and
+        `Engram.reembed()` is what supplies them.
+
+        Shape-driven and idempotent, like `_migrate_to_v2`: a brand-new database also
+        arrives here at version 0, with no episodes, and does nothing.
+        """
+        self._db.execute(
+            "INSERT INTO episodes_fts (rowid, episode_id, content) "
+            "SELECT rowid, id, content FROM episodes "
+            "WHERE rowid NOT IN (SELECT rowid FROM episodes_fts)"
+        )
+
     # -- vector index --------------------------------------------------------
 
     def _attach_vectors(self) -> None:
@@ -602,10 +730,7 @@ class SQLiteStore:
         matrix — which is what made a large store take seconds to open and, past a
         point, impossible to open at all.
         """
-        row = self._db.execute(
-            "SELECT COUNT(*) AS n, MIN(dim) AS lo, MAX(dim) AS hi, "
-            "MAX(slot) AS top, COUNT(*) - COUNT(slot) AS loose FROM embeddings"
-        ).fetchone()
+        row = self._db.execute(_VEC_CENSUS).fetchone()
         if not row["n"]:
             return  # dimension stays unknown until something is written
         if row["lo"] != row["hi"]:
@@ -622,26 +747,34 @@ class SQLiteStore:
         elif base is not None:
             # The mapping was usable but says nothing about rows that had no address a
             # moment ago, and a row of zeros is not the vector that was written.
-            self._fill("SELECT claim_id, slot, vec FROM embeddings WHERE slot >= ?",
-                       (base,))
+            for t in _VEC_TABLES:
+                self._fill(t, "WHERE slot >= ?", (base,))
 
     def _assign_slots(self) -> tuple[int, int]:
-        """Give a row to every embedding that has none; return the first and the last.
+        """Give a row to every vector that has none; return the first and the last.
 
         Two things arrive here: a v1 file, where the column did not exist, and a row
         written by something other than this class. Either way the vector is invisible
-        to search until it is addressable.
+        to search until it is addressable. Both tables are numbered from one counter,
+        because they share one matrix.
         """
         base = int(self._db.execute(
-            "SELECT COALESCE(MAX(slot), -1) + 1 FROM embeddings").fetchone()[0])
-        loose = self._db.execute(
-            "SELECT claim_id FROM embeddings WHERE slot IS NULL ORDER BY rowid").fetchall()
-        self._db.executemany(
-            "UPDATE embeddings SET slot = ?, seq = ? WHERE claim_id = ?",
-            [(base + i, base + i + 1, r["claim_id"]) for i, r in enumerate(loose)],
-        )
+            "SELECT MAX(top) + 1 FROM ("
+            + " UNION ALL ".join(f"SELECT COALESCE(MAX(slot), -1) AS top FROM {n}"
+                                 for n in _VEC_TABLE_NAMES)
+            + ")").fetchone()[0])
+        nxt = base
+        for t in _VEC_TABLES:
+            loose = self._db.execute(
+                f"SELECT {t.key} AS k FROM {t.name} WHERE slot IS NULL ORDER BY rowid"
+            ).fetchall()
+            self._db.executemany(
+                f"UPDATE {t.name} SET slot = ?, seq = ? WHERE {t.key} = ?",
+                [(nxt + i, nxt + i + 1, r["k"]) for i, r in enumerate(loose)],
+            )
+            nxt += len(loose)
         self._db.commit()
-        return base, base + len(loose) - 1
+        return base, nxt - 1
 
     def _rebuild_matrix(self) -> None:
         """Refill the whole matrix from the vectors SQLite holds.
@@ -650,21 +783,23 @@ class SQLiteStore:
         embedder. The database is the authority; the file is a view of it, which is
         what makes deleting the file a recoverable mistake rather than data loss.
         """
-        self._fill("SELECT claim_id, slot, vec FROM embeddings", ())
+        for t in _VEC_TABLES:
+            self._fill(t)
+            self._seq[t.name] = self._max_seq(t)
         self._index_loaded = True
-        self._seq = self._max_seq()
         self._data_version = self._version()
 
-    def _fill(self, sql: str, params: tuple) -> None:
+    def _fill(self, t: _VecTable, where: str = "", params: tuple = ()) -> None:
         """Copy vectors out of SQLite into their rows.
 
         The only place blobs are read in bulk, and the only place a blob that disagrees
         with its recorded width can surface — numpy would otherwise raise a broadcast
         error naming neither the store nor the cause.
         """
-        for r in self._db.execute(sql + " ORDER BY slot", params):
+        sql = f"SELECT {t.key} AS k, slot, vec FROM {t.name} {where} ORDER BY slot"
+        for r in self._db.execute(sql, params):
             try:
-                self._vec.put(r["claim_id"], r["slot"],
+                self._vec.put(r["k"], r["slot"],
                               np.frombuffer(r["vec"], dtype=np.float32))
             except ValueError as e:
                 raise ValueError(
@@ -673,20 +808,22 @@ class SQLiteStore:
                     "single one."
                 ) from e
 
-    def _count_embeddings(self) -> int:
+    def _count_vectors(self, t: _VecTable | None = None) -> int:
+        """How many vectors the store holds, in one table or across the matrix."""
+        tables = (t,) if t is not None else _VEC_TABLES
         with self._lock:
-            return int(
-                self._db.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0])
+            return sum(int(self._db.execute(f"SELECT COUNT(*) FROM {x.name}").fetchone()[0])
+                       for x in tables)
 
     def _version(self) -> int:
         return int(self._db.execute("PRAGMA data_version").fetchone()[0])
 
-    def _max_seq(self) -> int:
+    def _max_seq(self, t: _VecTable) -> int:
         return int(self._db.execute(
-            "SELECT COALESCE(MAX(seq), -1) FROM embeddings").fetchone()[0])
+            f"SELECT COALESCE(MAX(seq), -1) FROM {t.name}").fetchone()[0])
 
     def _read_map(self) -> None:
-        """Fold every embedding written since `self._seq` into the name-to-row map.
+        """Fold every vector written since the watermarks into the name-to-row map.
 
         Serves both the first use and every refresh after it. The ORDER BY is what
         makes SQLite answer from `emb_seq`, which carries all three columns — without
@@ -694,11 +831,12 @@ class SQLiteStore:
         """
         cur = self._db.cursor()
         cur.row_factory = None  # 100k Row objects cost more than the query does
-        cur.execute("SELECT claim_id, slot, seq FROM embeddings WHERE seq > ? "
-                    "ORDER BY seq", (self._seq,))
-        for claim_id, slot, seq in cur.fetchall():
-            self._vec.map(claim_id, slot)
-            self._seq = seq
+        for t in _VEC_TABLES:
+            cur.execute(f"SELECT {t.key}, slot, seq FROM {t.name} WHERE seq > ? "
+                        "ORDER BY seq", (self._seq[t.name],))
+            for item_id, slot, seq in cur.fetchall():
+                self._vec.map(item_id, slot)
+                self._seq[t.name] = seq
 
     def _ensure_index(self) -> None:
         """Make the map usable and current before a read resolves through it.
@@ -730,7 +868,7 @@ class SQLiteStore:
         """Put the matrix back in step with the database after a rollback.
 
         The matrix is a mapped file and takes no part in SQLite's transaction, so
-        without this a rolled-back batch leaves vectors no claim owns: they still match
+        without this a rolled-back batch leaves vectors nothing owns: they still match
         queries, `stats()` still counts them, and purge's erasure guarantee no longer
         holds. The database is the authority, so every row the batch touched is simply
         re-read from it.
@@ -742,14 +880,14 @@ class SQLiteStore:
             self._vec.reset()
             self._attach_vectors()
             return
-        for claim_id in self._touched:
+        for t, item_id in self._touched:
             r = self._db.execute(
-                "SELECT slot, vec FROM embeddings WHERE claim_id=?", (claim_id,)
+                f"SELECT slot, vec FROM {t.name} WHERE {t.key}=?", (item_id,)
             ).fetchone()
             if r is None:
-                self._vec.forget(claim_id)
+                self._vec.forget(item_id)
             else:
-                self._vec.put(claim_id, r["slot"],
+                self._vec.put(item_id, r["slot"],
                               np.frombuffer(r["vec"], dtype=np.float32))
 
     # -- transaction batching ------------------------------------------------
@@ -791,9 +929,9 @@ class SQLiteStore:
                     self._cleared = False
                     self._maybe_commit()
 
-    def _mark(self, claim_id: str) -> None:
+    def _mark(self, t: _VecTable, item_id: str) -> None:
         if self._batch_depth:
-            self._touched.add(claim_id)
+            self._touched.add((t, item_id))
 
     # -- scope / liveness SQL ------------------------------------------------
 
@@ -838,16 +976,40 @@ class SQLiteStore:
         )
         return clause, [t, t, t, t]
 
+    @staticmethod
+    def _happened_clause(as_of: datetime | None, alias: str = "") -> tuple[str, list]:
+        """An episode's one time axis: had this turn happened yet?
+
+        Episodes are not bitemporal and have no liveness. Nothing retires them, nothing
+        supersedes them, and `invalidated_at`/`valid_to` have no analogue — a turn that
+        was said was said. What survives from `_live_clause` is only its floor, and for
+        the same reason: returning a turn from July when asked what we knew in March is
+        the one way a time-travel query can lie, and it lies about raw source text
+        rather than about a derived belief.
+        """
+        a = f"{alias}." if alias else ""
+        t = _ts(as_of) if as_of is not None else datetime.now(timezone.utc).timestamp()
+        return f"({a}ts <= ?)", [t]
+
     # -- episodes ------------------------------------------------------------
 
     def add_episode(self, ep: Episode) -> None:
         with self._lock:
             self._db.execute(
-                "INSERT OR REPLACE INTO episodes "
-                "(id, tenant, usr, agent, session, role, content, ts, hash, meta) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                _EPISODE_UPSERT,
                 (ep.id, ep.scope.tenant, ep.scope.user, ep.scope.agent, ep.scope.session,
                  ep.role, ep.content, _ts(ep.ts), ep.hash, json.dumps(ep.meta)),
+            )
+            # Mirror the episode's rowid into the FTS table, exactly as `put_claim`
+            # does and for the same reason: `episode_id` is UNINDEXED, so deleting on
+            # it scans the whole index, and the upsert above exists precisely so the
+            # rowid survives a re-add.
+            rowid = self._db.execute(
+                "SELECT rowid FROM episodes WHERE id=?", (ep.id,)).fetchone()["rowid"]
+            self._db.execute("DELETE FROM episodes_fts WHERE rowid=?", (rowid,))
+            self._db.execute(
+                "INSERT INTO episodes_fts (rowid, episode_id, content) VALUES (?,?,?)",
+                (rowid, ep.id, ep.content),
             )
             self._maybe_commit()
 
@@ -872,6 +1034,33 @@ class SQLiteStore:
                 "SELECT * FROM episodes WHERE tenant=? AND hash=? LIMIT 1", (tenant, ep_hash)
             ).fetchone()
         return self._row_to_episode(r) if r else None
+
+    def get_episodes(self, episode_ids: Sequence[str]) -> dict[str, Episode]:
+        """Bulk fetch, for the same reason `get_claims` exists: hydrating a result set
+        one row at a time makes a search cost O(results) queries."""
+        out: dict[str, Episode] = {}
+        if not episode_ids:
+            return out
+        ids = list(dict.fromkeys(episode_ids))
+        with self._lock:
+            for i in range(0, len(ids), _MAX_SQL_PARAMS):
+                chunk = ids[i:i + _MAX_SQL_PARAMS]
+                q = f"SELECT * FROM episodes WHERE id IN ({','.join('?' * len(chunk))})"
+                for r in self._db.execute(q, chunk):
+                    out[r["id"]] = self._row_to_episode(r)
+        return out
+
+    def iter_episodes(self, tenant: str | None = None) -> Iterable[Episode]:
+        """Every stored turn, optionally for one tenant. What `reembed()` walks."""
+        sql = "SELECT * FROM episodes"
+        params: list = []
+        if tenant is not None:
+            sql += " WHERE tenant=?"
+            params.append(tenant)
+        with self._lock:
+            rows = self._db.execute(sql, params).fetchall()
+        for r in rows:
+            yield self._row_to_episode(r)
 
     # -- claims --------------------------------------------------------------
 
@@ -972,10 +1161,14 @@ class SQLiteStore:
         satisfy, because the text remains readable. Purging a user therefore also takes
         their agents and sessions.
 
-        Everything derived from the text goes too: the claims, the source episodes, the
-        embeddings (which leak content under inversion), and the FTS index (which stores
-        the tokens directly). Returns per-table counts so the caller can evidence the
-        erasure.
+        Everything derived from the text goes too: the claims, the source episodes,
+        every vector (which leaks content under inversion), and both FTS indexes (which
+        store the tokens directly). Returns per-table counts so the caller can evidence
+        the erasure.
+
+        Episodes are erased on the same terms as claims and always were — what is new
+        is that they now have indexes, and an FTS row surviving the row it describes is
+        not a stale cache entry, it is the purged text still being searchable.
         """
         conds = ["tenant = ?"]
         params: list = [scope.tenant]
@@ -985,30 +1178,35 @@ class SQLiteStore:
                 conds.append(f"{col} = ?")
                 params.append(val)
         where = " AND ".join(conds)
-        doomed = f"SELECT id FROM claims WHERE {where}"
 
         with self._lock:
-            # Set-based, not a statement pair per claim: erasing a user with 50k claims
+            # Set-based, not a statement pair per row: erasing a user with 50k claims
             # is one request, and 100k round trips through the SQL layer made it look
             # like the store had hung.
-            gone = self._db.execute(
-                f"SELECT claim_id, slot FROM embeddings WHERE claim_id IN ({doomed})",
-                params,
-            ).fetchall()
-            self._db.execute(
-                f"INSERT OR IGNORE INTO vec_free (slot) SELECT slot FROM embeddings "
-                f"WHERE claim_id IN ({doomed}) AND slot IS NOT NULL", params)
-            # FTS entries are keyed on the claim's rowid, so they must go before the
-            # claim rows do — afterwards the rowids are gone and the text is orphaned
-            # but still searchable.
-            self._db.execute(
-                f"DELETE FROM claims_fts WHERE rowid IN "
-                f"(SELECT rowid FROM claims WHERE {where})", params)
-            self._db.execute(
-                f"DELETE FROM embeddings WHERE claim_id IN ({doomed})", params)
-            for r in gone:
-                self._vec.forget(r["claim_id"])
-                self._mark(r["claim_id"])
+            gone = 0
+            for t, table, params2 in ((_CLAIM_VECS, "claims", params),
+                                      (_EPISODE_VECS, "episodes", params)):
+                doomed = f"SELECT id FROM {table} WHERE {where}"
+                rows = self._db.execute(
+                    f"SELECT {t.key} AS k FROM {t.name} WHERE {t.key} IN ({doomed})",
+                    params2,
+                ).fetchall()
+                self._db.execute(
+                    f"INSERT OR IGNORE INTO vec_free (slot) SELECT slot FROM {t.name} "
+                    f"WHERE {t.key} IN ({doomed}) AND slot IS NOT NULL", params2)
+                self._db.execute(
+                    f"DELETE FROM {t.name} WHERE {t.key} IN ({doomed})", params2)
+                for r in rows:
+                    self._vec.forget(r["k"])
+                    self._mark(t, r["k"])
+                gone += len(rows)
+            # FTS entries are keyed on their row's rowid, so they must go before the
+            # rows do — afterwards the rowids are gone and the text is orphaned but
+            # still searchable.
+            for fts, table in (("claims_fts", "claims"), ("episodes_fts", "episodes")):
+                self._db.execute(
+                    f"DELETE FROM {fts} WHERE rowid IN "
+                    f"(SELECT rowid FROM {table} WHERE {where})", params)
             claims = self._db.execute(f"DELETE FROM claims WHERE {where}", params).rowcount
             episodes = self._db.execute(
                 f"DELETE FROM episodes WHERE {where}", params
@@ -1016,7 +1214,7 @@ class SQLiteStore:
             # `_maybe_commit`, not `commit`: an unconditional commit here would end an
             # enclosing `batch()` early and silently void its rollback guarantee.
             self._maybe_commit()
-        return {"claims": claims, "episodes": episodes, "embeddings": len(gone)}
+        return {"claims": claims, "episodes": episodes, "embeddings": gone}
 
     # -- learned schema ------------------------------------------------------
 
@@ -1113,7 +1311,7 @@ class SQLiteStore:
 
     # -- retrieval -----------------------------------------------------------
 
-    def set_embedding(self, claim_id: str, vec: np.ndarray) -> None:
+    def _set_vector(self, t: _VecTable, item_id: str, vec: np.ndarray) -> None:
         # Normalize once, here, so the persisted bytes and the matrix row hold the same
         # thing. Otherwise every cosine computed against a vector silently depends on
         # which of the two it was read from.
@@ -1130,15 +1328,27 @@ class SQLiteStore:
                 )
             # SQLite assigns the slot, inside the write transaction, because it is the
             # only party both processes agree with. Two workers computing "next free
-            # row" independently would hand one row to two claims and each would read
+            # row" independently would hand one row to two items and each would read
             # back the other's vector.
             slot = int(self._db.execute(
-                _EMBEDDING_UPSERT, (claim_id, int(v.shape[0]), v.tobytes())
+                t.upsert, (item_id, int(v.shape[0]), v.tobytes())
             ).fetchone()[0])
             self._db.execute("DELETE FROM vec_free WHERE slot=?", (slot,))
-            self._vec.put(claim_id, slot, v)
-            self._mark(claim_id)
+            self._vec.put(item_id, slot, v)
+            self._mark(t, item_id)
             self._maybe_commit()
+
+    def set_embedding(self, claim_id: str, vec: np.ndarray) -> None:
+        self._set_vector(_CLAIM_VECS, claim_id, vec)
+
+    def set_episode_embedding(self, episode_id: str, vec: np.ndarray) -> None:
+        """Give a stored turn a vector, so semantic recall can reach it.
+
+        Separate from `set_embedding` rather than overloaded on the id, because the two
+        address different tables and silently guessing from a prefix is how an episode
+        ends up in the claims index. Same matrix, same width, same slot space.
+        """
+        self._set_vector(_EPISODE_VECS, episode_id, vec)
 
     def clear_embeddings(self) -> int:
         """Drop every stored vector and release the dimension they fixed.
@@ -1152,19 +1362,31 @@ class SQLiteStore:
 
         Claims, episodes and history are untouched: this drops the derived vectors, not
         the memory. Returns how many went, so the caller can report the migration.
+
+        Both tables, unconditionally. Leaving episode vectors behind would keep the old
+        model's width alive in the shared matrix, and the first re-embedded claim would
+        be rejected by the very dimension check this call exists to release.
         """
         with self._lock:
-            dropped = self._count_embeddings()
-            self._db.execute("DELETE FROM embeddings")
+            dropped = self._count_vectors()
+            for t in _VEC_TABLES:
+                self._db.execute(f"DELETE FROM {t.name}")
             self._db.execute("DELETE FROM vec_free")
             self._vec.reset()
             self._index_loaded = False
-            self._seq = -1
+            self._seq = {t.name: -1 for t in _VEC_TABLES}
             self._data_version = -1
             # Row-by-row repair cannot undo this, so a rollback has to rebuild instead.
             self._cleared = bool(self._batch_depth)
             self._maybe_commit()
         return dropped
+
+    def _get_vector(self, t: _VecTable, item_id: str) -> np.ndarray | None:
+        with self._lock:
+            r = self._db.execute(
+                f"SELECT vec FROM {t.name} WHERE {t.key}=?", (item_id,)
+            ).fetchone()
+        return np.frombuffer(r["vec"], dtype=np.float32).copy() if r else None
 
     def get_embedding(self, claim_id: str) -> np.ndarray | None:
         """Read back a stored vector.
@@ -1178,11 +1400,15 @@ class SQLiteStore:
         source: a cached read and a cold read cannot disagree if there is nothing to
         disagree with.
         """
-        with self._lock:
-            r = self._db.execute(
-                "SELECT vec FROM embeddings WHERE claim_id=?", (claim_id,)
-            ).fetchone()
-        return np.frombuffer(r["vec"], dtype=np.float32).copy() if r else None
+        return self._get_vector(_CLAIM_VECS, claim_id)
+
+    def get_episode_embedding(self, episode_id: str) -> np.ndarray | None:
+        """The vector for one turn, or None if it has never been embedded.
+
+        Also the cheap "is this turn already indexed?" probe, which is what keeps
+        re-ingesting a transcript from re-encoding every turn in it.
+        """
+        return self._get_vector(_EPISODE_VECS, episode_id)
 
     def candidate_ids(self, scopes: Sequence[Scope], as_of: datetime | None = None,
                       include_invalidated: bool = False) -> list[str]:
@@ -1194,6 +1420,24 @@ class SQLiteStore:
             # each of them costs more than the query.
             cur.row_factory = None
             cur.execute(f"SELECT id FROM claims WHERE {sc} AND {lv}", sp + lp)
+            return [r[0] for r in cur.fetchall()]
+
+    def episode_candidate_ids(self, scopes: Sequence[Scope],
+                              as_of: datetime | None = None) -> list[str]:
+        """Every turn visible at these scopes. The episode half of `candidate_ids`.
+
+        No `include_invalidated`: episodes have no end-of-life to lift. Scope, though,
+        is filtered exactly as claims are — the same `_scope_clause`, the same
+        fail-closed on an empty list — because "which turns can this caller see" is
+        precisely the same question for raw text as for a derived belief, and raw text
+        is the more sensitive of the two.
+        """
+        sc, sp = self._scope_clause(scopes)
+        hp, hpp = self._happened_clause(as_of)
+        with self._lock:
+            cur = self._db.cursor()
+            cur.row_factory = None
+            cur.execute(f"SELECT id FROM episodes WHERE {sc} AND {hp}", sp + hpp)
             return [r[0] for r in cur.fetchall()]
 
     def lexical_search(self, query: str, scopes: Sequence[Scope], limit: int,
@@ -1215,10 +1459,49 @@ class SQLiteStore:
         # bm25() is negative-is-better; flip it so callers see a normal ascending score.
         return [(r["cid"], -float(r["s"])) for r in rows]
 
+    def lexical_search_episodes(self, query: str, scopes: Sequence[Scope], limit: int,
+                                as_of: datetime | None = None) -> list[tuple[str, float]]:
+        """BM25 over raw turn text, scope-filtered inside the query.
+
+        The leg that matters most for episodes: a decision, a reason or a constraint is
+        usually recalled by a word that was actually in it, and the claim extracted from
+        the same turn — if any was — kept the fact and threw the wording away.
+        """
+        m = _fts_query(query)
+        if not m:
+            return []
+        sc, sp = self._scope_clause(scopes, alias="e")
+        hp, hpp = self._happened_clause(as_of, alias="e")
+        sql = (
+            "SELECT f.episode_id AS eid, bm25(episodes_fts) AS s "
+            "FROM episodes_fts f JOIN episodes e ON e.id = f.episode_id "
+            f"WHERE episodes_fts MATCH ? AND {sc} AND {hp} "
+            "ORDER BY s ASC LIMIT ?"
+        )
+        with self._lock:
+            rows = self._db.execute(sql, [m] + sp + hpp + [limit]).fetchall()
+        return [(r["eid"], -float(r["s"])) for r in rows]
+
     def vector_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int,
                       as_of: datetime | None = None,
                       include_invalidated: bool = False) -> list[tuple[str, float]]:
         allowed = self.candidate_ids(scopes, as_of, include_invalidated)
+        if not allowed:
+            return []
+        with self._lock:
+            self._ensure_index()
+        return self._vec.search(qvec, allowed, limit)
+
+    def vector_search_episodes(self, qvec: np.ndarray, scopes: Sequence[Scope],
+                               limit: int,
+                               as_of: datetime | None = None) -> list[tuple[str, float]]:
+        """Cosine over turn vectors, restricted to the ids this scope may see.
+
+        Same matrix and same code path as `vector_search`; the candidate set is what
+        differs, and it is what enforces isolation — an episode id the scope filter did
+        not return is not passed to the index at all.
+        """
+        allowed = self.episode_candidate_ids(scopes, as_of)
         if not allowed:
             return []
         with self._lock:
@@ -1251,7 +1534,9 @@ class SQLiteStore:
         other tenants hold, which is a real signal even without their content.
         `embeddings` stays global — it is a property of the store, not of a tenant —
         and is counted in SQLite rather than in the index, because the index is a cache
-        of a table that other processes also write to.
+        of a table that other processes also write to. It counts every vector in the
+        matrix, claims' and episodes' alike, since that is what the file on disk holds
+        and what a caller sizing the store is asking about.
         """
         where = " WHERE tenant = ?" if tenant is not None else ""
         params: tuple = (tenant,) if tenant is not None else ()
@@ -1268,7 +1553,7 @@ class SQLiteStore:
                     f"SELECT COUNT(*) FROM claims{where}{and_} invalidated_at IS NULL"),
                 "invalidated": q(
                     f"SELECT COUNT(*) FROM claims{where}{and_} invalidated_at IS NOT NULL"),
-                "embeddings": self._count_embeddings(),
+                "embeddings": self._count_vectors(),
             }
 
     def close(self) -> None:

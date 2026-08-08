@@ -16,10 +16,14 @@ import pytest
 
 from engram.embed import HashingEmbedder
 from engram.retrieve import (
+    CLAIM,
+    EPISODE,
     STOPWORDS,
+    EpisodeResult,
     HybridRetriever,
     analyze,
     calibrate_min_score,
+    kind_of,
     lexical_relevance,
     relevance,
     tokenize,
@@ -27,7 +31,7 @@ from engram.retrieve import (
 )
 from engram.schema import PredicateRegistry
 from engram.store import SQLiteStore
-from engram.types import Claim, MemoryType, Scope
+from engram.types import Claim, Episode, MemoryType, Scope
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
 T1 = datetime(2025, 6, 1, tzinfo=timezone.utc)
@@ -1307,3 +1311,397 @@ def test_naive_as_of_datetime_is_accepted(
                                  as_of=(T0 + timedelta(days=30)).replace(tzinfo=None)))
 
     assert naive == aware == [employment["old"].id]
+
+
+# ===========================================================================
+# Episodes: the turns no claim was ever extracted from
+# ===========================================================================
+#
+# `WriteReceipt.skipped` used to mean "we stored this and will never find it again".
+# These tests are the property that it no longer does, plus the two ways widening
+# retrieval could make it worse: raw turn text outranking a curated claim, and a
+# transcript's worth of turns crowding out the facts.
+
+
+EP_SCOPE = Scope("acme", "alice", "agent_a", "sess_1")
+
+
+def turn(store: SQLiteStore, embedder: HashingEmbedder | None, content: str,
+         scope: Scope, **kw) -> Episode:
+    ep = Episode(content=content, scope=scope, **kw)
+    store.add_episode(ep)
+    if embedder is not None:
+        store.set_episode_embedding(ep.id, embedder.encode([content])[0])
+    return ep
+
+
+KAFKA = ("We decided at the offsite to sunset the Kafka pipeline because the "
+         "ordering guarantees never held.")
+
+
+def test_a_turn_that_produced_no_claim_is_findable(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever
+) -> None:
+    """The whole point. This exact turn is a decision plus its reasoning, which no
+    extractor turns into a triple, and it used to be reachable only through `why()` on
+    a claim that was never created."""
+    ep = turn(store, embedder, KAFKA, EP_SCOPE)
+
+    assert retriever.search("kafka pipeline decision", EP_SCOPE, k=5) == []
+
+    found = retriever.search("kafka pipeline decision", EP_SCOPE, k=5,
+                             include_episodes=True)
+    assert [r.episode.id for r in found] == [ep.id]
+    assert found[0].text == KAFKA
+
+
+def test_an_episode_result_is_not_a_claim_result(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever
+) -> None:
+    """The discriminator. A caller that renders the two identically has turned
+    unverified conversation into asserted fact."""
+    turn(store, embedder, KAFKA, EP_SCOPE)
+    add(store, embedder, "the kafka pipeline is deprecated", EP_SCOPE)
+
+    found = retriever.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True)
+    episodes = [r for r in found if isinstance(r, EpisodeResult)]
+    claims = [r for r in found if not isinstance(r, EpisodeResult)]
+
+    assert len(episodes) == 1 and len(claims) == 1
+    assert kind_of(episodes[0]) == EPISODE == "episode"
+    assert kind_of(claims[0]) == CLAIM == "claim"
+    assert not hasattr(episodes[0], "claim"), "an episode has no claim to offer"
+    assert repr(episodes[0]).startswith("<EpisodeResult ")
+    assert "kafka" in repr(episodes[0]).lower()
+
+
+def test_an_episode_result_repr_survives_a_turn_with_no_retriever_support(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """`_short` truncates and the leg list can be empty; both belong in the repr rather
+    than in a 1,400-character dataclass dump."""
+    ep = Episode(content="x " * 200, scope=EP_SCOPE)
+    text = repr(EpisodeResult(episode=ep, score=0.0))
+    assert text.endswith(f"no-retriever {ep.id}>")
+    assert "…" in text and len(text) < 200
+
+
+def test_episodes_are_off_by_default_so_existing_prompts_do_not_change(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever
+) -> None:
+    turn(store, embedder, KAFKA, EP_SCOPE)
+    assert retriever.search("kafka", EP_SCOPE, k=5) == []
+    assert retriever.search("kafka", EP_SCOPE, k=5, include_episodes=True) != []
+
+
+def test_a_claim_outranks_the_turn_it_was_extracted_from(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever
+) -> None:
+    """The obvious failure mode: the turn contains the query's words verbatim while the
+    claim is a normalized triple that may share none of them, so on raw evidence the
+    turn wins. The weight is what stops it."""
+    text = "alice lives in Lisbon"
+    turn(store, embedder, text, EP_SCOPE)
+    claim = add(store, embedder, text, EP_SCOPE)
+
+    found = retriever.search(text, EP_SCOPE, k=5, include_episodes=True)
+
+    assert not isinstance(found[0], EpisodeResult)
+    assert found[0].claim.id == claim.id
+    assert isinstance(found[1], EpisodeResult)
+    assert found[1].score == pytest.approx(found[0].score * 0.5, rel=0.15)
+
+
+def test_the_weight_is_a_discount_not_an_exclusion(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """A turn still surfaces above a claim that is merely a worse match — the point is
+    ordering under equal evidence, not banishment."""
+    turn(store, embedder, KAFKA, EP_SCOPE)
+    add(store, embedder, "alice prefers oat milk", EP_SCOPE)
+    retriever = HybridRetriever(store, embedder, PredicateRegistry())
+
+    found = retriever.search("kafka ordering guarantees", EP_SCOPE, k=5,
+                             include_episodes=True)
+    assert isinstance(found[0], EpisodeResult)
+
+
+def test_the_episode_tail_is_capped(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """A transcript has far more turns than facts. Uncapped, one well-worded
+    conversation takes every slot."""
+    for i in range(12):
+        turn(store, embedder, f"we talked about the kafka pipeline, part {i}", EP_SCOPE)
+    retriever = HybridRetriever(store, embedder, PredicateRegistry(), max_episodes=3)
+
+    found = retriever.search("kafka pipeline", EP_SCOPE, k=10, include_episodes=True)
+    assert len(found) == 3
+
+    wider = HybridRetriever(store, embedder, PredicateRegistry(), max_episodes=7)
+    assert len(wider.search("kafka pipeline", EP_SCOPE, k=10,
+                            include_episodes=True)) == 7
+
+
+def test_the_cap_never_costs_a_claim_its_place(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """`k` is the total, and the episodes go in the space claims did not fill."""
+    claims = [add(store, embedder, f"alice rated kafka {i} out of five", EP_SCOPE,
+                  predicate=f"rated_{i}") for i in range(4)]
+    for i in range(6):
+        turn(store, embedder, f"kafka came up again, part {i}", EP_SCOPE)
+    retriever = HybridRetriever(store, embedder, PredicateRegistry(), max_episodes=3)
+
+    found = retriever.search("kafka", EP_SCOPE, k=5, include_episodes=True)
+    assert len(found) == 5
+    kept = {r.claim.id for r in found if not isinstance(r, EpisodeResult)}
+    assert len(kept) >= 2 and kept <= {c.id for c in claims}
+
+
+def test_the_diversity_demotion_survives_the_merge(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """`_rank` hands back a list that is deliberately *not* in score order, so merging
+    by a plain re-sort would silently undo the per-slot cap."""
+    dupes = [add(store, embedder, f"alice rated the standup format four of five{tail}",
+                 EP_SCOPE, predicate="rated")
+             for tail in ("", " today", " last week", " again")]
+    other = add(store, embedder, "alice rated the retro format three of five",
+                EP_SCOPE, predicate="also_rated")
+    retriever = HybridRetriever(store, embedder, PredicateRegistry(), max_per_slot=2)
+
+    with_eps = retriever.search("alice rated the format", EP_SCOPE, k=5,
+                                include_episodes=True)
+    without = retriever.search("alice rated the format", EP_SCOPE, k=5)
+
+    assert [r.claim.id for r in with_eps] == [r.claim.id for r in without]
+    assert other.id in {r.claim.id for r in with_eps[:3]}
+    assert {c.id for c in dupes} & {r.claim.id for r in with_eps}
+
+
+def test_a_memory_type_filter_suppresses_the_episode_leg(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever
+) -> None:
+    """A turn has no memory type. Returning one anyway would mean `memory_types=` had
+    silently stopped being a filter."""
+    turn(store, embedder, KAFKA, EP_SCOPE)
+    claim = add(store, embedder, "the kafka pipeline is deprecated", EP_SCOPE,
+                memory_type=MemoryType.PROCEDURAL)
+
+    found = retriever.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True,
+                             memory_types=[MemoryType.PROCEDURAL])
+    assert [r.claim.id for r in found] == [claim.id]
+
+
+def test_episode_search_abstains_on_a_query_with_no_signal(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever
+) -> None:
+    """Both guards apply to the episode legs too, and the stopword one matters more
+    here: turns are long and conversational, so BM25 on `"do"` ranks every turn in the
+    store — with enormous IDF, because at personal-memory scale stopwords are rare."""
+    turn(store, embedder, KAFKA, EP_SCOPE)
+
+    assert retriever.search("🙂", EP_SCOPE, k=5, include_episodes=True) == [], \
+        "no alphanumeric content: both legs abstain"
+
+    # Content-free but not signal-free. Cosine is defined for every pair, so the vector
+    # leg still produces a ranking - the honest answer is the same low-relevance tail a
+    # claim gets, not a confident BM25 hit on "do".
+    stopwords = retriever.search("what do you know about me?", EP_SCOPE, k=5,
+                                 include_episodes=True)
+    assert [r.explain.lexical_rank for r in stopwords] == [None]
+    assert stopwords[0].score < 0.01
+
+
+def test_min_score_applies_to_the_discounted_episode_score(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever
+) -> None:
+    """The floor is on what the caller is handed, so it has to be applied after the
+    weight rather than before it."""
+    turn(store, embedder, KAFKA, EP_SCOPE)
+    found = retriever.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True)
+    got = found[0].score
+
+    assert retriever.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True,
+                            min_score=got * 0.5) != []
+    assert retriever.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True,
+                            min_score=got * 1.5) == []
+
+
+def test_episode_time_travel_cannot_return_a_turn_from_the_future(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever
+) -> None:
+    old = turn(store, embedder, "kafka is holding up fine", EP_SCOPE, ts=T0)
+    turn(store, embedder, KAFKA, EP_SCOPE, ts=T2)
+
+    found = retriever.search("kafka", EP_SCOPE, k=5, include_episodes=True, as_of=T1)
+    assert [r.episode.id for r in found] == [old.id]
+
+
+def test_an_episode_explanation_reports_both_legs_and_neutral_quality(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever
+) -> None:
+    """The quality fields sit at 1.0 and mean "not applicable": decay is keyed to a
+    predicate, confidence is an extractor's self-report, salience is earned by
+    re-observation, and a turn has none of the three."""
+    turn(store, embedder, KAFKA, EP_SCOPE)
+    r = retriever.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True)[0]
+
+    assert r.explain.vector_rank == 0 and r.explain.lexical_rank == 0
+    assert r.explain.vector_score > 0.0 and r.explain.lexical_score > 0.0
+    assert (r.explain.recency, r.explain.confidence, r.explain.salience) == (1.0,) * 3
+    assert r.explain.raw_score == r.explain.fusion_score
+    assert r.score == pytest.approx(r.explain.final_score)
+
+
+def test_a_turn_matched_by_only_one_leg_still_surfaces(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever
+) -> None:
+    """Turns written before `reembed()` have text but no vector, which must degrade to
+    a lexical-only answer rather than to nothing."""
+    ep = turn(store, None, KAFKA, EP_SCOPE)
+
+    r = retriever.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True)[0]
+    assert r.episode.id == ep.id
+    assert r.explain.vector_rank is None
+    assert r.explain.lexical_rank == 0
+
+
+def test_episode_hydration_falls_back_for_a_store_without_bulk_fetch(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """`get_episodes` is an optimization on the protocol, not a requirement of it."""
+    class OneAtATime(SQLiteStore):
+        get_episodes = None
+
+    thin = OneAtATime(":memory:")
+    ep = turn(thin, embedder, KAFKA, EP_SCOPE)
+    retriever = HybridRetriever(thin, embedder, PredicateRegistry())
+
+    found = retriever.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True)
+    assert [r.episode.id for r in found] == [ep.id]
+    thin.close()
+
+
+def test_a_turn_purged_mid_query_is_dropped_rather_than_crashing(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """A row that vanishes between ranking and hydration is a race, not a ranking
+    error."""
+    class Vanishing(SQLiteStore):
+        def get_episodes(self, episode_ids):
+            return {}
+
+    vanishing = Vanishing(":memory:")
+    turn(vanishing, embedder, KAFKA, EP_SCOPE)
+    retriever = HybridRetriever(vanishing, embedder, PredicateRegistry())
+
+    assert retriever.search("kafka", EP_SCOPE, k=5, include_episodes=True) == []
+    vanishing.close()
+
+
+def test_a_store_without_episode_search_degrades_instead_of_raising(
+    embedder: HashingEmbedder
+) -> None:
+    """A third-party `Store` written against the old protocol. Losing the vector leg
+    should narrow the answer, not remove it; losing both should return nothing rather
+    than an AttributeError halfway through a query."""
+    class LexicalOnly(SQLiteStore):
+        vector_search_episodes = None
+
+    class NoEpisodeSearch(SQLiteStore):
+        vector_search_episodes = None
+        lexical_search_episodes = None
+
+    lexical = LexicalOnly(":memory:")
+    ep = turn(lexical, embedder, KAFKA, EP_SCOPE)
+    found = HybridRetriever(lexical, embedder, PredicateRegistry()).search(
+        "kafka pipeline", EP_SCOPE, k=5, include_episodes=True)
+    assert [r.episode.id for r in found] == [ep.id]
+    assert found[0].explain.vector_rank is None
+    lexical.close()
+
+    blind = NoEpisodeSearch(":memory:")
+    turn(blind, embedder, KAFKA, EP_SCOPE)
+    assert HybridRetriever(blind, embedder, PredicateRegistry()).search(
+        "kafka", EP_SCOPE, k=5, include_episodes=True) == []
+    blind.close()
+
+
+# --- Episode scope isolation, all three directions --------------------------
+
+@pytest.fixture
+def scoped_turns(store: SQLiteStore, embedder: HashingEmbedder) -> dict[str, Episode]:
+    """Byte-identical text at every scope. If the filter were on content rather than on
+    scope, identical text is what would slip through."""
+    return {
+        "session": turn(store, embedder, KAFKA, EP_SCOPE),
+        "user": turn(store, embedder, KAFKA, Scope("acme", "alice")),
+        "sibling_session": turn(store, embedder, KAFKA,
+                                Scope("acme", "alice", "agent_a", "sess_2")),
+        "sibling_agent": turn(store, embedder, KAFKA,
+                              Scope("acme", "alice", "agent_b")),
+        "other_user": turn(store, embedder, KAFKA, Scope("acme", "bob")),
+        "other_tenant": turn(store, embedder, KAFKA, Scope("globex")),
+    }
+
+
+def test_a_session_inherits_its_users_turns(
+    retriever: HybridRetriever, scoped_turns: dict[str, Episode]
+) -> None:
+    found = {r.episode.id for r in
+             retriever.search("kafka", EP_SCOPE, k=10, include_episodes=True)}
+    assert scoped_turns["user"].id in found
+    assert scoped_turns["session"].id in found
+
+
+@pytest.mark.parametrize(
+    "neighbour", ["sibling_session", "sibling_agent", "other_user", "other_tenant"])
+def test_no_query_reaches_sideways_for_turns_either(
+    retriever: HybridRetriever, scoped_turns: dict[str, Episode], neighbour: str
+) -> None:
+    found = {r.episode.id for r in
+             retriever.search("kafka", EP_SCOPE, k=10, include_episodes=True)}
+    assert scoped_turns[neighbour].id not in found
+
+
+def test_cross_tenant_turn_leakage_is_impossible(
+    retriever: HybridRetriever, scoped_turns: dict[str, Episode]
+) -> None:
+    """The worst bug this system could have, asserted from both directions — and raw
+    transcript is the more sensitive of the two payloads, not the less."""
+    from_acme = {r.episode.id for r in
+                 retriever.search("kafka", EP_SCOPE, k=10, include_episodes=True)}
+    from_globex = {r.episode.id for r in
+                   retriever.search("kafka", Scope("globex"), k=10,
+                                    include_episodes=True)}
+
+    assert from_globex == {scoped_turns["other_tenant"].id}
+    assert from_acme.isdisjoint(from_globex)
+    assert retriever.search("kafka", Scope("initech"), k=10,
+                            include_episodes=True) == []
+
+
+def test_a_zero_budget_turns_the_episode_leg_off_entirely(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """The escape hatch for a caller who wants the flag wired but the tail suppressed —
+    and the proof that the budget, not the flag, is what bounds the cost to the prompt."""
+    turn(store, embedder, KAFKA, EP_SCOPE)
+    off = HybridRetriever(store, embedder, PredicateRegistry(), max_episodes=0)
+    assert off.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True) == []
+
+
+def test_a_weak_turn_never_costs_a_claim_its_slot(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """`k` stays the total, so the guarantee has to come from the merge: an episode
+    takes a slot only from a claim it outscores after the discount."""
+    claims = [add(store, embedder, f"alice rated kafka {i} of five", EP_SCOPE,
+                  predicate=f"rated_{i}") for i in range(5)]
+    turn(store, embedder, "we had lunch and discussed nothing of consequence", EP_SCOPE)
+    retriever = HybridRetriever(store, embedder, PredicateRegistry(), max_per_slot=99)
+
+    found = retriever.search("alice rated kafka", EP_SCOPE, k=5, include_episodes=True)
+    assert {r.claim.id for r in found} == {c.id for c in claims}
