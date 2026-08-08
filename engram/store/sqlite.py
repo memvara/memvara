@@ -597,5 +597,13 @@ class SQLiteStore:
 
     def close(self) -> None:
         with self._lock:
-            self._maybe_commit()
+            # Commit unconditionally: closing inside an open batch would otherwise
+            # discard it, and an explicit close is a stronger signal than the batch.
+            self._db.commit()
             self._db.close()
+
+    def __enter__(self) -> "SQLiteStore":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()

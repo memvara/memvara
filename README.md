@@ -311,9 +311,36 @@ mem = Engram("memory.db", llm=AnthropicLLM(model="claude-opus-5"))
 ## Development
 
 ```bash
-python3 -m pytest -q          # full suite, offline, no API key
-python3 bench/compare.py      # architecture comparison
+python3 -m pytest -q                              # 775 tests, offline, no API key
+python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
+PYTHONPATH=. python3 bench/compare.py             # architecture comparison
+PYTHONPATH=. python3 bench/perf.py                # throughput and scaling
 ```
+
+**100% statement coverage, enforced** (`fail_under = 100`). The suite runs in under two
+seconds with no network, no API key, and no sleeping — time is controlled by passing
+explicit `datetime` values rather than patching the clock.
+
+Coverage of the *lines* is the floor, not the goal. What the suite actually pins down:
+
+- **Behavior** — contradictions resolve, history survives, users are isolated in all
+  three directions (sibling session, sibling agent, other tenant), and the LLM stays idle.
+  Fakes count their own calls, and the tests assert on those counts — the design claim is
+  that the model is rarely consulted, so a test that doesn't count calls doesn't test it.
+- **Failure paths** — dimension mismatches, transaction rollback (including nested),
+  a classifier that raises, a store that loses rows mid-query, and model output that
+  violates every field contract at once. These only run during an incident, which is
+  exactly why they can't ship unexercised.
+- **Adversarial input** — a fuzz corpus (SQL and FTS5 injection, path traversal, template
+  injection, control characters, astral-plane codepoints, 5KB strings, combining marks)
+  driven through every public method and a persistence round trip, plus randomized
+  transcripts asserting the store never ends up internally inconsistent.
+- **Executable docs** — the README walkthrough and the `Engram` docstring run as tests, so
+  the examples can't drift from the code.
+
+The seven remaining *branch* partials are verified-unreachable defensive guards (for
+example: a live claim always has `valid_to` unset or in the future, so that check can
+never be false). They are kept as guards rather than deleted, and documented as such.
 
 Design notes and the module-by-module contract live in [docs/INTERNALS.md](docs/INTERNALS.md).
 

@@ -128,9 +128,19 @@ class HybridRetriever:
         # narrow, and the alternative - pushing memory_type into both retrievers - would
         # widen the `Store` protocol for a case that is rare in practice. Raise
         # `candidate_multiplier` if you filter hard.
+        # Hydrate every fused candidate in one round trip. Fetching them individually
+        # makes a search cost O(candidates) queries — the classic N+1 — so retrieval
+        # would scale with how many results it considered rather than with the query.
+        # `get_claims` is optional on the Store protocol; fall back for third-party ones.
+        bulk = getattr(self.store, "get_claims", None)
+        claims = (bulk(list(fused))
+                  if bulk is not None
+                  else {cid: c for cid in fused
+                        if (c := self.store.get_claim(cid)) is not None})
+
         results: list[Result] = []
         for claim_id, fusion in fused.items():
-            claim = self.store.get_claim(claim_id)
+            claim = claims.get(claim_id)
             if claim is None:
                 continue  # raced with a delete; a missing row is not a ranking error
             if wanted is not None and claim.memory_type not in wanted:

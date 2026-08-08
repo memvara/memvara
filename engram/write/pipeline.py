@@ -18,6 +18,8 @@ never call a model at all.
 
 from __future__ import annotations
 
+import warnings
+from contextlib import nullcontext
 from time import perf_counter
 from typing import Any, Mapping, Sequence
 
@@ -52,6 +54,9 @@ class WritePipeline:
         # cache; this set additionally covers the case where a classification came back
         # unusable, so a pathological predicate cannot bill us twice.
         self._classified: set[str] = set()
+        # A rejected embedding is warned about once per pipeline, not once per claim —
+        # a misconfigured embedder would otherwise emit one warning per write forever.
+        self._warned_embedding = False
 
     # -- public ---------------------------------------------------------------
 
@@ -65,26 +70,40 @@ class WritePipeline:
             receipt.latency_ms = (perf_counter() - t0) * 1000.0
             return receipt
 
-        fresh = self._tier0_store(episodes, receipt, now)
-        kept = self._tier0_near_dupes(fresh, receipt, now)
-        gated, fast_claims = self._tier1(kept, receipt)
-        llm_claims = self._tier2(gated, receipt, now)
+        # One transaction for the whole batch. Ingesting a transcript writes an episode
+        # row, a claim row and an FTS row per turn, plus reconciliation updates; a
+        # durability round-trip on each of those costs far more than the work itself,
+        # and a half-applied transcript is not a state any caller wants to recover from.
+        with self._transaction():
+            fresh = self._tier0_store(episodes, receipt, now)
+            kept = self._tier0_near_dupes(fresh, receipt, now)
+            gated, fast_claims = self._tier1(kept, receipt)
+            llm_claims = self._tier2(gated, receipt, now)
 
-        # Reconcile in input order so a batch containing two claims for the same slot
-        # resolves the same way every run.
-        candidates: list[Claim] = []
-        for ep in kept:
-            candidates.extend(fast_claims.get(ep.id, ()))
-            candidates.extend(llm_claims.get(ep.id, ()))
+            # Reconcile in input order so a batch containing two claims for the same slot
+            # resolves the same way every run.
+            candidates: list[Claim] = []
+            for ep in kept:
+                candidates.extend(fast_claims.get(ep.id, ()))
+                candidates.extend(llm_claims.get(ep.id, ()))
 
-        to_embed: list[Claim] = []
-        for claim in candidates:
-            claim.recorded_at = now
-            self._absorb(self.reconciler.apply(claim, now=now), receipt, to_embed)
-        self._write_embeddings(to_embed)
+            to_embed: list[Claim] = []
+            for claim in candidates:
+                claim.recorded_at = now
+                self._absorb(self.reconciler.apply(claim, now=now), receipt, to_embed)
+            self._write_embeddings(to_embed)
 
         receipt.latency_ms = (perf_counter() - t0) * 1000.0
         return receipt
+
+    def _transaction(self):
+        """Batch commits when the store supports it; a no-op otherwise.
+
+        Kept behind `getattr` so third-party `Store` implementations that never heard of
+        batching keep working — they just commit per statement as before.
+        """
+        batch = getattr(self.store, "batch", None)
+        return batch() if batch is not None else nullcontext()
 
     def assert_claim(self, claim: Claim) -> WriteReceipt:
         """Write a caller-supplied claim. Never consults a model, by construction."""
@@ -227,7 +246,16 @@ class WritePipeline:
             # Marked before the call, not after: if the classifier raises or answers with
             # nonsense we still must not ask again.
             self._classified.add(predicate)
-            spec = self.llm.classify_predicate(predicate, self._example(item, episodes))
+            try:
+                spec = self.llm.classify_predicate(predicate, self._example(item, episodes))
+            except Exception:
+                # Schema acquisition is an enrichment, not a precondition. A rate limit
+                # or a network blip must not cost the caller the whole batch of facts —
+                # the predicate simply stays unclassified (and therefore multi-valued,
+                # the safe default), and the claim's own memory_type carries the
+                # decision. Marked classified above, so we do not retry in a hot loop.
+                calls += 1
+                continue
             calls += 1
             self.registry.learn(
                 predicate,
@@ -311,7 +339,22 @@ class WritePipeline:
             return
         vecs = self.embedder.encode([c.text for c in claims])
         for claim, vec in zip(claims, vecs):
-            self.store.set_embedding(claim.id, vec)
+            try:
+                self.store.set_embedding(claim.id, vec)
+            except ValueError as e:
+                # The store is the source of truth; the vector index is derived from it.
+                # Losing a derived entry must never lose the claim — and since `add()`
+                # now runs inside one transaction, raising here would roll back an
+                # entire transcript over a single bad vector. Warn once, because a
+                # misconfigured embedder that silently produced an unsearchable store
+                # would be far worse than a noisy one.
+                if not self._warned_embedding:
+                    self._warned_embedding = True
+                    warnings.warn(
+                        f"embedding rejected ({e}); claims are still stored, but will "
+                        "not be reachable by vector search until re-embedded",
+                        RuntimeWarning, stacklevel=2,
+                    )
 
 
 def _coerce(enum_cls, raw: Any, fallback):

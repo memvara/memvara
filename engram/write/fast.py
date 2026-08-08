@@ -96,6 +96,11 @@ _BAD_OBJECT_EXACT = frozenset(
      "any", "something", "anything", "stuff", "things", "thing"}
 )
 
+_REFERENTIAL = re.compile(
+    r"\b(?:we|us|you|they|them|i|me|my|our|your|their|this|that|those|these|"
+    r"whose|which|who)\b",
+    re.IGNORECASE,
+)
 _MAX_OBJECT_CHARS = 80
 _MAX_OBJECT_WORDS = 8
 
@@ -199,6 +204,12 @@ def _clean_object(raw: str) -> str | None:
     if " and " in low or " or " in low or " but " in low:
         return None
     if len(o.split()) > _MAX_OBJECT_WORDS:
+        return None
+    # A pronoun inside the value means this is a referential phrase, not a value:
+    # "the place we discussed", "the company you know about". Resolving those needs
+    # the conversation, which is exactly what the LLM tier has and these rules do not.
+    # Real values — "Acme Corp", "San Francisco", "pytest" — never contain one.
+    if _REFERENTIAL.search(o):
         return None
     if not any(ch.isalnum() for ch in o):
         return None

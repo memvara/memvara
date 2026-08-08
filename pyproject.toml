@@ -18,10 +18,24 @@ anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.40"]
 local-embed = ["sentence-transformers>=3.0"]
 server = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2.6"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "coverage>=7.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["engram"]
+
+[tool.coverage.run]
+source = ["engram"]
+
+[tool.coverage.report]
+# The suite covers every executable statement. Keep it that way: an untested line in a
+# memory layer is a line that only runs during an incident.
+fail_under = 100
+show_missing = true
+exclude_also = [
+    # Protocol method bodies are type declarations, not code.
+    ": \\.\\.\\.$",
+    "^\\s*\\.\\.\\.$",
+]
 
 [tool.pytest.ini_options]
 # `engram` is in testpaths so the docstring examples run as tests. Documentation that

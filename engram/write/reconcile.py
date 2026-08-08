@@ -66,6 +66,16 @@ class Reconciler:
             # reinforce nor supersede anything. Backdating (t in the past) stays legal
             # for replays and imports.
             claim.recorded_at = t
+
+        # A positive assertion needs all three parts to mean anything. "user likes
+        # <nothing>" would occupy a slot, surface in `recall()`, and answer no question.
+        # Empty objects stay meaningful for retraction, where they mean "clear the whole
+        # slot", so the object guard is deliberately positive-only.
+        if not claim.subject or not claim.predicate:
+            return ReconcileResult("noop", None, [])
+        if claim.polarity > 0 and not claim.object:
+            return ReconcileResult("noop", None, [])
+
         tenant = claim.scope.tenant
         owner = owner_key(claim.scope)
 
