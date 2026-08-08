@@ -18,6 +18,12 @@ dependencies = ["numpy>=1.24"]
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.40"]
 local-embed = ["sentence-transformers>=3.0"]
+# Framework adapters. The crewai floor is load-bearing rather than conservative: 1.0.0
+# through 1.9.3 ship the previous memory system with no `StorageBackend` protocol at all,
+# and 1.10.1 is the first release the adapter can bind to.
+langchain = ["langchain-core>=0.3"]
+llama-index = ["llama-index-core>=0.13"]
+crewai = ["crewai>=1.10.1"]
 # The MCP server needs nothing beyond the core: it speaks JSON-RPC 2.0 over stdio in
 # ~100 lines rather than pulling the reference SDK's dozen-package tree (anyio, httpx,
 # starlette, uvicorn, pydantic, cryptography, jsonschema) to frame one JSON object per

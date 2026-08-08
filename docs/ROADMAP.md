@@ -75,8 +75,14 @@ Only worth building once Phase 4 says the thing is worth deploying.
   **This gates the entire cloud monetization path**, so it is the highest-leverage item
   in the phase.
 - **Docker image**, so `docker run engram` is the evaluation path.
-- **Framework adapters** — LangChain, LlamaIndex, CrewAI. Distribution, not engineering:
-  these are where developers discover memory layers.
+- ~~**Framework adapters** — LangChain, LlamaIndex, CrewAI.~~ **Done** (wave 4), with
+  the caveat that they preserve different amounts: the retrievers keep everything, the
+  message-history and CrewAI surfaces lose structure their interfaces cannot express.
+  The highest-value remaining one is `langgraph.store.base.BaseStore`, whose
+  `search(namespace, *, query: str, ...)` is the only framework signature that hands over
+  the query text natively — a better fit than anything already built. This line is
+  distribution, not engineering: framework integrations are where developers discover
+  memory layers at all.
 
 ---
 

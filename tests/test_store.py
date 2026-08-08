@@ -1219,3 +1219,54 @@ def test_readers_and_writers_interleave_without_deadlocking(tmp_path, emb):
     assert not errors, errors
     assert store.stats()["claims"] == 120
     store.close()
+
+
+def test_iter_episodes_peak_memory_does_not_scale_with_the_table(tmp_path):
+    """`reembed()` exists to walk a store too large to have been embedded correctly the
+    first time. A generator that ran `fetchall()` first was a generator in shape only:
+    it held every row before yielding one, which turns the recovery path into the thing
+    that runs the process out of memory.
+
+    Asserted as a *ratio* rather than an absolute ceiling, because at small sizes the
+    fixed cost of one page dominates and any byte threshold would be measuring the page
+    rather than the property. Four times the rows through a paging walk costs roughly
+    the same peak; through `fetchall()` it costs four times as much.
+    """
+    import tracemalloc
+
+    def peak_walking(rows: int) -> int:
+        store = SQLiteStore(str(tmp_path / f"m{rows}.db"))
+        with store.batch():
+            for i in range(rows):
+                store.add_episode(Episode(content=f"turn {i} " + "x" * 300, scope=SCOPE))
+        tracemalloc.start()
+        seen = 0
+        for _ in store.iter_episodes(SCOPE.tenant):
+            seen += 1
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        store.close()
+        assert seen == rows, "paging lost rows"
+        return peak
+
+    small = peak_walking(2000)
+    large = peak_walking(8000)
+    assert large < small * 2, (
+        f"peak grew {large / small:.1f}x for 4x the rows — that is materialisation, "
+        "not paging")
+
+
+def test_iter_episodes_makes_progress_past_rows_another_tenant_owns(tmp_path):
+    """The gap case. A page window can land entirely on rows the filter rejects, and
+    an implementation that advanced only by the last row it *yielded* would spin there
+    forever."""
+    store = SQLiteStore(str(tmp_path / "m.db"))
+    with store.batch():
+        for i in range(2500):
+            store.add_episode(Episode(content=f"other {i}", scope=Scope("other")))
+        store.add_episode(Episode(content="ours", scope=SCOPE))
+
+    got = [e.content for e in store.iter_episodes(SCOPE.tenant)]
+
+    assert got == ["ours"]
+    store.close()

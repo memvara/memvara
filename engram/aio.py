@@ -13,9 +13,17 @@ thread.
 So the async surface is a wrapper: every method hands the synchronous one to
 `asyncio.to_thread` and awaits the result. What that fixes is real and is the only thing
 anyone was actually asking for — `encode()` on a sentence-transformer and a SQLite write
-lock are both hundreds of milliseconds of blocked event loop, and the LangChain,
-LlamaIndex and CrewAI adapters all declare async methods whose default implementation
-calls the sync one *on the loop thread*. Awaiting instead means the loop keeps serving.
+lock are both hundreds of milliseconds of blocked event loop, and blocking the loop for
+that long stalls every other request the process is serving. Awaiting instead means the
+loop keeps serving.
+
+An earlier version of this paragraph also claimed the LangChain, LlamaIndex and CrewAI
+adapters declare async methods that fall back to running the sync one on the loop
+thread. That is not true of any of the three — LangChain's `aget_messages` uses
+`run_in_executor`, LlamaIndex's `BaseMemory.aget` uses `asyncio.to_thread`, its
+`BaseMemoryBlock` is async-primary with no sync fallback at all, and CrewAI's
+`StorageBackend` is a bare `Protocol`, so an omitted `asave` is an `AttributeError`
+rather than a silent sync call. The argument above stands without it.
 
 Two things worth knowing before relying on it:
 

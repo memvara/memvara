@@ -636,9 +636,16 @@ looking at a top-k, and nothing ever looks again.
   is left that way.
 - **`AsyncEngram` is a thread-pool wrapper, not an async rewrite.** It keeps an asyncio
   event loop unblocked, which is what it is for; it does not make the store itself async.
-- **No REST server yet** — MCP over stdio is the shipped remote surface. The library is
-  the supported integration point, and framework adapters (LangChain, LlamaIndex, CrewAI)
-  are not written.
+- **No REST server yet** — MCP over stdio is the shipped remote surface.
+- **The framework adapters do not all preserve what makes engram different.** LangChain
+  and LlamaIndex *retrievers* keep everything, including `as_of=`, because "query in,
+  documents out" is what `search()` already is. A LangChain `ChatMessageHistory` keeps
+  the write path and loses the rest: a `list[BaseMessage]` has nowhere to put a
+  supersession, a valid-time interval or a source id, and tier-0 dedupe means it is not
+  a faithful transcript either. CrewAI loses the headline feature outright — its unit of
+  memory is an opaque sentence with no subject or predicate, so the keyed lookup has
+  nothing to key on and "Alice lives in Berlin" and "Alice moved to Lisbon" both stay
+  live. Each adapter says which it is; see `engram/integrations/`.
 - **No encryption at rest.** `purge()`, `erase()` and the redaction hook cover the
   deletion and ingestion halves of a privacy story; the storage half is the deployment's
   problem, and full-disk encryption is the honest answer today. It is not laziness:

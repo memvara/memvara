@@ -1152,6 +1152,18 @@ class ScopedEngram:
         self._mem = mem
         self.scope = scope
 
+    @property
+    def engram(self) -> Engram:
+        """The unscoped `Engram` underneath.
+
+        Public because the alternative is what actually happened: a server layer holds
+        one of these per request, needs the store or the registry off the real object,
+        finds no accessor, and reaches for `_mem`. A private attribute that every
+        adapter reads is not encapsulation, it is an undocumented API with a misleading
+        name.
+        """
+        return self._mem
+
     # -- narrowing -----------------------------------------------------------
 
     def bind(self, *, tenant=None, user=None, agent=None, session=None) -> "ScopedEngram":

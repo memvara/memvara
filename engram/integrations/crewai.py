@@ -69,7 +69,7 @@ from types import SimpleNamespace
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..compat import NOTE_PREDICATE, note_subject
-from ..compat._notes import ensure_note_predicate
+from ..compat import ensure_note_predicate
 from ..types import Claim, as_utc
 from ._common import IntegrationError, bind, require, scope_kw
 

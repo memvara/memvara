@@ -35,7 +35,12 @@ from .mem0_import import (
     import_mem0,
     read_history_db,
 )
-from ._notes import NOTE_PREDICATE, SUBJECT_PREFIX, note_subject
+from ._notes import (
+    NOTE_PREDICATE,
+    SUBJECT_PREFIX,
+    ensure_note_predicate,
+    note_subject,
+)
 
 __all__ = [
     # the shim
@@ -43,5 +48,9 @@ __all__ = [
     # the importer
     "import_mem0", "ImportReceipt", "ContestedSlot", "HistoryRow", "read_history_db",
     # how an opaque memory string is stored
-    "NOTE_PREDICATE", "SUBJECT_PREFIX", "note_subject",
+    # `ensure_note_predicate` is public because it has three consumers now — the
+    # shim, the importer, and the CrewAI adapter, which stores opaque sentences for
+    # the same reason. A third module importing it from `_notes` meant the leading
+    # underscore had stopped being true.
+    "NOTE_PREDICATE", "SUBJECT_PREFIX", "note_subject", "ensure_note_predicate",
 ]

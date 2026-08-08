@@ -303,6 +303,11 @@ class _VecTable:
     upsert: str
 
 
+#: Rows per page in `_iter_rows`. Large enough that a full scan is not dominated by
+#: round trips, small enough that the page is not the thing that runs the process out of
+#: memory — which is the failure the paging exists to prevent.
+_ITER_PAGE = 1000
+
 _CLAIM_VECS = _VecTable("embeddings", "claim_id",
                         _vector_upsert("embeddings", "claim_id"))
 _EPISODE_VECS = _VecTable("episode_embeddings", "episode_id",
@@ -1217,15 +1222,59 @@ class SQLiteStore:
 
     def iter_episodes(self, tenant: str | None = None) -> Iterable[Episode]:
         """Every stored turn, optionally for one tenant. What `reembed()` walks."""
-        sql = "SELECT * FROM episodes"
+        for row in self._iter_rows("episodes", tenant):
+            yield self._row_to_episode(row)
+
+    def _iter_rows(self, table: str, tenant: str | None,
+                   extra: Sequence[str] = ()) -> Iterator[sqlite3.Row]:
+        """Walk a table in rowid order, a page at a time.
+
+        A generator that ran `fetchall()` first was a generator in shape only: it
+        materialised the whole table before yielding anything, which is exactly what
+        `reembed()` must not do — that call exists to walk a store too large to have been
+        embedded correctly the first time, and loading every episode into a list to
+        re-encode them one at a time turns a slow operation into an unrunnable one.
+
+        Keyset pagination on `rowid` rather than `LIMIT/OFFSET`, because OFFSET re-walks
+        the rows it skips and makes a full scan quadratic. The ceiling is read once at the
+        start so a write landing mid-walk cannot extend it indefinitely; rows deleted
+        during the walk simply do not appear, which is the same guarantee the old
+        `fetchall()` gave.
+
+        The connection is taken and released per page, never held across a `yield`: the
+        caller decides when to resume, and a generator abandoned half-way would otherwise
+        keep a reader checked out until it was garbage collected.
+        """
+        conds = list(extra)
         params: list = []
         if tenant is not None:
-            sql += " WHERE tenant=?"
+            conds.append("tenant=?")
             params.append(tenant)
+        where = (" AND " + " AND ".join(conds)) if conds else ""
+
         with self._read() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        for r in rows:
-            yield self._row_to_episode(r)
+            row = conn.execute(f"SELECT MAX(rowid) AS m FROM {table}").fetchone()
+        ceiling = row["m"] if row is not None and row["m"] is not None else 0
+
+        after = 0
+        while after < ceiling:
+            with self._read() as conn:
+                page = conn.execute(
+                    # `rowid` explicitly: it is implicit in the table but not in `*`,
+                    # and the walk needs it to know where the next page starts.
+                    f"SELECT rowid AS _rid, * FROM {table} "
+                    f"WHERE rowid > ? AND rowid <= ?{where} ORDER BY rowid LIMIT ?",
+                    [after, ceiling, *params, _ITER_PAGE],
+                ).fetchall()
+            if not page:
+                # Every remaining row was filtered out rather than absent, so stepping
+                # past the page window is what makes progress. Without this the walk
+                # spins forever on a tenant whose rows sit past a gap.
+                after += _ITER_PAGE
+                continue
+            for r in page:
+                yield r
+            after = page[-1]["_rid"]
 
     # -- claims --------------------------------------------------------------
 

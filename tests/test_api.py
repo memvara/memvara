@@ -1323,3 +1323,16 @@ def test_a_retry_after_that_crash_converges_on_one_vector(mem):
     after = mem.store.stats()
     assert after["episodes"] == before["episodes"] == 1
     assert after["claims"] == before["claims"] == 1
+
+
+def test_a_scoped_view_exposes_the_engram_underneath(mem):
+    """Public because the alternative is what actually happened: an adapter holding a
+    scoped view needed the store off the real object, found no accessor, and read
+    `_mem`. A private attribute every integration reaches for is an undocumented API,
+    not encapsulation."""
+    scoped = mem.scope(user="bob")
+    assert scoped.engram is mem
+    # Still scoped: the accessor is an escape hatch, not a hole in the isolation.
+    scoped.add("I live in Oslo")
+    assert [c.object for c in scoped.get_all()] == ["Oslo"]
+    assert mem.get_all() == []

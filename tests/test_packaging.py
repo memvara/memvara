@@ -84,7 +84,8 @@ EXTRAS = {name: value for name, value in _toml_table("project.optional-dependenc
 # work before, and *not* installing it must produce an error that names the extra —
 # because the person reading that traceback has no other way to learn that the fix is one
 # `pip install` away. `ModuleNotFoundError: No module named 'x'` is not that error.
-ADAPTER_EXTRAS = {"anthropic", "openai", "local-embed"}
+ADAPTER_EXTRAS = {"anthropic", "openai", "local-embed",
+                  "langchain", "llama-index", "crewai"}
 # A **reserved** extra buys nothing yet and says so. `http` names the REST layer's
 # dependencies before the REST layer exists. That is defensible — it fixes the dependency
 # set publicly before anything depends on it — and it is one letter away from the
@@ -114,6 +115,26 @@ def _construct_local_embedder() -> None:
     LocalEmbedder()
 
 
+# The adapters are lazy attributes on their own modules, so naming the class is the
+# shortest thing that needs the SDK — there is no constructor to reach without it.
+def _resolve_langchain_history() -> None:
+    from engram.integrations import langchain
+
+    langchain.EngramChatMessageHistory
+
+
+def _resolve_llamaindex_block() -> None:
+    from engram.integrations import llamaindex
+
+    llamaindex.EngramMemoryBlock
+
+
+def _resolve_crewai_storage() -> None:
+    from engram.integrations import crewai
+
+    crewai.EngramStorage
+
+
 #: extra -> (the module its SDK provides, the shortest call that needs it). The module
 #: name is here rather than derived from the requirement because a distribution name and
 #: an import name are not the same string — `sentence-transformers` imports as
@@ -122,7 +143,18 @@ ADAPTERS = {
     "anthropic": ("anthropic", _construct_anthropic_llm),
     "openai": ("openai", _construct_openai_llm),
     "local-embed": ("sentence_transformers", _construct_local_embedder),
+    "langchain": ("langchain_core", _resolve_langchain_history),
+    "llama-index": ("llama_index", _resolve_llamaindex_block),
+    "crewai": ("crewai", _resolve_crewai_storage),
 }
+
+#: The subset of `ADAPTERS` whose SDK name never appears in an `import` statement,
+#: because `engram.integrations._common.require()` reaches it through
+#: `importlib.import_module` of a string. They are deliberately invisible to the static
+#: walk below and are covered by the runtime one instead — listing them here keeps that
+#: exemption explicit, so a framework that *does* get statically imported one day fails
+#: the static test rather than quietly joining the exempt set.
+DYNAMIC_SDKS = {"langchain_core", "llama_index", "crewai"}
 
 
 # -- static import graph ------------------------------------------------------------
@@ -281,7 +313,8 @@ def test_the_only_sdks_the_package_names_anywhere_are_the_ones_an_extra_installs
     anywhere: set[str] = set()
     for tree in _module_trees():
         anywhere |= _absolute_imports(ast.walk(tree))
-    assert _third_party(anywhere) == {"numpy"} | {module for module, _ in ADAPTERS.values()}, (
+    named = {module for module, _ in ADAPTERS.values()} - DYNAMIC_SDKS
+    assert _third_party(anywhere) == {"numpy"} | named, (
         "an SDK named in the source with no extra declaring it, or an extra whose SDK is "
         "no longer imported. Note that a framework reached through "
         "`engram.integrations._common.require()` is invisible here — it is an "
