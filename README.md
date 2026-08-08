@@ -39,17 +39,25 @@ and no vector database.
 
 ## Why this exists
 
-mem0 and its descendants store a memory as an opaque string with an embedding. Every
-`add()` costs two LLM calls — one to extract facts, one to decide ADD/UPDATE/DELETE
-against whatever the vector search happened to return. Retrieval is vector top-k.
+mem0 and its descendants store a memory as an opaque string with an embedding, and every
+`add()` costs a model call on the critical path. Retrieval is vector top-k.
+
+> **Corrected against mem0 2.0.17.** An earlier version of this section said `add()` costs
+> *two* LLM calls — extract, then adjudicate ADD/UPDATE/DELETE. That described mem0 1.x.
+> 2.x makes **one** call, with existing memories passed into a single additive extraction
+> prompt; `DEFAULT_UPDATE_MEMORY_PROMPT` is still in the source and no longer reached from
+> the add path. The correction cuts against us, so it is stated rather than quietly
+> dropped — but the contradiction problem it was cited for got *larger*, not smaller: 2.x's
+> add path emits only `ADD` events, and its prompt says "Your sole operation is ADD".
+> Conflicting values are **linked**, never retired. `update()` and `delete()` are calls
+> your application has to know to make.
 
 That design has four consequences that show up in production:
 
-1. **Contradictions leak.** Conflict detection is bounded by retrieval recall. If the
-   memory that contradicts the new fact isn't in the top-k, nothing catches it and both
-   survive. Six months in, the store holds three cities for one person and returns
-   whichever embeds closest to the question.
-2. **Writes are slow and expensive.** Two model calls per turn, on the critical path,
+1. **Contradictions accumulate.** In 2.x this is explicit: nothing on the write path
+   retires anything. Six months in, the store holds three cities for one person and
+   returns whichever embeds closest to the question.
+2. **Writes are slow and expensive.** A model call per turn, on the critical path,
    including for "ok, thanks."
 3. **There is no time.** One `updated_at` column can't answer "where did she live in
    March?" or absorb a fact that arrives late about the past.
@@ -57,6 +65,46 @@ That design has four consequences that show up in production:
    memory caused it, where that memory came from, or why it ranked first.
 
 Engram is built around the observation that **most of this doesn't need a model at all.**
+
+---
+
+## Measured against the real mem0 package
+
+`pip install mem0ai && PYTHONPATH=. python3 bench/mem0_real.py` — mem0 **2.0.17**, not a
+reimplementation of it. Same 105-turn transcript, same perfect extraction oracle, same
+`HashingEmbedder`, Qdrant in `:memory:`. Fully offline. Five runs each:
+
+| metric | mem0 2.0.17 | engram |
+|---|---:|---:|
+| LLM calls on the write path | 105 | **2** |
+| Current value stored correctly | 9–10 / 10 | **10 / 10** |
+| Stale values left live | 10–11 | **0** |
+| Live rows in the store | 20 | **10** |
+| **Identical result every run** | **no** | **yes** |
+| Wall clock, median | 108 ms | **11 ms** |
+| Install size | 33 packages | **2 packages** |
+
+The row that matters is not the stale count — it is **`no`**. The oracle returns
+byte-identical JSON on every run and both systems use the same deterministic embedder, so
+there is no model variance in this harness at all. mem0 still reaches a different final
+state between runs on identical input. We did not isolate the cause inside mem0, only
+established that it is not the model and not the embeddings, because neither varies here.
+
+That is the "a keyed lookup has no threshold to get wrong" claim, measured against the
+real package instead of argued against something we wrote.
+
+**Two caveats that cut against these numbers.** mem0 is charged per turn while engram
+receives the transcript in one `add()`, so the call-count row is partly an
+ingestion-granularity choice — the equal-granularity figure is 126 vs 17, below. And the
+oracle gives mem0 *perfect* extraction, which no real deployment gets; the stale count is
+therefore a floor for mem0, not a typical case.
+
+**The first version of this benchmark was wrong, in engram's favour.** Its oracle
+string-matched the whole prompt for known turns, and mem0's additive prompt embeds
+`last_k_messages` — so every earlier turn in the window matched and was re-extracted,
+emitting each fact eleven times and measuring mem0 under a firehose no real extractor
+would produce. It reported 6/10 for mem0. A benchmark whose bug flatters its author is the
+one to distrust most, so the mechanism is documented in `bench/mem0_real.py`.
 
 ---
 
@@ -559,10 +607,12 @@ looking at a top-k, and nothing ever looks again.
   the library runs offline in milliseconds with no download, and it makes tests
   deterministic. It will not put "physician" near "doctor". Install
   `engram[local-embed]` or pass your own embedder for real semantic recall.
-- **The benchmark's comparison target is a reimplementation** of mem0's documented
-  architecture (`bench/baseline.py`), not the mem0 package — so the numbers characterize
-  the design difference, not a head-to-head against a running install. Both systems share
-  one extraction oracle so the comparison isolates architecture from model quality.
+- **Two benchmarks, and only one of them runs the real thing.** `bench/mem0_real.py`
+  drives the actual `mem0ai` package; `bench/compare.py` drives `bench/baseline.py`, a
+  reimplementation of mem0's documented architecture, and is kept because it can vary
+  parameters (top-k, threshold, chitchat ratio) that the real package does not expose.
+  Both share one extraction oracle, so both isolate architecture from model quality — and
+  neither says anything about end-to-end answer quality.
 - **No LOCOMo / LongMemEval numbers yet.** Those need network access and an API key.
   The harness is the natural next step, not a completed result.
 - **The vector index is exact and in-process.** A numpy matmul over the candidate set —

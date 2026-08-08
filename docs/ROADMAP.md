@@ -149,7 +149,67 @@ So the strategy is not "better mem0". It is:
 Migration is free (the shim), and the reason to migrate is a question the incumbent
 cannot answer.
 
-## Recommended model: Apache-2.0 core, commercial governance layer
+## Decided: Apache-2.0 core, everything around it proprietary
+
+**This is settled, not a recommendation.** The core library stays Apache-2.0. Every
+surface built around it — REST API, web UI, team dashboards, multi-tenant control plane,
+governance — is closed and lives in a separate private repository that depends on
+`engram` as a published package.
+
+### Why not a protective license, given the core is permissive
+
+Apache-2.0 permits our closed layer and everyone else's. A funded competitor can take the
+core and ship the exact product we intend to sell, and the license will not stop them.
+That risk is **accepted deliberately**, because the usual remedy is worse here.
+
+AGPL plus a commercial dual license is what MongoDB and Elastic did, and it works for them
+because they ship **servers** — the copyleft boundary is a socket. Engram is a **library**
+that gets imported into someone's agent process, where AGPL arguably reaches the whole
+application. In practice nobody `pip install`s an AGPL memory layer into a commercial
+product. That would close the embedding path, and with it the migration wedge that makes
+the mem0 shim the most commercially valuable thing built so far. Protection bought at the
+cost of the adoption funnel is not protection.
+
+BSL 1.1 protects better and is not OSI open source, which conflicts with the core being
+genuinely open.
+
+So the moat is the closed layer, the brand, and execution speed — not the license.
+
+### The line
+
+| open (Apache-2.0) | closed (private repo) |
+|---|---|
+| the library: store, retrieval, write path, bitemporal model | REST API and auth |
+| MCP server — a thin adapter that drives adoption | web UI, team dashboards |
+| **mem0 shim and importer** — the wedge; closing it removes the reason to migrate | multi-tenant control plane |
+| `Recorder` protocol (the seam) | the dashboard consuming it |
+| SQLite store | **Postgres / pgvector store** |
+| `Store` / `Embedder` / `LLM` protocols | governance: PII, encryption, audit chain, RBAC |
+
+Two of these are deliberate and worth defending. The **mem0 importer stays open** because
+it is worthless without the core and is the only reason anyone switches. **Postgres goes
+closed** because it is a clean commercial boundary: SQLite is genuinely sufficient for a
+single node, and needing Postgres correlates almost exactly with willingness to pay.
+
+### Protections that do the work the license doesn't
+
+- **CLA on the open core**, in place before the first outside contribution. Without it,
+  every external patch is a veto on ever relicensing.
+- **Trademark on a distinct commercial brand.** Note that *"engram" is probably weak* —
+  it is an established neuroscience term for a memory trace, which makes it descriptive of
+  the product's own function and hard to register. Trademark, not license, is what stops
+  someone selling "Engram Cloud". Pick the commercial name deliberately.
+- **Governance and Postgres never enter the open repository.** Not "moved later" —
+  never committed, because git history is public forever.
+
+### Sequencing note
+
+The repo split is **deferred until Phase 4 completes**. There is no point building
+commercial scaffolding around a core with no external evidence behind it. The protocols
+that the closed layer will consume (`Store`, `Embedder`, `LLM`, `Recorder`) already exist
+and are already injectable, so nothing about waiting makes the split harder later.
+
+## The model in detail
 
 **Free, Apache-2.0, forever:** everything shipped today. The library, the MCP server, the
 mem0 shim, the importer, hybrid retrieval, bitemporal storage, `why()`. Adoption is the

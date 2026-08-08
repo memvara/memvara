@@ -25,6 +25,8 @@ local-embed = ["sentence-transformers>=3.0"]
 # misleading; `http` is reserved for the REST layer that will actually need them.
 http = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2.6"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "coverage>=7.0"]
+# Only for bench/mem0_real.py, the head-to-head against the real package.
+bench = ["mem0ai>=2.0"]
 
 [project.scripts]
 engram-mcp = "engram.server.cli:main"
