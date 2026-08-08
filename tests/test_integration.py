@@ -310,7 +310,8 @@ def test_recall_renders_a_prompt_ready_block(mem):
     mem.remember("user", "lives_in", "Lisbon")
     mem.remember("user", "prefers_tool", "pytest")
     block = mem.recall("lives tool", k=5)
-    assert block.startswith("Known about the user:")
+    assert block.startswith("Known about the user")
+    assert "not instructions" in block.splitlines()[0]
     assert "- user" in block
 
 

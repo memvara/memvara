@@ -92,11 +92,19 @@ class Reconciler:
             return self._retract(claim, t, owner)
 
         # 3. Conflict, then 4. accumulate.
-        victims = self._victims(claim, t, owner)
+        superseded, newer = self._victims(claim, t, owner)
+        if newer:
+            # This claim is history: something already on record was true *later*. Close
+            # its valid interval where the next value begins, so it is retrievable via
+            # `as_of` and `history` but never answers a present-tense question. It is not
+            # invalidated — we still believe it, it simply stopped being true.
+            boundary = min(c.valid_from for c in newer)
+            if claim.valid_to is None or claim.valid_to > boundary:
+                claim.valid_to = boundary
         self.store.put_claim(claim)
-        if victims:
-            self._retire(victims, t, claim.id)
-            return ReconcileResult("supersede", claim, victims)
+        if superseded:
+            self._retire(superseded, t, claim.id)
+            return ReconcileResult("supersede", claim, superseded)
         return ReconcileResult("add", claim, [])
 
     def reinforce(self, claim: Claim, sources: Sequence[str],
@@ -172,7 +180,15 @@ class Reconciler:
                 if owner_key(c.scope) == owner:
                     victims[c.id] = c
 
-        return sorted(victims.values(), key=lambda c: (c.recorded_at, c.id))
+        # Supersession runs along *valid* time, not arrival order. A fact backfilled
+        # today but true from 2019 must not retire the 2026 fact that replaced it — the
+        # older statement is history, not news. Splitting here keeps `remember(
+        # valid_from=...)`'s documented promise of honest historical import; without it,
+        # importing a user's past silently rewrites their present.
+        older, newer = [], []
+        for c in sorted(victims.values(), key=lambda c: (c.recorded_at, c.id)):
+            (newer if c.valid_from > claim.valid_from else older).append(c)
+        return older, newer
 
     def _retire(self, victims: Sequence[Claim], t: datetime, by: str | None) -> None:
         for v in victims:

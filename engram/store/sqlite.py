@@ -313,7 +313,13 @@ class SQLiteStore:
     def _scope_clause(scopes: Sequence[Scope], alias: str = "") -> tuple[str, list]:
         a = f"{alias}." if alias else ""
         if not scopes:
-            return "1=1", []
+            # Fail closed. An empty scope list means "no scope was resolved", which is a
+            # caller bug — and matching everything would hand back every tenant's rows.
+            # `Scope.ancestors()` never returns empty, so this is unreachable from the
+            # public API today; it exists because `candidate_ids`, `lexical_search` and
+            # `vector_search` are part of the published Store protocol, and a server that
+            # computes scopes from a filter can hand us [].
+            return "1=0", []
         parts, params = [], []
         for s in scopes:
             parts.append(f"({a}tenant IS ? AND {a}usr IS ? AND {a}agent IS ? AND {a}session IS ?)")
@@ -694,14 +700,29 @@ class SQLiteStore:
         for r in rows:
             yield self._row_to_claim(r)
 
-    def stats(self) -> dict[str, int]:
+    def stats(self, tenant: str | None = None) -> dict[str, int]:
+        """Row counts, optionally for one tenant.
+
+        Scoping matters on a shared store: unfiltered counts disclose how much data
+        other tenants hold, which is a real signal even without their content.
+        `embeddings` stays process-global — it reports the size of the in-memory index,
+        which is not a per-tenant quantity.
+        """
+        where = " WHERE tenant = ?" if tenant is not None else ""
+        params: tuple = (tenant,) if tenant is not None else ()
+        and_ = " AND" if tenant is not None else " WHERE"
+
         with self._lock:
-            q = lambda s: int(self._db.execute(s).fetchone()[0])  # noqa: E731
+            def q(sql: str) -> int:
+                return int(self._db.execute(sql, params).fetchone()[0])
+
             return {
-                "episodes": q("SELECT COUNT(*) FROM episodes"),
-                "claims": q("SELECT COUNT(*) FROM claims"),
-                "live_claims": q("SELECT COUNT(*) FROM claims WHERE invalidated_at IS NULL"),
-                "invalidated": q("SELECT COUNT(*) FROM claims WHERE invalidated_at IS NOT NULL"),
+                "episodes": q(f"SELECT COUNT(*) FROM episodes{where}"),
+                "claims": q(f"SELECT COUNT(*) FROM claims{where}"),
+                "live_claims": q(
+                    f"SELECT COUNT(*) FROM claims{where}{and_} invalidated_at IS NULL"),
+                "invalidated": q(
+                    f"SELECT COUNT(*) FROM claims{where}{and_} invalidated_at IS NOT NULL"),
                 "embeddings": len(self._vec),
             }
 

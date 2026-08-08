@@ -309,10 +309,19 @@ def test_candidate_ids_matches_scopes_exactly(store):
     assert set(store.candidate_ids([Scope("acme", "alice"), Scope("acme", "alice", "bot", "s1")])) == {a.id, b.id}
 
 
-def test_candidate_ids_with_no_scopes_returns_everything(store):
-    a = put(store, scope=Scope("acme", "alice"))
-    b = put(store, scope=Scope("other", "bob"))
-    assert set(store.candidate_ids([])) == {a.id, b.id}
+def test_no_scopes_matches_nothing_rather_than_everything(store):
+    """Fail closed. An empty scope list means no scope was resolved — a caller bug —
+    and matching everything would return every tenant's rows to whoever asked."""
+    put(store, scope=Scope("acme", "alice"))
+    put(store, scope=Scope("other", "bob"))
+    assert store.candidate_ids([]) == []
+    assert store.lexical_search("berlin", [], limit=10) == []
+
+
+def test_no_scopes_fails_closed_for_vector_search_too(store, emb):
+    c = put(store, emb, scope=Scope("acme", "alice"))
+    assert store.get_embedding(c.id) is not None
+    assert store.vector_search(emb.encode(["user lives in Berlin"])[0], [], limit=10) == []
 
 
 def test_include_invalidated_still_cannot_see_the_future(store):
