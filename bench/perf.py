@@ -50,16 +50,30 @@ def scaling() -> None:
         print(f"    {'write (bulk)':<28}{build_s / n * 1000:>9.3f} ms/op   "
               f"{n / build_s:>10.0f} ops/s")
 
-        w = timed("write (single)", lambda: mem.remember("user", "extra", "x"), 50)
-        s = timed("search k=10", lambda: mem.search("Berlin lives", k=10), 50)
-        g = timed("get_all", lambda: mem.get_all(user="u1"), 20)
-        c = timed("consolidate", lambda: mem.consolidate(), 3)
+        # Every measured op must run against a populated scope. `build()` writes to
+        # u0..u49, so timing the constructor's default scope times an empty search —
+        # which is what this harness previously did, reporting a search that found
+        # nothing and never exercised fusion or rescoring.
+        probe = mem.search("Berlin lives", k=10, user="u1")
+        assert probe, "search benchmark must hit a populated scope"
 
-        cur = {"write": w, "search": s, "get_all": g, "consolidate": c}
+        counter = iter(range(1_000_000))
+        w = timed("write (single)",
+                  lambda: mem.remember("user", f"extra_{next(counter)}", "x", user="u1"), 50)
+        s = timed("search k=10", lambda: mem.search("Berlin lives", k=10, user="u1"), 50)
+        g = timed("get_all", lambda: mem.get_all(user="u1"), 20)
+        a = timed("add (fast path, no LLM)",
+                  lambda: mem.add(f"I live in City{next(counter)}", user="u1"), 50)
+        # First sweep does the work; later sweeps converge to no-ops. Averaging them
+        # hides both numbers, so report the cold sweep separately from steady state.
+        c = timed("consolidate (cold)", lambda: mem.consolidate(), 1)
+        timed("consolidate (steady)", lambda: mem.consolidate(), 2)
+
+        cur = {"write": w, "search": s, "get_all": g, "add": a, "consolidate": c}
         if prev:
             growth = n / prev["_n"]
             print(f"    -- scaling vs previous ({growth:.0f}x more claims):")
-            for k in ("write", "search", "get_all", "consolidate"):
+            for k in ("write", "search", "get_all", "add", "consolidate"):
                 ratio = cur[k] / prev[k]
                 verdict = "flat" if ratio < growth * 0.35 else (
                     "sub-linear" if ratio < growth * 0.8 else "LINEAR+")

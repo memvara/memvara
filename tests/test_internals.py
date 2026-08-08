@@ -476,3 +476,16 @@ def test_response_parsing_skips_non_text_blocks_before_the_answer():
     assert _first_text(Response([Block("thinking"), Block("text", "yo")])) == "yo"
     assert _first_text(Response([])) == ""
     assert _first_text(Response(None)) == ""
+
+
+def test_stats_falls_back_for_a_store_without_tenant_scoping():
+    """A third-party Store predating the tenant argument must keep working."""
+    class OldStore(SQLiteStore):
+        def stats(self):  # no tenant parameter
+            return {"episodes": 0, "claims": 99, "live_claims": 99,
+                    "invalidated": 0, "embeddings": 0}
+
+    mem = Engram(store=OldStore(":memory:"), embedder=HashingEmbedder(dim=32),
+                 user="alice")
+    assert mem.stats()["claims"] == 99
+    mem.close()

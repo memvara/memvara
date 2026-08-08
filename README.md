@@ -8,16 +8,28 @@ pip install -e .
 ```
 
 ```python
+from datetime import datetime, timedelta, timezone
 from engram import Engram
 
+now = datetime.now(timezone.utc)
 mem = Engram("memory.db", user="alice")
 
-mem.add("I live in Berlin and work at Acme")
-mem.add("Actually, I moved to Lisbon last month")
+# Two independent axes. `valid_from` is when it was true in the world; `recorded_at`
+# is when we learned it. Both are set here so the time-travel query below has a past
+# to travel to — a plain mem.add() would record both facts as of now.
+mem.remember("user", "lives_in", "Berlin",
+             valid_from=now - timedelta(days=800), recorded_at=now - timedelta(days=800))
+mem.remember("user", "lives_in", "Lisbon",
+             valid_from=now - timedelta(days=30), recorded_at=now - timedelta(days=30))
 
-mem.search("where do they live?")     # -> Lisbon
-mem.history("user", "lives_in")       # -> Berlin (retired 2026-08-08), Lisbon (current)
-mem.search("where do they live?", as_of=last_year)   # -> Berlin
+[r.text for r in mem.search("where do they live?")]
+# -> ['user lives in Lisbon']
+
+[(c.object, c.valid_to) for c in mem.history("user", "lives_in")]
+# -> [('Berlin', datetime(... 30 days ago ...)), ('Lisbon', None)]
+
+[c.object for c in mem.get_all(as_of=now - timedelta(days=365))]
+# -> ['Berlin']      # what was true a year ago
 ```
 
 Core requires **numpy and nothing else**. It runs offline, with no API key, no Docker,
@@ -48,36 +60,63 @@ Engram is built around the observation that **most of this doesn't need a model 
 
 ---
 
-## Measured
+## A design comparison (synthetic, self-authored)
 
-`python3 bench/compare.py` — 105-turn transcript, 21 turns carrying a durable fact,
-10 distinct facts, several revised two or three times over the conversation:
+Not an external benchmark. One workload, n=1, written by the same people who wrote the
+system being measured and the system it is measured against. Read this section as an
+illustration of a mechanism, not as evidence of superiority.
+
+`PYTHONPATH=. python3 bench/compare.py` — 105-turn transcript, 21 turns carrying a
+durable fact, 10 distinct facts, several revised two or three times:
 
 | metric | mem0-style | engram |
 |---|---:|---:|
 | LLM calls on the write path | 126 | **2** |
 | Current value stored correctly | 10/10 | 10/10 |
 | **Stale values left live** | **7** | **0** |
-| Live memories (want 10) | 17 | **10** |
-| End-to-end @ 800ms/call | 101 s | **2 s** |
+| Local compute | **4 ms** | 11 ms |
 
-The row that matters is the third. Both systems know the right answer — but the baseline
-also still holds seven superseded values, so it answers the same question correctly and
-incorrectly at once, and which one you get depends on what embeds closest. Those seven
-contradictions were invisible to top-k adjudication; a keyed lookup catches them by
-construction.
+**Where the stale-value result actually comes from.** An earlier version of this README
+claimed those seven contradictions were "invisible to top-k adjudication." That was
+wrong, and the benchmark disproves it: sweeping the baseline's `top_k` from 1 to 1000
+changes nothing, because the conflicting memory is returned in the candidate list every
+time. What kills them is the baseline's similarity **threshold** (0.75) — competing
+values embed at 0.52–0.74, just under it. That threshold is a tuning choice and the
+result is sensitive to it: at 0.5 the baseline also holds zero stale values; at 0.9 it
+holds eleven. The honest claim is not "top-k loses conflicts" but **"a keyed lookup has
+no threshold to get wrong"** — which is a claim about determinism, not recall.
 
-At a more realistic 1:12 chitchat ratio the write-path gap widens to **294 calls vs 2**.
+**The call-count gap is mostly an ingestion-granularity choice.** Engram receives the
+whole transcript in one `add()` and batches extraction; the baseline is charged per turn.
+At equal per-turn granularity it is 126 vs 17, not 126 vs 2. The gap also scales linearly
+with the chitchat ratio, which is a parameter we picked: 1:0 → 21x, 1:4 → 63x, 1:12 →
+147x, 1:100 → 1071x, with identical information content at every point.
+
+**Engram loses the local-compute row** — roughly 3x slower per operation, because it does
+strictly more work (FTS indexing, reconciliation, bitemporal filtering). That trade is
+worth it only when model calls dominate, which is the normal case but not a universal one.
+
+**What this does not measure:** end-to-end answer quality. Both systems are driven by the
+same perfect extraction oracle, which neither would have in production. 9 of the 10
+predicates ship pre-seeded in the registry with the right cardinality, so the benchmark
+never exercises the path where an unknown predicate defaults to multi-valued and
+accumulates. And there are no LOCOMO or LongMemEval numbers yet — that is a gap in the
+work, not a limitation of the environment.
 
 ### Throughput
 
 `PYTHONPATH=. python3 bench/perf.py` — single process, in-memory store, no LLM:
 
+Single-shot point estimates on one loaded developer machine, no warmup, no repetition,
+no variance reported — treat as order-of-magnitude, not as a regression baseline.
+
 | @ 8,000 claims | per op | scaling per 4x data |
 |---|---:|---|
-| write | 0.13 ms (**~8,000/s**) | flat |
-| search k=10 | 1.3 ms (~770/s) | sub-linear |
-| consolidation sweep | 336 ms | linear |
+| `remember()` (structured write) | 0.12 ms | flat |
+| `add()` (fast path, no LLM) | 0.50 ms | flat |
+| search k=10 | 2.1 ms | sub-linear |
+| consolidation, cold sweep | 457 ms | linear |
+| consolidation, steady state | 273 ms | linear |
 
 Two algorithmic fixes got it there, both found by profiling rather than guessing:
 
@@ -85,8 +124,8 @@ Two algorithmic fixes got it there, both found by profiling rather than guessing
   claim_id = ?` on every write was a full scan of the text index, making N writes over N
   rows **O(n²)** — it dominated everything else at 80% of consolidation time. Mirroring
   the claim's rowid into the FTS table makes the delete an indexed lookup. Consolidation
-  went from 4.8 s to 336 ms at 8k claims, and from degrading 11x per 4x of data to
-  exactly 4x — i.e. from quadratic to linear, which is optimal for a full sweep.
+  went from 4.8 s to ~460 ms at 8k claims, and from degrading ~11x per 4x of data to
+  ~4x — i.e. from quadratic to about linear, which is the floor for a full sweep.
   (This required switching `INSERT OR REPLACE` to an upsert: REPLACE assigns a *new*
   rowid, which would orphan the index entry it is keyed on.)
 - **N+1 query patterns.** Retrieval hydrated every fused candidate with its own

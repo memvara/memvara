@@ -208,8 +208,12 @@ def run(chitchat_ratio: int = 4) -> None:
     print(f"  -> baseline kept {b['stale']} superseded values live alongside the "
           f"correct ones;\n     it answers the question right and wrong at the "
           f"same time")
-    print(f"  -> {base.stats.conflicts_missed} contradictions were invisible to top-k "
-          f"adjudication;\n     a keyed lookup catches them by construction")
+    print(f"  -> {base.stats.conflicts_missed} contradictions survived in the baseline.")
+    print("     Honest cause: they fall below its similarity threshold (0.75), NOT below")
+    print("     a top-k cutoff — sweeping top_k from 1 to 1000 changes nothing, because")
+    print("     the conflicting memory is returned every time. The threshold is a tuning")
+    print("     choice and the result is sensitive to it (0.5 -> 0 stale, 0.9 -> 11).")
+    print("     What a keyed lookup buys is that there is no such threshold to tune.")
 
     # Reported outside the table on purpose — with this embedder the row does not
     # discriminate, and presenting it as a win would be misleading.
