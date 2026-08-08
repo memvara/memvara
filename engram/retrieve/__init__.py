@@ -1,8 +1,9 @@
 """Read path: hybrid retrieval, rank fusion, and time-aware rescoring."""
 
 from .analyze import STOPWORDS, LexicalQuery, analyze, tokenize
+from .calibrate import FloorReport, calibrate_min_score
 from .fusion import reciprocal_rank_fusion
-from .hybrid import RELEVANCE_FLOOR, HybridRetriever
+from .hybrid import HybridRetriever
 from .scoring import (
     final_score,
     lexical_relevance,
@@ -26,6 +27,7 @@ __all__ = [
     "tokenize",
     "LexicalQuery",
     "STOPWORDS",
-    "RELEVANCE_FLOOR",
+    "calibrate_min_score",
+    "FloorReport",
     "HybridRetriever",
 ]

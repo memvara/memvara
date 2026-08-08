@@ -17,7 +17,7 @@ from engram.embed import HashingEmbedder
 from engram.schema import Cardinality, PredicateSpec, Volatility
 from engram.store import SQLiteStore
 from engram.store.sqlite import SCHEMA_VERSION, _VecIndex, _vec_path
-from engram.types import Claim, MemoryType, Scope
+from engram.types import Claim, Episode, MemoryType, Scope
 
 SCOPE = Scope("acme", "alice")
 
@@ -176,6 +176,36 @@ def test_growth_across_the_file_boundary_preserves_every_vector(tmp_path):
     with SQLiteStore(path) as s2:
         assert s2.stats()["embeddings"] == 600
         assert s2.vector_search(onehot(16, 300), [SCOPE], limit=1)[0][1] == pytest.approx(1.0)
+
+
+def test_reopening_never_grows_the_matrix_file(tmp_path):
+    """Sizing the file from what it already holds rather than from what is missing
+    doubles it on every open. It is sparse, so nothing complains — until the apparent
+    size outgrows what can be mapped and the store cannot be opened at all, which is
+    the exact failure the mapped file exists to prevent."""
+    path = str(tmp_path / "grow.db")
+    with SQLiteStore(path) as s:
+        for i in range(400):
+            embed(s, onehot(16, i), predicate=f"p{i}")
+    settled = os.path.getsize(path + ".vecs")
+    for _ in range(6):
+        with SQLiteStore(path) as s:
+            assert s.vector_search(onehot(16, 5), [SCOPE], limit=1)[0][1] \
+                == pytest.approx(1.0)
+    assert os.path.getsize(path + ".vecs") == settled
+
+
+def test_the_file_grows_only_when_a_row_is_missing(tmp_path):
+    path = str(tmp_path / "g2.db")
+    with SQLiteStore(path) as s:
+        embed(s, onehot(16, 0), predicate="first")
+        start = os.path.getsize(path + ".vecs")
+        for i in range(1, 200):  # still inside the initial 256 rows
+            embed(s, onehot(16, i), predicate=f"p{i}")
+        assert os.path.getsize(path + ".vecs") == start
+        for i in range(200, 400):  # now past it
+            embed(s, onehot(16, i), predicate=f"q{i}")
+        assert os.path.getsize(path + ".vecs") > start
 
 
 def test_a_bare_index_grows_on_the_heap_and_keeps_every_row():
@@ -380,6 +410,102 @@ def test_stats_counts_the_vectors_the_database_holds(tmp_path):
     assert b.stats()["embeddings"] == 2
     a.close()
     b.close()
+
+
+# --- Dropping every vector (the re-embedding hook) --------------------------
+
+def test_clear_embeddings_drops_the_vectors_and_keeps_the_memory(tmp_path):
+    """Derived data goes; claims, episodes and history do not. Re-embedding is a
+    migration of the index, not of the store."""
+    path = str(tmp_path / "c.db")
+    with SQLiteStore(path) as s:
+        kept = [embed(s, onehot(8, i), predicate=f"p{i}") for i in range(4)]
+        s.add_episode(Episode(content="hello", scope=SCOPE))
+
+        assert s.clear_embeddings() == 4
+        assert s.stats() == {"episodes": 1, "claims": 4, "live_claims": 4,
+                             "invalidated": 0, "embeddings": 0}
+        assert s.get_embedding(kept[0].id) is None
+        assert s.get_claim(kept[0].id).object == "Berlin"
+        assert s.lexical_search("berlin", [SCOPE], limit=10)
+
+
+def test_clearing_releases_the_width_so_a_new_embedder_can_own_the_store(tmp_path):
+    """The reason the hook has to exist: the index fixes its dimension on the first
+    vector it sees, so without this a migration fails on its first write having
+    replaced nothing."""
+    path = str(tmp_path / "w.db")
+    with SQLiteStore(path) as s:
+        c = embed(s, onehot(8, 1))
+        with pytest.raises(ValueError, match="dim"):
+            s.set_embedding(c.id, onehot(4, 1))
+
+        s.clear_embeddings()
+        s.set_embedding(c.id, onehot(4, 1))  # a narrower model now owns the store
+        assert s._vec.dim == 4
+        assert s.vector_search(onehot(4, 1), [SCOPE], limit=1)[0][0] == c.id
+    with SQLiteStore(path) as s2:
+        assert s2._vec.dim == 4
+        assert s2.vector_search(onehot(4, 1), [SCOPE], limit=1)[0][1] == pytest.approx(1.0)
+
+
+def test_clearing_empties_the_matrix_file_rather_than_unmapping_it(tmp_path):
+    """"Drop every vector" that leaves the bytes on disk is not what it says — the
+    file outlives the process and an embedding is invertible back to its text."""
+    path = str(tmp_path / "e.db")
+    with SQLiteStore(path) as s:
+        embed(s, onehot(8, 1))
+        assert os.path.getsize(path + ".vecs") > 0
+        s.clear_embeddings()
+        assert os.path.getsize(path + ".vecs") == 0
+
+
+def test_clearing_hands_the_rows_back_from_the_start(tmp_path):
+    path = str(tmp_path / "r.db")
+    with SQLiteStore(path) as s:
+        for i in range(3):
+            embed(s, onehot(8, i), predicate=f"p{i}")
+        s.purge(SCOPE)
+        assert s._db.execute("SELECT COUNT(*) FROM vec_free").fetchone()[0] == 3
+
+        s.clear_embeddings()
+        assert s._db.execute("SELECT COUNT(*) FROM vec_free").fetchone()[0] == 0
+        fresh = embed(s, onehot(8, 0), predicate="after")
+        assert s._db.execute("SELECT slot FROM embeddings").fetchone()[0] == 0
+        assert s.vector_search(onehot(8, 0), [SCOPE], limit=1)[0][0] == fresh.id
+
+
+def test_clearing_an_empty_store_is_a_no_op():
+    with SQLiteStore(":memory:") as s:
+        assert s.clear_embeddings() == 0
+        assert s.stats()["embeddings"] == 0
+
+
+def test_a_rolled_back_clear_puts_every_vector_back(tmp_path):
+    """A re-embedding that fails part way must leave the old index intact. Repairing
+    row by row cannot do it — the rows all came back and the matrix holds none of
+    them — so this is the one rollback that rebuilds."""
+    path = str(tmp_path / "rb.db")
+    with SQLiteStore(path) as s:
+        made = [embed(s, onehot(8, i), predicate=f"p{i}") for i in range(3)]
+        with pytest.raises(RuntimeError):
+            with s.batch():
+                s.clear_embeddings()
+                raise RuntimeError("the new embedder blew up")
+
+        assert s.stats()["embeddings"] == 3
+        for i, c in enumerate(made):
+            hits = s.vector_search(onehot(8, i), [SCOPE], limit=1)
+            assert hits[0][0] == c.id
+            assert hits[0][1] == pytest.approx(1.0)
+
+
+def test_clearing_an_in_memory_store_releases_its_width_too():
+    with SQLiteStore(":memory:") as s:
+        c = embed(s, onehot(8, 1))
+        assert s.clear_embeddings() == 1
+        s.set_embedding(c.id, onehot(16, 1))
+        assert s.vector_search(onehot(16, 1), [SCOPE], limit=1)[0][0] == c.id
 
 
 # --- Slot reuse -------------------------------------------------------------

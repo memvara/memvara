@@ -331,20 +331,27 @@ class _VecIndex:
         if self._mat is not None and need <= self._rows:
             return
         assert self.dim is not None
-        target = max(need, self._rows * 2, self._INITIAL_ROWS)
         if self.path is None:
+            target = max(need, self._rows * 2, self._INITIAL_ROWS)
             grown = np.zeros((target, self.dim), dtype=np.float32)
             if self._mat is not None:
                 grown[:self._rows] = self._mat
             self._mat = grown
             self._rows = target
             return
-        fd = self._fh.fileno()
-        size = _VEC_HEADER + target * self.dim * 4
-        if size > os.fstat(fd).st_size:
-            # A write past EOF extends the file; `ftruncate` would also shorten it, and
-            # two processes growing at once would then race to cut each other's rows.
-            os.pwrite(fd, b"\0", size - 1)
+        # Extend only when a row is actually missing. Sizing from what the file already
+        # holds instead would double it on *every* open, since arriving here with no
+        # mapping is the normal way a store starts — and a sparse file that doubles
+        # forever eventually exceeds what can be mapped, which bricks the store this
+        # was meant to keep openable.
+        if need > self._rows:
+            target = max(need, self._rows * 2, self._INITIAL_ROWS)
+            fd = self._fh.fileno()
+            size = _VEC_HEADER + target * self.dim * 4
+            if size > os.fstat(fd).st_size:
+                # A write past EOF extends the file; `ftruncate` would also shorten it,
+                # and two processes growing at once would race to cut each other's rows.
+                os.pwrite(fd, b"\0", size - 1)
         self._remap()
 
     def _remap(self) -> None:
@@ -409,6 +416,28 @@ class _VecIndex:
             if slot is not None and self._mat is not None and slot < self._rows:
                 self._mat[slot] = 0.0
             return slot
+
+    def reset(self) -> None:
+        """Forget every vector and release the width they shared.
+
+        Re-embedding is the caller. The index fixes its dimension on the first vector
+        it sees and rejects every later one of a different width, so a migration to a
+        new model cannot begin until that width is released. The file goes with it:
+        "drop every vector" that leaves the bytes behind is not what it says.
+        """
+        with self._lock:
+            self.dim = None
+            self._row.clear()
+            self._free.clear()
+            self._rows = 0
+            self._high = 0
+            # Unmap before truncating. A mapping that outlives the pages behind it
+            # faults on the next read rather than reporting a short file.
+            self._mat = None
+            if self._fh is not None:
+                os.ftruncate(self._fh.fileno(), 0)
+                self._fh.close()
+                self._fh = None
 
     def remove(self, claim_id: str) -> bool:
         """Drop a vector and keep its slot for reuse. Required for erasure — without
@@ -505,6 +534,7 @@ class SQLiteStore:
         # Claims whose matrix row this transaction touched, so a rollback can put the
         # index back in step with the database.
         self._touched: set[str] = set()
+        self._cleared = False
         self._vec = _VecIndex(path=_vec_path(path), count=self._count_embeddings)
         self._index_loaded = False
         self._seq = -1
@@ -705,6 +735,13 @@ class SQLiteStore:
         holds. The database is the authority, so every row the batch touched is simply
         re-read from it.
         """
+        if self._cleared:
+            # A rolled-back `clear_embeddings` is the one case with nothing to repair
+            # row by row: the vectors all came back and the matrix holds none of them.
+            self._cleared = False
+            self._vec.reset()
+            self._attach_vectors()
+            return
         for claim_id in self._touched:
             r = self._db.execute(
                 "SELECT slot, vec FROM embeddings WHERE claim_id=?", (claim_id,)
@@ -751,6 +788,7 @@ class SQLiteStore:
                 self._batch_depth -= 1
                 if self._batch_depth == 0:
                     self._touched.clear()
+                    self._cleared = False
                     self._maybe_commit()
 
     def _mark(self, claim_id: str) -> None:
@@ -1101,6 +1139,32 @@ class SQLiteStore:
             self._vec.put(claim_id, slot, v)
             self._mark(claim_id)
             self._maybe_commit()
+
+    def clear_embeddings(self) -> int:
+        """Drop every stored vector and release the dimension they fixed.
+
+        The one thing re-embedding needs that `set_embedding` cannot express. The index
+        binds its width to the first vector it sees and rejects every later one of a
+        different width, so migrating to a new model has to empty the store of vectors
+        *before* writing the first new one — otherwise the migration fails on that
+        first write, having already replaced nothing, and the error names a dimension
+        mismatch rather than the fact that it was never going to work.
+
+        Claims, episodes and history are untouched: this drops the derived vectors, not
+        the memory. Returns how many went, so the caller can report the migration.
+        """
+        with self._lock:
+            dropped = self._count_embeddings()
+            self._db.execute("DELETE FROM embeddings")
+            self._db.execute("DELETE FROM vec_free")
+            self._vec.reset()
+            self._index_loaded = False
+            self._seq = -1
+            self._data_version = -1
+            # Row-by-row repair cannot undo this, so a rollback has to rebuild instead.
+            self._cleared = bool(self._batch_depth)
+            self._maybe_commit()
+        return dropped
 
     def get_embedding(self, claim_id: str) -> np.ndarray | None:
         """Read back a stored vector.

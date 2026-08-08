@@ -52,22 +52,12 @@ from .scoring import (
 VECTOR = "vector"
 LEXICAL = "lexical"
 
-#: Suggested `min_score` for a caller that would rather answer "I don't know" than
-#: return the least bad thing in the store - `recall()` rendering a prompt block, or
-#: mem0's `threshold`. Measured, not guessed: on a 36-claim personal corpus with 17
-#: answerable and 6 unanswerable questions, a floor of 0.25 keeps every question that
-#: was answered correctly and silences 5 of the 6 unanswerable ones. The survivor is a
-#: porter-stemmer collision ("production" -> "product", matching "dairy products") at
-#: 0.28; raising the floor to 0.30 silences it too, at the cost of two correct but
-#: weakly-evidenced answers.
-#:
-#: Embedder-dependent, and honestly so: it is calibrated against the shipped lexical
-#: `HashingEmbedder`. A semantic embedder shifts the cosine distribution upward and the
-#: floor should be re-measured with the eval, not assumed to carry over.
-#:
-#: Not the default for `search`, which stays 0.0 - filtering is the caller's call, and
-#: a retriever that silently withheld results would be much harder to debug.
-RELEVANCE_FLOOR = 0.25
+# There is deliberately no default relevance floor here. One was measured and shipped
+# (0.25, calibrated on a 36-claim corpus) and it is wrong at both ends: the window
+# between the weakest correct answer and the best wrong one moves with corpus size, and
+# the windows at 5 claims and at 1,000 do not intersect. See `calibrate.py` for the
+# measurement and for `calibrate_min_score`, which derives the number from a
+# deployment's own probes instead of guessing it here.
 
 
 def _as_utc(dt: datetime) -> datetime:
@@ -141,9 +131,10 @@ class HybridRetriever:
         dead at `as_of` - useful for auditing, wrong for answering a question.
 
         `min_score` drops results below a normalized relevance (see
-        `scoring.normalized_score`); at the default 0.0 nothing is dropped, and
-        `RELEVANCE_FLOOR` is the suggested starting point for a caller that would
-        rather return nothing than return the least bad thing in the store.
+        `scoring.normalized_score`); at the default 0.0 nothing is dropped. The right
+        value is a property of the store rather than of this library - it moves with
+        corpus size and with the embedder - so measure it with
+        `calibrate.calibrate_min_score` rather than picking one.
         """
         if k <= 0:
             return []

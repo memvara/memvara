@@ -154,27 +154,19 @@ def _drop_vectors(store: Store) -> None:
     migration that skipped this would fail on its first write and leave the store half
     re-embedded.
     """
+    # `clear_embeddings` is part of the `Store` protocol, so there is no fallback worth
+    # keeping. An earlier version reached into `store._db` / `store._vec` and rebuilt the
+    # index with `type(index)()`; that worked only by luck, because a store whose index
+    # needs constructor arguments would have been silently detached from its own matrix
+    # rather than cleared.
     clear = getattr(store, "clear_embeddings", None)
-    if clear is not None:
-        clear()
-        return
-
-    db = getattr(store, "_db", None)
-    index = getattr(store, "_vec", None)
-    if db is None or index is None:
+    if clear is None:
         raise NotImplementedError(
             f"{type(store).__name__} cannot drop its vectors, so it cannot be "
             "re-embedded. Implement clear_embeddings(): delete every stored vector and "
             "reset the index dimension."
         )
-    # Reaching into the shipped store on purpose, and only here: this is the one
-    # operation the storage protocol does not express, and shipping `reembed()` without
-    # it would mean shipping the migration the store's own error message tells people
-    # to run and having it not work.
-    with getattr(store, "_lock", nullcontext()):
-        db.execute("DELETE FROM embeddings")
-        db.commit()
-    store._vec = type(index)()
+    clear()
 
 
 class Engram:
@@ -533,17 +525,17 @@ class Engram:
                memory_types: Sequence[MemoryType] | None = None) -> list[Result]:
         """Hybrid retrieval over current belief, or over belief as of a past instant.
 
-        `min_score` is a floor on `Result.score`, which is normalized into [0, 1] — so
-        the same number means the same thing across queries and across stores.
+        `min_score` is a floor on `Result.score`, which is normalized into [0, 1]. The
+        right value is a property of *your store*, not of this library: it drifts with
+        corpus size and with the embedder, and a measured sweep showed the usable window
+        at 5 claims and at 1,000 do not even overlap. There is deliberately no default —
+        derive one from your own labelled probes with
+        `engram.calibrate_min_score`, and re-derive it as the store grows.
         """
         scope = self._scope(tenant, user, agent, session)
-        # A zero floor is a no-op, so it is not forwarded at all. That keeps the
-        # retriever free to treat filtering as an optional capability rather than a
-        # parameter every implementation has to accept.
-        floor = {"min_score": min_score} if min_score > 0.0 else {}
         return self.reader.search(
-            query, scope, k=k, as_of=as_of,
-            include_invalidated=include_invalidated, memory_types=memory_types, **floor,
+            query, scope, k=k, as_of=as_of, min_score=min_score,
+            include_invalidated=include_invalidated, memory_types=memory_types,
         )
 
     def get(self, claim_id: str, *, tenant=None, user=None, agent=None,
@@ -646,6 +638,20 @@ class Engram:
 
         `min_score` is here because this output goes into a prompt: a weak match is not
         neutral there, it is a confident-looking irrelevant fact the model will use.
+
+        It defaults to 0.0, and that is a deliberate refusal rather than an oversight.
+        A floor was measured and very nearly shipped as a constant; a corpus-size sweep
+        then showed the usable window — above the best wrong answer, below the weakest
+        correct one — moves as the store grows, and the windows at 5 claims and at 1,000
+        do not intersect. No single number is right at both ends, and the failure is
+        silent in the worse direction: too high and a correct memory is withheld with no
+        trace. Relative criteria (top/median, MAD, top/runner-up) were tried and all
+        invert on a nonsense query, where the whole pool sits near zero and the best of
+        the noise looks like a standout.
+
+        So: a deployment that wants "I don't know" measures its own floor with
+        `engram.calibrate_min_score` and re-measures as the store grows. The
+        vector-noise crossover sits near twenty claims, so this is not one-time setup.
         """
         results = self.search(query, k=k, min_score=min_score, tenant=tenant, user=user,
                               agent=agent, session=session, memory_types=memory_types)

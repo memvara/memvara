@@ -73,6 +73,17 @@ class Store(Protocol):
         already been embedded."""
         ...
 
+    def clear_embeddings(self) -> int:
+        """Drop every stored vector and release the dimension they fixed; return how
+        many went.
+
+        Part of the protocol because re-embedding cannot be expressed without it: an
+        index fixes its width on the first vector it sees, so migrating to a new model
+        must empty the store of vectors before writing the first new one. Claims and
+        episodes are untouched — this drops derived data, not memory.
+        """
+        ...
+
     def candidate_ids(self, scopes: Sequence[Scope], as_of: datetime | None = None,
                       include_invalidated: bool = False) -> list[str]: ...
 

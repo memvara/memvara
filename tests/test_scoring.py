@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from engram.retrieve import (
+    calibrate_min_score,
     final_score,
     lexical_relevance,
     normalized_score,
@@ -22,7 +23,7 @@ from engram.retrieve import (
 )
 from engram.retrieve.scoring import LEXICAL_HALF_SATURATION
 from engram.schema import PredicateRegistry
-from engram.types import Claim, utcnow
+from engram.types import Claim, Explanation, Result, utcnow
 
 NOW = datetime(2026, 8, 8, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -455,3 +456,80 @@ def test_normalization_separates_an_answerable_query_from_an_unanswerable_one() 
     assert score(fusion, 1.0) == pytest.approx(fusion * 1.5)
     assert answerable > 0.5 > unanswerable
     assert answerable > 4 * unanswerable
+
+
+# --- calibrating a floor ----------------------------------------------------
+
+
+def fake_search(scores: dict[str, float]):
+    """A search function with pinned scores, so the calibrator is tested on arithmetic
+    rather than on whatever the embedder happens to do today."""
+    claim = Claim(subject="user", predicate="lives_in", object="Lisbon")
+
+    def search(query: str) -> list[Result]:
+        score = scores[query]
+        return [] if score is None else [
+            Result(claim=claim, score=score, explain=Explanation())]
+
+    return search
+
+
+def test_a_clean_split_puts_the_floor_between_the_two_classes() -> None:
+    report = calibrate_min_score(
+        fake_search({"a": 0.50, "b": 0.40, "x": 0.20, "y": 0.10}),
+        answerable=["a", "b"], unanswerable=["x", "y"])
+
+    assert report.separable
+    assert report.floor == pytest.approx(0.30)  # midway between 0.20 and 0.40
+    assert (report.kept, report.answerable) == (2, 2)
+    assert (report.silenced, report.unanswerable) == (2, 2)
+
+
+def test_margin_slides_the_floor_between_noise_and_the_weakest_answer() -> None:
+    """0.0 sits on the noise ceiling and keeps everything; 1.0 sits on the weakest
+    correct answer. Which error is worse is the caller's judgement, not the library's."""
+    probes = {"answerable": ["a", "b"], "unanswerable": ["x", "y"]}
+    search = fake_search({"a": 0.50, "b": 0.40, "x": 0.20, "y": 0.10})
+
+    assert calibrate_min_score(search, margin=0.0, **probes).floor == pytest.approx(0.20)
+    assert calibrate_min_score(search, margin=1.0, **probes).floor == pytest.approx(0.40)
+
+
+def test_overlapping_classes_are_reported_rather_than_papered_over() -> None:
+    """No threshold can separate these, and saying so is the useful output - the fix is
+    better retrieval, not a better number."""
+    report = calibrate_min_score(
+        fake_search({"a": 0.50, "b": 0.20, "x": 0.30, "y": 0.10}),
+        answerable=["a", "b"], unanswerable=["x", "y"])
+
+    assert not report.separable
+    assert report.kept + report.silenced == 3  # the best any single cut can do
+    assert "OVERLAPPING" in str(report)
+
+
+def test_an_overlap_tie_prefers_the_lower_floor() -> None:
+    """Two cuts score equally, so the one that answers more questions wins: a silently
+    withheld memory is the error the caller cannot see."""
+    report = calibrate_min_score(
+        fake_search({"a": 0.40, "b": 0.20, "x": 0.30, "y": 0.10}),
+        answerable=["a", "b"], unanswerable=["x", "y"])
+
+    assert report.floor == pytest.approx(0.20)
+    assert report.kept == 2
+
+
+def test_a_probe_that_returns_nothing_counts_as_zero() -> None:
+    report = calibrate_min_score(
+        fake_search({"a": 0.50, "x": None}), answerable=["a"], unanswerable=["x"])
+
+    assert report.separable and report.floor == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize("probes", [
+    {"answerable": [], "unanswerable": ["x"]},
+    {"answerable": ["a"], "unanswerable": []},
+    {"answerable": [], "unanswerable": []},
+])
+def test_calibration_refuses_to_run_on_one_class(probes: dict) -> None:
+    with pytest.raises(ValueError, match="both answerable and unanswerable"):
+        calibrate_min_score(fake_search({"a": 0.5, "x": 0.1}), **probes)

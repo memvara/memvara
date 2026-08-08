@@ -16,10 +16,10 @@ import pytest
 
 from engram.embed import HashingEmbedder
 from engram.retrieve import (
-    RELEVANCE_FLOOR,
     STOPWORDS,
     HybridRetriever,
     analyze,
+    calibrate_min_score,
     lexical_relevance,
     relevance,
     tokenize,
@@ -793,11 +793,10 @@ def test_a_query_of_pure_stopwords_makes_the_lexical_leg_abstain(
 
     assert all(r.explain.lexical_rank is None for r in results)
     # The vector leg still has an opinion - cosine is defined for every pair - but with
-    # no lexical corroboration behind it the whole result set falls under the floor,
-    # which is the honest answer to a question the store cannot answer.
-    assert all(r.score < RELEVANCE_FLOOR for r in results)
-    assert retriever.search("what do you know about me?", scope, k=5,
-                            min_score=RELEVANCE_FLOOR) == []
+    # no lexical corroboration behind it, everything it found scores below the weakest
+    # answer this store gives to a question it can actually answer.
+    answerable = retriever.search("what is alice allergic to?", scope, k=5)
+    assert max(r.score for r in results) < answerable[0].score
 
 
 def test_content_terms_survive_and_stopwords_are_dropped(
@@ -890,23 +889,81 @@ def test_the_raw_fusion_product_is_preserved_for_debugging(
     assert top.explain.raw_score < 0.05 < top.score
 
 
-def test_an_unanswerable_question_scores_below_the_floor(
+def test_an_unanswerable_question_scores_below_an_answerable_one(
     store: SQLiteStore, retriever: HybridRetriever, personal: dict[str, Claim]
 ) -> None:
     """The headline: 6 of 6 unanswerable queries used to come back confident, and
     `"what is my mother's maiden name?"` scored *identically* to the best answerable
-    query. The absolute evidence for it is near zero and now the score says so."""
+    query. The absolute evidence for it is near zero and now the score says so.
+
+    Asserted as an ordering, not against a constant. The gap is real and stable; where
+    it sits on the number line is a property of this corpus's size, which is why the
+    library ships a calibrator instead of a floor.
+    """
     scope = Scope("acme", "alice")
 
-    unanswerable = retriever.search("what is the capital of France?", scope, k=5)
-    answerable = retriever.search("what is alice allergic to?", scope, k=5)
+    for question in ("what is the capital of France?",
+                     "what is my mother's maiden name?",
+                     "what did the CFO say on the earnings call"):
+        unanswerable = retriever.search(question, scope, k=5)
+        answerable = retriever.search("what is alice allergic to?", scope, k=5)
 
-    assert unanswerable  # still returned, with an honest score attached
-    assert unanswerable[0].score < RELEVANCE_FLOOR <= answerable[0].score
+        assert unanswerable, "still returned, with an honest score attached"
+        assert unanswerable[0].score < answerable[0].score, question
+
+
+def test_a_calibrated_floor_silences_the_unanswerable_and_keeps_the_rest(
+    store: SQLiteStore, retriever: HybridRetriever, personal: dict[str, Claim]
+) -> None:
+    """End to end: measure the floor from probes, then use it as `min_score`."""
+    scope = Scope("acme", "alice")
+
+    def search(query: str):
+        return retriever.search(query, scope, k=5)
+
+    report = calibrate_min_score(
+        search,
+        answerable=["what is alice allergic to?", "where does alice live?",
+                    "where does alice work?"],
+        unanswerable=["what is the capital of France?",
+                      "what is my mother's maiden name?",
+                      "what do you know about me?"],
+    )
+
+    assert report.separable
+    assert report.kept == report.answerable == 3
+    assert report.silenced == report.unanswerable == 3
+    assert "clean" in str(report)
     assert retriever.search("what is the capital of France?", scope, k=5,
-                            min_score=RELEVANCE_FLOOR) == []
+                            min_score=report.floor) == []
     assert retriever.search("what is alice allergic to?", scope, k=5,
-                            min_score=RELEVANCE_FLOOR)
+                            min_score=report.floor)
+
+
+def test_the_calibrated_floor_moves_with_corpus_size(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever,
+    personal: dict[str, Claim]
+) -> None:
+    """Why there is no `RELEVANCE_FLOOR` constant any more.
+
+    The same claims, the same questions, the same embedder - only unrelated filler is
+    added, and the floor that separates answerable from unanswerable moves. A constant
+    calibrated at one size silences correct answers at the other.
+    """
+    scope = Scope("acme", "alice")
+    probes = {
+        "answerable": ["what is alice allergic to?", "where does alice live?"],
+        "unanswerable": ["what is the capital of France?",
+                         "what did the CFO say on the earnings call"],
+    }
+
+    small = calibrate_min_score(lambda q: retriever.search(q, scope, k=5), **probes)
+    for i in range(120):
+        add(store, embedder, f"the sprint board was retagged as batch {i} on friday",
+            scope, predicate="reported")
+    large = calibrate_min_score(lambda q: retriever.search(q, scope, k=5), **probes)
+
+    assert large.floor > small.floor * 1.2, (small, large)
 
 
 def test_min_score_filters_on_the_normalized_value(

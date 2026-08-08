@@ -45,7 +45,7 @@ from .embed import (
     default_embedder,
 )
 from .llm import LLM, NullLLM
-from .retrieve import HybridRetriever
+from .retrieve import FloorReport, HybridRetriever, calibrate_min_score
 from .schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
 from .store import SQLiteStore, Store
 from .types import (
@@ -81,6 +81,8 @@ __all__ = [
     # subsystems
     "WritePipeline", "SalienceGate", "FastExtractor", "Reconciler",
     "HybridRetriever", "Consolidator",
+    # relevance floors are measured per deployment, never assumed
+    "calibrate_min_score", "FloorReport",
     "__version__",
 ]
 
