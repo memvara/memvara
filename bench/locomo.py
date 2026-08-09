@@ -2,7 +2,30 @@
 
     PYTHONPATH=. python3 bench/locomo.py --dry-run                    # offline, no key
     PYTHONPATH=. python3 bench/locomo.py --download                   # 2.8 MB, once
+    PYTHONPATH=. python3 bench/locomo.py --score retrieval            # no model at all
     PYTHONPATH=. python3 bench/locomo.py --reader anthropic --judge llm
+
+## Scoring retrieval on its own
+
+`--score retrieval` drops the reader entirely and asks only whether retrieval surfaced
+the evidence — see `evalkit.score_retrieval`. LOCOMO supports the strong form of that
+question: every turn carries a `dia_id` and every QA item lists the `dia_id`s an
+annotator marked as its evidence, so "did the memory return the turn the answer is in"
+is a fact about the run rather than a string comparison. 2,815 evidence fields across
+the file, nine of which are malformed: six pack several ids into one string (`"D9:1 D4:4
+D4:6"`, `"D8:6; D9:17"`) and three are simply wrong (a bare `"D"`, a `"D:11:26"`, a
+`"D30:05"`). Splitting on separators recovers the first six and turns the file's 2,815
+fields into 2,824 ids, of which exactly 5 still name no turn; those 5 questions leave
+the evidence table and are counted in the report rather than repaired by guessing. Four
+more questions carry an empty `evidence` list and leave it for that reason.
+
+Category 5 is excluded from this mode in both measures. It has no gold answer to look
+for, and retrieving the turns its bait was built from is neither success nor failure.
+Exactly one answerable gold reduces to no content tokens under the presence rule and is
+reported as unmeasurable rather than as a miss, which is why the string table reads
+n=1,539 against 1,540 questions. It is the TV show titled `"That"`, eaten by
+`evalkit.PRESENCE_STOPWORDS` — a real cost of that list, named here rather than
+absorbed, and one question in 1,540 is the size of it.
 
 ## The dataset, and where it actually comes from
 
@@ -83,7 +106,9 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -145,6 +170,23 @@ class LocomoQA:
     def is_adversarial(self) -> bool:
         return self.category == ADVERSARIAL
 
+    @property
+    def evidence_ids(self) -> frozenset[str]:
+        """The `dia_id`s this question's answer lives in, as the annotators recorded them.
+
+        Split on separators because nine of the file's 2,815 references pack more than
+        one id into a single string (`"D9:1 D4:4 D4:6"`, `"D8:6; D9:17"`). Splitting
+        recovers those exactly; the leftovers — a bare `"D"`, a `"D:11:26"` — come back
+        as ids that resolve to no turn, and the caller drops the question from the
+        evidence measure rather than guessing what was meant.
+        """
+        return frozenset(part for raw in self.evidence
+                         for part in _EVIDENCE_SPLIT.split(raw) if part)
+
+
+#: `;`, `,` or whitespace inside one evidence field. See `LocomoQA.evidence_ids`.
+_EVIDENCE_SPLIT = re.compile(r"[;,\s]+")
+
 
 @dataclass(slots=True)
 class Sample:
@@ -158,6 +200,11 @@ class Sample:
     @property
     def haystack(self) -> str:
         return "\n".join(t.text for s in self.sessions for t in s.turns)
+
+    @property
+    def dia_ids(self) -> frozenset[str]:
+        """Every turn id actually ingested, which is what an evidence id must match."""
+        return frozenset(t.label for s in self.sessions for t in s.turns if t.label)
 
 
 def parse_when(raw: str) -> datetime | None:
@@ -218,7 +265,11 @@ def parse_sample(raw: dict[str, Any], *, base: datetime | None = None) -> Sample
         for turn in conversation[f"session_{i}"]:
             speaker = str(turn.get("speaker") or speaker_a)
             turns.append(ek.Turn(role=speaker.lower().replace(" ", "_"),
-                                 text=_turn_text(turn, speaker), ts=when))
+                                 text=_turn_text(turn, speaker), ts=when,
+                                 # The annotators' own address for this turn, carried
+                                 # through ingestion so `--score retrieval` can check
+                                 # what came back against what they marked.
+                                 label=str(turn.get("dia_id") or "")))
         sessions.append(Session(index=i, when=when, turns=turns, raw_when=raw_when))
 
     qa = []
@@ -299,17 +350,23 @@ def fixture() -> list[Sample]:
 # --- the run --------------------------------------------------------------------
 
 
-def build_memory(sample: Sample, budget: ek.RetrievalBudget, llm: Any = None) -> Memvara:
+def build_memory(sample: Sample, budget: ek.RetrievalBudget, llm: Any = None,
+                 read_k: int | None = None) -> Memvara:
     """A store per conversation, which is the unit a LOCOMO question is about.
 
     `read_max_episodes=k` because the library's default of 3 assumes raw turns are a
     tail on a list of extracted facts. On this dataset, with the shipped extractor
     inert (see the module docstring), they are the entire answer.
+
+    `read_k` raises that cap for `--score retrieval`, whose curve reads deeper than the
+    budget. It has to be set on the constructor rather than per call — the cap is a
+    property of the retriever — and a cap left at the budget would truncate the curve
+    at the budget and make every deeper column a lie.
     """
     return Memvara(
         user=sample.sample_id,
         llm=llm if llm is not None else NullLLM(),
-        read_max_episodes=budget.k,
+        read_max_episodes=read_k or budget.k,
     )
 
 
@@ -400,6 +457,83 @@ def run(
         if limit and len(results) >= limit:
             break
     return results, totals, read_stats, ledger
+
+
+def run_retrieval(
+    samples: Sequence[Sample],
+    *,
+    budget: ek.RetrievalBudget | None = None,
+    plan: ek.RetrievalPlan | None = None,
+    limit: int = 0,
+    llm: Any = None,
+) -> tuple[list[ek.RetrievalScore], ek.IngestStats, ek.RetrievalStats, Counter]:
+    """The same ingest and the same retrieval as `run()`, scored with no reader.
+
+    The read path is exercised twice per question and that is deliberate:
+    `ek.retrieve()` at the budget, so the context size and the latency reported are the
+    ones a real integration would see, and then a deeper `search()` for the ranks. Only
+    the first is charged to `RetrievalStats`.
+    """
+    budget = budget or ek.RetrievalBudget()
+    plan = plan or ek.RetrievalPlan()
+    totals, read_stats = ek.IngestStats(), ek.RetrievalStats()
+    scores: list[ek.RetrievalScore] = []
+    excluded: Counter = Counter()
+
+    for sample in samples:
+        mem = build_memory(sample, budget, llm, read_k=plan.depth(budget))
+        haystack = sample.haystack
+        labels: dict[str, str] = {}
+        try:
+            stats = ek.ingest(mem, [s.turns for s in sample.sessions], labels)
+            stats.undated_turns = sum(len(s.turns) for s in sample.sessions
+                                      if not s.raw_when or parse_when(s.raw_when) is None)
+            totals.merge(stats)
+            known = sample.dia_ids
+            for qa in sample.qa:
+                if limit and len(scores) >= limit:
+                    break
+                if qa.is_adversarial:
+                    # No gold to look for, and its evidence turns are what the bait was
+                    # built from — retrieving them is neither right nor wrong.
+                    excluded["are not scored at all: category 5 has no gold answer, "
+                             "and its\n    evidence turns are what the bait was built "
+                             "from"] += 1
+                    continue
+                context, ms, hits = ek.retrieve(
+                    mem, qa.question, budget, ek.ContextSource.MEMORY, haystack)
+                read_stats.record(ms, len(context), hits, len(haystack))
+                items, _ = ek.retrieval_pass(mem, qa.question, plan, budget, labels)
+                wanted = qa.evidence_ids
+                usable = bool(wanted) and wanted <= known
+                if wanted and not usable:
+                    excluded["are missing from the evidence table only: their evidence "
+                             "ids name\n    no turn in the file, and were not repaired "
+                             "by guessing"] += 1
+                elif not wanted:
+                    excluded["are missing from the evidence table only: the annotators "
+                             "recorded\n    no evidence for them"] += 1
+                scores.append(ek.score_retrieval(
+                    f"{sample.sample_id}:{qa.index}",
+                    CATEGORIES.get(qa.category, f"category-{qa.category}"),
+                    items,
+                    ek.EvidenceGold(answer=qa.answer,
+                                    labels=wanted if usable else frozenset(),
+                                    has_labels=usable,
+                                    # Distinct turns actually in the store, not turns in
+                                    # the file: two byte-identical turns dedupe to one
+                                    # episode, and the denominator has to be what
+                                    # retrieval could have returned.
+                                    pool=len(set(labels.values()))),
+                    context=context, haystack_chars=len(haystack), retrieval_ms=ms,
+                    ks=plan.ks, threshold=plan.threshold, stem=plan.stem,
+                    stopwords=plan.stopwords,
+                ))
+        finally:
+            mem.close()
+        if limit and len(scores) >= limit:
+            break
+    return scores, totals, read_stats, excluded
 
 
 # --- reporting ------------------------------------------------------------------
@@ -511,7 +645,8 @@ def main(argv: Sequence[str] | None = None,
 
     if args.dry_run:
         samples = fixture()
-        out("\n  --dry-run: five built-in questions, one per category, stub reader.")
+        out("\n  --dry-run: five built-in questions, one per category, "
+            + ek.dry_run_reader_note(args))
     else:
         path = args.data or ek.require(ek.LOCOMO10, args.cache)
         samples = load(path)
@@ -529,17 +664,42 @@ def main(argv: Sequence[str] | None = None,
         out("\n  NOTE: this is a slice in file order, which is grouped by conversation "
             "and\n  clusters categories. Pass --shuffle SEED for a representative one.")
 
-    reader = ek.build_reader(args)
-    judge = ek.build_judge(args, reader)
     budget = ek.RetrievalBudget(k=args.k, max_chars=args.max_chars,
                                 include_episodes=not args.no_episodes)
+
+    if args.score == "retrieval":
+        plan = ek.build_plan(args)
+        scores, ingest_stats, read_stats, excluded = run_retrieval(
+            samples, budget=budget, plan=plan, limit=args.limit)
+        out(ek.retrieval_report(
+            scores, ingest_stats, read_stats, title="LOCOMO", plan=plan, budget=budget,
+            categories=[CATEGORIES[c] for c in ANSWERABLE],
+            unmeasurable=[f"{count:,} questions {reason}"
+                          for reason, count in sorted(excluded.items())],
+        ))
+        if args.out:
+            ek.write_retrieval_jsonl(args.out, scores)
+            out(f"  per-question results: {args.out}\n")
+        return 0
+
+    reader = ek.build_reader(args)
+    judge = ek.build_judge(args, reader)
     results, ingest_stats, read_stats, ledger = run(
         samples, reader=reader, judge=judge, budget=budget,
         source=ek.ContextSource(args.context), limit=args.limit,
         ledger=ek.build_ledger(args, reader), stem=ek.build_stemmer(args),
     )
+    if getattr(reader, "dumping", False):
+        # The dump phase has no answers yet, so every result is empty. Printing the
+        # table would print a run that scored 0.0 on everything and looked like a
+        # finding.
+        out(reader.finish())
+        return 0
     out(report(results, ingest_stats, read_stats, ledger, reader=reader, judge=judge,
                budget=budget, source=ek.ContextSource(args.context), stemmed=args.stem))
+    if getattr(reader, "missing", 0):
+        out(f"  {reader.missing:,} of {reader.calls:,} questions had no row in the "
+            f"answers file; each was scored as an empty answer.\n")
     if args.out:
         ek.write_jsonl(args.out, results)
         out(f"  per-question results: {args.out}\n")

@@ -2,6 +2,7 @@
 
     PYTHONPATH=. python3 bench/longmemeval.py --dry-run                  # offline, no key
     PYTHONPATH=. python3 bench/longmemeval.py --download --dataset oracle
+    PYTHONPATH=. python3 bench/longmemeval.py --score retrieval          # no model at all
     PYTHONPATH=. python3 bench/longmemeval.py --dataset s --reader anthropic --judge llm
 
 ## The dataset, and where it actually comes from
@@ -47,6 +48,35 @@ The `has_answer: true` flag on evidence turns is **deliberately ignored** — us
 would be an oracle leak dressed up as retrieval, and a test asserts the loader never
 reads it.
 
+## Scoring retrieval on its own
+
+`--score retrieval` drops the reader and asks only whether retrieval surfaced the
+evidence — see `evalkit.score_retrieval`. This file supports the strong form of that
+question directly: all 500 instances carry `answer_session_ids`, 948 references in
+total, every one of which names a session that is in the same instance's
+`haystack_session_ids`. So "did we retrieve the session the annotators marked" is a
+fact about the run, and it is reported separately from, and trusted over, the
+string-based measure that runs alongside it.
+
+`answer_session_ids` is used **only after retrieval, to grade it**. Nothing on the
+ingest or the query path can see it, for the same reason `has_answer` is untouched.
+
+The 30 `_abs` instances keep their evidence measure and lose their string measure:
+their gold answer is a refusal sentence ("The information provided is not enough…"),
+and looking for its words in the retrieved text would measure nothing, while the
+sessions an annotator marked as establishing the absence are still a real target.
+
+One more category defeats the string rule and is not excluded, because the number is
+worth seeing. `single-session-preference`'s 30 golds are not answers, they are
+meta-descriptions of what a good answer would be — "The user would prefer responses
+that suggest resources specifically tailored to Adobe Premiere Pro, especially those
+that delve into its advanced settings…", thirty-odd content tokens of it. No single
+retrieved turn can carry 60% of that, and the measured ceiling across all 30 is a best
+coverage of 0.6 on exactly one of them. The row therefore reads 0.0% on every string
+column and that is the metric failing, not retrieval. The `best cov` column is in the
+table so this is visible rather than deduced, and the evidence table is where that
+category's actual retrieval quality is (poorly) reported.
+
 **The file is grouped by question type.** The first 60 instances of the oracle file are
 all `temporal-reasoning`, so `--limit 60` unshuffled is not a 12% sample of the
 benchmark, it is the whole of its hardest category. `--shuffle SEED` fixes that, and a
@@ -79,7 +109,8 @@ import argparse
 import json
 import random
 import sys
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -130,6 +161,10 @@ class Instance:
     asked_on_raw: str
     sessions: list[list[ek.Turn]]
     session_ids: list[str]
+    #: The sessions an annotator marked as containing the evidence. Read only by
+    #: `--score retrieval`, and only to grade a retrieval that has already happened —
+    #: nothing on the ingest or query path can reach it.
+    answer_session_ids: list[str] = field(default_factory=list)
     undated: int = 0
 
     @property
@@ -155,10 +190,21 @@ def parse_when(raw: str) -> datetime | None:
         return None
 
 
+def session_label(qid: str, session_ids: Sequence[str], index: int) -> str:
+    """This session's address, matching what `--share-store` deduplicates on.
+
+    The synthesised form has to agree with `run()`'s, or a run with no
+    `haystack_session_ids` would key its store on one id and grade its retrieval
+    against another.
+    """
+    return session_ids[index] if session_ids else f"{qid}:{index}"
+
+
 def parse_instance(raw: dict[str, Any], *, base: datetime | None = None) -> Instance:
     fallback = base or datetime(2023, 1, 1, tzinfo=timezone.utc)
     dates = list(raw.get("haystack_dates") or [])
     session_ids = [str(s) for s in raw.get("haystack_session_ids") or []]
+    qid = str(raw.get("question_id") or "?")
     sessions: list[list[ek.Turn]] = []
     undated = 0
     for i, session in enumerate(raw.get("haystack_sessions") or []):
@@ -166,6 +212,7 @@ def parse_instance(raw: dict[str, Any], *, base: datetime | None = None) -> Inst
         if when is None:
             undated += 1
             when = fallback
+        label = session_label(qid, session_ids, i)
         turns = []
         for turn in session:
             # `has_answer` is present on evidence turns and is never read: retrieving
@@ -174,11 +221,11 @@ def parse_instance(raw: dict[str, Any], *, base: datetime | None = None) -> Inst
             if not content:
                 continue
             turns.append(ek.Turn(role=str(turn.get("role") or "user").strip().lower(),
-                                 text=content, ts=when))
+                                 text=content, ts=when, label=label))
         sessions.append(turns)
     asked_raw = str(raw.get("question_date") or "")
     return Instance(
-        qid=str(raw.get("question_id") or "?"),
+        qid=qid,
         question_type=str(raw.get("question_type") or "unknown"),
         question=str(raw.get("question") or ""),
         answer=str(raw.get("answer") if raw.get("answer") is not None else ""),
@@ -186,6 +233,7 @@ def parse_instance(raw: dict[str, Any], *, base: datetime | None = None) -> Inst
         asked_on_raw=asked_raw,
         sessions=sessions,
         session_ids=session_ids,
+        answer_session_ids=[str(s) for s in raw.get("answer_session_ids") or []],
         undated=undated,
     )
 
@@ -269,15 +317,17 @@ def fixture() -> list[Instance]:
 # --- the run --------------------------------------------------------------------
 
 
-def build_memory(user: str, budget: ek.RetrievalBudget, llm: Any = None) -> Memvara:
+def build_memory(user: str, budget: ek.RetrievalBudget, llm: Any = None,
+                 read_k: int | None = None) -> Memvara:
     """One store, scoped to a user.
 
     `read_max_episodes=k` for the same reason as in `bench/locomo.py`: raw turns are
     capped at 3 by default because they are meant to be a tail on a fact list, and a
-    conversation benchmark needs them as a first-class result.
+    conversation benchmark needs them as a first-class result. `read_k` raises the cap
+    for `--score retrieval`, whose recall curve reads deeper than the budget.
     """
     return Memvara(user=user, llm=llm if llm is not None else NullLLM(),
-                  read_max_episodes=budget.k)
+                  read_max_episodes=read_k or budget.k)
 
 
 def answer_one(
@@ -380,6 +430,102 @@ def run(
         finally:
             mem.close()
     return results, totals, read_stats, ledger
+
+
+def score_one(
+    mem: Any,
+    item: Instance,
+    *,
+    budget: ek.RetrievalBudget,
+    plan: ek.RetrievalPlan,
+    labels: dict[str, str],
+    read_stats: ek.RetrievalStats,
+    excluded: Counter,
+) -> ek.RetrievalScore:
+    """One question's retrieval, scored with no reader. See `ek.score_retrieval`."""
+    haystack = item.haystack
+    context, ms, hits = ek.retrieve(
+        mem, item.question, budget, ek.ContextSource.MEMORY, haystack)
+    read_stats.record(ms, len(context), hits, len(haystack))
+    items, _ = ek.retrieval_pass(mem, item.question, plan, budget, labels)
+
+    wanted = frozenset(item.answer_session_ids)
+    ingested = frozenset(t.label for s in item.sessions for t in s if t.label)
+    usable = bool(wanted) and wanted <= ingested
+    if wanted and not usable:
+        excluded["are missing from the evidence table only: an answer_session_id names "
+                 "no\n    session that was ingested"] += 1
+    elif not wanted:
+        excluded["are missing from the evidence table only: no answer_session_ids "
+                 "were\n    recorded for them"] += 1
+    if item.is_abstention:
+        excluded["are missing from the string table only: unanswerable (_abs), whose "
+                 "gold\n    is a refusal sentence rather than an answer"] += 1
+    return ek.score_retrieval(
+        item.qid, item.category, items,
+        ek.EvidenceGold(answer=item.answer,
+                        labels=wanted if usable else frozenset(),
+                        has_labels=usable,
+                        score_answer=not item.is_abstention,
+                        # Sessions retrieval could actually have returned, which under
+                        # `--share-store` is every question's sessions rather than this
+                        # one's — the chance column has to follow the store it ran on.
+                        pool=len(set(labels.values()))),
+        context=context, haystack_chars=len(haystack), retrieval_ms=ms,
+        ks=plan.ks, threshold=plan.threshold, stem=plan.stem, stopwords=plan.stopwords,
+    )
+
+
+def run_retrieval(
+    items: Sequence[Instance],
+    *,
+    budget: ek.RetrievalBudget | None = None,
+    plan: ek.RetrievalPlan | None = None,
+    llm: Any = None,
+    share_store: bool = False,
+) -> tuple[list[ek.RetrievalScore], ek.IngestStats, ek.RetrievalStats, Counter]:
+    """`run()`'s ingest and retrieval, scored with no reader and no judge."""
+    budget = budget or ek.RetrievalBudget()
+    plan = plan or ek.RetrievalPlan()
+    totals, read_stats = ek.IngestStats(), ek.RetrievalStats()
+    scores: list[ek.RetrievalScore] = []
+    excluded: Counter = Counter()
+
+    if share_store:
+        shared = build_memory("shared", budget, llm, read_k=plan.depth(budget))
+        labels: dict[str, str] = {}
+        seen: set[str] = set()
+        try:
+            for item in items:
+                fresh = []
+                for i, turns in enumerate(item.sessions):
+                    sid = session_label(item.qid, item.session_ids, i)
+                    if sid in seen:
+                        continue
+                    seen.add(sid)
+                    fresh.append(turns)
+                totals.merge(ek.ingest(shared, fresh, labels))
+            for item in items:
+                scores.append(score_one(shared, item, budget=budget, plan=plan,
+                                        labels=labels, read_stats=read_stats,
+                                        excluded=excluded))
+        finally:
+            shared.close()
+        return scores, totals, read_stats, excluded
+
+    for item in items:
+        mem = build_memory(item.qid, budget, llm, read_k=plan.depth(budget))
+        per_item: dict[str, str] = {}
+        try:
+            stats = ek.ingest(mem, item.sessions, per_item)
+            stats.undated_turns = item.undated
+            totals.merge(stats)
+            scores.append(score_one(mem, item, budget=budget, plan=plan,
+                                    labels=per_item, read_stats=read_stats,
+                                    excluded=excluded))
+        finally:
+            mem.close()
+    return scores, totals, read_stats, excluded
 
 
 # --- reporting ------------------------------------------------------------------
@@ -491,7 +637,7 @@ def main(argv: Sequence[str] | None = None,
     if args.dry_run:
         items = fixture()
         out("\n  --dry-run: three built-in instances, one of them unanswerable, "
-            "stub reader.")
+            + ek.dry_run_reader_note(args))
     else:
         path = args.data or ek.require(spec, args.cache)
         # Only pre-slice when the order is being kept: shuffling a slice of the file
@@ -506,19 +652,47 @@ def main(argv: Sequence[str] | None = None,
     if args.limit:
         items = items[: args.limit]
 
-    reader = ek.build_reader(args)
-    judge = ek.build_judge(args, reader)
     budget = ek.RetrievalBudget(k=args.k, max_chars=args.max_chars,
                                 include_episodes=not args.no_episodes)
+
+    if args.score == "retrieval":
+        plan = ek.build_plan(args)
+        scores, ingest_stats, read_stats, excluded = run_retrieval(
+            items, budget=budget, plan=plan, share_store=args.share_store)
+        out(ek.retrieval_report(
+            scores, ingest_stats, read_stats,
+            title=f"LongMemEval ({args.dataset})", plan=plan, budget=budget,
+            categories=[*QUESTION_TYPES, ek.ABSTENTION_TYPE],
+            unmeasurable=[f"{count:,} questions {reason}"
+                          for reason, count in sorted(excluded.items())],
+        ))
+        if args.share_store:
+            out("  --share-store WAS SET: one store for every question, so retrieval "
+                "can reach\n  another question's sessions. Not a LongMemEval number.\n")
+        if args.out:
+            ek.write_retrieval_jsonl(args.out, scores)
+            out(f"  per-question results: {args.out}\n")
+        return 0
+
+    reader = ek.build_reader(args)
+    judge = ek.build_judge(args, reader)
     results, ingest_stats, read_stats, ledger = run(
         items, reader=reader, judge=judge, budget=budget,
         source=ek.ContextSource(args.context),
         ledger=ek.build_ledger(args, reader), stem=ek.build_stemmer(args),
         share_store=args.share_store,
     )
+    if getattr(reader, "dumping", False):
+        # No answers exist yet, so every result is empty. Printing the table would
+        # print a run that scored zero on everything and looked like a finding.
+        out(reader.finish())
+        return 0
     out(report(results, ingest_stats, read_stats, ledger, reader=reader, judge=judge,
                budget=budget, source=ek.ContextSource(args.context),
                dataset=args.dataset, share_store=args.share_store))
+    if getattr(reader, "missing", 0):
+        out(f"  {reader.missing:,} of {reader.calls:,} questions had no row in the "
+            f"answers file; each was scored as an empty answer.\n")
     if args.out:
         ek.write_jsonl(args.out, results)
         out(f"  per-question results: {args.out}\n")

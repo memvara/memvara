@@ -550,7 +550,10 @@ class _Args:
     def __init__(self, **kw):
         self.__dict__.update({"dry_run": False, "judge": "none", "reader": "stub",
                               "judge_model": None, "effort": "low", "model": None,
-                              "stem": False, "price_in": None, "price_out": None, **kw})
+                              "stem": False, "price_in": None, "price_out": None,
+                              "score": "answer", "k": 12, "recall_at": "1,3,5,10,20",
+                              "presence_threshold": ek.DEFAULT_PRESENCE_THRESHOLD,
+                              "dump": None, "answers": None, "dump_seed": 1, **kw})
 
 
 def test_asking_for_an_llm_judge_with_a_stub_reader_is_refused_not_quietly_downgraded():
@@ -1115,6 +1118,683 @@ def test_longmemeval_synthesises_session_ids_when_the_file_omits_them():
     _, stats, _, _ = lme.run([item, item], reader=_ScriptedReader(["x", "y"]),
                              share_store=True)
     assert stats.sessions == 2
+
+
+# --- retrieval-only scoring -------------------------------------------------------
+
+
+def test_the_presence_rule_ignores_function_words_a_ratio_would_otherwise_reward():
+    """The presence test is a one-sided coverage ratio, so it has no precision term to
+    punish a stray match. Without the stoplist, a gold of "in the morning" is half
+    covered by any retrieved turn containing the word "in"."""
+    assert ek.content_tokens("in the morning") == {"morning"}
+    assert ek.coverage("we spoke in a cafe", ek.content_tokens("in the morning")) == 0.0
+
+
+def test_the_presence_rule_is_one_sided_so_a_long_turn_is_not_punished_for_context():
+    """The retrieved thing is a whole turn and will contain hundreds of tokens the gold
+    does not. Scoring it with F1 would penalise retrieval for doing its job."""
+    gold = ek.content_tokens("Lisbon")
+    assert ek.coverage("Ada: I finally moved to Lisbon last month, tiny flat", gold) == 1.0
+    assert ek.token_f1("Ada: I finally moved to Lisbon last month, tiny flat",
+                       "Lisbon") < 0.3
+
+
+def test_the_default_threshold_is_containment_for_the_short_golds_that_dominate_both_files():
+    """614 of LOCOMO's 1,540 answerable golds and 289 of LongMemEval's 500 reduce to one
+    or two content tokens. At 0.6 a two-token gold needs both, which is containment; the
+    threshold only starts conceding partial credit once the gold is generative."""
+    two = ek.content_tokens("Initech Lisbon")
+    assert ek.coverage("she works at Initech", two) == 0.5  # below 0.6: not present
+    five = ek.content_tokens("GPS system not functioning correctly properly")
+    assert ek.coverage("the GPS system was not functioning", five) >= 0.6
+
+
+def _items(*pairs) -> list[ek.RetrievedItem]:
+    return [ek.RetrievedItem(text=text, labels=frozenset(labels))
+            for text, labels in pairs]
+
+
+def _score(items, gold, *, context=None, **kw):
+    return ek.score_retrieval("q1", "single-hop", items, gold,
+                              context="\n".join(i.text for i in items)
+                              if context is None else context, **kw)
+
+
+def test_the_rank_of_the_first_item_carrying_the_gold_drives_mrr_and_the_recall_curve():
+    got = _score(_items(("nothing here", []), ("nor here", []), ("she lives in Lisbon", [])),
+                 ek.EvidenceGold(answer="Lisbon"), ks=(1, 3, 5))
+    assert got.answer_rank == 3
+    assert got.answer_mrr == pytest.approx(1 / 3)
+    assert got.answer_recall_at == {1: 0.0, 3: 1.0, 5: 1.0}
+
+
+def test_a_gold_no_single_item_carries_scores_zero_rather_than_absent():
+    """Zero and unmeasurable are different findings and the report separates them, so a
+    genuine miss has to come back as a number."""
+    got = _score(_items(("Berlin", []),), ek.EvidenceGold(answer="Lisbon"), ks=(1,))
+    assert got.answer_rank is None
+    assert (got.answer_in_context, got.answer_mrr) == (False, 0.0)
+
+
+def test_a_gold_that_reduces_to_no_content_tokens_is_unmeasurable_not_wrong():
+    """Scoring it zero would put a question nothing could pass into the denominator and
+    quietly lower every reported rate."""
+    got = _score(_items(("anything", []),), ek.EvidenceGold(answer="it was about that"))
+    assert got.answer_in_context is None
+    assert got.answer_mrr is None
+    assert got.answer_recall_at == {}
+
+
+def test_an_unanswerable_question_keeps_its_evidence_measure_and_loses_the_string_one():
+    """LongMemEval's `_abs` gold is a refusal sentence. Looking for its words in the
+    retrieved text measures the phrasing of the refusal, not retrieval — but the sessions
+    an annotator marked are still a real target."""
+    got = _score(_items(("a session", ["s1"]),),
+                 ek.EvidenceGold(answer="The information provided is not enough.",
+                                 labels=frozenset({"s1"}), has_labels=True,
+                                 score_answer=False, pool=4), ks=(1,))
+    assert got.answer_in_context is None
+    assert got.evidence_recall_at == {1: 1.0}
+
+
+def test_the_context_measure_takes_the_union_because_that_is_what_the_reader_sees():
+    """Gold tokens spread over two retrieved turns are still in front of the reader.
+    A per-item rule cannot see that, and a rank over a union does not exist — so both
+    are computed and the gap between them is reported."""
+    items = _items(("she moved to Lisbon", []), ("in May of that year", []))
+    got = _score(items, ek.EvidenceGold(answer="Lisbon May"), ks=(1, 3))
+    assert got.answer_in_context is True
+    assert got.answer_rank is None
+
+
+def test_the_clipped_context_is_what_the_presence_measure_reads_not_the_full_ranking():
+    """The character budget is real. Evidence retrieved but truncated away never reached
+    the reader, and scoring it as present would make the budget cosmetic."""
+    items = _items(("padding " * 40, []), ("she moved to Lisbon", []))
+    got = _score(items, ek.EvidenceGold(answer="Lisbon"),
+                 context=ek.clip("\n".join(i.text for i in items), 60), ks=(1, 3))
+    assert got.answer_in_context is False
+    assert got.answer_rank == 2  # the ranking found it; the budget cut it off
+
+
+def test_evidence_recall_is_the_fraction_of_marked_units_found_by_each_cut_off():
+    """A question with two evidence sessions cannot score above 50% at rank 1, and
+    reporting it as a hit would overstate every multi-evidence question in the file."""
+    got = _score(_items(("first", ["s1"]), ("noise", []), ("second", ["s2"])),
+                 ek.EvidenceGold(labels=frozenset({"s1", "s2"}), has_labels=True,
+                                 score_answer=False, pool=10),
+                 ks=(1, 3))
+    assert got.evidence_recall_at == {1: 0.5, 3: 1.0}
+    assert got.evidence_mrr == 1.0
+    assert (got.evidence_found, got.evidence_total) == (2, 2)
+
+
+def test_a_cut_off_deeper_than_the_ranking_reports_what_the_ranking_ended_with():
+    """recall@20 over a list of three is a real number, and leaving it out of the table
+    would make the curve stop wherever retrieval happened to."""
+    got = _score(_items(("first", ["s1"]),),
+                 ek.EvidenceGold(labels=frozenset({"s1"}), has_labels=True,
+                                 score_answer=False, pool=9),
+                 ks=(1, 20))
+    assert got.evidence_recall_at == {1: 1.0, 20: 1.0}
+
+
+def test_a_question_with_no_annotator_evidence_is_absent_from_that_measure_not_zero():
+    got = _score(_items(("anything", []),), ek.EvidenceGold(answer="Lisbon"), ks=(1,))
+    assert got.evidence_recall_at is None
+    assert got.evidence_mrr is None
+
+
+def test_the_chance_column_reports_what_a_random_retrieval_would_have_scored():
+    """`longmemeval_oracle` ships nothing but evidence sessions — all 500 instances have
+    `answer_session_ids == haystack_session_ids` — so an evidence recall of 100% there is
+    arithmetic. Without this column the table reads as a result."""
+    vacuous = _score(_items(("only session", ["s1"]),),
+                     ek.EvidenceGold(labels=frozenset({"s1"}), has_labels=True,
+                                     score_answer=False, pool=1), ks=(1,))
+    real = _score(_items(("one of many", ["s1"]),),
+                  ek.EvidenceGold(labels=frozenset({"s1"}), has_labels=True,
+                                  score_answer=False, pool=500), ks=(1,))
+    assert vacuous.evidence_chance == 1.0
+    assert real.evidence_chance == pytest.approx(0.002)
+    assert "READ THE 'chance' COLUMN" in ek._chance_warning([vacuous])
+    assert "are measuring something" in ek._chance_warning([real])
+    assert ek._chance_warning([]) == ""
+
+
+def test_the_evidence_table_says_it_has_no_ground_truth_rather_than_printing_nothing():
+    """A silently absent table reads as a table of zeroes that failed to render."""
+    text = ek.retrieval_tables(
+        [_score(_items(("Lisbon", []),), ek.EvidenceGold(answer="Lisbon"))],
+        ek.RetrievalPlan(), ek.RetrievalBudget())
+    assert "no questions in this slice carry that ground truth" in text
+
+
+def test_the_report_refuses_to_present_retrieval_recall_as_an_answer_quality_result():
+    text = ek.retrieval_report(
+        [_score(_items(("Lisbon", ["d1"]),),
+                ek.EvidenceGold(answer="Lisbon", labels=frozenset({"d1"}),
+                                has_labels=True, pool=100))],
+        ek.IngestStats(), ek.RetrievalStats(), title="LOCOMO",
+        plan=ek.RetrievalPlan(), budget=ek.RetrievalBudget(),
+    )
+    assert "THIS IS NOT AN ANSWER-QUALITY RESULT" in text
+    assert "necessary for a correct answer and not sufficient" in text
+
+
+def test_the_threshold_sensitivity_block_lets_a_reader_reject_the_default_and_recompute():
+    """A tuned-looking constant inside a metric definition is the first thing a sceptic
+    should attack, and `best_coverage` makes answering them free."""
+    scores = [_score(_items(("she moved to Lisbon in May", []),),
+                     ek.EvidenceGold(answer="Lisbon May June"))]
+    block = ek._threshold_sensitivity(scores, ek.RetrievalPlan())
+    assert "(in use)" in block
+    assert "0.60" in block and "1.00" in block
+    assert "no question in this slice" in ek._threshold_sensitivity([], ek.RetrievalPlan())
+
+
+def test_retrieval_results_are_written_as_jsonl_carrying_the_coverage_behind_the_verdict():
+    """Recorded per question so the whole string measure can be recomputed at another
+    threshold without re-running the benchmark."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "r.jsonl"
+        ek.write_retrieval_jsonl(out, [_score(
+            _items(("Lisbon", ["d1"]),),
+            ek.EvidenceGold(answer="Lisbon", labels=frozenset({"d1"}), has_labels=True,
+                            pool=50), ks=(1,))])
+        row = json.loads(out.read_text(encoding="utf-8").strip())
+    assert row["best_coverage"] == 1.0
+    assert row["evidence_recall_at"] == {"1": 1.0}
+    assert row["evidence_pool"] == 50
+
+
+def test_the_scorer_takes_plain_items_so_a_competing_memory_layer_can_be_measured_by_it():
+    """`bench/mem0_real.py` drives the real mem0ai package, whose results are dicts. A
+    scorer typed against memvara's `Result` could only ever score memvara, which is the
+    one thing a head-to-head must not do — so this is the shape mem0 returns, scored by
+    the same code path the memvara runners use."""
+    rows = [{"memory": "user works at Initech", "metadata": {"dia_id": "D2:1"}},
+            {"memory": "user adopted a greyhound", "metadata": {"dia_id": "D1:4"}}]
+    items = [ek.RetrievedItem(text=row["memory"], kind="claim",
+                              labels=frozenset({row["metadata"]["dia_id"]}))
+             for row in rows]
+    budget = ek.RetrievalBudget(k=12, max_chars=4000)
+    got = ek.score_retrieval(
+        "q", "single-hop", items,
+        ek.EvidenceGold(answer="Initech", labels=frozenset({"D2:1"}), has_labels=True,
+                        pool=590),
+        context=ek.render_context(items, budget), ks=(1, 3))
+    assert got.answer_recall_at == {1: 1.0, 3: 1.0}
+    assert got.evidence_recall_at == {1: 1.0, 3: 1.0}
+    assert got.answer_in_context is True
+
+
+def test_the_neutral_renderer_exists_so_a_head_to_head_is_not_comparing_prompt_framing():
+    """memvara's `recall()` spends characters on its own headers. Scoring one system's
+    context that way and a competitor's raw would compare budgets, not retrieval."""
+    items = [ek.RetrievedItem(text="one"), ek.RetrievedItem(text="two")]
+    assert ek.render_context(items, ek.RetrievalBudget(k=1)) == "- one"
+    assert len(ek.render_context(items, ek.RetrievalBudget(max_chars=4))) == 4
+
+
+def test_a_gold_with_no_content_tokens_covers_nothing_rather_than_dividing_by_zero():
+    assert ek.coverage("anything at all", set()) == 0.0
+
+
+# --- labels, provenance and the deeper pass ---------------------------------------
+
+
+def test_a_turn_label_reaches_the_store_and_comes_back_on_the_retrieved_episode():
+    """The evidence measure rests entirely on this. If the label does not survive
+    ingestion, "did we retrieve the marked turn" silently becomes unanswerable."""
+    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=5)
+    labels: dict[str, str] = {}
+    try:
+        ek.ingest(mem, [[ek.Turn("user", "I moved to Lisbon", datetime(2023, 5, 1,
+                                                                      tzinfo=UTC),
+                                 label="D1:1")]], labels)
+        items = ek.as_items(mem.search("Lisbon", k=5, include_episodes=True), labels)
+    finally:
+        mem.close()
+    assert list(labels.values()) == ["D1:1"]
+    assert items[0].labels == frozenset({"D1:1"})
+
+
+def test_an_unlabelled_turn_writes_nothing_extra_so_the_default_path_is_unchanged():
+    """`Turn.label` is opt-in. A run that does not need it must store byte-identical
+    episodes to one from before the field existed."""
+    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=3)
+    try:
+        ek.ingest(mem, [[ek.Turn("user", "I moved to Lisbon",
+                                 datetime(2023, 5, 1, tzinfo=UTC))]])
+        episodes = [r for r in mem.search("Lisbon", k=3, include_episodes=True)
+                    if hasattr(r, "episode")]
+        assert [r.episode.meta for r in episodes] == [{}]
+    finally:
+        mem.close()
+
+
+def test_a_repeated_identical_turn_does_not_shift_every_later_label_by_one():
+    """`add()` returns the *existing* id for a hash-identical repeat. Zipping ids against
+    input turns would misattribute every label after the first duplicate — an off-by-one
+    that makes a retrieval score look plausible and be wrong."""
+    when = datetime(2023, 5, 1, tzinfo=UTC)
+    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=5)
+    labels: dict[str, str] = {}
+    try:
+        ek.ingest(mem, [[ek.Turn("user", "same text", when, label="D1:1"),
+                         ek.Turn("user", "same text", when, label="D1:2"),
+                         ek.Turn("user", "different text", when, label="D1:3")]], labels)
+        by_text = {r.text: r for r in mem.search("text", k=5, include_episodes=True)}
+    finally:
+        mem.close()
+    assert ek.as_items([by_text["different text"]], labels)[0].labels \
+        == frozenset({"D1:3"})
+
+
+def test_a_retrieved_claim_is_attributed_through_the_turns_it_was_extracted_from():
+    """A claim carries no label of its own — only the ids of its source turns — so the
+    evidence measure has to resolve it, or every extracted fact scores as a miss."""
+    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=0)
+    labels: dict[str, str] = {}
+    try:
+        ek.ingest(mem, [[ek.Turn("user", "I live in Lisbon",
+                                 datetime(2023, 5, 1, tzinfo=UTC), label="s7")]], labels)
+        claims = [r for r in mem.search("where do I live", k=5)]
+        items = ek.as_items(claims, labels)
+    finally:
+        mem.close()
+    assert claims and items[0].kind == "claim"
+    assert items[0].labels == frozenset({"s7"})
+
+
+def test_reading_the_curve_deeper_than_the_budget_does_not_change_what_the_budget_returns():
+    """The curve's R@20 column comes from one search at depth 20, and the R@12 column has
+    to still describe the run that was configured. If the deeper read reordered the head,
+    every column left of it would be describing a different retrieval."""
+    lines = [f"turn {i}: lisbon greyhound initech number {i}" for i in range(40)]
+
+    def top(k):
+        mem = _memory_with(lines, k=k)
+        try:
+            return [r.text for r in mem.search("lisbon greyhound", k=k,
+                                               include_episodes=True)]
+        finally:
+            mem.close()
+
+    assert top(20)[:12] == top(12)
+
+
+def test_raising_the_episode_cap_for_the_curve_does_not_change_the_context_reported():
+    """`--score retrieval` builds the store with `read_max_episodes` at the curve's
+    depth, then reports the context and the latency of a `recall()` at the budget — so
+    that those stay the numbers an answer-mode run would produce. That only holds while
+    the raised cap is inert at the budget, which is what this pins."""
+    lines = [f"turn {i}: lisbon greyhound initech number {i}" for i in range(40)]
+    budget = ek.RetrievalBudget(k=12, max_chars=4000)
+
+    def context(cap):
+        mem = _memory_with(lines, k=cap)
+        try:
+            return ek.retrieve(mem, "lisbon greyhound", budget,
+                               ek.ContextSource.MEMORY, "hay")
+        finally:
+            mem.close()
+
+    assert context(20)[0] == context(12)[0]
+    assert context(20)[2] == context(12)[2] == 12
+
+
+def test_the_plan_reads_deep_enough_for_the_curve_and_never_shallower_than_the_budget():
+    assert ek.RetrievalPlan(ks=(1, 3)).depth(ek.RetrievalBudget(k=12)) == 12
+    assert ek.RetrievalPlan(ks=(1, 50)).depth(ek.RetrievalBudget(k=12)) == 50
+
+
+def test_the_budgets_own_k_joins_the_recall_curve_whether_or_not_it_was_asked_for():
+    """Drawing recall at five depths and not at the one the run used would leave the
+    only quotable column off the table."""
+    plan = ek.build_plan(_Args(recall_at="1,5", presence_threshold=0.6, k=12))
+    assert plan.ks == (1, 5, 12)
+
+
+def test_a_malformed_recall_curve_is_refused_rather_than_silently_emptied():
+    for bad in ("", "0,3", "-1"):
+        with pytest.raises(SystemExit, match="positive integers"):
+            ek.build_plan(_Args(recall_at=bad, presence_threshold=0.6, k=12))
+
+
+# --- the file-based reader --------------------------------------------------------
+
+
+def test_the_dump_contains_no_hint_of_which_system_produced_the_context(tmp_path):
+    """The answerer here is the same party that wrote the library under test, so an
+    unblinded dump is worthless as evidence."""
+    dump = tmp_path / "d.jsonl"
+    reader = ek.FileReader(dump=dump, system_label="memvara")
+    reader.answer("sys", ek.build_prompt("Where does Ada live?", "- Ada: Lisbon"))
+    reader.finish()
+    rows = [json.loads(line) for line in dump.read_text(encoding="utf-8").splitlines()]
+    assert set(rows[0]) == {"id", "system_prompt", "prompt"}
+    assert "memvara" not in dump.read_text(encoding="utf-8")
+
+
+def test_the_key_file_records_the_seed_and_the_mapping_the_dump_withholds(tmp_path):
+    """Recoverable afterwards, invisible during — which is the whole of what blinding
+    can mean when the answerer has filesystem access."""
+    dump = tmp_path / "d.jsonl"
+    reader = ek.FileReader(dump=dump, seed=5, system_label="memvara")
+    reader.answer("sys", ek.build_prompt("Where?", "- Lisbon"))
+    reader.finish()
+    key = json.loads(reader.key_path.read_text(encoding="utf-8"))
+    assert key["seed"] == 5
+    assert key["systems"] == ["memvara"]
+    assert key["items"][0]["system"] == "memvara"
+    assert "Where?" in key["items"][0]["question"]
+
+
+def test_the_dump_order_is_shuffled_by_the_recorded_seed_and_reproducible(tmp_path):
+    """Run order leaks the dataset's grouping — and, with two systems in one file, leaks
+    which half is which."""
+    def order(name, seed):
+        reader = ek.FileReader(dump=tmp_path / name, seed=seed)
+        for i in range(12):
+            reader.answer("sys", ek.build_prompt(f"Question {i}?", f"- context {i}"))
+        reader.finish()
+        return [json.loads(line)["prompt"]
+                for line in (tmp_path / name).read_text(encoding="utf-8").splitlines()]
+
+    seeded = order("a.jsonl", 3)
+    assert order("b.jsonl", 3) == seeded
+    assert order("c.jsonl", 4) != seeded
+
+
+def test_two_systems_dumped_to_one_path_merge_and_reshuffle_together(tmp_path):
+    """A head-to-head is only blind if both systems' items are in one shuffled file.
+    Keeping them in two files hands the answerer the answer."""
+    dump = tmp_path / "d.jsonl"
+    for label, context in (("memvara", "- context A"), ("other", "- context B")):
+        reader = ek.FileReader(dump=dump, seed=9, system_label=label)
+        reader.answer("sys", ek.build_prompt("Where?", context))
+        reader.finish()
+    key = json.loads((tmp_path / "d.jsonl.key.json").read_text(encoding="utf-8"))
+    assert key["systems"] == ["memvara", "other"]
+    assert len(dump.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_re_dumping_the_same_system_does_not_relabel_what_another_run_wrote(tmp_path):
+    dump = tmp_path / "d.jsonl"
+    prompt = ek.build_prompt("Where?", "- shared context")
+    ek.FileReader(dump=dump, system_label="other").answer("sys", prompt)
+    first = ek.FileReader(dump=dump, system_label="other")
+    first.answer("sys", prompt)
+    first.finish()
+    second = ek.FileReader(dump=dump, system_label="memvara")
+    second.answer("sys", prompt)
+    second.finish()
+    key = json.loads(second.key_path.read_text(encoding="utf-8"))
+    assert [row["system"] for row in key["items"]] == ["other"]
+
+
+def test_answers_are_served_back_by_prompt_digest_so_the_shuffle_is_harmless(tmp_path):
+    prompt = ek.build_prompt("Where does Ada live?", "- Ada: Lisbon")
+    answers = tmp_path / "a.jsonl"
+    answers.write_text(json.dumps({"id": ek.item_id(prompt), "answer": "Lisbon"}) + "\n",
+                       encoding="utf-8")
+    reader = ek.FileReader(answers=answers)
+    assert reader.answer("sys", prompt).text == "Lisbon"
+    assert reader.dumping is False
+
+
+def test_an_unanswered_item_is_counted_rather_than_quietly_scored_as_a_blank(tmp_path):
+    """Half an answers file would otherwise report a low score that looks like a finding
+    about retrieval."""
+    answers = tmp_path / "a.jsonl"
+    answers.write_text("", encoding="utf-8")
+    reader = ek.FileReader(answers=answers)
+    assert reader.answer("sys", ek.build_prompt("Where?", "-x")).text == ""
+    assert reader.missing == 1
+
+
+def test_the_file_reader_refuses_a_configuration_with_no_phase_or_with_both(tmp_path):
+    with pytest.raises(SystemExit, match="exactly one"):
+        ek.FileReader()
+    with pytest.raises(SystemExit, match="exactly one"):
+        ek.FileReader(dump=tmp_path / "d.jsonl", answers=tmp_path / "a.jsonl")
+
+
+def test_an_llm_judge_is_refused_for_a_human_reader_because_it_would_be_the_same_person(
+        tmp_path):
+    reader = ek.FileReader(dump=tmp_path / "d.jsonl")
+    with pytest.raises(SystemExit, match="same person"):
+        ek.build_judge(_Args(judge="llm"), reader)
+
+
+def test_a_human_read_run_carries_a_banner_saying_it_is_not_reproducible(tmp_path):
+    banner = ek.stub_caveat(ek.FileReader(dump=tmp_path / "d.jsonl"), None)
+    assert "NOT REPRODUCIBLE" in banner
+    assert "sanity check" in banner
+    assert "not as a benchmark result" in banner
+
+
+def test_build_reader_returns_the_file_reader_even_for_a_dry_run(tmp_path):
+    """The fixture is the cheapest way to rehearse a dump before pointing one at 1,986
+    real questions."""
+    reader = ek.build_reader(_Args(dry_run=True, reader="file",
+                                   dump=str(tmp_path / "d.jsonl")))
+    assert isinstance(reader, ek.FileReader)
+
+
+# --- the runners, in retrieval mode -----------------------------------------------
+
+
+def test_locomo_carries_each_turns_dia_id_through_ingestion():
+    sample = locomo.fixture()[0]
+    assert [t.label for t in sample.sessions[0].turns][:2] == ["D1:1", "D1:2"]
+    assert "D2:3" in sample.dia_ids
+
+
+def test_locomo_splits_the_evidence_fields_that_pack_several_ids_into_one_string():
+    """Nine of the file's 2,815 references do this. Splitting recovers most of them; the
+    rest resolve to no turn and their question leaves the evidence measure."""
+    assert locomo.LocomoQA("q", "a", 1, evidence=["D9:1 D4:4", "D8:6; D9:17"]).evidence_ids \
+        == {"D9:1", "D4:4", "D8:6", "D9:17"}
+    assert locomo.LocomoQA("q", "a", 1, evidence=["D1:3"]).evidence_ids == {"D1:3"}
+
+
+def test_locomo_drops_a_question_whose_evidence_names_no_turn_rather_than_guessing():
+    """A bare `"D"` and a `"D:11:26"` are in the real file. Repairing them to something
+    plausible would invent ground truth."""
+    raw = json.loads(json.dumps(locomo.FIXTURE[0]))
+    raw["qa"] = [{"question": "Where does Ada live?", "answer": "Lisbon",
+                  "evidence": ["D:11:26"], "category": 4}]
+    scores, _, _, excluded = locomo.run_retrieval([locomo.parse_sample(raw)])
+    assert scores[0].evidence_recall_at is None
+    assert sum(excluded.values()) == 1
+    assert "name" in " ".join(excluded)
+
+
+def test_locomo_counts_a_question_the_annotators_left_no_evidence_for():
+    """Four of the file's 1,986 QA items have an empty `evidence` list. They still get a
+    string measure; leaving them out of the evidence table silently would understate how
+    much of it rests on ground truth."""
+    raw = json.loads(json.dumps(locomo.FIXTURE[0]))
+    raw["qa"] = [{"question": "Where does Ada live?", "answer": "Lisbon",
+                  "evidence": [], "category": 4}]
+    scores, _, _, excluded = locomo.run_retrieval([locomo.parse_sample(raw)])
+    assert scores[0].answer_in_context is not None
+    assert scores[0].evidence_recall_at is None
+    assert any("annotators recorded" in reason for reason in excluded)
+
+
+def test_locomo_reports_how_many_questions_no_answer_came_back_for(tmp_path):
+    answers = tmp_path / "a.jsonl"
+    answers.write_text("", encoding="utf-8")
+    text = _run_cli(locomo.main, ["--dry-run", "--reader", "file", "--answers",
+                                  str(answers)])
+    assert "5 of 5 questions had no row" in text
+
+
+def test_locomo_leaves_the_adversarial_category_out_of_retrieval_scoring_entirely():
+    """It has no gold answer, and retrieving the turns its bait was built from is
+    neither success nor failure."""
+    scores, _, _, excluded = locomo.run_retrieval(locomo.fixture())
+    assert len(scores) == 4
+    assert "adversarial" not in {s.category for s in scores}
+    assert any("category 5" in reason for reason in excluded)
+
+
+def test_locomo_retrieval_mode_reports_both_measures_and_needs_no_reader():
+    text = _run_cli(locomo.main, ["--dry-run", "--score", "retrieval"])
+    assert "No reader, no judge, no model" in text
+    assert "annotators marked as evidence" in text
+    assert "THIS IS NOT AN ANSWER-QUALITY RESULT" in text
+    assert "THE READER IS A STUB" not in text
+
+
+def test_locomo_retrieval_mode_writes_its_own_per_question_jsonl(tmp_path):
+    out = tmp_path / "r.jsonl"
+    _run_cli(locomo.main, ["--dry-run", "--score", "retrieval", "--out", str(out)])
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 4
+    assert all("best_coverage" in row for row in rows)
+
+
+def test_locomo_retrieval_mode_stops_at_the_question_limit():
+    scores, _, _, _ = locomo.run_retrieval(locomo.fixture(), limit=2)
+    assert len(scores) == 2
+
+
+def test_longmemeval_reads_the_evidence_session_ids_the_annotators_recorded():
+    assert lme.fixture()[0].answer_session_ids == ["fx_a_1"]
+    assert lme.fixture()[2].answer_session_ids == []
+
+
+def test_longmemeval_evidence_ids_are_read_only_after_retrieval_never_before_it():
+    """Same rule as `has_answer`: ground truth that reaches the ingest or the query path
+    is an oracle, not a memory. Deleting it must not change a single stored turn."""
+    with_truth = json.loads(json.dumps(lme.FIXTURE[0]))
+    without = json.loads(json.dumps(lme.FIXTURE[0]))
+    del without["answer_session_ids"]
+
+    def shape(raw):
+        item = lme.parse_instance(raw)
+        return [[(t.role, t.text, t.ts, t.label) for t in s] for s in item.sessions]
+
+    assert shape(with_truth) == shape(without)
+    assert lme.parse_instance(without).answer_session_ids == []
+
+
+def test_longmemeval_labels_each_turn_with_the_session_the_share_store_dedupes_on():
+    """Two spellings of a session's identity would key the store on one and grade
+    retrieval against the other."""
+    raw = json.loads(json.dumps(lme.FIXTURE[0]))
+    del raw["haystack_session_ids"]
+    item = lme.parse_instance(raw)
+    assert [s[0].label for s in item.sessions] == ["fx_single_user:0", "fx_single_user:1"]
+    assert lme.session_label(item.qid, item.session_ids, 1) == "fx_single_user:1"
+
+
+def test_longmemeval_retrieval_mode_scores_the_unanswerable_question_on_evidence_only():
+    scores = {s.qid: s for s in lme.run_retrieval(lme.fixture())[0]}
+    assert scores["fx_temporal_abs"].answer_in_context is None
+    assert scores["fx_single_user"].evidence_recall_at is not None
+
+
+def test_longmemeval_drops_an_evidence_session_that_names_nothing_ingested():
+    """An `answer_session_ids` entry that matches no haystack session cannot be graded.
+    All 948 of the oracle file's references do match; this is the guard for the file
+    changing under us, not for a defect in it today."""
+    raw = json.loads(json.dumps(lme.FIXTURE[0]))
+    raw["answer_session_ids"] = ["a_session_that_is_not_here"]
+    scores, _, _, excluded = lme.run_retrieval([lme.parse_instance(raw)])
+    assert scores[0].evidence_recall_at is None
+    assert any("names no" in reason or "no\n" in reason for reason in excluded)
+
+
+def test_longmemeval_retrieval_under_a_shared_store_writes_each_session_once():
+    """Same dedupe as `run()`, and it has to key on the same id the scorer grades
+    against or the two disagree about what a session is."""
+    doubled = lme.fixture() + lme.fixture()
+    _, shared, _, _ = lme.run_retrieval(doubled, share_store=True)
+    _, per_question, _, _ = lme.run_retrieval(doubled)
+    assert shared.sessions * 2 == per_question.sessions
+
+
+def test_longmemeval_retrieval_mode_prints_the_chance_column_the_oracle_file_needs():
+    """Every haystack session in `longmemeval_oracle.json` is an evidence session, in all
+    500 instances, so its evidence recall is arithmetic. The report has to say so without
+    being asked."""
+    text = _run_cli(lme.main, ["--dry-run", "--score", "retrieval"])
+    assert "chance" in text
+    assert "READ THE 'chance' COLUMN" in text
+
+
+def test_longmemeval_retrieval_mode_under_a_shared_store_says_it_is_a_different_task():
+    text = _run_cli(lme.main, ["--dry-run", "--score", "retrieval", "--share-store"])
+    assert "Not a LongMemEval number" in text
+    scores, stats, _, _ = lme.run_retrieval(lme.fixture(), share_store=True)
+    assert len(scores) == 3
+    # One store means one pool, so `chance` falls and the measure stops being vacuous.
+    assert scores[0].evidence_pool > 1
+
+
+def test_longmemeval_retrieval_mode_writes_per_question_jsonl(tmp_path):
+    out = tmp_path / "r.jsonl"
+    _run_cli(lme.main, ["--dry-run", "--score", "retrieval", "--out", str(out)])
+    assert len(out.read_text(encoding="utf-8").splitlines()) == 3
+
+
+# --- the file reader, through the runners -----------------------------------------
+
+
+def test_a_dump_run_writes_the_questions_and_prints_no_score_table(tmp_path):
+    """Every prediction is empty in the dump phase. Printing the table would print a run
+    that scored zero on everything and looked like a finding."""
+    dump = tmp_path / "d.jsonl"
+    text = _run_cli(locomo.main, ["--dry-run", "--reader", "file", "--dump", str(dump)])
+    assert "Wrote 5 blinded items" in text
+    assert "all answerable" not in text
+    assert len(dump.read_text(encoding="utf-8").splitlines()) == 5
+
+
+def test_answers_read_back_from_a_file_score_exactly_as_a_model_reader_would(tmp_path):
+    """The point of the two phases: everything downstream of `Reader.answer` is the same
+    code, so a human-answered run is comparable to an API one in shape if not in status."""
+    dump = tmp_path / "d.jsonl"
+    _run_cli(locomo.main, ["--dry-run", "--reader", "file", "--dump", str(dump)])
+    key = json.loads((tmp_path / "d.jsonl.key.json").read_text(encoding="utf-8"))
+    gold = {"Where does Ada live?": "Lisbon",
+            "Where did Ada work after leaving Globex?": "Initech",
+            "When did Ada run a half marathon?": "2022"}
+    answers = tmp_path / "a.jsonl"
+    with answers.open("w", encoding="utf-8") as out:
+        for row in key["items"]:
+            question = row["question"].removeprefix("Question: ").strip()
+            out.write(json.dumps({"id": row["id"],
+                                  "answer": gold.get(question, "")}) + "\n")
+
+    text = _run_cli(locomo.main, ["--dry-run", "--reader", "file",
+                                  "--answers", str(answers)])
+    assert "reader=file" in text
+    assert "NOT REPRODUCIBLE" in text
+    assert "100.0" in text
+
+
+def test_a_longmemeval_dump_run_also_stops_before_reporting(tmp_path):
+    dump = tmp_path / "d.jsonl"
+    text = _run_cli(lme.main, ["--dry-run", "--reader", "file", "--dump", str(dump)])
+    assert "Wrote 3 blinded items" in text
+    assert "judged correct" not in text
+
+
+def test_a_longmemeval_run_reports_how_many_questions_no_answer_came_back_for(tmp_path):
+    answers = tmp_path / "a.jsonl"
+    answers.write_text("", encoding="utf-8")
+    text = _run_cli(lme.main, ["--dry-run", "--reader", "file", "--answers",
+                               str(answers)])
+    assert "3 of 3 questions had no row" in text
 
 
 # --- helpers --------------------------------------------------------------------

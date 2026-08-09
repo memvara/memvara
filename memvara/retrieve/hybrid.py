@@ -28,7 +28,9 @@ out of that, and both are routine rather than exotic.
 
 Everything here is deterministic. No LLM sits on the read path, and identical inputs
 produce an identical ordering, ties included - unstable ranking makes retrieval
-regressions impossible to bisect.
+regressions impossible to bisect. "Identical inputs" means the *content*: ties break on
+a content hash rather than on a row id, because ids are minted per ingest and an
+ordering that only holds within one store is not reproducibility, it is luck.
 """
 
 from __future__ import annotations
@@ -482,7 +484,9 @@ class HybridRetriever:
                     final_score=score,
                 ),
             ))
-        out.sort(key=lambda r: (-r.score, r.episode.id))
+        # Content hash, not `id`. See `_rank_claims` for why — the same argument, and
+        # `Episode.hash` is already the content digest tier 0 dedupes on.
+        out.sort(key=lambda r: (-r.score, r.episode.hash, r.episode.id))
         return out[:self.max_episodes]
 
     def _hydrate_episodes(self, ids: Sequence[str]) -> dict[str, Episode]:
@@ -573,7 +577,16 @@ class HybridRetriever:
         and the store already knows it exactly: capping on it gives 7.04 with the
         ranking otherwise untouched.
         """
-        results.sort(key=lambda r: (-r.score, r.claim.id))
+        # `value_key` before `id`, and the difference is the whole promise in this
+        # module's docstring. A claim id is `uuid4`, minted fresh at ingest — so breaking
+        # ties on it gives an ordering that is stable *within* a store and a coin flip
+        # *across* two ingests of identical data. That is exactly the comparison a
+        # benchmark, a regression test and a `git bisect` all make, and it was measured:
+        # repeated LOCOMO runs disagreed by up to 0.07 points with nothing else changed.
+        # `value_key` is derived from the claim's content, so identical data ranks
+        # identically everywhere. `id` stays as the final key so the order is still total
+        # when two rows share a value.
+        results.sort(key=lambda r: (-r.score, r.claim.value_key, r.claim.id))
         if self.max_per_slot <= 0:
             return results[:k]
 

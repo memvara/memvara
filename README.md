@@ -108,6 +108,67 @@ one to distrust most, so the mechanism is documented in `bench/mem0_real.py`.
 
 ---
 
+## LOCOMO and LongMemEval — retrieval, measured
+
+Not answer accuracy, and **not comparable to published LOCOMO/LongMemEval scores**, which
+are end-to-end judged accuracy. This measures the thing a memory layer is actually
+responsible for: *did retrieval surface the evidence the annotators marked?* It needs no
+model, so it runs the full question sets for nothing, and it removes the reader — which
+both systems would share anyway — as a confound.
+
+```bash
+PYTHONPATH=. python3 bench/locomo.py       --score retrieval
+PYTHONPATH=. python3 bench/longmemeval.py  --score retrieval --share-store
+```
+
+`k=12`, 4000-char budget, `HashingEmbedder`, `NullLLM` — **no extraction ran**, so this is
+episode retrieval alone. `chance` is the share of the haystack marked as evidence: what
+random retrieval would score.
+
+**LOCOMO, all 1,531 evidence-labelled questions** — recall of annotator-marked evidence:
+
+| category | n | R@1 | R@5 | **R@12** | R@20 | MRR | chance |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| single-hop | 840 | 35.7 | 60.0 | **70.7** | 75.5 | 48.1 | 0.2 |
+| temporal | 320 | 41.5 | 63.1 | **71.0** | 76.2 | 54.0 | 0.2 |
+| multi-hop | 279 | 7.4 | 22.9 | **36.0** | 44.0 | 31.6 | 0.5 |
+| open-domain | 92 | 13.9 | 22.4 | **30.7** | 34.1 | 24.7 | 0.4 |
+| **all** | **1531** | **30.5** | **51.7** | **62.0** | **67.4** | **44.9** | **0.3** |
+
+**LongMemEval, all 500, one shared 940-session store** so there are distractors:
+
+| category | n | R@1 | R@5 | **R@12** | MRR | chance |
+|---|---:|---:|---:|---:|---:|---:|
+| single-session-assistant | 56 | 96.4 | 98.2 | **100.0** | 97.6 | 0.1 |
+| single-session-user | 64 | 56.2 | 76.6 | **92.2** | 66.0 | 0.1 |
+| knowledge-update | 72 | 39.6 | 79.9 | **91.0** | 85.3 | 0.2 |
+| temporal-reasoning | 127 | 23.6 | 52.1 | **66.6** | 56.4 | 0.3 |
+| multi-session | 121 | 22.4 | 45.1 | **65.5** | 61.7 | 0.3 |
+| single-session-preference | 30 | 13.3 | 20.0 | **23.3** | 17.4 | 0.1 |
+| abstention | 30 | 0.0 | 1.7 | **1.7** | 0.7 | 0.2 |
+| **all** | **500** | **35.9** | **57.7** | **70.4** | **62.0** | **0.2** |
+
+**Read the weak rows first.** Multi-hop LOCOMO is 36% and open-domain is 31% — questions
+needing evidence stitched across sessions are where a top-k budget hurts most, and no
+amount of contradiction resolution helps. LongMemEval abstention is **1.7%**, essentially
+never: unanswerable questions retrieve nothing relevant, which is the right *outcome* by
+accident rather than by design. Preference questions score 23% because their golds are
+30-token meta-descriptions no single turn can contain — a metric artifact, visible in the
+`best cov` column the report prints.
+
+`knowledge-update` at **91.0%** is the row that matters for the thesis: it is the category
+where a fact changes and the old value must not win.
+
+Two findings from building this. **LongMemEval's `oracle` split cannot measure evidence
+retrieval at all** — in all 500 instances every haystack session *is* an evidence session,
+so recall there is 99.2% by arithmetic. The harness now computes `chance` and warns loudly
+above 50%; `--share-store` is the offline workaround. And **retrieval was not reproducible
+until this run**: `HybridRetriever` broke score ties on `claim.id`, a fresh `uuid4` per
+ingest, so two ingests of one corpus ranked differently and the numbers drifted 0.07
+points. Ties now break on a content hash and three full runs are byte-identical.
+
+---
+
 ## A design comparison (synthetic, self-authored)
 
 Not an external benchmark. One workload, n=1, written by the same people who wrote the
@@ -613,14 +674,14 @@ looking at a top-k, and nothing ever looks again.
   parameters (top-k, threshold, chitchat ratio) that the real package does not expose.
   Both share one extraction oracle, so both isolate architecture from model quality — and
   neither says anything about end-to-end answer quality.
-- **No LOCOMO / LongMemEval numbers yet — the harness exists, the key does not.**
-  `bench/locomo.py` and `bench/longmemeval.py` load both datasets, and everything except
-  the model call is exercised offline. A full LOCOMO run is ~$17.50 on `claude-opus-5`;
-  LongMemEval is ~$5. Until those run, every comparative number here is self-authored.
-  The harness reports a `none` / `memory` / `full` triple on purpose: a memory score with
-  no reader-only floor and no whole-haystack ceiling beside it is uninterpretable, and
-  stuffing the transcript into the reader is measurable as `full`, which is labelled as a
-  reader ceiling rather than a result.
+- **The LOCOMO / LongMemEval numbers above are retrieval, not accuracy.** They are real
+  and they run free, but they are not the metric those papers report and must never be
+  quoted as if they were. Closing that gap needs a reader model: ~$17.50 for LOCOMO and
+  ~$5 for LongMemEval on `claude-opus-5`, or ~$2 for a stratified sample.
+  The harness reports a `none` / `memory` / `full` triple when a reader *is* configured,
+  on purpose: a memory score with no reader-only floor and no whole-haystack ceiling
+  beside it is uninterpretable, and stuffing the transcript into the reader is measurable
+  as `full`, labelled a reader ceiling rather than a result.
 - **The vector index is exact and in-process.** A numpy matmul over the candidate set —
   correct and fast to roughly a million claims, at which point the `Store` protocol is
   where pgvector or Qdrant goes.

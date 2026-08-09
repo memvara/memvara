@@ -1859,3 +1859,44 @@ def test_a_degenerate_search_emits_nothing_because_it_ran_nothing(
     reader = HybridRetriever(store, embedder, PredicateRegistry(), telemetry=rec)
     assert reader.search("anything", Scope("acme", "alice"), k=0) == []
     assert rec.names() == []
+
+
+def test_ties_break_on_content_so_two_ingests_of_one_corpus_rank_alike():
+    """The module docstring promises identical inputs give an identical ordering. It was
+    false across ingests: ties broke on `claim.id`, which is a fresh `uuid4` every time,
+    so ordering was stable within a store and a coin flip between two stores holding the
+    same data. That is precisely the comparison a benchmark, a regression test and a
+    bisect all make — measured on LOCOMO, repeated runs disagreed by up to 0.07 points
+    with nothing else changed.
+    """
+    from memvara import Memvara, HashingEmbedder, NullLLM
+
+    def ingest_and_rank():
+        mem = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+        for i in range(20):
+            # One scoring text across every row, so BM25 and cosine tie exactly and the
+            # tiebreak is the only thing deciding the order.
+            mem.remember("user", f"pred_{i}", f"value_{i}", text="alpha beta gamma")
+        out = [r.claim.value_key for r in mem.search("alpha beta", k=20)]
+        mem.close()
+        return out
+
+    orderings = {tuple(ingest_and_rank()) for _ in range(5)}
+    assert len(orderings) == 1, "five ingests of one corpus produced different rankings"
+
+
+def test_the_tiebreak_key_is_not_derived_from_the_row_id():
+    """Stated structurally as well, because the test above only fails when a tie happens
+    to occur — and a future scoring change could hide the defect by making exact ties
+    rare rather than by fixing them."""
+    import inspect
+
+    from memvara.retrieve.hybrid import HybridRetriever
+
+    for method in (HybridRetriever._rank, HybridRetriever._episodes):
+        src = inspect.getsource(method)
+        sort_lines = [l for l in src.splitlines() if ".sort(key=" in l]
+        assert sort_lines, f"{method.__name__} no longer sorts; update this test"
+        for line in sort_lines:
+            assert "value_key" in line or "hash" in line, (
+                f"{method.__name__} breaks ties without a content-derived key: {line.strip()}")
