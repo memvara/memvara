@@ -74,11 +74,13 @@ def _stamp(when: datetime) -> str:
 
 
 def _state(claim: Claim) -> str:
-    if claim.invalidated_at is not None:
-        return f"retired {_stamp(claim.invalidated_at)}"
-    if claim.valid_to is not None:
-        return f"ended {_stamp(claim.valid_to)}"
-    return "live"
+    """`Claim.state`, with the instant it happened appended.
+
+    The word comes from the model so this cannot drift from `repr` or from any other
+    surface; only the timestamp is this layer's business.
+    """
+    stamp = {"retired": claim.invalidated_at, "ended": claim.valid_to}.get(claim.state)
+    return claim.state if stamp is None else f"{claim.state} {_stamp(stamp)}"
 
 
 def _timestamp(raw: str, label: str) -> datetime:

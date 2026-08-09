@@ -731,10 +731,26 @@ class _VecIndex:
         return len(self._row) if self._count is None else self._count()
 
 
+#: The oldest SQLite this store works on. `RETURNING` (used by the vector-slot upsert on
+#: every `set_embedding`) landed in 3.35, March 2021. `requires-python = ">=3.10"` admits
+#: interpreters linked against 3.31, and on one of those the package installs cleanly,
+#: opens a store, serves reads, and fails on the first write that touches a vector — the
+#: worst possible place to discover it. Checked once at construction instead.
+_MIN_SQLITE = (3, 35, 0)
+
+
 class SQLiteStore:
     """Reference `Store` implementation. Single file, no server, no Docker."""
 
     def __init__(self, path: str = ":memory:") -> None:
+        if sqlite3.sqlite_version_info < _MIN_SQLITE:
+            need = ".".join(str(n) for n in _MIN_SQLITE)
+            raise RuntimeError(
+                f"memvara needs SQLite {need} or newer; this interpreter is linked "
+                f"against {sqlite3.sqlite_version}. The Python version is not the "
+                f"problem — SQLite is a C library bundled with the interpreter, so the "
+                f"fix is a newer build of Python (or of libsqlite3), not a newer memvara."
+            )
         self.path = path
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
@@ -1393,6 +1409,28 @@ class SQLiteStore:
         during the walk simply do not appear, which is the same guarantee the old
         `fetchall()` gave.
 
+        `extra` is `AND`-ed on beside the tenant, for a filter that belongs to the walk
+        rather than to the caller's loop. `iter_claims(include_invalidated=False)` is the
+        one that needs it: filtering retired rows out afterwards would page over the
+        whole table to yield a fraction of it, and on a long-lived store most claims are
+        retired.
+
+        **Every filter here is written `+column`, which is not decoration.** The unary
+        plus makes a term unusable as an index lookup, and that is the only thing keeping
+        this walk on the rowid it pages by. Given `tenant=?` plainly, SQLite prefers a
+        secondary index — `ep_hash` for episodes, `cl_live` for claims — and then has to
+        `USE TEMP B-TREE FOR ORDER BY` to get back into rowid order. Per page. So the
+        walk sorted the whole matching set once for every page of it, which is n log n
+        per page and quadratic over the table, in the method whose entire purpose is to
+        make a full pass affordable: measured over 20,000 rows, the episode walk that
+        `reembed()` runs took 109.9 ms against 28.1 with the plus, and the gap widens
+        with the tenant. A caller adding a term to `extra` must write it the same way.
+
+        The plus also strips the column's affinity, so the comparison no longer coerces
+        its operands. That is safe here and only here: `tenant` is typed `str` all the
+        way up to `Scope`, and `invalidated_at IS NULL` tests for a value rather than
+        comparing one.
+
         The connection is taken and released per page, never held across a `yield`: the
         caller decides when to resume, and a generator abandoned half-way would otherwise
         keep a reader checked out until it was garbage collected.
@@ -1400,7 +1438,7 @@ class SQLiteStore:
         conds = list(extra)
         params: list = []
         if tenant is not None:
-            conds.append("tenant=?")
+            conds.append("+tenant=?")
             params.append(tenant)
         where = (" AND " + " AND ".join(conds)) if conds else ""
 
@@ -1432,6 +1470,14 @@ class SQLiteStore:
 
     def put_claim(self, c: Claim) -> None:
         with self._lock:
+            cited = json.dumps(c.sources)
+            # Read *before* the upsert overwrites it. The stored array is this claim's
+            # provenance as the store currently holds it, so it is also the answer to
+            # "which edges are already there" — and having it here is what lets the sync
+            # below skip both the write and the read when nothing has changed. It costs
+            # nothing extra: the rowid this fetches was already being fetched.
+            prior = self._db.execute(
+                "SELECT rowid, sources FROM claims WHERE id=?", (c.id,)).fetchone()
             self._db.execute(
                 _CLAIM_UPSERT,
                 (
@@ -1440,7 +1486,7 @@ class SQLiteStore:
                     c.memory_type.value, _ts(c.valid_from), _ts(c.valid_to),
                     _ts(c.recorded_at), _ts(c.invalidated_at), c.invalidated_by,
                     c.confidence, c.salience, c.observation_count,
-                    json.dumps(c.sources), c.derivation.value, c.extractor,
+                    cited, c.derivation.value, c.extractor,
                     json.dumps(c.meta), c.fact_key, c.value_key,
                 ),
             )
@@ -1448,22 +1494,30 @@ class SQLiteStore:
             # replaced by rowid. `claim_id` is UNINDEXED — deleting on it costs a full
             # scan of the FTS index, which turns N writes over N rows into O(n^2) and
             # was, measurably, the single slowest thing in the system.
-            row = self._db.execute("SELECT rowid FROM claims WHERE id=?", (c.id,)).fetchone()
-            rowid = row["rowid"]
+            #
+            # The upsert preserves the rowid, which is the whole reason it is an upsert,
+            # so an existing claim's was already read a few lines up.
+            rowid = prior["rowid"] if prior is not None else self._db.execute(
+                "SELECT rowid FROM claims WHERE id=?", (c.id,)).fetchone()["rowid"]
             self._db.execute("DELETE FROM claims_fts WHERE rowid=?", (rowid,))
             self._db.execute(
                 "INSERT INTO claims_fts (rowid, claim_id, text) VALUES (?,?,?)",
                 (rowid, c.id, c.text),
             )
-            self._sync_sources(c.id, c.sources)
+            stored = prior["sources"] if prior is not None else "[]"
+            if stored != cited:
+                self._sync_sources(c.id, c.sources, json.loads(stored))
             self._maybe_commit()
 
-    def _sync_sources(self, claim_id: str, sources: Sequence[str]) -> None:
+    def _sync_sources(self, claim_id: str, sources: Sequence[str],
+                      have: Sequence[str]) -> None:
         """Bring one claim's rows in `claim_sources` into line with its `sources` array.
 
-        Called from the two places `sources` can change, and there are exactly two: here
-        and `reinforce`. Everything else that writes a claim — the reconciler retiring
-        one, `Reconciler.reinforce` merging provenance — comes back through `put_claim`.
+        Called from the two places `sources` can change, and there are exactly two:
+        `put_claim` and `reinforce`. Everything else that writes a claim — the reconciler
+        retiring one, `Reconciler.reinforce` merging provenance — comes back through
+        `put_claim`. Both callers pass `have`, the array as the store held it a moment
+        ago, and both skip the call entirely when it equals what they are about to write.
 
         Writes the difference, not the list, and that is not a micro-optimization.
         `sources` is cumulative, so a fact restated a few hundred times carries a few
@@ -1477,34 +1531,36 @@ class SQLiteStore:
             delete + insert 26.0   32.1   65.9  235.8
             insert only    23.9   25.3   37.8  101.8
 
-        End to end that was the difference between 1.43 and 2.37 ms per round on a
-        workload reinforcing one claim per round for 400 rounds, against 1.17 before the
-        index existed at all. Reading the claim's own edges back is covered by `cs_claim`,
-        so finding the difference touches no table pages.
-
         Insert-only is the cheapest column at one source and loses from five upward, and
         it is wrong anyway: a claim can be re-put with *fewer* sources than the row
         already has, and an edge left behind reads to `_orphan` as a live citer, which
         keeps a turn that should have been erased. Under-erasing is the direction that
         matters, so the delete side is not skippable.
 
-        What remains — 4.5 us for the one-source claim almost every extraction produces,
-        under 1% of an end-to-end write — is what the reverse index costs. It rises with
-        the claim's own source count, because the delta pass reads them. Worth naming
-        that the last column of that table is superlinear in the row above it too:
-        `sources` has no cap, so the JSON column is itself rewritten in full every time.
+        The `have` argument is what closed the gap that table left. Wave 5 read the
+        claim's own edges back out of `claim_sources` to find the difference; covered by
+        `cs_claim`, so no table pages — but still one index row per source, on every
+        write, whether or not anything had changed. That read *was* the growth the column
+        was blamed for. Isolated on raw SQLite at 5,000 claims, rewriting a row whose
+        JSON array holds 1,000 ids costs 9.1 us against 5.8 for one id; reading the same
+        claim's 1,000 edges back costs 332.4. The array is a cheap copy of the same
+        information and `put_claim` has it in hand, so the difference is now found in
+        Python and the edges are only touched when they actually move.
+
+        `OR IGNORE` on the insert because `have` is now the array rather than the table.
+        The array is the authority — that is the documented direction and what the v5
+        backfill derives from — so the two cannot disagree; if they ever did, this is the
+        difference between a write that raises on the hot path and one that converges.
         """
         # De-duplicated for the same reason `reinforce` de-duplicates: a caller may hand
         # us the same turn twice, and the primary key would reject the second.
         want = dict.fromkeys(sources)
-        cur = self._db.cursor()
-        cur.row_factory = None  # a set of ids, not a Row per edge
-        cur.execute("SELECT episode_id FROM claim_sources WHERE claim_id=?", (claim_id,))
-        have = {r[0] for r in cur.fetchall()}
-        if add := [(ep, claim_id) for ep in want if ep not in have]:
+        had = dict.fromkeys(have)
+        if add := [(ep, claim_id) for ep in want if ep not in had]:
             self._db.executemany(
-                "INSERT INTO claim_sources (episode_id, claim_id) VALUES (?,?)", add)
-        if drop := [(claim_id, ep) for ep in have if ep not in want]:
+                "INSERT OR IGNORE INTO claim_sources (episode_id, claim_id) VALUES (?,?)",
+                add)
+        if drop := [(claim_id, ep) for ep in had if ep not in want]:
             self._db.executemany(
                 "DELETE FROM claim_sources WHERE claim_id=? AND episode_id=?", drop)
 
@@ -1951,7 +2007,8 @@ class SQLiteStore:
             r = self._db.execute("SELECT sources FROM claims WHERE id=?", (claim_id,)).fetchone()
             if r is None:
                 return
-            merged = list(dict.fromkeys(json.loads(r["sources"]) + list(sources)))
+            stored = json.loads(r["sources"])
+            merged = list(dict.fromkeys(stored + list(sources)))
             self._db.execute(
                 "UPDATE claims SET salience=?, obs_count=?, sources=? WHERE id=?",
                 (salience, observation_count, json.dumps(merged), claim_id),
@@ -1959,8 +2016,11 @@ class SQLiteStore:
             # The only write of `sources` that does not go through `put_claim`, so the
             # reverse index has to be told here too or provenance added by a
             # reinforcement is invisible to `claims_citing` — which is the call this
-            # index exists for, on exactly the path that reinforces.
-            self._sync_sources(claim_id, merged)
+            # index exists for, on exactly the path that reinforces. Skipped outright
+            # when the turn was already a source, which is what a re-observation of an
+            # exactly repeated turn is.
+            if merged != stored:
+                self._sync_sources(claim_id, merged, stored)
             self._maybe_commit()
 
     # -- retrieval -----------------------------------------------------------
@@ -2164,20 +2224,29 @@ class SQLiteStore:
 
     def iter_claims(self, tenant: str | None = None,
                     include_invalidated: bool = False) -> Iterable[Claim]:
-        sql = "SELECT * FROM claims"
-        params: list = []
-        conds = []
-        if tenant is not None:
-            conds.append("tenant=?")
-            params.append(tenant)
-        if not include_invalidated:
-            conds.append("invalidated_at IS NULL")
-        if conds:
-            sql += " WHERE " + " AND ".join(conds)
-        with self._read() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        for r in rows:
-            yield self._row_to_claim(r)
+        """Every claim, optionally for one tenant. What `reembed()` and a sweep walk.
+
+        Paged through `_iter_rows`, like `iter_episodes`, and for the reason that method
+        was written: this ran `fetchall()` and so was a generator in shape only. Three
+        callers are built around it not materialising — `reembed` chunks by `batch_size`
+        so a store too large for memory can still be re-encoded, `Sweep` reads it once
+        outside every transaction, and `embed.fingerprint` reads at most 32 claims and
+        stops. The third is the one that shows the cost: probing a 100k-claim store for
+        the width of its vectors built 100k `Claim` objects to look at 32 of them.
+
+        `Sweep` takes its own `list()` of this and that stays the caller's business:
+        consolidation mutates the claims it is walking, and the snapshot is deliberate.
+        Nothing here is weakened by a mutation mid-walk anyway — the upsert preserves a
+        claim's rowid, so a row rewritten behind the cursor keeps its place in the order
+        this pages on.
+        """
+        yield from (
+            self._row_to_claim(r) for r in self._iter_rows(
+                # `+`, for the reason `_iter_rows` gives: without it the planner takes
+                # `cl_live` and sorts every page back into rowid order.
+                "claims", tenant,
+                () if include_invalidated else ("+invalidated_at IS NULL",))
+        )
 
     def stats(self, tenant: str | None = None) -> dict[str, int]:
         """Row counts, optionally for one tenant.

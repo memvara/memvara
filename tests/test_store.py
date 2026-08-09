@@ -1190,6 +1190,63 @@ def test_re_putting_an_unchanged_claim_leaves_its_edges_alone(store):
     assert provenance(store) == {(ep.id, c.id)}
 
 
+def edge_statements(store, fn) -> list[str]:
+    """Every statement `fn()` runs against `claim_sources`.
+
+    Through SQLite's own trace callback rather than by wrapping `execute`, which is a
+    read-only attribute on a `Connection` — and this sees what actually reached the
+    engine, including each row of an `executemany`.
+    """
+    seen: list[str] = []
+    store._db.set_trace_callback(
+        lambda sql: seen.append(sql) if "claim_sources" in sql else None)
+    try:
+        fn()
+    finally:
+        store._db.set_trace_callback(None)
+    return seen
+
+
+def test_re_putting_an_unchanged_claim_does_not_read_its_edges_back(store):
+    """Not merely "writes nothing" — *touches* nothing. Finding the difference by
+    reading `claim_sources` costs one indexed row per source on every write, whether or
+    not anything moved, and provenance is cumulative and uncapped. That read, not the
+    JSON column it was blamed on, is what made a re-put grow with the claim's history:
+    222.4 us at 365 sources against 95.6 once the prior array is used instead. The claim
+    is rewritten unchanged by every retirement, every decay pass and every sweep."""
+    eps = [turn(store, content=f"turn {i}").id for i in range(40)]
+    c = put(store, sources=eps)
+    assert edge_statements(store, lambda: store.put_claim(c)) == []
+
+
+def test_a_reinforcement_from_a_turn_already_cited_touches_no_edges(store):
+    """An exactly repeated turn is the reverse index's own traffic — the write path
+    looks up what that turn produced and bumps it. The claim already cites it, so the
+    merge is a no-op, and paying to rediscover that on the hottest path this table has
+    is the cost the index was supposed to remove."""
+    ep = turn(store, content="I live in Berlin")
+    c = put(store, sources=[ep.id])
+    ran = edge_statements(
+        store, lambda: store.reinforce(c.id, 1.5, 2, sources=[ep.id]))
+    assert ran == []
+    assert store.get_claim(c.id).sources == [ep.id]
+    assert store.get_claim(c.id).salience == 1.5, "the bump still lands"
+
+
+def test_a_reinforcement_from_a_new_turn_writes_only_the_new_edge(store):
+    """The other half: a genuinely new source has to reach the index, and only it. A
+    delete-and-reinsert here rewrites the whole history on every observation."""
+    old = [turn(store, content=f"turn {i}").id for i in range(5)]
+    fresh = turn(store, content="said again, differently")
+    c = put(store, sources=old)
+    ran = edge_statements(
+        store, lambda: store.reinforce(c.id, 1.5, 2, sources=[fresh.id]))
+
+    assert [s.split()[0] for s in ran] == ["INSERT"], "no delete, no read-back"
+    assert store.get_claim(c.id).sources == [*old, fresh.id], "appended, order kept"
+    assert provenance(store) == implied(store)
+
+
 def test_erasing_a_claim_takes_its_provenance_with_it(store, emb):
     """The fourth-table trap. Wave 4 found `entities` surviving a purge that reported
     per-table counts as evidence; this is the same mistake one table over, and it does
@@ -1578,3 +1635,97 @@ def test_iter_episodes_makes_progress_past_rows_another_tenant_owns(tmp_path):
 
     assert got == ["ours"]
     store.close()
+
+
+@pytest.mark.parametrize("table, page", [
+    ("episodes", "SELECT rowid AS _rid, * FROM episodes WHERE rowid > ? AND rowid <= ? "
+                 "AND +tenant=? ORDER BY rowid LIMIT ?"),
+    ("claims", "SELECT rowid AS _rid, * FROM claims WHERE rowid > ? AND rowid <= ? "
+               "AND +invalidated_at IS NULL AND +tenant=? ORDER BY rowid LIMIT ?"),
+])
+def test_a_paged_walk_never_sorts_a_page_back_into_rowid_order(store, table, page):
+    """The plus signs in `_iter_rows` are load-bearing and look like typos, so this is
+    what stops someone tidying them away.
+
+    Written plainly, `tenant=?` is an indexable term and SQLite prefers a secondary
+    index for it — `ep_hash` over episodes, `cl_live` over claims — which leaves the
+    rows out of rowid order and forces `USE TEMP B-TREE FOR ORDER BY`. Once per page. So
+    the walk sorted the whole matching set again for every page of it, in the method
+    whose only purpose is to make a full pass affordable: measured through
+    `iter_episodes` over one tenant, 26.7 / 169.1 / 626.6 ms at 5k / 20k / 50k turns,
+    against 17.4 / 69.2 / 173.3 with the plus. Note the shape, not just the size — 23x
+    for 10x the rows is the quadratic, and it is what `reembed()` walks.
+    """
+    plan = [r[3] for r in store._db.execute(
+        "EXPLAIN QUERY PLAN " + page, [0, 10, "acme", 1000])]
+
+    assert not any("TEMP B-TREE" in step for step in plan), plan
+    assert any("INTEGER PRIMARY KEY" in step for step in plan), plan
+
+
+def test_iter_claims_filters_retired_rows_in_sql_not_in_the_caller(store):
+    """`include_invalidated=False` has to be part of the walk. Paging over every row and
+    dropping the retired ones afterwards reads the whole table to yield a fraction of
+    it, and on a long-lived store most claims are retired — which is the case this
+    argument exists for."""
+    live = put(store, object="Berlin")
+    dead = put(store, predicate="works_at", object="Acme")
+    store.invalidate(dead.id, T1, live.id)
+
+    assert [c.id for c in store.iter_claims("acme")] == [live.id]
+    assert {c.id for c in store.iter_claims("acme", include_invalidated=True)} == {
+        live.id, dead.id}
+
+
+def test_iter_claims_peak_memory_does_not_scale_with_the_table(tmp_path):
+    """The same materialisation `iter_episodes` was fixed for, on the table that has the
+    bigger rows. Three callers are built around this streaming and one of them shows what
+    it cost: `embed.fingerprint` reads at most 32 claims to learn the store's vector
+    width, and a `fetchall()` walk built every `Claim` in the store to hand it those 32 —
+    3.06 ms against 64.83 over 20,000 claims, and unbounded memory against one page.
+
+    A ratio, like the episode walk, and for the same reason: at these sizes an absolute
+    threshold measures the page rather than the property.
+    """
+    import tracemalloc
+
+    def peak_probing(rows: int) -> int:
+        store = SQLiteStore(str(tmp_path / f"c{rows}.db"))
+        with store.batch():
+            for i in range(rows):
+                store.put_claim(claim(predicate=f"p{i}", text="x" * 300))
+        tracemalloc.start()
+        seen = 0
+        for _ in store.iter_claims(SCOPE.tenant):
+            seen += 1
+            if seen >= 32:
+                break
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        store.close()
+        return peak
+
+    small = peak_probing(2000)
+    large = peak_probing(8000)
+    assert large < small * 2, (
+        f"peak grew {large / small:.1f}x for 4x the rows to read the same 32 — that is "
+        "materialisation, not paging")
+
+
+def test_an_old_sqlite_is_refused_at_construction_not_at_the_first_vector_write(monkeypatch):
+    """`_vector_upsert` ends in `RETURNING`, which is SQLite 3.35 (March 2021), and every
+    `set_embedding` runs it. `requires-python = ">=3.10"` admits interpreters linked
+    against 3.31 — so without this check the package installs cleanly, opens a store,
+    serves reads, and dies on the first write that touches a vector. Failing at
+    construction turns a confusing runtime error into a sentence that names the fix.
+    """
+    import memvara.store.sqlite as mod
+
+    monkeypatch.setattr(mod.sqlite3, "sqlite_version_info", (3, 31, 1))
+    monkeypatch.setattr(mod.sqlite3, "sqlite_version", "3.31.1")
+    with pytest.raises(RuntimeError, match=r"3\.35") as exc:
+        SQLiteStore(":memory:")
+    # The fix is a newer interpreter build, not a newer memvara — say so, because the
+    # obvious reading of a version error is "upgrade the library".
+    assert "3.31.1" in str(exc.value)
+    assert "not a newer memvara" in str(exc.value)

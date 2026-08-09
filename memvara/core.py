@@ -47,6 +47,12 @@ from .schema import PredicateRegistry
 from .store import SQLiteStore, Store
 from .telemetry import Recorder
 from .types import (
+    RESERVED_META,
+    ENTITY_REKEY,
+    LAST_OBSERVED,
+    OBJECT_ENTITY,
+    SALIENCE_BASE,
+    SUBJECT_ENTITY,
     Claim,
     Derivation,
     Episode,
@@ -59,6 +65,15 @@ from .types import (
 )
 from .write import WritePipeline
 
+#: `meta` keys the engine owns. They are ordinary dict keys on a persisted JSON column,
+#: so `remember(**meta)` reached every one of them — and two are not inert. Reinforcement
+#: and decay read `salience_base` and `last_observed_at` (see `Claim.salience_base`), so
+#: `remember(..., salience_base=5.0)` writes a claim that the *next* consolidation pass
+#: lifts to the salience ceiling and holds there, outranking everything else for good.
+#: A permanent ranking override, through no documented argument, latent until a
+#: maintenance run — which is the shape that makes it worth rejecting rather than
+#: documenting.
+#:
 # What `add()` accepts. The dict form matches the OpenAI/mem0 message shape so an
 # existing agent loop can pass its transcript straight through.
 Messages = str | Episode | Mapping[str, Any] | Sequence[str | Episode | Mapping[str, Any]]
@@ -570,7 +585,20 @@ class Memvara:
         asserted. Note that it is a real parameter rather than `**meta`, so a `meta` key
         of that name is no longer reachable here — it never meant anything anyway, since
         `Claim.extractor` is the field provenance actually reads.
+
+        `**meta` is the caller's, with the exception of the keys the engine stores there
+        itself — see `RESERVED_META`, and note that two of them are a ranking override.
+        Rejected here at the boundary rather than stripped, because a silently dropped
+        argument is how a caller comes to believe something untrue about what they wrote.
         """
+        if reserved := RESERVED_META & set(meta):
+            raise TypeError(
+                "these meta keys belong to the engine and cannot be set through "
+                "remember(): " + ", ".join(repr(k) for k in sorted(reserved))
+                + ". salience_base and last_observed_at are read by reinforcement and "
+                "decay, so setting one is a permanent ranking override; the entity keys "
+                "are restamped by the reconciler on every write."
+            )
         scope = self._scope(tenant, user, agent, session)
         pred = self.registry.normalize(predicate)
         now = utcnow()
@@ -588,13 +616,45 @@ class Memvara:
 
     @staticmethod
     def _cite(claim: Claim, sources: Sequence[str | Episode] | None) -> list[Episode]:
-        """Point `claim` at its sources; return the turns that still need storing."""
+        """Point `claim` at its sources; return the turns that still need storing.
+
+        A caller-built `Episode` that never named a scope takes the claim's, and that is
+        an erasure fix rather than a convenience. `Episode.scope` defaults to `Scope()`,
+        whose tenant is the literal `"default"`, so `remember(subject, predicate, obj,
+        user="alice", sources=[Episode(content=...)])` — the documented way to attach
+        provenance — stored the claim under the caller's scope and its source *text*
+        under `default`. Nothing surfaced it: `get_episode` is id-addressed and unscoped,
+        so `why()` kept resolving and the store looked healthy, while `purge(user=
+        "alice")` reported `episodes: 0` and left the sentence on disk. That is the third
+        time this shape has been found here, after the episodes themselves and the entity
+        rows, and it is the same failure each time — a purge that reports success as
+        evidence, with the text still readable.
+
+        An episode carrying a *different* explicit scope is left exactly as it is. The
+        caller said something, and overriding it would break the legitimate case of
+        citing a turn that genuinely belongs elsewhere — a tenant-level document behind a
+        user-level claim. Only the untouched default is adopted, because only that one
+        is indistinguishable from not having thought about it. The consequence is worth
+        stating plainly: a turn explicitly scoped outside the claim's scope survives that
+        claim's purge, by the caller's instruction.
+
+        One case the rule cannot distinguish, because no rule of this shape could:
+        `Scope("default")` *is* `Scope()`, so a caller deliberately filing a tenant-wide
+        turn under the default tenant reads as a caller who set nothing, and it is
+        adopted. That is the right way to lose the argument — between erasing a turn with
+        its claim and leaving it after a purge that reported success, only one is safe to
+        guess at. Naming the tenant makes the intent expressible again.
+        """
         if not sources:
             return []
         claim.sources = list(dict.fromkeys(
             list(claim.sources)
             + [s.id if isinstance(s, Episode) else s for s in sources]))
-        return [s for s in sources if isinstance(s, Episode)]
+        fresh = [s for s in sources if isinstance(s, Episode)]
+        for ep in fresh:
+            if ep.scope == Scope():
+                ep.scope = claim.scope
+        return fresh
 
     def _write_claim(self, claim: Claim, sources: Sequence[str | Episode] | None,
                      retire: Claim | None = None,
@@ -690,6 +750,16 @@ class Memvara:
         Retires rather than erases: the claims stop being returned by present-tense
         queries but remain visible to `as_of` and `history`. For true erasure (a GDPR
         deletion, say), use `purge`.
+
+        The claims handed back are stamped with the retirement, which they were not.
+        `Store.invalidate` and `set_valid_to` update rows; the in-memory objects were
+        read before either ran, so every claim this returned reported
+        `invalidated_at=None` and `is_live()` true, while the same row re-read from the
+        store read as retired. A caller logging or rendering the return value of the call
+        that just retired them showed them as live. `Reconciler._retire` has always
+        stamped its objects, which is why `WriteReceipt.invalidated` renders correctly
+        and this did not — the same operation, two implementations, one of them a
+        half-step behind the database.
         """
         scope = self._scope(tenant, user, agent, session)
         now = at or utcnow()
@@ -711,6 +781,11 @@ class Memvara:
             for c in retired:
                 self.store.invalidate(c.id, now, None)
                 self.store.set_valid_to(c.id, now)
+                # Both axes on the object too, and both: `Claim.is_live` requires them to
+                # agree, so stamping one would produce a claim that reads as retired to
+                # `repr` and live to a bitemporal query.
+                c.invalidated_at = now
+                c.valid_to = now
         return retired
 
     def purge(self, *, tenant=None, user=None, agent=None, session=None) -> dict[str, int]:
@@ -1057,18 +1132,60 @@ class Memvara:
 
         Returns `None` rather than raising when out of scope: an error would confirm the
         id exists, which is itself a disclosure.
+
+        Provenance is cumulative and uncapped — a fact restated in new words every day
+        for a year cites 365 turns — so the source text is fetched in one call rather
+        than one per turn. That N+1 cost 2.79 ms for a claim with 365 sources against
+        1.36 here, and it grew with the very claims most worth explaining: the ones the
+        user keeps confirming.
         """
         claim = self.store.get_claim(claim_id)
         if claim is None:
             return None
         if not self._scope(tenant, user, agent, session).sees(claim.scope):
             return None
-        episodes = [e for e in (self.store.get_episode(s) for s in claim.sources)
-                    if e is not None]
+        found = self.store.get_episodes(claim.sources)
+        # Rebuilt in `sources` order, because `get_episodes` returns a mapping and the
+        # order a claim cites its turns in is the order they were observed. A turn that
+        # has been erased is simply absent — `erase_claim` is allowed to leave provenance
+        # dangling, and wave 3 settled that the read is not where that gets discovered.
+        episodes = [e for e in (found.get(s) for s in claim.sources) if e is not None]
         superseded = [c for c in self.store.slot_history(claim.scope.tenant, claim.fact_key)
                       if c.invalidated_by == claim.id]
         return Provenance(claim=claim, episodes=episodes, derivation=claim.derivation,
                           extractor=claim.extractor, superseded=superseded)
+
+    def produced(self, episode_id: str, *, tenant=None, user=None, agent=None,
+                 session=None) -> list[Claim]:
+        """What one turn was turned into: every claim derived from it.
+
+        `why()` run backwards. It answers the question an audit actually starts from —
+        "this conversation happened, what did the system take away from it?" — which
+        until now had no door on the facade at all, only a scan of the tenant comparing
+        `sources` in Python.
+
+        Scope-checked the same way `why()` is, and with the same predicate for the same
+        reason. `Scope.sees` is the *reading* rule: a handle sees its own scope and every
+        broader one, never a deeper or sideways one. `Scope.contains` is the opposite
+        direction and belongs to `forget` and `history`, where a broad caller reaching
+        down into a slot is the documented intent; using it here would let a handle
+        scoped to one session read what a sibling agent derived from a shared turn. The
+        tenant is fenced in SQL and the rest is filtered here, so a caller learns only
+        about claims it could have reached through `get_all()` anyway.
+
+        Returns `[]` for a turn that does not exist, holds nothing, or belongs to someone
+        else — the same non-answer `why()` gives, and for the same reason: distinguishing
+        them would confirm an id. Note the turn's *own* scope is deliberately not
+        consulted. What a caller may read is decided by the claims, and a turn nobody can
+        see that some visible claim was derived from is exactly a case where the claim
+        should still be returned.
+
+        Retired claims are included, because they were still derived from that turn.
+        `[c for c in mem.produced(ep) if c.invalidated_at is None]` is the live view.
+        """
+        scope = self._scope(tenant, user, agent, session)
+        return [c for c in self.store.claims_citing(scope.tenant, episode_id)
+                if scope.sees(c.scope)]
 
     # -- scoped views --------------------------------------------------------
 
@@ -1324,6 +1441,9 @@ class ScopedMemvara:
 
     def why(self, claim_id: str) -> Provenance | None:
         return self._mem.why(claim_id, **self._kw)
+
+    def produced(self, episode_id: str) -> list[Claim]:
+        return self._mem.produced(episode_id, **self._kw)
 
     def count(self, *, as_of: datetime | None = None,
               include_invalidated: bool = False) -> int:

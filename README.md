@@ -513,6 +513,7 @@ mem.get_all(*, as_of=None, include_invalidated=False)      -> list[Claim]
 mem.count(*, as_of=None, include_invalidated=False)        -> int
 mem.history(subject, predicate)                   -> list[Claim]    # timeline of one slot
 mem.why(claim_id)                                 -> Provenance | None
+mem.produced(episode_id)                          -> list[Claim]    # why(), backwards
 
 # maintenance
 mem.consolidate()                                 -> dict[str, int]
@@ -737,7 +738,7 @@ looking at a top-k, and nothing ever looks again.
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 2,092 tests, offline, no API key
+python3 -m pytest -q                              # 2,231 tests, offline, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison
 PYTHONPATH=. python3 bench/perf.py                # throughput and scaling

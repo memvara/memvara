@@ -40,6 +40,22 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`Memvara.produced(episode_id)`** — `why()` run backwards: which claims a turn
+  produced. Cheap now that a reverse provenance index exists, and it had no public door.
+  Scope-checked with `Scope.sees`, so a session handle cannot read what a sibling agent
+  derived from a shared turn.
+- **LangGraph adapter** (`memvara[langgraph]`). The best-fitting framework interface of
+  the four: `BaseStore` hands over the query text natively *and* `put(namespace, key,
+  value)` supplies all three parts of a triple, so an item is stored as one claim **per
+  field** and changing `city` retires exactly `city`. Per-field contradiction resolution,
+  which the CrewAI adapter cannot do because its unit of memory is a sentence with no
+  subject or predicate in it.
+- **`Claim.state`** — `live` / `ended` / `retired`, deliberately absolute rather than
+  relative to an `as_of`. Three surfaces had derived it independently.
+- **A SQLite floor.** `RETURNING` needs 3.35 and every `set_embedding` runs it, while
+  `requires-python = ">=3.10"` admits builds linked against 3.31. Checked at construction
+  instead of failing on the first vector write.
+
 - **`OpenAILLM`** — the `memvara[openai]` extra has been declared since the first commit
   and shipped no adapter. Chat Completions with `strict: true` structured output.
   Refusals (`message.refusal`) are handled explicitly, because reading `content` alone
@@ -61,6 +77,23 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`remember(sources=[Episode(...)])` filed the turn under tenant `"default"`, and
+  `purge()` then left it on disk.** `Episode.scope` defaults to `Scope()`, whose tenant is
+  the literal `"default"`, so the documented way to attach provenance wrote raw user text
+  into another tenant while its claim landed in the right one — and an erasure of that
+  user reported `episodes: 0` with the sentence still there. Nothing surfaced it, because
+  `get_episode` is unscoped so `why()` kept resolving. A caller-built episode that names
+  no scope now adopts its claim's. **Existing stores may already hold orphaned turns**;
+  `docs/RELEASING.md` carries a detection query.
+- **`forget()` returned stale claims** — every one reported `invalidated_at=None` and read
+  as live while the same row re-read from the store read as retired.
+- **`remember(**meta)` accepted `salience_base`**, which the next `consolidate()` turned
+  into a permanent 5.0 ranking override reachable through no documented argument. Reserved
+  keys are now rejected at the boundary.
+- **`iter_claims`/`iter_episodes` re-sorted the whole matching set once per page.** A
+  plain `tenant=?` is indexable, so SQLite chose an index and then a temp b-tree to get
+  back into rowid order — for every page. `iter_episodes` over one tenant, which is what
+  `reembed()` walks: 26.7 / 169.1 / 626.6 ms at 5k / 20k / 50k → 17.4 / 69.2 / 173.3.
 - **A backdated supersession left two live values for a single-valued predicate.**
   `Reconciler._retire` stamped the transaction instant on both time axes, so learning
   today that someone moved in July closed the old value *today* — leaving it valid across

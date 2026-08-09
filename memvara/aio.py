@@ -242,6 +242,13 @@ class AsyncMemvara:
             self.memvara.why, claim_id, tenant=tenant, user=user, agent=agent,
             session=session)
 
+    async def produced(self, episode_id: str, *, tenant=None, user=None, agent=None,
+                       session=None) -> list[Claim]:
+        """See `Memvara.produced`."""
+        return await asyncio.to_thread(
+            self.memvara.produced, episode_id, tenant=tenant, user=user, agent=agent,
+            session=session)
+
     async def count(self, *, tenant=None, user=None, agent=None, session=None,
                     as_of: datetime | None = None,
                     include_invalidated: bool = False) -> int:

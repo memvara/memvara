@@ -64,6 +64,17 @@ OBJECT_ENTITY = "object_entity"
 #: Timestamped record of every backfill that changed a claim's place in history.
 ENTITY_REKEY = "entity_rekey"
 
+#: The `meta` keys above, as one set: everything in `Claim.meta` that the engine owns
+#: rather than the caller. Two surfaces need it and they need it for opposite reasons —
+#: `Memvara.remember` **rejects** them on the way in, because `salience_base` reaching
+#: the store is a permanent ranking override no documented argument can produce, and
+#: `compat.mem0` **filters** them on the way out, so a compatibility layer never hands
+#: internal bookkeeping back as user data. Defined here, beside the five constants, so
+#: adding a sixth cannot leave one of those two surfaces behind.
+RESERVED_META = frozenset({
+    SALIENCE_BASE, LAST_OBSERVED, SUBJECT_ENTITY, OBJECT_ENTITY, ENTITY_REKEY,
+})
+
 #: Decimal places kept on a stored salience. Salience is a ranking weight, not an
 #: accounting figure, and quantizing kills the sub-nanosecond drift between two
 #: scheduler ticks that would otherwise make an idempotent pass look like a change.
@@ -467,16 +478,36 @@ class Claim:
             str(self.polarity),
         )
 
+    @property
+    def state(self) -> str:
+        """`"live"`, `"ended"` or `"retired"` — the two axes reduced to one word.
+
+        `retired` is transaction time: we stopped believing it. `ended` is valid time: we
+        still believe it, and it stopped being true. `live` is neither. The distinction is
+        the whole bitemporal model, and collapsing it to a boolean is how a surface ends
+        up reporting "deleted" for a fact that merely finished.
+
+        A property rather than a helper because three surfaces had each derived it
+        independently — `server.tools._state`, this class's `__repr__`, and the REST
+        renderer — and three copies of a rule this small is three chances to disagree
+        about what a retired claim is called.
+
+        Deliberately **not** relative to an `as_of`: a claim retired last week is
+        `retired` even in a March view, and it is the caller who pairs that with the
+        `as_of` it asked for. A state that silently means "as of your query" cannot
+        express "believed then, retired since", which is the thing worth showing.
+        """
+        if self.invalidated_at is not None:
+            return "retired"
+        if self.valid_to is not None:
+            return "ended"
+        return "live"
+
     def __repr__(self) -> str:
         # State, not raw timestamps: "is this claim still believed?" is the question
         # anyone reading a list of claims at a REPL is actually asking, and the two
         # timestamp pairs that answer it are four fields of eighteen.
-        if self.invalidated_at is not None:
-            state = "retired"
-        elif self.valid_to is not None:
-            state = "ended"
-        else:
-            state = "live"
+        state = self.state
         neg = "not " if self.polarity < 0 else ""
         return (
             f"<Claim {self.id} {self.scope.key()} {self.subject} "

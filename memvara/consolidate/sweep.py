@@ -17,10 +17,13 @@ The snapshot is read once and the writes are deduplicated by claim id: measured 
 20k claims, a settled pass went from 4.8 s and 163 MB to 0.6 s and 40 MB, and the full
 sweep over 100k from 107 s to 13 s.
 
-`iter_claims` materializing its rows is deliberate and is respected here rather than
-worked around: consolidation mutates rows while iterating, and streaming a live SQLite
-cursor through that is undefined behaviour. The snapshot is that materialization, taken
-once, outside every transaction this module opens.
+**The snapshot is this module's own `list()`, and taking it is deliberate.**
+Consolidation mutates rows while iterating, and streaming a live SQLite cursor through
+that is undefined behaviour — so the ids are read once, outside every transaction opened
+here, and the sweep walks that fixed list. An earlier version of this paragraph credited
+the snapshot to `iter_claims` materializing its own rows; it no longer does — it pages —
+so the guarantee now rests where it always should have, on the `list()` below rather than
+on a callee's implementation detail.
 """
 
 from __future__ import annotations

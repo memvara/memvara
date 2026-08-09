@@ -1585,3 +1585,259 @@ def test_forget_and_history_still_reach_downward_deliberately(mem):
 
     assert [c.object for c in mem.history("user", "lives_in", user="alice")] == ["Berlin"]
     assert mem.forget("user", "lives_in", user="alice"), "broad forget stopped reaching"
+
+
+# --- what the caller's own scope covers -------------------------------------------
+
+def test_a_cited_turn_that_named_no_scope_is_erased_with_the_claims_scope(mem):
+    """The end-to-end one, and the only assertion that matters: after purging the user,
+    the sentence is not on disk.
+
+    `Episode.scope` defaults to `Scope()`, whose tenant is the literal `"default"`, so
+    the documented way to attach provenance — `remember(..., user="alice",
+    sources=[Episode(content=...)])` — filed the claim under alice and its source *text*
+    under the tenant. Nothing surfaced it: `get_episode` is id-addressed and unscoped, so
+    `why()` kept resolving and the store looked healthy, while `purge(user="alice")`
+    reported `episodes: 0` and returned that count as evidence of the erasure. Third time
+    this shape has been found in this codebase, after the episodes themselves and the
+    entity rows.
+    """
+    said = Episode(content="SENSITIVE: I moved to Lisbon last month")
+    assert said.scope == Scope(), "the default this test is about"
+    mem.remember("user", "lives_in", "Lisbon", user="alice", sources=[said])
+
+    counts = mem.purge(user="alice")
+
+    assert mem.store.get_episode(said.id) is None, \
+        "the source text outlived the erasure that reported success"
+    assert counts["episodes"] == 1, "and the count said so"
+
+
+def test_a_cited_turn_that_named_a_scope_keeps_it(mem):
+    """Only the untouched default is adopted. A caller citing a tenant-level document
+    behind a user-level claim said something, and overriding it would break the case the
+    argument exists for — at the price, stated here so it is a decision and not a
+    surprise, that such a turn survives the claim's purge."""
+    shared = Episode(content="the company handbook, revision 4", scope=Scope("acme"))
+    mem.remember("user", "read", "handbook", tenant="acme", user="alice",
+                 sources=[shared])
+
+    mem.purge(tenant="acme", user="alice")
+
+    assert mem.store.get_episode(shared.id) is not None
+    assert mem.store.get_episode(shared.id).scope == Scope("acme")
+
+
+def test_a_turn_under_the_default_tenant_cannot_say_it_meant_tenant_scope(mem):
+    """The one case the rule cannot distinguish, asserted so it is a known limit rather
+    than a surprise. `Scope("default")` *is* `Scope()`, so a caller who deliberately
+    wants a tenant-wide turn under the default tenant is indistinguishable from one who
+    never set a scope — and adoption wins, because between "erased with the claim" and
+    "left on disk after a purge that reported success", only one of the two is safe to
+    guess. Naming the tenant makes it expressible again."""
+    assert Scope("default") == Scope()
+
+    said = Episode(content="everyone here uses postgres", scope=Scope("default"))
+    mem.remember("user", "uses_tool", "postgres", user="alice", sources=[said])
+
+    assert mem.store.get_episode(said.id).scope == mem.default_scope
+
+
+def test_supersede_scopes_its_cited_turn_the_same_way(mem):
+    """`supersede(sources=…)` reaches the store through the same `_cite`, so it is fixed
+    by the same line — asserted rather than assumed, because it is the other public door
+    that stores a caller-built turn."""
+    old = mem.remember("user", "lives_in", "Berlin", user="alice").added[0]
+    fresh = Episode(content="SENSITIVE: I moved to Lisbon last month")
+    replacement = Claim(subject="user", predicate="lives_in", object="Lisbon",
+                        scope=mem.default_scope)
+    mem.supersede(old.id, replacement, sources=[fresh], user="alice")
+
+    assert mem.purge(user="alice")["episodes"] == 1
+    assert mem.store.get_episode(fresh.id) is None
+
+
+def test_forget_returns_claims_stamped_with_the_retirement_it_just_did(mem):
+    """Every claim this handed back said `invalidated_at=None` and `is_live()` true,
+    while the same row re-read from the store read as retired — so a caller logging or
+    rendering the result of the call that just retired them showed them live.
+    `Store.invalidate` updates rows and not the objects that were read before it ran;
+    `Reconciler._retire` stamps both, which is why `WriteReceipt.invalidated` renders
+    correctly and this did not."""
+    mem.remember("user", "lives_in", "Berlin", user="alice")
+
+    retired = mem.forget("user", "lives_in", user="alice")
+
+    assert [c.id for c in retired] == [mem.history("user", "lives_in")[0].id]
+    for c in retired:
+        assert c.invalidated_at is not None, "returned as live by the call that killed it"
+        assert c.valid_to is not None, "and both axes, or `is_live` disagrees with `repr`"
+        assert not c.is_live()
+        stored = mem.store.get_claim(c.id)
+        assert (c.invalidated_at, c.valid_to) == (stored.invalidated_at, stored.valid_to)
+
+
+@pytest.mark.parametrize("key, value", [
+    ("salience_base", 5.0),
+    ("last_observed_at", 4102444800.0),
+    ("subject_entity", "en_someone_else"),
+    ("object_entity", "en_elsewhere"),
+    ("entity_rekey", []),
+])
+def test_remember_refuses_the_meta_keys_the_engine_owns(mem, key, value):
+    """`meta` is a persisted JSON dict, so `**meta` reached every key the engine keeps
+    there — and two of them are not inert. `salience_base` is what reinforcement raises
+    and decay reads, so a claim written with `salience_base=5.0` is lifted to the
+    salience ceiling by the *next* consolidation pass and outranks everything else
+    permanently: a ranking override through no documented argument, latent until a
+    maintenance run. The entity keys are restamped by the reconciler and so are merely
+    useless, which is not a reason to accept them — that the write path happens to
+    overwrite them is an implementation detail, and a caller who set one and saw it
+    ignored learned something untrue about what `meta` is."""
+    with pytest.raises(TypeError, match=key):
+        mem.remember("user", "lives_in", "Berlin", **{key: value})
+
+
+def test_the_ranking_override_that_made_reserved_meta_worth_rejecting(mem):
+    """The reason it is a `TypeError` and not a docs note. Named separately so a refactor
+    of the table above cannot quietly leave the door open."""
+    with pytest.raises(TypeError):
+        mem.remember("user", "lives_in", "Berlin", salience_base=5.0)
+
+    mem.remember("user", "lives_in", "Berlin")
+    mem.consolidate()
+
+    assert mem.get_all()[0].salience <= 1.0, "an ordinary claim stays ordinary"
+
+
+def test_ordinary_meta_still_goes_through_untouched(mem):
+    """The rejection is five keys, not a policy on `meta`."""
+    written = mem.remember("user", "lives_in", "Berlin", source_system="crm",
+                           salience="high")
+
+    assert written.added[0].meta["source_system"] == "crm"
+    assert written.added[0].meta["salience"] == "high", "a near-miss is still the caller's"
+
+
+# --- provenance, backwards -------------------------------------------------------
+#
+# `why()` resolves a claim to the turns behind it. `produced()` is the same edge read the
+# other way — "this conversation happened, what did the system take away from it?" — and
+# it is the question an audit starts from. It had no door on the facade until now, only
+# a scan of the tenant comparing `sources` in Python.
+
+def test_produced_names_the_claims_one_turn_was_turned_into(mem):
+    """The reverse of `why()`, and its round trip: every claim `produced()` returns must
+    name that turn back."""
+    said = Episode(content="I moved to Berlin", scope=mem.default_scope)
+    receipt = mem.remember("user", "lives_in", "Berlin", sources=[said])
+    other = mem.remember("user", "works_at", "Acme",
+                         sources=[Episode(content="unrelated", scope=mem.default_scope)])
+
+    produced = mem.produced(said.id)
+    turn_id = said.id
+
+    assert [c.id for c in produced] == [receipt.added[0].id]
+    assert all(turn_id in [e.id for e in mem.why(c.id).episodes] for c in produced)
+    assert other.added[0].id not in [c.id for c in produced]
+
+
+def test_produced_answers_nothing_for_a_turn_that_was_never_stored(mem):
+    """`[]`, not a raise — the same non-answer `why()` gives for an id it will not
+    resolve, and for the same reason: an error distinguishes "no such turn" from "not
+    yours" and so confirms an id."""
+    assert mem.produced("ep_never_stored") == []
+
+
+def test_produced_is_read_authorized_upward_like_every_other_read(mem):
+    """The wrong predicate here is a cross-scope read. `Scope.contains` reaches
+    *downward* with an unset field as a wildcard, so a session-scoped handle asking what
+    a shared turn produced would be handed a sibling agent's claim — the escalation wave
+    5 fixed at `get()` and `why()`, arriving through a new door. `sees` is the
+    enumeration rule, so `produced()` returns exactly what `get_all()` would.
+    """
+    shared = Episode(content="the team uses postgres", scope=mem.default_scope)
+    written = mem.remember("user", "uses_tool", "postgres", sources=[shared],
+                           user="alice", agent="researcher", session="s1")
+    cid = written.added[0].id
+
+    for kw in ({}, dict(user="alice"), dict(user="alice", agent="researcher"),
+               dict(user="alice", agent="researcher", session="s1"),
+               dict(user="alice", session="s1"), dict(user="alice", agent="other"),
+               dict(user="bob")):
+        enumerated = bool(mem.get_all(**kw))
+        assert (cid in [c.id for c in mem.produced(shared.id, **kw)]) is enumerated, \
+            f"produced disagrees with get_all at {kw}"
+
+
+def test_produced_does_not_answer_across_tenants(mem):
+    """Turn ids leak exactly as claim ids do, through receipts and logs. The tenant is
+    fenced in SQL rather than filtered afterwards, so this is the cheap check as well as
+    the correct one."""
+    ep = Episode(content="I moved to Berlin", scope=mem.default_scope)
+    mem.remember("user", "lives_in", "Berlin", sources=[ep])
+
+    assert mem.produced(ep.id) != []
+    assert mem.produced(ep.id, tenant="globex") == []
+
+
+def test_produced_still_names_a_claim_that_has_since_been_retired(mem):
+    """A superseded claim was still derived from that turn, and an audit asking what a
+    conversation produced wants what it produced — not what survived. The live view is
+    the caller's filter, which is the same contract `Store.claims_citing` states."""
+    ep = Episode(content="I live in Berlin", scope=mem.default_scope)
+    first = mem.remember("user", "lives_in", "Berlin", sources=[ep]).added[0]
+    mem.remember("user", "lives_in", "Lisbon", sources=[ep])
+
+    produced = mem.produced(ep.id)
+
+    assert first.id in [c.id for c in produced]
+    assert [c.id for c in produced if c.invalidated_at is None] != [], "and the live one"
+
+
+def test_produced_is_reachable_from_a_scoped_view_and_from_the_async_facade(mem):
+    """Both wrappers forward, which is the whole of what they do — and a public method
+    missing from either is the gap `_unwrapped()` and `ScopedMemvara` exist to close."""
+    import asyncio
+
+    from memvara.aio import AsyncMemvara
+
+    view = mem.scope(user="alice")
+    ep = Episode(content="I moved to Berlin", scope=Scope("acme", "alice"))
+    cid = view.remember("user", "lives_in", "Berlin", sources=[ep]).added[0].id
+
+    assert [c.id for c in view.produced(ep.id)] == [cid]
+    assert [c.id for c in asyncio.run(AsyncMemvara(mem).produced(ep.id))] == [cid]
+
+
+def test_why_resolves_every_source_in_the_order_the_claim_cites_them(mem):
+    """Provenance is cumulative and uncapped — a fact restated in new words every day for
+    a year cites 365 turns — so this fetches them in one call rather than one per turn:
+    2.79 ms against 1.36 at that size, and the N+1 grew with exactly the claims most
+    worth explaining. A bulk fetch returns a mapping, so the order is the caller's job to
+    restore, and the order is the order they were observed in."""
+    turns = [Episode(content=f"day {i}: still in Berlin", scope=mem.default_scope)
+             for i in range(5)]
+    cid = mem.remember("user", "lives_in", "Berlin", sources=turns).added[0].id
+
+    assert [e.id for e in mem.why(cid).episodes] == [t.id for t in turns]
+
+
+def test_why_skips_a_source_turn_that_has_since_been_erased(mem):
+    """Provenance is allowed to dangle: `erase(sources=False)` and a neighbour's purge
+    can both take a turn a surviving claim still cites, and wave 3 settled that the read
+    is not where that gets discovered. A bulk fetch returns nothing for a missing id, and
+    `None` reaching a `Provenance.episodes` list would be worse than the gap."""
+    tenant = mem.default_scope.tenant
+    kept = Episode(content="I moved to Berlin", scope=mem.default_scope)
+    # A neighbour's turn, cited across the scope boundary. Purging that neighbour is
+    # allowed to take it — see `test_purging_one_scope_leaves_a_neighbours_citation
+    # _intact` in the store suite, which settles that erasure is not the moment to
+    # discover a dangling citation.
+    doomed = Episode(content="bob said it too", scope=Scope(tenant, "bob"))
+    cid = mem.remember("user", "lives_in", "Berlin", sources=[kept, doomed]).added[0].id
+    mem.purge(user="bob")
+
+    assert [e.id for e in mem.why(cid).episodes] == [kept.id]
+    assert mem.get(cid).sources == [kept.id, doomed.id], \
+        "the citation itself is not rewritten — the turn is gone, the record of it is not"

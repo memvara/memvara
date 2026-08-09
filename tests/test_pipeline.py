@@ -372,6 +372,41 @@ def test_an_exact_repeat_finds_its_claims_through_the_reverse_index():
     store.close()
 
 
+def test_a_fact_restated_all_year_keeps_every_turn_that_supports_it():
+    """The one property the answer to unbounded `sources` had to preserve.
+
+    Provenance is cumulative and nothing caps it: a fact the user restates in new words
+    every day for a year accumulates 365 source ids, each of which is rewritten into the
+    claim's row on every observation and maintained as an edge. Capping the list is the
+    cheap fix and it is the wrong one — `why()` silently not naming a turn it was derived
+    from, in the library whose pitch is that provenance always resolves, is worse than a
+    slow write. So the write was made cheap instead (222.4 us at 365 sources against
+    95.6, by finding the edge delta from the array already in hand rather than by reading
+    the edges back), and the list still holds everything.
+
+    A hundred restatements rather than 365, because the property is "none are dropped"
+    and the number only changes the runtime.
+    """
+    pipe, store, _ = build()
+    first = pipe.add([ep("I live in Berlin.")])
+    claim_id = first.added[0].id
+
+    for day in range(100):
+        # Byte-different every time, so each is a genuinely new turn rather than the
+        # exact-repeat branch, and each one adds a source.
+        pipe.add([ep(f"Just to say again on day {day}: I live in Berlin.")])
+
+    stored = store.get_claim(claim_id)
+    assert len(stored.sources) == 101, "a source went missing"
+    assert len(set(stored.sources)) == 101, "or was counted twice"
+    assert {r[0] for r in store._db.execute(
+        "SELECT episode_id FROM claim_sources WHERE claim_id=?", (claim_id,))} == set(
+        stored.sources), "the index and the array disagree about what supports this"
+    assert all(store.claims_citing("acme", s) for s in stored.sources), \
+        "every turn resolves backwards too"
+    store.close()
+
+
 def test_a_store_without_the_reverse_index_still_reinforces():
     """`claims_citing` is new to the protocol, and a `Store` someone else wrote must not
     start raising on the write path because of it. The fallback scan is slower and that

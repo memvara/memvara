@@ -85,7 +85,7 @@ EXTRAS = {name: value for name, value in _toml_table("project.optional-dependenc
 # because the person reading that traceback has no other way to learn that the fix is one
 # `pip install` away. `ModuleNotFoundError: No module named 'x'` is not that error.
 ADAPTER_EXTRAS = {"anthropic", "openai", "local-embed",
-                  "langchain", "llama-index", "crewai"}
+                  "langchain", "llama-index", "crewai", "langgraph"}
 # A **reserved** extra buys nothing yet and says so. `http` names the REST layer's
 # dependencies before the REST layer exists. That is defensible — it fixes the dependency
 # set publicly before anything depends on it — and it is one letter away from the
@@ -135,6 +135,12 @@ def _resolve_crewai_storage() -> None:
     crewai.MemvaraStorage
 
 
+def _resolve_langgraph_store() -> None:
+    from memvara.integrations import langgraph
+
+    langgraph.MemvaraStore
+
+
 #: extra -> (the module its SDK provides, the shortest call that needs it). The module
 #: name is here rather than derived from the requirement because a distribution name and
 #: an import name are not the same string — `sentence-transformers` imports as
@@ -146,6 +152,11 @@ ADAPTERS = {
     "langchain": ("langchain_core", _resolve_langchain_history),
     "llama-index": ("llama_index", _resolve_llamaindex_block),
     "crewai": ("crewai", _resolve_crewai_storage),
+    # The import name is `langgraph`, but the *distribution* that provides
+    # `langgraph.store.base` is `langgraph-checkpoint` — the `langgraph` wheel has no
+    # `store/` in it at all. Exactly the distribution-name-is-not-import-name trap this
+    # mapping exists for.
+    "langgraph": ("langgraph", _resolve_langgraph_store),
 }
 
 #: The subset of `ADAPTERS` whose SDK name never appears in an `import` statement,
@@ -154,7 +165,7 @@ ADAPTERS = {
 #: walk below and are covered by the runtime one instead — listing them here keeps that
 #: exemption explicit, so a framework that *does* get statically imported one day fails
 #: the static test rather than quietly joining the exempt set.
-DYNAMIC_SDKS = {"langchain_core", "llama_index", "crewai"}
+DYNAMIC_SDKS = {"langchain_core", "llama_index", "crewai", "langgraph"}
 
 
 # -- static import graph ------------------------------------------------------------

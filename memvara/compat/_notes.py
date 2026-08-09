@@ -18,6 +18,15 @@ Putting the id in the *subject* rather than in the predicate is what makes
 `history(memory_id)` returns, and it keeps the predicate registry at one entry instead
 of one per imported memory — which matters, because learned predicates are capped.
 
+**A synthetic subject must be opaque, not readable.** The subject is folded through
+`entity_key` before it keys a slot, and that fold strips punctuation — so
+`langgraph:a/b#c` and `langgraph:a#b/c` both become `langgraph a b c` and share one
+slot, superseding each other's data. `mem0:` and `note:` get away with putting an id
+straight in only because those ids are uuids and hex survives the fold. Any adapter
+minting a subject from structured parts (a namespace tuple, a path, anything with
+separators) has to hash the address rather than spell it out. The LangGraph adapter
+does; this note exists so the next one does too.
+
 `write_note` goes below the `Memvara` facade on purpose. `Memvara.remember(sources=…)` and
 `Memvara.supersede` now cover everything it does *except* that they also embed each source
 turn — and a note's turn is a byte-identical copy of the claim's own text, so the facade

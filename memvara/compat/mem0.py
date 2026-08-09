@@ -46,6 +46,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from ..core import Memvara
 from ..types import (
+    RESERVED_META,
     ENTITY_REKEY,
     LAST_OBSERVED,
     OBJECT_ENTITY,
@@ -58,12 +59,6 @@ from ..types import (
     Scope,
 )
 from ._notes import NOTE_PREDICATE, build_note, ensure_note_predicate, write_note
-
-#: `Claim.meta` keys memvara owns. Filtered out of the mem0 `metadata` field so a
-#: compatibility surface never hands back internal bookkeeping as user data.
-_RESERVED_META = frozenset({
-    SALIENCE_BASE, LAST_OBSERVED, SUBJECT_ENTITY, OBJECT_ENTITY, ENTITY_REKEY,
-})
 
 
 class Mem0CompatError(NotImplementedError):
@@ -483,7 +478,7 @@ class Memory:
         dict. Echoing ours back would leak implementation detail through a compatibility
         surface and invite someone to depend on it.
         """
-        return {k: v for k, v in claim.meta.items() if k not in _RESERVED_META}
+        return {k: v for k, v in claim.meta.items() if k not in RESERVED_META}
 
     @staticmethod
     def _row(claim: Claim, *, result: Result | None = None,
