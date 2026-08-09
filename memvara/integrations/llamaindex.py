@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import asyncio
 from functools import lru_cache
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from ..types import Episode
 from ._common import IntegrationError, bind, require, result_metadata, scope_kw
@@ -123,6 +123,24 @@ class _MemoryBlock:
     for this. `search` and `history` stay synchronous because they are escape hatches
     an application calls on its own terms, not hooks the framework awaits.
     """
+
+    if TYPE_CHECKING:  # pragma: no cover
+        # Declared for the type checker only. Pydantic v2 collects fields from the
+        # annotations of every class in the MRO, mixins included — measured on 2.12.5,
+        # where a name declared only on the mixin becomes a *required* field of the
+        # composed model. That is exactly why `last_receipt` is not in this list: `_aput`
+        # assigns it and that assignment is its declaration, but an annotation here would
+        # make every `MemvaraMemoryBlock(...)` demand one. `_block_class` stays the one
+        # place these are defined.
+        memory: Any
+        tenant: Any
+        user: Any
+        agent: Any
+        session: Any
+        k: int
+        min_score: float
+        include_episodes: bool
+        context_window: int
 
     def _memvara(self) -> tuple[Any, Any]:
         return bind(self.memory, tenant=self.tenant, user=self.user, agent=self.agent,

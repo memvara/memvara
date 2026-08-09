@@ -331,6 +331,81 @@ def test_near_dup_threshold_of_one_disables_the_shortcut():
     store.close()
 
 
+# --- tier 0: finding what a repeated turn already produced --------------------
+#
+# The repeat branch has to answer "which claims came from this turn?". It used to do that
+# by scanning every claim in the tenant, which was affordable only while repeats were
+# rare — and the redaction seam is precisely what stops them being rare, since two turns
+# differing only inside a redacted span are one turn once the redactor has run.
+
+class StoreWithoutReverseIndex:
+    """A third-party `Store` written before `claims_citing` existed.
+
+    Delegates everything else to a real store, so the only difference under test is the
+    one missing method. `__getattr__` runs only for attributes not found normally, which
+    is what makes the delegation total.
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str):
+        if name == "claims_citing":
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+
+def test_an_exact_repeat_finds_its_claims_through_the_reverse_index():
+    """The lookup this branch is built on. Asserted by making the scan it replaced
+    impossible: `iter_claims` raises, so a reinforcement can only have come from
+    `claims_citing`."""
+    pipe, store, _ = build()
+    first = pipe.add([ep("I live in Berlin.")])
+    claim_id = first.added[0].id
+    store.iter_claims = lambda *a, **kw: (_ for _ in ()).throw(
+        AssertionError("the tenant was scanned"))
+
+    receipt = pipe.add([ep("I live in Berlin.")])
+
+    assert [c.id for c in receipt.reinforced] == [claim_id]
+    assert store.get_claim(claim_id).observation_count == 2
+    store.close()
+
+
+def test_a_store_without_the_reverse_index_still_reinforces():
+    """`claims_citing` is new to the protocol, and a `Store` someone else wrote must not
+    start raising on the write path because of it. The fallback scan is slower and that
+    is the whole of the difference."""
+    inner = SQLiteStore(":memory:")
+    pipe = WritePipeline(StoreWithoutReverseIndex(inner), HashingEmbedder(),
+                         PredicateRegistry(), CountingLLM())
+
+    first = pipe.add([ep("I live in Berlin.")])
+    receipt = pipe.add([ep("I live in Berlin.")])
+
+    assert [c.id for c in receipt.reinforced] == [first.added[0].id]
+    assert inner.get_claim(first.added[0].id).observation_count == 2
+    inner.close()
+
+
+def test_a_repeat_does_not_reinforce_a_claim_that_has_been_retired():
+    """`claims_citing` answers a provenance question and so includes retired claims,
+    which the scan it replaced did not. Reinforcement raises a claim's storage strength
+    so retrieval ranks it higher, and a claim nothing believes any more has no ranking to
+    raise — so the filter belongs here, on the caller, not in the store."""
+    pipe, store, _ = build()
+    first = pipe.add([ep("I live in Berlin.")])
+    claim = first.added[0]
+    store.invalidate(claim.id, utcnow(), "cl_superseded")
+
+    receipt = pipe.add([ep("I live in Berlin.")])
+
+    assert receipt.reinforced == []
+    assert receipt.skipped == 1, "the turn is still recognised as a repeat"
+    assert store.get_claim(claim.id).observation_count == 1
+    store.close()
+
+
 # --- tier 2: schema acquisition is paid for once -----------------------------
 
 def test_novel_predicate_is_classified_exactly_once():
@@ -1108,4 +1183,41 @@ def test_evidence_roles_reaches_the_gate_from_the_pipeline_constructor():
 
     default, _, _ = build()
     assert default.gate.evidence_roles == SalienceGate.DEFAULT_EVIDENCE_ROLES
+    store.close()
+
+
+def test_a_redactor_does_not_relabel_a_non_latin_turn_as_latin():
+    """The gate/fast-path script slices exist to measure how English-centric tier 1 is.
+    Redaction runs first, and a replacement token is Latin — "[redacted:phone]" is
+    thirteen Latin letters — so on a short Han turn it outvoted the real script and the
+    slice reported `latin`. The signal was wrong precisely for the deployments careful
+    enough to turn redaction on."""
+    from memvara.redact import PatternRedactor
+    from memvara.telemetry import MemoryRecorder, script_of
+
+    turn = "我住在北京，电话 555-123-4567"
+    assert script_of(turn) == "han", "fixture no longer exercises the case"
+
+    rec = MemoryRecorder()
+    pipe, store, _ = build(telemetry=rec, redactor=PatternRedactor())
+    pipe.add([ep(turn)])
+
+    assert rec.total("gate.pass", script="han") == 1
+    assert rec.total("gate.pass", script="latin") == 0
+    assert rec.total("fast.miss", script="han") == 1
+    # And the redaction still happened — this is not the fix working by not redacting.
+    assert rec.total("redact.changed") >= 1
+    store.close()
+
+
+def test_the_script_is_read_from_the_stored_turn_when_no_redactor_rewrote_it():
+    """The pre-redaction map is only populated when a redactor is configured, so the
+    unredacted path must still classify. Cheap to get wrong by making the map the only
+    source."""
+    from memvara.telemetry import MemoryRecorder
+
+    rec = MemoryRecorder()
+    pipe, store, _ = build(telemetry=rec)
+    pipe.add([ep("我住在北京")])
+    assert rec.total("gate.pass", script="han") == 1
     store.close()

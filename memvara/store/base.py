@@ -34,6 +34,22 @@ class Store(Protocol):
         """Every stored turn, optionally for one tenant. What re-embedding walks."""
         ...
 
+    def scope_episodes(self, scopes: Sequence[Scope], *, limit: int | None = None,
+                       newest_first: bool = False) -> list[Episode]:
+        """Turns visible at these scopes, in `ts` order, newest end optional.
+
+        Here because `iter_episodes` was the only listing, so a caller wanting one
+        scope's turns filtered the whole tenant in Python — which an adapter exposing a
+        session transcript does on every read, paying for the tenant's size to answer a
+        question about one session.
+
+        Matches the scopes given and does not descend into narrower ones; pass
+        `scope.ancestors()` for the widening view retrieval uses. Fails closed on an
+        empty sequence, exactly as `candidate_ids` does. `newest_first` flips the order
+        and with it the end `limit` takes from, so "the last N turns" is expressible.
+        """
+        ...
+
     # --- claims -----------------------------------------------------------
     def put_claim(self, claim: Claim) -> None: ...
     def get_claim(self, claim_id: str) -> Claim | None: ...
@@ -52,6 +68,21 @@ class Store(Protocol):
         ...
 
     def find_by_value(self, tenant: str, value_key: str) -> list[Claim]: ...
+
+    def claims_citing(self, tenant: str, episode_id: str) -> list[Claim]:
+        """Every claim whose `sources` names this turn — provenance, backwards.
+
+        In the protocol because the write path needs it on its hot path, not merely for
+        auditing: an exactly repeated turn is reinforced rather than re-extracted, and
+        finding what to reinforce without this is a scan of the tenant. Redaction makes
+        exact repeats common, since two turns differing only inside a redacted span are
+        one turn once the redactor has run, so the scan's cost rose with the store and
+        the total went quadratic.
+
+        No liveness filter: a retired claim was still extracted from that turn. Callers
+        that want only live claims say so.
+        """
+        ...
 
     def slot_history(self, tenant: str, fact_key: str) -> list[Claim]:
         """Every claim ever recorded in one slot, oldest first — the audit trail."""

@@ -66,11 +66,11 @@ import warnings
 from collections import OrderedDict
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence, cast
 
 from ..compat import NOTE_PREDICATE, note_subject
 from ..compat import ensure_note_predicate
-from ..types import Claim, as_utc
+from ..types import Claim, Result, as_utc
 from ._common import IntegrationError, bind, require, scope_kw
 
 _PKG = "crewai.memory.types"
@@ -318,6 +318,12 @@ class MemvaraStorage:
         return [c for c in self.memory.get_all(**self._kw) if self._is_record(c)]
 
     def _write(self, record: Any, *, at: datetime | None) -> None:
+        # Typed `dict[str, Any]` rather than inlined: `remember` takes `**meta`, but a
+        # dict whose value type is narrower than `Any` is checked against every named
+        # keyword it could theoretically land on, and `CREWAI_META` is a constant a
+        # checker cannot read. The annotation is the honest description of the blob and
+        # it costs no suppression.
+        meta: dict[str, Any] = {CREWAI_META: self._blob(record)}
         self.memory.remember(
             note_subject(record.id, prefix=SUBJECT_PREFIX),
             NOTE_PREDICATE,
@@ -327,7 +333,7 @@ class MemvaraStorage:
             text=record.content,
             valid_from=at, recorded_at=at,
             extractor="crewai-storage",
-            **{CREWAI_META: self._blob(record)},
+            **meta,
             **self._kw,
         )
 
@@ -376,9 +382,13 @@ class MemvaraStorage:
         if metadata_filter:
             raise CrewAICompatError(_NO_METADATA_FILTER)
         wanted = set(categories or ())
-        results = self.memory.search(
+        # `search` is typed for `Result | EpisodeResult` because `include_episodes`
+        # exists; this call never passes it, so nothing but claims can come back. A cast
+        # rather than an `isinstance` guard, because the guard's false branch would be a
+        # statement no input can reach and no test can honestly cover.
+        results = cast("list[Result]", self.memory.search(
             self._query_for(query_embedding), k=max(limit, 1) * self.oversample,
-            min_score=min_score, **self._kw)
+            min_score=min_score, **self._kw))
         out: list[tuple[Any, float]] = []
         for result in results:
             if len(out) >= limit:

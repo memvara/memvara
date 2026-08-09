@@ -57,6 +57,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from contextlib import contextmanager
+from io import BufferedRandom
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Sequence
 
 import numpy as np
@@ -83,7 +84,16 @@ if TYPE_CHECKING:  # pragma: no cover
 #    migration. The stamp still earns its place: it is what tells version 5 whether the
 #    table it is looking at was built by 4 or invented on the spot by its own
 #    `IF NOT EXISTS`, which is the distinction every backfill after this one rests on.
-SCHEMA_VERSION = 4
+# 5: provenance became reversible (`claim_sources`). The edges already existed, inside
+#    the `sources` JSON array, so this one is a pure backfill of a table that is derived
+#    from a column — and the derivation is what has to be exercised, since an empty
+#    reverse index is indistinguishable from a store where nothing cites anything.
+#
+#    The stamp is also what keeps the derived table honest across builds. A store that
+#    an older Memvara could still open would have its `sources` arrays written without
+#    the edges, and the index would be quietly wrong rather than absent; `_migrate`
+#    refuses to open a file stamped newer than this build, so that cannot happen.
+SCHEMA_VERSION = 5
 
 # Kept separate because the v1 -> v2 migration has to recreate this table: SQLite
 # cannot add a column to an existing primary key, and (tenant, name) is now the key.
@@ -154,6 +164,26 @@ CREATE INDEX IF NOT EXISTS cl_fact  ON claims(tenant, fact_key, invalidated_at);
 CREATE INDEX IF NOT EXISTS cl_value ON claims(tenant, value_key);
 CREATE INDEX IF NOT EXISTS cl_scope ON claims(tenant, usr, agent, session);
 CREATE INDEX IF NOT EXISTS cl_live  ON claims(tenant, invalidated_at, recorded_at);
+
+-- Reverse provenance: which claims cite which turn. The edges are already in
+-- `claims.sources`, but that is a JSON array in a column and there is nothing to index:
+-- SQLite has no multi-valued index, a generated column can hold one value and not a
+-- list, and a `json_each` join scans the very table it would exist to avoid (JSON1 is
+-- also not compiled into every build this library runs on). So the array stays the
+-- authority and its edges are mirrored here as rows.
+--
+-- `WITHOUT ROWID`, because the whole row is the key: the primary key btree *is* the
+-- table. With a rowid there would be three btrees to write per source instead of two,
+-- and this sits on the write path the library's whole pitch is about.
+CREATE TABLE IF NOT EXISTS claim_sources (
+    episode_id TEXT NOT NULL,
+    claim_id   TEXT NOT NULL,
+    PRIMARY KEY (episode_id, claim_id)
+) WITHOUT ROWID;
+-- The other direction, and not optional: `put_claim` re-syncs a claim's edges on every
+-- write and every erasure path deletes them, so without this each of those scans the
+-- whole table.
+CREATE INDEX IF NOT EXISTS cs_claim ON claim_sources(claim_id);
 
 CREATE TABLE IF NOT EXISTS embeddings (
     claim_id TEXT PRIMARY KEY,
@@ -236,6 +266,13 @@ _CLAIM_VALUES = ", ".join("?" * len(_CLAIM_FIELDS))
 # Upsert rather than INSERT OR REPLACE. REPLACE deletes the row and re-inserts it, which
 # assigns a *new* rowid — and the FTS row is keyed on that rowid, so every update would
 # orphan its index entry. ON CONFLICT ... DO UPDATE preserves the rowid.
+#
+# It does *not* end in `RETURNING rowid`, which would fold the `SELECT rowid` that
+# follows it in `put_claim` into one statement. Tried, and measured 39 us per claim
+# against 26 — on this table, with its four secondary indexes, a RETURNING upsert costs
+# far more than the extra primary-key lookup it saves. An isolated microbenchmark of the
+# same two shapes over an index-free table shows them equal, so the difference is the
+# indexes and not the clause; the in-situ number is the one that decides.
 _CLAIM_UPSERT = (
     f"INSERT INTO claims ({_CLAIM_COLS}) VALUES ({_CLAIM_VALUES}) "
     "ON CONFLICT(id) DO UPDATE SET "
@@ -327,7 +364,12 @@ _VEC_CENSUS = (
     + ")"
 )
 
-_VEC_MAGIC = b"ENGRMVEC"
+# Renamed with the package. Safe to change *because* an unrecognised magic is already
+# treated as a stale file and the matrix is rebuilt from SQLite — the same path a foreign
+# embedder's file takes, which `test_a_matrix_file_written_by_another_embedder_is_rebuilt`
+# covers. The cost is one O(n) rebuild the first time an existing store is opened, which
+# is release-notes-visible and cheap at the version this ships at: nothing is published.
+_VEC_MAGIC = b"MEMVAVEC"
 _VEC_FORMAT = 1
 # 64 bytes of header keeps row 0 cache-line aligned, which matters because every query
 # runs a BLAS product straight off these pages.
@@ -438,7 +480,10 @@ class _VecIndex:
         self._row: dict[str, int] = {}
         self._free: list[int] = []
         self._mat: np.ndarray | None = None
-        self._fh = None
+        # Annotated because it is initialised to None and only ever assigned a real
+        # handle later: without it every use below reads as an attribute on `None`, and
+        # that one omission was most of this module's type errors.
+        self._fh: BufferedRandom | None = None
         self._rows = 0          # capacity
         self._high = 0          # one past the highest slot ever mapped
         # Its own lock, always taken inside the store's: growth swaps the mapping out
@@ -487,6 +532,11 @@ class _VecIndex:
             self._mat = grown
             self._rows = target
             return
+        # Past the branch above there is a path, and `attach` is the only thing that sets
+        # one — so the handle it opened is there too. Named locally because the two
+        # fields move together and nothing in the types says so.
+        fh = self._fh
+        assert fh is not None
         # Extend only when a row is actually missing. Sizing from what the file already
         # holds instead would double it on *every* open, since arriving here with no
         # mapping is the normal way a store starts — and a sparse file that doubles
@@ -494,21 +544,24 @@ class _VecIndex:
         # was meant to keep openable.
         if need > self._rows:
             target = max(need, self._rows * 2, self._INITIAL_ROWS)
-            fd = self._fh.fileno()
+            fd = fh.fileno()
             size = _VEC_HEADER + target * self.dim * 4
             if size > os.fstat(fd).st_size:
                 # A write past EOF extends the file; `ftruncate` would also shorten it,
                 # and two processes growing at once would race to cut each other's rows.
                 os.pwrite(fd, b"\0", size - 1)
-        self._remap()
+        self._remap(fh)
 
-    def _remap(self) -> None:
+    def _remap(self, fh: BufferedRandom) -> None:
+        # The handle is a parameter rather than read off `self`, because a remap with no
+        # file behind it is not a state this method can do anything with.
+        assert self.dim is not None
         # Drop the old mapping first: holding both doubles the address space, and the
         # point of the exercise is that growth costs no memory.
         self._mat = None
-        size = os.fstat(self._fh.fileno()).st_size
+        size = os.fstat(fh.fileno()).st_size
         self._rows = (size - _VEC_HEADER) // (self.dim * 4)
-        self._mat = np.memmap(self._fh, dtype=np.float32, mode="r+",
+        self._mat = np.memmap(fh, dtype=np.float32, mode="r+",
                               offset=_VEC_HEADER, shape=(self._rows, self.dim))
 
     # -- mutation ------------------------------------------------------------
@@ -519,6 +572,8 @@ class _VecIndex:
             if self.dim is None:
                 self.attach(int(np.asarray(vec).reshape(-1).shape[0]), slot + 1)
             self._ensure_rows(slot + 1)
+            # `_ensure_rows` returns with a matrix or not at all, whichever branch it took.
+            assert self._mat is not None
             self._mat[slot] = vec
             self._row[item_id] = slot
             self._high = max(self._high, slot + 1)
@@ -609,6 +664,9 @@ class _VecIndex:
         indexing copies, so a broad query at 100k x 768 allocated and threw away
         307 MB, and two thirds of the query was not the product.
         """
+        # `search` has already established both, and holds the lock across this call so
+        # neither can be dropped underneath it; the assertions are what say so locally.
+        assert self._mat is not None and self.dim is not None
         if rows.shape[0] >= self._high * self._DENSE_SHARE:
             # Most of the matrix is in play: one pass over contiguous memory allocates
             # one float per row instead of one row per candidate.
@@ -656,7 +714,10 @@ class _VecIndex:
 
     def close(self) -> None:
         with self._lock:
-            if self._mat is not None and self.path is not None:
+            # `isinstance`, not `self.path is not None`: flushing is a thing a mapping
+            # can do and a heap array cannot, so ask the object rather than re-derive it
+            # from the field that decided which one was built.
+            if isinstance(self._mat, np.memmap):
                 self._mat.flush()
             self._mat = None
             if self._fh is not None:
@@ -818,6 +879,9 @@ class SQLiteStore:
         if found < SCHEMA_VERSION:
             self._migrate_to_v2()
             self._migrate_to_v3()
+            # No `_migrate_to_v4`: version 4 added a table nothing had ever written to,
+            # so its `CREATE TABLE IF NOT EXISTS` genuinely was the whole migration.
+            self._migrate_to_v5()
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _migrate_to_v2(self) -> None:
@@ -868,6 +932,40 @@ class SQLiteStore:
             "SELECT rowid, id, content FROM episodes "
             "WHERE rowid NOT IN (SELECT rowid FROM episodes_fts)"
         )
+
+    def _migrate_to_v5(self) -> None:
+        """Derive the reverse provenance index from the `sources` arrays already stored.
+
+        The DDL is not the migration here either. `CREATE TABLE IF NOT EXISTS` gives an
+        old file an *empty* `claim_sources`, and an empty reverse index is
+        indistinguishable from a store in which nothing cites anything — so every claim
+        written before this version would silently stop being reinforced when its source
+        turn arrived again, and every turn behind one would look like an orphan to
+        `erase(sources=True)`, which erases orphans. That is a wrong answer in the
+        deleting direction, which is the one that cannot be taken back.
+
+        Parsed in Python rather than through JSON1, for the reason `_orphan` used to
+        give: the extension is not compiled into every SQLite this library runs on. Read
+        a page at a time, because this is a full pass over the claims table and a store
+        large enough to need the index is large enough that `fetchall()` here is the
+        thing that stops it opening.
+
+        Shape-driven and idempotent like the two before it: a brand-new database also
+        arrives here at version 0, with no claims, and does nothing.
+        """
+        cur = self._db.execute("SELECT id, sources FROM claims WHERE sources <> '[]'")
+        while True:
+            page = cur.fetchmany(_ITER_PAGE)
+            if not page:
+                return
+            self._db.executemany(
+                # `OR IGNORE` because this runs again on every upgrade that starts below
+                # 5 — a v2 file walks the whole ladder — and a second pass must add
+                # nothing rather than raise on the primary key.
+                "INSERT OR IGNORE INTO claim_sources (episode_id, claim_id) VALUES (?,?)",
+                [(ep, r["id"]) for r in page
+                 for ep in dict.fromkeys(json.loads(r["sources"]))],
+            )
 
     # -- vector index --------------------------------------------------------
 
@@ -1225,6 +1323,60 @@ class SQLiteStore:
         for row in self._iter_rows("episodes", tenant):
             yield self._row_to_episode(row)
 
+    def scope_episodes(self, scopes: Sequence[Scope], *, limit: int | None = None,
+                       newest_first: bool = False) -> list[Episode]:
+        """The turns visible at these scopes, in `ts` order.
+
+        The listing `iter_episodes` is not. A caller wanting one scope's turns had to
+        walk the tenant and filter in Python — which LangChain's `ChatMessageHistory`
+        did on every chain invocation, so a busy tenant paid for its own size on every
+        read of a single session's history. Reading the last twenty turns of one session:
+        4.1 / 61.6 / 604 ms at 1k / 10k / 50k turns in the tenant, against 0.075 / 0.076 /
+        0.081 here. `ep_scope` ends in `ts`, and a rowid table's index carries the rowid,
+        so a single scope is answered in index order with no sort at all; several scopes
+        become one indexed range each plus a sort over what they matched.
+
+        Scope is the same `_scope_clause` claims are filtered by, deliberately rather
+        than as a shortcut: "which turns may this caller see" is one question, and a
+        second implementation of the hierarchy is how the two answers drift. It matches
+        the scopes given, exactly — it does not descend into narrower ones. A caller
+        wanting a session's turns passes that session; one wanting everything a session
+        inherits passes `scope.ancestors()`, which is what retrieval does. And it fails
+        closed on an empty list, because no scope resolved is a caller bug and matching
+        everything would hand back the tenant.
+
+        `newest_first` flips the ordering *and therefore the end `limit` takes from*,
+        which is the only useful reading: a caller filling a context window is asking for
+        the last N turns, and an ascending order with a cap would hand back the first N
+        and drop everything recent.
+
+        Ties on `ts` break on rowid, i.e. insertion order. Callers sorting in Python got
+        that free from a stable sort; leaving it to the planner instead would reorder two
+        turns the clock could not separate, and differently on different files.
+
+        Returns a list, so an uncapped call on a large scope materialises it. That is the
+        signature's choice and the reason `limit` is there; `iter_episodes` is still what
+        a whole-store walk should use.
+
+        `_iter_rows` is not reused here and does not fit: it pages on rowid, which is the
+        one ordering this must not return, and a keyset walk cannot produce `ts` order
+        without sorting the whole scope anyway.
+        """
+        sc, sp = self._scope_clause(scopes)
+        direction = "DESC" if newest_first else "ASC"
+        sql = (f"SELECT * FROM episodes WHERE {sc} "
+               f"ORDER BY ts {direction}, rowid {direction}")
+        params = list(sp)
+        if limit is not None:
+            sql += " LIMIT ?"
+            # Clamped at zero, because SQLite reads a negative LIMIT as *no* limit — so
+            # a caller whose cap came out of an arithmetic slip would get the whole scope
+            # back rather than nothing. Fail closed, as the scope clause does.
+            params.append(max(limit, 0))
+        with self._read() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [self._row_to_episode(r) for r in rows]
+
     def _iter_rows(self, table: str, tenant: str | None,
                    extra: Sequence[str] = ()) -> Iterator[sqlite3.Row]:
         """Walk a table in rowid order, a page at a time.
@@ -1303,7 +1455,58 @@ class SQLiteStore:
                 "INSERT INTO claims_fts (rowid, claim_id, text) VALUES (?,?,?)",
                 (rowid, c.id, c.text),
             )
+            self._sync_sources(c.id, c.sources)
             self._maybe_commit()
+
+    def _sync_sources(self, claim_id: str, sources: Sequence[str]) -> None:
+        """Bring one claim's rows in `claim_sources` into line with its `sources` array.
+
+        Called from the two places `sources` can change, and there are exactly two: here
+        and `reinforce`. Everything else that writes a claim — the reconciler retiring
+        one, `Reconciler.reinforce` merging provenance — comes back through `put_claim`.
+
+        Writes the difference, not the list, and that is not a micro-optimization.
+        `sources` is cumulative, so a fact restated a few hundred times carries a few
+        hundred ids, and delete-every-edge-then-reinsert rewrites all of them on every
+        observation. Re-putting a claim over a 5,000-claim store, in us per claim against
+        the same store with this method stubbed out:
+
+            sources           1      5     20    100
+            no index       20.0   22.0   21.4   26.4
+            delta          24.5   25.8   34.8   72.7
+            delete + insert 26.0   32.1   65.9  235.8
+            insert only    23.9   25.3   37.8  101.8
+
+        End to end that was the difference between 1.43 and 2.37 ms per round on a
+        workload reinforcing one claim per round for 400 rounds, against 1.17 before the
+        index existed at all. Reading the claim's own edges back is covered by `cs_claim`,
+        so finding the difference touches no table pages.
+
+        Insert-only is the cheapest column at one source and loses from five upward, and
+        it is wrong anyway: a claim can be re-put with *fewer* sources than the row
+        already has, and an edge left behind reads to `_orphan` as a live citer, which
+        keeps a turn that should have been erased. Under-erasing is the direction that
+        matters, so the delete side is not skippable.
+
+        What remains — 4.5 us for the one-source claim almost every extraction produces,
+        under 1% of an end-to-end write — is what the reverse index costs. It rises with
+        the claim's own source count, because the delta pass reads them. Worth naming
+        that the last column of that table is superlinear in the row above it too:
+        `sources` has no cap, so the JSON column is itself rewritten in full every time.
+        """
+        # De-duplicated for the same reason `reinforce` de-duplicates: a caller may hand
+        # us the same turn twice, and the primary key would reject the second.
+        want = dict.fromkeys(sources)
+        cur = self._db.cursor()
+        cur.row_factory = None  # a set of ids, not a Row per edge
+        cur.execute("SELECT episode_id FROM claim_sources WHERE claim_id=?", (claim_id,))
+        have = {r[0] for r in cur.fetchall()}
+        if add := [(ep, claim_id) for ep in want if ep not in have]:
+            self._db.executemany(
+                "INSERT INTO claim_sources (episode_id, claim_id) VALUES (?,?)", add)
+        if drop := [(claim_id, ep) for ep in have if ep not in want]:
+            self._db.executemany(
+                "DELETE FROM claim_sources WHERE claim_id=? AND episode_id=?", drop)
 
     @staticmethod
     def _row_to_claim(r: sqlite3.Row) -> Claim:
@@ -1370,6 +1573,39 @@ class SQLiteStore:
             ).fetchall()
         return [self._row_to_claim(r) for r in rows]
 
+    def claims_citing(self, tenant: str, episode_id: str) -> list[Claim]:
+        """Every claim whose `sources` names this turn — provenance, run backwards.
+
+        One indexed lookup where the only available answer used to be a scan of the
+        tenant's claims. That was affordable while the caller was erasure, which is rare;
+        it stopped being affordable when the redaction seam landed, because two turns
+        differing only inside a redacted span are one turn after the redactor has run,
+        and an exact repeat is precisely what sends the write path looking for the claims
+        a turn already produced. Per-round cost therefore rose with the store, making the
+        total quadratic: 1.57 / 2.85 / 5.52 ms per round at 100 / 200 / 400 rounds, now
+        0.26 / 0.28 / 0.28 — flat, which is the part that matters.
+
+        Joined back to `claims` rather than answered from the index alone. The array is
+        the authority and this table is derived from it, so a row that somehow outlived
+        the claim it describes must not be able to conjure one — and under-erasure, which
+        is what a phantom citer causes in `_orphan`, is the failure direction that
+        matters.
+
+        Ordered by rowid, i.e. insertion order, because callers reinforce in the order
+        they are handed and an unordered result would leave that to whichever index the
+        planner picked — a thing that changes with the data rather than with the code.
+
+        No liveness filter: this answers a provenance question, and a retired claim was
+        still extracted from that turn. Callers wanting only live claims filter.
+        """
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT c.* FROM claim_sources s JOIN claims c ON c.id = s.claim_id "
+                "WHERE s.episode_id = ? AND c.tenant = ? ORDER BY c.rowid",
+                (episode_id, tenant),
+            ).fetchall()
+        return [self._row_to_claim(r) for r in rows]
+
     def _erase_row(self, table: str, fts: str, t: _VecTable, item_id: str) -> bool:
         """Erase one row and everything derived from its text. Caller holds the lock.
 
@@ -1399,26 +1635,24 @@ class SQLiteStore:
     def _orphan(self, episode_id: str) -> bool:
         """Whether no surviving claim still cites this turn as a source.
 
-        `sources` is stored as a JSON array, so the needle is what `json.dumps` would
-        have written for this one id — quotes and escaping included — which makes the
-        substring match exact without needing the JSON1 extension, and that matters
-        because it is not compiled into every SQLite build this library runs on.
+        This was a `LIKE` scan over the `sources` JSON, with the needle's metacharacters
+        escaped by hand so that a caller-supplied `%` could not match another claim's
+        citation and leave an orphaned turn un-erased. The reverse index makes the
+        question exact rather than approximately exact, which is worth more here than
+        the speed: a substring match over JSON is one escaping bug away from the wrong
+        answer, in a method whose answer decides what gets deleted.
 
-        The LIKE metacharacters in the needle are escaped rather than trusted. Ids
-        generated here are hex and could not collide, but `sources` accepts whatever the
-        caller passed, and an unescaped `%` matches other claims' citations — which
-        would leave an orphaned turn *un*erased. Under-erasing is the failure direction
-        that matters here.
+        Joined back to `claims` for the same reason `claims_citing` is. A provenance row
+        outliving its claim would report a citer that is not there, and this is the
+        method where that reads as "keep the turn" — an under-erasure, silently.
 
-        A table scan, deliberately: there is no reverse provenance index, an erasure
-        request is rare, and being right about it is not negotiable.
+        The writer's connection, not `_read()`: the caller is mid-erasure inside the
+        write lock, and a snapshot predating the claim deleted two statements ago would
+        have that claim vote to keep its own source turn.
         """
-        needle = json.dumps(episode_id)
-        for char in ("\\", "%", "_"):
-            needle = needle.replace(char, "\\" + char)
         hit = self._db.execute(
-            "SELECT 1 FROM claims WHERE sources LIKE ? ESCAPE '\\' LIMIT 1",
-            (f"%{needle}%",)).fetchone()
+            "SELECT 1 FROM claim_sources s JOIN claims c ON c.id = s.claim_id "
+            "WHERE s.episode_id = ? LIMIT 1", (episode_id,)).fetchone()
         return hit is None
 
     def erase_claim(self, claim_id: str, *, sources: bool = False) -> bool:
@@ -1445,10 +1679,19 @@ class SQLiteStore:
         with self._lock:
             row = self._db.execute(
                 "SELECT tenant, sources FROM claims WHERE id=?", (claim_id,)).fetchone()
-            tenant = row["tenant"] if row is not None else None
-            cited = json.loads(row["sources"]) if row is not None and sources else []
-            if not self._erase_row("claims", "claims_fts", _CLAIM_VECS, claim_id):
+            if row is None:
                 return False
+            tenant: str = row["tenant"]
+            cited = json.loads(row["sources"]) if sources else []
+            # Before the claim row goes, and not as housekeeping afterwards: these rows
+            # are what `_orphan` reads three lines below to decide whether the turns this
+            # claim cited still have a citer. Left behind, the claim being erased votes
+            # to keep its own source turn alive — and `sources=True` quietly stops
+            # erasing anything.
+            self._db.execute("DELETE FROM claim_sources WHERE claim_id=?", (claim_id,))
+            # Nothing to test on the return: the row was there one statement ago, on this
+            # connection, under this lock.
+            self._erase_row("claims", "claims_fts", _CLAIM_VECS, claim_id)
             # Orphan-checked after the claim is gone, so it cannot count itself a citer.
             for episode_id in cited:
                 if self._orphan(episode_id):
@@ -1515,6 +1758,13 @@ class SQLiteStore:
                 self._db.execute(
                     f"DELETE FROM {fts} WHERE rowid IN "
                     f"(SELECT rowid FROM {table} WHERE {where})", params)
+            # Before the claims, like the FTS entries and for a related reason: the
+            # subquery names them. Nothing here is text, so this is not part of the
+            # erasure guarantee — it is what keeps the derived table from outliving what
+            # it is derived from, which `_orphan` would otherwise read as a live citer.
+            self._db.execute(
+                "DELETE FROM claim_sources WHERE claim_id IN "
+                f"(SELECT id FROM claims WHERE {where})", params)
             claims = self._db.execute(f"DELETE FROM claims WHERE {where}", params).rowcount
             episodes = self._db.execute(
                 f"DELETE FROM episodes WHERE {where}", params
@@ -1706,6 +1956,11 @@ class SQLiteStore:
                 "UPDATE claims SET salience=?, obs_count=?, sources=? WHERE id=?",
                 (salience, observation_count, json.dumps(merged), claim_id),
             )
+            # The only write of `sources` that does not go through `put_claim`, so the
+            # reverse index has to be told here too or provenance added by a
+            # reinforcement is invisible to `claims_citing` — which is the call this
+            # index exists for, on exactly the path that reinforces.
+            self._sync_sources(claim_id, merged)
             self._maybe_commit()
 
     # -- retrieval -----------------------------------------------------------

@@ -140,14 +140,23 @@ class WritePipeline:
             receipt.latency_ms = (perf_counter() - t0) * 1000.0
             return receipt
         rec = self.telemetry
+        pre_redaction_script: dict[str, str] = {}
         if self.redactor is not None:
             # First, ahead of everything, because everything else in this method is
             # downstream of the text: `ep.hash` is a stored digest of it, `add_episode`
             # writes it and indexes it for BM25, `encode` may post it to a hosted
             # embedder and `extract` may post it to a model provider. Redacting after
             # any one of those is not redacting.
+            if rec is not None:
+                # Classify *before* redacting. A replacement token is Latin —
+                # "[redacted:phone]" is thirteen Latin letters — so on a short non-Latin
+                # turn it outvotes the real script, and `_tier1` would report a Han turn
+                # as `latin`. That silently corrupts the gate/fast-path script slices,
+                # which exist precisely to measure how English-centric tier 1 is, and it
+                # does so only for deployments careful enough to enable redaction.
+                pre_redaction_script = {ep.id: script_of(ep.content) for ep in episodes}
             for ep in episodes:
-                redact_episode(self.redactor, ep)
+                redact_episode(self.redactor, ep, telemetry=rec)
 
         # -- candidate production, with no transaction open ----------------------
         # Everything slow lives here: `_tier2` makes a network round trip to a model and
@@ -163,7 +172,7 @@ class WritePipeline:
                     self.store.add_episode(ep)
 
         kept = self._tier0_near_dupes(fresh, receipt, now, pending)
-        gated, fast_claims = self._tier1(kept, receipt)
+        gated, fast_claims = self._tier1(kept, receipt, pre_redaction_script)
         llm_claims = self._tier2(gated, receipt, now)
 
         # Reconcile in input order so a batch containing two claims for the same slot
@@ -180,7 +189,7 @@ class WritePipeline:
             # transitivity — and so a rule tightened for claim objects but not for prose
             # still applies where the value actually lands.
             for claim in candidates:
-                redact_claim(self.redactor, claim)
+                redact_claim(self.redactor, claim, telemetry=rec)
 
         # -- the one transaction that spans claim state --------------------------
         # Still one transaction rather than one per claim: a transcript writes a claim
@@ -228,7 +237,7 @@ class WritePipeline:
             # The door `remember()`, `supersede()` and the importer come through, where
             # the value arrives as a structured field and never was a conversation turn.
             # Before `reconciler.apply`, which derives both keys from these strings.
-            redact_claim(self.redactor, claim)
+            redact_claim(self.redactor, claim, telemetry=self.telemetry)
         if claim.derivation is Derivation.LLM_EXTRACT and not claim.extractor:
             # Still at the dataclass default, so nobody claimed authorship: this came in
             # through the API and the provenance should say so.
@@ -285,9 +294,16 @@ class WritePipeline:
     def _reinforcements_from_source(self, ep: Episode, now) -> list[_Reinforcement]:
         """Every claim that already cites this episode, queued for a bump.
 
-        Linear in the tenant's claim count: the Store protocol carries no reverse
-        provenance index and inventing one is outside this subsystem's ownership. It runs
-        only on exact repeats, which is the cheap case to begin with.
+        One indexed lookup where this used to scan the tenant's claims. The scan was
+        defensible while exact repeats were rare; the redaction seam is what stopped them
+        being rare, because two turns differing only inside a redacted span hash
+        identically once the redactor has run, and that is this branch. Its cost rose
+        with the store, so a redacting workload's total cost was quadratic — 1.57 / 2.85 /
+        5.52 ms per round at 100 / 200 / 400 rounds, against 0.26 / 0.28 / 0.28 now.
+
+        Behind `getattr` because `claims_citing` is new to the `Store` protocol and a
+        third-party store predating it must keep working rather than raise on the write
+        path. Same pattern as `_transaction`.
         """
         # `ep.ts`, not `now`: the observation happened when the turn was uttered.
         # Stamping wall-clock time here would mark every turn of a replayed historical
@@ -295,8 +311,17 @@ class WritePipeline:
         # exists to reconstruct. Clamped so a turn dated in the future cannot push the
         # trace clock ahead.
         at = min(ep.ts, now)
-        return [(c, [ep.id], at) for c in self.store.iter_claims(ep.scope.tenant)
-                if ep.id in c.sources]
+        citing = getattr(self.store, "claims_citing", None)
+        if citing is None:
+            found: Iterable[Claim] = (c for c in self.store.iter_claims(ep.scope.tenant)
+                                      if ep.id in c.sources)
+        else:
+            found = citing(ep.scope.tenant, ep.id)
+        # Retired claims are skipped, which is what the scan did — `iter_claims` excludes
+        # them by default — and is the behaviour worth keeping: reinforcement raises a
+        # claim's storage strength so retrieval ranks it higher, and a claim nothing
+        # believes any more has no ranking to raise.
+        return [(c, [ep.id], at) for c in found if c.invalidated_at is None]
 
     def _tier0_near_dupes(self, episodes: Sequence[Episode], receipt: WriteReceipt,
                           now, pending: list[_Reinforcement]) -> list[Episode]:
@@ -343,9 +368,11 @@ class WritePipeline:
 
     # -- tier 1 ---------------------------------------------------------------
 
-    def _tier1(self, episodes: Sequence[Episode],
-               receipt: WriteReceipt) -> tuple[list[Episode], dict[str, list[Claim]]]:
+    def _tier1(self, episodes: Sequence[Episode], receipt: WriteReceipt,
+               scripts: Mapping[str, str] | None = None,
+               ) -> tuple[list[Episode], dict[str, list[Claim]]]:
         rec = self.telemetry
+        scripts = scripts or {}
         gated: list[Episode] = []
         fast_claims: dict[str, list[Claim]] = {}
         for ep in episodes:
@@ -356,7 +383,8 @@ class WritePipeline:
             # turn costs a model call. Neither is visible without the script slice, so
             # "the write path is cheap" stays an unqualified claim when it may only be
             # true for Latin-script users.
-            script = script_of(ep.content) if rec is not None else ""
+            # The pre-redaction reading when there is one; see `add`.
+            script = "" if rec is None else scripts.get(ep.id) or script_of(ep.content)
             if not ok:
                 receipt.skipped += 1
                 if rec is not None:

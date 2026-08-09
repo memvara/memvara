@@ -99,7 +99,8 @@ class OpenAILLM:
         # Imported here, not at module scope, so `import memvara` works in the default
         # offline configuration where the SDK is not installed at all.
         try:
-            import openai
+            # The whole point is that this is absent in the default install.
+            import openai  # type: ignore[import-not-found]
         except ImportError as exc:
             raise ImportError(
                 "OpenAILLM needs the `openai` package: pip install 'memvara[openai]'. "

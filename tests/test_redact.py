@@ -20,6 +20,12 @@ Then contract-shaped things: provenance still resolves, the two documented costs
 (collapsing hashes, collapsing values) are real and asserted rather than hedged, and the
 unset path is booby-trapped the way `tests/test_telemetry.py` booby-traps telemetry.
 
+Last, the seventh silent failure. A policy whose rules stop matching the data raises
+nothing and *speeds the write path up*, so the only evidence is aggregate:
+`redact.inspected` against `redact.changed`, per field and per script. Those tests are
+the counterpart to `test_telemetry.py::test_every_silent_failure_mode_has_a_live_series`
+and they live here because the emission point is the seam rather than the pipeline.
+
 Fully offline: `SQLiteStore(":memory:")`, `HashingEmbedder`, and local fakes.
 """
 
@@ -44,9 +50,21 @@ from memvara.redact import (
     redact_claim,
     redact_episode,
 )
+from memvara.telemetry import (
+    REDACT_CHANGED,
+    REDACT_INSPECTED,
+    MemoryRecorder,
+    script_of,
+)
 
 RAW_EMAIL = "bob.smith@corp.example"
 RAW_PHONE = "555-123-4567"
+
+#: A Japanese mobile number, punctuated exactly like the Latin one above and grouped
+#: 3-4-4 instead of 3-3-4. `_PHONE` matches the second and not the first, which makes
+#: this the cheapest honest example of the failure the telemetry exists to catch: not an
+#: exotic input, just a locale whose formatting convention differs by one digit.
+RAW_JP_TURN = "私の電話は090-1234-5678です"
 
 
 # ===========================================================================
@@ -488,6 +506,132 @@ def test_the_helpers_rewrite_in_place_so_no_returned_object_holds_the_raw_text()
 
 
 # ===========================================================================
+# The seventh silent failure: a policy that has quietly stopped matching
+# ===========================================================================
+
+def turn(text: str) -> Episode:
+    return Episode(content=text, scope=Scope("t", "alice"))
+
+
+def claim_of(obj: str, predicate: str = "contact_at") -> Claim:
+    return Claim(subject="user", predicate=predicate, object=obj, scope=Scope("t", "alice"))
+
+
+def test_the_seam_reports_what_it_offered_the_policy_and_what_came_back_changed():
+    """The pair, on the two doors. Neither number is readable alone — see
+    `telemetry.REDACT_INSPECTED` — but a policy that inspected four strings and rewrote
+    two of them is a policy demonstrably still doing something, which is the one thing no
+    receipt, log line or exception in this library can tell you."""
+    rec = MemoryRecorder()
+    r = PatternRedactor()
+
+    redact_episode(r, turn(f"call me at {RAW_PHONE}"), telemetry=rec)
+    redact_claim(r, claim_of(RAW_PHONE), telemetry=rec)
+
+    # One episode field plus a claim's three: four strings looked at.
+    assert rec.total(REDACT_INSPECTED) == 4
+    assert rec.total(REDACT_INSPECTED, field=EPISODE) == 1
+    # The turn, the claim's object, and the rendering that repeats it.
+    assert rec.total(REDACT_CHANGED) == 3
+    assert rec.total(REDACT_CHANGED, field=CLAIM_OBJECT) == 1
+    assert rec.total(REDACT_CHANGED, field=CLAIM_TEXT) == 1
+
+
+def test_a_policy_that_matched_nothing_reports_a_zero_rather_than_no_series_at_all():
+    """The `consolidate.merged` decision, applied where it matters more.
+
+    Zero redactions is the *normal* day for most tenants, so the zero is not an alarm.
+    What makes it worth emitting is the state it excludes: a series sitting at 0 says a
+    policy ran and found nothing, and no series at all says nothing ran — a deployment
+    that lost its `redactor=`, which is silent, raises nothing and makes writes faster.
+    Only the reported zero distinguishes those two.
+    """
+    rec = MemoryRecorder()
+    redact_episode(PatternRedactor(), turn("I live in Berlin"), telemetry=rec)
+
+    assert rec.total(REDACT_CHANGED) == 0
+    assert REDACT_CHANGED in rec.names()          # reported, not absent
+    assert rec.total(REDACT_INSPECTED) == 1
+
+
+def test_the_script_slice_names_the_population_a_rule_set_does_not_cover():
+    """The failure this exists for, in its cheapest real form.
+
+    Both turns state a phone number and both are punctuated with plain hyphens. The
+    Latin one groups 3-3-4 and is removed; the Japanese one groups 3-4-4, which `_PHONE`
+    has no branch for, and goes to disk verbatim. On the aggregate the policy looks
+    healthy — it changed half of what it saw. Sliced by script it is 1-of-1 for one
+    population and 0-of-1 for the other, which is the finding.
+    """
+    rec = MemoryRecorder()
+    r = PatternRedactor()
+    latin, kana = turn(f"call me at {RAW_PHONE}"), turn(RAW_JP_TURN)
+
+    redact_episode(r, latin, telemetry=rec)
+    redact_episode(r, kana, telemetry=rec)
+
+    assert rec.total(REDACT_CHANGED) == 1 and rec.total(REDACT_INSPECTED) == 2
+    assert rec.total(REDACT_INSPECTED, script="latin") == 1
+    assert rec.total(REDACT_CHANGED, script="latin") == 1
+    assert rec.total(REDACT_INSPECTED, script="kana") == 1
+    assert rec.total(REDACT_CHANGED, script="kana") == 0
+    # And the number really is still there, which is the point of the whole exercise.
+    assert kana.content == RAW_JP_TURN
+
+
+def test_the_script_is_taken_from_the_text_offered_not_from_the_policys_own_token():
+    """A replacement token is Latin. On a short non-Latin turn its letters outvote the
+    real ones, so classifying the *output* would file the han slice's own successes under
+    latin and leave the slice reporting that nothing from that population is ever
+    inspected — the exact blindness it was added to remove."""
+    rec = MemoryRecorder()
+    han = turn("我住在北京，电话 555-123-4567")
+
+    redact_episode(PatternRedactor(), han, telemetry=rec)
+
+    assert rec.total(REDACT_INSPECTED, script="han") == 1
+    assert rec.total(REDACT_CHANGED, script="han") == 1
+    assert rec.total(REDACT_INSPECTED, script="latin") == 0
+    assert script_of(han.content) == "latin"      # the output really does read Latin
+
+
+def test_the_field_slice_is_what_makes_a_half_redacted_row_visible():
+    """One number per claim would average this away. A policy configured per field —
+    which is why `field` is in the protocol at all — can remove a value from
+    `claim.object` and leave it standing in `claim.text`, which is the string BM25
+    indexes and the embedder encodes. Two fields, two rates, and the gap is the row."""
+
+    class ObjectOnly:
+        def redact(self, text: str, /, *, field: str, scope: Scope) -> str:
+            return "[withheld]" if field == CLAIM_OBJECT else text
+
+    rec = MemoryRecorder()
+    c = claim_of(RAW_PHONE)
+    redact_claim(ObjectOnly(), c, telemetry=rec)
+
+    assert rec.total(REDACT_CHANGED, field=CLAIM_OBJECT) == 1
+    assert rec.total(REDACT_CHANGED, field=CLAIM_TEXT) == 0
+    assert rec.total(REDACT_INSPECTED, field=CLAIM_TEXT) == 1
+    assert RAW_PHONE in c.text and c.object == "[withheld]"
+
+
+def test_no_policy_configured_means_no_policy_metrics():
+    """The absence is deliberate and is itself the signal. A deployment that never asked
+    for redaction should not pay `script_of` on every field to be told so, and an
+    operator reading a dashboard should see the series appear when a policy is installed
+    and vanish when one is dropped — which is the alert for the blunter half of this
+    failure mode."""
+    rec = MemoryRecorder()
+    mem = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice",
+                  telemetry=rec)
+    mem.add("call me at 555-123-4567")
+    mem.remember("user", "phone", RAW_PHONE)
+
+    assert [n for n in rec.names() if n.startswith("redact.")] == []
+    mem.close()
+
+
+# ===========================================================================
 # Cost when unset
 # ===========================================================================
 
@@ -593,3 +737,93 @@ def test_redacting_is_a_small_fraction_of_the_write_it_guards():
     assert redacting < unset * 1.6, (
         f"redacting={redacting * 1000:.3f}ms against unset={unset * 1000:.3f}ms — "
         "the seam has stopped being a rounding error on the write it guards")
+
+
+def test_no_telemetry_work_happens_while_redacting_without_a_recorder(monkeypatch):
+    """The mechanism half of the telemetry cost claim, and the half that cannot be flaky.
+
+    The complement of the test above it: there the *redactor* is unset, here it is
+    configured and running and the *recorder* is not. That is the ordinary shape of a
+    deployment that redacts and does not collect metrics, and it must pay for exactly the
+    three statements it paid for before the series existed. Booby-trap the classification
+    and the whole measured branch, then drive all four write doors with a live policy:
+    reaching either is the bug.
+    """
+
+    def boom(*a, **kw):
+        raise AssertionError("telemetry work ran with no recorder configured")
+
+    monkeypatch.setattr("memvara.redact.script_of", boom)
+    monkeypatch.setattr("memvara.redact._measured", boom)
+
+    mem = memory(redactor=PatternRedactor(), llm=RecordingLLM())
+    mem.add([f"call me at {RAW_PHONE}", "ok thanks", "something else entirely"])
+    source = Episode(content=f"mail {RAW_EMAIL}", scope=mem.default_scope)
+    [claim] = mem.remember("user", "drinks", "coffee", sources=[source]).added
+    mem.supersede(claim.id, Claim(subject="user", predicate="drinks", object="tea",
+                                  scope=mem.default_scope))
+    mem.writer.assert_claim(Claim(subject="user", predicate="likes", object="rain",
+                                  scope=mem.default_scope))
+    assert [e.content for e in mem.store.iter_episodes()][:1] == [
+        "call me at [redacted:phone]"]           # the policy really did run
+    mem.close()
+
+
+def _seam(redactor: Redactor, rec, i: int) -> float:
+    """Seconds for the redaction one `_round` above pays for, telemetry included.
+
+    Built outside the timer so the arms differ by the measurement and nothing else.
+    """
+    turns = [Episode(content=t, scope=Scope("t", "alice")) for t in (
+        f"My name is Alice number {i}.",
+        f"Turn {i}: reach me on 555-123-{i:04d} or at alice{i}@corp.example.",
+        f"Some unremarkable turn {i} that carries a statement.")]
+    claims = [claim_of(f"555-123-{i:04d}"), claim_of(f"B-{i:06d}", "badge")]
+    t0 = perf_counter()
+    for ep in turns:
+        redact_episode(redactor, ep, telemetry=rec)
+    for claim in claims:
+        redact_claim(redactor, claim, telemetry=rec)
+    return perf_counter() - t0
+
+
+def test_measuring_the_seam_costs_a_fraction_of_the_write_the_seam_guards():
+    """The measurement half.
+
+    The unset arm is enforced structurally above rather than by a stopwatch, on the same
+    reasoning as everywhere else here: it is one `is not None` test and its cost is under
+    any timer this suite could run without measuring the machine. Measured out of tree
+    instead, against a build of this tree with the seam's telemetry — the import, the
+    `_measured` helper, the branch and the four `telemetry=` arguments — deleted from the
+    source and nothing else changed. 200 rounds of `_round` above into a fresh in-memory
+    store, `HashingEmbedder(dim=64)`, `NullLLM`, `PatternRedactor` on in every arm, best
+    of five trials per launch, median over eight process launches per arm, on a developer
+    machine running three other workstreams' test suites:
+
+        no telemetry in the seam, no recorder    1.5221 ms/round  (range 1.4296-1.5656)
+        seam telemetry present, no recorder      1.5120 ms/round  (-0.7%, 1.4392-1.6018)
+        no telemetry in the seam, recording      1.5645 ms/round
+        seam telemetry present, recording        1.6034 ms/round  (+2.5% on that arm)
+
+    The unset arm's median is *below* the control's and its whole range sits inside the
+    control's own launch-to-launch range, which is the useful form of the result rather
+    than a flattering one: the difference is under the noise floor, not merely small. The
+    recording arm's +2.5% is almost entirely `script_of`, measured directly at 5.64 us for
+    a 59-character turn against 0.78 us for the two counter calls it feeds — the tags cost
+    more than the emission, which is the honest way round for a slice nobody can
+    reconstruct afterwards.
+
+    What is stable enough to assert in-tree is the bound that matters: the whole measured
+    seam stays a small fraction of the write it guards. Rounds are interleaved so a
+    scheduler excursion hits both arms, and the minimum is taken because noise only adds.
+    """
+    mem, r, rec = memory(redactor=PatternRedactor()), PatternRedactor(), MemoryRecorder()
+    _round(mem, 0), _seam(r, rec, 0)                  # warm both, measure neither
+    write = measured = float("inf")
+    for i in range(1, 41):
+        write = min(write, _round(mem, i))
+        measured = min(measured, _seam(r, rec, i))
+    mem.close()
+    assert measured < write * 0.20, (
+        f"seam+telemetry={measured * 1000:.3f}ms against write={write * 1000:.3f}ms — "
+        "watching the redactor has stopped being a rounding error on the write")

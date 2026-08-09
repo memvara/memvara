@@ -74,9 +74,12 @@ class Sweep:
         # than of dict iteration.
         self._dirty: dict[str, Claim] = {}
         if telemetry is not None:
-            self._observe_slots()
+            # Handed the recorder rather than reading it back off `self`: the guard is
+            # right here, and passing what it just proved non-`None` is what lets the
+            # signature say so instead of re-testing it inside.
+            self._observe_slots(telemetry)
 
-    def _observe_slots(self) -> None:
+    def _observe_slots(self, rec: Recorder) -> None:
         """How crowded the slots are — the metric to build if only one gets built.
 
         Live claims per concept is the number that would have caught the worst defect in
@@ -97,7 +100,6 @@ class Sweep:
         per_slot: dict[str, int] = {}
         for claim in self.claims:
             per_slot[claim.fact_key] = per_slot.get(claim.fact_key, 0) + 1
-        rec = self.telemetry
         rec.gauge(CONSOLIDATE_CLAIMS_PER_SLOT, float(max(per_slot.values(), default=0)))
         rec.gauge(CONSOLIDATE_CROWDED_SLOTS,
                   float(sum(1 for n in per_slot.values() if n > CROWDED_SLOT)))

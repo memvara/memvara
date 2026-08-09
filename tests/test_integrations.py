@@ -495,6 +495,141 @@ def test_the_transcript_is_scoped_to_this_session_and_reaches_nothing_sideways(
     assert two.messages == []
 
 
+# --- how the transcript is read out of the store -------------------------------------
+#
+# `messages` is the hot path: a chain reads it once per invocation. It used to mean
+# walking every turn in the tenant and filtering in Python, so one chat turn cost
+# O(everything everyone in that tenant had ever said). `Store.scope_episodes` moves the
+# filter and the cap into the store, and the `getattr` in front of it is what keeps a
+# store that never implements it working. Both paths therefore need a store of their
+# own: one `SQLiteStore` cannot be both, and "whichever one it happens to be today" is
+# how a fallback stops being tested without anything failing.
+
+
+class _WithScopeEpisodes:
+    """A `Store` implementing P-2, spelled straight out of the pinned signature.
+
+    Episodes whose scope is *exactly* one of `scopes`, in `ts` order, `newest_first`
+    deciding which end `limit` counts from. Everything else delegates. It records its
+    calls, so a test can assert the cap was pushed down rather than applied afterwards
+    on a list the store had already built.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.calls = []
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def scope_episodes(self, scopes, *, limit=None, newest_first=False):
+        self.calls.append((list(scopes), limit, newest_first))
+        wanted = set(scopes)
+        turns = sorted((e for e in self.inner.iter_episodes() if e.scope in wanted),
+                       key=lambda e: e.ts, reverse=newest_first)
+        return turns[:limit] if limit else turns
+
+
+class _WithoutScopeEpisodes:
+    """A `Store` that has not grown P-2 — the third party the `getattr` exists for.
+
+    Explicit rather than leaning on `SQLiteStore` not having the method yet. The day it
+    does, a fallback covered only that way stops being covered, and nothing here fails
+    — the bill arrives from a store that lives in someone else's repo.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.walked = 0
+
+    def __getattr__(self, name):
+        if name == "scope_episodes":
+            raise AttributeError(name)
+        return getattr(self.inner, name)
+
+    def iter_episodes(self, tenant=None):
+        self.walked += 1
+        return self.inner.iter_episodes(tenant)
+
+
+def test_a_store_that_can_scope_its_episodes_is_asked_to_rather_than_walked(
+        mem, monkeypatch):
+    """The cost every LangChain app was paying. One chain invocation reads `messages`
+    once, and reading it by walking `iter_episodes(tenant)` makes a single chat turn
+    scale with everything every other session in that tenant ever said — so the app
+    slows down because somebody else's users got busy."""
+    install_langchain(monkeypatch)
+    history = lc.MemvaraChatMessageHistory(mem, session="s1", limit=3,
+                                           transcript_warning=False)
+    history.add_messages([fake_messages_module().HumanMessage(content=f"turn {i}")
+                          for i in range(8)])
+    mem.store = _WithScopeEpisodes(mem.store)
+    assert [m.content for m in history.messages] == ["turn 5", "turn 6", "turn 7"]
+    scopes, limit, newest_first = mem.store.calls[0]
+    assert scopes == [Scope("default", "alice", None, "s1")]
+    # The cap goes down with the query. Applied up here instead, the store would still
+    # have built every turn in the scope in order to throw all but three of them away.
+    assert (limit, newest_first) == (3, True)
+
+
+def test_a_store_without_scope_episodes_still_serves_a_transcript(mem, monkeypatch):
+    """`scope_episodes` is an optional `Store` capability, reached the way `core.py`
+    reaches `batch` and `clear_embeddings`. A store outside this repo that never grows
+    it has to keep working — slower, but working, and without an AttributeError from
+    inside somebody's chain."""
+    install_langchain(monkeypatch)
+    history = lc.MemvaraChatMessageHistory(mem, session="s1", limit=2,
+                                           transcript_warning=False)
+    history.add_messages([fake_messages_module().HumanMessage(content=f"turn {i}")
+                          for i in range(4)])
+    mem.store = _WithoutScopeEpisodes(mem.store)
+    assert [m.content for m in history.messages] == ["turn 2", "turn 3"]
+    assert mem.store.walked == 1            # the tenant walk, taken because it had to be
+
+
+def test_both_ways_of_reading_the_transcript_return_the_same_transcript(
+        mem, monkeypatch):
+    """Two paths that disagree are worse than the slow one on its own: every store in
+    this repo takes the fast one and everyone else's takes the fallback, so a divergence
+    arrives as a bug report nobody here can reproduce. `limit=0` is in the sweep because
+    it is the one value that changes which arguments the store is given."""
+    install_langchain(monkeypatch)
+    messages = fake_messages_module()
+    writer = lc.MemvaraChatMessageHistory(mem, session="s1", transcript_warning=False)
+    writer.add_messages([messages.HumanMessage(content=f"turn {i}") for i in range(5)])
+    mem.add("a turn a cron job wrote", session="s1")
+    expected = [f"turn {i}" for i in range(5)] + ["a turn a cron job wrote"]
+    raw = mem.store
+    for limit, wanted in ((0, expected), (3, expected[-3:]), (100, expected)):
+        history = lc.MemvaraChatMessageHistory(mem, session="s1", limit=limit,
+                                               transcript_warning=False)
+        mem.store = _WithScopeEpisodes(raw)
+        fast = [m.content for m in history.messages]
+        mem.store = _WithoutScopeEpisodes(raw)
+        assert fast == [m.content for m in history.messages] == wanted
+    mem.store = raw
+
+
+def test_a_sibling_agents_turn_in_the_same_session_is_not_in_this_transcript(
+        mem, monkeypatch):
+    """What this read used to do, and why it stopped. `Scope.contains` treats an unset
+    field as a wildcard, so a history bound to `alice/*/s1` collected turns written at
+    `alice/researcher/s1` — turns the *same object's* `search()` cannot reach, because
+    retrieval resolves scope through `Scope.ancestors()` and that walks strictly upward.
+    One object answering two different questions about what is in scope is the defect;
+    the transcript now reports exactly the scope it writes to, on both paths."""
+    install_langchain(monkeypatch)
+    history = lc.MemvaraChatMessageHistory(mem, session="s1", transcript_warning=False)
+    history.add_messages([fake_messages_module().HumanMessage(content="said here")])
+    mem.add("Zyxwvu, said by an agent in this session", agent="researcher", session="s1")
+    assert [m.content for m in history.messages] == ["said here"]
+    mem.store = _WithScopeEpisodes(mem.store)
+    assert [m.content for m in history.messages] == ["said here"]
+    # The half of this object that was already that strict.
+    assert [r for r in history.search("Zyxwvu", include_episodes=True)
+            if "Zyxwvu" in r.text] == []
+
+
 def test_limit_keeps_the_most_recent_turns_and_zero_means_all(mem, monkeypatch):
     install_langchain(monkeypatch)
     messages = fake_messages_module()

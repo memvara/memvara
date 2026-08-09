@@ -45,7 +45,7 @@ from __future__ import annotations
 import warnings
 from datetime import timedelta
 from functools import lru_cache
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from ..types import Episode, utcnow
 from ._common import IntegrationError, bind, require, result_metadata, scope_kw
@@ -200,18 +200,37 @@ class _ChatHistory:
     def _stored_turns(self) -> list[Episode]:
         """This scope's turns, oldest last, capped at `limit`.
 
-        Scope containment rather than equality, so a history bound to a session shows
-        that session and nothing beside it — not the user's other sessions, and not the
-        user-level turns a background job wrote, because neither was said *here*.
+        Exactly this scope — not the subtree under it, which is what the `Scope.contains`
+        filter here used to mean. The narrowing settles a disagreement inside one object:
+        `search()` and `recall()` resolve scope through `Scope.ancestors()`, which walks
+        strictly upward, so a turn written at `t/alice/researcher/s1` is invisible to the
+        retrieval half of a history bound to `t/alice/*/s1` — and was in the transcript
+        half anyway. Two readers on one object answering different questions about what
+        is in scope is the bug. `add_messages` writes at exactly `self.scope`, so that is
+        the set `messages` reports, and the promise the docstring already made — that
+        session and nothing beside it — is kept more strictly than before.
 
-        The cost is honest and worth stating: `iter_episodes` walks the tenant, so this
-        is O(turns in the tenant) per read and a chain reads it once per invocation.
-        Memvara has no scoped, ordered episode enumeration to call instead; that gap is
-        reported rather than worked around with a cache that another process could make
-        stale.
+        `Store.scope_episodes` does the filter and the cap in the store. It is reached
+        through `getattr` because it is an optional capability, the pattern `core.py`
+        uses for `batch` and `clear_embeddings`: a third-party `Store` that does not have
+        it still works, and gets the fallback below. That fallback walks the whole
+        tenant, which is O(turns in the tenant) on a path a chain takes once per
+        invocation — the cost `scope_episodes` exists to retire.
         """
+        scoped = getattr(self.memory.store, "scope_episodes", None)
+        if scoped is not None:
+            # `newest_first` is how `limit` means "the most recent N"; a transcript reads
+            # oldest-first, so the page comes back reversed. Reversing recovers ascending
+            # order, and the stable sort behind it costs nothing at this size while
+            # making the order this method promises independent of how any one store
+            # spells its ORDER BY.
+            turns: list[Episode] = scoped(
+                [self.scope], limit=self.limit or None, newest_first=True)
+            turns.reverse()
+            turns.sort(key=lambda e: e.ts)
+            return turns
         turns = [e for e in self.memory.store.iter_episodes(self.scope.tenant)
-                 if self.scope.contains(e.scope)]
+                 if e.scope == self.scope]
         # Sorted on `ts` alone, and the omission is deliberate: `list.sort` is stable, so
         # turns with equal timestamps keep the order the store returned them in, which is
         # insertion order. Adding `id` as a tie-break would replace that with a uuid
@@ -222,6 +241,11 @@ class _ChatHistory:
     @property
     def messages(self) -> list[Any]:
         """The stored turns of this scope, as LangChain messages.
+
+        Of *this* scope exactly — the one this history writes to. Turns a narrower scope
+        holds are not in here, including a turn written by a named agent inside the same
+        session, which is the one case that used to slip through; `search()` on this
+        object could not see it either, and the two halves now agree.
 
         Lossy in two directions, both named by `MemvaraTranscriptWarning`. The claims
         memvara extracted, what they superseded and where they came from are not
@@ -352,6 +376,26 @@ class _Retriever:
     That is also why there is no `__init__` here — pydantic owns construction, and a
     mixin `__init__` would win the MRO and break it.
     """
+
+    if TYPE_CHECKING:  # pragma: no cover
+        # For the type checker only, and the guard is load-bearing rather than tidy.
+        # Pydantic v2 collects a model's fields from the annotations of every class in
+        # the MRO, mixins included — measured on 2.12.5: annotating these for real here
+        # reorders the composed model's fields, and any name this mixin declared that
+        # `_retriever_class` did not would become a *required* field of it, demanded by
+        # a class that owns no construction and can give it no default. Under
+        # `TYPE_CHECKING` nothing reaches `__annotations__` at runtime, so the composed
+        # class stays the single declaration site.
+        memory: Any
+        tenant: Any
+        user: Any
+        agent: Any
+        session: Any
+        k: int
+        min_score: float
+        as_of: Any
+        memory_types: Any
+        include_episodes: bool
 
     def _memvara(self) -> tuple[Any, Any]:
         return bind(self.memory, tenant=self.tenant, user=self.user, agent=self.agent,

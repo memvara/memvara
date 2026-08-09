@@ -247,7 +247,7 @@ class FastExtractor:
                 m = rule.pattern.search(clause)
                 if m is None:
                     continue
-                triples = []
+                triples: list[tuple[str, str, int]] = []
                 for group, predicate, polarity in rule.outputs:
                     value = _clean_object(m.group(group) or "")
                     if value is None:

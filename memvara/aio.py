@@ -54,12 +54,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence, overload
 
 from .core import Memvara, Messages
 from .embed import Embedder
 from .retrieve import Retrieved
-from .types import Claim, Episode, MemoryType, Provenance, Scope, WriteReceipt
+from .types import Claim, Episode, MemoryType, Provenance, Result, Scope, WriteReceipt
 
 
 class AsyncMemvara:
@@ -164,11 +164,36 @@ class AsyncMemvara:
 
     # -- reading -------------------------------------------------------------
 
+    # Mirrored from `Memvara.search`, overloads included — "same name, same arguments,
+    # same return value" is the promise this class makes, and a return type that is
+    # precise on one facade and a union on the other breaks it in the way that costs
+    # most: awaiting the wrapper would be the version you have to narrow.
+    @overload
+    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     tenant=..., user=..., agent=..., session=...,
+                     as_of: datetime | None = ..., include_invalidated: bool = ...,
+                     memory_types: Sequence[MemoryType] | None = ...,
+                     include_episodes: Literal[False] = ...) -> list[Result]: ...
+
+    @overload
+    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     tenant=..., user=..., agent=..., session=...,
+                     as_of: datetime | None = ..., include_invalidated: bool = ...,
+                     memory_types: Sequence[MemoryType] | None = ...,
+                     include_episodes: Literal[True]) -> list[Retrieved]: ...
+
+    @overload
+    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     tenant=..., user=..., agent=..., session=...,
+                     as_of: datetime | None = ..., include_invalidated: bool = ...,
+                     memory_types: Sequence[MemoryType] | None = ...,
+                     include_episodes: bool) -> list[Retrieved]: ...
+
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                      tenant=None, user=None, agent=None, session=None,
                      as_of: datetime | None = None, include_invalidated: bool = False,
                      memory_types: Sequence[MemoryType] | None = None,
-                     include_episodes: bool = False) -> list[Retrieved]:
+                     include_episodes: bool = False) -> list[Any]:
         """See `Memvara.search`. Encodes the query, so it belongs off the loop too."""
         return await asyncio.to_thread(
             self.memvara.search, query, k=k, min_score=min_score, tenant=tenant,

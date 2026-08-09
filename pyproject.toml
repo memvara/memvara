@@ -30,7 +30,7 @@ crewai = ["crewai>=1.10.1"]
 # line. `memvara[server]` used to name those and imply they were required, which was
 # misleading; `http` is reserved for the REST layer that will actually need them.
 http = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2.6"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "coverage>=7.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "coverage>=7.0", "mypy>=1.8"]
 # Only for bench/mem0_real.py, the head-to-head against the real package.
 # `nltk` only for `--stem`: published LOCOMO F1 uses Porter stemming, so an
 # unstemmed number is not comparable to the papers.

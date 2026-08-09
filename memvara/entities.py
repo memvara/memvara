@@ -249,9 +249,12 @@ class EntityRegistry:
         if target is not None:
             spec = self._specs[owner][target]
             return self._counted(EntityResolution(spec.key, spec.canonical, "alias", True))
-        spec = self._specs.get(owner, {}).get(key)
-        if spec is not None:
-            return self._counted(EntityResolution(spec.key, spec.canonical, "known", True))
+        # A separate name from the alias branch's `spec`: that one is a direct index and
+        # cannot be None, this one is a lookup that can be. Sharing the name made the
+        # variable's type the union of the two, which is neither of the things it holds.
+        known = self._specs.get(owner, {}).get(key)
+        if known is not None:
+            return self._counted(EntityResolution(known.key, known.canonical, "known", True))
         display = " ".join(surface.split())
         if register:
             self._register(owner, EntitySpec(key, display))

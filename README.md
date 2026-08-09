@@ -434,10 +434,21 @@ mind — the spacing effect, which an exponential-decay-plus-flat-bump scheme ge
 
 ### It says when it is failing
 
-Six things can go wrong here without raising anything: predicate explosion, reinforcement
-that never refreshes recency, flip-flop growth, salience overriding relevance, a gate
-tuned for English silently dropping other scripts, and a retraction that quietly no-ops.
-Each now has a metric series.
+Seven things can go wrong here without raising anything: predicate explosion,
+reinforcement that never refreshes recency, flip-flop growth, salience overriding
+relevance, a gate tuned for English silently dropping other scripts, a retraction that
+quietly no-ops, and a **redaction policy that stops matching**. Each has a metric series.
+
+The last one is the nastiest and the newest. A deployment configures a `Redactor`, it
+works, and then the data drifts — a new phone format, a different locale, a vendor
+changing an id shape. Nothing raises, nothing logs, and the write path gets *faster*. The
+only symptom is unredacted PII on disk, found by an auditor. So `redact.inspected` and
+`redact.changed` are emitted as a **pair**, tagged by field and by script: a count of
+redactions alone cannot be read, because "zero today" is the silent failure and the
+normal case at once. It is the *ratio*, sliced by script, that shows a rule set matching
+a steady fraction of one population and nothing of another —
+`私の電話は090-1234-5678です` is punctuated exactly like `555-123-4567` but grouped
+3-4-4, so a rule written for the second misses the first entirely.
 
 ```python
 from memvara import Memvara, MemoryRecorder
@@ -726,13 +737,14 @@ looking at a top-k, and nothing ever looks again.
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 1,680 tests, offline, no API key
+python3 -m pytest -q                              # 2,092 tests, offline, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison
 PYTHONPATH=. python3 bench/perf.py                # throughput and scaling
 ```
 
-**100% statement coverage, enforced** (`fail_under = 100`). The suite runs in about 17
+**100% statement coverage, enforced** (`fail_under = 100`), and `mypy -p memvara` is
+clean in CI. The suite runs in about 21
 seconds with no network, no API key, and almost no sleeping — time is controlled by
 passing explicit `datetime` values rather than patching the clock, and the handful of
 tests that do sleep are measuring concurrency, where the wall clock is the thing under

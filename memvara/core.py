@@ -28,7 +28,7 @@ import warnings
 from contextlib import nullcontext
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Literal, Mapping, Sequence, overload
 
 from .consolidate import Consolidator
 from .embed import Embedder, default_embedder
@@ -52,6 +52,7 @@ from .types import (
     Episode,
     MemoryType,
     Provenance,
+    Result,
     Scope,
     WriteReceipt,
     utcnow,
@@ -618,14 +619,25 @@ class Memvara:
             # provenance to an imported memory. Before the store and before
             # `_index_episodes` encodes it, for the reasons in `memvara.redact`.
             for ep in episodes:
-                redact_episode(self.redactor, ep)
+                redact_episode(self.redactor, ep,
+                               telemetry=self.writer.telemetry)
         batch = getattr(self.store, "batch", None)
         with (batch() if batch is not None else nullcontext()):
             for ep in episodes:
                 self.store.add_episode(ep)
             if retire is not None:
-                self.store.invalidate(retire.id, at, claim.id)
-                self.store.set_valid_to(retire.id, at)
+                # `at` is never actually `None` here — `supersede`, the only caller that
+                # passes `retire`, defaults it to the new claim's `recorded_at` — but the
+                # signature cannot say "these two arrive together" and the consequence of
+                # a `None` slipping through is not a crash: `Store.invalidate` would
+                # write a NULL `invalidated_at`, which reads as *not retired*, and
+                # `set_valid_to(None)` would reopen the interval. A supersession that
+                # leaves two live values is the exact failure the transaction below
+                # exists to prevent, so the fallback is the same instant `supersede`
+                # computes rather than a cast.
+                when = at if at is not None else claim.recorded_at
+                self.store.invalidate(retire.id, when, claim.id)
+                self.store.set_valid_to(retire.id, when)
             receipt = self.writer.assert_claim(claim)
             # Indexed on the same terms `add()` indexes its turns. Costs one encode per
             # turn, and skipping it would make a turn stored this way findable by text
@@ -724,11 +736,43 @@ class Memvara:
 
     # -- reading -------------------------------------------------------------
 
+    # `include_episodes` decides what kind of thing comes back, so it decides the return
+    # type too. Stated as one signature this method returned `list[Retrieved]` — the
+    # union — to everyone, including the overwhelming majority of callers who never ask
+    # for episodes and can never receive one; they were made to narrow a union that
+    # cannot occur before touching `.claim`. Cosmetic while the annotations stopped at
+    # the source tree, and not cosmetic since `py.typed` started shipping: this is now
+    # the first thing a typed caller meets.
+    #
+    # Three variants rather than two, because the third is the one that keeps a
+    # *forwarding* caller working — `recall()` below, and any wrapper holding a runtime
+    # bool. Dropping it would turn "pass the flag through" into a type error.
+    @overload
+    def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
+               user=..., agent=..., session=..., as_of: datetime | None = ...,
+               include_invalidated: bool = ...,
+               memory_types: Sequence[MemoryType] | None = ...,
+               include_episodes: Literal[False] = ...) -> list[Result]: ...
+
+    @overload
+    def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
+               user=..., agent=..., session=..., as_of: datetime | None = ...,
+               include_invalidated: bool = ...,
+               memory_types: Sequence[MemoryType] | None = ...,
+               include_episodes: Literal[True]) -> list[Retrieved]: ...
+
+    @overload
+    def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
+               user=..., agent=..., session=..., as_of: datetime | None = ...,
+               include_invalidated: bool = ...,
+               memory_types: Sequence[MemoryType] | None = ...,
+               include_episodes: bool) -> list[Retrieved]: ...
+
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0, tenant=None,
                user=None, agent=None, session=None, as_of: datetime | None = None,
                include_invalidated: bool = False,
                memory_types: Sequence[MemoryType] | None = None,
-               include_episodes: bool = False) -> list[Retrieved]:
+               include_episodes: bool = False) -> list[Any]:
         """Hybrid retrieval over current belief, or over belief as of a past instant.
 
         `min_score` is a floor on `Result.score`, which is normalized into [0, 1]. The
@@ -744,6 +788,11 @@ class Memvara:
         `EpisodeResult` rather than `Result`, so a caller can never mistake one for a
         fact; they are down-weighted and capped (see `HybridRetriever.w_episode` and
         `max_episodes`).
+
+        The return type follows that flag: `list[Result]` without it, `list[Retrieved]`
+        with it. `list[Any]` here is the implementation signature, which an overloaded
+        function cannot make narrower than every variant it serves; the three overloads
+        above are the surface.
         """
         scope = self._scope(tenant, user, agent, session)
         return self.reader.search(
@@ -765,7 +814,7 @@ class Memvara:
         claim = self.store.get_claim(claim_id)
         if claim is None:
             return None
-        if not self._scope(tenant, user, agent, session).contains(claim.scope):
+        if not self._scope(tenant, user, agent, session).sees(claim.scope):
             return None
         return claim
 
@@ -967,9 +1016,17 @@ class Memvara:
         ids = self.store.candidate_ids(
             scope.ancestors(), as_of=as_of, include_invalidated=include_invalidated)
         claims = list(self.store.get_claims(ids).values())
-        # Sort id-ascending first; the stable sort below then breaks timestamp ties
-        # deterministically instead of exposing whatever order SQLite returned.
-        claims.sort(key=lambda c: c.id)
+        # Content first, id only to make the order total; the stable sort below then
+        # breaks timestamp ties on that instead of on whatever order SQLite returned.
+        #
+        # Ties here are the common case, not the corner: one `add()` stamps every claim
+        # it extracts with the same `recorded_at`, to the microsecond. Sorting those on
+        # `id` alone looked deterministic and was not — a claim id is a `uuid4` minted
+        # per ingest, so six ingests of one three-fact corpus produced five different
+        # orderings of `get_all()`. Same defect the ranking tiebreak was fixed for, same
+        # fix: `value_key` is derived from the claim's content, so identical data comes
+        # back in an identical order in every store that holds it.
+        claims.sort(key=lambda c: (c.value_key, c.id))
         claims.sort(key=lambda c: c.recorded_at, reverse=True)
         return claims
 
@@ -1004,7 +1061,7 @@ class Memvara:
         claim = self.store.get_claim(claim_id)
         if claim is None:
             return None
-        if not self._scope(tenant, user, agent, session).contains(claim.scope):
+        if not self._scope(tenant, user, agent, session).sees(claim.scope):
             return None
         episodes = [e for e in (self.store.get_episode(s) for s in claim.sources)
                     if e is not None]
@@ -1214,10 +1271,31 @@ class ScopedMemvara:
 
     # -- reading -------------------------------------------------------------
 
+    # Same three variants as `Memvara.search`, for the same reason. A view that widened
+    # the type back to the union would be the more-convenient object that types worse,
+    # and this is the one the MCP server and every integration holds.
+    @overload
+    def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               as_of: datetime | None = ..., include_invalidated: bool = ...,
+               memory_types: Sequence[MemoryType] | None = ...,
+               include_episodes: Literal[False] = ...) -> list[Result]: ...
+
+    @overload
+    def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               as_of: datetime | None = ..., include_invalidated: bool = ...,
+               memory_types: Sequence[MemoryType] | None = ...,
+               include_episodes: Literal[True]) -> list[Retrieved]: ...
+
+    @overload
+    def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               as_of: datetime | None = ..., include_invalidated: bool = ...,
+               memory_types: Sequence[MemoryType] | None = ...,
+               include_episodes: bool) -> list[Retrieved]: ...
+
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                as_of: datetime | None = None, include_invalidated: bool = False,
                memory_types: Sequence[MemoryType] | None = None,
-               include_episodes: bool = False) -> list[Retrieved]:
+               include_episodes: bool = False) -> list[Any]:
         return self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
                                 include_invalidated=include_invalidated,
                                 memory_types=memory_types,

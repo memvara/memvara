@@ -13,6 +13,12 @@ file's job is to hold two claims true:
    measurably cheaper than the recording one, which is what fails if a hook ever
    becomes unconditional.
 
+A seventh silent failure arrived with the redaction seam — a configured `Redactor` whose
+rules stop matching the data, which raises nothing and makes the write path faster. Its
+names (`redact.inspected`, `redact.changed`) are in the catalogue checked here; its
+emission point is the seam rather than any subsystem this file builds, so the workload
+proving it lives in `tests/test_redact.py` alongside the rest of the redaction contract.
+
 Runs fully offline: `SQLiteStore(":memory:")`, `HashingEmbedder`, and a local fake LLM.
 """
 
@@ -43,6 +49,8 @@ from memvara.telemetry import (
     GATE_DROP,
     GATE_PASS,
     PREDICATE_LEARNED,
+    REDACT_CHANGED,
+    REDACT_INSPECTED,
     RETRIEVAL_LATENCY_MS,
     RETRIEVAL_OBSERVATION_RANK_CORR,
     RETRIEVAL_QUALITY_FACTOR,
@@ -249,6 +257,17 @@ def test_the_catalogue_is_enumerable_and_every_name_is_namespaced():
     assert all(n.islower() and "." in n for n in names)
     for expected in (GATE_DROP, RETRIEVAL_QUALITY_FACTOR, CONSOLIDATE_CLAIMS_PER_SLOT):
         assert expected in names
+
+
+def test_a_series_defined_for_another_module_is_still_in_this_modules_catalogue():
+    """`series_names()` is what a dashboard, a metrics-proxy allow-list or a release
+    check reads instead of grepping for string literals, so a name that lives here and
+    is emitted somewhere else has to enumerate like any other. The redaction pair is the
+    first of those: `memvara.redact` emits it, this module owns the spelling, and a
+    constant defined at the emission point instead would be invisible to every consumer
+    of the catalogue."""
+    names = list(series_names())
+    assert REDACT_INSPECTED in names and REDACT_CHANGED in names
 
 
 def test_a_recorder_that_raises_is_not_swallowed():

@@ -499,6 +499,81 @@ def test_a_future_turn_is_invisible_to_a_present_query(store):
     assert store.lexical_search_episodes("kafka", [SCOPE], limit=10) == []
 
 
+# --- Scoped episode listing --------------------------------------------------
+#
+# `iter_episodes` was the only listing, so a caller wanting one scope's turns walked the
+# tenant and filtered in Python — which an adapter exposing a session transcript does on
+# every read. These pin the ordering, the cap, and the isolation, in that order of how
+# easy they are to get quietly wrong.
+
+def test_scope_episodes_returns_only_the_scopes_asked_for(store):
+    """Not the caller's siblings and not their neighbours. Raw turn text is the more
+    sensitive of the two things this store holds, so a listing that leaked sideways
+    would hand one session's transcript to another."""
+    mine = turn(store, content="mine", scope=MINE)
+    turn(store, content="sibling session", scope=SIBLING_SESSION)
+    turn(store, content="sibling agent", scope=SIBLING_AGENT)
+    turn(store, content="other tenant", scope=OTHER_TENANT)
+
+    assert [e.id for e in store.scope_episodes([MINE])] == [mine.id]
+
+
+def test_scope_episodes_does_not_descend_into_narrower_scopes(store):
+    """The hierarchy widens upward and this listing does not walk it in either
+    direction: it matches what it is given. A caller wanting the inherited view passes
+    `ancestors()`, which is the same thing retrieval passes, rather than hoping this
+    method guesses which direction it meant."""
+    user_level = turn(store, content="written by a background job", scope=Scope("acme", "alice"))
+    session = turn(store, content="said in the session", scope=MINE)
+
+    assert [e.id for e in store.scope_episodes([Scope("acme", "alice")])] == [user_level.id]
+    assert {e.id for e in store.scope_episodes(MINE.ancestors())} == {user_level.id, session.id}
+
+
+def test_scope_episodes_fails_closed_on_an_empty_scope_list(store):
+    """The same fail-closed as `candidate_ids`, and it matters more here: an empty scope
+    list means no scope was resolved, and the generous reading of that hands back every
+    turn in the tenant."""
+    turn(store, content="hello")
+    assert store.scope_episodes([]) == []
+
+
+def test_scope_episodes_orders_by_ts_and_can_take_the_newest_end(store):
+    """`newest_first` flips which end `limit` takes from, and that is the whole point of
+    it: a caller filling a context window wants the last N turns, and an ascending order
+    with a cap hands back the first N and drops everything recent."""
+    first = turn(store, content="first", ts=T0)
+    middle = turn(store, content="middle", ts=TMID)
+    last = turn(store, content="last", ts=T1)
+
+    assert [e.id for e in store.scope_episodes([SCOPE])] == [first.id, middle.id, last.id]
+    assert [e.id for e in store.scope_episodes([SCOPE], newest_first=True)] \
+        == [last.id, middle.id, first.id]
+    assert [e.id for e in store.scope_episodes([SCOPE], limit=2)] == [first.id, middle.id]
+    assert [e.id for e in store.scope_episodes([SCOPE], limit=2, newest_first=True)] \
+        == [last.id, middle.id]
+
+
+def test_scope_episodes_breaks_ts_ties_on_insertion_order(store):
+    """Callers doing this in Python got insertion order free from a stable sort. Left to
+    the query planner, two turns the clock could not separate come back in whatever order
+    the pages happen to be in — and differently on different files."""
+    ids = [turn(store, content=f"turn {i}", ts=T0).id for i in range(5)]
+    assert [e.id for e in store.scope_episodes([SCOPE])] == ids
+    assert [e.id for e in store.scope_episodes([SCOPE], newest_first=True)] == ids[::-1]
+    assert [e.id for e in store.scope_episodes([SCOPE], limit=2, newest_first=True)] \
+        == ids[:-3:-1], "and the cap takes the newest of the tied turns, not the first"
+
+
+def test_scope_episodes_reads_a_negative_limit_as_none_rather_than_all(store):
+    """SQLite reads a negative LIMIT as *no* limit, so a cap that came out of an
+    arithmetic slip would return the whole scope instead of nothing. Fail closed, like
+    the scope clause above it."""
+    turn(store, content="hello")
+    assert store.scope_episodes([SCOPE], limit=-1) == []
+    assert store.scope_episodes([SCOPE], limit=0) == []
+
+
 # --- Scope resolution -------------------------------------------------------
 
 def test_candidate_ids_matches_scopes_exactly(store):
@@ -1017,6 +1092,239 @@ def test_erase_rolls_back_with_its_batch(store, emb):
     assert store._vec.get(c.id) is not None
     assert [h[0] for h in store.vector_search(
         emb.encode(["user lives in Berlin"])[0], [SCOPE], limit=1)] == [c.id]
+
+
+# --- Reverse provenance ------------------------------------------------------
+#
+# `claim_sources` is derived data: the authority is the `sources` array on the claim, and
+# this table mirrors its edges so "which claims came from this turn?" is a lookup rather
+# than a scan of the tenant. Two properties have to hold, and the second is the one with
+# teeth. It must be *complete*, or the write path stops reinforcing and `erase(
+# sources=True)` deletes turns other claims still cite. And it must not outlive what it
+# describes, because a row that survives an erasure reads to `_orphan` as a live citer —
+# the same shape as the entities bug wave 4 found, one table over.
+
+def provenance(store) -> set[tuple[str, str]]:
+    """The edges actually stored."""
+    return {(r[0], r[1]) for r in store._db.execute(
+        "SELECT episode_id, claim_id FROM claim_sources")}
+
+
+def implied(store) -> set[tuple[str, str]]:
+    """The edges the surviving claims say there should be."""
+    return {(source, c.id)
+            for c in store.iter_claims(include_invalidated=True) for source in c.sources}
+
+
+def test_claims_citing_returns_what_was_extracted_from_one_turn(store):
+    ep_a, ep_b = turn(store, content="a"), turn(store, content="b")
+    here = put(store, sources=[ep_a.id])
+    both = put(store, predicate="works_at", object="Acme", sources=[ep_a.id, ep_b.id])
+    put(store, predicate="likes", object="rain", sources=[ep_b.id])
+
+    assert {c.id for c in store.claims_citing("acme", ep_a.id)} == {here.id, both.id}
+    assert store.claims_citing("acme", "ep_never_stored") == []
+
+
+def test_claims_citing_is_tenant_scoped(store):
+    """Provenance ids are opaque and a caller could hold one from anywhere. Answering
+    across tenants would let a claim id from one customer be confirmed by another."""
+    ep = turn(store, content="shared id")
+    mine = put(store, sources=[ep.id])
+    put(store, scope=Scope("globex", "alice"), sources=[ep.id])
+    assert [c.id for c in store.claims_citing("acme", ep.id)] == [mine.id]
+
+
+def test_claims_citing_includes_a_retired_claim(store):
+    """No liveness filter, deliberately: a claim that was superseded last week was still
+    extracted from that turn, and `why()` has to keep answering for it. Callers wanting
+    only live claims say so — the write path does."""
+    ep = turn(store, content="I live in Berlin")
+    c = put(store, sources=[ep.id])
+    store.invalidate(c.id, T1, "cl_later")
+    assert [x.id for x in store.claims_citing("acme", ep.id)] == [c.id]
+
+
+def test_claims_citing_sees_provenance_added_by_reinforce(store):
+    """`reinforce` is the one write of `sources` that does not go through `put_claim`,
+    so it is the one place the index can silently stop being told — on the path that
+    exists to record repeated observations, which is exactly what this index serves."""
+    old, fresh = turn(store, content="first"), turn(store, content="again")
+    c = put(store, sources=[old.id])
+    store.reinforce(c.id, salience=1.5, observation_count=2, sources=[fresh.id])
+
+    assert [x.id for x in store.claims_citing("acme", fresh.id)] == [c.id]
+    assert [x.id for x in store.claims_citing("acme", old.id)] == [c.id]
+    assert provenance(store) == implied(store)
+
+
+def test_a_re_put_that_drops_a_source_drops_its_edge(store):
+    """The reason the sync cannot be insert-only. An edge left behind after a claim
+    stops citing a turn reads to `_orphan` as a live citer, so the turn survives an
+    erasure that should have taken it — under-erasing, silently."""
+    kept, dropped = turn(store, content="kept"), turn(store, content="dropped")
+    c = put(store, sources=[kept.id, dropped.id])
+    c.sources = [kept.id]
+    store.put_claim(c)
+
+    assert store.claims_citing("acme", dropped.id) == []
+    assert [x.id for x in store.claims_citing("acme", kept.id)] == [c.id]
+    assert provenance(store) == implied(store)
+
+
+def test_a_claim_citing_one_turn_twice_is_stored_once(store):
+    """`sources` is whatever the caller passed, and the edge table has a primary key
+    over the pair. A caller repeating an id must not take the write down."""
+    ep = turn(store, content="once")
+    c = put(store, sources=[ep.id, ep.id])
+    assert [x.id for x in store.claims_citing("acme", ep.id)] == [c.id]
+    assert provenance(store) == {(ep.id, c.id)}
+
+
+def test_re_putting_an_unchanged_claim_leaves_its_edges_alone(store):
+    """The shape every retirement and every reinforcement takes: the claim is rewritten
+    with the sources it already had. Nothing to add and nothing to drop."""
+    ep = turn(store, content="once")
+    c = put(store, sources=[ep.id])
+    store.put_claim(c)
+    assert provenance(store) == {(ep.id, c.id)}
+
+
+def test_erasing_a_claim_takes_its_provenance_with_it(store, emb):
+    """The fourth-table trap. Wave 4 found `entities` surviving a purge that reported
+    per-table counts as evidence; this is the same mistake one table over, and it does
+    more than leave a row behind — the erased claim goes on voting to keep its own
+    source turn alive, so `sources=True` quietly stops erasing anything."""
+    ep = turn(store, emb, content="the kafka pipeline is being sunset")
+    c = put(store, emb, sources=[ep.id])
+
+    assert store.erase_claim(c.id, sources=True) is True
+
+    assert provenance(store) == set() == implied(store)
+    assert store.get_episode(ep.id) is None, "the last citer must take the turn with it"
+
+
+def test_purge_takes_the_provenance_of_every_claim_it_erases(store, emb):
+    """Set-based deletion is the path that forgets a side table, because nothing walks
+    the rows one at a time to remind you they exist."""
+    ep = turn(store, emb, content="I live in Berlin")
+    put(store, emb, sources=[ep.id])
+    put(store, emb, predicate="works_at", object="Acme", sources=[ep.id])
+    survivor_turn = turn(store, emb, content="elsewhere", scope=Scope("globex", "bob"))
+    survivor = put(store, emb, scope=Scope("globex", "bob"), sources=[survivor_turn.id])
+
+    store.purge(Scope("acme"))
+
+    assert provenance(store) == {(survivor_turn.id, survivor.id)} == implied(store)
+
+
+def test_purging_one_scope_leaves_a_neighbours_citation_intact(store, emb):
+    """Provenance is allowed to dangle — a purge can take a turn a claim in another
+    scope still cites, and wave 3 settled that erasure is not the moment to discover
+    that by raising. What must not happen is the *claim's* edge disappearing with it,
+    because then the surviving claim's `sources` and the index disagree."""
+    ep = turn(store, emb, content="shared", scope=Scope("acme", "alice"))
+    other = put(store, emb, scope=Scope("acme", "bob"), sources=[ep.id])
+
+    store.purge(Scope("acme", "alice"))
+
+    assert store.get_episode(ep.id) is None
+    assert [c.id for c in store.claims_citing("acme", ep.id)] == [other.id]
+    assert provenance(store) == implied(store)
+
+
+def write_v4(path: str) -> tuple[str, str]:
+    """A store as the previous release left it: claims with `sources`, no edge table.
+
+    Built with this code and then cut back, like `write_v2` — every other table's DDL is
+    byte-identical to today's, so the absence of `claim_sources` plus the stamp is the
+    whole difference.
+    """
+    with SQLiteStore(path) as s:
+        ep = turn(s, content="the kafka pipeline is being sunset")
+        c = put(s, sources=[ep.id, ep.id])
+        put(s, predicate="likes", object="rain")      # no sources: nothing to backfill
+    raw = sqlite3.connect(path)
+    raw.execute("DROP TABLE claim_sources")
+    raw.execute("PRAGMA user_version = 4")
+    raw.commit()
+    raw.close()
+    return ep.id, c.id
+
+
+def test_a_v4_file_gets_its_provenance_backfilled_and_is_restamped(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` makes the table and leaves it empty, and an empty
+    reverse index is indistinguishable from a store in which nothing cites anything. So
+    every pre-v5 claim would stop being reinforced when its turn came round again, and
+    every turn behind one would look like an orphan to `erase(sources=True)` — a wrong
+    answer in the deleting direction."""
+    path = str(tmp_path / "v4.db")
+    ep_id, claim_id = write_v4(path)
+    with SQLiteStore(path) as s:
+        assert int(s._db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
+        assert [c.id for c in s.claims_citing("acme", ep_id)] == [claim_id]
+        assert provenance(s) == implied(s)
+
+
+def test_the_v5_backfill_is_idempotent(tmp_path):
+    """It is stamped, and idempotent anyway: a file that starts below 4 walks the whole
+    ladder, so this runs again on an upgrade that has already done it."""
+    path = str(tmp_path / "v4.db")
+    ep_id, claim_id = write_v4(path)
+    for _ in range(2):
+        with SQLiteStore(path) as s:
+            assert [c.id for c in s.claims_citing("acme", ep_id)] == [claim_id]
+
+
+def test_a_migrated_store_erases_a_backfilled_turn_correctly(tmp_path):
+    """The backfill is only worth having if erasure believes it. Before it, the one
+    claim citing this turn was invisible to `_orphan`, which would have called the turn
+    an orphan and deleted it out from under a claim that still pointed at it."""
+    path = str(tmp_path / "v4.db")
+    ep_id, claim_id = write_v4(path)
+    with SQLiteStore(path) as s:
+        extra = put(s, predicate="note", object="n", sources=[ep_id])
+        s.erase_claim(extra.id, sources=True)
+        assert s.get_episode(ep_id) is not None, "the backfilled claim still cites it"
+        s.erase_claim(claim_id, sources=True)
+        assert s.get_episode(ep_id) is None, "and the last citer takes it"
+
+
+def test_the_backfill_pages_rather_than_loading_every_claim(tmp_path):
+    """A store large enough to need the index is large enough that reading every claim's
+    `sources` into one list is what stops it opening. Asserted as a ratio, like the
+    `iter_episodes` walk: at small sizes the fixed cost of one page dominates and any
+    byte threshold would be measuring the page."""
+    import tracemalloc
+
+    def peak_opening(rows: int) -> int:
+        path = str(tmp_path / f"v4_{rows}.db")
+        with SQLiteStore(path) as s, s.batch():
+            for i in range(rows):
+                s.put_claim(claim(predicate=f"p{i}", sources=[f"ep_{i}_{j}"
+                                                             for j in range(8)]))
+        raw = sqlite3.connect(path)
+        raw.execute("DROP TABLE claim_sources")
+        raw.execute("PRAGMA user_version = 4")
+        raw.commit()
+        raw.close()
+
+        tracemalloc.start()
+        with SQLiteStore(path) as s:
+            _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        assert len(provenance_of(path)) == rows * 8, "the backfill lost edges"
+        return peak
+
+    small = peak_opening(1000)
+    large = peak_opening(4000)
+    assert large < small * 2, (
+        f"peak grew {large / small:.1f}x for 4x the claims — that is materialisation")
+
+
+def provenance_of(path: str) -> set[tuple[str, str]]:
+    with SQLiteStore(path) as s:
+        return provenance(s)
 
 
 # --- Resolved entities ------------------------------------------------------

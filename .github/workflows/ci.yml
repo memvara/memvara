@@ -70,6 +70,25 @@ jobs:
           python -m coverage run -m pytest -q
           python -m coverage report
 
+  types:
+    # The package ships `py.typed`, so these annotations are what a user's checker
+    # consumes — and `search()` is `@overload`ed, which is the kind of declaration that
+    # can be wrong in a way no runtime test notices: a bad overload type-checks a call
+    # that then fails. The overload tests skip without mypy installed, so without this
+    # job they were enforced only on machines that happened to have it.
+    name: mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - run: python -m mypy -p memvara
+
   offline:
     # The headline claim is "numpy and nothing else, runs offline with no API key". That
     # is worth testing rather than asserting: install the bare package with no extras and

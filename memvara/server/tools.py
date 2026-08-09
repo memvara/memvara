@@ -335,7 +335,12 @@ def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
         return (f"Retired claim {claim_id}. It no longer answers questions; "
                 "memory_history still shows it.")
 
-    retired = ctx.memory.forget(args["subject"], predicate)
+    # `predicate` is a validated string here: the guard above rejected both-or-neither,
+    # and the branch above consumed the claim_id case. That is a relationship between
+    # two variables rather than a fact about one, so no narrowing can reach it — the
+    # suppression is on this line only, and turning the guard into something a checker
+    # could follow would mean an unreachable third branch nothing executes.
+    retired = ctx.memory.forget(args["subject"], predicate)  # type: ignore[arg-type]
     if not retired:
         return (f"Nothing to forget: no live value for {args['subject']}/{predicate}. "
                 "Check the predicate spelling with memory_search.")

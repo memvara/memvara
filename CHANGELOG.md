@@ -9,6 +9,23 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### BREAKING
+
+- **`get()` and `why()` are now scope-checked by the same rule as `get_all()`.** They
+  authorized with `Scope.contains`, where an unset field is a wildcard reaching
+  *downward*; enumeration uses `Scope.ancestors()`, which reaches only upward. The two
+  disagreed in four of seven scope shapes, so a handle could `get()` a claim that
+  `get_all()` on the identical handle would not return — and with agents isolated by
+  `agent=`, a session-scoped handle could read a sibling agent's claim by id. Ids are not
+  secret: receipts, `invalidated_by` pointers, results and logs all leak them.
+  `get(id)`/`why(id)` now return `None` when the claim was written at a **deeper** scope
+  than the reader's handle. `forget()` and `history()` keep the downward reach on
+  purpose — a `fact_key` ignores agent and session, so a user-level `forget` is meant to
+  retire what its sessions wrote.
+- **The vector matrix header changed** from `ENGRMVEC` to `MEMVAVEC` with the rename. No
+  action needed: an unrecognised magic is already treated as a stale file and the matrix
+  is rebuilt from SQLite. Costs one O(n) rebuild the first time an existing store opens.
+
 ### Changed
 
 - **Renamed `engram` to `memvara`** — package, class (`Engram` → `Memvara`), env vars

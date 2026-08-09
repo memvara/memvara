@@ -153,8 +153,19 @@ def write_note(mem: Memvara, claim: Claim, episode: Episode, *,
     with mem.store.batch():
         mem.store.add_episode(episode)
         if retire is not None:
-            mem.store.invalidate(retire.id, at, claim.id)
+            # `retire` and `at` arrive as independent optionals, so `retire=old` with no
+            # `at` is a legal call — and passing that `None` straight through is not a
+            # no-op, it is corruption in both directions. `invalidate(id, None)` writes a
+            # NULL `invalidated_at`, which reads as *not retired* while
+            # `invalidated_by` says otherwise; and `set_valid_to(id, None)` does not
+            # merely fail to close the interval, it **reopens** one that was already
+            # closed. The row then asserts "superseded by X" and "still live" at once.
+            # Today the reconciler happens to rescue the note path a moment later,
+            # because the note predicate is single-valued and `assert_claim` supersedes
+            # through the same slot — correct by accident, from two statements away.
+            when = at if at is not None else claim.recorded_at
+            mem.store.invalidate(retire.id, when, claim.id)
             # Both axes together: committed separately, an `as_of` query between the two
             # sees a claim that is retracted and still in force.
-            mem.store.set_valid_to(retire.id, at)
+            mem.store.set_valid_to(retire.id, when)
         return mem.writer.assert_claim(claim)

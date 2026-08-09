@@ -344,7 +344,8 @@ class Reconciler:
         # older statement is history, not news. Splitting here keeps `remember(
         # valid_from=...)`'s documented promise of honest historical import; without it,
         # importing a user's past silently rewrites their present.
-        older, newer = [], []
+        older: list[Claim] = []
+        newer: list[Claim] = []
         for c in sorted(victims.values(), key=lambda c: (c.recorded_at, c.id)):
             (newer if c.valid_from > claim.valid_from else older).append(c)
         return older, newer

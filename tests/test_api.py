@@ -10,7 +10,12 @@ correctness — the code did what it said, and what it said was misleading:
   scope) either did not exist or had to be spelled out four keyword arguments at a time.
 """
 
+import importlib.util
 import json
+import os
+import pathlib
+import re
+import subprocess
 import sys
 import types
 import warnings
@@ -25,10 +30,12 @@ from memvara import (
     DegradedExtractionWarning,
     EmbedderChangedWarning,
     EmbedderMismatchError,
+    EpisodeResult,
     Memvara,
     Episode,
     HashingEmbedder,
     NullLLM,
+    Result,
     Scope,
     SQLiteStore,
     utcnow,
@@ -1336,3 +1343,245 @@ def test_a_scoped_view_exposes_the_memvara_underneath(mem):
     scoped.add("I live in Oslo")
     assert [c.object for c in scoped.get_all()] == ["Oslo"]
     assert mem.get_all() == []
+
+
+# =============================================================================
+# What a caller's type checker is told
+# =============================================================================
+#
+# `search()` used to be annotated `-> list[Retrieved]`, i.e. `Result | EpisodeResult`,
+# whatever was asked for — so a caller who never opted into episodes still had to narrow
+# a union before reaching `.claim`, for a case that cannot occur. That was a cosmetic
+# imprecision for as long as the annotations stopped at this repository, and stopped
+# being one the moment `py.typed` shipped: it is now the first thing a typed caller
+# meets.
+#
+# The fix is `@overload`, and an overload is a promise a test suite can otherwise not
+# see at all — it is erased before a single statement runs, so every runtime assertion
+# in this file would pass just as happily against a *wrong* one. A wrong overload is
+# worse than none: it certifies a call that fails at runtime. So the checker itself is
+# the assertion, run in a subprocess against this working tree, exactly as
+# `test_packaging.py` runs a fresh interpreter to ask what a fresh interpreter does.
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+
+needs_mypy = pytest.mark.skipif(
+    importlib.util.find_spec("mypy") is None,
+    reason="mypy is not installed (pip install mypy); the annotations are unchecked here")
+
+#: (expression, the type its caller should be told it has). One probe module for all of
+#: them rather than one per case: mypy start-up dominates the cost, so a dozen processes
+#: would turn a few-second test into a slow one for no extra evidence.
+_INFERENCE = [
+    # The default, and the whole point: no union to narrow.
+    ("mem.search('q')", "list[Result]"),
+    ("mem.search('q', include_episodes=False)", "list[Result]"),
+    # Asked for, so the union is real and the caller is told to expect it.
+    ("mem.search('q', include_episodes=True)", "list[Result | EpisodeResult]"),
+    # A flag forwarded from somewhere else — `recall()` does exactly this. Without a
+    # third `bool` overload this is not a wider type, it is "no overload variant
+    # matches", which would break every wrapper in the package.
+    ("mem.search('q', include_episodes=flag)", "list[Result | EpisodeResult]"),
+    ("view.search('q')", "list[Result]"),
+    ("view.search('q', include_episodes=True)", "list[Result | EpisodeResult]"),
+    ("await amem.search('q')", "list[Result]"),
+    ("await amem.search('q', include_episodes=True)", "list[Result | EpisodeResult]"),
+    # The retriever underneath carries the same overloads, so a wrapper written against
+    # it inherits them instead of re-deriving the union.
+    ("reader.search('q', scope)", "list[Result]"),
+    ("reader.search('q', scope, include_episodes=True)", "list[Result | EpisodeResult]"),
+    # The two neighbours worth checking precisely because they are *not* overloaded:
+    # neither one's return type depends on a flag, and adding overloads to them would be
+    # ceremony. `recall()` renders to text whatever it retrieved; `get_all()` reads
+    # claims and never looks at an episode.
+    ("mem.recall('q', include_episodes=True)", "str"),
+    ("mem.get_all(include_invalidated=True)", "list[Claim]"),
+]
+
+#: Uses that must *not* type-check, with the error code mypy should report. The half
+#: that catches an overload which is merely too generous: `list[Result]` everywhere
+#: would satisfy every assertion above and quietly certify the first line here.
+_MISUSE = [
+    ("mem.search('q', include_episodes=True)[0].claim", "union-attr"),
+    ("mem.search('q')[0].episode", "attr-defined"),
+]
+
+
+def _probe(body: list[str]) -> str:
+    """One module exercising `body` with every facade in scope, ready for mypy."""
+    return "".join([
+        "from memvara import HybridRetriever, Memvara, Scope\n",
+        "from memvara.aio import AsyncMemvara\n",
+        "\n",
+        "async def probe(mem: Memvara, amem: AsyncMemvara, reader: HybridRetriever,\n",
+        "                scope: Scope, flag: bool) -> None:\n",
+        "    view = mem.scope(user='alice')\n",
+        *(f"    {line}\n" for line in body),
+    ])
+
+
+def _run_mypy(source: str, tmp_path) -> str:
+    """Type-check `source` against this tree and hand back what mypy said.
+
+    `--follow-imports=silent` reads the package for its types and reports nothing about
+    it, which is the difference between asking "what is a caller told?" and re-running
+    the library's own type check inside a test. Its own cache directory because the
+    repository's is shared with whatever else is running.
+    """
+    probe = tmp_path / "probe.py"
+    probe.write_text(source, encoding="utf-8")
+    done = subprocess.run(
+        [sys.executable, "-m", "mypy", "--follow-imports=silent", "--no-error-summary",
+         "--cache-dir", str(tmp_path / "cache"), str(probe)],
+        cwd=REPO, capture_output=True, text=True, check=False,
+        env={**os.environ, "MYPYPATH": str(REPO)})
+    # 0 is clean, 1 is "found errors", anything else is mypy failing to run at all —
+    # which must not be read as "the annotations are fine".
+    assert done.returncode in (0, 1), f"mypy did not run:\n{done.stderr}{done.stdout}"
+    return done.stdout
+
+
+def _plain(revealed: str) -> str:
+    """`list[memvara.types.Result]` -> `list[Result]`, so the expectations stay readable
+    and do not pin either mypy's `builtins.` prefix or where a class happens to live."""
+    return re.sub(r"[A-Za-z_][A-Za-z_0-9]*\.", "", revealed)
+
+
+@needs_mypy
+def test_search_promises_only_claims_unless_the_caller_asked_for_episodes(tmp_path):
+    """The union a caller had to narrow for a case that could not happen.
+
+    `[r.claim for r in mem.search(q)]` is the single most common thing anyone does with
+    this library, and under one signature it was a type error — `Item "EpisodeResult" of
+    "Result | EpisodeResult" has no attribute "claim"` — that no runtime test could ever
+    fail on. Two of memvara's own adapters were carrying exactly that error.
+    """
+    output = _run_mypy(
+        _probe([f"reveal_type({expr})" for expr, _ in _INFERENCE]
+               # Not a reveal: the point of the overload is that this line is clean.
+               + ["mem.search('q')[0].claim.id"]),
+        tmp_path)
+    revealed = [_plain(line.split('Revealed type is "', 1)[1].rsplit('"', 1)[0])
+                for line in output.splitlines() if "Revealed type is" in line]
+
+    assert revealed == [want for _, want in _INFERENCE], "\n".join(
+        f"{expr}: want {want}, got {got}"
+        for (expr, want), got in zip(_INFERENCE, revealed + ["<missing>"] * len(_INFERENCE))
+        if want != got)
+    assert "error:" not in output, output
+
+
+@needs_mypy
+def test_asking_for_episodes_still_hands_back_a_union_the_caller_must_narrow(tmp_path):
+    """The other direction, and the one that makes the test above worth trusting.
+
+    An overload can be wrong by being too generous as easily as by being absent, and the
+    too-generous version — `list[Result]` whatever the flag says — passes every
+    assertion in the previous test while certifying `r.claim` on a call that returns
+    turns at runtime. That is a type checker actively making things worse, so the
+    absence of an error is asserted here rather than assumed.
+    """
+    output = _run_mypy(_probe([expr for expr, _ in _MISUSE]), tmp_path)
+    # The error code, which mypy prints last on the line — matched there rather than
+    # anywhere, so a bracketed type inside the message text cannot be read as one.
+    codes = re.findall(r"\[([a-z-]+)\]$", output, re.MULTILINE)
+
+    assert codes == [code for _, code in _MISUSE], output
+
+
+def test_the_default_search_returns_no_turn_however_well_a_turn_matched(mem):
+    """The runtime fact the `list[Result]` overload rests on, pinned on its own.
+
+    The annotation is erased before anything runs, so nothing else in this suite would
+    notice if `search()` started letting an episode through without being asked — and
+    the type checker would by then be certifying `.claim` on it. Set up so the turn
+    would comfortably win if it were eligible: it contains the query verbatim while the
+    claim is a normalized triple sharing one word with it.
+    """
+    mem.remember("user", "dislikes", "kafka")
+    mem.add(KAFKA)
+
+    assert [type(r) for r in mem.search("sunset the Kafka pipeline")] == [Result]
+    kinds = {type(r) for r in mem.search("sunset the Kafka pipeline",
+                                         include_episodes=True)}
+    assert kinds == {Result, EpisodeResult}, "otherwise the setup proves nothing"
+
+
+def test_get_all_returns_one_corpus_in_one_order_however_often_it_is_ingested(mem):
+    """`get_all()` broke ties on the row id, which is a fresh `uuid4` per ingest.
+
+    The same defect the ranking tiebreak was fixed for, in the method every integration
+    layer enumerates memory through — and reached far more easily, because ties here are
+    the normal case rather than a coincidence: one `add()` stamps every claim it extracts
+    with the same `recorded_at`, to the microsecond. Measured before the fix, six ingests
+    of this three-fact corpus produced five different orderings.
+    """
+    corpus = ["I live in Berlin", "I work at Acme", "my name is Dana"]
+
+    def ingest_and_list():
+        m = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+        m.add(corpus)
+        out = [c.value_key for c in m.get_all()]
+        m.close()
+        return out
+
+    mem.add(corpus)
+    assert len({c.recorded_at for c in mem.get_all()}) == 1, \
+        "three claims no longer share an instant; this test has stopped testing ties"
+    assert len({tuple(ingest_and_list()) for _ in range(6)}) == 1
+
+
+# --- one rule for "is this claim in scope" --------------------------------------
+
+def test_id_addressed_reads_use_the_same_scope_rule_as_enumeration(mem):
+    """memvara used to hold two answers to one question. `get()` and `why()` authorized
+    with `Scope.contains`, where an unset field is a wildcard reaching *downward*;
+    `get_all()`, `count()` and `search()` enumerate with `Scope.ancestors()`, which
+    reaches only upward. So a handle could `get()` a claim that `get_all()` on the very
+    same handle would not return — in four of seven scope shapes.
+
+    It was reachable, not theoretical: with agents isolated by `agent=`, a handle scoped
+    to a session could read a sibling agent's claim by id. And `get()`'s own docstring
+    argues ids are not secret, because receipts, `invalidated_by` pointers, results and
+    logs all leak them.
+    """
+    written = mem.remember("user", "lives_in", "Berlin",
+                           user="alice", agent="researcher", session="s1")
+    cid = written.added[0].id
+
+    handles = [
+        {},                                                        # tenant only
+        dict(user="alice"),
+        dict(user="alice", agent="researcher"),
+        dict(user="alice", agent="researcher", session="s1"),      # exact
+        dict(user="alice", session="s1"),                          # agent unset
+        dict(user="alice", agent="other"),
+        dict(user="bob"),
+    ]
+    for kw in handles:
+        enumerated = bool(mem.get_all(**kw))
+        assert (mem.get(cid, **kw) is not None) is enumerated, f"get disagrees at {kw}"
+        assert (mem.why(cid, **kw) is not None) is enumerated, f"why disagrees at {kw}"
+
+
+def test_a_session_handle_cannot_read_a_sibling_agents_claim_by_id(mem):
+    """The specific escalation, named on its own so it cannot be lost in a refactor of
+    the table above."""
+    written = mem.remember("user", "lives_in", "Berlin",
+                           user="alice", agent="researcher", session="s1")
+    cid = written.added[0].id
+
+    assert mem.get(cid, user="alice", session="s1") is None
+    assert mem.why(cid, user="alice", session="s1") is None
+    # The agent that wrote it still can.
+    assert mem.get(cid, user="alice", agent="researcher", session="s1") is not None
+
+
+def test_forget_and_history_still_reach_downward_deliberately(mem):
+    """`sees` replaced `contains` at the two id-addressed doors and nowhere else. The
+    slot operations keep the downward reach on purpose — a `fact_key` ignores agent and
+    session, so a user-level `forget` is supposed to retire what its sessions wrote."""
+    mem.remember("user", "lives_in", "Berlin", user="alice", agent="researcher")
+
+    assert [c.object for c in mem.history("user", "lives_in", user="alice")] == ["Berlin"]
+    assert mem.forget("user", "lives_in", user="alice"), "broad forget stopped reaching"

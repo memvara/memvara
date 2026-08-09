@@ -128,7 +128,10 @@ def stored_dim(store: Any) -> int | None:
     # not a requirement.
     index = getattr(store, "_vec", None)
     dim = getattr(index, "dim", None)
-    if isinstance(dim, int) and len(index) > 0:
+    # `index is not None` is implied by `dim` being an int — a missing index yields a
+    # missing `dim` — but implied is not stated, and the `len()` below is what a reader
+    # (and a checker) has to justify without leaving the line.
+    if index is not None and isinstance(dim, int) and len(index) > 0:
         return dim
 
     get_embedding = getattr(store, "get_embedding", None)

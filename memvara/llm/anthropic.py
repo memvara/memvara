@@ -63,7 +63,8 @@ class AnthropicLLM:
         # Imported here, not at module scope, so `import memvara` works in the default
         # offline configuration where the SDK is not installed at all.
         try:
-            import anthropic
+            # The whole point is that this is absent in the default install.
+            import anthropic  # type: ignore[import-not-found]
         except ImportError as exc:
             raise ImportError(
                 "AnthropicLLM needs the `anthropic` package: pip install 'memvara[anthropic]'. "

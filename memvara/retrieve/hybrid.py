@@ -38,7 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import perf_counter
-from typing import ClassVar, Sequence
+from typing import Any, ClassVar, Literal, Sequence, overload
 
 import numpy as np
 
@@ -221,6 +221,36 @@ class HybridRetriever:
         self.w_episode = w_episode
         self.max_episodes = max_episodes
 
+    # Three signatures for one method, because `include_episodes` decides what comes
+    # back and the caller almost always knows which at the point of the call. Without
+    # this, every caller of the common form is handed `Result | EpisodeResult` and has
+    # to narrow a union that cannot occur. See `Memvara.search` for the full argument;
+    # the engine carries the same overloads so a wrapper written against it inherits
+    # them rather than re-deriving the union.
+    @overload
+    def search(
+        self, query: str, scope: Scope, *, k: int = ...,
+        as_of: datetime | None = ..., include_invalidated: bool = ...,
+        memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
+        include_episodes: Literal[False] = ...,
+    ) -> list[Result]: ...
+
+    @overload
+    def search(
+        self, query: str, scope: Scope, *, k: int = ...,
+        as_of: datetime | None = ..., include_invalidated: bool = ...,
+        memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
+        include_episodes: Literal[True],
+    ) -> list[Retrieved]: ...
+
+    @overload
+    def search(
+        self, query: str, scope: Scope, *, k: int = ...,
+        as_of: datetime | None = ..., include_invalidated: bool = ...,
+        memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
+        include_episodes: bool,
+    ) -> list[Retrieved]: ...
+
     def search(
         self,
         query: str,
@@ -232,7 +262,7 @@ class HybridRetriever:
         memory_types: Sequence[MemoryType] | None = None,
         min_score: float = 0.0,
         include_episodes: bool = False,
-    ) -> list[Retrieved]:
+    ) -> list[Any]:
         """Return the top `k` results for `query`, each with a populated `Explanation`.
 
         `as_of` is transaction-time travel: the result is what we believed at that
@@ -253,6 +283,12 @@ class HybridRetriever:
         starting to answer with conversation would change what lands in every prompt
         built on it. `memory_types` is a claim-only filter and, when given, suppresses
         the episode leg entirely rather than pretending a turn has a memory type.
+
+        The declared return type follows that flag rather than covering both cases:
+        `list[Result]` unless episodes were asked for. The annotation on the
+        implementation is `list[Any]` only because an overloaded implementation cannot
+        name a return type narrower than every variant's; the overloads above are what
+        a caller sees.
         """
         if k <= 0:
             return []
@@ -295,21 +331,27 @@ class HybridRetriever:
             ranked = self._interleave(
                 ranked, self._episodes(query, scopes, limit, as_of, min_score), k)
         if rec is not None:
-            self._observe(query, ranked, (perf_counter() - t0) * 1000.0)
+            self._observe(rec, query, ranked, (perf_counter() - t0) * 1000.0)
         return ranked
 
     # -- internals -----------------------------------------------------------
 
-    def _observe(self, query: str, results: Sequence[Retrieved],
+    def _observe(self, rec: Recorder, query: str, results: Sequence[Retrieved],
                  elapsed_ms: float) -> None:
-        """Emit the aggregate view of one search. Never reached with telemetry unset.
+        """Emit the aggregate view of one search.
 
         The per-call view is already `Explanation`, and this deliberately does not
         duplicate it: what is emitted here are the two *distributions* an explanation
         cannot show, because each of them is a property of many searches rather than of
         one.
+
+        The recorder arrives as an argument rather than being re-read from
+        `self.telemetry`, which is the same object. "Never reached with telemetry
+        unset" was true and was written only in this docstring, so every emission below
+        read as a call on `Recorder | None`; taking the recorder as a parameter puts
+        the caller's guard in the signature, where it holds for a reader and for a type
+        checker alike.
         """
-        rec = self.telemetry
         # Sliced by script for the same reason the gate is: query volume from a script
         # with no corresponding `gate.pass` is a population whose writes are being
         # dropped and whose reads therefore find nothing.

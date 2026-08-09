@@ -226,8 +226,31 @@ class Scope:
     def __repr__(self) -> str:
         return f"<Scope {self.key()}>"
 
+    def sees(self, other: "Scope") -> bool:
+        """True if a reader at this scope may read a claim written at `other`.
+
+        The enumeration rule, stated once so it can be shared. `get_all`, `count` and
+        `search` already implement it in SQL via `ancestors()`: a handle sees its own
+        scope and every broader one, and never a deeper one. This is that same predicate
+        for the id-addressed reads, which used to authorize with `contains` — the
+        opposite direction — so `get()` and `why()` answered for claims that `get_all()`
+        on the identical handle would not return. Two answers to one question, and the
+        permissive one was reachable: with agents isolated by `agent=`, a handle scoped
+        to a session could read a sibling agent's claim by id, and ids are not secret —
+        receipts, `invalidated_by` pointers, results and logs all leak them.
+
+        `contains` is still right for `forget` and `history`, which are slot operations
+        where a broad caller reaching downward is the documented intent.
+        """
+        mine = {s.key() for s in self.ancestors()}
+        return other.key() in mine
+
     def contains(self, other: "Scope") -> bool:
-        """True if `other` is at or beneath this scope."""
+        """True if `other` is at or beneath this scope.
+
+        The downward-reaching predicate: an unset field is a wildcard. Use `sees` for
+        read authorization — see there for why the two must not be confused.
+        """
         if self.tenant != other.tenant:
             return False
         for mine, theirs in (

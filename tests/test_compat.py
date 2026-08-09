@@ -733,3 +733,49 @@ def test_an_import_crash_cannot_leave_a_note_slot_empty(mem):
     still = mem.history(note_subject("m1"), NOTE_PREDICATE)
     assert [c.object for c in still] == ["Likes pizza"]
     assert still[0].invalidated_at is None and still[0].valid_to is None
+
+
+def test_retiring_a_note_without_an_explicit_instant_still_closes_both_axes(mem):
+    """`write_note(retire=old)` with no `at` is a legal call, and passing that `None`
+    through is not a no-op in either direction: `invalidate(id, None)` writes a NULL
+    `invalidated_at` that reads as *not retired* while `invalidated_by` says otherwise,
+    and `set_valid_to(id, None)` reopens an interval that was already closed.
+
+    The note path survived it only because the note predicate is single-valued, so the
+    reconciler superseded through the same slot two statements later. Correct by
+    accident is not correct.
+    """
+    from memvara.compat._notes import build_note, write_note
+
+    ensure_note_predicate(mem, NOTE_PREDICATE, "default")
+    first, ep1 = build_note(memory_id="m1", text="Likes pizza",
+                            scope=mem.default_scope, ts=at(0))
+    live = write_note(mem, first, ep1).added[0]
+
+    second, ep2 = build_note(memory_id="m1", text="Likes calzone",
+                             scope=mem.default_scope, ts=at(1))
+    write_note(mem, second, ep2, retire=live)      # deliberately no `at=`
+
+    retired = mem.store.get_claim(live.id)
+    assert retired.invalidated_at is not None, "row says superseded and not retired"
+    assert retired.invalidated_by == second.id
+    assert retired.valid_to is not None, "the valid interval was reopened"
+    assert retired.valid_to <= retired.invalidated_at
+
+
+def test_retiring_a_note_without_an_instant_does_not_erase_an_existing_valid_to(mem):
+    """The reopening half, isolated. A claim that already carried a `valid_to` must not
+    have it cleared by a retirement that simply did not name an instant."""
+    from memvara.compat._notes import build_note, write_note
+
+    ensure_note_predicate(mem, NOTE_PREDICATE, "default")
+    first, ep1 = build_note(memory_id="m2", text="Likes pizza",
+                            scope=mem.default_scope, ts=at(0))
+    live = write_note(mem, first, ep1).added[0]
+    mem.store.set_valid_to(live.id, at(5))
+
+    second, ep2 = build_note(memory_id="m2", text="Likes calzone",
+                             scope=mem.default_scope, ts=at(1))
+    write_note(mem, second, ep2, retire=live)
+
+    assert mem.store.get_claim(live.id).valid_to is not None

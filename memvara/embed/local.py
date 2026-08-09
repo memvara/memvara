@@ -15,7 +15,14 @@ DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 class LocalEmbedder:
     def __init__(self, model: str = DEFAULT_MODEL) -> None:
         try:
-            from sentence_transformers import SentenceTransformer  # noqa: PLC0415
+            # `type: ignore` because the SDK is an extra: a checker run in an
+            # environment that has not installed `memvara[local-embed]` — CI, and most
+            # contributors — cannot resolve the module, and the alternative is a global
+            # `ignore_missing_imports` that would also hide a *real* missing import
+            # anywhere else in the package.
+            from sentence_transformers import (  # type: ignore[import-not-found] # noqa: PLC0415
+                SentenceTransformer,
+            )
         except ImportError as exc:
             # Naming the extra matters more here than anywhere else it is done: this is
             # the class a user reaches for after reading that the default embedder is a

@@ -37,8 +37,18 @@ def reciprocal_rank_fusion(
     than "one retriever liked this slightly more than that". Lowering `k` sharpens
     trust in each retriever's own ordering.
 
-    Returns a dict ordered best-first, ties broken by item id so the same inputs
-    always produce the same ranking. Items absent from every list are simply absent.
+    Returns a dict ordered best-first, ties broken by item id. Items absent from every
+    list are simply absent.
+
+    Read that tiebreak as *deterministic*, not as *content-addressed* — it is stable for
+    a given set of ids and no further. This function is handed ids and positions and
+    nothing else, so an id is the only total order available to it, and a memvara claim
+    id is a `uuid4` minted at ingest: two ingests of one corpus tie differently here.
+    Nothing downstream inherits that, because `HybridRetriever._rank` and `._episodes`
+    both re-sort on a content digest, which is where reproducibility across two stores
+    of the same data is actually made. It is stated because this is exported, and a
+    caller fusing its own rankings on ids that mean something would be right to expect
+    more from the sentence above than it can give.
     """
     if k < 0:
         raise ValueError(f"rrf k must be non-negative, got {k}")

@@ -121,6 +121,32 @@ Consequences worth knowing before you turn it on
   library storing the key beside the ciphertext is theatre, and the moment it did, the
   plaintext would be back inside this process and back inside `why()`.
 
+Knowing it is still working
+---------------------------
+
+A redaction policy is the one part of this library whose failure is *rewarded*. Every
+other seam that stops doing its job costs something visible — a slower query, a missing
+answer, an exception. A `Redactor` whose rules stop matching the data raises nothing,
+logs nothing, returns the string it was handed, and makes the write path measurably
+faster; the store fills with the exact text the policy exists to remove, and the first
+person to find out is an auditor. Nothing about that is hypothetical: the built-in rules
+below match punctuated Latin-script phone numbers and a fixed email shape, so a tenant
+switching to a new number format, a new locale, or a vendor id whose shape changed
+crosses that line without anyone touching the code.
+
+So the two helpers here take a `Recorder` and report `redact.inspected` and
+`redact.changed`, tagged by field and by script. Neither number means much alone — see
+`memvara.telemetry.REDACT_INSPECTED` for why the *ratio* is the signal, why the changed
+count is emitted at zero, and why the absence of the pair is itself the alarm for the
+blunter failure of a deployment that dropped its `redactor=`.
+
+Both are reported by the seam rather than by any redactor, which is deliberate and is
+what makes them worth having: a policy that self-reports can only report the misses it
+knows about, and a policy's dangerous blind spots are by definition the ones it does not
+know about. Measuring at the door instead means a deployment's own `Redactor` — the
+serious case, and the one this module exists for — is measured on exactly the same terms
+as the default, with nothing to implement.
+
 Cost when unset
 ---------------
 
@@ -129,6 +155,12 @@ redactor costs one `is not None` test per `add()` and per `assert_claim()` — n
 not per claim, and no object is constructed, no list rebuilt and no string touched. A
 library whose entire argument is the cost of the write path cannot ship an always-on hook
 on it. See `tests/test_redact.py::test_nothing_on_the_redaction_path_runs_when_it_is_unset`.
+
+The telemetry above is guarded a second time, independently, and everything it needs
+computed — the script classification, the before/after comparison — lives inside that
+guard rather than in front of it. A redactor with no recorder runs the same three
+statements it ran before the series existed. See
+`tests/test_redact.py::test_no_telemetry_work_happens_while_redacting_without_a_recorder`.
 
 A redactor that raises propagates, and is not caught anywhere. That is the same contract
 `Recorder` has and for a stronger reason: a redaction pass that failed open would write
@@ -140,6 +172,7 @@ from __future__ import annotations
 import re
 from typing import Callable, Mapping, Protocol
 
+from .telemetry import REDACT_CHANGED, REDACT_INSPECTED, Recorder, script_of
 from .types import Claim, Episode, Scope
 
 __all__ = [
@@ -224,28 +257,77 @@ class Redactor(Protocol):
 # redaction that produced a clean copy for the store while leaving the caller holding the
 # original would make the return value of `add()` a channel around the redactor. One
 # object, one version of the text, everywhere.
+#
+# Both also take an optional `telemetry`, and both branch on it rather than threading it
+# through one code path. The unset branch is the same statement it was before the series
+# existed - one attribute read, one call, one attribute write - which is the only way the
+# cost claim above survives contact with a profiler.
 
 
-def redact_episode(redactor: Redactor, episode: Episode) -> Episode:
+def _measured(redactor: Redactor, text: str, field: str, scope: Scope,
+              rec: Recorder) -> str:
+    """Apply the policy to one string and report that it was looked at.
+
+    Only ever reached with a recorder in hand, which is what keeps `script_of` and the
+    comparison out of the unmeasured path entirely rather than merely out of an `if`.
+
+    The comparison is the whole measurement: a `Redactor` reports nothing about its own
+    work, so "did this string come back different" is the only evidence available at the
+    seam, and it is available for every implementation rather than for the ones that
+    chose to instrument themselves.
+    """
+    out = redactor.redact(text, field=field, scope=scope)
+    # Classified on the input. The output is a mixture of the caller's text and the
+    # policy's own replacement tokens, and bucketing a Han turn as Latin because
+    # `[redacted:phone]` is Latin would corrupt precisely the slice that exists to show a
+    # policy covering one population and no other.
+    script = script_of(text)
+    rec.counter(REDACT_INSPECTED, 1, field=field, script=script)
+    # `0` rather than "no call": see `telemetry.REDACT_INSPECTED`. A policy that ran and
+    # matched nothing and a policy that is not running are the two states an operator has
+    # to tell apart, and only the reported zero does it.
+    rec.counter(REDACT_CHANGED, 0 if out == text else 1, field=field, script=script)
+    return out
+
+
+def redact_episode(redactor: Redactor, episode: Episode, *,
+                   telemetry: Recorder | None = None) -> Episode:
     """Redact a turn, in place, before anything derives from it.
 
     Must be called before `Episode.hash` is read, which is what `WritePipeline.add` does
     first. See the module docstring for why that ordering is not negotiable.
     """
-    episode.content = redactor.redact(episode.content, field=EPISODE, scope=episode.scope)
+    if telemetry is None:
+        episode.content = redactor.redact(episode.content, field=EPISODE,
+                                          scope=episode.scope)
+    else:
+        episode.content = _measured(redactor, episode.content, EPISODE, episode.scope,
+                                    telemetry)
     return episode
 
 
-def redact_claim(redactor: Redactor, claim: Claim) -> Claim:
+def redact_claim(redactor: Redactor, claim: Claim, *,
+                 telemetry: Recorder | None = None) -> Claim:
     """Redact a claim's three stored text fields, in place, before it is reconciled.
 
     Before reconciliation rather than after, because `Reconciler.apply` derives
     `fact_key`, `value_key` and the entity stamps from these strings and then writes the
     row. Redacting afterwards would leave keys computed over text that no longer exists.
+
+    Three fields, three inspections. Counting the claim once instead would hide the thing
+    the `field` slice is for: a value reaching the store through `claim.object` while the
+    same policy leaves it standing in `claim.text` is a half-redacted row, and one
+    per-claim number cannot say so.
     """
-    claim.subject = redactor.redact(claim.subject, field=CLAIM_SUBJECT, scope=claim.scope)
-    claim.object = redactor.redact(claim.object, field=CLAIM_OBJECT, scope=claim.scope)
-    claim.text = redactor.redact(claim.text, field=CLAIM_TEXT, scope=claim.scope)
+    scope = claim.scope
+    if telemetry is None:
+        claim.subject = redactor.redact(claim.subject, field=CLAIM_SUBJECT, scope=scope)
+        claim.object = redactor.redact(claim.object, field=CLAIM_OBJECT, scope=scope)
+        claim.text = redactor.redact(claim.text, field=CLAIM_TEXT, scope=scope)
+    else:
+        claim.subject = _measured(redactor, claim.subject, CLAIM_SUBJECT, scope, telemetry)
+        claim.object = _measured(redactor, claim.object, CLAIM_OBJECT, scope, telemetry)
+        claim.text = _measured(redactor, claim.text, CLAIM_TEXT, scope, telemetry)
     return claim
 
 
@@ -347,6 +429,18 @@ class PatternRedactor:
     text as a `[redacted:…]` token, which is the least bad way for a redactor to be
     wrong — the loss is legible instead of silent.
 
+    **It does not report its own blind spots**, now that the seam around it can be
+    measured, and that is a decision. Every entry in the list above is either something
+    this class has no rule for (names, addresses, semantics) and therefore cannot count,
+    or something it deliberately declines (`5551234567`) and could only count by running
+    a second, shadow rule set — a detector that finds personal data and leaves it in
+    place, which is the comprehensive ruleset `docs/ROADMAP.md` puts in the closed
+    governance tier, carrying its cost on every write and none of its benefit. What an
+    operator can act on is already emitted one level up: `redact.changed` against
+    `redact.inspected`, sliced by `script`, shows a rule set matching a steady fraction
+    of one population and nothing at all of another, which is the same finding, arrives
+    for a redactor this class knows nothing about, and costs a comparison.
+
     Rules apply in mapping order, and the shipped order matters: emails first, then
     phones, then cards, so a punctuated phone number is gone before the card rule can
     consider a longer digit run that spans it. Replacement tokens contain no digits, so
@@ -386,8 +480,17 @@ class PatternRedactor:
         for label, pattern in self.patterns.items():
             token = self.token.format(label=label)
             accept = self.ACCEPT.get(label, _always)
-            text = pattern.sub(
-                lambda m, t=token, ok=accept: t if ok(m.group()) else m.group(), text)
+
+            # Bound as defaults rather than closed over, so the callable `sub` invokes is
+            # pinned to this iteration's label. Spelled as a `def` rather than the lambda
+            # it used to be purely so the two parameters can carry annotations: mypy
+            # cannot infer a lambda that has defaults, and the alternative was a
+            # suppression on working code.
+            def substitute(m: re.Match[str], replacement: str = token,
+                           ok: Callable[[str], bool] = accept) -> str:
+                return replacement if ok(m.group()) else m.group()
+
+            text = pattern.sub(substitute, text)
         return text
 
     def __repr__(self) -> str:

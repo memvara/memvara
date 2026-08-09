@@ -33,6 +33,15 @@ months. If only one of them is ever wired to a dashboard it should be
 ``consolidate.claims_per_slot``, which is the one that would have caught the worst bug
 in the project in its first week.
 
+**A seventh arrived with the redaction seam**, and it is the same shape as the other six
+with a worse consequence. A configured `Redactor` whose rules stop matching the data —
+a new phone format, a different locale, a vendor changing an id shape — raises nothing,
+logs nothing, and makes the write path *faster*; the only symptom is unredacted personal
+data sitting in the store, found by an auditor rather than by an alert. It is caught by
+``redact.changed`` against ``redact.inspected``, sliced by field and script, and by the
+disappearance of ``redact.inspected`` altogether while ``write.turns`` keeps climbing —
+which is the same failure one level up, a deployment that lost its policy.
+
 Cost, which is the whole argument of this library and therefore not negotiable. The
 default recorder is ``None``, not a no-op object: an unset recorder costs one
 ``is not None`` test per emission point and nothing else — no call, no tuple of tags
@@ -136,6 +145,40 @@ WRITE_LATENCY_MS = "write.latency_ms"
 #: trip. Watch the gap between this and `write.latency_ms` — that gap is the work the
 #: rest of the process was *not* blocked by.
 WRITE_LOCK_HELD_MS = "write.lock_held_ms"
+
+#: Strings offered to the configured `Redactor`, and how many of them it rewrote. Both
+#: tagged `field` (one of `memvara.redact.FIELDS`) and `script`, and emitted only when a
+#: redactor is actually configured — no policy, no policy metrics, and no `script_of`
+#: bill for the deployments that run without one.
+#:
+#: **The ratio is the signal, not either half.** A count of redactions on its own cannot
+#: be read: zero today is "the policy has silently stopped matching" and "no personal
+#: data arrived today" at the same time, and for most tenants the second is the normal
+#: case. `redact.changed / redact.inspected` per field and per script is a rate that
+#: holds roughly steady for a given tenant and workload, so a tenant that sat at 3% for a
+#: year and now sits at 0 has had its data drift out from under its rules — silent
+#: otherwise, and *cheaper* than working, since a rule that matches nothing is a rule
+#: that substitutes nothing.
+#:
+#: `redact.changed` is emitted **even at zero**, for the reason `consolidate.merged` is:
+#: a policy that ran and matched nothing has to be distinguishable from a policy that is
+#: not running, and only the reported zero tells those apart. The absence of
+#: `redact.inspected` while `write.turns` climbs is the second, blunter failure — the
+#: `redactor=` argument was dropped from a deployment's construction — and it is worth an
+#: alert on absence rather than on value.
+#:
+#: Sliced by `script` on the same argument as `gate.*`: pattern rules are written against
+#: the formats of one locale, and a rule set matching 3% of Latin-script turns and 0% of
+#: everything else reads as healthy in the aggregate while covering one population and no
+#: other. Sliced by `field` because a policy is legitimately allowed to differ across
+#: them — aggressive on raw turns, conservative on claim objects — so one rate over all
+#: four fields would average away the field a deployment actually cares about.
+#:
+#: The unit is **strings inspected**, not spans removed. `Redactor.redact` returns text
+#: and nothing else, so a span count would mean widening the protocol for one metric and
+#: then trusting every third-party implementation to count its own work honestly.
+REDACT_INSPECTED = "redact.inspected"
+REDACT_CHANGED = "redact.changed"
 
 #: Tier-1 gate outcomes, tagged `reason` (the gate's own slug) and `script`. The gate's
 #: filler vocabulary and its sentence rules are English; the script slice is what turns

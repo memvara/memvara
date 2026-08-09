@@ -90,7 +90,12 @@ def _unit_vectors(store: Store, embedder: Embedder,
         )
         for slot, i in enumerate(missing):
             stored[i] = encoded[slot]
-    vecs = np.asarray(np.stack(stored), dtype=np.float32)
+    # `missing` enumerated every `None` and the loop above filled each one, so no element
+    # survives as `None` here. Suppressed on this line rather than by widening `stored`
+    # to `list[Any]`: the `| None` is load-bearing three lines up, and dropping a `None`
+    # element to satisfy the checker would silently shorten the matrix and misalign every
+    # row after the gap with the claim it is supposed to describe.
+    vecs = np.asarray(np.stack(stored), dtype=np.float32)   # type: ignore[arg-type]
     norms = np.linalg.norm(vecs, axis=1)
     unit = vecs / np.where(norms > 0.0, norms, 1.0)[:, None]
     # A zero-norm row has no direction to compare, so it is similar to nothing - that is
