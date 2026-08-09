@@ -12,9 +12,9 @@ import types
 import numpy as np
 import pytest
 
-import engram
-from engram import Claim, Engram, Episode, HashingEmbedder, MemoryType, Scope, SQLiteStore
-from engram.write.pipeline import _coerce
+import memvara
+from memvara import Claim, Memvara, Episode, HashingEmbedder, MemoryType, Scope, SQLiteStore
+from memvara.write.pipeline import _coerce
 
 SCOPE = Scope("acme", "alice")
 
@@ -49,15 +49,15 @@ class CountingLLM:
 # =============================================================================
 
 def test_anthropic_llm_is_reachable_lazily_from_the_package_root():
-    """`import engram` must not require the anthropic SDK, but `engram.AnthropicLLM`
+    """`import memvara` must not require the anthropic SDK, but `memvara.AnthropicLLM`
     must still resolve for people who installed it."""
-    cls = engram.AnthropicLLM
+    cls = memvara.AnthropicLLM
     assert cls.__name__ == "AnthropicLLM"
 
 
 def test_unknown_package_attribute_still_raises_attribute_error():
     with pytest.raises(AttributeError, match="has no attribute"):
-        engram.definitely_not_a_real_symbol
+        memvara.definitely_not_a_real_symbol
 
 
 def test_anthropic_backend_builds_a_default_client_when_the_sdk_is_present(monkeypatch):
@@ -75,7 +75,7 @@ def test_anthropic_backend_builds_a_default_client_when_the_sdk_is_present(monke
     fake.Anthropic = factory
     monkeypatch.setitem(sys.modules, "anthropic", fake)
 
-    from engram.llm.anthropic import AnthropicLLM
+    from memvara.llm.anthropic import AnthropicLLM
 
     llm = AnthropicLLM()
     assert built, "constructing without an explicit client must build the default one"
@@ -84,7 +84,7 @@ def test_anthropic_backend_builds_a_default_client_when_the_sdk_is_present(monke
 
 def test_anthropic_backend_explains_itself_when_the_sdk_is_missing(monkeypatch):
     monkeypatch.setitem(sys.modules, "anthropic", None)
-    from engram.llm.anthropic import AnthropicLLM
+    from memvara.llm.anthropic import AnthropicLLM
 
     with pytest.raises(ImportError, match="client=|install|anthropic"):
         AnthropicLLM()
@@ -107,7 +107,7 @@ def test_local_embedder_wraps_sentence_transformers(monkeypatch):
     fake.SentenceTransformer = FakeST
     monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
 
-    from engram.embed.local import LocalEmbedder
+    from memvara.embed.local import LocalEmbedder
 
     emb = LocalEmbedder()
     assert emb.dim == 8
@@ -116,7 +116,7 @@ def test_local_embedder_wraps_sentence_transformers(monkeypatch):
 
 def test_default_embedder_falls_back_when_local_backend_is_unavailable(monkeypatch):
     monkeypatch.setitem(sys.modules, "sentence_transformers", None)
-    from engram.embed import default_embedder
+    from memvara.embed import default_embedder
 
     emb = default_embedder(dim=64)
     assert emb.encode(["hello"]).shape == (1, 64)
@@ -129,7 +129,7 @@ def test_default_embedder_falls_back_when_local_backend_is_unavailable(monkeypat
 def test_near_duplicate_check_survives_an_index_dimension_mismatch():
     """The near-dup lookup is an optimization. If the vector index was built by another
     embedder it must decline to help, not abort a valid write."""
-    mem = Engram(embedder=HashingEmbedder(dim=32), user="alice")
+    mem = Memvara(embedder=HashingEmbedder(dim=32), user="alice")
     mem.add("I live in Berlin.")
     assert len(mem.get_all()) == 1
 
@@ -148,7 +148,7 @@ def test_near_duplicate_hit_pointing_at_a_vanished_claim_is_ignored():
 
     # Threshold 0 makes any vector hit count, so the near-duplicate branch is guaranteed
     # to run rather than depending on how similar two phrasings happen to embed.
-    mem = Engram(store=GhostStore(":memory:"), embedder=HashingEmbedder(dim=32),
+    mem = Memvara(store=GhostStore(":memory:"), embedder=HashingEmbedder(dim=32),
                  user="alice", write_near_dup_threshold=0.0)
     mem.add("I live in Berlin.")
     # Not byte-identical, so episode-hash dedupe does not short-circuit it and the
@@ -164,7 +164,7 @@ def test_consolidation_skips_claims_that_are_not_yet_in_force():
     from datetime import datetime, timezone
 
     store = SQLiteStore(":memory:")
-    mem = Engram(store=store, embedder=HashingEmbedder(dim=32), user="alice")
+    mem = Memvara(store=store, embedder=HashingEmbedder(dim=32), user="alice")
     future = datetime(2090, 1, 1, tzinfo=timezone.utc)
     for obj in ("alpha", "omega"):
         c = claim(predicate="likes", object=obj, valid_from=future)
@@ -190,7 +190,7 @@ def test_retrieval_reapplies_the_transaction_floor_even_if_the_store_forgets():
                           include_invalidated=False):
             return super().vector_search(qvec, scopes, limit, None, True)
 
-    mem = Engram(store=LeakyStore(":memory:"), embedder=HashingEmbedder(dim=32),
+    mem = Memvara(store=LeakyStore(":memory:"), embedder=HashingEmbedder(dim=32),
                  user="alice")
     mem.remember("user", "lives_in", "Lisbon",
                  recorded_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
@@ -223,7 +223,7 @@ def test_the_learned_schema_outranks_a_per_claim_guess():
                 "polarity": 1, "memory_type": "episodic", "confidence": 0.9,
                 "source_index": 0}]
     llm = CountingLLM(payload)  # classifies every novel predicate as "semantic"
-    with Engram(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
         mem.add("Some sentence the rules will not touch, spoken at length here.")
         assert {c.memory_type for c in mem.get_all()} == {MemoryType.SEMANTIC}
 
@@ -248,7 +248,7 @@ def test_a_failed_classification_falls_back_to_the_per_claim_memory_type(raw, ex
                 "polarity": 1, "memory_type": raw, "confidence": 0.9,
                 "source_index": 0}]
     llm = FailingClassifier(payload)
-    with Engram(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
         mem.add("Some sentence the rules will not touch, spoken at length here.")
         stored = mem.get_all()
         assert stored, "a failed classification must not cost the caller the facts"
@@ -260,7 +260,7 @@ def test_a_failed_classification_is_not_retried_in_a_loop():
                 "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
                 "source_index": 0}]
     llm = FailingClassifier(payload)
-    with Engram(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
         mem.add("Some sentence the rules will not touch, spoken at length here.")
         mem.add("A different sentence the rules will also not touch, at length.")
         assert llm.classify_calls == 1, "a failing predicate must not bill us repeatedly"
@@ -278,7 +278,7 @@ def test_an_unhelpful_classification_still_registers_safe_defaults():
                 "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
                 "source_index": 0}]
     llm = Unhelpful(payload)
-    with Engram(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
         mem.add("Some sentence the rules will not touch, spoken at length here.")
         assert mem.registry.known("collects_stamps")
         assert not mem.registry.functional("collects_stamps")
@@ -292,7 +292,7 @@ def test_a_novel_predicate_is_classified_exactly_once_across_many_claims():
          "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
     ]
     llm = CountingLLM(payload)
-    with Engram(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
         mem.add("Some sentence the rules will not touch, spoken at length here.")
         mem.add("A different sentence the rules will also not touch, at length.")
         assert llm.classify_calls == 1, "schema acquisition is paid for once, ever"
@@ -306,7 +306,7 @@ def test_classification_example_falls_back_to_the_object_when_the_index_is_unusa
                 "object": "penny black", "polarity": 1, "memory_type": "semantic",
                 "confidence": 0.9, "source_index": 999}]
     llm = CountingLLM(payload)
-    with Engram(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
         mem.add("Some sentence the rules will not touch, spoken at length here.")
     if llm.classify_args:
         assert llm.classify_args[0][1] == "penny black"
@@ -319,7 +319,7 @@ def test_classification_example_falls_back_to_the_object_when_the_index_is_unusa
 @pytest.mark.parametrize("subject,predicate", [("", "lives_in"), ("user", ""), ("", "")])
 def test_a_claim_missing_subject_or_predicate_is_not_stored(subject, predicate):
     store = SQLiteStore(":memory:")
-    mem = Engram(store=store, embedder=HashingEmbedder(dim=32), user="alice")
+    mem = Memvara(store=store, embedder=HashingEmbedder(dim=32), user="alice")
     mem.writer.assert_claim(claim(subject=subject, predicate=predicate))
     assert store.stats()["claims"] == 0
     mem.close()
@@ -327,7 +327,7 @@ def test_a_claim_missing_subject_or_predicate_is_not_stored(subject, predicate):
 
 def test_a_positive_claim_with_no_value_is_not_stored():
     store = SQLiteStore(":memory:")
-    mem = Engram(store=store, embedder=HashingEmbedder(dim=32), user="alice")
+    mem = Memvara(store=store, embedder=HashingEmbedder(dim=32), user="alice")
     mem.remember("user", "likes", "   ")
     assert store.stats()["claims"] == 0
     mem.close()
@@ -338,13 +338,13 @@ def test_a_positive_claim_with_no_value_is_not_stored():
 # =============================================================================
 
 def test_an_object_longer_than_the_cap_is_left_to_the_llm():
-    with Engram(embedder=HashingEmbedder(dim=32), user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=32), user="alice") as mem:
         mem.add("I live in " + "Averylongplacename" * 12 + ".")
         assert mem.get_all() == []
 
 
 def test_an_object_with_no_alphanumeric_content_is_rejected():
-    with Engram(embedder=HashingEmbedder(dim=32), user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=32), user="alice") as mem:
         mem.add("My name is ---.")
         assert mem.get_all() == []
 
@@ -355,13 +355,13 @@ def test_an_object_with_no_alphanumeric_content_is_rejected():
     "I work at Acme but not really.",
 ])
 def test_coordinated_objects_are_handed_to_the_llm_whole(turn):
-    with Engram(embedder=HashingEmbedder(dim=32), user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=32), user="alice") as mem:
         mem.add(turn)
         assert mem.get_all() == []
 
 
 def test_stacked_filler_is_stripped_down_to_the_value():
-    with Engram(embedder=HashingEmbedder(dim=32), user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=32), user="alice") as mem:
         mem.add("I live in Berlin now.")
         assert [c.object for c in mem.get_all()] == ["Berlin"]
 
@@ -374,7 +374,7 @@ def test_dissimilar_claims_sharing_a_slot_are_not_merged():
     """Same (subject, predicate) is not enough — merging requires the texts to actually
     be near-identical, or two genuinely different values would collapse into one."""
     store = SQLiteStore(":memory:")
-    mem = Engram(store=store, embedder=HashingEmbedder(dim=64), user="alice")
+    mem = Memvara(store=store, embedder=HashingEmbedder(dim=64), user="alice")
     for obj in ("completely different alpha", "utterly unrelated omega"):
         c = claim(predicate="likes", object=obj)
         store.put_claim(c)
@@ -386,7 +386,7 @@ def test_dissimilar_claims_sharing_a_slot_are_not_merged():
 
 def test_near_identical_claims_sharing_a_slot_do_merge():
     store = SQLiteStore(":memory:")
-    mem = Engram(store=store, embedder=HashingEmbedder(dim=64), user="alice")
+    mem = Memvara(store=store, embedder=HashingEmbedder(dim=64), user="alice")
     ids = []
     for _ in range(2):
         c = claim(predicate="likes", object="espresso")
@@ -408,7 +408,7 @@ def test_near_identical_claims_sharing_a_slot_do_merge():
 def test_vector_index_tolerates_a_zero_norm_query():
     """A query that embeds to nothing has no direction. It must score everything at
     zero rather than divide by zero."""
-    from engram.store.sqlite import _VecIndex
+    from memvara.store.sqlite import _VecIndex
 
     idx = _VecIndex()
     idx.add("a", np.array([1.0, 0.0], dtype=np.float32))
@@ -447,7 +447,7 @@ def test_an_already_expired_claim_is_not_retired_a_second_time():
     from datetime import datetime, timezone
 
     store = SQLiteStore(":memory:")
-    mem = Engram(store=store, embedder=HashingEmbedder(dim=32), user="alice")
+    mem = Memvara(store=store, embedder=HashingEmbedder(dim=32), user="alice")
     old_end = datetime(2020, 6, 1, tzinfo=timezone.utc)
 
     first = claim(scope=Scope("default", "alice"), object="Berlin")
@@ -461,7 +461,7 @@ def test_an_already_expired_claim_is_not_retired_a_second_time():
 
 def test_response_parsing_skips_non_text_blocks_before_the_answer():
     """Real responses interleave thinking and tool blocks ahead of the text one."""
-    from engram.llm.anthropic import _first_text
+    from memvara.llm.anthropic import _first_text
 
     class Block:
         def __init__(self, type_, text=None):
@@ -485,7 +485,7 @@ def test_stats_falls_back_for_a_store_without_tenant_scoping():
             return {"episodes": 0, "claims": 99, "live_claims": 99,
                     "invalidated": 0, "embeddings": 0}
 
-    mem = Engram(store=OldStore(":memory:"), embedder=HashingEmbedder(dim=32),
+    mem = Memvara(store=OldStore(":memory:"), embedder=HashingEmbedder(dim=32),
                  user="alice")
     assert mem.stats()["claims"] == 99
     mem.close()

@@ -8,10 +8,10 @@ from datetime import datetime, timezone
 import numpy as np
 import pytest
 
-from engram.embed import HashingEmbedder
-from engram.store import SQLiteStore
-from engram.store.sqlite import SCHEMA_VERSION
-from engram.types import Claim, Derivation, Episode, MemoryType, Scope
+from memvara.embed import HashingEmbedder
+from memvara.store import SQLiteStore
+from memvara.store.sqlite import SCHEMA_VERSION
+from memvara.types import Claim, Derivation, Episode, MemoryType, Scope
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
 TMID = datetime(2024, 6, 1, tzinfo=timezone.utc)

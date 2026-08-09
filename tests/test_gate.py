@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from engram.types import Episode, Scope
-from engram.write import SalienceGate
+from memvara.types import Episode, Scope
+from memvara.write import SalienceGate
 
 
 def ep(content: str, role: str = "user", **kw) -> Episode:

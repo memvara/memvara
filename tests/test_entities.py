@@ -15,9 +15,9 @@ import random
 
 import pytest
 
-from engram import Engram, NullLLM
-from engram.embed import HashingEmbedder
-from engram.entities import (
+from memvara import Memvara, NullLLM
+from memvara.embed import HashingEmbedder
+from memvara.entities import (
     DEFAULT_ENTITY_CAP,
     EntityRegistry,
     EntitySpec,
@@ -25,11 +25,11 @@ from engram.entities import (
     entity_key,
     split_entity_id,
 )
-from engram.schema import PredicateRegistry
-from engram.store import SQLiteStore
-from engram.types import Claim, Scope
-from engram.write import Reconciler
-from engram.write.reconcile import backfill_entities
+from memvara.schema import PredicateRegistry
+from memvara.store import SQLiteStore
+from memvara.types import Claim, Scope
+from memvara.write import Reconciler
+from memvara.write.reconcile import backfill_entities
 
 OWNER = "acme\x1falice"
 OTHER = "acme\x1fbob"
@@ -506,7 +506,7 @@ def _legacy(store, obj: str, minutes: int) -> Claim:
     """
     from datetime import timedelta
 
-    from engram.types import utcnow
+    from memvara.types import utcnow
 
     at = utcnow() - timedelta(minutes=minutes)
     c = Claim(subject="user", predicate="works_at", object=obj, scope=SCOPE,
@@ -691,7 +691,7 @@ def test_acquisition_closes_the_shortening(store):
 
 @pytest.fixture()
 def mem():
-    with Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(),
+    with Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(),
                 tenant="acme", user="alice") as m:
         yield m
 
@@ -770,7 +770,7 @@ def test_purge_erases_the_verbatim_text_held_in_the_entity_table():
     per-table counts as evidence of the erasure, `stats()` reported zero, and the
     entity table still held the first-seen spelling of every subject and object —
     a street address and a company name, in a live row that survives VACUUM."""
-    mem = Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+    mem = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
     mem.remember("user", "works_at", "Grüner & Sohn Bestattungen GmbH")
     mem.remember("user", "lives_in", "14 Rue de la Paix, Paris")
     assert mem.store.all_entities("default"), "nothing to erase; test is vacuous"
@@ -787,7 +787,7 @@ def test_purging_one_user_leaves_another_users_entities_alone():
     """Entity ids are owner-scoped, so two users holding the same employer hold two
     rows. Erasing one must not take the other — over-deleting here would silently
     degrade a tenant every time one of its users exercised a deletion right."""
-    mem = Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM())
+    mem = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM())
     mem.remember("user", "works_at", "Acme Corp", user="alice")
     mem.remember("user", "works_at", "Acme Corp", user="bob")
 
@@ -800,7 +800,7 @@ def test_purging_one_user_leaves_another_users_entities_alone():
 
 
 def test_erasing_a_claim_takes_an_entity_no_surviving_claim_cites():
-    mem = Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+    mem = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
     written = mem.remember("user", "lives_in", "14 Rue de la Paix, Paris")
 
     assert mem.erase(written.added[0].id, sources=True)
@@ -814,7 +814,7 @@ def test_erasing_a_claim_keeps_an_entity_another_claim_still_cites():
     """Reference counting, not a prefix match. One entity is usually shared, and
     erasing a row out from under a live claim would lose the identity that makes its
     contradictions resolve."""
-    mem = Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+    mem = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
     doomed = mem.remember("user", "works_at", "Acme Corp")
     mem.remember("colleague", "works_at", "Acme Corp")
 
@@ -827,7 +827,7 @@ def test_erasing_a_claim_keeps_an_entity_another_claim_still_cites():
 def test_a_session_scoped_purge_keeps_entities_the_user_still_uses():
     """A purge narrower than the owner. Deleting every entity the owner holds would be
     the easy implementation and would take rows the surviving sessions depend on."""
-    mem = Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+    mem = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
     mem.remember("user", "works_at", "Acme Corp", session="s1")
     mem.remember("user", "lives_in", "Berlin", session="s2")
 

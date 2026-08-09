@@ -7,18 +7,18 @@ from datetime import timedelta
 import numpy as np
 import pytest
 
-from engram.consolidate import Consolidator
-from engram.embed.base import HashingEmbedder
-from engram.schema import PredicateRegistry
-from engram.store.sqlite import SQLiteStore
-from engram.telemetry import (
+from memvara.consolidate import Consolidator
+from memvara.embed.base import HashingEmbedder
+from memvara.schema import PredicateRegistry
+from memvara.store.sqlite import SQLiteStore
+from memvara.telemetry import (
     CONSOLIDATE_CLAIMS_PER_SLOT,
     CONSOLIDATE_MERGED,
     CONSOLIDATE_PROMOTED,
     CONSOLIDATE_ROWS_WRITTEN,
     MemoryRecorder,
 )
-from engram.types import Claim, Derivation, MemoryType, Scope, utcnow
+from memvara.types import Claim, Derivation, MemoryType, Scope, utcnow
 
 NOW = utcnow()
 SCOPE = Scope(tenant="acme", user="u1")

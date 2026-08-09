@@ -15,15 +15,15 @@ import sys
 import time
 from io import StringIO
 
-from engram import Engram, HashingEmbedder
-from engram.types import Claim, Scope
+from memvara import Memvara, HashingEmbedder
+from memvara.types import Claim, Scope
 
 CITIES = ["Berlin", "Lisbon", "Osaka", "Nairobi", "Lima", "Oslo", "Cairo", "Perth"]
 
 
-def build(n: int, *, path: str = ":memory:") -> Engram:
+def build(n: int, *, path: str = ":memory:") -> Memvara:
     """A store with `n` live claims spread over many slots and users."""
-    mem = Engram(path, embedder=HashingEmbedder(dim=256), user="alice")
+    mem = Memvara(path, embedder=HashingEmbedder(dim=256), user="alice")
     for i in range(n):
         mem.remember("user", f"pred_{i % 400}", f"{CITIES[i % len(CITIES)]}_{i}",
                      user=f"u{i % 50}")

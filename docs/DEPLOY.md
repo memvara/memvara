@@ -1,4 +1,4 @@
-# Deploying engram
+# Deploying memvara
 
 Three ways to run it, in increasing order of ceremony: as a library inside your process,
 as an MCP server your editor launches, and in a container. The library is the supported
@@ -17,31 +17,31 @@ combination a memory layer can have.
 pip install -e .                   # numpy, and nothing else
 ```
 
-Not `pip install engram`. Nothing has been published yet, and the name `engram` on PyPI
+Not `pip install memvara`. Nothing has been published yet, and the name `memvara` on PyPI
 already belongs to an unrelated differentiable-rendering library — see
 [`RELEASING.md`](RELEASING.md#the-name-on-pypi-is-taken). Until that is resolved, install
 from this tree or from a wheel you built (`python3 -m build --wheel`).
 
 ```python
-from engram import Engram
+from memvara import Memvara
 
-mem = Engram("/var/lib/myapp/memory.db", user="alice")
+mem = Memvara("/var/lib/myapp/memory.db", user="alice")
 mem.add("I live in Berlin")
 print(mem.recall("where do they live?"))
 mem.close()                        # or use it as a context manager
 ```
 
-`Engram()` with no path is an in-memory store that dies with the process. That is right
+`Memvara()` with no path is an in-memory store that dies with the process. That is right
 for tests and wrong for everything else, and nothing will tell you which one you got.
 
 **The parent directory has to exist.** SQLite does not create it, and the error you get
 is `sqlite3.OperationalError: unable to open database file` — which reads like a
 permissions problem and is usually a missing `mkdir -p`.
 
-**One `Engram` per process is enough.** It is synchronous and thread-safe for reads (a
+**One `Memvara` per process is enough.** It is synchronous and thread-safe for reads (a
 per-thread read connection), so a web application should build one at startup and use
 `mem.scope(user=...)` per request rather than opening the store per request. For asyncio,
-wrap it once: `AsyncEngram(Engram(...))`.
+wrap it once: `AsyncMemvara(Memvara(...))`.
 
 **With no `llm=`, most of a conversation is not stored.** The default `NullLLM` runs the
 deterministic fast path and nothing else, so `add()` keeps only the sentence forms the
@@ -54,11 +54,11 @@ every write. `remember()` is unaffected — a structured write never needed a mo
 ## 2. As an MCP server
 
 ```bash
-ENGRAM_DB=~/.engram/memory.db python3 -m engram.server
+MEMVARA_DB=~/.memvara/memory.db python3 -m memvara.server
 ```
 
 JSON-RPC 2.0 over stdio, eight tools, no SDK dependency. It refuses to start without
-`ENGRAM_DB` and prints the client configuration block instead — so if you have arrived
+`MEMVARA_DB` and prints the client configuration block instead — so if you have arrived
 here because your client said the server failed, run the command by hand and read what it
 says.
 
@@ -66,18 +66,18 @@ says.
 
 `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS,
 `%APPDATA%\Claude\claude_desktop_config.json` on Windows. This is the block the server
-itself prints when `ENGRAM_DB` is unset, which makes it the one to trust if this document
+itself prints when `MEMVARA_DB` is unset, which makes it the one to trust if this document
 ever drifts from the code:
 
 ```json
 {
   "mcpServers": {
-    "engram": {
+    "memvara": {
       "command": "python3",
-      "args": ["-m", "engram.server"],
+      "args": ["-m", "memvara.server"],
       "env": {
-        "ENGRAM_DB": "/absolute/path/to/memory.db",
-        "ENGRAM_USER": "your-name"
+        "MEMVARA_DB": "/absolute/path/to/memory.db",
+        "MEMVARA_USER": "your-name"
       }
     }
   }
@@ -86,16 +86,16 @@ ever drifts from the code:
 
 Two things about `command` that cost people an afternoon each. It is executed without a
 shell and without your login profile, so `python3` resolves against a `PATH` that is not
-your terminal's — if engram lives in a virtualenv, give the absolute interpreter path
+your terminal's — if memvara lives in a virtualenv, give the absolute interpreter path
 (`/path/to/venv/bin/python3`) rather than hoping. And `~` is expanded by the server for
-`ENGRAM_DB` specifically, because that is what people type in a JSON file; it is *not*
+`MEMVARA_DB` specifically, because that is what people type in a JSON file; it is *not*
 expanded in `command`.
 
 ### Claude Code
 
 ```bash
-claude mcp add engram --env ENGRAM_DB=$HOME/.engram/memory.db --env ENGRAM_USER=alice \
-  -- python3 -m engram.server
+claude mcp add memvara --env MEMVARA_DB=$HOME/.memvara/memory.db --env MEMVARA_USER=alice \
+  -- python3 -m memvara.server
 ```
 
 or the same `mcpServers` object in a project-local `.mcp.json`. Any MCP client works; the
@@ -105,12 +105,12 @@ transport is stdio and the configuration is entirely environment.
 
 | variable | meaning |
 |---|---|
-| `ENGRAM_DB` | **required.** Path to the SQLite file, created on first use. `:memory:` for a smoke test that forgets everything on exit. |
-| `ENGRAM_USER` | who this server remembers for. Unset means the whole tenant. |
-| `ENGRAM_TENANT` | isolation boundary above the user. Default `default`. |
-| `ENGRAM_AGENT`, `ENGRAM_SESSION` | narrow further. Leave unset for durable facts — memory written at session scope is invisible to the next session. |
-| `ENGRAM_LLM` | `none` (default, offline) or `anthropic` (needs `ANTHROPIC_API_KEY` and `engram[anthropic]`). |
-| `ENGRAM_READ_ONLY` | `1` hides every tool that writes. |
+| `MEMVARA_DB` | **required.** Path to the SQLite file, created on first use. `:memory:` for a smoke test that forgets everything on exit. |
+| `MEMVARA_USER` | who this server remembers for. Unset means the whole tenant. |
+| `MEMVARA_TENANT` | isolation boundary above the user. Default `default`. |
+| `MEMVARA_AGENT`, `MEMVARA_SESSION` | narrow further. Leave unset for durable facts — memory written at session scope is invisible to the next session. |
+| `MEMVARA_LLM` | `none` (default, offline) or `anthropic` (needs `ANTHROPIC_API_KEY` and `memvara[anthropic]`). |
+| `MEMVARA_READ_ONLY` | `1` hides every tool that writes. |
 
 The scope is bound at startup and **cannot be changed by a tool call**. That is the
 security property of the stdio transport: the process is the user, because the client
@@ -126,16 +126,16 @@ still have to run.
 ## 3. In Docker
 
 ```bash
-docker build -t engram-mcp:0.1.0 .
-docker volume create engram-data
+docker build -t memvara-mcp:0.1.0 .
+docker volume create memvara-data
 ```
 
 ```bash
 docker run --rm -i \
-  -v engram-data:/data \
-  -e ENGRAM_DB=/data/memory.db \
-  -e ENGRAM_USER=alice \
-  engram-mcp:0.1.0
+  -v memvara-data:/data \
+  -e MEMVARA_DB=/data/memory.db \
+  -e MEMVARA_USER=alice \
+  memvara-mcp:0.1.0
 ```
 
 **`-i`, never `-it`.** The container's stdin and stdout *are* the MCP transport. A TTY
@@ -153,14 +153,14 @@ process cannot say anything about the one holding stdio. The pipe is the livenes
 ```json
 {
   "mcpServers": {
-    "engram": {
+    "memvara": {
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
-        "-v", "engram-data:/data",
-        "-e", "ENGRAM_DB=/data/memory.db",
-        "-e", "ENGRAM_USER=alice",
-        "engram-mcp:0.1.0"
+        "-v", "memvara-data:/data",
+        "-e", "MEMVARA_DB=/data/memory.db",
+        "-e", "MEMVARA_USER=alice",
+        "memvara-mcp:0.1.0"
       ]
     }
   }
@@ -173,8 +173,8 @@ cross into the container explicitly, either as `-e NAME=value` in `args` (above)
 bare `-e NAME` which forwards the value from the client's own environment:
 
 ```json
-"args": ["run", "--rm", "-i", "-v", "engram-data:/data", "-e", "ENGRAM_DB", "-e", "ENGRAM_USER", "engram-mcp:0.1.0"],
-"env": {"ENGRAM_DB": "/data/memory.db", "ENGRAM_USER": "alice"}
+"args": ["run", "--rm", "-i", "-v", "memvara-data:/data", "-e", "MEMVARA_DB", "-e", "MEMVARA_USER", "memvara-mcp:0.1.0"],
+"env": {"MEMVARA_DB": "/data/memory.db", "MEMVARA_USER": "alice"}
 ```
 
 Both work. The first is easier to read six months later.
@@ -185,7 +185,7 @@ Verified working with a real write:
 
 ```bash
 docker run --rm -i --read-only --cap-drop=ALL --security-opt no-new-privileges \
-  -v engram-data:/data -e ENGRAM_DB=/data/memory.db engram-mcp:0.1.0
+  -v memvara-data:/data -e MEMVARA_DB=/data/memory.db memvara-mcp:0.1.0
 ```
 
 The image runs as uid 10001 and has no `pip` on `PATH` — both the venv's and the base
@@ -198,19 +198,19 @@ the only thing that writes is the store, and the store is on the volume.
 
 `python:3.13-slim`, multi-stage, linux/arm64: **292 MB unpacked, 63.2 MB to pull.**
 linux/amd64 pulls 64.0 MB. That splits as ~150 MiB of official Python base image, 62 MiB
-of numpy (35 of numpy plus 27 of the OpenBLAS it bundles), and **1.4 MiB of engram**.
+of numpy (35 of numpy plus 27 of the OpenBLAS it bundles), and **1.4 MiB of memvara**.
 There is no dependency tree to trim; the base image is the image. Dropping pip out of the
 venv before it is copied into the runtime stage is worth 17 MB unpacked and 3.7 MB
 compressed, and is the only trim here that measurably moved the number.
 
 An Alpine base is the one lever that moves it — 169 MB unpacked / 38.6 MB pulled, a 39%
 saving, by changing `slim` to `alpine` in both `FROM` lines and `useradd --create-home
---uid 10001 engram` to `adduser -D -u 10001 engram`. It is not the default for two
+--uid 10001 memvara` to `adduser -D -u 10001 memvara`. It is not the default for two
 measured reasons. Musl was slower on a local write/search workload inside the image (400
 `remember()` 140 → 165 ms, 200 `search()` 618 → 659 ms, best of three on one loaded
 machine — treat as "a few percent", not as a benchmark). And musl closes doors: there are
-no musllinux wheels for torch, so `engram[local-embed]` cannot be installed on top of an
-Alpine image at all, while `engram[anthropic]` and `engram[openai]` can.
+no musllinux wheels for torch, so `memvara[local-embed]` cannot be installed on top of an
+Alpine image at all, while `memvara[anthropic]` and `memvara[openai]` can.
 
 ---
 
@@ -234,7 +234,7 @@ nothing raises: the store re-opens, BM25 keeps working, and semantic recall quie
 
 Two further notes on volumes:
 
-- A **named volume** (`-v engram-data:/data`) is the recommended shape. It is owned by uid
+- A **named volume** (`-v memvara-data:/data`) is the recommended shape. It is owned by uid
   10001 because the image pre-creates `/data` with that owner, and Docker seeds a new
   named volume from the image.
 - A **bind mount** (`-v /host/path:/data`) inherits the host directory's ownership
@@ -276,9 +276,9 @@ deliberately **not** an MCP tool, because a model handed a tool will call it in 
 
 ```python
 # consolidate.py, run nightly
-from engram import Engram
+from memvara import Memvara
 
-with Engram("/var/lib/myapp/memory.db") as mem:
+with Memvara("/var/lib/myapp/memory.db") as mem:
     print(mem.consolidate())
 ```
 
@@ -291,9 +291,9 @@ running", which is the failure this whole paragraph exists to make visible.
 Vectors written by one embedder are meaningless to another, and there are two failure
 shapes depending on whether the widths happen to match.
 
-**Different width.** `Engram()` raises `EmbedderMismatchError` at construction, before
+**Different width.** `Memvara()` raises `EmbedderMismatchError` at construction, before
 anything writes. This is the case that used to be a disaster: installing
-`engram[local-embed]` changes what `default_embedder()` returns from a 512-dimensional
+`memvara[local-embed]` changes what `default_embedder()` returns from a 512-dimensional
 hashing embedder to a 384-dimensional model, so following the README's own upgrade advice
 made every read raise while every write kept succeeding — a store that grows and cannot
 be searched.
@@ -306,7 +306,7 @@ Either way the fix is one migration, which re-encodes every claim *and* every ep
 rewrites the fingerprint:
 
 ```python
-mem = Engram("memory.db", embedder=NewEmbedder(), reembed=True)   # at open
+mem = Memvara("memory.db", embedder=NewEmbedder(), reembed=True)   # at open
 n = mem.reembed(NewEmbedder())                                    # or later; returns claims re-encoded
 ```
 
@@ -324,8 +324,8 @@ another agent's, or another tenant's. Scope filters fail **closed** — a scope 
 resolves to nothing matches nothing, rather than degrading into an unfiltered query across
 every user.
 
-For a server process, build one `Engram` and take `mem.scope(user=...)` per request. A
-`ScopedEngram` is a binding, not a second store, so making one per request is free.
+For a server process, build one `Memvara` and take `mem.scope(user=...)` per request. A
+`ScopedMemvara` is a binding, not a second store, so making one per request is free.
 
 ### Deletion, when someone asks for it
 

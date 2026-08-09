@@ -1,10 +1,10 @@
 """Head-to-head against the real mem0 package, not a reimplementation of it.
 
-`bench/compare.py` measures engram against `bench/baseline.py`, a reimplementation of
+`bench/compare.py` measures memvara against `bench/baseline.py`, a reimplementation of
 mem0's *documented* architecture. That was always the weakest claim in the README — a
 benchmark where we wrote both competitors. This runs the actual `mem0ai` package.
 
-    pip install mem0ai        # 33 packages; engram's install is 2
+    pip install mem0ai        # 33 packages; memvara's install is 2
     PYTHONPATH=. python3 bench/mem0_real.py
 
 **Both systems are driven by the same perfect oracle**, so the comparison isolates
@@ -18,7 +18,7 @@ Fully offline. Qdrant runs in `:memory:`, and both systems embed with the same
 
 ## What reading the source turned up, before any measurement
 
-mem0 2.x is not the architecture the engram README was written against, and two of the
+mem0 2.x is not the architecture the memvara README was written against, and two of the
 differences matter:
 
 * **One LLM call per `add()`, not two.** 2.x uses a single `ADDITIVE_EXTRACTION_PROMPT`
@@ -51,7 +51,7 @@ os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 # before we can swap them, and those constructors want a key present.
 os.environ.setdefault("OPENAI_API_KEY", "sk-not-used-by-this-benchmark")
 
-from engram import Engram, HashingEmbedder
+from memvara import Memvara, HashingEmbedder
 
 from compare import NEEDLE_VALUE, ScriptedLLM, build_workload, make_extractor
 
@@ -104,7 +104,7 @@ class OracleLLM(LLMBase):
     obviously correct and was not: mem0's additive prompt embeds `last_k_messages`, so
     every earlier turn in the window matched and got re-extracted. Each fact was emitted
     eleven times, mem0 was measured under a firehose of repeats no real extractor would
-    produce, and the resulting numbers flattered engram. A benchmark whose bug favours its
+    produce, and the resulting numbers flattered memvara. A benchmark whose bug favours its
     author is the one to distrust most.
     """
 
@@ -119,7 +119,7 @@ class OracleLLM(LLMBase):
 
 
 class OracleEmbedder(EmbeddingBase):
-    """engram's `HashingEmbedder`, so neither system wins on vector quality."""
+    """memvara's `HashingEmbedder`, so neither system wins on vector quality."""
 
     def embed(self, text, memory_action=None):
         STATE.embed_calls += 1
@@ -172,7 +172,7 @@ def score_mem0(api, w) -> dict:
     }
 
 
-def score_engram(mem: Engram, w) -> dict:
+def score_memvara(mem: Memvara, w) -> dict:
     live = mem.get_all()
     by_pred: dict[str, list[str]] = {}
     for c in live:
@@ -220,13 +220,13 @@ def run_mem0(w) -> tuple[dict, float, int]:
     return score_mem0(api, w), elapsed, STATE.llm_calls
 
 
-def run_engram(w) -> tuple[dict, float, int]:
+def run_memvara(w) -> tuple[dict, float, int]:
     llm = ScriptedLLM(make_extractor(w))
-    mem = Engram(embedder=HashingEmbedder(dim=EMBED_DIM), llm=llm, user="alice")
+    mem = Memvara(embedder=HashingEmbedder(dim=EMBED_DIM), llm=llm, user="alice")
     start = time.perf_counter()
     mem.add(w.turns)
     elapsed = time.perf_counter() - start
-    out = score_engram(mem, w)
+    out = score_memvara(mem, w)
     mem.close()
     return out, elapsed, llm.calls
 
@@ -248,7 +248,7 @@ def run(chitchat_ratio: int = 4, trials: int = 5) -> None:
     # Repeated, because a single run of mem0 is not reproducible — see below. Reporting
     # one number would have meant reporting whichever one we happened to draw.
     m = [run_mem0(w) for _ in range(trials)]
-    e = [run_engram(w) for _ in range(trials)]
+    e = [run_memvara(w) for _ in range(trials)]
 
     def col(runs, key):
         return _span([r[0][key] for r in runs])
@@ -272,7 +272,7 @@ def run(chitchat_ratio: int = 4, trials: int = 5) -> None:
         ("Install size", "33 packages", "2 packages"),
     ]
     width = max(len(r[0]) for r in rows)
-    print(f"  {'metric':<{width}}  {'mem0 2.x':>12}  {'engram':>12}   ({trials} runs)")
+    print(f"  {'metric':<{width}}  {'mem0 2.x':>12}  {'memvara':>12}   ({trials} runs)")
     print(f"  {'-' * width}  {'-' * 12}  {'-' * 12}")
     for label, a, b in rows:
         print(f"  {label:<{width}}  {str(a):>12}  {str(b):>12}")
@@ -280,7 +280,7 @@ def run(chitchat_ratio: int = 4, trials: int = 5) -> None:
     print(f"""
   Read before quoting any of this:
 
-  * mem0 is charged per turn and engram receives the transcript in one `add()`, so
+  * mem0 is charged per turn and memvara receives the transcript in one `add()`, so
     the call-count row is partly an ingestion-granularity choice, not purely an
     architectural one. `bench/compare.py` reports the equal-granularity number.
   * The oracle gives mem0 perfect extraction. A real model would do worse.

@@ -25,8 +25,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from engram import Engram, HashingEmbedder, MemoryType, NullLLM
-from engram.compat import (
+from memvara import Memvara, HashingEmbedder, MemoryType, NullLLM
+from memvara.compat import (
     ContestedSlot,
     ImportReceipt,
     Mem0CompatError,
@@ -37,9 +37,9 @@ from engram.compat import (
     note_subject,
     read_history_db,
 )
-from engram.compat._notes import ensure_note_predicate
-from engram.compat.mem0 import _memory_type, _reject_entity_kwargs
-from engram.compat.mem0_import import _confidence, _parse_ts
+from memvara.compat._notes import ensure_note_predicate
+from memvara.compat.mem0 import _memory_type, _reject_entity_kwargs
+from memvara.compat.mem0_import import _confidence, _parse_ts
 
 TZ = timezone.utc
 T0 = datetime(2024, 1, 1, tzinfo=TZ)
@@ -53,7 +53,7 @@ def at(days: int) -> datetime:
 def mem():
     # NullLLM by name, not by default: the default warns about degraded extraction, and
     # a suite that trips that warning teaches everyone to filter the category.
-    m = Engram(embedder=HashingEmbedder(dim=128), llm=NullLLM(), user="alice")
+    m = Memvara(embedder=HashingEmbedder(dim=128), llm=NullLLM(), user="alice")
     yield m
     m.close()
 
@@ -101,7 +101,7 @@ def test_add_and_search_round_trip_in_mem0s_response_shape(api):
 
 
 def test_a_supersession_is_reported_as_an_add_and_a_delete(api):
-    """mem0 emits one UPDATE. Engram wrote a new claim and retired another, so it says
+    """mem0 emits one UPDATE. Memvara wrote a new claim and retired another, so it says
     so — the retired id is the one `history()` can still reach."""
     api.add("I live in Berlin")
     events = api.add("Actually I live in Lisbon")["results"]
@@ -136,13 +136,13 @@ def test_get_resolves_one_id_and_stops_after_a_delete(api):
 def test_the_row_carries_the_triple_the_string_came_from(api):
     row = api.add("I live in Berlin")["results"][0]
     full = api.get(row["id"])
-    assert full["engram"] == {
+    assert full["memvara"] == {
         "subject": "user", "predicate": "lives_in", "object": "Berlin",
-        "memory_type": "semantic", "confidence": full["engram"]["confidence"],
-        "salience": 1.0, "valid_from": full["engram"]["valid_from"], "valid_to": None,
+        "memory_type": "semantic", "confidence": full["memvara"]["confidence"],
+        "salience": 1.0, "valid_from": full["memvara"]["valid_from"], "valid_to": None,
     }
     assert full["user_id"] == "alice" and full["agent_id"] is None
-    assert full["updated_at"] is None       # engram never edits a live claim
+    assert full["updated_at"] is None       # memvara never edits a live claim
 
 
 def test_search_threshold_is_a_floor_and_defaults_to_none(api):
@@ -151,7 +151,7 @@ def test_search_threshold_is_a_floor_and_defaults_to_none(api):
     assert api.search("where do they live?", threshold=1.01)["results"] == []
 
 
-def test_explain_returns_engrams_per_leg_reason(api):
+def test_explain_returns_memvaras_per_leg_reason(api):
     api.add("I live in Berlin")
     plain = api.search("where do they live?")["results"][0]
     explained = api.search("where do they live?", explain=True)["results"][0]
@@ -181,8 +181,8 @@ def test_infer_false_stores_the_message_verbatim(api):
     stored = api.get_all()["results"][0]
     # The indexed text is the sentence; the slot address lives in the subject.
     assert stored["memory"] == "Prefers oat milk in coffee"
-    assert stored["engram"]["subject"].startswith("note:")
-    assert stored["engram"]["predicate"] == NOTE_PREDICATE
+    assert stored["memvara"]["subject"].startswith("note:")
+    assert stored["memvara"]["predicate"] == NOTE_PREDICATE
     assert api.search("oat milk")["results"]
 
 
@@ -190,7 +190,7 @@ def test_infer_false_accepts_a_memory_type_and_a_transcript(api):
     api.add([{"role": "user", "content": "Always run pytest"},
              {"role": "assistant", "content": "Noted"}],
             infer=False, memory_type=MemoryType.PROCEDURAL)
-    kinds = {r["engram"]["memory_type"] for r in api.get_all()["results"]}
+    kinds = {r["memvara"]["memory_type"] for r in api.get_all()["results"]}
     assert kinds == {"procedural"}
 
 
@@ -203,7 +203,7 @@ def test_history_synthesizes_mem0s_rows_from_the_slot_timeline(api):
         (None, "user lives in Berlin", "ADD"),
         ("user lives in Berlin", "user lives in Lisbon", "UPDATE"),
     ]
-    # mem0's memory_id is stable across the log; engram's per-value ids are `id`.
+    # mem0's memory_id is stable across the log; memvara's per-value ids are `id`.
     assert {r["memory_id"] for r in rows} == {memory_id}
     assert rows[0]["updated_at"] is None and rows[1]["updated_at"] is not None
 
@@ -223,7 +223,7 @@ def test_history_of_an_unknown_id_is_empty_rather_than_an_error(api):
 def test_delete_all_and_reset_really_erase(mem):
     api = Memory(mem)
     api.add("I live in Berlin", filters={"user_id": "bob"})
-    api.add("I live in Lisbon")                    # alice, this Engram's own scope
+    api.add("I live in Lisbon")                    # alice, this Memvara's own scope
     erased = api.delete_all(filters={"user_id": "bob"})
     assert erased["counts"]["claims"] == 1
     # Erasure, not retirement: nothing is left to time-travel to.
@@ -233,8 +233,8 @@ def test_delete_all_and_reset_really_erase(mem):
     assert mem.get_all(include_invalidated=True) == []
 
 
-def test_reset_cannot_widen_past_the_engrams_own_scope(mem):
-    """Engram scope arguments only ever narrow, so a `Memory` over a user-bound Engram
+def test_reset_cannot_widen_past_the_memvaras_own_scope(mem):
+    """Memvara scope arguments only ever narrow, so a `Memory` over a user-bound Memvara
     resets that user — not mem0's whole-store wipe. Worth a test because the difference
     is invisible until the day someone expects a clean store and gets a half-clean one."""
     api = Memory(mem)                              # mem is bound to user="alice"
@@ -262,7 +262,7 @@ def test_delete_retires_and_says_so_exactly_once(api):
         api.delete(second)
     # Retired, not erased — which is precisely what the warning said.
     assert api.get_all()["results"] == []
-    assert len(api.engram.get_all(include_invalidated=True)) == 2
+    assert len(api.memvara.get_all(include_invalidated=True)) == 2
 
 
 def test_on_delete_retire_is_the_informed_silent_choice(mem):
@@ -355,7 +355,7 @@ def test_reject_entity_kwargs_is_a_no_op_when_there_is_nothing_to_reject():
     assert _reject_entity_kwargs({}, "add") is None
 
 
-def test_a_metadata_filter_says_engram_filters_by_scope(api):
+def test_a_metadata_filter_says_memvara_filters_by_scope(api):
     with pytest.raises(ValueError, match="tenant > user > agent > session"):
         api.get_all(filters={"category": "food"})
 
@@ -375,12 +375,12 @@ def test_constructor_rejects_ambiguity_and_bad_policies(mem):
         Memory(mem, on_delete="obliterate")
 
 
-def test_a_bare_memory_builds_its_own_engram():
+def test_a_bare_memory_builds_its_own_memvara():
     api = Memory(llm=NullLLM(), embedder=HashingEmbedder(dim=64))
     try:
         assert api.add("I live in Berlin")["results"]
     finally:
-        api.engram.close()
+        api.memvara.close()
 
 
 # =============================================================================
@@ -613,7 +613,7 @@ def test_extraction_turns_notes_into_triples_that_still_trace_to_mem0(mem, histo
     assert [e.content for e in trace.episodes] == ["Lives in Lisbon"]
 
 
-def test_extraction_defaults_to_the_engrams_own_model(mem, history_db):
+def test_extraction_defaults_to_the_memvaras_own_model(mem, history_db):
     """`NullLLM` extracts nothing, and reports that honestly rather than looking busy."""
     receipt = import_mem0(mem, history_db=history_db, extract=True)
     assert receipt.llm_calls == 1 and receipt.extracted == 0
@@ -713,9 +713,9 @@ def test_an_import_crash_cannot_leave_a_note_slot_empty(mem):
 
     The failure this prevents is the one that matters in a migration: the old value
     retired, the new one never written, and a memory that mem0 merely *updated* arriving
-    as a memory engram no longer holds. Separate transactions made that reachable.
+    as a memory memvara no longer holds. Separate transactions made that reachable.
     """
-    from engram.compat._notes import build_note, write_note
+    from memvara.compat._notes import build_note, write_note
 
     ensure_note_predicate(mem, NOTE_PREDICATE, "default")
     first, ep1 = build_note(memory_id="m1", text="Likes pizza",

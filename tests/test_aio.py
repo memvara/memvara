@@ -4,7 +4,7 @@ Two things are under test, and only one of them is "does it work".
 
 The first is coverage of the surface: an adapter that declares `aadd`/`asearch` and
 finds nothing to call falls back to the synchronous method *on the loop thread*, which
-is the failure this module exists to remove — so a public `Engram` method with no
+is the failure this module exists to remove — so a public `Memvara` method with no
 counterpart here is a regression, and `_unwrapped()` is what says so.
 
 The second is that it genuinely leaves the loop free. A wrapper that awaited nothing
@@ -23,9 +23,9 @@ import time
 
 import pytest
 
-from engram import Engram, HashingEmbedder, NullLLM, Scope
-from engram.aio import NOT_WRAPPED, AsyncEngram, _unwrapped
-from engram.types import Claim
+from memvara import Memvara, HashingEmbedder, NullLLM, Scope
+from memvara.aio import NOT_WRAPPED, AsyncMemvara, _unwrapped
+from memvara.types import Claim
 
 
 def run(coro):
@@ -34,20 +34,20 @@ def run(coro):
 
 @pytest.fixture()
 def mem():
-    m = Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+    m = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
     yield m
     m.close()
 
 
 @pytest.fixture()
 def amem(mem):
-    return AsyncEngram(mem)
+    return AsyncMemvara(mem)
 
 
 # --- surface ----------------------------------------------------------------
 
-def test_every_public_engram_method_has_an_awaitable_counterpart():
-    """The reported gap was literal: `dir(Engram)` had exactly one method starting with
+def test_every_public_memvara_method_has_an_awaitable_counterpart():
+    """The reported gap was literal: `dir(Memvara)` had exactly one method starting with
     `a`, and it was `add`. LangChain, LlamaIndex and CrewAI all declare async methods
     whose default implementation runs the sync one on the loop thread."""
     assert _unwrapped() == set()
@@ -55,16 +55,16 @@ def test_every_public_engram_method_has_an_awaitable_counterpart():
 
 def test_scope_is_the_one_deliberate_omission():
     assert NOT_WRAPPED == {"scope"}
-    assert not hasattr(AsyncEngram, "scope")
+    assert not hasattr(AsyncMemvara, "scope")
 
 
-def test_a_method_added_to_engram_and_not_here_is_reported():
+def test_a_method_added_to_memvara_and_not_here_is_reported():
     """The check above is only worth anything if it can fail."""
     assert _unwrapped(type("Fake", (), {"vaporize": lambda self: None})) == {"vaporize"}
 
 
 def test_the_wrapper_says_what_it_wraps(amem):
-    assert repr(amem).startswith("<AsyncEngram of <Engram default/alice/")
+    assert repr(amem).startswith("<AsyncMemvara of <Memvara default/alice/")
 
 
 def test_state_is_read_without_awaiting(amem, mem):
@@ -81,7 +81,7 @@ def test_a_slow_call_does_not_block_the_event_loop(amem, monkeypatch):
     """The assertion the whole module rests on. `encode()` on a real embedding model and
     a SQLite write lock are both hundreds of milliseconds; run on the loop thread they
     stall every other task in the process."""
-    monkeypatch.setattr(amem.engram, "consolidate",
+    monkeypatch.setattr(amem.memvara, "consolidate",
                         lambda **kw: time.sleep(0.2) or {"decayed": 0})
 
     async def main():
@@ -100,7 +100,7 @@ def test_concurrent_calls_serialize_inside_the_store_rather_than_corrupting_it(m
     """`SQLiteStore` guards its connection with an `RLock`, which is what makes the
     threadpool safe to point at it. Concurrency here buys overlap, not parallel writes —
     SQLite has one writer."""
-    amem = AsyncEngram(mem)
+    amem = AsyncMemvara(mem)
 
     async def main():
         await asyncio.gather(*(amem.remember("user", f"p{i}", f"v{i}")
@@ -171,26 +171,26 @@ def test_maintenance_is_awaitable(amem):
 
 
 def test_close_is_awaitable_because_it_commits():
-    engram = Engram(embedder=HashingEmbedder(dim=32), llm=NullLLM(), user="alice")
+    memvara = Memvara(embedder=HashingEmbedder(dim=32), llm=NullLLM(), user="alice")
 
     async def main():
-        amem = AsyncEngram(engram)
+        amem = AsyncMemvara(memvara)
         await amem.remember("user", "lives_in", "Berlin")
         await amem.close()
 
     run(main())
     with pytest.raises(sqlite3.ProgrammingError):
-        engram.count()
+        memvara.count()
 
 
 def test_the_async_context_manager_closes_the_store():
     async def main():
-        engram = Engram(embedder=HashingEmbedder(dim=32), llm=NullLLM(), user="alice")
-        async with AsyncEngram(engram) as amem:
+        memvara = Memvara(embedder=HashingEmbedder(dim=32), llm=NullLLM(), user="alice")
+        async with AsyncMemvara(memvara) as amem:
             await amem.remember("user", "lives_in", "Berlin")
             assert await amem.count() == 1
-        return engram
+        return memvara
 
-    engram = run(main())
+    memvara = run(main())
     with pytest.raises(sqlite3.ProgrammingError):
-        engram.count()
+        memvara.count()

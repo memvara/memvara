@@ -1,8 +1,8 @@
 """Framework adapters: LangChain, LlamaIndex, CrewAI.
 
 **None of the three frameworks is installed here, and none is needed.** That is not a
-convenience — it is the property under test. `import engram` must keep working with
-numpy alone, so every framework import in `engram/integrations/**` happens inside a
+convenience — it is the property under test. `import memvara` must keep working with
+numpy alone, so every framework import in `memvara/integrations/**` happens inside a
 function, and the way to prove that is a suite that exercises the whole surface with
 nothing installed. The fakes below go into `sys.modules` under the real import paths, so
 the adapters' own `require()` and `__getattr__` run for real against them rather than
@@ -19,7 +19,7 @@ tests, because a fake that agrees with the adapter is worth nothing:
   `ValueError` on the ndarray an `Embedder` returns.
 
 What most of these tests assert is not "it works" but **what refuses, and what is lost**.
-The three interfaces model memory as a message list or a vector store; engram is neither,
+The three interfaces model memory as a message list or a vector store; memvara is neither,
 and the adapters' value is that they say so at the call site rather than months later.
 """
 
@@ -34,13 +34,13 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from engram import Engram, HashingEmbedder, NullLLM, Scope
-from engram.compat import NOTE_PREDICATE, note_subject
-from engram.integrations import IntegrationError
-from engram.integrations import _common
-from engram.integrations import crewai as ca
-from engram.integrations import langchain as lc
-from engram.integrations import llamaindex as li
+from memvara import Memvara, HashingEmbedder, NullLLM, Scope
+from memvara.compat import NOTE_PREDICATE, note_subject
+from memvara.integrations import IntegrationError
+from memvara.integrations import _common
+from memvara.integrations import crewai as ca
+from memvara.integrations import langchain as lc
+from memvara.integrations import llamaindex as li
 
 TZ = timezone.utc
 T0 = datetime(2024, 3, 1, tzinfo=TZ)
@@ -54,7 +54,7 @@ def run(coro):
 def mem():
     # NullLLM by name, not by default: the default warns about degraded extraction, and
     # a suite that trips that warning teaches everyone to filter the category.
-    m = Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+    m = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
     yield m
     m.close()
 
@@ -302,15 +302,15 @@ def crew_embed(storage, text):
 # =====================================================================================
 
 def test_require_returns_the_named_attributes_when_the_module_is_there():
-    (claim,) = _common.require("engram.types", "Claim", extra="x", needs="y")
-    from engram.types import Claim
+    (claim,) = _common.require("memvara.types", "Claim", extra="x", needs="y")
+    from memvara.types import Claim
     assert claim is Claim
 
 
-def test_a_missing_framework_names_the_extra_and_says_engram_does_not_need_it():
+def test_a_missing_framework_names_the_extra_and_says_memvara_does_not_need_it():
     """The error a user hits first. It has to say what to install *and* that the absence
-    is an adapter's problem rather than a broken engram install."""
-    with pytest.raises(ImportError, match=r"engram\[langchain\]"):
+    is an adapter's problem rather than a broken memvara install."""
+    with pytest.raises(ImportError, match=r"memvara\[langchain\]"):
         _common.require("no_such_framework_pkg", "Thing", extra="langchain",
                         needs="langchain-core>=0.3")
 
@@ -323,21 +323,21 @@ def test_a_present_package_missing_the_class_is_reported_as_version_skew(monkeyp
         _common.require("pretend_fw", "Missing", extra="x", needs="pretend-fw>=1.0")
 
 
-def test_bind_takes_the_engrams_own_scope_when_nothing_overrides_it(mem):
-    engram, scope = _common.bind(mem)
-    assert engram is mem
+def test_bind_takes_the_memvaras_own_scope_when_nothing_overrides_it(mem):
+    memvara, scope = _common.bind(mem)
+    assert memvara is mem
     assert scope == Scope("default", "alice", None, None)
 
 
-def test_bind_narrows_a_scoped_engram_without_widening_it(mem):
-    """A server layer holds a `ScopedEngram` per request and has no public way back to
-    the `Engram`. Accepting one here is the difference between usable and not."""
-    engram, scope = _common.bind(mem.scope(user="bob"), session="s1")
-    assert engram is mem
+def test_bind_narrows_a_scoped_memvara_without_widening_it(mem):
+    """A server layer holds a `ScopedMemvara` per request and has no public way back to
+    the `Memvara`. Accepting one here is the difference between usable and not."""
+    memvara, scope = _common.bind(mem.scope(user="bob"), session="s1")
+    assert memvara is mem
     assert scope == Scope("default", "bob", None, "s1")
 
 
-def test_scope_kw_is_exactly_what_every_engram_method_takes(mem):
+def test_scope_kw_is_exactly_what_every_memvara_method_takes(mem):
     assert _common.scope_kw(Scope("t", "u", "a", "s")) == {
         "tenant": "t", "user": "u", "agent": "a", "session": "s"}
     mem.remember("user", "lives_in", "Berlin", **_common.scope_kw(Scope("t", "u")))
@@ -347,7 +347,7 @@ def test_scope_kw_is_exactly_what_every_engram_method_takes(mem):
 def test_result_metadata_carries_both_time_axes_not_one_timestamp(mem):
     """The whole reason the adapters bother with a metadata dict. A `Document` or a
     `TextNode` is a string plus a mapping, and if the mapping loses valid-time then
-    engram has been reduced to a slower vector store on the way out."""
+    memvara has been reduced to a slower vector store on the way out."""
     mem.remember("user", "lives_in", "Berlin", valid_from=T0, recorded_at=T0)
     meta = _common.result_metadata(mem.search("where do they live?")[0])
     assert meta["kind"] == "claim"
@@ -376,7 +376,7 @@ def test_an_episode_result_gets_no_predicate_so_a_turn_cannot_pass_as_a_fact(mem
                 if r.kind == "episode"]
     meta = _common.result_metadata(episodes[0])
     assert meta["kind"] == "episode" and "predicate" not in meta
-    assert meta["role"] == "user" and meta["engram_id"].startswith("ep_")
+    assert meta["role"] == "user" and meta["memvara_id"].startswith("ep_")
 
 
 def test_every_adapter_error_is_catchable_with_one_clause():
@@ -395,20 +395,20 @@ def test_every_adapter_error_is_catchable_with_one_clause():
 @pytest.fixture()
 def history(mem, monkeypatch):
     install_langchain(monkeypatch)
-    return lc.EngramChatMessageHistory(mem, session="s1", transcript_warning=False)
+    return lc.MemvaraChatMessageHistory(mem, session="s1", transcript_warning=False)
 
 
 def test_the_history_is_a_real_basechatmessagehistory(history):
     """Subclassed rather than duck-typed, so `add_user_message` and the async defaults
     come from the base and cannot drift from it."""
     assert isinstance(history, FakeBaseChatMessageHistory)
-    assert type(history).__name__ == "EngramChatMessageHistory"
+    assert type(history).__name__ == "MemvaraChatMessageHistory"
 
 
 def test_the_composed_class_is_minted_once_so_isinstance_stays_stable(monkeypatch):
     install_langchain(monkeypatch)
-    assert lc.EngramChatMessageHistory is lc.EngramChatMessageHistory
-    assert lc.EngramRetriever is lc.EngramRetriever
+    assert lc.MemvaraChatMessageHistory is lc.MemvaraChatMessageHistory
+    assert lc.MemvaraRetriever is lc.MemvaraRetriever
 
 
 def test_messages_round_trip_role_and_text_through_the_store(history):
@@ -436,7 +436,7 @@ def test_messages_written_in_one_batch_come_back_in_the_order_they_were_sent(his
 
 
 def test_an_exactly_repeated_turn_is_stored_once_so_the_transcript_is_not_a_log(history):
-    """Engram's tier-0 dedupe is keyed on `(scope, role, content)`, so a user who says
+    """Memvara's tier-0 dedupe is keyed on `(scope, role, content)`, so a user who says
     "ok" twice in one session appears once. That is the right design for a memory store
     — re-ingesting a transcript has to be cheap and idempotent — and it means
     `messages` cannot be sold as verbatim replay. Pinned here so the day it changes,
@@ -450,8 +450,8 @@ def test_an_exactly_repeated_turn_is_stored_once_so_the_transcript_is_not_a_log(
 def test_the_transcript_warning_names_both_ways_the_list_is_smaller_than_it_looks(
         mem, monkeypatch):
     install_langchain(monkeypatch)
-    with pytest.warns(lc.EngramTranscriptWarning) as caught:
-        lc.EngramChatMessageHistory(mem, session="s1").messages
+    with pytest.warns(lc.MemvaraTranscriptWarning) as caught:
+        lc.MemvaraChatMessageHistory(mem, session="s1").messages
     text = str(caught[0].message)
     assert "not the memory" in text and "deduplicates" in text
 
@@ -488,8 +488,8 @@ def test_the_write_receipt_is_kept_because_the_interface_returns_none(history):
 def test_the_transcript_is_scoped_to_this_session_and_reaches_nothing_sideways(
         mem, monkeypatch):
     install_langchain(monkeypatch)
-    one = lc.EngramChatMessageHistory(mem, session="s1", transcript_warning=False)
-    two = lc.EngramChatMessageHistory(mem, session="s2", transcript_warning=False)
+    one = lc.MemvaraChatMessageHistory(mem, session="s1", transcript_warning=False)
+    two = lc.MemvaraChatMessageHistory(mem, session="s2", transcript_warning=False)
     one.add_messages([fake_messages_module().HumanMessage(content="only in s1")])
     assert [m.content for m in one.messages] == ["only in s1"]
     assert two.messages == []
@@ -498,11 +498,11 @@ def test_the_transcript_is_scoped_to_this_session_and_reaches_nothing_sideways(
 def test_limit_keeps_the_most_recent_turns_and_zero_means_all(mem, monkeypatch):
     install_langchain(monkeypatch)
     messages = fake_messages_module()
-    capped = lc.EngramChatMessageHistory(mem, session="s1", limit=2,
+    capped = lc.MemvaraChatMessageHistory(mem, session="s1", limit=2,
                                          transcript_warning=False)
     capped.add_messages([messages.HumanMessage(content=f"turn {i}") for i in range(5)])
     assert [m.content for m in capped.messages] == ["turn 3", "turn 4"]
-    uncapped = lc.EngramChatMessageHistory(mem, session="s1", limit=0,
+    uncapped = lc.MemvaraChatMessageHistory(mem, session="s1", limit=0,
                                            transcript_warning=False)
     assert len(uncapped.messages) == 5
 
@@ -512,13 +512,13 @@ def test_reading_the_transcript_says_once_that_the_memory_is_not_in_it(mem, monk
     supersession, a valid-time interval or a source turn id, and an adapter that handed
     one back in silence would look like it had delivered the memory layer."""
     install_langchain(monkeypatch)
-    history = lc.EngramChatMessageHistory(mem, session="s1")
-    with pytest.warns(lc.EngramTranscriptWarning, match="recall"):
+    history = lc.MemvaraChatMessageHistory(mem, session="s1")
+    with pytest.warns(lc.MemvaraTranscriptWarning, match="recall"):
         history.messages
     with warnings.catch_warnings():
         warnings.simplefilter("error")     # once per process, not once per read
         history.messages
-        lc.EngramChatMessageHistory(mem, session="s2").messages
+        lc.MemvaraChatMessageHistory(mem, session="s2").messages
 
 
 def test_the_transcript_warning_can_be_switched_off_by_someone_who_has_read_it(
@@ -526,7 +526,7 @@ def test_the_transcript_warning_can_be_switched_off_by_someone_who_has_read_it(
     install_langchain(monkeypatch)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        lc.EngramChatMessageHistory(mem, session="s1", transcript_warning=False).messages
+        lc.MemvaraChatMessageHistory(mem, session="s1", transcript_warning=False).messages
 
 
 def test_recall_is_the_escape_hatch_and_returns_current_belief_not_the_transcript(
@@ -547,7 +547,7 @@ def test_search_on_the_history_reaches_scores_and_time_travel(history):
 
 
 def test_clear_refuses_by_default_and_names_both_things_it_could_have_meant(history):
-    """The example the whole adapter is built around. LangChain says "erase"; engram can
+    """The example the whole adapter is built around. LangChain says "erase"; memvara can
     retire or purge, and guessing at session teardown is the worst possible moment."""
     with pytest.raises(lc.LangChainCompatError, match="on_clear='purge'") as caught:
         history.clear()
@@ -556,7 +556,7 @@ def test_clear_refuses_by_default_and_names_both_things_it_could_have_meant(hist
 
 def test_clear_can_be_opted_into_as_a_real_erasure(mem, monkeypatch):
     install_langchain(monkeypatch)
-    history = lc.EngramChatMessageHistory(mem, session="s1", on_clear="purge",
+    history = lc.MemvaraChatMessageHistory(mem, session="s1", on_clear="purge",
                                           transcript_warning=False)
     history.add_messages([fake_messages_module().HumanMessage(content="I live in Berlin")])
     history.clear()
@@ -566,7 +566,7 @@ def test_clear_can_be_opted_into_as_a_real_erasure(mem, monkeypatch):
 def test_clear_can_be_opted_into_as_a_no_op_for_a_memory_that_outlives_the_session(
         mem, monkeypatch):
     install_langchain(monkeypatch)
-    history = lc.EngramChatMessageHistory(mem, session="s1", on_clear="ignore",
+    history = lc.MemvaraChatMessageHistory(mem, session="s1", on_clear="ignore",
                                           transcript_warning=False)
     history.add_messages([fake_messages_module().HumanMessage(content="I live in Berlin")])
     history.clear()
@@ -576,7 +576,7 @@ def test_clear_can_be_opted_into_as_a_no_op_for_a_memory_that_outlives_the_sessi
 def test_an_unknown_on_clear_is_rejected_at_construction(mem, monkeypatch):
     install_langchain(monkeypatch)
     with pytest.raises(ValueError, match="on_clear='wipe'"):
-        lc.EngramChatMessageHistory(mem, session="s1", on_clear="wipe")
+        lc.MemvaraChatMessageHistory(mem, session="s1", on_clear="wipe")
 
 
 def test_the_history_repr_names_the_scope_and_the_deletion_policy(history):
@@ -638,14 +638,14 @@ def test_only_non_content_fields_are_copied_into_meta():
 
 def test_a_stored_turn_with_no_adapter_metadata_falls_back_to_its_role(monkeypatch):
     install_langchain(monkeypatch)
-    from engram.types import Episode
+    from memvara.types import Episode
     classes = lc._message_classes()
     assert lc._to_message(Episode(content="hi", role="assistant"), classes).type == "ai"
     assert lc._to_message(Episode(content="hi", role="oracle"), classes).type == "chat"
 
 
 def test_the_message_classes_are_imported_lazily_and_say_so_when_absent():
-    with pytest.raises(ImportError, match=r"engram\[langchain\]"):
+    with pytest.raises(ImportError, match=r"memvara\[langchain\]"):
         lc._message_classes()
 
 
@@ -659,7 +659,7 @@ def retriever(mem, monkeypatch):
     mem.remember("user", "lives_in", "Berlin", valid_from=T0, recorded_at=T0)
     mem.remember("user", "lives_in", "Lisbon", valid_from=T0 + timedelta(days=30),
                  recorded_at=T0 + timedelta(days=30))
-    return lc.EngramRetriever(memory=mem, user="alice", k=5)
+    return lc.MemvaraRetriever(memory=mem, user="alice", k=5)
 
 
 def test_the_retriever_returns_documents_carrying_the_whole_claim(retriever):
@@ -690,7 +690,7 @@ def test_time_travel_survives_an_interface_that_never_imagined_it(mem, monkeypat
     mem.remember("user", "lives_in", "Berlin", valid_from=T0, recorded_at=T0)
     mem.remember("user", "lives_in", "Lisbon", valid_from=T0 + timedelta(days=30),
                  recorded_at=T0 + timedelta(days=30))
-    past = lc.EngramRetriever(memory=mem, user="alice",
+    past = lc.MemvaraRetriever(memory=mem, user="alice",
                               as_of=T0 + timedelta(days=10))
     assert [d.page_content for d in past.invoke("where do they live?")] == [
         "user lives in Berlin"]
@@ -699,7 +699,7 @@ def test_time_travel_survives_an_interface_that_never_imagined_it(mem, monkeypat
 def test_episodes_come_back_labelled_so_a_remark_cannot_pass_as_a_fact(mem, monkeypatch):
     install_langchain(monkeypatch)
     mem.add("I have been thinking about moving to Lisbon")
-    docs = lc.EngramRetriever(memory=mem, user="alice", k=6,
+    docs = lc.MemvaraRetriever(memory=mem, user="alice", k=6,
                               include_episodes=True).invoke("Lisbon")
     assert {d.metadata["kind"] for d in docs} == {"episode"}
     assert all("predicate" not in d.metadata for d in docs)
@@ -711,17 +711,17 @@ def test_the_retriever_declares_run_manager_so_langchain_uses_the_modern_path(mo
     async path — it would still pass every functional test above."""
     import inspect
     install_langchain(monkeypatch)
-    parameters = inspect.signature(lc.EngramRetriever._get_relevant_documents).parameters
+    parameters = inspect.signature(lc.MemvaraRetriever._get_relevant_documents).parameters
     assert "run_manager" in parameters
     assert set(parameters) == {"self", "query", "run_manager"}
 
 
 def test_min_score_and_memory_types_reach_the_search(mem, monkeypatch):
     install_langchain(monkeypatch)
-    from engram.types import MemoryType
+    from memvara.types import MemoryType
     mem.remember("user", "lives_in", "Berlin")
-    assert lc.EngramRetriever(memory=mem, user="alice", min_score=0.99).invoke("where") == []
-    procedural = lc.EngramRetriever(memory=mem, user="alice",
+    assert lc.MemvaraRetriever(memory=mem, user="alice", min_score=0.99).invoke("where") == []
+    procedural = lc.MemvaraRetriever(memory=mem, user="alice",
                                     memory_types=[MemoryType.PROCEDURAL])
     assert procedural.invoke("where do they live?") == []
 
@@ -733,16 +733,16 @@ def test_min_score_and_memory_types_reach_the_search(mem, monkeypatch):
 @pytest.fixture()
 def block(mem, monkeypatch):
     install_llamaindex(monkeypatch)
-    return li.EngramMemoryBlock(memory=mem, user="alice")
+    return li.MemvaraMemoryBlock(memory=mem, user="alice")
 
 
 def test_the_block_is_a_real_basememoryblock_with_a_usable_default_name(block):
     assert isinstance(block, FakeBaseMemoryBlock)
-    assert block.name == "engram"
+    assert block.name == "memvara"
     assert "contradictions" in block.description
 
 
-def test_the_block_writes_through_engrams_write_path_so_contradictions_resolve(block, mem):
+def test_the_block_writes_through_memvaras_write_path_so_contradictions_resolve(block, mem):
     """The difference from the CrewAI adapter, in one test. A memory block is handed raw
     turns, so extraction runs and the keyed lookup fires — Berlin is retired rather than
     accumulating beside Lisbon."""
@@ -785,7 +785,7 @@ def test_messages_with_no_text_are_not_written(block, mem):
 
 def test_the_full_context_window_is_used_when_it_is_switched_off(mem, monkeypatch):
     install_llamaindex(monkeypatch)
-    block = li.EngramMemoryBlock(memory=mem, user="alice", context_window=0)
+    block = li.MemvaraMemoryBlock(memory=mem, user="alice", context_window=0)
     run(block.aput([FakeChatMessage("I work at Acme")]))
     assert "Acme" in run(block.aget([FakeChatMessage("tell me about Acme")] +
                                     [FakeChatMessage("ok") for _ in range(9)]))
@@ -805,7 +805,7 @@ def test_search_and_history_are_where_the_structure_lives(block, mem):
 
 def test_the_block_honours_the_bases_short_term_memory_gate(mem, monkeypatch):
     install_llamaindex(monkeypatch)
-    block = li.EngramMemoryBlock(memory=mem, user="alice",
+    block = li.MemvaraMemoryBlock(memory=mem, user="alice",
                                  accept_short_term_memory=False)
     run(block.aput([FakeChatMessage("I live in Berlin")], from_short_term_memory=True))
     assert mem.count() == 0
@@ -829,18 +829,18 @@ def test_a_message_with_no_role_is_a_user_turn():
 def test_the_llamaindex_retriever_returns_nodes_carrying_the_claim(mem, monkeypatch):
     install_llamaindex(monkeypatch)
     mem.remember("user", "lives_in", "Lisbon")
-    nodes = li.EngramRetriever(mem, user="alice").retrieve("where do they live?")
+    nodes = li.MemvaraRetriever(mem, user="alice").retrieve("where do they live?")
     assert isinstance(nodes[0], FakeNodeWithScore)
     assert nodes[0].node.text == "user lives in Lisbon"
     assert nodes[0].node.metadata["predicate"] == "lives_in"
-    assert nodes[0].node.id_ == nodes[0].node.metadata["engram_id"]
+    assert nodes[0].node.id_ == nodes[0].node.metadata["memvara_id"]
     assert nodes[0].score > 0
 
 
 def test_the_retriever_accepts_a_query_bundle_or_a_bare_string(mem, monkeypatch):
     install_llamaindex(monkeypatch)
     mem.remember("user", "lives_in", "Lisbon")
-    retriever = li.EngramRetriever(mem, user="alice")
+    retriever = li.MemvaraRetriever(mem, user="alice")
     bundle = SimpleNamespace(query_str="where do they live?", embedding=[0.0] * 64)
     assert [n.node.text for n in retriever.retrieve(bundle)] == ["user lives in Lisbon"]
 
@@ -848,18 +848,18 @@ def test_the_retriever_accepts_a_query_bundle_or_a_bare_string(mem, monkeypatch)
 def test_a_pre_embedded_query_bundle_is_answered_from_its_text_not_its_vector(
         mem, monkeypatch):
     """`QueryBundle.embedding` comes from LlamaIndex's embed_model and is not a point in
-    engram's space. Using it would be exactly the vector-store mistake `as_vector_store`
+    memvara's space. Using it would be exactly the vector-store mistake `as_vector_store`
     refuses, and it would fail silently — a wrong-space cosine still returns a ranking."""
     install_llamaindex(monkeypatch)
     mem.remember("user", "lives_in", "Lisbon")
     nonsense = SimpleNamespace(query_str="where do they live?", embedding=[9.9] * 1536)
-    assert li.EngramRetriever(mem, user="alice").retrieve(nonsense)[0].node.text == (
+    assert li.MemvaraRetriever(mem, user="alice").retrieve(nonsense)[0].node.text == (
         "user lives in Lisbon")
 
 
 def test_the_retriever_passes_the_frameworks_own_arguments_up_to_the_base(mem, monkeypatch):
     install_llamaindex(monkeypatch)
-    retriever = li.EngramRetriever(mem, user="alice", verbose=True)
+    retriever = li.MemvaraRetriever(mem, user="alice", verbose=True)
     assert retriever.verbose is True
 
 
@@ -868,19 +868,19 @@ def test_llamaindex_time_travel_and_episode_labelling(mem, monkeypatch):
     mem.remember("user", "lives_in", "Berlin", valid_from=T0, recorded_at=T0)
     mem.remember("user", "lives_in", "Lisbon", valid_from=T0 + timedelta(days=30),
                  recorded_at=T0 + timedelta(days=30))
-    past = li.EngramRetriever(mem, user="alice", as_of=T0 + timedelta(days=1),
+    past = li.MemvaraRetriever(mem, user="alice", as_of=T0 + timedelta(days=1),
                               k=3, min_score=0.0, memory_types=None)
     assert [n.node.text for n in past.retrieve("where")] == ["user lives in Berlin"]
     mem.add("I have been thinking about Porto")
-    with_turns = li.EngramRetriever(mem, user="alice", include_episodes=True, k=6)
+    with_turns = li.MemvaraRetriever(mem, user="alice", include_episodes=True, k=6)
     assert "episode" in {n.node.metadata["kind"] for n in with_turns.retrieve("Porto")}
 
 
 def test_standing_in_as_a_vector_store_is_refused_and_names_the_retriever(mem):
     """The most interesting refusal. A vector store is handed an embedding and never the
-    query text; engram retrieves from text. Serving one means degrading to cosine top-k
-    in someone else's vector space, which is every reason to use engram, gone."""
-    with pytest.raises(li.LlamaIndexCompatError, match="EngramRetriever") as caught:
+    query text; memvara retrieves from text. Serving one means degrading to cosine top-k
+    in someone else's vector space, which is every reason to use memvara, gone."""
+    with pytest.raises(li.LlamaIndexCompatError, match="MemvaraRetriever") as caught:
         li.as_vector_store(mem)
     assert "query_embedding" in str(caught.value)
 
@@ -888,12 +888,12 @@ def test_standing_in_as_a_vector_store_is_refused_and_names_the_retriever(mem):
 def test_standing_in_as_the_chat_buffer_is_refused_and_names_the_composable_shape(mem):
     with pytest.raises(li.LlamaIndexCompatError, match="memory_blocks") as caught:
         li.as_chat_memory(mem)
-    assert "EngramMemoryBlock" in str(caught.value)
+    assert "MemvaraMemoryBlock" in str(caught.value)
 
 
 def test_the_llamaindex_classes_are_lazy_and_name_the_extra_when_absent():
-    for name in ("EngramMemoryBlock", "EngramRetriever"):
-        with pytest.raises(ImportError, match=r"engram\[llama-index\]"):
+    for name in ("MemvaraMemoryBlock", "MemvaraRetriever"):
+        with pytest.raises(ImportError, match=r"memvara\[llama-index\]"):
             getattr(li, name)
 
 
@@ -903,7 +903,7 @@ def test_the_llamaindex_classes_are_lazy_and_name_the_extra_when_absent():
 
 @pytest.fixture()
 def storage(mem):
-    return ca.EngramStorage(mem, user="alice", types=CREWAI_TYPES)
+    return ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES)
 
 
 def record(content, **kw):
@@ -995,7 +995,7 @@ def test_the_embedder_returns_plain_lists_because_crewai_truth_tests_the_result(
 
 def test_search_recovers_the_query_text_and_runs_real_hybrid_retrieval(storage):
     """The crux. `StorageBackend.search` is handed a vector and never the query, and
-    engram retrieves from text — so the backend supplies the embedder, remembers what it
+    memvara retrieves from text — so the backend supplies the embedder, remembers what it
     embedded, and gets the question back."""
     saved(storage, record("Alice lives in Berlin"), record("Alice prefers pytest"))
     hits = storage.search(crew_embed(storage, "pytest"), limit=5)
@@ -1017,7 +1017,7 @@ def test_a_vector_this_backend_did_not_produce_is_refused_rather_than_searched(s
 def test_an_evicted_query_says_which_knob_to_turn(mem):
     """The cache is bounded, so this is reachable. It must not look like a wiring error
     when it is a sizing one."""
-    small = ca.EngramStorage(mem, user="alice", types=CREWAI_TYPES, query_cache=1)
+    small = ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES, query_cache=1)
     stale = crew_embed(small, "first question")
     crew_embed(small, "second question")
     with pytest.raises(ca.CrewAICompatError, match="query_cache"):
@@ -1026,7 +1026,7 @@ def test_an_evicted_query_says_which_knob_to_turn(mem):
 
 
 def test_re_embedding_a_text_keeps_it_warm_rather_than_ageing_it_out(mem):
-    small = ca.EngramStorage(mem, user="alice", types=CREWAI_TYPES, query_cache=2)
+    small = ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES, query_cache=2)
     for text in ("a", "b", "a", "c"):
         crew_embed(small, text)
     assert small.search(crew_embed(small, "a")) == []          # "a" was refreshed
@@ -1076,8 +1076,8 @@ def test_a_metadata_filter_is_refused_because_post_filtering_would_lie_about_rec
 def test_oversampling_is_what_stops_a_scoped_search_under_filling(mem):
     """Post-ranking filters thin the list, so the backend asks for more than it needs.
     The knob exists because the honest statement is that the filter is not in the index."""
-    thin_storage = ca.EngramStorage(mem, user="alice", types=CREWAI_TYPES, oversample=1)
-    wide_storage = ca.EngramStorage(mem, user="alice", types=CREWAI_TYPES, oversample=20)
+    thin_storage = ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES, oversample=1)
+    wide_storage = ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES, oversample=20)
     saved(thin_storage, *(record(f"Alice noise {i}", scope="/noise") for i in range(6)))
     saved(thin_storage, record("Alice signal", scope="/wanted"))
     thin = thin_storage.search(crew_embed(thin_storage, "Alice"),
@@ -1088,7 +1088,7 @@ def test_oversampling_is_what_stops_a_scoped_search_under_filling(mem):
 
 
 def test_a_claim_that_is_not_a_crewai_record_is_never_returned_as_one(storage, mem):
-    """One engram store can hold CrewAI records, imported mem0 notes and ordinary
+    """One memvara store can hold CrewAI records, imported mem0 notes and ordinary
     extracted facts. A backend that handed a `lives_in` triple back as a `MemoryRecord`
     would be inventing an id and a scope for it."""
     mem.remember("user", "lives_in", "Berlin")
@@ -1137,7 +1137,7 @@ def test_deleting_nothing_does_not_warn_about_a_retirement_that_did_not_happen(s
 
 
 def test_erase_mode_removes_the_text_and_the_turn_behind_it(mem):
-    storage = ca.EngramStorage(mem, user="alice", types=CREWAI_TYPES, on_delete="erase")
+    storage = ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES, on_delete="erase")
     first = saved(storage, record("Alice lives in Berlin"))[0]
     with warnings.catch_warnings():
         warnings.simplefilter("error")            # an erasure has nothing to disclose
@@ -1148,7 +1148,7 @@ def test_erase_mode_removes_the_text_and_the_turn_behind_it(mem):
 
 
 def test_retire_mode_is_the_informed_choice_and_stays_silent(mem):
-    storage = ca.EngramStorage(mem, user="alice", types=CREWAI_TYPES, on_delete="retire")
+    storage = ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES, on_delete="retire")
     first = saved(storage, record("Alice lives in Berlin"))[0]
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -1157,7 +1157,7 @@ def test_retire_mode_is_the_informed_choice_and_stays_silent(mem):
 
 def test_an_unknown_on_delete_is_rejected_at_construction(mem):
     with pytest.raises(ValueError, match="on_delete='wipe'"):
-        ca.EngramStorage(mem, user="alice", types=CREWAI_TYPES, on_delete="wipe")
+        ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES, on_delete="wipe")
 
 
 def test_delete_can_select_by_scope_by_category_and_by_age(storage):
@@ -1195,7 +1195,7 @@ def test_every_spelling_of_the_root_scope_resets_the_whole_binding(storage, ever
 
 
 def test_resetting_one_crewai_scope_erases_only_that_subtree(storage, mem):
-    """Engram cannot purge by CrewAI's scope tree — the two point in opposite directions
+    """Memvara cannot purge by CrewAI's scope tree — the two point in opposite directions
     — so those records are erased one at a time. The same erasure, reached the long way."""
     keep, drop = saved(storage, record("keep", scope="/keep"),
                        record("drop", scope="/drop/deep"))
@@ -1248,10 +1248,10 @@ def test_an_empty_scope_reports_no_dates_rather_than_inventing_them(storage):
 
 
 def test_two_backends_on_one_store_cannot_see_each_other(mem):
-    """The engram scope binding is the isolation, and it is the half of CrewAI's scope
-    story that engram enforces rather than filters."""
-    alice = ca.EngramStorage(mem, user="alice", types=CREWAI_TYPES)
-    bob = ca.EngramStorage(mem, user="bob", types=CREWAI_TYPES)
+    """The memvara scope binding is the isolation, and it is the half of CrewAI's scope
+    story that memvara enforces rather than filters."""
+    alice = ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES)
+    bob = ca.MemvaraStorage(mem, user="bob", types=CREWAI_TYPES)
     saved(alice, record("alice's", scope="/shared"))
     assert bob.count() == 0
     assert bob.search(crew_embed(bob, "alice's")) == []
@@ -1282,38 +1282,38 @@ def test_the_async_half_is_the_sync_half_off_the_loop_thread(storage):
 def test_crewais_types_are_imported_on_first_use_not_at_import_time(mem, monkeypatch):
     """The class body needs no CrewAI at all — `StorageBackend` is a Protocol. Only the
     two return types do, and construction must not reach for them."""
-    storage = ca.EngramStorage(mem, user="alice")
+    storage = ca.MemvaraStorage(mem, user="alice")
     monkeypatch.setitem(sys.modules, "crewai.memory.types", CREWAI_TYPES)
     first = saved(storage, record("Alice lives in Berlin"))[0]
     assert isinstance(storage.get_record(first.id), FakeMemoryRecord)
 
 
 def test_a_missing_crewai_names_the_extra_only_when_a_record_is_needed(mem):
-    storage = ca.EngramStorage(mem, user="alice")
+    storage = ca.MemvaraStorage(mem, user="alice")
     saved(storage, record("Alice lives in Berlin"))       # save needs no CrewAI type
-    with pytest.raises(ImportError, match=r"engram\[crewai\]"):
+    with pytest.raises(ImportError, match=r"memvara\[crewai\]"):
         storage.list_records()
 
 
 def test_the_package_exposes_each_adapter_lazily_and_rejects_anything_else(monkeypatch):
-    """`import engram.integrations` must import no framework — the numpy-only install is
+    """`import memvara.integrations` must import no framework — the numpy-only install is
     a CI job, not a slogan."""
-    import engram.integrations as pkg
+    import memvara.integrations as pkg
 
     install_langchain(monkeypatch)
     install_llamaindex(monkeypatch)
-    assert pkg.EngramChatMessageHistory is lc.EngramChatMessageHistory
-    assert pkg.EngramMemoryBlock is li.EngramMemoryBlock
-    assert pkg.EngramStorage is ca.EngramStorage
-    with pytest.raises(AttributeError, match="EngramRetriever"):
-        pkg.EngramRetriever        # ambiguous: two frameworks have one
+    assert pkg.MemvaraChatMessageHistory is lc.MemvaraChatMessageHistory
+    assert pkg.MemvaraMemoryBlock is li.MemvaraMemoryBlock
+    assert pkg.MemvaraStorage is ca.MemvaraStorage
+    with pytest.raises(AttributeError, match="MemvaraRetriever"):
+        pkg.MemvaraRetriever        # ambiguous: two frameworks have one
     with pytest.raises(AttributeError):
         pkg.NotAThing
 
 
 def test_naming_a_langchain_class_without_the_sdk_says_what_to_install():
-    for name in ("EngramChatMessageHistory", "EngramRetriever"):
-        with pytest.raises(ImportError, match=r"engram\[langchain\]"):
+    for name in ("MemvaraChatMessageHistory", "MemvaraRetriever"):
+        with pytest.raises(ImportError, match=r"memvara\[langchain\]"):
             getattr(lc, name)
     with pytest.raises(AttributeError):
         lc.NotAThing
@@ -1323,13 +1323,13 @@ def test_naming_a_langchain_class_without_the_sdk_says_what_to_install():
 
 def test_the_adapters_import_with_numpy_alone():
     """The actual CI assertion, run here too so it fails in a second rather than in a
-    workflow: no module under `engram.integrations` may import a framework at module
+    workflow: no module under `memvara.integrations` may import a framework at module
     scope, however convenient."""
     import importlib
     import pkgutil
 
-    import engram.integrations as pkg
+    import memvara.integrations as pkg
 
     for module in pkgutil.walk_packages(pkg.__path__, f"{pkg.__name__}."):
         importlib.import_module(module.name)
-    assert np.__name__ == "numpy"          # the only third-party import engram allows
+    assert np.__name__ == "numpy"          # the only third-party import memvara allows

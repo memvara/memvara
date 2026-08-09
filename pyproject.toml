@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "engram"
+name = "memvara"
 version = "0.1.0"
 description = "Bitemporal memory for AI agents. Hybrid retrieval, deterministic contradiction resolution, LLM-free write path."
 readme = "README.md"
@@ -27,7 +27,7 @@ crewai = ["crewai>=1.10.1"]
 # The MCP server needs nothing beyond the core: it speaks JSON-RPC 2.0 over stdio in
 # ~100 lines rather than pulling the reference SDK's dozen-package tree (anyio, httpx,
 # starlette, uvicorn, pydantic, cryptography, jsonschema) to frame one JSON object per
-# line. `engram[server]` used to name those and imply they were required, which was
+# line. `memvara[server]` used to name those and imply they were required, which was
 # misleading; `http` is reserved for the REST layer that will actually need them.
 http = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2.6"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "coverage>=7.0"]
@@ -37,13 +37,13 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "coverage>=7.0"]
 bench = ["mem0ai>=2.0", "nltk>=3.8"]
 
 [project.scripts]
-engram-mcp = "engram.server.cli:main"
+memvara-mcp = "memvara.server.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["engram"]
+packages = ["memvara"]
 
 [tool.coverage.run]
-source = ["engram"]
+source = ["memvara"]
 
 [tool.coverage.report]
 # The suite covers every executable statement. Keep it that way: an untested line in a
@@ -57,8 +57,8 @@ exclude_also = [
 ]
 
 [tool.pytest.ini_options]
-# `engram` is in testpaths so the docstring examples run as tests. Documentation that
+# `memvara` is in testpaths so the docstring examples run as tests. Documentation that
 # isn't executed drifts from the code silently.
-testpaths = ["tests", "engram"]
+testpaths = ["tests", "memvara"]
 addopts = "--doctest-modules"
 filterwarnings = ["error::DeprecationWarning"]

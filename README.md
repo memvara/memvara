@@ -1,4 +1,4 @@
-# Engram
+# Memvara
 
 **Bitemporal memory for AI agents.** Structured facts, deterministic contradiction
 resolution, hybrid retrieval, and a write path that mostly doesn't call an LLM.
@@ -9,10 +9,10 @@ pip install -e .
 
 ```python
 from datetime import datetime, timedelta, timezone
-from engram import Engram
+from memvara import Memvara
 
 now = datetime.now(timezone.utc)
-mem = Engram("memory.db", user="alice")
+mem = Memvara("memory.db", user="alice")
 
 # Two independent axes. `valid_from` is when it was true in the world; `recorded_at`
 # is when we learned it. Both are set here so the time-travel query below has a past
@@ -64,7 +64,7 @@ That design has four consequences that show up in production:
 4. **Nothing explains itself.** When the agent says something wrong, you cannot ask which
    memory caused it, where that memory came from, or why it ranked first.
 
-Engram is built around the observation that **most of this doesn't need a model at all.**
+Memvara is built around the observation that **most of this doesn't need a model at all.**
 
 ---
 
@@ -74,7 +74,7 @@ Engram is built around the observation that **most of this doesn't need a model 
 reimplementation of it. Same 105-turn transcript, same perfect extraction oracle, same
 `HashingEmbedder`, Qdrant in `:memory:`. Fully offline. Five runs each:
 
-| metric | mem0 2.0.17 | engram |
+| metric | mem0 2.0.17 | memvara |
 |---|---:|---:|
 | LLM calls on the write path | 105 | **2** |
 | Current value stored correctly | 9–10 / 10 | **10 / 10** |
@@ -93,13 +93,13 @@ established that it is not the model and not the embeddings, because neither var
 That is the "a keyed lookup has no threshold to get wrong" claim, measured against the
 real package instead of argued against something we wrote.
 
-**Two caveats that cut against these numbers.** mem0 is charged per turn while engram
+**Two caveats that cut against these numbers.** mem0 is charged per turn while memvara
 receives the transcript in one `add()`, so the call-count row is partly an
 ingestion-granularity choice — the equal-granularity figure is 126 vs 17, below. And the
 oracle gives mem0 *perfect* extraction, which no real deployment gets; the stale count is
 therefore a floor for mem0, not a typical case.
 
-**The first version of this benchmark was wrong, in engram's favour.** Its oracle
+**The first version of this benchmark was wrong, in memvara's favour.** Its oracle
 string-matched the whole prompt for known turns, and mem0's additive prompt embeds
 `last_k_messages` — so every earlier turn in the window matched and was re-extracted,
 emitting each fact eleven times and measuring mem0 under a firehose no real extractor
@@ -117,7 +117,7 @@ illustration of a mechanism, not as evidence of superiority.
 `PYTHONPATH=. python3 bench/compare.py` — 105-turn transcript, 21 turns carrying a
 durable fact, 10 distinct facts, several revised two or three times:
 
-| metric | mem0-style | engram |
+| metric | mem0-style | memvara |
 |---|---:|---:|
 | LLM calls on the write path | 126 | **2** |
 | Current value stored correctly | 10/10 | 10/10 |
@@ -134,13 +134,13 @@ result is sensitive to it: at 0.5 the baseline also holds zero stale values; at 
 holds eleven. The honest claim is not "top-k loses conflicts" but **"a keyed lookup has
 no threshold to get wrong"** — which is a claim about determinism, not recall.
 
-**The call-count gap is mostly an ingestion-granularity choice.** Engram receives the
+**The call-count gap is mostly an ingestion-granularity choice.** Memvara receives the
 whole transcript in one `add()` and batches extraction; the baseline is charged per turn.
 At equal per-turn granularity it is 126 vs 17, not 126 vs 2. The gap also scales linearly
 with the chitchat ratio, which is a parameter we picked: 1:0 → 21x, 1:4 → 63x, 1:12 →
 147x, 1:100 → 1071x, with identical information content at every point.
 
-**Engram loses the local-compute row** — roughly 3x slower per operation, because it does
+**Memvara loses the local-compute row** — roughly 3x slower per operation, because it does
 strictly more work (FTS indexing, reconciliation, bitemporal filtering). That trade is
 worth it only when model calls dominate, which is the normal case but not a universal one.
 
@@ -249,7 +249,7 @@ fold — Unicode NFKD, casefold, punctuation and legal-suffix stripping — appl
 and object *before* the `(subject, predicate)` key exists:
 
 ```python
-from engram import entity_key
+from memvara import entity_key
 entity_key("Acme Corp.") == entity_key("ACME, Inc.") == entity_key("acme")   # True
 ```
 
@@ -283,7 +283,7 @@ Four tiers, in order, each cheaper than the next one down:
 | 2 | batched structured extraction for what survives | **one** call per batch |
 
 Most conversational turns carry nothing durable. mem0 pays two model calls for "sounds
-good"; Engram pays zero. Every `add()` returns a receipt that reports the cost, because a
+good"; Memvara pays zero. Every `add()` returns a receipt that reports the cost, because a
 number you can't see is a number nobody optimizes:
 
 ```python
@@ -379,10 +379,10 @@ tuned for English silently dropping other scripts, and a retraction that quietly
 Each now has a metric series.
 
 ```python
-from engram import Engram, MemoryRecorder
+from memvara import Memvara, MemoryRecorder
 
 rec = MemoryRecorder()
-mem = Engram("memory.db", telemetry=rec)
+mem = Memvara("memory.db", telemetry=rec)
 mem.add(["I live in Berlin", "你好，我住在北京", "ok thanks"])
 
 rec.total("fast.hit",  script="latin")   # 1  — extracted by rule, no model
@@ -414,7 +414,7 @@ Every method takes `tenant=`/`user=`/`agent=`/`session=` to override the default
 omitted below for readability.
 
 ```python
-mem = Engram(path=":memory:", *, store=, embedder=, llm=, registry=, telemetry=,
+mem = Memvara(path=":memory:", *, store=, embedder=, llm=, registry=, telemetry=,
              redactor=, tenant=, user=, agent=, session=)
 
 # write
@@ -446,7 +446,7 @@ mem.why(claim_id)                                 -> Provenance | None
 mem.consolidate()                                 -> dict[str, int]
 mem.reembed(embedder=None)                        -> int            # after a model change
 mem.stats()                                       -> dict[str, int]
-mem.scope(user="bob")                             -> ScopedEngram   # same API, scope bound
+mem.scope(user="bob")                             -> ScopedMemvara   # same API, scope bound
 mem.close()                                       -> None           # or use as a context manager
 ```
 
@@ -491,26 +491,26 @@ than degrading into an unfiltered query across every user.
 Everything is a protocol:
 
 ```python
-Engram(embedder=MyEmbedder(),      # anything with .dim and .encode(texts) -> (n, dim)
+Memvara(embedder=MyEmbedder(),      # anything with .dim and .encode(texts) -> (n, dim)
        llm=AnthropicLLM(),         # or your own .extract() / .classify_predicate()
-       store=MyPgVectorStore())    # see engram/store/base.py
+       store=MyPgVectorStore())    # see memvara/store/base.py
 ```
 
-Defaults are `HashingEmbedder` + `NullLLM` + `SQLiteStore` — so `Engram()` constructs and
+Defaults are `HashingEmbedder` + `NullLLM` + `SQLiteStore` — so `Memvara()` constructs and
 works with zero configuration. To use a real model:
 
 ```python
-from engram import AnthropicLLM, Engram          # pip install 'engram[anthropic]'
-mem = Engram("memory.db", llm=AnthropicLLM(model="claude-opus-5"))
+from memvara import AnthropicLLM, Memvara          # pip install 'memvara[anthropic]'
+mem = Memvara("memory.db", llm=AnthropicLLM(model="claude-opus-5"))
 
-from engram import OpenAILLM                     # pip install 'engram[openai]'
-mem = Engram("memory.db", llm=OpenAILLM(model="gpt-4.1"))
+from memvara import OpenAILLM                     # pip install 'memvara[openai]'
+mem = Memvara("memory.db", llm=OpenAILLM(model="gpt-4.1"))
 ```
 
 Both are lazy attributes: naming one does not import its SDK, so the default offline
-install stays a two-package install (`engram` and `numpy`, verified in CI). Each backend
+install stays a two-package install (`memvara` and `numpy`, verified in CI). Each backend
 is transport and response-shape only — every rule about what counts as a valid claim is
-shared in `engram/llm/_shape.py`, so the same turn produces the same claim regardless of
+shared in `memvara/llm/_shape.py`, so the same turn produces the same claim regardless of
 which model wrote it.
 
 ### Concurrency
@@ -532,17 +532,17 @@ Idle read latency is unchanged (12.7 µs → 13.0 µs), so this was not taken fr
 path. The sweep itself goes 2.2 s → 2.8 s *with a reader beside it*, because the reader is
 now doing about 9× the work instead of waiting.
 
-For an asyncio application, `AsyncEngram` wraps each method over `asyncio.to_thread`:
+For an asyncio application, `AsyncMemvara` wraps each method over `asyncio.to_thread`:
 
 ```python
-from engram import AsyncEngram, Engram
+from memvara import AsyncMemvara, Memvara
 
-mem = AsyncEngram(Engram("memory.db", user="alice"))
+mem = AsyncMemvara(Memvara("memory.db", user="alice"))
 await mem.add("I live in Berlin")
 [r.text for r in await mem.search("where do they live?")]
 ```
 
-It wraps an `Engram` rather than constructing one, so the sync object stays available for
+It wraps an `Memvara` rather than constructing one, so the sync object stays available for
 setup and for the calls that have no async form.
 
 It is a thread-pool wrapper, not an async rewrite, and says so: SQLite has no async
@@ -555,13 +555,13 @@ driver worth the name, and the work here is CPU and disk rather than network.
 ### MCP server
 
 ```bash
-ENGRAM_DB=/path/to/memory.db python3 -m engram.server    # JSON-RPC 2.0 over stdio
+MEMVARA_DB=/path/to/memory.db python3 -m memvara.server    # JSON-RPC 2.0 over stdio
 ```
 
 Eight tools — `memory_add`, `memory_remember`, `memory_recall`, `memory_search`,
 `memory_history`, `memory_why`, `memory_forget`, `memory_stats`. Hand-rolled against the
 MCP wire format rather than taking an SDK dependency, so the library's "numpy and nothing
-else" claim survives. It refuses to start without `ENGRAM_DB` and prints the client config
+else" claim survives. It refuses to start without `MEMVARA_DB` and prints the client config
 block, rather than silently remembering into a store that vanishes on exit.
 
 `consolidate`, `purge`, `reset` and `erase` are deliberately **absent**, and a test
@@ -572,7 +572,7 @@ you control. `memory_forget` is present because retirement is recoverable.
 ### Running an existing mem0 app
 
 ```python
-from engram.compat import Memory          # mem0's method surface, backed by engram
+from memvara.compat import Memory          # mem0's method surface, backed by memvara
 api = Memory(user_id="alice")
 api.add("I live in Berlin")
 api.search("where do they live?")
@@ -586,7 +586,7 @@ later.
 ### Importing a mem0 store
 
 ```python
-from engram.compat import import_mem0
+from memvara.compat import import_mem0
 receipt = import_mem0(mem, history_db="~/.mem0/history.db")
 ```
 
@@ -606,7 +606,7 @@ looking at a top-k, and nothing ever looks again.
 - **`HashingEmbedder` is a lexical fallback, not a semantic model.** It's the default so
   the library runs offline in milliseconds with no download, and it makes tests
   deterministic. It will not put "physician" near "doctor". Install
-  `engram[local-embed]` or pass your own embedder for real semantic recall.
+  `memvara[local-embed]` or pass your own embedder for real semantic recall.
 - **Two benchmarks, and only one of them runs the real thing.** `bench/mem0_real.py`
   drives the actual `mem0ai` package; `bench/compare.py` drives `bench/baseline.py`, a
   reimplementation of mem0's documented architecture, and is kept because it can vary
@@ -634,10 +634,10 @@ looking at a top-k, and nothing ever looks again.
   `acme, inc.` collapse; `Big Blue` and `IBM` do not, unless you enable the opt-in model
   path or declare the alias. `Stark` versus `Stark Industries` is genuinely ambiguous and
   is left that way.
-- **`AsyncEngram` is a thread-pool wrapper, not an async rewrite.** It keeps an asyncio
+- **`AsyncMemvara` is a thread-pool wrapper, not an async rewrite.** It keeps an asyncio
   event loop unblocked, which is what it is for; it does not make the store itself async.
 - **No REST server yet** — MCP over stdio is the shipped remote surface.
-- **The framework adapters do not all preserve what makes engram different.** LangChain
+- **The framework adapters do not all preserve what makes memvara different.** LangChain
   and LlamaIndex *retrievers* keep everything, including `as_of=`, because "query in,
   documents out" is what `search()` already is. A LangChain `ChatMessageHistory` keeps
   the write path and loses the rest: a `list[BaseMessage]` has nowhere to put a
@@ -645,7 +645,7 @@ looking at a top-k, and nothing ever looks again.
   a faithful transcript either. CrewAI loses the headline feature outright — its unit of
   memory is an opaque sentence with no subject or predicate, so the keyed lookup has
   nothing to key on and "Alice lives in Berlin" and "Alice moved to Lisbon" both stay
-  live. Each adapter says which it is; see `engram/integrations/`.
+  live. Each adapter says which it is; see `memvara/integrations/`.
 - **No encryption at rest.** `purge()`, `erase()` and the redaction hook cover the
   deletion and ingestion halves of a privacy story; the storage half is the deployment's
   problem, and full-disk encryption is the honest answer today. It is not laziness:
@@ -691,7 +691,7 @@ Coverage of the *lines* is the floor, not the goal. What the suite actually pins
   injection, control characters, astral-plane codepoints, 5KB strings, combining marks)
   driven through every public method and a persistence round trip, plus randomized
   transcripts asserting the store never ends up internally inconsistent.
-- **Executable docs** — the README walkthrough and the `Engram` docstring run as tests, so
+- **Executable docs** — the README walkthrough and the `Memvara` docstring run as tests, so
   the examples can't drift from the code.
 
 The ten remaining *branch* partials are verified-unreachable defensive guards — mostly

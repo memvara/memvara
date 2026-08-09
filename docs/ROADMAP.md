@@ -4,7 +4,7 @@ Waves 1–3 are shipped and committed: 1,657 tests, 100% statement coverage, and
 that does what the README says. What follows is everything between here and a product,
 written in the order that actually de-risks it.
 
-The organizing judgement: **engram's problem is not capability, it is credibility.**
+The organizing judgement: **memvara's problem is not capability, it is credibility.**
 Every comparative number in the README is self-authored, measured against a baseline we
 also wrote. That single fact gates fundraising, adoption, and every monetization path
 below. So it goes first, and nothing else is allowed to jump the queue.
@@ -13,7 +13,7 @@ below. So it goes first, and nothing else is allowed to jump the queue.
 
 ## Phase 4 — Prove it
 
-The only phase that changes engram's position rather than its surface area.
+The only phase that changes memvara's position rather than its surface area.
 
 ### 4a. Head-to-head against the real mem0 package
 
@@ -24,12 +24,12 @@ now, not a constraint. It should stop being true.
 
 - Install `mem0ai`, drive both systems from the same transcript and the same extraction
   oracle, and replace `bench/baseline.py`'s numbers with measured ones.
-- Report the losses too. The local-compute row already says engram is ~3× slower; a real
+- Report the losses too. The local-compute row already says memvara is ~3× slower; a real
   head-to-head will surface more, and publishing them is what makes the wins credible.
 - If mem0 wins somewhere that matters, that is a finding, not a failure of the benchmark.
 
 **Risk to name up front:** mem0's `add()` wants a real LLM. Wiring it to the same stub
-oracle engram uses is fiddly and may not be faithful to how mem0 actually behaves. If the
+oracle memvara uses is fiddly and may not be faithful to how mem0 actually behaves. If the
 two cannot be driven from an identical oracle, the honest move is to report both under a
 real model and eat the API cost, not to hand-wave the difference.
 
@@ -39,7 +39,7 @@ real model and eat the API cost, not to hand-wave the difference.
 is set in this environment. The harness can be built now and run the moment a key exists.
 
 These are the benchmarks the field actually cites. Without a number on at least one of
-them, engram is a well-argued library with no evidence, and every claim below is a
+them, memvara is a well-argued library with no evidence, and every claim below is a
 promise. With one, the compliance pitch in the monetization section becomes sellable.
 
 **Deliverable:** `bench/locomo.py` and `bench/longmemeval.py`, plus a results table in the
@@ -55,8 +55,8 @@ first user finds them before we do.
 
 | gap | what's wrong |
 |---|---|
-| `engram[openai]` extra | Declared in `pyproject.toml`. There is no `engram/llm/openai.py`. Installing the extra gets you a dependency and no adapter. |
-| OpenAI / Voyage embedders | `engram[local-embed]` ships `LocalEmbedder`; the hosted embedders most users actually want are absent. |
+| `memvara[openai]` extra | Declared in `pyproject.toml`. There is no `memvara/llm/openai.py`. Installing the extra gets you a dependency and no adapter. |
+| OpenAI / Voyage embedders | `memvara[local-embed]` ships `LocalEmbedder`; the hosted embedders most users actually want are absent. |
 | Python floor | `requires-python = ">=3.10"`. The suite has only ever run on 3.13. Either test 3.10–3.12 in CI or raise the floor to what is verified. |
 | No CI | A library that enforces `fail_under = 100` and has never run on another machine is enforcing it on exactly one machine. |
 | No `LICENSE` file | Apache-2.0 is declared in `pyproject.toml` and the README. The file does not exist. This is a real legal gap, not a formality. |
@@ -74,7 +74,7 @@ Only worth building once Phase 4 says the thing is worth deploying.
   the hard prerequisite for anything hosted — SQLite does not multi-tenant across nodes.
   **This gates the entire cloud monetization path**, so it is the highest-leverage item
   in the phase.
-- **Docker image**, so `docker run engram` is the evaluation path.
+- **Docker image**, so `docker run memvara` is the evaluation path.
 - ~~**Framework adapters** — LangChain, LlamaIndex, CrewAI.~~ **Done** (wave 4), with
   the caveat that they preserve different amounts: the retrievers keep everything, the
   message-history and CrewAI surfaces lose structure their interfaces cannot express.
@@ -109,13 +109,15 @@ is unusual and worth saying out loud.
   `LLM` protocols are stable. All three, because all three are extension points a closed
   layer and third-party backends build against — an earlier version of this line said two
   and disagreed with `CHANGELOG.md`.
-- **The PyPI name `engram` is already taken.** `pip download --no-deps engram` resolves
-  today to an unrelated MIT-licensed rendering/vision library at `0.1.0a1`, so
-  `pip install engram` currently installs someone else's package and `twine upload` under
-  that name will be rejected. This has to be settled before anything else in this phase,
-  and it is the same decision as the commercial brand — see the trademark note above,
-  which this makes concrete rather than hypothetical. `docs/RELEASING.md` lists the
-  options and their costs.
+- **The name is settled, and settling it is why the project is called `memvara`.** It was
+  `engram` until Phase 8 prep found that `pip install engram` already resolves to an
+  unrelated MIT rendering/vision library — so the name was not merely unregistered, it was
+  actively pointing at someone else's code. `engram` was also a poor mark on its own
+  terms: it is the standard neuroscience word for a memory trace, which makes it
+  *descriptive* of the product's own function and the hardest class to register or
+  defend. `memvara` is coined and means nothing in any language, which makes it a fanciful
+  mark — the strongest class — and it is free on PyPI, GitHub and npm (verified 404 on all
+  three). Do not let it drift: register the PyPI name before the first public mention.
 - **PyPI publish.** Outward-facing and effectively irreversible — a name, once taken and
   published against, cannot be quietly un-published. Requires an explicit decision.
 
@@ -133,8 +135,8 @@ Three things are true at once, and a plan that ignores any of them is wishful:
 2. **The category is crowded and funded.** mem0, Zep, Letta, Cognee. mem0 in particular
    has funding, mindshare, and a hosted product already selling. Competing on "a nicer
    memory layer for your chatbot" is fighting on their ground with none of their assets.
-3. **The migration cost from mem0 to engram is close to zero, and that is ours.** The
-   compat shim plus the `history.db` importer means a mem0 user can evaluate engram in an
+3. **The migration cost from mem0 to memvara is close to zero, and that is ours.** The
+   compat shim plus the `history.db` importer means a mem0 user can evaluate memvara in an
    afternoon without rewriting a call site or losing their history. That is a real wedge
    and it was expensive to build. It should be the centre of the go-to-market, not a
    footnote in the README.
@@ -153,7 +155,7 @@ deterministic contradiction resolution answer a question no vector store can:
 That is not a developer-convenience feature. It is an **audit requirement** in every
 industry that is currently too scared to deploy agents: healthcare, finance, insurance,
 legal, and anything touching the EU AI Act's logging obligations or a GDPR Article 17
-erasure request. Engram already answers the erasure half properly, which most of the
+erasure request. Memvara already answers the erasure half properly, which most of the
 category does not — retirement that leaves the text on disk is the normal behaviour, and
 it does not satisfy a deletion request.
 
@@ -169,7 +171,7 @@ cannot answer.
 **This is settled, not a recommendation.** The core library stays Apache-2.0. Every
 surface built around it — REST API, web UI, team dashboards, multi-tenant control plane,
 governance — is closed and lives in a separate private repository that depends on
-`engram` as a published package.
+`memvara` as a published package.
 
 ### Why not a protective license, given the core is permissive
 
@@ -178,7 +180,7 @@ core and ship the exact product we intend to sell, and the license will not stop
 That risk is **accepted deliberately**, because the usual remedy is worse here.
 
 AGPL plus a commercial dual license is what MongoDB and Elastic did, and it works for them
-because they ship **servers** — the copyleft boundary is a socket. Engram is a **library**
+because they ship **servers** — the copyleft boundary is a socket. Memvara is a **library**
 that gets imported into someone's agent process, where AGPL arguably reaches the whole
 application. In practice nobody `pip install`s an AGPL memory layer into a commercial
 product. That would close the embedding path, and with it the migration wedge that makes
@@ -210,10 +212,10 @@ single node, and needing Postgres correlates almost exactly with willingness to 
 
 - **CLA on the open core**, in place before the first outside contribution. Without it,
   every external patch is a veto on ever relicensing.
-- **Trademark on a distinct commercial brand.** Note that *"engram" is probably weak* —
+- **Trademark on a distinct commercial brand.** Note that *"memvara" is probably weak* —
   it is an established neuroscience term for a memory trace, which makes it descriptive of
   the product's own function and hard to register. Trademark, not license, is what stops
-  someone selling "Engram Cloud". Pick the commercial name deliberately.
+  someone selling "Memvara Cloud". Pick the commercial name deliberately.
 - **Governance and Postgres never enter the open repository.** Not "moved later" —
   never committed, because git history is public forever.
 

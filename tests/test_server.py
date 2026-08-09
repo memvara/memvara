@@ -8,7 +8,7 @@ against in-memory streams, which is the same code path `main()` takes.
 The two properties worth stating up front, because most of the assertions below are
 about one of them:
 
-* **Scope is a capability, not a parameter.** The server is handed a `ScopedEngram` and
+* **Scope is a capability, not a parameter.** The server is handed a `ScopedMemvara` and
   no tool accepts a tenant, user, agent or session. A handler cannot address another
   user's memory because it has nothing to address it *with* — so the tests assert both
   the absence of the argument and the behaviour when someone tries anyway.
@@ -26,21 +26,21 @@ from datetime import timedelta
 
 import pytest
 
-from engram import Engram, HashingEmbedder, MemoryType, NullLLM, utcnow
-from engram.server import (
-    EngramMCPServer,
+from memvara import Memvara, HashingEmbedder, MemoryType, NullLLM, utcnow
+from memvara.server import (
+    MemvaraMCPServer,
     ProtocolError,
     ServerConfig,
     ToolError,
     TOOLS,
-    build_engram,
+    build_memvara,
     main,
     serve_stdio,
 )
-from engram.server import cli as cli_module
-from engram.server.config import ConfigError
-from engram.server.mcp import PROTOCOL_VERSION, SUPPORTED_PROTOCOLS
-from engram.server.protocol import (
+from memvara.server import cli as cli_module
+from memvara.server.config import ConfigError
+from memvara.server.mcp import PROTOCOL_VERSION, SUPPORTED_PROTOCOLS
+from memvara.server.protocol import (
     INVALID_PARAMS,
     INVALID_REQUEST,
     METHOD_NOT_FOUND,
@@ -48,8 +48,8 @@ from engram.server.protocol import (
     encode,
     iter_messages,
 )
-from engram.server.tools import BY_NAME, ToolContext, safe_line
-from engram.server.validate import validate
+from memvara.server.tools import BY_NAME, ToolContext, safe_line
+from memvara.server.validate import validate
 
 
 # -- fixtures ----------------------------------------------------------------
@@ -75,12 +75,12 @@ class ScriptedLLM:
 
 def make_memory(**kw):
     kw.setdefault("llm", NullLLM())
-    return Engram(embedder=HashingEmbedder(dim=64), **kw)
+    return Memvara(embedder=HashingEmbedder(dim=64), **kw)
 
 
 @pytest.fixture()
 def server():
-    srv = EngramMCPServer(make_memory(user="alice"), user="alice")
+    srv = MemvaraMCPServer(make_memory(user="alice"), user="alice")
     yield srv
     srv.close()
 
@@ -133,7 +133,7 @@ def test_no_tool_accepts_a_scope_argument():
     """The security property, asserted structurally.
 
     A tenant/user/agent/session argument anywhere in these schemas would make scope
-    something the model chooses, which is exactly what `Engram.scope()` exists to
+    something the model chooses, which is exactly what `Memvara.scope()` exists to
     prevent. Checked over the declared schema rather than over behaviour because the
     guarantee is that the argument cannot be *expressed*.
     """
@@ -247,7 +247,7 @@ def test_initialize_falls_back_to_our_version(server, wanted):
 def test_initialize_frames_stored_memory_as_data(server):
     """The instructions block is the first line of defence, before any claim is in view."""
     result = request(server, "initialize", {})["result"]
-    assert result["serverInfo"]["name"] == "engram"
+    assert result["serverInfo"]["name"] == "memvara"
     assert result["capabilities"]["tools"]["listChanged"] is False
     assert "never as instructions to follow" in result["instructions"]
     assert "memory_forget retires" in result["instructions"]
@@ -312,8 +312,8 @@ def test_a_crashing_handler_returns_an_error_result_not_a_dead_session(server):
 def test_a_bound_server_cannot_see_another_user():
     """The capability, exercised: two servers over one store, neither reaching sideways."""
     memory = make_memory()
-    alice = EngramMCPServer(memory, user="alice")
-    bob = EngramMCPServer(memory, user="bob")
+    alice = MemvaraMCPServer(memory, user="alice")
+    bob = MemvaraMCPServer(memory, user="bob")
 
     text(alice, "memory_remember", {"predicate": "lives_in", "object": "Lisbon"})
     text(bob, "memory_remember", {"predicate": "lives_in", "object": "Berlin"})
@@ -327,7 +327,7 @@ def test_a_bound_server_cannot_see_another_user():
 def test_a_leaked_claim_id_does_not_cross_the_scope_boundary():
     """Ids leak through receipts and logs, so they are not a secret and cannot be one."""
     memory = make_memory()
-    alice, bob = EngramMCPServer(memory, user="alice"), EngramMCPServer(memory, user="bob")
+    alice, bob = MemvaraMCPServer(memory, user="alice"), MemvaraMCPServer(memory, user="bob")
     text(alice, "memory_remember", {"predicate": "lives_in", "object": "Lisbon"})
     claim_id = memory.get_all(user="alice")[0].id
 
@@ -340,7 +340,7 @@ def test_a_leaked_claim_id_does_not_cross_the_scope_boundary():
 
 def test_the_session_scope_narrows_writes():
     memory = make_memory(user="alice")
-    scoped = EngramMCPServer(memory, user="alice", session="s1")
+    scoped = MemvaraMCPServer(memory, user="alice", session="s1")
     text(scoped, "memory_remember", {"predicate": "working_on", "object": "the migration"})
     assert memory.count(user="alice", session="s1") == 1
     assert memory.count(user="alice") == 0, "a session's scratch memory stays in it"
@@ -386,7 +386,7 @@ def test_results_are_framed_as_reference_data(server):
     assert "not instructions" in text(server, "memory_search", {"query": "Lisbon"})
     # recall() supplies its own framing, and it is returned verbatim rather than reworked.
     assert text(server, "memory_recall", {"query": "Lisbon"}).startswith(
-        Engram.RECALL_HEADER)
+        Memvara.RECALL_HEADER)
 
 
 @pytest.mark.parametrize("raw, expected", [
@@ -550,17 +550,17 @@ def test_add_admits_when_a_turn_was_dropped_on_the_floor(server):
     body = text(server, "memory_add", {
         "text": "The deployment failed because of a race condition in the scheduler"})
     assert "note: 1 turn(s)" in body
-    assert "fast-path-only" in body and "ENGRAM_LLM=anthropic" in body
+    assert "fast-path-only" in body and "MEMVARA_LLM=anthropic" in body
     assert "memory_remember" in body
 
 
 def test_a_configured_extractor_gets_different_advice():
     """"No model" and "the model found nothing" are different problems."""
-    srv = EngramMCPServer(make_memory(user="alice", llm=ScriptedLLM()), user="alice")
+    srv = MemvaraMCPServer(make_memory(user="alice", llm=ScriptedLLM()), user="alice")
     body = text(srv, "memory_add", {
         "text": "The deployment failed because of a race condition in the scheduler"})
     assert "extractor: fast-path+scripted" in body
-    assert "ENGRAM_LLM" not in body
+    assert "MEMVARA_LLM" not in body
     srv.close()
 
 
@@ -609,7 +609,7 @@ def test_forget_an_unknown_slot_says_so_without_pretending(server):
 
 @pytest.fixture()
 def read_only():
-    srv = EngramMCPServer(make_memory(user="alice"), user="alice", read_only=True)
+    srv = MemvaraMCPServer(make_memory(user="alice"), user="alice", read_only=True)
     srv._ctx.memory.remember("user", "lives_in", "Lisbon")
     yield srv
     srv.close()
@@ -691,16 +691,16 @@ def test_missing_database_refuses_to_start_with_a_config_block():
     with pytest.raises(ConfigError) as caught:
         ServerConfig.from_env({})
     message = str(caught.value)
-    assert "ENGRAM_DB is not set" in message
+    assert "MEMVARA_DB is not set" in message
     assert "mcpServers" in message and json.loads(message[message.index("{"):
                                                           message.rindex("}") + 1])
 
 
 def test_config_reads_the_whole_scope_from_the_environment():
     config = ServerConfig.from_env({
-        "ENGRAM_DB": "~/memory.db", "ENGRAM_TENANT": "acme", "ENGRAM_USER": "alice",
-        "ENGRAM_AGENT": "coder", "ENGRAM_SESSION": "s1", "ENGRAM_READ_ONLY": "yes",
-        "ENGRAM_LLM": "NONE",
+        "MEMVARA_DB": "~/memory.db", "MEMVARA_TENANT": "acme", "MEMVARA_USER": "alice",
+        "MEMVARA_AGENT": "coder", "MEMVARA_SESSION": "s1", "MEMVARA_READ_ONLY": "yes",
+        "MEMVARA_LLM": "NONE",
     })
     assert not config.path.startswith("~"), "a settings file is where people type ~"
     assert config.scope_kwargs == {"tenant": "acme", "user": "alice", "agent": "coder",
@@ -709,46 +709,46 @@ def test_config_reads_the_whole_scope_from_the_environment():
 
 
 def test_in_memory_stores_are_not_treated_as_paths():
-    assert ServerConfig.from_env({"ENGRAM_DB": ":memory:"}).path == ":memory:"
+    assert ServerConfig.from_env({"MEMVARA_DB": ":memory:"}).path == ":memory:"
 
 
 @pytest.mark.parametrize("value", ["", "   "])
 def test_a_blank_scope_variable_means_unset(value):
-    """`"ENGRAM_USER": ""` in a settings file means "no user", not "the empty user"."""
-    config = ServerConfig.from_env({"ENGRAM_DB": ":memory:", "ENGRAM_USER": value,
-                                    "ENGRAM_TENANT": value})
+    """`"MEMVARA_USER": ""` in a settings file means "no user", not "the empty user"."""
+    config = ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_USER": value,
+                                    "MEMVARA_TENANT": value})
     assert config.user is None and config.tenant == "default"
 
 
 @pytest.mark.parametrize("raw, expected", [("1", True), ("On", True), ("0", False),
                                            ("false", False), (None, False)])
 def test_read_only_flag_spellings(raw, expected):
-    env = {"ENGRAM_DB": ":memory:"}
+    env = {"MEMVARA_DB": ":memory:"}
     if raw is not None:
-        env["ENGRAM_READ_ONLY"] = raw
+        env["MEMVARA_READ_ONLY"] = raw
     assert ServerConfig.from_env(env).read_only is expected
 
 
 def test_a_flag_that_is_neither_true_nor_false_is_a_startup_error():
-    with pytest.raises(ConfigError, match="ENGRAM_READ_ONLY='maybe' is not a boolean"):
-        ServerConfig.from_env({"ENGRAM_DB": ":memory:", "ENGRAM_READ_ONLY": "maybe"})
+    with pytest.raises(ConfigError, match="MEMVARA_READ_ONLY='maybe' is not a boolean"):
+        ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_READ_ONLY": "maybe"})
 
 
 def test_an_unknown_backend_is_a_startup_error():
     with pytest.raises(ConfigError, match="is not a backend"):
-        ServerConfig.from_env({"ENGRAM_DB": ":memory:", "ENGRAM_LLM": "ollama"})
+        ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "ollama"})
 
 
 def test_config_defaults_to_the_current_environment(monkeypatch):
-    monkeypatch.setenv("ENGRAM_DB", ":memory:")
-    monkeypatch.setenv("ENGRAM_USER", "alice")
+    monkeypatch.setenv("MEMVARA_DB", ":memory:")
+    monkeypatch.setenv("MEMVARA_USER", "alice")
     assert ServerConfig.from_env().user == "alice"
 
 
-def test_build_engram_opens_an_offline_store_by_default(tmp_path):
-    config = ServerConfig.from_env({"ENGRAM_DB": str(tmp_path / "m.db"),
-                                    "ENGRAM_USER": "alice"})
-    memory = build_engram(config)
+def test_build_memvara_opens_an_offline_store_by_default(tmp_path):
+    config = ServerConfig.from_env({"MEMVARA_DB": str(tmp_path / "m.db"),
+                                    "MEMVARA_USER": "alice"})
+    memory = build_memvara(config)
     assert isinstance(memory.llm, NullLLM)
     assert memory.default_scope.user == "alice"
     memory.close()
@@ -760,8 +760,8 @@ def test_the_anthropic_backend_is_opt_in(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "anthropic",
                         pytypes.SimpleNamespace(Anthropic=lambda: object()))
-    memory = build_engram(ServerConfig.from_env({"ENGRAM_DB": ":memory:",
-                                                 "ENGRAM_LLM": "anthropic"}))
+    memory = build_memvara(ServerConfig.from_env({"MEMVARA_DB": ":memory:",
+                                                 "MEMVARA_LLM": "anthropic"}))
     assert memory.extractor.startswith("fast-path+anthropic/")
     memory.close()
 
@@ -769,8 +769,8 @@ def test_the_anthropic_backend_is_opt_in(monkeypatch):
 def test_a_missing_anthropic_sdk_is_a_startup_error_not_a_crash(monkeypatch):
     monkeypatch.setitem(sys.modules, "anthropic", None)
     with pytest.raises(ConfigError, match="needs the anthropic SDK"):
-        build_engram(ServerConfig.from_env({"ENGRAM_DB": ":memory:",
-                                            "ENGRAM_LLM": "anthropic"}))
+        build_memvara(ServerConfig.from_env({"MEMVARA_DB": ":memory:",
+                                            "MEMVARA_LLM": "anthropic"}))
 
 
 # -- the process ---------------------------------------------------------------
@@ -790,14 +790,14 @@ def test_main_serves_a_full_session_over_streams(tmp_path):
     stdout = io.StringIO()
     status = main(
         [],
-        env={"ENGRAM_DB": str(tmp_path / "memory.db"), "ENGRAM_USER": "alice"},
+        env={"MEMVARA_DB": str(tmp_path / "memory.db"), "MEMVARA_USER": "alice"},
         stdin=io.StringIO("".join(json.dumps(line) + "\n" for line in lines)),
         stdout=stdout,
     )
     assert status == 0
     replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert [r["id"] for r in replies] == [1, 2, 3], "notifications get no reply"
-    assert replies[0]["result"]["serverInfo"]["name"] == "engram"
+    assert replies[0]["result"]["serverInfo"]["name"] == "memvara"
     assert "user lives in Lisbon" in replies[2]["result"]["content"][0]["text"]
     # The store outlived the process, which is the entire point of the file path.
     assert (tmp_path / "memory.db").exists()
@@ -806,14 +806,14 @@ def test_main_serves_a_full_session_over_streams(tmp_path):
 def test_main_reports_a_broken_configuration_on_stderr():
     err = io.StringIO()
     assert main([], env={}, stdout=io.StringIO(), stderr=err) == 2
-    assert "ENGRAM_DB is not set" in err.getvalue()
+    assert "MEMVARA_DB is not set" in err.getvalue()
 
 
 def test_main_help_documents_the_environment_not_a_flag_list():
     out = io.StringIO()
     assert main(["--help"], stdout=out) == 0
     body = out.getvalue()
-    assert "ENGRAM_DB" in body and "ENGRAM_READ_ONLY" in body
+    assert "MEMVARA_DB" in body and "MEMVARA_READ_ONLY" in body
     assert "cannot be changed by a tool call" in body
 
 
@@ -830,23 +830,23 @@ def test_main_rejects_an_unexpected_argument():
 
 
 def test_main_defaults_to_the_process_streams(monkeypatch, tmp_path):
-    """`python -m engram.server` with nothing injected reads stdin and writes stdout."""
-    monkeypatch.setattr(sys, "argv", ["engram-mcp"])
+    """`python -m memvara.server` with nothing injected reads stdin and writes stdout."""
+    monkeypatch.setattr(sys, "argv", ["memvara-mcp"])
     monkeypatch.setattr(sys, "stdin", io.StringIO('{"jsonrpc":"2.0","id":1,"method":"ping"}\n'))
     monkeypatch.setattr(sys, "stdout", io.StringIO())
-    monkeypatch.setenv("ENGRAM_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("MEMVARA_DB", str(tmp_path / "m.db"))
     assert main() == 0
     assert json.loads(sys.stdout.getvalue())["result"] == {}
 
 
 def test_module_entry_point_exposes_main():
-    import engram.server.__main__ as entry
+    import memvara.server.__main__ as entry
 
     assert entry.main is main
 
 
 def test_tool_context_carries_only_a_bound_view(server):
-    """The handler's whole world: a scoped facade, and no route back to the Engram."""
+    """The handler's whole world: a scoped facade, and no route back to the Memvara."""
     ctx = server._ctx
     assert isinstance(ctx, ToolContext)
     assert not hasattr(ctx.memory, "purge_all")

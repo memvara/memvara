@@ -20,11 +20,11 @@ from typing import Any, Sequence
 
 import pytest
 
-from engram.embed import HashingEmbedder
-from engram.retrieve import HybridRetriever
-from engram.schema import Cardinality, PredicateRegistry
-from engram.store import SQLiteStore
-from engram.telemetry import (
+from memvara.embed import HashingEmbedder
+from memvara.retrieve import HybridRetriever
+from memvara.schema import Cardinality, PredicateRegistry
+from memvara.store import SQLiteStore
+from memvara.telemetry import (
     FAST_HIT,
     FAST_MISS,
     GATE_DROP,
@@ -39,8 +39,8 @@ from engram.telemetry import (
     WRITE_RETRACTION,
     MemoryRecorder,
 )
-from engram.types import Claim, Derivation, Episode, Scope, utcnow
-from engram.write import SalienceGate, WritePipeline
+from memvara.types import Claim, Derivation, Episode, Scope, utcnow
+from memvara.write import SalienceGate, WritePipeline
 
 
 class CountingLLM:
@@ -475,7 +475,7 @@ def test_a_deterministically_foldable_form_never_reaches_the_model():
 
 
 def test_a_no_op_backend_is_not_billed_and_reports_the_loss():
-    from engram.llm import NullLLM
+    from memvara.llm import NullLLM
 
     pipe, store, _ = build(NullLLM())
     receipt = pipe.add([ep("The quarterly review is next Tuesday."),
@@ -1099,7 +1099,7 @@ def test_an_empty_batch_emits_nothing():
 
 
 def test_evidence_roles_reaches_the_gate_from_the_pipeline_constructor():
-    """`write_evidence_roles=` on `Engram` works because this parameter is keyword-only
+    """`write_evidence_roles=` on `Memvara` works because this parameter is keyword-only
     here — the facade forwards `write_*` by reading this signature. Pinned so the
     passthrough cannot be broken by making it positional."""
     pipe, store, _ = build(evidence_roles=None)

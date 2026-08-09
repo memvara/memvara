@@ -26,12 +26,12 @@ from typing import Any, Sequence
 
 import pytest
 
-from engram import Engram
-from engram.embed import HashingEmbedder
-from engram.llm import NullLLM
-from engram.schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
-from engram.store import SQLiteStore
-from engram.types import Episode, MemoryType, Scope
+from memvara import Memvara
+from memvara.embed import HashingEmbedder
+from memvara.llm import NullLLM
+from memvara.schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
+from memvara.store import SQLiteStore
+from memvara.types import Episode, MemoryType, Scope
 
 # =============================================================================
 # The six concepts, and the surface forms a real extractor drifts across
@@ -193,10 +193,10 @@ def turn(round_no: int, index: int, concept: Concept) -> Episode:
     )
 
 
-def simulate(llm, *, rounds: int = ROUNDS, **engram_kw):
+def simulate(llm, *, rounds: int = ROUNDS, **memvara_kw):
     """Drive `rounds * 6` extractions through the public API and hand back the memory."""
-    mem = Engram(store=SQLiteStore(":memory:"), embedder=HashingEmbedder(dim=64),
-                 llm=llm, tenant="acme", user="alice", **engram_kw)
+    mem = Memvara(store=SQLiteStore(":memory:"), embedder=HashingEmbedder(dim=64),
+                 llm=llm, tenant="acme", user="alice", **memvara_kw)
     for r in range(rounds):
         mem.add([turn(r, i, c) for i, c in enumerate(CONCEPTS)])
     return mem
@@ -349,7 +349,7 @@ def test_extraction_stays_the_only_thing_billed(unaided):
 
 def test_a_noop_backend_is_never_billed():
     """Contract C: `llm_calls` counts model consultations, not method invocations."""
-    with Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(),
+    with Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(),
                 tenant="acme", user="alice") as mem:
         receipt = mem.add([turn(0, 0, CONCEPTS[0])])
         assert receipt.llm_calls == 0
@@ -359,7 +359,7 @@ def test_a_noop_backend_is_never_billed():
 def test_a_noop_backend_reports_what_it_could_not_extract():
     """The turn reached tier 2 and yielded nothing. Reporting a clean empty write
     instead is how the default configuration reads as a broken library."""
-    with Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(),
+    with Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(),
                 tenant="acme", user="alice") as mem:
         receipt = mem.add([turn(0, 0, CONCEPTS[0])])
         assert receipt.unextracted == 1
@@ -371,7 +371,7 @@ def test_an_unextractable_turn_is_reported_even_with_a_real_model():
     the turn and found nothing durable in it loses exactly as much."""
     llm = DriftingExtractor(include_novel=False)
     llm.extract = lambda episodes, known: []            # type: ignore[method-assign]
-    with Engram(embedder=HashingEmbedder(dim=64), llm=llm,
+    with Memvara(embedder=HashingEmbedder(dim=64), llm=llm,
                 tenant="acme", user="alice") as mem:
         receipt = mem.add([turn(0, 0, CONCEPTS[0]), turn(1, 1, CONCEPTS[1])])
         assert (receipt.llm_calls, receipt.unextracted) == (1, 2)
@@ -569,7 +569,7 @@ def test_a_resolved_alias_survives_a_restart(tmp_path):
     """'Asked once, ever' has to hold across processes or a CLI agent re-pays daily."""
     path = str(tmp_path / "s.db")
     first = DriftingExtractor(include_novel=True, synonyms=SYNONYMS)
-    mem = Engram(path, embedder=HashingEmbedder(dim=64), llm=first,
+    mem = Memvara(path, embedder=HashingEmbedder(dim=64), llm=first,
                  tenant="acme", user="alice")
     for r in range(8):
         mem.add([turn(r, i, c) for i, c in enumerate(CONCEPTS)])
@@ -577,7 +577,7 @@ def test_a_resolved_alias_survives_a_restart(tmp_path):
     assert first.resolve_calls == len(CONCEPTS)
 
     second = DriftingExtractor(include_novel=True, synonyms=SYNONYMS)
-    mem2 = Engram(path, embedder=HashingEmbedder(dim=64), llm=second,
+    mem2 = Memvara(path, embedder=HashingEmbedder(dim=64), llm=second,
                   tenant="acme", user="alice")
     for r in range(8, 16):
         mem2.add([turn(r, i, c) for i, c in enumerate(CONCEPTS)])
@@ -588,7 +588,7 @@ def test_a_resolved_alias_survives_a_restart(tmp_path):
 def test_specs_are_stored_against_the_pipeline_tenant():
     store = SQLiteStore(":memory:")
     llm = DriftingExtractor(include_novel=True, synonyms=SYNONYMS)
-    mem = Engram(store=store, embedder=HashingEmbedder(dim=64), llm=llm,
+    mem = Memvara(store=store, embedder=HashingEmbedder(dim=64), llm=llm,
                  tenant="acme", user="alice")
     mem.add([turn(NOVEL_ROUND, 0, CONCEPTS[0])])
     assert any(CONCEPTS[0].novel in s.aliases for s in stored_specs(store))
@@ -610,7 +610,7 @@ class _Wrapping:
 
 def _drive_one_acquisition(store):
     llm = DriftingExtractor(include_novel=True, synonyms=SYNONYMS)
-    mem = Engram(store=store, embedder=HashingEmbedder(dim=64), llm=llm,
+    mem = Memvara(store=store, embedder=HashingEmbedder(dim=64), llm=llm,
                  tenant="acme", user="alice")
     mem.add([turn(NOVEL_ROUND, 0, CONCEPTS[0])])
     return mem, llm
@@ -648,7 +648,7 @@ def test_a_store_predating_tenant_scoped_specs_still_persists():
 
 def test_spec_carries_the_new_alias_without_mutating_the_builtin_tuple():
     """`BUILTIN_PREDICATES` is module state shared by every registry in the process."""
-    from engram.schema import BUILTIN_PREDICATES
+    from memvara.schema import BUILTIN_PREDICATES
 
     reg = PredicateRegistry()
     reg.learn_alias("works_at", "paycheck_source")

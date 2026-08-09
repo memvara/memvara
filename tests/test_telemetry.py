@@ -24,12 +24,12 @@ from typing import Any, Sequence
 
 import pytest
 
-from engram.consolidate import Consolidator
-from engram.embed import HashingEmbedder
-from engram.retrieve import HybridRetriever
-from engram.schema import PredicateRegistry
-from engram.store import SQLiteStore
-from engram.telemetry import (
+from memvara.consolidate import Consolidator
+from memvara.embed import HashingEmbedder
+from memvara.retrieve import HybridRetriever
+from memvara.schema import PredicateRegistry
+from memvara.store import SQLiteStore
+from memvara.telemetry import (
     CONSOLIDATE_CLAIMS_PER_SLOT,
     CONSOLIDATE_CROWDED_SLOTS,
     CONSOLIDATE_DECAYED,
@@ -61,8 +61,8 @@ from engram.telemetry import (
     script_of,
     series_names,
 )
-from engram.types import Claim, Episode, Scope, utcnow
-from engram.write import WritePipeline
+from memvara.types import Claim, Episode, Scope, utcnow
+from memvara.write import WritePipeline
 
 SCOPE = Scope("t", "alice")
 
@@ -96,7 +96,7 @@ def ep(text: str, *, ts=None, role: str = "user") -> Episode:
 class Rig:
     """The three subsystems that emit, wired to one recorder.
 
-    Built by hand rather than through `Engram` because the constructor parameter that
+    Built by hand rather than through `Memvara` because the constructor parameter that
     threads a recorder through the facade is workstream F's, and this workstream's
     contract is the protocol and the emission points.
     """
@@ -352,11 +352,11 @@ def test_nothing_is_computed_for_telemetry_when_it_is_unset(monkeypatch):
     def boom(*a, **kw):
         raise AssertionError("telemetry work ran with no recorder configured")
 
-    monkeypatch.setattr("engram.write.pipeline.script_of", boom)
-    monkeypatch.setattr("engram.retrieve.hybrid.script_of", boom)
-    monkeypatch.setattr("engram.retrieve.hybrid.rank_correlation", boom)
-    monkeypatch.setattr("engram.retrieve.hybrid.quality_boost", boom)
-    monkeypatch.setattr("engram.consolidate.sweep.Sweep._observe_slots", boom)
+    monkeypatch.setattr("memvara.write.pipeline.script_of", boom)
+    monkeypatch.setattr("memvara.retrieve.hybrid.script_of", boom)
+    monkeypatch.setattr("memvara.retrieve.hybrid.rank_correlation", boom)
+    monkeypatch.setattr("memvara.retrieve.hybrid.quality_boost", boom)
+    monkeypatch.setattr("memvara.consolidate.sweep.Sweep._observe_slots", boom)
 
     rig = Rig(None, FakeLLM([
         {"subject": "user", "predicate": "likes", "object": "tea", "polarity": 1,

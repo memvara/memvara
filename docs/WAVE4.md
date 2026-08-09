@@ -2,7 +2,7 @@
 
 Four agents, exclusive file ownership. Read this whole file before writing anything.
 
-## What engram is
+## What memvara is
 
 A bitemporal memory layer for AI agents, at `/Applications/workstation/agent-memory`.
 Facts are `Claim` triples carrying two independent time axes (valid time: when it was true;
@@ -29,7 +29,7 @@ python3 -m coverage run -m pytest && python3 -m coverage report
 thing under test. Control time by passing explicit `datetime` values, never by patching the
 clock. If your work needs a third-party SDK, it must be an *optional* import behind a lazy
 `__getattr__` or a function-local import, tested with an injected fake — see
-`engram/llm/openai.py` and `tests/test_llm_openai.py` for the exact pattern to copy.
+`memvara/llm/openai.py` and `tests/test_llm_openai.py` for the exact pattern to copy.
 
 **A test states a behaviour that would be wrong if the code changed.** Name the failure:
 `test_a_backdated_supersession_closes_valid_time_where_the_new_value_begins`, not
@@ -53,12 +53,12 @@ and I will apply it.
 | workstream | owns |
 |---|---|
 | **A — evaluation** | `bench/locomo.py`, `bench/longmemeval.py`, `bench/evalkit.py`, `tests/test_bench_eval.py` |
-| **B — framework adapters** | `engram/integrations/**` (new package), `tests/test_integrations.py` |
-| **C — privacy seams** | `engram/redact.py`, `tests/test_redact.py`, `engram/core.py`, `engram/write/pipeline.py` |
-| **D — deploy & release** | `Dockerfile`, `.dockerignore`, `docs/DEPLOY.md`, `docs/RELEASING.md`, `engram/py.typed`, `tests/test_packaging.py` |
+| **B — framework adapters** | `memvara/integrations/**` (new package), `tests/test_integrations.py` |
+| **C — privacy seams** | `memvara/redact.py`, `tests/test_redact.py`, `memvara/core.py`, `memvara/write/pipeline.py` |
+| **D — deploy & release** | `Dockerfile`, `.dockerignore`, `docs/DEPLOY.md`, `docs/RELEASING.md`, `memvara/py.typed`, `tests/test_packaging.py` |
 
 **Mine, do not edit:** `pyproject.toml`, `README.md`, `CHANGELOG.md`, `docs/*.md` except the
-two D owns, `engram/__init__.py`, `engram/compat/**`, `engram/server/**`, `bench/compare.py`,
+two D owns, `memvara/__init__.py`, `memvara/compat/**`, `memvara/server/**`, `bench/compare.py`,
 `bench/baseline.py`, `bench/mem0_real.py`.
 
 **If you need a new dependency or extra**, do not edit `pyproject.toml`. Name the exact

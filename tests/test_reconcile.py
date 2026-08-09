@@ -12,16 +12,16 @@ from datetime import timedelta
 
 import pytest
 
-from engram.schema import (
+from memvara.schema import (
     BUILTIN_PREDICATES,
     Cardinality,
     PredicateRegistry,
     PredicateSpec,
     Volatility,
 )
-from engram.store import SQLiteStore
-from engram.types import Claim, Episode, Scope, utcnow
-from engram.write import Reconciler
+from memvara.store import SQLiteStore
+from memvara.types import Claim, Episode, Scope, utcnow
+from memvara.write import Reconciler
 
 
 @pytest.fixture()

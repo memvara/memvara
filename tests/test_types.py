@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from engram.types import (
+from memvara.types import (
     OBJECT_ENTITY,
     Claim,
     Derivation,
@@ -108,7 +108,7 @@ def test_value_key_distinguishes_polarity():
 # --- entity identity ---------------------------------------------------------
 # Both keys hash entity identities rather than raw text. Hashing the text made "Acme",
 # "Acme Corp" and "ACME" three employers, so a single-valued predicate reported two job
-# changes that never happened. See `engram/entities.py`.
+# changes that never happened. See `memvara/entities.py`.
 
 def test_value_key_folds_spellings_of_one_value():
     assert mk(object="Acme").value_key == mk(object="Acme Corp").value_key
@@ -124,7 +124,7 @@ def test_fact_key_folds_spellings_of_one_subject():
 
 
 def test_fact_key_for_folds_a_raw_subject_the_same_way():
-    # `Engram.history` and `Engram.forget` build their probe from a raw string with no
+    # `Memvara.history` and `Memvara.forget` build their probe from a raw string with no
     # registry in reach, so this is the equality that keeps them able to find a slot.
     c = mk(subject="Acme Corp")
     assert fact_key_for(c.scope, "ACME", c.predicate) == c.fact_key

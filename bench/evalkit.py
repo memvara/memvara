@@ -23,7 +23,7 @@ unbounded setting, and the only way to put a full transcript in front of the rea
 score. Three context sources give the triple that makes a number interpretable:
 
     NONE    the reader answering from its own priors, with no memory at all — the floor
-    MEMORY  what engram retrieved under the stated budget — the measurement
+    MEMORY  what memvara retrieved under the stated budget — the measurement
     FULL    the whole haystack in the prompt — the ceiling, and not a memory result
 
 A memory layer is worth something to the extent MEMORY sits above NONE while costing a
@@ -40,7 +40,7 @@ is about the write path and an eval that prints only F1 hides it.
 **Not** controlled: reader nondeterminism (the current models reject `temperature`, so
 there is no seed to pin — re-runs will differ, and the runners print how many questions
 were asked so a difference can be judged against sample size); ingestion granularity
-(engram receives a whole session per `add()`); and, most importantly, this is engram
+(memvara receives a whole session per `add()`); and, most importantly, this is memvara
 measured against *itself* under different context sources. It is not a head-to-head
 against another memory layer. Comparing to a published LOCOMO or LongMemEval number
 from a paper compares two harnesses as much as two systems — the reader model, the
@@ -162,13 +162,13 @@ class DatasetMissing(FileNotFoundError):
 
 
 def cache_root(root: str | os.PathLike[str] | None = None) -> Path:
-    """Where datasets are cached. `ENGRAM_BENCH_DATA` overrides the default."""
+    """Where datasets are cached. `MEMVARA_BENCH_DATA` overrides the default."""
     if root is not None:
         return Path(root)
-    env = os.environ.get("ENGRAM_BENCH_DATA")
+    env = os.environ.get("MEMVARA_BENCH_DATA")
     if env:
         return Path(env)
-    return Path.home() / ".cache" / "engram-bench"
+    return Path.home() / ".cache" / "memvara-bench"
 
 
 def local_path(spec: DatasetSpec, root: str | os.PathLike[str] | None = None) -> Path:
@@ -275,7 +275,7 @@ def porter_stemmer() -> Callable[[str], str]:
         from nltk.stem.porter import PorterStemmer
     except ImportError as exc:  # pragma: no cover - exercised with an injected fake
         raise ImportError(
-            "--stem needs nltk, which engram does not depend on: pip install 'nltk>=3.8'. "
+            "--stem needs nltk, which memvara does not depend on: pip install 'nltk>=3.8'. "
             "Without it F1 is computed unstemmed, which is slightly lower on "
             "morphological variants and is what the harness reports by default."
         ) from exc
@@ -526,7 +526,7 @@ class AnthropicReader:
         except ImportError as exc:
             raise ImportError(
                 "AnthropicReader needs the `anthropic` package: "
-                "pip install 'engram[anthropic]'. Pass client= to inject one, or run "
+                "pip install 'memvara[anthropic]'. Pass client= to inject one, or run "
                 "with --reader stub to exercise the harness offline."
             ) from exc
         return anthropic.Anthropic()
@@ -543,7 +543,7 @@ class AnthropicReader:
 
 
 class OpenAIReader:
-    """Reader backed by Chat Completions, mirroring `engram/llm/openai.py`'s transport."""
+    """Reader backed by Chat Completions, mirroring `memvara/llm/openai.py`'s transport."""
 
     is_stub = False
 
@@ -566,7 +566,7 @@ class OpenAIReader:
             import openai
         except ImportError as exc:
             raise ImportError(
-                "OpenAIReader needs the `openai` package: pip install 'engram[openai]'. "
+                "OpenAIReader needs the `openai` package: pip install 'memvara[openai]'. "
                 "Pass client= to inject one, or run with --reader stub to exercise the "
                 "harness offline."
             ) from exc
@@ -838,7 +838,7 @@ class Turn:
     """One conversation turn, with the timestamp it happened at.
 
     The timestamp is load-bearing rather than cosmetic: both benchmarks ask temporal
-    questions, and engram's whole proposition is two time axes. Ingesting a dated
+    questions, and memvara's whole proposition is two time axes. Ingesting a dated
     transcript with `utcnow()` on every turn would throw away the axis under test.
     """
 
@@ -874,7 +874,7 @@ def ingest(mem: Any, sessions: Iterable[Sequence[Turn]]) -> IngestStats:
     """Write a conversation into a memory, one `add()` per session.
 
     Per session rather than per turn because that is how an agent loop with a session
-    boundary actually calls it, and because engram batches extraction — charging it
+    boundary actually calls it, and because memvara batches extraction — charging it
     per turn would inflate the model-call count this benchmark is meant to report
     honestly. `bench/compare.py` reports the equal-granularity figure for the same
     reason.
@@ -959,7 +959,7 @@ def retrieve(
 
     The MEMORY path goes through `recall()` rather than `search()` on purpose: it is the
     call a real integration makes, so the measured latency is the real end-to-end read
-    cost including rendering, and the context carries engram's own prompt framing —
+    cost including rendering, and the context carries memvara's own prompt framing —
     which is part of what is being evaluated.
     """
     if source is ContextSource.NONE:
@@ -1042,10 +1042,10 @@ def cost_block(ledger: TokenLedger) -> str:
 
 
 def retrieval_block(ingest_stats: IngestStats, read: RetrievalStats) -> str:
-    """Engram's own cost. Reported next to accuracy, not instead of it.
+    """Memvara's own cost. Reported next to accuracy, not instead of it.
 
     The write-path model-call count is the number this architecture exists to drive to
-    zero, so an eval that printed only F1 would hide the thing engram is actually good
+    zero, so an eval that printed only F1 would hide the thing memvara is actually good
     at — and would also hide it getting worse.
     """
     rows = [
@@ -1069,7 +1069,7 @@ def retrieval_block(ingest_stats: IngestStats, read: RetrievalStats) -> str:
     if ingest_stats.undated_turns:
         rows.append(("turns whose timestamp would not parse",
                      f"{ingest_stats.undated_turns:,}"))
-    return render_table(["engram cost", "measured"], rows)
+    return render_table(["memvara cost", "measured"], rows)
 
 
 def source_caveat(source: ContextSource) -> str:
@@ -1081,7 +1081,7 @@ def source_caveat(source: ContextSource) -> str:
             "nothing.",
         ContextSource.MEMORY:
             "  CONTEXT=memory — the measured configuration. The reader saw only what "
-            "engram\n  retrieved, under the budget printed above.",
+            "memvara\n  retrieved, under the budget printed above.",
         ContextSource.FULL:
             "  CONTEXT=full — the whole haystack in the prompt. This is a READER "
             "CEILING and\n  is NOT a memory result: it measures long-context recall, "
@@ -1132,8 +1132,8 @@ def add_common_arguments(parser: Any) -> None:
                         help="run the built-in fixture with a stub reader; no key, no network")
     parser.add_argument("--data", default=None, help="path to the dataset JSON")
     parser.add_argument("--cache", default=None,
-                        help="dataset cache directory (default $ENGRAM_BENCH_DATA or "
-                             "~/.cache/engram-bench)")
+                        help="dataset cache directory (default $MEMVARA_BENCH_DATA or "
+                             "~/.cache/memvara-bench)")
     parser.add_argument("--download", action="store_true",
                         help="fetch the dataset into the cache and exit")
     parser.add_argument("--limit", type=int, default=0,

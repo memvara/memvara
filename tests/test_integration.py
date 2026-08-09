@@ -1,4 +1,4 @@
-"""End-to-end tests through the public `Engram` surface.
+"""End-to-end tests through the public `Memvara` surface.
 
 These are the tests that would catch a subsystem being wired up wrong even when every
 unit test passes. They deliberately assert on the properties the README claims:
@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from engram import Engram, HashingEmbedder, MemoryType, NullLLM, SQLiteStore, utcnow
+from memvara import Memvara, HashingEmbedder, MemoryType, NullLLM, SQLiteStore, utcnow
 
 TZ = timezone.utc
 T_2023 = datetime(2023, 1, 1, tzinfo=TZ)
@@ -52,7 +52,7 @@ class FakeLLM:
 
 @pytest.fixture()
 def mem():
-    m = Engram(embedder=HashingEmbedder(dim=128), user="alice")
+    m = Memvara(embedder=HashingEmbedder(dim=128), user="alice")
     yield m
     m.close()
 
@@ -161,7 +161,7 @@ def test_backfilled_facts_separate_the_two_time_axes(mem):
 def test_why_traces_a_claim_back_to_the_source_turn():
     llm = FakeLLM({"lisbon": [{"subject": "user", "predicate": "lives_in",
                                "object": "Lisbon"}]})
-    with Engram(embedder=HashingEmbedder(dim=128), llm=llm, user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=128), llm=llm, user="alice") as mem:
         mem.add(["Good morning!", "I just moved to Lisbon.", "Anyway, thanks."])
         claim = mem.get_all()[0]
         prov = mem.why(claim.id)
@@ -223,7 +223,7 @@ def test_user_scope_does_not_see_session_scratch(mem):
 
 def test_chitchat_never_reaches_the_model():
     llm = FakeLLM()
-    with Engram(embedder=HashingEmbedder(dim=128), llm=llm, user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=128), llm=llm, user="alice") as mem:
         receipt = mem.add(["hi", "ok", "thanks!", "sounds good", "great", "yep",
                            "sure thing", "no worries", "?", "  "])
         assert llm.extract_calls == 0, "pure acknowledgements must not cost an LLM call"
@@ -234,7 +234,7 @@ def test_chitchat_never_reaches_the_model():
 def test_a_batch_of_turns_costs_at_most_one_extraction_call():
     llm = FakeLLM({"berlin": [{"subject": "user", "predicate": "lives_in",
                                "object": "Berlin"}]})
-    with Engram(embedder=HashingEmbedder(dim=128), llm=llm, user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=128), llm=llm, user="alice") as mem:
         turns = ["hello there", "how are you", "I recently relocated to Berlin for work",
                  "that's interesting", "tell me more", "thanks!"]
         receipt = mem.add(turns)
@@ -245,7 +245,7 @@ def test_a_batch_of_turns_costs_at_most_one_extraction_call():
 def test_reingesting_the_same_transcript_is_free():
     llm = FakeLLM({"berlin": [{"subject": "user", "predicate": "lives_in",
                                "object": "Berlin"}]})
-    with Engram(embedder=HashingEmbedder(dim=128), llm=llm, user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=128), llm=llm, user="alice") as mem:
         turns = ["I moved to Berlin", "cool", "yes"]
         mem.add(turns)
         calls_after_first = llm.extract_calls
@@ -257,7 +257,7 @@ def test_reingesting_the_same_transcript_is_free():
 
 def test_direct_assertions_never_call_the_model():
     llm = FakeLLM()
-    with Engram(embedder=HashingEmbedder(dim=128), llm=llm, user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=128), llm=llm, user="alice") as mem:
         mem.remember("user", "lives_in", "Berlin")
         assert llm.extract_calls == 0 and llm.classify_calls == 0
 
@@ -372,25 +372,25 @@ def test_consolidate_is_idempotent(mem):
 
 def test_memory_survives_a_restart(tmp_path):
     path = str(tmp_path / "m.db")
-    with Engram(path, embedder=HashingEmbedder(dim=128), user="alice") as m1:
+    with Memvara(path, embedder=HashingEmbedder(dim=128), user="alice") as m1:
         m1.remember("user", "lives_in", "Berlin")
         m1.remember("user", "lives_in", "Lisbon")
 
-    with Engram(path, embedder=HashingEmbedder(dim=128), user="alice") as m2:
+    with Memvara(path, embedder=HashingEmbedder(dim=128), user="alice") as m2:
         assert [c.object for c in m2.get_all()] == ["Lisbon"]
         assert len(m2.history("user", "lives_in")) == 2
         assert [r.claim.object for r in m2.search("lives")] == ["Lisbon"]
 
 
-def test_engram_accepts_an_injected_store():
+def test_memvara_accepts_an_injected_store():
     store = SQLiteStore(":memory:")
-    with Engram(store=store, embedder=HashingEmbedder(dim=128)) as mem:
+    with Memvara(store=store, embedder=HashingEmbedder(dim=128)) as mem:
         assert mem.store is store
 
 
 def test_unknown_tuning_options_are_rejected_loudly():
     with pytest.raises(TypeError, match="unknown tuning options"):
-        Engram(nonsense_option=1)
+        Memvara(nonsense_option=1)
 
 
 def test_repr_surfaces_scope_and_counts(mem):
@@ -445,7 +445,7 @@ def test_the_default_configuration_stores_what_it_can_and_is_findable_about_the_
 def test_the_same_conversation_with_a_model_keeps_the_rest():
     llm = FakeLLM({"postgres": [{"subject": "user", "predicate": "uses_database",
                                  "object": "Postgres 14"}]})
-    with Engram(embedder=HashingEmbedder(dim=128), llm=llm, user="alice") as mem:
+    with Memvara(embedder=HashingEmbedder(dim=128), llm=llm, user="alice") as mem:
         mem.add(CONVERSATION)
         # The predicate is whatever schema resolution settles on; the point is that the
         # fact survives at all, which under the default configuration it does not.
@@ -476,16 +476,16 @@ def test_a_store_survives_an_embedder_upgrade_across_a_restart(tmp_path):
     """Week one writes with the offline embedder; week two installs a different one.
     Without a migration every read raises and every write lands somewhere unsearchable."""
     path = str(tmp_path / "m.db")
-    with Engram(path, embedder=HashingEmbedder(dim=128), user="alice") as week_one:
+    with Memvara(path, embedder=HashingEmbedder(dim=128), user="alice") as week_one:
         week_one.add("I live in Berlin and work at Acme")
 
-    with Engram(path, embedder=HashingEmbedder(dim=256), user="alice",
+    with Memvara(path, embedder=HashingEmbedder(dim=256), user="alice",
                 reembed=True) as week_two:
         assert week_two.search("lives in berlin")[0].claim.object == "Berlin"
         week_two.add("Actually, I moved to Lisbon last month")
         assert [c.object for c in week_two.get_all()] == ["Lisbon", "Acme"]
 
-    with Engram(path, embedder=HashingEmbedder(dim=256), user="alice") as week_three:
+    with Memvara(path, embedder=HashingEmbedder(dim=256), user="alice") as week_three:
         assert [r.claim.object for r in week_three.search("lives")][:1] == ["Lisbon"]
 
 
@@ -494,7 +494,7 @@ def test_a_store_survives_an_embedder_upgrade_across_a_restart(tmp_path):
 
 def test_readme_entity_fold_example(mem):
     """README: `entity_key("Acme Corp.") == entity_key("ACME, Inc.") == entity_key("acme")`."""
-    from engram import entity_key
+    from memvara import entity_key
     assert entity_key("Acme Corp.") == entity_key("ACME, Inc.") == entity_key("acme")
     # And the claim right after it: folding is what makes the keyed lookup fire.
     mem.remember("user", "works_at", "Acme Corp.")
@@ -513,10 +513,10 @@ def test_readme_scope_example(mem):
 def test_readme_telemetry_example():
     """README prints three specific counter totals. If the tags or series names change,
     the example silently becomes fiction — so it is asserted rather than trusted."""
-    from engram import MemoryRecorder
+    from memvara import MemoryRecorder
 
     rec = MemoryRecorder()
-    with Engram(embedder=HashingEmbedder(dim=128), llm=NullLLM(), user="alice",
+    with Memvara(embedder=HashingEmbedder(dim=128), llm=NullLLM(), user="alice",
                 telemetry=rec) as mem:
         mem.add(["I live in Berlin", "你好，我住在北京", "ok thanks"])
     assert rec.total("fast.hit", script="latin") == 1
@@ -525,14 +525,14 @@ def test_readme_telemetry_example():
 
 
 def test_readme_async_example():
-    """README: `AsyncEngram(Engram(...))` — it wraps, it does not construct."""
+    """README: `AsyncMemvara(Memvara(...))` — it wraps, it does not construct."""
     import asyncio
 
-    from engram import AsyncEngram, Engram, HashingEmbedder, NullLLM
+    from memvara import AsyncMemvara, Memvara, HashingEmbedder, NullLLM
 
     async def main():
-        mem = AsyncEngram(
-            Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice"))
+        mem = AsyncMemvara(
+            Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice"))
         await mem.add("I live in Berlin")
         found = [r.text for r in await mem.search("where do they live?")]
         await mem.close()

@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from engram.retrieve import (
+from memvara.retrieve import (
     calibrate_min_score,
     final_score,
     lexical_relevance,
@@ -22,9 +22,9 @@ from engram.retrieve import (
     relevance,
     vector_relevance,
 )
-from engram.retrieve.scoring import LEXICAL_HALF_SATURATION
-from engram.schema import PredicateRegistry
-from engram.types import Claim, Explanation, Result, utcnow
+from memvara.retrieve.scoring import LEXICAL_HALF_SATURATION
+from memvara.schema import PredicateRegistry
+from memvara.types import Claim, Explanation, Result, utcnow
 
 NOW = datetime(2026, 8, 8, 12, 0, 0, tzinfo=timezone.utc)
 

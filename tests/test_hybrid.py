@@ -14,8 +14,8 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from engram.embed import HashingEmbedder
-from engram.retrieve import (
+from memvara.embed import HashingEmbedder
+from memvara.retrieve import (
     CLAIM,
     EPISODE,
     STOPWORDS,
@@ -29,9 +29,9 @@ from engram.retrieve import (
     tokenize,
     vector_relevance,
 )
-from engram.schema import PredicateRegistry
-from engram.store import SQLiteStore
-from engram.telemetry import (
+from memvara.schema import PredicateRegistry
+from memvara.store import SQLiteStore
+from memvara.telemetry import (
     RETRIEVAL_LATENCY_MS,
     RETRIEVAL_OBSERVATION_RANK_CORR,
     RETRIEVAL_QUALITY_FACTOR,
@@ -39,7 +39,7 @@ from engram.telemetry import (
     RETRIEVAL_RESULTS,
     MemoryRecorder,
 )
-from engram.types import Claim, Episode, MemoryType, Scope
+from memvara.types import Claim, Episode, MemoryType, Scope
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
 T1 = datetime(2025, 6, 1, tzinfo=timezone.utc)
@@ -739,7 +739,7 @@ def test_the_analyzer_tokenizes_exactly_as_the_store_does() -> None:
     """The two must agree about what a term is. If they disagree, the per-term BM25
     normalization divides by a count the store never used, and every score built on it
     is quietly wrong."""
-    from engram.store.sqlite import _fts_query
+    from memvara.store.sqlite import _fts_query
 
     for query in ("ERR_7734 in prod", "what's my mother's maiden name?",
                   "PLAT-2291", "東京 に 住んでいる", "a b cd", "!!! ???"):

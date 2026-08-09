@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from engram.retrieve import reciprocal_rank_fusion
+from memvara.retrieve import reciprocal_rank_fusion
 
 # Hand-computed contributions at the default k=60, for 0-based rank r: 1 / (60 + r + 1).
 R0 = 1.0 / 61.0  # 0.016393442622950821

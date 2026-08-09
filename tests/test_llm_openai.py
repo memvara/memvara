@@ -19,10 +19,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from engram.llm import LLM
-from engram.llm.base import CLAIM_SCHEMA, EXTRACT_SYSTEM, PREDICATE_SCHEMA, RESOLVE_SCHEMA
-from engram.llm.openai import OpenAILLM, _first_text
-from engram.types import Episode, Scope
+from memvara.llm import LLM
+from memvara.llm.base import CLAIM_SCHEMA, EXTRACT_SYSTEM, PREDICATE_SCHEMA, RESOLVE_SCHEMA
+from memvara.llm.openai import OpenAILLM, _first_text
+from memvara.types import Episode, Scope
 
 
 class FakeCompletions:
@@ -216,7 +216,7 @@ def test_a_missing_sdk_names_the_extra_and_the_two_ways_out(monkeypatch):
         return real(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", no_openai)
-    with pytest.raises(ImportError, match=r"engram\[openai\]"):
+    with pytest.raises(ImportError, match=r"memvara\[openai\]"):
         OpenAILLM()
 
 
@@ -237,12 +237,12 @@ def test_the_default_client_is_built_from_the_sdk(monkeypatch):
 def test_reachable_from_both_packages_without_the_sdk_installed():
     """PEP 562 lazy attributes. The `openai` package is genuinely absent here, which is
     the configuration this has to survive: naming the class must not import the SDK, or
-    the default offline install stops being able to `import engram` at all."""
-    import engram
-    import engram.llm as pkg
+    the default offline install stops being able to `import memvara` at all."""
+    import memvara
+    import memvara.llm as pkg
 
     assert pkg.OpenAILLM is OpenAILLM
-    assert engram.OpenAILLM is OpenAILLM
-    assert "OpenAILLM" in pkg.__all__ and "OpenAILLM" in engram.__all__
+    assert memvara.OpenAILLM is OpenAILLM
+    assert "OpenAILLM" in pkg.__all__ and "OpenAILLM" in memvara.__all__
     with pytest.raises(AttributeError):
-        engram.NotAThing
+        memvara.NotAThing

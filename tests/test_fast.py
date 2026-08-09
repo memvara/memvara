@@ -11,10 +11,10 @@ from datetime import timedelta
 
 import pytest
 
-from engram.schema import Cardinality, PredicateRegistry
-from engram.types import Derivation, Episode, Scope, utcnow
-from engram.write import FastExtractor
-from engram.write.fast import EXTRACTOR
+from memvara.schema import Cardinality, PredicateRegistry
+from memvara.types import Derivation, Episode, Scope, utcnow
+from memvara.write import FastExtractor
+from memvara.write.fast import EXTRACTOR
 
 
 @pytest.fixture()

@@ -1,15 +1,15 @@
-# Engram internals — module contracts
+# Memvara internals — module contracts
 
 This file is the interface contract between subsystems. `core.py` wires them together
 against exactly these signatures, so treat them as fixed. Everything here is already
 importable from the foundation modules:
 
-- `engram/types.py` — `Claim`, `Episode`, `Scope`, `Result`, `Explanation`, `WriteReceipt`,
+- `memvara/types.py` — `Claim`, `Episode`, `Scope`, `Result`, `Explanation`, `WriteReceipt`,
   `MemoryType`, `Derivation`, `utcnow()`, `content_hash()`
-- `engram/schema.py` — `PredicateRegistry`, `PredicateSpec`, `Cardinality`, `Volatility`
-- `engram/store/` — `Store` protocol, `SQLiteStore`
-- `engram/embed/` — `Embedder` protocol, `HashingEmbedder`, `CachedEmbedder`, `default_embedder()`
-- `engram/llm/base.py` — `LLM` protocol, `NullLLM`, `CLAIM_SCHEMA`, `PREDICATE_SCHEMA`,
+- `memvara/schema.py` — `PredicateRegistry`, `PredicateSpec`, `Cardinality`, `Volatility`
+- `memvara/store/` — `Store` protocol, `SQLiteStore`
+- `memvara/embed/` — `Embedder` protocol, `HashingEmbedder`, `CachedEmbedder`, `default_embedder()`
+- `memvara/llm/base.py` — `LLM` protocol, `NullLLM`, `CLAIM_SCHEMA`, `PREDICATE_SCHEMA`,
   `EXTRACT_SYSTEM`, `PREDICATE_SYSTEM`
 
 ## Design invariants (do not violate)
@@ -28,7 +28,7 @@ importable from the foundation modules:
 
 ---
 
-## `engram/write/`
+## `memvara/write/`
 
 ### `write/gate.py`
 
@@ -131,7 +131,7 @@ embedding written via `store.set_embedding()`.
 
 ---
 
-## `engram/retrieve/`
+## `memvara/retrieve/`
 
 ### `retrieve/fusion.py`
 
@@ -185,7 +185,7 @@ Search must:
 
 ---
 
-## `engram/consolidate/`
+## `memvara/consolidate/`
 
 ```python
 class Consolidator:
@@ -212,7 +212,7 @@ All counts are "number of claims affected". These run off the write path.
 
 ---
 
-## `engram/llm/anthropic.py`
+## `memvara/llm/anthropic.py`
 
 ```python
 class AnthropicLLM:
@@ -231,7 +231,7 @@ Hard API requirements — these are current and getting them wrong is a 400:
 - **Never** pass `temperature`, `top_p`, or `top_k` — they are rejected on this model.
 - Control depth with `output_config={"effort": "low"}` alongside `format`. Leave adaptive
   thinking on (the default); do not pass `thinking={"type": "disabled"}`.
-- Import `anthropic` lazily inside `__init__` so `import engram` works without it, and
+- Import `anthropic` lazily inside `__init__` so `import memvara` works without it, and
   raise a clear install hint if it is missing.
 - Use `CLAIM_SCHEMA` / `PREDICATE_SCHEMA` / `EXTRACT_SYSTEM` / `PREDICATE_SYSTEM` from
   `llm/base.py` rather than redefining them.

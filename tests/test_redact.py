@@ -31,8 +31,8 @@ from typing import Any, Sequence
 
 import pytest
 
-from engram import Claim, Engram, Episode, HashingEmbedder, NullLLM, Scope
-from engram.redact import (
+from memvara import Claim, Memvara, Episode, HashingEmbedder, NullLLM, Scope
+from memvara.redact import (
     CLAIM_OBJECT,
     CLAIM_SUBJECT,
     CLAIM_TEXT,
@@ -114,10 +114,10 @@ class RecordingRedactor:
 
 
 def memory(*, redactor: Redactor | None = None, embedder=None, llm=None,
-           user: str = "alice") -> Engram:
-    """An `Engram` that constructs silently: an explicit `llm=` suppresses the
+           user: str = "alice") -> Memvara:
+    """An `Memvara` that constructs silently: an explicit `llm=` suppresses the
     degraded-extraction warning, which is about extraction and not about this."""
-    return Engram(embedder=embedder or HashingEmbedder(dim=64), llm=llm or NullLLM(),
+    return Memvara(embedder=embedder or HashingEmbedder(dim=64), llm=llm or NullLLM(),
                   user=user, redactor=redactor)
 
 
@@ -305,7 +305,7 @@ def test_a_claim_is_redacted_before_the_keys_are_derived_from_it():
 # ===========================================================================
 
 def test_a_source_turn_attached_to_a_structured_write_is_redacted_too():
-    """`remember(sources=[Episode(...)])` writes turns through `Engram._write_claim`,
+    """`remember(sources=[Episode(...)])` writes turns through `Memvara._write_claim`,
     not through the pipeline. Without a second call site the seam would hold for `add()`
     and leak for the call whose entire purpose is attaching provenance to an import."""
     mem = memory(redactor=PatternRedactor())
@@ -367,7 +367,7 @@ def test_exactly_the_documented_fields_are_offered_and_the_catalogue_lists_them_
 
 
 def test_the_scope_is_passed_so_a_policy_can_route_on_who_the_data_belongs_to():
-    """A server holds one `Engram` per process, not one per tenant. Without the scope in
+    """A server holds one `Memvara` per process, not one per tenant. Without the scope in
     the signature, "redact for the EU tenant" is not expressible at runtime at all."""
 
     class PerTenant:
@@ -497,7 +497,7 @@ def test_there_is_one_redaction_policy_per_instance_however_it_is_spelled():
     privacy control that covers `add()` and skips `remember(sources=...)`, so the two
     are kept in step and the source turn is redacted either way."""
     r = PatternRedactor()
-    mem = Engram(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice",
+    mem = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice",
                  write_redactor=r)
     assert mem.redactor is r and mem.writer.redactor is r
     mem.remember("user", "email", "x", sources=[Episode(content=f"mail {RAW_EMAIL}",
@@ -527,9 +527,9 @@ def test_nothing_on_the_redaction_path_runs_when_it_is_unset(monkeypatch):
     def boom(*a, **kw):
         raise AssertionError("redaction ran with no redactor configured")
 
-    monkeypatch.setattr("engram.write.pipeline.redact_episode", boom)
-    monkeypatch.setattr("engram.write.pipeline.redact_claim", boom)
-    monkeypatch.setattr("engram.core.redact_episode", boom)
+    monkeypatch.setattr("memvara.write.pipeline.redact_episode", boom)
+    monkeypatch.setattr("memvara.write.pipeline.redact_claim", boom)
+    monkeypatch.setattr("memvara.core.redact_episode", boom)
 
     mem = memory(llm=RecordingLLM())
     mem.add(["I live in Berlin", "ok thanks", "something else entirely"])
@@ -542,7 +542,7 @@ def test_nothing_on_the_redaction_path_runs_when_it_is_unset(monkeypatch):
     mem.close()
 
 
-def _round(mem: Engram, i: int) -> float:
+def _round(mem: Memvara, i: int) -> float:
     """Seconds for one three-turn write plus one structured write.
 
     The `Turn {i}:` prefix on the redactable turn is load bearing. Without it the phone

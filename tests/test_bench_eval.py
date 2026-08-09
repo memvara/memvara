@@ -33,7 +33,7 @@ import evalkit as ek  # noqa: E402
 import locomo  # noqa: E402
 import longmemeval as lme  # noqa: E402
 
-from engram import Engram, NullLLM  # noqa: E402
+from memvara import Memvara, NullLLM  # noqa: E402
 
 UTC = timezone.utc
 
@@ -191,10 +191,10 @@ def test_requiring_a_present_dataset_returns_its_path(tmp_path):
 
 
 def test_the_cache_directory_honours_the_environment_variable(monkeypatch, tmp_path):
-    monkeypatch.setenv("ENGRAM_BENCH_DATA", str(tmp_path))
+    monkeypatch.setenv("MEMVARA_BENCH_DATA", str(tmp_path))
     assert ek.cache_root() == tmp_path
-    monkeypatch.delenv("ENGRAM_BENCH_DATA")
-    assert ek.cache_root().name == "engram-bench"
+    monkeypatch.delenv("MEMVARA_BENCH_DATA")
+    assert ek.cache_root().name == "memvara-bench"
     assert ek.cache_root(tmp_path) == tmp_path
 
 
@@ -480,7 +480,7 @@ def test_the_openai_reader_without_the_sdk_names_the_extra(monkeypatch):
         return real(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", no_sdk)
-    with pytest.raises(ImportError, match=r"engram\[openai\]"):
+    with pytest.raises(ImportError, match=r"memvara\[openai\]"):
         ek.OpenAIReader()
 
 
@@ -601,7 +601,7 @@ def test_the_question_is_placed_before_retrieved_text_that_a_user_controls():
 
 
 def _memory_with(lines, *, k=12):
-    mem = Engram(user="t", llm=NullLLM(), read_max_episodes=k)
+    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=k)
     base = datetime(2023, 5, 1, tzinfo=UTC)
     mem.add([{"role": "user", "content": line, "ts": base + timedelta(days=i)}
              for i, line in enumerate(lines)])
@@ -671,11 +671,11 @@ def test_the_ceiling_source_still_stops_before_the_context_window():
 
 
 def test_ingestion_keeps_each_turns_own_timestamp_so_time_travel_still_answers():
-    """Both benchmarks ask temporal questions and engram's proposition is two time axes.
+    """Both benchmarks ask temporal questions and memvara's proposition is two time axes.
     Stamping the whole transcript with `utcnow()` would throw away the axis under test."""
     old = datetime(2021, 3, 1, tzinfo=UTC)
     new = datetime(2023, 3, 1, tzinfo=UTC)
-    mem = Engram(user="t", llm=NullLLM())
+    mem = Memvara(user="t", llm=NullLLM())
     try:
         ek.ingest(mem, [[ek.Turn("user", "session one", old)],
                         [ek.Turn("user", "session two", new)]])
@@ -691,7 +691,7 @@ def test_ingestion_keeps_each_turns_own_timestamp_so_time_travel_still_answers()
 def test_ingestion_reports_the_write_paths_model_call_count():
     """The number this architecture exists to drive to zero. Reported next to accuracy,
     because an eval that prints only F1 hides it getting worse."""
-    mem = Engram(user="t", llm=NullLLM())
+    mem = Memvara(user="t", llm=NullLLM())
     try:
         stats = ek.ingest(mem, [[ek.Turn("user", "I live in Berlin",
                                          datetime(2023, 1, 1, tzinfo=UTC))]])
@@ -703,7 +703,7 @@ def test_ingestion_reports_the_write_paths_model_call_count():
 
 
 def test_an_empty_session_is_skipped_rather_than_charged_as_an_add():
-    mem = Engram(user="t", llm=NullLLM())
+    mem = Memvara(user="t", llm=NullLLM())
     try:
         assert ek.ingest(mem, [[], []]).sessions == 0
     finally:
@@ -1019,7 +1019,7 @@ def test_longmemeval_share_store_writes_each_session_once():
 
 
 def test_longmemeval_resolves_a_knowledge_update_to_the_value_that_replaced_the_old_one():
-    """The one place engram's deterministic contradiction resolution is directly under
+    """The one place memvara's deterministic contradiction resolution is directly under
     test: two employers arrive in different sessions and only the second should be live."""
     item = [i for i in lme.fixture() if i.qid == "fx_knowledge_update"][0]
     mem = lme.build_memory(item.qid, ek.RetrievalBudget())

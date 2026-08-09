@@ -89,9 +89,9 @@ jobs:
         run: |
           cd /tmp
           python -c "
-          import importlib, pkgutil, engram
+          import importlib, pkgutil, memvara
           failed = []
-          for m in pkgutil.walk_packages(engram.__path__, 'engram.'):
+          for m in pkgutil.walk_packages(memvara.__path__, 'memvara.'):
               try:
                   importlib.import_module(m.name)
               except ImportError as e:

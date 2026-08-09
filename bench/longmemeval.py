@@ -1,4 +1,4 @@
-"""LongMemEval — chat-assistant long-term memory, run against engram.
+"""LongMemEval — chat-assistant long-term memory, run against memvara.
 
     PYTHONPATH=. python3 bench/longmemeval.py --dry-run                  # offline, no key
     PYTHONPATH=. python3 bench/longmemeval.py --download --dataset oracle
@@ -16,7 +16,7 @@ no token** — with sizes read from the datasets API rather than guessed:
 | `m`         | `longmemeval_m_cleaned.json`  | 2.7 GB  | ~500 sessions each                |
 
 Nothing is vendored and nothing downloads implicitly: `--download` writes into
-`$ENGRAM_BENCH_DATA` (default `~/.cache/engram-bench`), and a run without the file fails
+`$MEMVARA_BENCH_DATA` (default `~/.cache/memvara-bench`), and a run without the file fails
 with the URL and a `curl` command. The oracle file is a smoke test, not a headline — it
 hands the system only the sessions that contain the answer, so a score on it says
 nothing about retrieval under distraction. `s` is what "LongMemEval" means in a paper.
@@ -40,7 +40,7 @@ Three differences that do not abstract away, which is why there are two files:
   and correctness turns on paraphrase, on "the *updated* value", on off-by-one-day
   tolerance. F1 and BLEU-1 are still computed and printed, clearly marked secondary.
 * **The turns are `user` / `assistant`.** Unlike LOCOMO's two named humans, this shape
-  is what engram's `SalienceGate` and `FastExtractor` were built for, so the
+  is what memvara's `SalienceGate` and `FastExtractor` were built for, so the
   deterministic write path actually fires here and the run reports how much it extracted.
 
 The `has_answer: true` flag on evidence turns is **deliberately ignored** — using it
@@ -61,13 +61,13 @@ plus roughly $1 for a `--judge llm` pass at much shorter prompts.
 Ingestion is the number that will surprise you. With no `llm=` configured it is free.
 With an extraction model on `--dataset s` it is 500 × ~115K tokens ≈ **57M input tokens
 of extraction**, which is several hundred dollars before a single question is asked.
-That is a property of the benchmark's shape rather than of engram — every memory layer
+That is a property of the benchmark's shape rather than of memvara — every memory layer
 that extracts on write pays it — but it should be a decision, not a surprise, so
 `--llm` is not wired to a default here at all.
 
 ## What this does not establish
 
-The same caveat as `bench/locomo.py`: this compares engram against itself under three
+The same caveat as `bench/locomo.py`: this compares memvara against itself under three
 context sources, with one reader and one judge, using judge prompts written from the
 reference protocol's description rather than copied from it. It is not comparable
 token-for-token with a published autograder score.
@@ -86,7 +86,7 @@ from typing import Any, Callable, Sequence
 
 import evalkit as ek
 
-from engram import Engram, NullLLM
+from memvara import Memvara, NullLLM
 
 QUESTION_TYPES = (
     "single-session-user",
@@ -269,14 +269,14 @@ def fixture() -> list[Instance]:
 # --- the run --------------------------------------------------------------------
 
 
-def build_memory(user: str, budget: ek.RetrievalBudget, llm: Any = None) -> Engram:
+def build_memory(user: str, budget: ek.RetrievalBudget, llm: Any = None) -> Memvara:
     """One store, scoped to a user.
 
     `read_max_episodes=k` for the same reason as in `bench/locomo.py`: raw turns are
     capped at 3 by default because they are meant to be a tail on a fact list, and a
     conversation benchmark needs them as a first-class result.
     """
-    return Engram(user=user, llm=llm if llm is not None else NullLLM(),
+    return Memvara(user=user, llm=llm if llm is not None else NullLLM(),
                   read_max_episodes=budget.k)
 
 

@@ -13,11 +13,11 @@ import threading
 import numpy as np
 import pytest
 
-from engram.embed import HashingEmbedder
-from engram.schema import Cardinality, PredicateSpec, Volatility
-from engram.store import SQLiteStore
-from engram.store.sqlite import SCHEMA_VERSION, _VecIndex, _vec_path
-from engram.types import Claim, Episode, MemoryType, Scope
+from memvara.embed import HashingEmbedder
+from memvara.schema import Cardinality, PredicateSpec, Volatility
+from memvara.store import SQLiteStore
+from memvara.store.sqlite import SCHEMA_VERSION, _VecIndex, _vec_path
+from memvara.types import Claim, Episode, MemoryType, Scope
 
 SCOPE = Scope("acme", "alice")
 
@@ -555,7 +555,7 @@ def test_a_v1_file_is_migrated_and_stamped(tmp_path):
 
 
 def test_v1_predicate_specs_become_the_default_tenants(tmp_path):
-    """The table was global, so its rows belong to the tenant `Engram` uses when the
+    """The table was global, so its rows belong to the tenant `Memvara` uses when the
     caller names none — anything else silently loses a learned schema on upgrade."""
     path = str(tmp_path / "v1.db")
     write_v1(path)
@@ -659,7 +659,7 @@ def test_put_spec_upserts_within_a_tenant():
         assert [x.cardinality for x in s.all_specs("acme")] == [Cardinality.MANY]
 
 
-def test_specs_default_to_the_tenant_engram_uses_when_none_is_named():
+def test_specs_default_to_the_tenant_memvara_uses_when_none_is_named():
     with SQLiteStore(":memory:") as s:
         s.put_spec(spec("works_at"))
         assert [x.name for x in s.all_specs()] == ["works_at"]

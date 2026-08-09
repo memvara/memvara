@@ -11,10 +11,10 @@ Non-negotiable for everyone: `python3 -m pytest -q` must be green and
 
 | workstream | owns |
 |---|---|
-| **W1 predicate identity** | `engram/schema.py`, `engram/write/pipeline.py`, `engram/llm/base.py`, `engram/llm/anthropic.py`, `engram/llm/__init__.py`, `tests/test_schema.py`, `tests/test_pipeline.py`, `tests/test_llm.py`, `tests/test_predicates.py` (new) |
-| **W2 store scale** | `engram/store/sqlite.py`, `engram/store/base.py`, `engram/store/__init__.py`, `tests/test_store.py`, `tests/test_vecindex.py` (new) |
-| **W3 retrieval quality** | `engram/retrieve/*`, `tests/test_fusion.py`, `tests/test_scoring.py`, `tests/test_hybrid.py` |
-| **W4 defaults & API** | `engram/core.py`, `engram/types.py`, `engram/embed/*`, `engram/__init__.py`, `tests/test_types.py`, `tests/test_integration.py`, `tests/test_api.py` (new) |
+| **W1 predicate identity** | `memvara/schema.py`, `memvara/write/pipeline.py`, `memvara/llm/base.py`, `memvara/llm/anthropic.py`, `memvara/llm/__init__.py`, `tests/test_schema.py`, `tests/test_pipeline.py`, `tests/test_llm.py`, `tests/test_predicates.py` (new) |
+| **W2 store scale** | `memvara/store/sqlite.py`, `memvara/store/base.py`, `memvara/store/__init__.py`, `tests/test_store.py`, `tests/test_vecindex.py` (new) |
+| **W3 retrieval quality** | `memvara/retrieve/*`, `tests/test_fusion.py`, `tests/test_scoring.py`, `tests/test_hybrid.py` |
+| **W4 defaults & API** | `memvara/core.py`, `memvara/types.py`, `memvara/embed/*`, `memvara/__init__.py`, `tests/test_types.py`, `tests/test_integration.py`, `tests/test_api.py` (new) |
 
 Nobody owns `tests/test_edges.py`, `tests/test_internals.py`, `tests/test_decay.py`,
 `tests/test_merge.py`, `tests/test_fast.py`, `tests/test_gate.py`, `README.md`,
@@ -175,7 +175,7 @@ why rather than rushing them.
    and a claim containing "do" was returned as the #1 answer for three unrelated queries.
    The vector leg already abstains on a zero-norm query — the lexical leg needs the same
    guard when no content tokens survive. **Note `_fts_query` lives in `store/sqlite.py`,
-   which W2 owns.** Implement the stopword logic in `engram/retrieve/` and have the
+   which W2 owns.** Implement the stopword logic in `memvara/retrieve/` and have the
    retriever pre-check the query; coordinate through me if you need the store to change.
    Measured payoff: P@1 0.556 → 0.722 with the shipped embedder, 0.778 → 0.833 with a
    semantic one.
@@ -200,7 +200,7 @@ justify, and fix the `final_score` docstring arithmetic (it says 1.25×; it is 1
    conversation produces **0 claims** under `NullLLM` + `HashingEmbedder`, with no signal.
    A new user concludes the library is broken in ten minutes. Fix the *honesty*, not by
    pretending: warn once at construction naming what is lost, surface
-   `receipt.unextracted`, and make `repr(Engram)` show the extractor. Consider
+   `receipt.unextracted`, and make `repr(Memvara)` show the extractor. Consider
    auto-detecting `ANTHROPIC_API_KEY` and say clearly in the warning what to pass.
 2. **The `local-embed` upgrade path bricks the store.** `default_embedder()` prefers
    MiniLM (dim 384) over `HashingEmbedder` (dim 512), so week two every read raises
@@ -231,12 +231,12 @@ a test in a file you do not own, **report the name rather than editing it**.
 
 | workstream | owns |
 |---|---|
-| **A — memory dynamics** (W5+W8) | `engram/consolidate/*`, `engram/write/reconcile.py`, `engram/retrieve/scoring.py`, `engram/types.py`, `tests/test_decay.py`, `tests/test_merge.py`, `tests/test_reconcile.py`, `tests/test_scoring.py` |
-| **B — retrievable episodes** (W7) | `engram/store/*`, `engram/retrieve/hybrid.py`, `engram/retrieve/__init__.py`, `engram/core.py`, `tests/test_store.py`, `tests/test_hybrid.py`, `tests/test_api.py` |
-| **C — mem0 compatibility** (W11) | `engram/compat/` (new), `tests/test_compat.py` (new). **Public API only** — do not edit any existing module. |
-| **D — MCP server** (W10) | `engram/server/` (new), `tests/test_server.py` (new). **Public API only** — do not edit any existing module. |
+| **A — memory dynamics** (W5+W8) | `memvara/consolidate/*`, `memvara/write/reconcile.py`, `memvara/retrieve/scoring.py`, `memvara/types.py`, `tests/test_decay.py`, `tests/test_merge.py`, `tests/test_reconcile.py`, `tests/test_scoring.py` |
+| **B — retrievable episodes** (W7) | `memvara/store/*`, `memvara/retrieve/hybrid.py`, `memvara/retrieve/__init__.py`, `memvara/core.py`, `tests/test_store.py`, `tests/test_hybrid.py`, `tests/test_api.py` |
+| **C — mem0 compatibility** (W11) | `memvara/compat/` (new), `tests/test_compat.py` (new). **Public API only** — do not edit any existing module. |
+| **D — MCP server** (W10) | `memvara/server/` (new), `tests/test_server.py` (new). **Public API only** — do not edit any existing module. |
 
-`engram/__init__.py`, `README.md`, `docs/*`, `bench/*`, `tests/test_edges.py`,
+`memvara/__init__.py`, `README.md`, `docs/*`, `bench/*`, `tests/test_edges.py`,
 `tests/test_internals.py`, `tests/test_integration.py`, `tests/test_predicates.py` are
 mine; I will wire exports and reconcile.
 
@@ -245,7 +245,7 @@ mine; I will wire exports and reconcile.
 A needs a per-claim "when was this last observed". **Prefer `Claim.meta`** — it is already
 persisted as JSON and needs no schema change, so A can land without waiting on B. If you
 conclude a real column is required, say so in your report and I will schedule it; do not
-edit `engram/store/*` (B owns it this wave).
+edit `memvara/store/*` (B owns it this wave).
 
 ---
 
@@ -257,11 +257,11 @@ own, **report the name rather than editing it**.
 
 | workstream | owns |
 |---|---|
-| **E — entity resolution** | `engram/entities.py` (new), `engram/types.py`, `engram/write/reconcile.py`, `tests/test_entities.py` (new), `tests/test_reconcile.py`, `tests/test_types.py` |
-| **F — store + API completeness + async** | `engram/store/*`, `engram/core.py`, `engram/aio.py` (new), `tests/test_store.py`, `tests/test_api.py`, `tests/test_aio.py` (new) |
-| **G — observability + lock hoisting** | `engram/telemetry.py` (new), `engram/write/pipeline.py`, `engram/consolidate/*`, `engram/retrieve/hybrid.py`, `tests/test_telemetry.py` (new), `tests/test_pipeline.py`, `tests/test_hybrid.py`, `tests/test_decay.py`, `tests/test_merge.py` |
+| **E — entity resolution** | `memvara/entities.py` (new), `memvara/types.py`, `memvara/write/reconcile.py`, `tests/test_entities.py` (new), `tests/test_reconcile.py`, `tests/test_types.py` |
+| **F — store + API completeness + async** | `memvara/store/*`, `memvara/core.py`, `memvara/aio.py` (new), `tests/test_store.py`, `tests/test_api.py`, `tests/test_aio.py` (new) |
+| **G — observability + lock hoisting** | `memvara/telemetry.py` (new), `memvara/write/pipeline.py`, `memvara/consolidate/*`, `memvara/retrieve/hybrid.py`, `tests/test_telemetry.py` (new), `tests/test_pipeline.py`, `tests/test_hybrid.py`, `tests/test_decay.py`, `tests/test_merge.py` |
 
-Mine: `engram/__init__.py`, `engram/compat/*`, `engram/server/*`, `README.md`, `docs/*`,
+Mine: `memvara/__init__.py`, `memvara/compat/*`, `memvara/server/*`, `README.md`, `docs/*`,
 `bench/*`, `tests/test_edges.py`, `tests/test_internals.py`, `tests/test_integration.py`,
 `tests/test_compat.py`, `tests/test_server.py`, `tests/test_vecindex.py`.
 
@@ -290,7 +290,7 @@ to derive a key for a predicate other than a claim's own.**
 
 ```python
 store.erase_claim(claim_id: str) -> bool      # irreversible; claim + FTS + vector
-Engram.erase(claim_id, *, tenant=, user=, ...) -> bool   # scope-checked like why()
+Memvara.erase(claim_id, *, tenant=, user=, ...) -> bool   # scope-checked like why()
 ```
 
 Distinct from `delete()`, which retires. The mem0 shim currently warns that it cannot
@@ -300,8 +300,8 @@ should become unnecessary.
 ### F-2. Provenance-preserving writes (C had to bypass the facade for these)
 
 ```python
-Engram.remember(..., sources=Sequence[str] | None, text: str | None)
-Engram.supersede(old_claim_id, new_claim) -> WriteReceipt   # sets invalidated_by
+Memvara.remember(..., sources=Sequence[str] | None, text: str | None)
+Memvara.supersede(old_claim_id, new_claim) -> WriteReceipt   # sets invalidated_by
 ```
 
 C currently reaches `store.add_episode()` + `writer.assert_claim()` + `store.invalidate()`
@@ -310,7 +310,7 @@ directly — public objects, but below the facade, so a refactor breaks compat s
 ### G-1. Telemetry (G owns the module, F wires it)
 
 ```python
-Engram(..., telemetry=Recorder | None)
+Memvara(..., telemetry=Recorder | None)
 ```
 
 A `Recorder` protocol with a no-op default. **Must impose no measurable cost when unset** —

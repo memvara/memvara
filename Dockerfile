@@ -1,4 +1,4 @@
-# Engram's MCP server, containerised. See docs/DEPLOY.md for how a client launches it.
+# Memvara's MCP server, containerised. See docs/DEPLOY.md for how a client launches it.
 #
 # The shape of this file is decided by one fact: the server speaks JSON-RPC 2.0 over
 # **stdio**, not HTTP. So there is no EXPOSE, no port, no HEALTHCHECK and no supervisor,
@@ -8,10 +8,10 @@
 #   stdin and reads responses from its stdout, so `docker run -i` *is* the transport.
 # * **No HEALTHCHECK.** A healthcheck runs a second process in the container, and a
 #   second process cannot observe the one holding stdio — it could only prove that
-#   `python -c "import engram"` works, which was already true when the image was built.
+#   `python -c "import memvara"` works, which was already true when the image was built.
 #   Liveness here is the pipe: if the server dies, the client's next read returns EOF
 #   immediately, which is a better signal than a 30-second probe interval.
-# * **No CMD.** `engram-mcp` takes no arguments and exits 2 on any (see server/cli.py),
+# * **No CMD.** `memvara-mcp` takes no arguments and exits 2 on any (see server/cli.py),
 #   so an argument list appended by `docker run` is a startup failure, not configuration.
 #   Everything is environment, because an environment block is what an MCP client's
 #   settings file can actually set.
@@ -43,7 +43,7 @@ ENV PATH=/opt/venv/bin:$PATH
 
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
-COPY engram ./engram
+COPY memvara ./memvara
 
 # `.` and not `-e .`: an editable install would leave the runtime image pointing at
 # /src, which is not copied forward, and the failure would be an ImportError on first
@@ -70,7 +70,7 @@ FROM python:${PYTHON_VERSION}-slim
 # and a label pointing at a URL nobody owns is worse than a missing one — it is what a
 # scanner, a registry listing and `docker inspect` will all cite as the provenance. Add it
 # when the repository has somewhere to point at.
-LABEL org.opencontainers.image.title="engram-mcp" \
+LABEL org.opencontainers.image.title="memvara-mcp" \
       org.opencontainers.image.description="Bitemporal memory for AI agents, as an MCP stdio server." \
       org.opencontainers.image.licenses="Apache-2.0"
 
@@ -92,9 +92,9 @@ RUN rm -rf /usr/local/lib/python*/site-packages/pip \
 # Unprivileged, and with a real home: SQLite writes its journal beside the database, and
 # a process that cannot write the directory gets "attempt to write a readonly database"
 # on the first commit rather than at open.
-RUN useradd --create-home --uid 10001 engram \
+RUN useradd --create-home --uid 10001 memvara \
  && mkdir -p /data \
- && chown engram:engram /data
+ && chown memvara:memvara /data
 
 # The mount point, pre-created and owned, but deliberately **not** a VOLUME instruction:
 # an implicit anonymous volume would let a forgotten `-v` look like it worked, and the
@@ -104,13 +104,13 @@ RUN useradd --create-home --uid 10001 engram \
 # SQLite database, its `-wal` and `-shm` siblings, the `<db>.vecs` mmapped vector matrix
 # and the `<db>.embedder.json` fingerprint that says which model wrote it. Bind-mounting
 # just `memory.db` would persist the rows and silently discard every embedding.
-USER engram
+USER memvara
 WORKDIR /data
 
-# ENGRAM_DB is deliberately unset. The server refuses to start without it and prints the
+# MEMVARA_DB is deliberately unset. The server refuses to start without it and prints the
 # client configuration block, which is the behaviour that stops a misconfigured client
 # from remembering into a store that dies with the container. Defaulting it here would
 # convert that loud failure into a silent one, which is the whole thing config.py exists
 # to prevent.
 
-ENTRYPOINT ["python", "-m", "engram.server"]
+ENTRYPOINT ["python", "-m", "memvara.server"]

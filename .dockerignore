@@ -11,9 +11,9 @@
 !pyproject.toml
 !README.md
 !LICENSE
-!engram
+!memvara
 
 # Byte-compiled from the host, and possibly for a different interpreter than the image
 # runs. `pip install` compiles fresh inside the builder.
-engram/**/__pycache__
-engram/**/*.pyc
+memvara/**/__pycache__
+memvara/**/*.pyc

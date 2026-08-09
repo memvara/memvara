@@ -1,4 +1,4 @@
-"""Benchmark: Engram vs. a mem0-style architecture, on the same workload.
+"""Benchmark: Memvara vs. a mem0-style architecture, on the same workload.
 
 Run:  python3 bench/compare.py
 
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 from baseline import Mem0StyleMemory
 
-from engram import Engram, HashingEmbedder
+from memvara import Memvara, HashingEmbedder
 
 # Slots that genuinely change over a long relationship with a user, plus a few that
 # never do. Each entry is (predicate, [values in chronological order]).
@@ -94,7 +94,7 @@ def make_extractor(workload: Workload):
 
 
 class ScriptedLLM:
-    """Adapts the shared extractor to Engram's LLM protocol, counting calls."""
+    """Adapts the shared extractor to Memvara's LLM protocol, counting calls."""
 
     name = "scripted"
 
@@ -120,7 +120,7 @@ class ScriptedLLM:
 
 # --- scoring ----------------------------------------------------------------
 
-def score_engram(mem: Engram, w: Workload) -> dict:
+def score_memvara(mem: Memvara, w: Workload) -> dict:
     live = mem.get_all()
     by_pred: dict[str, list[str]] = {}
     for c in live:
@@ -169,13 +169,13 @@ def run(chitchat_ratio: int = 4) -> None:
     base_ms = (time.perf_counter() - t0) * 1000
     b = score_baseline(base, w)
 
-    # --- engram ---
+    # --- memvara ---
     llm = ScriptedLLM(extractor)
-    mem = Engram(embedder=embedder, llm=llm, user="alice")
+    mem = Memvara(embedder=embedder, llm=llm, user="alice")
     t0 = time.perf_counter()
     mem.add(w.turns)
     eng_ms = (time.perf_counter() - t0) * 1000
-    e = score_engram(mem, w)
+    e = score_memvara(mem, w)
 
     print(f"\n  Workload: {len(w.turns)} turns, {w.fact_turns} carrying a durable fact, "
           f"{total_slots} distinct facts\n")
@@ -197,7 +197,7 @@ def run(chitchat_ratio: int = 4) -> None:
          f"{base_total / 1000:.0f}", f"{eng_total / 1000:.0f}", "lower"),
     ]
 
-    print(f"  {'metric':<34}{'mem0-style':>14}{'engram':>12}   {'better'}")
+    print(f"  {'metric':<34}{'mem0-style':>14}{'memvara':>12}   {'better'}")
     print(f"  {'-' * 34}{'-' * 14:>14}{'-' * 12:>12}   {'-' * 6}")
     for name, bv, ev, better in rows:
         print(f"  {name:<34}{str(bv):>14}{str(ev):>12}   {better}")
@@ -219,7 +219,7 @@ def run(chitchat_ratio: int = 4) -> None:
     # discriminate, and presenting it as a win would be misleading.
     print(f"\n  Exact-token recall ({NEEDLE_VALUE}): "
           f"baseline={'hit' if b['needle_found'] else 'MISS'}, "
-          f"engram={'hit' if e['needle_found'] else 'MISS'}")
+          f"memvara={'hit' if e['needle_found'] else 'MISS'}")
     print("     Not a meaningful comparison here: the offline HashingEmbedder is built "
           "on character\n     n-grams, so it is unusually good at literal tokens and the "
           "vector-only baseline finds\n     them too. The BM25 leg earns its keep against "

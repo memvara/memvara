@@ -8,12 +8,12 @@ from datetime import timedelta
 
 import pytest
 
-from engram.consolidate import SALIENCE_FLOOR, Consolidator
-from engram.embed.base import HashingEmbedder
-from engram.retrieve.scoring import recency_factor
-from engram.schema import PredicateRegistry
-from engram.store.sqlite import SQLiteStore
-from engram.telemetry import (
+from memvara.consolidate import SALIENCE_FLOOR, Consolidator
+from memvara.embed.base import HashingEmbedder
+from memvara.retrieve.scoring import recency_factor
+from memvara.schema import PredicateRegistry
+from memvara.store.sqlite import SQLiteStore
+from memvara.telemetry import (
     CONSOLIDATE_CLAIMS_PER_SLOT,
     CONSOLIDATE_CROWDED_SLOTS,
     CONSOLIDATE_DECAYED,
@@ -24,8 +24,8 @@ from engram.telemetry import (
     CROWDED_SLOT,
     MemoryRecorder,
 )
-from engram.types import Claim, MemoryType, Scope, utcnow
-from engram.write.reconcile import Reconciler
+from memvara.types import Claim, MemoryType, Scope, utcnow
+from memvara.write.reconcile import Reconciler
 
 NOW = utcnow()
 

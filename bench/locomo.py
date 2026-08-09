@@ -1,4 +1,4 @@
-"""LOCOMO — long-term conversational memory, run against engram.
+"""LOCOMO — long-term conversational memory, run against memvara.
 
     PYTHONPATH=. python3 bench/locomo.py --dry-run                    # offline, no key
     PYTHONPATH=. python3 bench/locomo.py --download                   # 2.8 MB, once
@@ -8,8 +8,8 @@
 
 `locomo10.json` lives in the `snap-research/locomo` GitHub repository and is **2.8 MB,
 public, ungated and needs no token** — verified against the host, not assumed. It is
-not vendored here; `--download` puts it in `$ENGRAM_BENCH_DATA` (default
-`~/.cache/engram-bench`) and a run without it fails with the URL and a `curl` command.
+not vendored here; `--download` puts it in `$MEMVARA_BENCH_DATA` (default
+`~/.cache/memvara-bench`) and a run without it fails with the URL and a `curl` command.
 
 Measured from the file itself: 10 conversations, 272 sessions, 5,882 turns, 726,756
 characters of dialogue, and 1,986 QA items — 1,540 in categories 1–4 and 446 in category
@@ -42,7 +42,7 @@ information available" or "not mentioned" — is what scores it. The reader is i
 to use the first phrase, so the rule is a check on whether it abstained rather than a
 vocabulary lottery.
 
-## How engram ingests two humans talking
+## How memvara ingests two humans talking
 
 Every turn is written with `role` set to the speaker's name and the speaker's name
 prefixed into the text, one `add()` per session, timestamped from
@@ -70,7 +70,7 @@ nothing unless an extraction model is configured.
 
 ## What this does not establish
 
-It compares engram against itself under three context sources (see
+It compares memvara against itself under three context sources (see
 `evalkit.ContextSource`), not against another memory layer. A published LOCOMO score
 was produced with a different reader, a different retrieval budget and a different
 judge; quoting this number beside one of those compares harnesses. And the answer format
@@ -91,7 +91,7 @@ from typing import Any, Callable, Sequence
 
 import evalkit as ek
 
-from engram import Engram, NullLLM
+from memvara import Memvara, NullLLM
 
 CATEGORIES = {
     1: "multi-hop",
@@ -114,7 +114,7 @@ SYSTEM = (
 
 #: `"1:56 pm on 8 May, 2023"` — the only shape in the file, checked across all 288
 #: session timestamps. Parsed rather than ignored because 321 of the questions are
-#: temporal and engram's whole proposition is that time is a first-class axis.
+#: temporal and memvara's whole proposition is that time is a first-class axis.
 WHEN_FORMAT = "%I:%M %p on %d %B, %Y"
 
 
@@ -174,7 +174,7 @@ def parse_when(raw: str) -> datetime | None:
 
 
 def _turn_text(turn: dict[str, Any], speaker: str) -> str:
-    """One turn as engram will store it: speaker-attributed, caption included.
+    """One turn as memvara will store it: speaker-attributed, caption included.
 
     The speaker prefix is load-bearing. `role` carries the name too, but `recall()`
     renders an episode's *content* into the prompt and nothing else, so without the
@@ -299,14 +299,14 @@ def fixture() -> list[Sample]:
 # --- the run --------------------------------------------------------------------
 
 
-def build_memory(sample: Sample, budget: ek.RetrievalBudget, llm: Any = None) -> Engram:
+def build_memory(sample: Sample, budget: ek.RetrievalBudget, llm: Any = None) -> Memvara:
     """A store per conversation, which is the unit a LOCOMO question is about.
 
     `read_max_episodes=k` because the library's default of 3 assumes raw turns are a
     tail on a list of extracted facts. On this dataset, with the shipped extractor
     inert (see the module docstring), they are the entire answer.
     """
-    return Engram(
+    return Memvara(
         user=sample.sample_id,
         llm=llm if llm is not None else NullLLM(),
         read_max_episodes=budget.k,
@@ -314,7 +314,7 @@ def build_memory(sample: Sample, budget: ek.RetrievalBudget, llm: Any = None) ->
 
 
 def answer_one(
-    mem: Engram,
+    mem: Memvara,
     qa: LocomoQA,
     haystack: str,
     *,

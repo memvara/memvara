@@ -1,14 +1,14 @@
 """Promises the *distribution* makes, as opposed to promises the code makes.
 
 Everything here is a claim printed on the tin — "numpy and nothing else", "the annotations
-reach your type checker", "`pip install 'engram[openai]'` gets you an OpenAI backend" —
+reach your type checker", "`pip install 'memvara[openai]'` gets you an OpenAI backend" —
 and every one of them can break without a single line of library code changing. An extra
 gets declared and no adapter is written behind it. A name is added to `__all__` and never
 imported. A subpackage is created and the wheel quietly does not ship it. None of that is
 visible from inside the package, which is why it needs its own file.
 
-The bug that motivates the extras section is not hypothetical: `engram[openai]` was
-declared in `pyproject.toml` from the first commit and `engram/llm/openai.py` did not
+The bug that motivates the extras section is not hypothetical: `memvara[openai]` was
+declared in `pyproject.toml` from the first commit and `memvara/llm/openai.py` did not
 exist until Phase 5, so for the whole of waves 1–3 installing that extra bought you a
 dependency and no adapter.
 
@@ -30,10 +30,10 @@ from typing import Iterable
 
 import pytest
 
-import engram
+import memvara
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-PACKAGE = REPO / "engram"
+PACKAGE = REPO / "memvara"
 PYPROJECT = REPO / "pyproject.toml"
 
 
@@ -89,28 +89,28 @@ ADAPTER_EXTRAS = {"anthropic", "openai", "local-embed",
 # A **reserved** extra buys nothing yet and says so. `http` names the REST layer's
 # dependencies before the REST layer exists. That is defensible — it fixes the dependency
 # set publicly before anything depends on it — and it is one letter away from the
-# `engram[openai]` bug, so the test below checks that nothing in the package secretly
+# `memvara[openai]` bug, so the test below checks that nothing in the package secretly
 # imports these. The day the REST layer lands, that test fails and this line has to move.
 RESERVED_EXTRAS = {"http"}
-# A **tooling** extra is for working on engram, not with it. Nothing imports these from
+# A **tooling** extra is for working on memvara, not with it. Nothing imports these from
 # library code, and nothing should.
 TOOLING_EXTRAS = {"dev", "bench"}
 
 
 def _construct_anthropic_llm() -> None:
-    from engram.llm.anthropic import AnthropicLLM
+    from memvara.llm.anthropic import AnthropicLLM
 
     AnthropicLLM()
 
 
 def _construct_openai_llm() -> None:
-    from engram.llm.openai import OpenAILLM
+    from memvara.llm.openai import OpenAILLM
 
     OpenAILLM()
 
 
 def _construct_local_embedder() -> None:
-    from engram.embed.local import LocalEmbedder
+    from memvara.embed.local import LocalEmbedder
 
     LocalEmbedder()
 
@@ -118,21 +118,21 @@ def _construct_local_embedder() -> None:
 # The adapters are lazy attributes on their own modules, so naming the class is the
 # shortest thing that needs the SDK — there is no constructor to reach without it.
 def _resolve_langchain_history() -> None:
-    from engram.integrations import langchain
+    from memvara.integrations import langchain
 
-    langchain.EngramChatMessageHistory
+    langchain.MemvaraChatMessageHistory
 
 
 def _resolve_llamaindex_block() -> None:
-    from engram.integrations import llamaindex
+    from memvara.integrations import llamaindex
 
-    llamaindex.EngramMemoryBlock
+    llamaindex.MemvaraMemoryBlock
 
 
 def _resolve_crewai_storage() -> None:
-    from engram.integrations import crewai
+    from memvara.integrations import crewai
 
-    crewai.EngramStorage
+    crewai.MemvaraStorage
 
 
 #: extra -> (the module its SDK provides, the shortest call that needs it). The module
@@ -149,7 +149,7 @@ ADAPTERS = {
 }
 
 #: The subset of `ADAPTERS` whose SDK name never appears in an `import` statement,
-#: because `engram.integrations._common.require()` reaches it through
+#: because `memvara.integrations._common.require()` reaches it through
 #: `importlib.import_module` of a string. They are deliberately invisible to the static
 #: walk below and are covered by the runtime one instead — listing them here keeps that
 #: exemption explicit, so a framework that *does* get statically imported one day fails
@@ -177,7 +177,7 @@ def _absolute_imports(nodes: Iterable[ast.AST]) -> set[str]:
 
 
 def _import_time_imports(body: list[ast.stmt]) -> set[str]:
-    """What executes on `import engram.<module>`.
+    """What executes on `import memvara.<module>`.
 
     Descends into `if`, `try` and `with` — a conditional import at module scope still runs
     at import time — and stops at every `def` and `class`, which is precisely the line the
@@ -195,7 +195,7 @@ def _import_time_imports(body: list[ast.stmt]) -> set[str]:
 
 
 def _third_party(names: set[str]) -> set[str]:
-    return {n for n in names if n != "engram" and n not in sys.stdlib_module_names}
+    return {n for n in names if n != "memvara" and n not in sys.stdlib_module_names}
 
 
 # -- the built wheel ----------------------------------------------------------------
@@ -204,9 +204,9 @@ def _third_party(names: set[str]) -> set[str]:
 # themselves the moment `python3 -m build --wheel` has run, which is the step
 # `docs/RELEASING.md` puts immediately before them.
 
-WHEELS = sorted((REPO / "dist").glob(f"engram-{engram.__version__}-*.whl"))
+WHEELS = sorted((REPO / "dist").glob(f"memvara-{memvara.__version__}-*.whl"))
 needs_wheel = pytest.mark.skipif(
-    not WHEELS, reason=f"no dist/engram-{engram.__version__}-*.whl; run python3 -m build --wheel")
+    not WHEELS, reason=f"no dist/memvara-{memvara.__version__}-*.whl; run python3 -m build --wheel")
 
 
 def _wheel_names() -> set[str]:
@@ -225,15 +225,15 @@ def test_the_py_typed_marker_sits_in_the_top_level_package_directory() -> None:
 
     PEP 561 says an installed package's inline types are only honoured when a `py.typed`
     marker sits beside its `__init__.py`; mypy's answer without it is "module is installed,
-    but missing library stubs or py.typed marker" and every engram symbol becomes `Any`.
+    but missing library stubs or py.typed marker" and every memvara symbol becomes `Any`.
     The annotations were all already written, so this one empty file is the entire
     difference between a thoroughly annotated library and an untyped one at the call site.
 
     Top level only, and deliberately not repeated in the subpackages: one marker covers
-    `engram.store`, `engram.llm` and the rest.
+    `memvara.store`, `memvara.llm` and the rest.
     """
     marker = PACKAGE / "py.typed"
-    assert marker.is_file(), f"{marker} is missing; every annotation in engram stops here"
+    assert marker.is_file(), f"{marker} is missing; every annotation in memvara stops here"
     assert [p for p in PACKAGE.rglob("py.typed") if p.parent != PACKAGE] == [], (
         "a marker inside a subpackage claims that subpackage is separately distributed, "
         "which none of them are")
@@ -254,12 +254,12 @@ def test_the_marker_is_empty_because_the_word_partial_in_it_would_change_its_mea
 def test_the_marker_survives_the_trip_into_the_wheel() -> None:
     """A marker in the source tree that the build drops is worth nothing to an installer.
 
-    Hatchling includes it today by virtue of `packages = ["engram"]` sweeping the whole
+    Hatchling includes it today by virtue of `packages = ["memvara"]` sweeping the whole
     directory, which means the guarantee rests on the marker never matching a VCS ignore
     rule. That is a thin thread to hang the library's entire typing story on, and this is
     the test that notices when it snaps.
     """
-    assert "engram/py.typed" in _wheel_names()
+    assert "memvara/py.typed" in _wheel_names()
 
 
 @needs_wheel
@@ -269,7 +269,7 @@ def test_the_wheel_carries_every_module_in_the_package() -> None:
     It cannot fail any earlier: the source tree keeps working for everyone who has the
     repository, and only someone installing the wheel ever sees the missing module.
     """
-    expected = {f"engram/{p.relative_to(PACKAGE).as_posix()}" for p in PACKAGE.rglob("*.py")}
+    expected = {f"memvara/{p.relative_to(PACKAGE).as_posix()}" for p in PACKAGE.rglob("*.py")}
     assert expected <= _wheel_names(), (
         "modules in the tree and not in dist/. Either the build is dropping them or the "
         "wheel predates them — rebuild with `python3 -m build --wheel` and rerun before "
@@ -289,7 +289,7 @@ def test_the_core_declares_exactly_one_runtime_dependency() -> None:
 
 
 def test_nothing_but_numpy_is_imported_while_the_package_is_being_imported() -> None:
-    """`import engram` must not touch an optional SDK, on any path, in any module.
+    """`import memvara` must not touch an optional SDK, on any path, in any module.
 
     Read statically so the answer does not depend on what happens to be installed on the
     machine running the suite: a developer with `openai` in their environment gets the
@@ -307,7 +307,7 @@ def test_the_only_sdks_the_package_names_anywhere_are_the_ones_an_extra_installs
     """An import of something no extra declares is a dependency nobody agreed to ship.
 
     This is the check that keeps a reserved extra honest in the other direction too: no
-    module imports `fastapi`, `uvicorn` or `pydantic`, so `engram[http]` really is
+    module imports `fastapi`, `uvicorn` or `pydantic`, so `memvara[http]` really is
     reserved rather than half-wired.
     """
     anywhere: set[str] = set()
@@ -317,7 +317,7 @@ def test_the_only_sdks_the_package_names_anywhere_are_the_ones_an_extra_installs
     assert _third_party(anywhere) == {"numpy"} | named, (
         "an SDK named in the source with no extra declaring it, or an extra whose SDK is "
         "no longer imported. Note that a framework reached through "
-        "`engram.integrations._common.require()` is invisible here — it is an "
+        "`memvara.integrations._common.require()` is invisible here — it is an "
         "`importlib.import_module` of a string — so those are covered by the runtime "
         "walk below instead.")
 
@@ -332,9 +332,9 @@ def test_every_module_imports_cleanly_in_a_process_that_has_only_numpy() -> None
     already imported half the package.
     """
     probe = (
-        "import importlib, pkgutil, sys, engram\n"
+        "import importlib, pkgutil, sys, memvara\n"
         "bad = []\n"
-        "for m in pkgutil.walk_packages(engram.__path__, 'engram.'):\n"
+        "for m in pkgutil.walk_packages(memvara.__path__, 'memvara.'):\n"
         "    try:\n"
         "        importlib.import_module(m.name)\n"
         "    except ImportError as exc:\n"
@@ -348,7 +348,7 @@ def test_every_module_imports_cleanly_in_a_process_that_has_only_numpy() -> None
     assert done.returncode == 0, done.stderr
     failed, leaked = done.stdout.strip().split("|")
     assert not failed, f"modules that would not import on a core install: {failed}"
-    assert not leaked, f"importing engram pulled in an optional SDK: {leaked}"
+    assert not leaked, f"importing memvara pulled in an optional SDK: {leaked}"
 
 
 # -- extras and the adapters behind them ----------------------------------------------
@@ -357,7 +357,7 @@ def test_every_module_imports_cleanly_in_a_process_that_has_only_numpy() -> None
 def test_every_declared_extra_is_classified_so_a_new_one_cannot_ship_unexamined() -> None:
     """Declaring an extra is a promise; this is the place the promise gets made explicitly.
 
-    `engram[openai]` shipped for three waves as a dependency with no adapter behind it
+    `memvara[openai]` shipped for three waves as a dependency with no adapter behind it
     precisely because nothing anywhere had to say what the extra was *for*. Adding one to
     `pyproject.toml` now fails the suite until someone writes down which of the three
     kinds it is.
@@ -370,7 +370,7 @@ def test_every_declared_extra_is_classified_so_a_new_one_cannot_ship_unexamined(
 
 
 def test_every_adapter_extra_has_a_call_that_actually_needs_its_sdk() -> None:
-    """The `engram[openai]` bug, stated as a rule: an adapter extra must have an adapter."""
+    """The `memvara[openai]` bug, stated as a rule: an adapter extra must have an adapter."""
     assert set(ADAPTERS) == ADAPTER_EXTRAS
 
 
@@ -396,17 +396,17 @@ def test_an_adapter_whose_sdk_is_absent_raises_an_error_naming_the_extra(
     monkeypatch.setitem(sys.modules, module, None)
     with pytest.raises(ImportError) as caught:
         construct()
-    assert f"engram[{extra}]" in str(caught.value)
+    assert f"memvara[{extra}]" in str(caught.value)
 
 
 def test_the_version_is_the_same_string_in_both_places_that_state_it() -> None:
     """`pyproject.toml` names the version for the installer, `__init__.py` for the program.
 
-    Nothing keeps them equal. When they drift, `pip show engram` and
-    `engram-mcp --version` disagree, and the bug report you get back quotes the one that
+    Nothing keeps them equal. When they drift, `pip show memvara` and
+    `memvara-mcp --version` disagree, and the bug report you get back quotes the one that
     is wrong. The two-place bump is the first line of `docs/RELEASING.md` for this reason.
     """
-    assert _toml_table("project")["version"] == engram.__version__
+    assert _toml_table("project")["version"] == memvara.__version__
 
 
 @needs_wheel
@@ -418,19 +418,19 @@ def test_the_built_wheel_is_the_version_the_package_reports() -> None:
     """
     for wheel in WHEELS:
         with zipfile.ZipFile(wheel) as archive:
-            metadata = archive.read(f"engram-{engram.__version__}.dist-info/METADATA")
-        assert f"Version: {engram.__version__}".encode() in metadata
+            metadata = archive.read(f"memvara-{memvara.__version__}.dist-info/METADATA")
+        assert f"Version: {memvara.__version__}".encode() in metadata
 
 
 def test_the_console_script_points_at_something_importable() -> None:
-    """`engram-mcp` is generated by the installer and never executed by the test suite.
+    """`memvara-mcp` is generated by the installer and never executed by the test suite.
 
     So a typo in the entry point survives every test in this repository and surfaces as an
     ImportError on the user's first launch — from a wrapper script they did not write and
     cannot easily read.
     """
     scripts = _toml_table("project.scripts")
-    target = scripts["engram-mcp"]
+    target = scripts["memvara-mcp"]
     assert isinstance(target, str)
     module, _, attribute = target.partition(":")
     imported = __import__(module, fromlist=[attribute])
@@ -441,7 +441,7 @@ def test_the_console_script_points_at_something_importable() -> None:
 
 
 def _lazy_exports() -> set[str]:
-    """Names `engram.__getattr__` will hand out, read from its source.
+    """Names `memvara.__getattr__` will hand out, read from its source.
 
     Read rather than listed because a fourth backend added to that function and forgotten
     here would make the test below vacuous, which is the failure mode of every hardcoded
@@ -455,23 +455,23 @@ def _lazy_exports() -> set[str]:
 
 
 def test_every_name_in_dunder_all_can_actually_be_imported() -> None:
-    """`__all__` is what `from engram import *` binds, and it is not checked by anything.
+    """`__all__` is what `from memvara import *` binds, and it is not checked by anything.
 
     A name listed here and not exported is an `AttributeError` at the star-import, which
     no test in this repository would otherwise reach — the rest of the suite imports the
     symbols it needs by name.
     """
-    missing = [name for name in engram.__all__ if not hasattr(engram, name)]
+    missing = [name for name in memvara.__all__ if not hasattr(memvara, name)]
     assert not missing
 
 
 def test_dunder_all_lists_nothing_twice() -> None:
     """Duplicates are how two people adding an export to the same list both succeed."""
-    assert len(engram.__all__) == len(set(engram.__all__))
+    assert len(memvara.__all__) == len(set(memvara.__all__))
 
 
-def test_a_star_import_of_engram_needs_no_optional_sdk() -> None:
-    """`from engram import *` resolves every lazy export, including the hosted backends.
+def test_a_star_import_of_memvara_needs_no_optional_sdk() -> None:
+    """`from memvara import *` resolves every lazy export, including the hosted backends.
 
     That makes `__all__` the one place where adding a lazily-imported name can break the
     core install: the star import calls `__getattr__` for it, and if that adapter imports
@@ -480,33 +480,33 @@ def test_a_star_import_of_engram_needs_no_optional_sdk() -> None:
     module's namespace would be a mess to undo.
     """
     done = subprocess.run(
-        [sys.executable, "-c", "exec('from engram import *')\nprint('ok')"],
+        [sys.executable, "-c", "exec('from memvara import *')\nprint('ok')"],
         cwd=REPO, check=False, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
     assert done.stdout.strip() == "ok"
 
 
 def test_every_eagerly_imported_public_name_is_exported() -> None:
-    """A symbol imported into `engram/__init__.py` and left out of `__all__` is a trap.
+    """A symbol imported into `memvara/__init__.py` and left out of `__all__` is a trap.
 
-    It works for anyone who writes `from engram import X`, is absent for anyone who writes
-    `from engram import *`, and the difference only shows up in someone else's code.
+    It works for anyone who writes `from memvara import X`, is absent for anyone who writes
+    `from memvara import *`, and the difference only shows up in someone else's code.
     """
     tree = ast.parse((PACKAGE / "__init__.py").read_text(encoding="utf-8"))
     eager = {alias.asname or alias.name
              for node in tree.body if isinstance(node, ast.ImportFrom)
              for alias in node.names}
-    assert eager <= set(engram.__all__)
+    assert eager <= set(memvara.__all__)
 
 
 def test_every_lazily_exported_backend_is_listed_in_dunder_all() -> None:
     """Two backends behind one `__getattr__` should not disagree about being public.
 
-    `__all__` is the inventory a reader consults and the list `from engram import *`
+    `__all__` is the inventory a reader consults and the list `from memvara import *`
     obeys, so a backend missing from it is documented nowhere and star-imports to nothing,
     while its sibling does both.
     """
-    assert _lazy_exports() <= set(engram.__all__)
+    assert _lazy_exports() <= set(memvara.__all__)
 
 
 # -- the parser this file leans on -----------------------------------------------------

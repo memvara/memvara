@@ -2,14 +2,14 @@
 
 import pytest
 
-from engram.schema import (
+from memvara.schema import (
     BUILTIN_PREDICATES,
     Cardinality,
     PredicateRegistry,
     PredicateSpec,
     Volatility,
 )
-from engram.types import MemoryType
+from memvara.types import MemoryType
 
 
 @pytest.fixture()
