@@ -12,11 +12,17 @@ best-effort.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Iterable, Protocol, Sequence, runtime_checkable
+from contextlib import AbstractContextManager
+from typing import TYPE_CHECKING, Iterable, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 
 from ..types import Claim, Episode, Scope
+
+if TYPE_CHECKING:
+    # Only for annotations: a `Store` implementation should not have to import
+    # the schema module to satisfy the protocol.
+    from ..schema import PredicateSpec
 
 
 @runtime_checkable
@@ -59,7 +65,7 @@ class Store(Protocol):
         result count rather than with the query."""
         ...
 
-    def batch(self):
+    def batch(self) -> AbstractContextManager["Store"]:
         """Context manager deferring commits to one transaction for bulk work."""
         ...
 
@@ -198,7 +204,7 @@ class Store(Protocol):
         ...
 
     # --- learned schema ---------------------------------------------------
-    def put_spec(self, spec, tenant: str = "default") -> None:
+    def put_spec(self, spec: "PredicateSpec", tenant: str = "default") -> None:
         """Persist a learned predicate specification. Must survive restart: cardinality
         is what makes a contradiction detectable.
 
@@ -209,7 +215,7 @@ class Store(Protocol):
         """
         ...
 
-    def all_specs(self, tenant: str = "default") -> list:
+    def all_specs(self, tenant: str = "default") -> list["PredicateSpec"]:
         """Every persisted predicate specification for one tenant."""
         ...
 

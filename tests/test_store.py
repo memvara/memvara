@@ -1729,3 +1729,55 @@ def test_an_old_sqlite_is_refused_at_construction_not_at_the_first_vector_write(
     # obvious reading of a version error is "upgrade the library".
     assert "3.31.1" in str(exc.value)
     assert "not a newer memvara" in str(exc.value)
+
+
+def test_stats_for_one_tenant_does_not_disclose_another_tenants_vector_count(store, emb):
+    """`embeddings` used to be exempt from tenant scoping, described as a property of
+    the store rather than of a tenant. True of the file on disk, false of the number a
+    tenant is handed: two tenants with one claim each were both told `embeddings: 2`, so
+    a hosted store leaked its neighbours' write volume through a stats call."""
+    for tenant in ("acme", "globex"):
+        c = claim(scope=Scope(tenant))
+        store.put_claim(claim=c)
+        store.set_embedding(c.id, emb.encode([c.text])[0])
+
+    assert store.stats("acme")["embeddings"] == 1
+    assert store.stats("globex")["embeddings"] == 1
+    # Unfiltered still reports the whole matrix, which is what sizing the store asks.
+    assert store.stats()["embeddings"] == 2
+
+
+def test_a_vector_for_a_claim_that_does_not_exist_is_not_persisted(store, emb):
+    """It would be unreachable — every search joins back to `claims` — while still being
+    counted by `stats()`, holding a matrix slot forever, and surviving `purge()`, which
+    also deletes by joining to the owning table. Pure leak, and reachable:
+    `WritePipeline._write_embeddings` catches a dimension error and carries on."""
+    store.set_embedding("cl_never_written", emb.encode(["ghost"])[0])
+    assert store.stats()["embeddings"] == 0
+    assert store.get_embedding("cl_never_written") is None
+
+    # The same guard for episodes, which have their own table and their own join.
+    store.set_episode_embedding("ep_never_written", emb.encode(["ghost"])[0])
+    assert store.stats()["embeddings"] == 0
+
+
+def test_every_store_method_is_callable_by_the_protocols_parameter_names():
+    """A `Store` is a Protocol, so an implementation diverging on a *parameter name*
+    still satisfies `isinstance` and still breaks any caller using a keyword. Found for
+    real: `put_claim(self, c)` against the protocol's `put_claim(self, claim)`, so
+    `store.put_claim(claim=…)` raised `TypeError` against the reference implementation.
+    """
+    import inspect
+
+    from memvara.store.base import Store
+
+    def shape(f):
+        return [(n, p.kind, p.default is not inspect.Parameter.empty)
+                for n, p in inspect.signature(f).parameters.items()]
+
+    diverged = [
+        name for name in dir(Store)
+        if not name.startswith("_") and callable(getattr(Store, name))
+        and shape(getattr(Store, name)) != shape(getattr(SQLiteStore, name))
+    ]
+    assert diverged == []

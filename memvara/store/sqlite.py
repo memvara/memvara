@@ -338,6 +338,10 @@ class _VecTable:
     name: str
     key: str
     upsert: str
+    #: The table whose rows these vectors belong to. Needed because a vector for a row
+    #: that does not exist is unreachable by search and invisible to `purge`, both of
+    #: which join back to it — so the join has to be nameable here.
+    owner: str
 
 
 #: Rows per page in `_iter_rows`. Large enough that a full scan is not dominated by
@@ -346,9 +350,9 @@ class _VecTable:
 _ITER_PAGE = 1000
 
 _CLAIM_VECS = _VecTable("embeddings", "claim_id",
-                        _vector_upsert("embeddings", "claim_id"))
+                        _vector_upsert("embeddings", "claim_id"), "claims")
 _EPISODE_VECS = _VecTable("episode_embeddings", "episode_id",
-                          _vector_upsert("episode_embeddings", "episode_id"))
+                          _vector_upsert("episode_embeddings", "episode_id"), "episodes")
 _VEC_TABLES = (_CLAIM_VECS, _EPISODE_VECS)
 
 # Everything the index needs to know about what is on disk, in one query per open:
@@ -1468,26 +1472,26 @@ class SQLiteStore:
 
     # -- claims --------------------------------------------------------------
 
-    def put_claim(self, c: Claim) -> None:
+    def put_claim(self, claim: Claim) -> None:
         with self._lock:
-            cited = json.dumps(c.sources)
+            cited = json.dumps(claim.sources)
             # Read *before* the upsert overwrites it. The stored array is this claim's
             # provenance as the store currently holds it, so it is also the answer to
             # "which edges are already there" — and having it here is what lets the sync
             # below skip both the write and the read when nothing has changed. It costs
             # nothing extra: the rowid this fetches was already being fetched.
             prior = self._db.execute(
-                "SELECT rowid, sources FROM claims WHERE id=?", (c.id,)).fetchone()
+                "SELECT rowid, sources FROM claims WHERE id=?", (claim.id,)).fetchone()
             self._db.execute(
                 _CLAIM_UPSERT,
                 (
-                    c.id, c.scope.tenant, c.scope.user, c.scope.agent, c.scope.session,
-                    c.subject, c.predicate, c.object, c.text, c.polarity,
-                    c.memory_type.value, _ts(c.valid_from), _ts(c.valid_to),
-                    _ts(c.recorded_at), _ts(c.invalidated_at), c.invalidated_by,
-                    c.confidence, c.salience, c.observation_count,
-                    cited, c.derivation.value, c.extractor,
-                    json.dumps(c.meta), c.fact_key, c.value_key,
+                    claim.id, claim.scope.tenant, claim.scope.user, claim.scope.agent, claim.scope.session,
+                    claim.subject, claim.predicate, claim.object, claim.text, claim.polarity,
+                    claim.memory_type.value, _ts(claim.valid_from), _ts(claim.valid_to),
+                    _ts(claim.recorded_at), _ts(claim.invalidated_at), claim.invalidated_by,
+                    claim.confidence, claim.salience, claim.observation_count,
+                    cited, claim.derivation.value, claim.extractor,
+                    json.dumps(claim.meta), claim.fact_key, claim.value_key,
                 ),
             )
             # Mirror the claim's rowid into the FTS table so the index entry can be
@@ -1498,15 +1502,15 @@ class SQLiteStore:
             # The upsert preserves the rowid, which is the whole reason it is an upsert,
             # so an existing claim's was already read a few lines up.
             rowid = prior["rowid"] if prior is not None else self._db.execute(
-                "SELECT rowid FROM claims WHERE id=?", (c.id,)).fetchone()["rowid"]
+                "SELECT rowid FROM claims WHERE id=?", (claim.id,)).fetchone()["rowid"]
             self._db.execute("DELETE FROM claims_fts WHERE rowid=?", (rowid,))
             self._db.execute(
                 "INSERT INTO claims_fts (rowid, claim_id, text) VALUES (?,?,?)",
-                (rowid, c.id, c.text),
+                (rowid, claim.id, claim.text),
             )
             stored = prior["sources"] if prior is not None else "[]"
             if stored != cited:
-                self._sync_sources(c.id, c.sources, json.loads(stored))
+                self._sync_sources(claim.id, claim.sources, json.loads(stored))
             self._maybe_commit()
 
     def _sync_sources(self, claim_id: str, sources: Sequence[str],
@@ -2026,6 +2030,20 @@ class SQLiteStore:
     # -- retrieval -----------------------------------------------------------
 
     def _set_vector(self, t: _VecTable, item_id: str, vec: np.ndarray) -> None:
+        """Persist and index one vector. No-ops when the row it belongs to is absent.
+
+        A vector for a claim that does not exist is unreachable — every search joins
+        back to `claims` — but it is counted by `stats()`, holds a matrix slot forever,
+        and survives `purge()`, which also deletes by joining to the owning table. So it
+        is pure leak, and it is reachable: `WritePipeline._write_embeddings` catches a
+        dimension error and carries on, and any caller that embeds before it writes gets
+        there too.
+
+        Dropped rather than raised, because the alternative is worse in both directions:
+        the write path already treats embedding failure as recoverable and would now
+        crash on it, while a caller that embedded an id it never stored has made a
+        mistake this layer cannot distinguish from a legitimate race with an erasure.
+        """
         # Normalize once, here, so the persisted bytes and the matrix row hold the same
         # thing. Otherwise every cosine computed against a vector silently depends on
         # which of the two it was read from.
@@ -2034,6 +2052,9 @@ class SQLiteStore:
             # Validate against the store's dimension *before* touching the DB. Writing
             # first would leave a row the index rejects, and the store would then fail
             # to reopen.
+            if self._db.execute(
+                f"SELECT 1 FROM {t.owner} WHERE id=?", (item_id,)).fetchone() is None:
+                return
             self._ensure_dim()
             if self._vec.dim is not None and v.shape[0] != self._vec.dim:
                 raise ValueError(
@@ -2252,12 +2273,16 @@ class SQLiteStore:
         """Row counts, optionally for one tenant.
 
         Scoping matters on a shared store: unfiltered counts disclose how much data
-        other tenants hold, which is a real signal even without their content.
-        `embeddings` stays global — it is a property of the store, not of a tenant —
-        and is counted in SQLite rather than in the index, because the index is a cache
-        of a table that other processes also write to. It counts every vector in the
-        matrix, claims' and episodes' alike, since that is what the file on disk holds
-        and what a caller sizing the store is asking about.
+        other tenants hold, which is a real signal even without their content. That
+        applies to `embeddings` too, and it used to be exempt — described as "a property
+        of the store, not of a tenant", which is true of the file on disk and false of
+        the number a tenant is handed. Two tenants with one claim each were both told
+        `embeddings: 2`, so a hosted store leaked its neighbours' write volume through a
+        stats call. It is now counted through the owning rows, claims' and episodes'
+        alike, and only the unfiltered call reports the whole matrix.
+
+        Counted in SQLite rather than in the index, because the index is a cache of a
+        table that other processes also write to.
         """
         where = " WHERE tenant = ?" if tenant is not None else ""
         params: tuple = (tenant,) if tenant is not None else ()
@@ -2274,7 +2299,14 @@ class SQLiteStore:
                     f"SELECT COUNT(*) FROM claims{where}{and_} invalidated_at IS NULL"),
                 "invalidated": q(
                     f"SELECT COUNT(*) FROM claims{where}{and_} invalidated_at IS NOT NULL"),
-                "embeddings": self._count_vectors(),
+                "embeddings": (
+                    self._count_vectors() if tenant is None
+                    else sum(
+                        q(f"SELECT COUNT(*) FROM {t.name} v JOIN {t.owner} o "
+                          f"ON o.id = v.{t.key} WHERE o.tenant = ?")
+                        for t in _VEC_TABLES
+                    )
+                ),
             }
 
     def close(self) -> None:
