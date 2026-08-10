@@ -1840,3 +1840,70 @@ def test_erasing_a_cited_turn_is_refused_unless_asked(store, emb):
 
     assert store.erase_episode(ep.id, cited=True) is True
     assert store.get_episode(ep.id) is None
+
+
+# --- portability: what the platform's C library will actually invert ------------------
+
+
+def test_the_timestamp_ceiling_is_probed_rather_than_assumed(monkeypatch):
+    """`_MAX_TS` exists so an accepted write cannot break every later read of its scope,
+    and it was hard-coded to the POSIX bound. Windows' CRT refuses anything past roughly
+    year 3000 with `OSError: [Errno 22]`, so the same defect was alive there at a lower
+    ceiling — CI found it the first time it ran on Windows.
+
+    Simulated here rather than skipped, because the platform this suite usually runs on
+    is exactly the one that cannot exercise the branch."""
+    import datetime as dtmod
+    from memvara.store import sqlite as mod
+
+    real = dtmod.datetime
+    ceiling = real(3000, 12, 31, tzinfo=dtmod.timezone.utc).timestamp()
+
+    class NarrowCRT(real):
+        @classmethod
+        def fromtimestamp(cls, ts, tz=None):
+            if ts > ceiling:
+                raise OSError(22, "Invalid argument")
+            return real.fromtimestamp(ts, tz)
+
+    monkeypatch.setattr(mod, "datetime", NarrowCRT)
+    probed = mod._max_roundtrip_ts()
+
+    assert probed <= ceiling, "a bound the platform cannot invert is not a bound"
+    # And it is the *largest* such second, not merely a safe one — a clamp that gives up
+    # decades of range would silently rewrite ordinary far-future dates.
+    assert real.fromtimestamp(probed, dtmod.timezone.utc).year == 3000
+
+
+def test_the_posix_ceiling_keeps_its_sub_second_headroom():
+    """The probe must not cost precision where nothing was wrong. `datetime.max`'s own
+    timestamp is unusable — float64 has no precision left at 2.5e11, so it rounds *up*
+    onto year 10000, which is the original defect — so the answer is one ulp below it,
+    and an implementation that seeded a search from `int()` of that would land a whole
+    second lower. It did, before this test."""
+    from datetime import datetime, timezone
+    from memvara.store.sqlite import _MAX_TS
+
+    assert datetime.fromtimestamp(_MAX_TS, timezone.utc).year == 9999
+    assert _MAX_TS != int(_MAX_TS), "the fractional headroom was rounded away"
+
+
+def test_positional_file_io_does_not_depend_on_a_posix_only_call(tmp_path):
+    """`os.pread`/`os.pwrite` do not exist on Windows at all, so every store with a
+    `.vecs` sidecar raised AttributeError there — 95 of the 99 failures in the first CI
+    run. One code path rather than a `hasattr` fallback, because a fallback only one
+    platform exercises is a fallback nobody tests."""
+    import os
+    from memvara.store.sqlite import _read_at, _write_at
+
+    path = tmp_path / "m.bin"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        _write_at(fd, b"HEADER", 0)
+        _write_at(fd, b"\0", 63)          # extends by writing the last byte
+        assert _read_at(fd, 6, 0) == b"HEADER"
+        assert os.fstat(fd).st_size == 64
+        # Offsets are absolute: a second read does not continue from the first.
+        assert _read_at(fd, 6, 0) == b"HEADER"
+    finally:
+        os.close(fd)

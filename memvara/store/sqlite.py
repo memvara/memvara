@@ -436,7 +436,69 @@ _VEC_HEADER = 64
 #: raises `year 10000 is out of range`. One ulp down is a timestamp the float could not
 #: represent anyway, and it keeps the invariant that actually matters: a row this store
 #: accepted is a row it can read back.
-_MAX_TS = math.nextafter(datetime.max.replace(tzinfo=timezone.utc).timestamp(), 0.0)
+def _max_roundtrip_ts() -> float:
+    """The largest timestamp `_dt` can invert **on this platform**.
+
+    Probed rather than computed, because the answer is not the same everywhere. A glibc
+    build inverts up to year 9999; Windows' CRT refuses anything past roughly year 3000
+    with `OSError: [Errno 22] Invalid argument`. Hard-coding the POSIX bound left the
+    exact defect this clamp exists to prevent — a write that stores fine and breaks every
+    later read of its scope — alive on Windows at a lower ceiling, and CI found it the
+    first time it ran.
+
+    A binary search over an int range rather than a table of candidate years: the bound
+    is a property of the C library, no list of platforms stays right, and ~50 iterations
+    at import costs nothing.
+    """
+    # One ulp below `datetime.max`, which is the POSIX answer and must stay exactly that
+    # — including its sub-second headroom. `datetime.max.timestamp()` is itself
+    # unusable: float64 has no precision left at 2.5e11, so it rounds *up* onto
+    # 253402300800.0, which is year 10000. That rounding is the original defect, and
+    # taking `int()` of it to seed a search would reintroduce it as an invalid bound.
+    best = math.nextafter(datetime.max.replace(tzinfo=timezone.utc).timestamp(), 0.0)
+    try:
+        datetime.fromtimestamp(best, tz=timezone.utc)
+        return best
+    except (OSError, OverflowError, ValueError):
+        pass
+    lo, hi = 2 ** 31, int(best)      # 2**31 is year 2038, invertible wherever Python runs
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        try:
+            datetime.fromtimestamp(float(mid), tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            hi = mid - 1
+        else:
+            lo = mid
+    return float(lo)
+
+
+_MAX_TS = _max_roundtrip_ts()
+
+
+def _read_at(fd: int, n: int, offset: int) -> bytes:
+    """`os.pread`, for platforms that have no `os.pread`.
+
+    Positional I/O is POSIX-only — Python does not provide `pread`/`pwrite` on Windows at
+    all, so every store with a `.vecs` sidecar raised `AttributeError` there. The seek is
+    safe in both directions that matter: `_VecMatrix._lock` serializes the callers inside
+    a process, and two processes hold two file descriptions and therefore two independent
+    offsets. Written as one code path rather than a `hasattr` branch, because a fallback
+    only one platform exercises is a fallback nobody tests.
+    """
+    os.lseek(fd, offset, os.SEEK_SET)
+    return os.read(fd, n)
+
+
+def _write_at(fd: int, data: bytes, offset: int) -> None:
+    """`os.pwrite`, for platforms that have no `os.pwrite`. See `_read_at`.
+
+    Used to extend the matrix file by writing its last byte, which `ftruncate` would also
+    do — and must not, because `ftruncate` shortens as well as extends and two processes
+    growing at once would race to cut each other's rows.
+    """
+    os.lseek(fd, offset, os.SEEK_SET)
+    os.write(fd, data)
 
 
 def _ts(dt: datetime | None) -> float | None:
@@ -593,12 +655,12 @@ class _VecIndex:
             fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
             self._fh = os.fdopen(fd, "r+b")
             size = os.fstat(fd).st_size
-            head = os.pread(fd, _VEC_HEADER, 0) if size >= _VEC_HEADER else b""
+            head = _read_at(fd, _VEC_HEADER, 0) if size >= _VEC_HEADER else b""
             usable = (head[:8] == _VEC_MAGIC
                       and struct.unpack_from("<II", head, 8) == (_VEC_FORMAT, dim))
             if not usable:
                 os.ftruncate(fd, 0)
-                os.pwrite(fd, _VEC_MAGIC + struct.pack("<II", _VEC_FORMAT, dim), 0)
+                _write_at(fd, _VEC_MAGIC + struct.pack("<II", _VEC_FORMAT, dim), 0)
                 self._rows = 0
             else:
                 self._rows = (size - _VEC_HEADER) // (dim * 4)
@@ -634,7 +696,7 @@ class _VecIndex:
             if size > os.fstat(fd).st_size:
                 # A write past EOF extends the file; `ftruncate` would also shorten it,
                 # and two processes growing at once would race to cut each other's rows.
-                os.pwrite(fd, b"\0", size - 1)
+                _write_at(fd, b"\0", size - 1)
         self._remap(fh)
 
     def _remap(self, fh: BufferedRandom) -> None:
