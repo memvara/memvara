@@ -1781,3 +1781,62 @@ def test_every_store_method_is_callable_by_the_protocols_parameter_names():
         and shape(getattr(Store, name)) != shape(getattr(SQLiteStore, name))
     ]
     assert diverged == []
+
+
+def test_a_timestamp_at_the_far_edge_does_not_poison_the_scope_it_lands_in(store, emb):
+    """A single accepted write used to break every later read of its scope, permanently.
+
+    `datetime.max.timestamp()` is 253402300800.0, and float64 has no precision left at
+    that magnitude — so `datetime(9999,12,31,23,59,59,999999)` rounds *up* onto it and
+    `datetime.fromtimestamp` then raises `year 10000 is out of range`. The write returns
+    success; `get_all()` and `search()` over that claim raise from then on, and nothing
+    points at the row that caused it. Any caller able to write could do it in one call.
+    """
+    put(store, emb, object="Berlin")
+    put(store, emb, object="Acme", predicate="works_at",
+        valid_to=datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc))
+
+    assert len(list(store.iter_claims("acme"))) == 2
+    assert store.lexical_search("berlin", [SCOPE], limit=10)
+    assert store.stats("acme")["claims"] == 2
+
+
+@pytest.mark.parametrize("moment", [
+    datetime(1, 1, 1, tzinfo=timezone.utc),
+    datetime(1970, 1, 1, tzinfo=timezone.utc),
+    datetime(2024, 3, 5, 12, 0, 0, 123456, tzinfo=timezone.utc),
+    datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc),
+])
+def test_the_clamp_moves_only_the_value_that_could_not_round_trip(moment):
+    """The fix must not quietly shift ordinary timestamps — a store that rounds every
+    write is worse than one that breaks on a value nobody sends."""
+    from memvara.store.sqlite import _dt, _ts
+
+    assert _dt(_ts(moment)) == moment
+
+
+def test_a_turn_no_claim_came_from_can_be_erased(store, emb):
+    """`erase_claim(sources=True)` reaches a turn only *through* a claim, so a turn the
+    extractor found nothing in — an acknowledgement, a greeting, a script tier 1 does not
+    handle — was unreachable by any per-claim erasure and accumulated forever. `purge` is
+    far too blunt for a retention rule over raw transcripts."""
+    ep = turn(store, emb, content="ok thanks")
+
+    assert store.erase_episode(ep.id) is True
+    assert store.get_episode(ep.id) is None
+    assert store.erase_episode(ep.id) is False, "erasing twice must not claim success"
+
+
+def test_erasing_a_cited_turn_is_refused_unless_asked(store, emb):
+    """Refusing by default keeps `why()` from resolving to nothing, which is the one
+    thing this library promises always works. `cited=True` is the escape hatch a
+    transcript-retention obligation needs, and the dangling provenance is then a
+    deliberate consequence rather than an accident."""
+    ep = turn(store, emb, content="I live in Berlin")
+    put(store, emb, sources=[ep.id])
+
+    assert store.erase_episode(ep.id) is False
+    assert store.get_episode(ep.id) is not None
+
+    assert store.erase_episode(ep.id, cited=True) is True
+    assert store.get_episode(ep.id) is None

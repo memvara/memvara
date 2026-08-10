@@ -187,6 +187,24 @@ class Store(Protocol):
         """
         ...
 
+    def erase_episode(self, episode_id: str, *, cited: bool = False) -> bool:
+        """Irreversibly erase one turn — row, text index, vector. Returns whether it
+        existed.
+
+        The gap this closes: `erase_claim(sources=True)` reaches a turn only *through* a
+        claim, so a turn the extractor found nothing in — an acknowledgement, a greeting,
+        anything in a script tier 1 does not handle — is unreachable by any per-claim
+        erasure and accumulates forever. `purge` takes a whole scope, which is far too
+        blunt for a retention rule over raw transcripts.
+
+        `cited=False` refuses a turn a surviving claim still cites, because erasing it
+        leaves `why()` pointing at nothing — the one thing this library promises always
+        resolves. `cited=True` erases anyway and is what a retention obligation over
+        transcripts needs; the dangling provenance is then a deliberate, recorded
+        consequence rather than an accident.
+        """
+        ...
+
     def erase_claim(self, claim_id: str, *, sources: bool = False) -> bool:
         """Irreversibly erase one claim — row, text index, vector. Returns whether it
         existed.

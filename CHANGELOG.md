@@ -50,6 +50,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   field** and changing `city` retires exactly `city`. Per-field contradiction resolution,
   which the CrewAI adapter cannot do because its unit of memory is a sentence with no
   subject or predicate in it.
+- **`Store.erase_episode(episode_id, *, cited=False)`** — the turn a retention rule has
+  to reach and `erase_claim` cannot. `erase_claim(sources=True)` finds a turn only
+  *through* a claim, so a turn the extractor found nothing in ("ok thanks") was
+  unreachable by any per-claim erasure and accumulated forever, with `purge` far too
+  blunt as the alternative. Refuses a cited turn by default, because erasing it leaves
+  `why()` resolving to nothing.
 - **`Claim.state`** — `live` / `ended` / `retired`, deliberately absolute rather than
   relative to an `as_of`. Three surfaces had derived it independently.
 - **A SQLite floor.** `RETURNING` needs 3.35 and every `set_embedding` runs it, while
@@ -77,6 +83,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **One accepted write permanently broke every later read of its scope.**
+  `valid_to=datetime.max` stored fine and every subsequent `get_all()`/`search()` over
+  that claim raised `year 10000 is out of range`: `datetime.max.timestamp()` is
+  253402300800.0, float64 has no precision left there, so the value rounds *up* onto it
+  and `fromtimestamp` cannot invert it. The write returned success and the damage was
+  deferred, with nothing pointing at the row that caused it. `_ts` now clamps one ulp
+  down — a timestamp the float could not represent anyway.
+- **`remember(sources=…)` returned a receipt saying it stored no turns**, while the turn
+  was on disk and the claim cited it. Anything reading `episode_ids` to evidence what a
+  call wrote — a governance audit entry, an importer reconciling itself — evidenced
+  nothing.
 - **`remember(sources=[Episode(...)])` filed the turn under tenant `"default"`, and
   `purge()` then left it on disk.** `Episode.scope` defaults to `Scope()`, whose tenant is
   the literal `"default"`, so the documented way to attach provenance wrote raw user text

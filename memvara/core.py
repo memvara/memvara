@@ -703,6 +703,14 @@ class Memvara:
             # turn, and skipping it would make a turn stored this way findable by text
             # and not by meaning — an asymmetry nothing at the call site could explain.
             self._index_episodes([ep.id for ep in episodes])
+        # The receipt has to name the turns this call stored. `add()` populates
+        # `episode_ids` and this path did not, so `remember(sources=[Episode(...)])`
+        # returned a receipt reporting that it wrote nothing while the turn sat on disk
+        # and the claim cited it. Anything reading the receipt to evidence what it wrote
+        # — a governance log, an importer's reconciliation — evidenced nothing.
+        # Extended rather than assigned: `assert_claim` may already have recorded turns.
+        known = set(receipt.episode_ids)
+        receipt.episode_ids.extend(ep.id for ep in episodes if ep.id not in known)
         return receipt
 
     def supersede(self, old_claim_id: str, new_claim: Claim, *,

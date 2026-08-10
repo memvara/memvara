@@ -1841,3 +1841,42 @@ def test_why_skips_a_source_turn_that_has_since_been_erased(mem):
     assert [e.id for e in mem.why(cid).episodes] == [kept.id]
     assert mem.get(cid).sources == [kept.id, doomed.id], \
         "the citation itself is not rewritten — the turn is gone, the record of it is not"
+
+
+def test_remember_reports_the_turns_it_stored_in_the_receipt(mem):
+    """`add()` populated `episode_ids` and this path did not, so a call whose entire
+    purpose is attaching provenance returned a receipt saying it wrote no turns — while
+    the turn was on disk and the claim cited it. Anything reading the receipt to evidence
+    what it wrote, such as a governance audit entry, evidenced nothing."""
+    ep = Episode(content="I moved to Berlin", scope=mem.default_scope)
+    written = mem.remember("user", "lived_in", "Berlin", sources=[ep])
+
+    assert written.episode_ids == [ep.id]
+    assert written.episode_ids == written.added[0].sources
+    assert mem.store.get_episode(ep.id) is not None
+
+
+def test_citing_a_turn_that_is_already_stored_does_not_claim_to_have_stored_it(mem):
+    """`sources=[<id>]` points at something already on disk. The receipt lists what this
+    call wrote, not what the claim cites — `claim.sources` is the second question and it
+    has its own answer."""
+    ep = Episode(content="I moved to Berlin", scope=mem.default_scope)
+    mem.remember("user", "lived_in", "Berlin", sources=[ep])
+
+    second = mem.remember("user", "likes", "tea", sources=[ep.id])
+
+    assert second.episode_ids == []
+    assert second.added[0].sources == [ep.id]
+
+
+def test_supersede_reports_its_turn_too(mem):
+    """Same code path, and the one where it matters most: a replayed update is a new turn
+    and a new value, and an importer reconciling what it wrote reads this list."""
+    first = mem.remember("user", "lived_in", "Berlin")
+    replacement = Claim(subject="user", predicate="lived_in", object="Lisbon",
+                        scope=mem.default_scope)
+    ep = Episode(content="Actually, Lisbon", scope=mem.default_scope)
+
+    receipt = mem.supersede(first.added[0].id, replacement, sources=[ep])
+
+    assert receipt.episode_ids == [ep.id]

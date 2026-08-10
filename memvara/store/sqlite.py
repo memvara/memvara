@@ -50,6 +50,7 @@ connection. See `_read`.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import struct
@@ -380,12 +381,28 @@ _VEC_FORMAT = 1
 _VEC_HEADER = 64
 
 
+#: The largest epoch float `_dt` can convert back. `datetime.max.timestamp()` is exactly
+#: this value, and float64 has no precision left at that magnitude — so
+#: `datetime(9999,12,31,23,59,59,999999)` rounds *up* onto it and `fromtimestamp` then
+#: raises `year 10000 is out of range`. One ulp down is a timestamp the float could not
+#: represent anyway, and it keeps the invariant that actually matters: a row this store
+#: accepted is a row it can read back.
+_MAX_TS = math.nextafter(datetime.max.replace(tzinfo=timezone.utc).timestamp(), 0.0)
+
+
 def _ts(dt: datetime | None) -> float | None:
+    """A datetime as epoch seconds, clamped to what `_dt` can invert.
+
+    Without the clamp a single accepted write permanently breaks the scope it landed in:
+    `valid_to=datetime.max` stores fine, and every later `get_all()` and `search()` over
+    that claim raises while trying to read it back. The write succeeds, the damage is
+    deferred, and nothing points at the row that caused it.
+    """
     if dt is None:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
+    return min(dt.timestamp(), _MAX_TS)
 
 
 def _dt(v: float | None) -> datetime | None:
@@ -1714,6 +1731,22 @@ class SQLiteStore:
             "SELECT 1 FROM claim_sources s JOIN claims c ON c.id = s.claim_id "
             "WHERE s.episode_id = ? LIMIT 1", (episode_id,)).fetchone()
         return hit is None
+
+    def erase_episode(self, episode_id: str, *, cited: bool = False) -> bool:
+        """Erase one turn. See `Store.erase_episode` for why this exists separately.
+
+        The citation check is the whole subtlety: refusing by default keeps `why()` from
+        resolving to nothing, and `cited=True` is the escape hatch a transcript-retention
+        rule needs. `_orphan` already answers the question, and answers it exactly —
+        it joins back to `claims` rather than matching JSON text.
+        """
+        with self._lock:
+            if not cited and not self._orphan(episode_id):
+                return False
+            erased = self._erase_row("episodes", "episodes_fts", _EPISODE_VECS,
+                                     episode_id)
+            self._maybe_commit()
+        return erased
 
     def erase_claim(self, claim_id: str, *, sources: bool = False) -> bool:
         """Irreversibly erase one claim. Returns whether it existed.

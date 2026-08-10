@@ -718,7 +718,13 @@ looking at a top-k, and nothing ever looks again.
   a faithful transcript either. CrewAI loses the headline feature outright — its unit of
   memory is an opaque sentence with no subject or predicate, so the keyed lookup has
   nothing to key on and "Alice lives in Berlin" and "Alice moved to Lisbon" both stay
-  live. Each adapter says which it is; see `memvara/integrations/`.
+  live. **LangGraph loses least of the four**, and instructively: `BaseStore` is the only
+  interface that hands over the query text natively, *and* `put(namespace, key, value)`
+  supplies all three parts of a triple — so an item is stored as one claim per field and
+  changing `city` retires exactly `city`, which is contradiction resolution surviving a
+  foreign interface intact. What it loses is the predicate registry: a stored `home_city`
+  does not contradict an extracted `lives_in`. Each adapter says which it is; see
+  `memvara/integrations/`.
 - **No encryption at rest.** `purge()`, `erase()` and the redaction hook cover the
   deletion and ingestion halves of a privacy story; the storage half is the deployment's
   problem, and full-disk encryption is the honest answer today. It is not laziness:
