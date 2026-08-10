@@ -593,10 +593,16 @@ def test_an_embedding_inserted_by_hand_is_given_a_row(tmp_path):
     with SQLiteStore(path) as s:
         embed(s, onehot(8, 0))
     raw = sqlite3.connect(path)
-    raw.execute("INSERT INTO claims VALUES (" + ",".join("?" * 25) + ")",
-                ("cl_hand", "acme", "alice", None, None, "user", "p", "o", "hand", 1,
-                 "semantic", 0.0, None, 0.0, None, None, 1.0, 1.0, 1, "[]", "extraction",
-                 "x", "{}", "fk", "vk"))
+    # Columns named rather than positional. The point of the row is that this class did
+    # not write it, not that it happens to know today's column count — spelled
+    # positionally, every future column addition breaks a test about vector slots.
+    raw.execute(
+        "INSERT INTO claims (id, tenant, usr, agent, session, subject, predicate, "
+        "object, text, polarity, memory_type, valid_from, recorded_at, fact_key, "
+        "value_key, subject_key, object_key, derivation) "
+        "VALUES (" + ",".join("?" * 18) + ")",
+        ("cl_hand", "acme", "alice", None, None, "user", "p", "o", "hand", 1,
+         "semantic", 0.0, 0.0, "fk", "vk", "user", "o", "extraction"))
     raw.execute("INSERT INTO embeddings (claim_id, dim, vec) VALUES (?,?,?)",
                 ("cl_hand", 8, onehot(8, 5).tobytes()))
     raw.commit()

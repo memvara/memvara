@@ -94,6 +94,68 @@ class Store(Protocol):
         """Every claim ever recorded in one slot, oldest first — the audit trail."""
         ...
 
+    def adjacent(self, tenant: str, keys: Sequence[str], *,
+                 outgoing: bool = True, incoming: bool = True,
+                 predicates: Sequence[str] | None = None,
+                 as_of: datetime | None = None,
+                 scopes: Sequence[Scope] | None = None,
+                 limit: int = 1000) -> list[Claim]:
+        """Claims whose folded subject (outgoing) or folded object (incoming) is in `keys`.
+
+        The primitive multi-hop traversal is built from, and the one lookup no existing
+        index could answer. `fact_key` and `value_key` both hash the predicate, so
+        neither can be asked "which claims touch entity X" in *either* direction — and
+        `subject`/`object` are the raw text somebody typed, which is four spellings of
+        one employer. `keys` are therefore *folded* identities (`Claim.subject_key` /
+        `Claim.object_key`, i.e. `memvara.entities.entity_key` plus any write-time
+        stamp), not surface forms.
+
+        `as_of` applies the ordinary liveness predicate — both time axes, retired and
+        expired claims excluded. A traversal passes one instant to every call it makes,
+        because a path stitched from edges believed at different times is a connection
+        that never simultaneously held. Implementations must therefore treat `as_of` as
+        an exact instant and must not substitute their own clock per call; the caller
+        pins it before the first hop precisely so they cannot.
+
+        **`scopes` must be applied inside `limit`, not after it.** It is the same list
+        `candidate_ids` takes — normally `Scope.ancestors()` — and `None` means "no scope
+        filter", which is only correct when the caller is going to filter every row
+        itself. It exists because doing that turned out to be unsound rather than merely
+        slow: on a tenant two people share, another user's claims about the same entity
+        fill the page, and the caller's own edges are cut before they can be filtered in.
+        Measured on SQLite, one user holding 20 readable claims about a hub: at 15,000
+        competing claims the answer came back 19, and at 40,000 it came back **8**. The
+        result carries nothing to say it is partial, and its size is a function of a
+        *different* user's write volume — so the answer is both wrong and faintly
+        informative about them. Re-asking wider only moves the threshold.
+
+        The rule it violates is general: a filter and a limit cannot be split across two
+        layers and still yield a correct top-k. Whatever narrows the rows has to run
+        where the truncation runs. An empty `scopes` list therefore fails closed and
+        matches nothing, exactly as `candidate_ids` does — an unresolved scope is a
+        caller bug, and matching everything would be the worst possible response to it.
+
+        `limit` still truncates, so a genuinely enormous hub is still cut. Order that
+        truncation deterministically and by something content-derived rather than by
+        insertion order, so which claims survive is a function of the data and not of who
+        wrote first, and two stores holding the same rows cut the same ones.
+
+        **An empty key names no entity, and neither end of an empty key is adjacency.**
+        A retraction stores `''` for the object it retracts, so implementations must
+        ignore empty strings in `keys` *and* never match a row on an empty end —
+        otherwise `adjacent(t, [""])` returns every retraction in the tenant as one giant
+        hub. This is stated here rather than left to storage because the two backends
+        represent it differently (SQLite `''`, Postgres `NULL`) and that difference must
+        not be observable through this method.
+
+        `predicates` matches the stored `predicate` column exactly; normalizing through
+        the registry is the caller's job, and a short list is assumed. Polarity is *not*
+        filtered: a negation is genuinely a claim about those entities, and whether it
+        may be walked as a link between them is a traversal question, answered once in
+        `GraphTraverser` so that no store implementation can get it wrong.
+        """
+        ...
+
     def invalidate(self, claim_id: str, at: datetime, by: str | None) -> None: ...
 
     def set_valid_to(self, claim_id: str, valid_to: datetime | None) -> None:

@@ -59,11 +59,20 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from io import BufferedRandom
-from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Sequence, cast
 
 import numpy as np
 
-from ..types import Claim, Derivation, Episode, MemoryType, Scope
+from ..types import (
+    OBJECT_ENTITY,
+    SUBJECT_ENTITY,
+    Claim,
+    Derivation,
+    Episode,
+    MemoryType,
+    Scope,
+    resolved_entity,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..schema import PredicateSpec
@@ -94,7 +103,15 @@ if TYPE_CHECKING:  # pragma: no cover
 #    an older Memvara could still open would have its `sources` arrays written without
 #    the edges, and the index would be quietly wrong rather than absent; `_migrate`
 #    refuses to open a file stamped newer than this build, so that cannot happen.
-SCHEMA_VERSION = 5
+# 6: claims became traversable — `subject_key` and `object_key` are stored and indexed,
+#    so `adjacent()` can ask "which claims touch entity X" in either direction. They
+#    were Python properties over `meta` and the raw text, which is unindexable: every
+#    existing index hashes the predicate in, so none of them can answer a question about
+#    an entity alone. The columns are a pure function of columns the row already has, so
+#    the backfill is derivable — and it has to run, because an unfilled key column is
+#    indistinguishable from an entity nothing mentions, which would make a two-hop
+#    question over a store written last year return "not connected" rather than an error.
+SCHEMA_VERSION = 6
 
 # Kept separate because the v1 -> v2 migration has to recreate this table: SQLite
 # cannot add a column to an existing primary key, and (tenant, name) is now the key.
@@ -158,7 +175,9 @@ CREATE TABLE IF NOT EXISTS claims (
     extractor      TEXT NOT NULL DEFAULT '',
     meta           TEXT NOT NULL DEFAULT '{}',
     fact_key       TEXT NOT NULL,
-    value_key      TEXT NOT NULL
+    value_key      TEXT NOT NULL,
+    subject_key    TEXT NOT NULL DEFAULT '',
+    object_key     TEXT NOT NULL DEFAULT ''
 );
 -- The index that makes contradiction detection O(1) instead of a similarity search.
 CREATE INDEX IF NOT EXISTS cl_fact  ON claims(tenant, fact_key, invalidated_at);
@@ -254,13 +273,43 @@ CREATE INDEX IF NOT EXISTS emb_dim  ON embeddings(dim, slot);
 CREATE UNIQUE INDEX IF NOT EXISTS epemb_slot ON episode_embeddings(slot);
 CREATE INDEX IF NOT EXISTS epemb_seq ON episode_embeddings(seq, slot, episode_id);
 CREATE INDEX IF NOT EXISTS epemb_dim ON episode_embeddings(dim, slot);
+
+-- The traversal indexes, over `claims.subject_key` / `claims.object_key`: the two ends
+-- of the triple as *entity identities* rather than as the text somebody typed. Those
+-- columns are the only stored keys that do not hash the predicate in, which is exactly
+-- what a traversal needs and what nothing else could answer — `cl_fact` finds what else
+-- is in a slot, `cl_value` finds who else asserts a value, and neither can find what
+-- else touches an entity, in either direction. They were Python properties over `meta`
+-- and the raw text, and a property has no index behind it.
+--
+-- Shaped exactly like `cl_fact` because they answer the same kind of question one
+-- column over: an equality on the tenant, an equality or `IN` list on the key, and the
+-- liveness column beside it. They live down here rather than in `SCHEMA` because on a
+-- pre-v6 file the columns do not exist until `_migrate_to_v6` has added them, and
+-- `executescript` would abort on the first of them.
+--
+-- Two more secondary indexes on the busiest table in the file is not free, and the cost
+-- is measured rather than assumed. Over a 20,000-claim store, us per `put_claim`, with
+-- these two indexes against the same store with them dropped:
+--
+--                        with   without   delta
+--     inside batch()     50.7      49.8    +0.9
+--     commit per claim  225.8     211.4   +14.4
+--
+-- The bulk path — which is what `add()` and every importer use — pays under a
+-- microsecond, inside the noise. A claim committed on its own pays 7%, because the two
+-- extra index pages are two more pages for that commit to journal. Wide rows widen the
+-- gap (+49.7 us on 346 at ~3 KB of text per claim) for the same reason and only on the
+-- unbatched path.
+CREATE INDEX IF NOT EXISTS cl_subj ON claims(tenant, subject_key, invalidated_at);
+CREATE INDEX IF NOT EXISTS cl_obj  ON claims(tenant, object_key, invalidated_at);
 """
 
 _CLAIM_FIELDS = (
     "id", "tenant", "usr", "agent", "session", "subject", "predicate", "object", "text",
     "polarity", "memory_type", "valid_from", "valid_to", "recorded_at", "invalidated_at",
     "invalidated_by", "confidence", "salience", "obs_count", "sources", "derivation",
-    "extractor", "meta", "fact_key", "value_key",
+    "extractor", "meta", "fact_key", "value_key", "subject_key", "object_key",
 )
 _CLAIM_COLS = ", ".join(_CLAIM_FIELDS)
 _CLAIM_VALUES = ", ".join("?" * len(_CLAIM_FIELDS))
@@ -409,6 +458,21 @@ def _dt(v: float | None) -> datetime | None:
     if v is None:
         return None
     return datetime.fromtimestamp(v, tz=timezone.utc)
+
+
+# The two halves of `Claim.subject_key` / `Claim.object_key`, spelled so SQLite can call
+# them. They exist for `_migrate_to_v6` and for nothing else: a live claim gets its keys
+# from the object, and only the rows already on disk have to be re-derived from the two
+# columns that hold the same information. Taking `meta` as its stored JSON rather than as
+# a dict is what lets the whole backfill be one UPDATE.
+
+
+def _subject_key_of(meta: str, surface: str) -> str:
+    return resolved_entity(json.loads(meta), SUBJECT_ENTITY, surface)
+
+
+def _object_key_of(meta: str, surface: str) -> str:
+    return resolved_entity(json.loads(meta), OBJECT_ENTITY, surface)
 
 
 def _unit(vec: np.ndarray) -> np.ndarray:
@@ -919,6 +983,7 @@ class SQLiteStore:
             # No `_migrate_to_v4`: version 4 added a table nothing had ever written to,
             # so its `CREATE TABLE IF NOT EXISTS` genuinely was the whole migration.
             self._migrate_to_v5()
+            self._migrate_to_v6()
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _migrate_to_v2(self) -> None:
@@ -1003,6 +1068,74 @@ class SQLiteStore:
                 [(ep, r["id"]) for r in page
                  for ep in dict.fromkeys(json.loads(r["sources"]))],
             )
+
+    def _migrate_to_v6(self) -> None:
+        """Give every stored claim the two entity-key columns a traversal reads.
+
+        The DDL is only half of it again. `ALTER TABLE ... ADD COLUMN` with a constant
+        default is a schema edit and touches no row — which is what keeps opening a large
+        store cheap, and also what leaves every existing claim keyed to the empty string.
+        An empty key is not a missing key: it is a real value (an object of `""` is how a
+        retraction says "clear the slot"), so nothing downstream could have told the two
+        apart, and every claim written before this version would simply be absent from
+        the graph. "Not connected" is the wrong answer in the direction that looks like an
+        answer, so the fill is not deferrable.
+
+        **The fill is one UPDATE and it rewrites every row of the claims table**, because
+        SQLite rewrites a whole row to widen it. Say the cost plainly, measured on this
+        machine:
+
+            claims     file    alter    update    index    first open   opens after
+            100,000   62 MB   1.0 ms    0.62 s   0.13 s        0.75 s        0.9 ms
+          1,000,000  610 MB   1.7 ms    9.88 s   4.77 s     14 to 16 s        6.3 ms
+
+        One-time, and linear. The `ALTER`s are free — a constant default is a schema edit
+        and touches no row — so the whole bill is the row rewrite and the two index
+        builds. Widen the rows and the rewrite dominates completely: the same 100,000
+        claims carrying ~3 KB of text each are an 846 MB file and 6.9 s.
+
+        It runs inside the same transaction as the rest of `_migrate`, so an interrupted
+        upgrade rolls back to v5 rather than leaving half a graph, and the indexes are
+        `IF NOT EXISTS` on every open, so a crash between the commit and the index build
+        heals on the next one.
+
+        The keys are computed by two Python functions registered on the connection rather
+        than by paging rows into Python. **That is not for speed** — the `fetchmany` loop
+        the other migrations in this file use measures 0.81 s against 0.62 at 100,000 and
+        13.97 against 9.88 at a million, a consistent ~1.4x and not the order of magnitude
+        it looks like it should be; on very wide rows it is actually *faster* (5.30 s
+        against 6.58 at ~3 KB of text per claim). It is one statement because one
+        statement cannot half-run and has no page size to tune. They have to be Python at
+        all because folding a surface form onto an
+        entity is NFKD normalization, case folding, accent and apostrophe stripping and
+        corporate form removal, none of which SQLite can express — and an approximation
+        of it in SQL is how migrated rows end up keyed differently from every row written
+        after the migration, which is a silently split graph rather than an error.
+
+        `meta` is consulted for the write-time stamp (`SUBJECT_ENTITY`/`OBJECT_ENTITY`),
+        which only an alias ever produces, so the common claim's key is the pure fold. It
+        is parsed for every row rather than only for rows that look stamped: a `LIKE`
+        pre-filter saves a `json.loads` of `{}` — about half a microsecond — and costs a
+        second pass over the same pages, which is the more expensive half.
+
+        Idempotent and shape-driven like the three before it. A brand-new database also
+        arrives here at version 0, finds the columns already present from `SCHEMA` and an
+        empty claims table, and does nothing.
+        """
+        cols = {r["name"] for r in self._db.execute("PRAGMA table_info(claims)")}
+        if "subject_key" not in cols:
+            for col in ("subject_key", "object_key"):
+                self._db.execute(
+                    f"ALTER TABLE claims ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        # `deterministic=True` is what lets SQLite call these from an index or a partial
+        # index expression later; it is also simply true of them, and asserting it costs
+        # nothing here while a future indexed use would need it.
+        self._db.create_function("mv_subject_key", 2, _subject_key_of, deterministic=True)
+        self._db.create_function("mv_object_key", 2, _object_key_of, deterministic=True)
+        self._db.execute(
+            "UPDATE claims SET subject_key = mv_subject_key(meta, subject), "
+            "object_key = mv_object_key(meta, object)"
+        )
 
     # -- vector index --------------------------------------------------------
 
@@ -1509,6 +1642,12 @@ class SQLiteStore:
                     claim.confidence, claim.salience, claim.observation_count,
                     cited, claim.derivation.value, claim.extractor,
                     json.dumps(claim.meta), claim.fact_key, claim.value_key,
+                    # Persisted from the properties rather than left derived, because a
+                    # property cannot be indexed and an unindexed entity lookup is a scan
+                    # of the tenant. Both are already computed on this path — `fact_key`
+                    # folds the subject and `value_key` folds both — so the write costs
+                    # two dict lookups and the two extra index rows below.
+                    claim.subject_key, claim.object_key,
                 ),
             )
             # Mirror the claim's rowid into the FTS table so the index entry can be
@@ -2015,6 +2154,86 @@ class SQLiteStore:
                 (tenant, fact_key),
             ).fetchall()
         return [self._row_to_claim(r) for r in rows]
+
+    def adjacent(self, tenant: str, keys: Sequence[str], *,
+                 outgoing: bool = True, incoming: bool = True,
+                 predicates: Sequence[str] | None = None,
+                 as_of: datetime | None = None,
+                 scopes: Sequence[Scope] | None = None,
+                 limit: int = 1000) -> list[Claim]:
+        """Claims whose folded subject (outgoing) or folded object (incoming) is in `keys`.
+
+        See `Store.adjacent` for the contract. Two indexed lookups per direction, which
+        is the whole reason the columns exist: before them the only way to ask "what else
+        touches Acme" was a scan of the tenant, because every index in the file hashes
+        the predicate in and so can only answer questions about a *slot*.
+
+        **One query per direction, not a `UNION`.** The compound select is the obvious
+        spelling and it forces SQLite to sort and de-duplicate whole rows — a claim whose
+        subject and object are both in `keys` is one row either way, and comparing 3 KB
+        rows to discover that costs more than the `id` de-duplication two lines of Python
+        do. The legs are merged here instead, and merging is needed regardless because
+        `keys` may exceed the parameter limit.
+
+        Chunking is exact rather than approximate, which is worth stating because it
+        looks like it should not be: each leg and each chunk is limited to `limit`, and a
+        row cut from its own chunk had `limit` better rows in that same chunk, all of
+        which are in the merged pool — so a cut row can never belong in the global top
+        `limit`.
+
+        `scopes` is applied in the same statement as `limit`, which is the whole point of
+        it being a parameter rather than the caller's job — see `Store.adjacent` for the
+        measurement that forced it. The clause is `_scope_clause`, the one `candidate_ids`
+        uses, so there is a single definition of which rows a scope may read.
+
+        The ordering is the truncation policy. Confidence first, so a hub that has to be
+        cut keeps its best-evidenced edges; then `value_key`, which is derived from the
+        claim's content, so two stores holding the same data truncate identically. `id`
+        last only to make the order total — it is a `uuid4` and nothing may depend on it.
+        """
+        # An empty key is not an entity. A retraction stores `''` for the object it
+        # retracts, so without this `adjacent(t, [""])` answers with every retraction in
+        # the tenant as one hub. Dropped from the input *and* excluded from matching
+        # below, because `''` is a real stored value here — Postgres stores NULL for the
+        # same thing and never matches it, and that difference must not be observable.
+        wanted = [k for k in dict.fromkeys(keys) if k]
+        cols = [c for c, on in (("subject_key", outgoing), ("object_key", incoming)) if on]
+        preds = list(dict.fromkeys(predicates)) if predicates is not None else None
+        # An empty `predicates` is "nothing may be traversed", not "no filter" — the
+        # None/empty distinction is the same one `_scope_clause` fails closed on.
+        if not wanted or not cols or limit <= 0 or preds == []:
+            return []
+        live, lp = self._live_clause(as_of, include_invalidated=False)
+        pred_sql = ""
+        if preds is not None:
+            pred_sql = f" AND predicate IN ({','.join('?' * len(preds))})"
+        # `None` is "no scope filter"; `[]` is an unresolved scope and fails closed to
+        # `1=0`. Inside the same statement as LIMIT — see the docstring.
+        scope_sql, sp = "", cast("list[Any]", [])
+        if scopes is not None:
+            clause, sp = self._scope_clause(scopes)
+            scope_sql = f" AND {clause}"
+        # Everything the statement binds besides the keys: the tenant, the liveness
+        # bounds, the predicate list, the scope terms and the limit.
+        room = max(1, _MAX_SQL_PARAMS - 2 - len(lp) - len(preds or ()) - len(sp))
+
+        found: dict[str, sqlite3.Row] = {}
+        with self._read() as conn:
+            for col in cols:
+                for i in range(0, len(wanted), room):
+                    chunk = wanted[i:i + room]
+                    rows = conn.execute(
+                        f"SELECT * FROM claims WHERE tenant=? "
+                        f"AND {col} IN ({','.join('?' * len(chunk))}) AND {live}"
+                        f"{pred_sql}{scope_sql} "
+                        "ORDER BY confidence DESC, value_key, id LIMIT ?",
+                        [tenant, *chunk, *lp, *(preds or ()), *sp, limit],
+                    ).fetchall()
+                    for r in rows:
+                        found.setdefault(r["id"], r)
+        merged = sorted(found.values(),
+                        key=lambda r: (-r["confidence"], r["value_key"], r["id"]))
+        return [self._row_to_claim(r) for r in merged[:limit]]
 
     def find_by_value(self, tenant: str, value_key: str) -> list[Claim]:
         with self._read() as conn:

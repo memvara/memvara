@@ -58,7 +58,7 @@ from typing import Any, Literal, Sequence, overload
 
 from .core import Memvara, Messages
 from .embed import Embedder
-from .retrieve import Retrieved
+from .retrieve import Path, Retrieved
 from .types import Claim, Episode, MemoryType, Provenance, Result, Scope, WriteReceipt
 
 
@@ -70,10 +70,18 @@ class AsyncMemvara:
     second set of semantics to keep in step.
 
     The one omission is `scope()`. Every method here already takes the four scope
-    keywords, and an async binding would mean a third facade to keep aligned with the
-    other two for no new capability; a server that wants per-request scoping either
-    passes `user=` on the call or holds one `AsyncMemvara` per scope, both of which are
-    free (they share the store).
+    keywords, so nothing is unreachable without it, and an async binding would mean a
+    third facade to keep aligned with the other two for no new capability.
+
+    The workaround has a price, and this docstring used to understate it. Holding one
+    `AsyncMemvara` per scope means holding one `Memvara` per scope — this class has no
+    scope of its own, it forwards the one it is given — and constructing a `Memvara` over
+    an existing store is *not* free even though the store is shared: it re-reads the
+    persisted predicate specs, re-runs the embedder fingerprint check, and builds a fresh
+    `PredicateRegistry` that starts empty of anything learned since. Per request, that is
+    several queries and a schema the process has already paid for. Pass `registry=` (and
+    `store=`) to share both if that shape is wanted; otherwise pass `user=` per call,
+    which really is free.
     """
 
     __slots__ = ("memvara",)
@@ -256,6 +264,30 @@ class AsyncMemvara:
         return await asyncio.to_thread(
             self.memvara.count, tenant=tenant, user=user, agent=agent, session=session,
             as_of=as_of, include_invalidated=include_invalidated)
+
+    async def neighborhood(self, entity: str, *, depth: int = 2, k: int = 10,
+                           min_hops: int = 1,
+                           predicates: Sequence[str] | None = None,
+                           as_of: datetime | None = None, min_score: float = 0.0,
+                           tenant=None, user=None, agent=None,
+                           session=None) -> list[Path]:
+        """See `Memvara.neighborhood`. One store round trip per hop, so it belongs off
+        the loop for the same reason `search` does — more so at depth."""
+        return await asyncio.to_thread(
+            self.memvara.neighborhood, entity, depth=depth, k=k, min_hops=min_hops,
+            predicates=predicates, as_of=as_of, min_score=min_score, tenant=tenant,
+            user=user, agent=agent, session=session)
+
+    async def paths_between(self, source: str, target: str, *, depth: int = 3,
+                            k: int = 3, predicates: Sequence[str] | None = None,
+                            as_of: datetime | None = None, min_score: float = 0.0,
+                            tenant=None, user=None, agent=None,
+                            session=None) -> list[Path]:
+        """See `Memvara.paths_between`."""
+        return await asyncio.to_thread(
+            self.memvara.paths_between, source, target, depth=depth, k=k,
+            predicates=predicates, as_of=as_of, min_score=min_score, tenant=tenant,
+            user=user, agent=agent, session=session)
 
     # -- maintenance ---------------------------------------------------------
 

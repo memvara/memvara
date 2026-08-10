@@ -49,9 +49,13 @@ from .embed import (
 )
 from .llm import LLM, NullLLM
 from .retrieve import (
+    HOP_DAMPING,
+    Edge,
     EpisodeResult,
     FloorReport,
+    GraphTraverser,
     HybridRetriever,
+    Path,
     Retrieved,
     calibrate_min_score,
 )
@@ -92,6 +96,8 @@ __all__ = [
     # subsystems
     "WritePipeline", "SalienceGate", "FastExtractor", "Reconciler",
     "HybridRetriever", "Retrieved", "EpisodeResult",
+    # multi-hop traversal. `Path` is a chain of claims, not a filesystem path.
+    "GraphTraverser", "Path", "Edge", "HOP_DAMPING",
     "EntityRegistry", "EntityResolution", "EntitySpec", "entity_key",
     "backfill_entities",
     "Recorder", "NullRecorder", "MemoryRecorder",

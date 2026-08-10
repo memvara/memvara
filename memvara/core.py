@@ -28,7 +28,7 @@ import warnings
 from contextlib import nullcontext
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Callable, Iterable, Literal, Mapping, Sequence, overload
+from typing import Any, Callable, ClassVar, Iterable, Literal, Mapping, Sequence, overload
 
 from .consolidate import Consolidator
 from .embed import Embedder, default_embedder
@@ -42,7 +42,7 @@ from .embed.fingerprint import (
 )
 from .llm import LLM, NullLLM
 from .redact import Redactor, redact_episode
-from .retrieve import EpisodeResult, HybridRetriever, Retrieved
+from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retrieved
 from .schema import PredicateRegistry
 from .store import SQLiteStore, Store
 from .telemetry import Recorder
@@ -239,7 +239,8 @@ class Memvara:
             )
         scope_kw: dict[str, str | None] = {"user": user, "agent": agent, "session": session}
         self._absorb_scope_aliases(tuning, scope_kw)
-        write_kw, read_kw = self._split_tuning(tuning)
+        tuned = self._split_tuning(tuning)
+        write_kw, read_kw, graph_kw = tuned["write_"], tuned["read_"], tuned["graph_"]
         #: Where aggregate measurements go, or `None` — the default, and a fast path
         #: rather than a no-op object: every emission point is inside an `is not None`
         #: guard, because a library arguing about cost cannot ship an always-on hook.
@@ -286,6 +287,12 @@ class Memvara:
         self.reader = HybridRetriever(
             self.store, self.embedder, self.registry, **read_kw
         )
+        #: Multi-hop traversal. No embedder: a walk follows stored entity identity, not
+        #: similarity — which is the point, since a chain of "close enough" hops
+        #: compounds into an assertion nobody made. No telemetry either, for now: the
+        #: series worth publishing here (frontier truncation, paths pruned by the beam)
+        #: are not in `telemetry.series_names()` yet.
+        self.traverser = GraphTraverser(self.store, self.registry, **graph_kw)
         self.consolidator = Consolidator(self.store, self.embedder, self.registry,
                                          telemetry=telemetry)
         # See `_index_episodes`: warned once per instance, not once per rejected turn.
@@ -329,30 +336,39 @@ class Memvara:
             )
             scope_kw[new] = value
 
-    def _split_tuning(self, tuning: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Route `write_*`/`read_*` options to their subsystems, reject the rest loudly.
+    #: Keyword prefix -> the initializer whose options it reaches. `Memvara(read_k=...)`
+    #: is how a caller configures a subsystem without having to construct it, and the
+    #: accepted names are read off each signature (see `_keyword_options`) rather than
+    #: listed, so they cannot drift from what the subsystems actually take. A table
+    #: rather than a chain of `elif`s because a third subsystem was exactly the point at
+    #: which the chain started duplicating itself.
+    _TUNABLE: ClassVar[dict[str, Callable[..., Any]]] = {
+        "write_": WritePipeline.__init__,
+        "read_": HybridRetriever.__init__,
+        "graph_": GraphTraverser.__init__,
+    }
+
+    def _split_tuning(self, tuning: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        """Route prefixed options to their subsystems, reject the rest loudly.
 
         Unknown options used to be rejected only by prefix, so `write_nearduplicate=0.9`
         reached `WritePipeline` and died there with a message about a parameter the
         caller never typed. Validating against the real signatures lets the error name
         the thing they probably meant instead.
         """
-        write_opts = _keyword_options(WritePipeline.__init__)
-        read_opts = _keyword_options(HybridRetriever.__init__)
-        write_kw: dict[str, Any] = {}
-        read_kw: dict[str, Any] = {}
+        options = {p: _keyword_options(init) for p, init in self._TUNABLE.items()}
+        routed: dict[str, dict[str, Any]] = {p: {} for p in self._TUNABLE}
         unknown: list[str] = []
         for key, value in tuning.items():
-            if key.startswith("write_") and key[6:] in write_opts:
-                write_kw[key[6:]] = value
-            elif key.startswith("read_") and key[5:] in read_opts:
-                read_kw[key[5:]] = value
+            for prefix, names in options.items():
+                if key.startswith(prefix) and key[len(prefix):] in names:
+                    routed[prefix][key[len(prefix):]] = value
+                    break
             else:
                 unknown.append(key)
         if unknown:
             vocabulary = (
-                [f"write_{o}" for o in write_opts]
-                + [f"read_{o}" for o in read_opts]
+                [f"{p}{o}" for p, names in options.items() for o in names]
                 + list(_keyword_options(Memvara.__init__))
                 + ["path"]
             )
@@ -360,7 +376,7 @@ class Memvara:
                 "unknown tuning options: "
                 + ", ".join(_suggest(k, vocabulary) for k in unknown)
             )
-        return write_kw, read_kw
+        return routed
 
     def _warn_if_degraded(self, llm_was_explicit: bool) -> None:
         """Say once, at construction, that this configuration extracts almost nothing.
@@ -1195,6 +1211,75 @@ class Memvara:
         return [c for c in self.store.claims_citing(scope.tenant, episode_id)
                 if scope.sees(c.scope)]
 
+    # -- traversal -----------------------------------------------------------
+    #
+    # Both return `Path`, never bare claims. A caller handed "Alice and Carol are
+    # connected, 0.42" cannot check it; handed the chain, they can read every hop and
+    # take any of them to `why()`. That is the difference between an inference and an
+    # assertion, and a memory layer is only allowed to make the first kind if it shows
+    # its work.
+
+    def neighborhood(self, entity: str, *, depth: int = 2, k: int = 10,
+                     min_hops: int = 1, predicates: Sequence[str] | None = None,
+                     as_of: datetime | None = None, min_score: float = 0.0,
+                     tenant=None, user=None, agent=None,
+                     session=None) -> list[Path]:
+        """What is around `entity`: the best paths of `min_hops` to `depth` hops out of it.
+
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> _ = mem.remember("Alice", "reports_to", "Dana")
+        >>> _ = mem.remember("Dana", "works_at", "Acme, Inc.")
+        >>> for path in mem.neighborhood("Alice"):
+        ...     print(path.render())
+        Alice -reports_to-> Dana
+        Alice -reports_to-> Dana -works_at-> Acme, Inc.
+
+        `entity` is a surface form and is folded exactly as a stored one is, so `"acme,
+        inc."` and `"ACME"` reach the same node. The fold is the deterministic one
+        (`entity_key`); an alias learned at write time is *not* consulted, which is the
+        same limitation `history()` has and for the same reason — a probe carries no
+        stamp.
+
+        Edges are followed in both directions, because "who works at Acme" and "where
+        does Alice work" are one stored claim. `predicates` narrows to particular
+        relations, normalized through the registry so `works_at` also matches whatever
+        was stored as `employed_by_company`.
+
+        `as_of` travels in transaction *and* valid time, exactly as `search()` does — and
+        the whole walk is evaluated at one instant, so a returned chain is one that held
+        all at once rather than one assembled from different mornings. With `as_of=None`
+        that instant is pinned when the call starts, not read again per hop.
+        """
+        scope = self._scope(tenant, user, agent, session)
+        return self.traverser.neighborhood(
+            entity, scope, depth=depth, k=k, min_hops=min_hops, predicates=predicates,
+            as_of=as_of, min_score=min_score)
+
+    def paths_between(self, source: str, target: str, *, depth: int = 3, k: int = 3,
+                      predicates: Sequence[str] | None = None,
+                      as_of: datetime | None = None, min_score: float = 0.0,
+                      tenant=None, user=None, agent=None,
+                      session=None) -> list[Path]:
+        """How two entities are connected: the best chains of at most `depth` hops.
+
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> _ = mem.remember("Alice", "reports_to", "Dana")
+        >>> _ = mem.remember("Dana", "works_at", "Acme")
+        >>> mem.paths_between("Alice", "Acme")[0].render()
+        'Alice -reports_to-> Dana -works_at-> Acme'
+
+        `[]` means "not connected within `depth`, through claims you can read". Both
+        halves of that are load-bearing: the search is bounded (see
+        `GraphTraverser.between`), and every hop is scope-checked on the `Scope.sees`
+        rule `get()` uses — so a session-scoped handle is not told about a link that
+        exists only through a sibling agent's claim, and traversal cannot be used to read
+        what `get_all()` at the same handle would not return.
+        """
+        scope = self._scope(tenant, user, agent, session)
+        return self.traverser.between(
+            source, target, scope, depth=depth, k=k, predicates=predicates,
+            as_of=as_of, min_score=min_score)
+
     # -- scoped views --------------------------------------------------------
 
     def scope(self, *, tenant=None, user=None, agent=None, session=None) -> "ScopedMemvara":
@@ -1452,6 +1537,22 @@ class ScopedMemvara:
 
     def produced(self, episode_id: str) -> list[Claim]:
         return self._mem.produced(episode_id, **self._kw)
+
+    def neighborhood(self, entity: str, *, depth: int = 2, k: int = 10,
+                     min_hops: int = 1, predicates: Sequence[str] | None = None,
+                     as_of: datetime | None = None,
+                     min_score: float = 0.0) -> list[Path]:
+        return self._mem.neighborhood(entity, depth=depth, k=k, min_hops=min_hops,
+                                      predicates=predicates, as_of=as_of,
+                                      min_score=min_score, **self._kw)
+
+    def paths_between(self, source: str, target: str, *, depth: int = 3, k: int = 3,
+                      predicates: Sequence[str] | None = None,
+                      as_of: datetime | None = None,
+                      min_score: float = 0.0) -> list[Path]:
+        return self._mem.paths_between(source, target, depth=depth, k=k,
+                                       predicates=predicates, as_of=as_of,
+                                       min_score=min_score, **self._kw)
 
     def count(self, *, as_of: datetime | None = None,
               include_invalidated: bool = False) -> int:

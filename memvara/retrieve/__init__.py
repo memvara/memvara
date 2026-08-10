@@ -1,4 +1,4 @@
-"""Read path: hybrid retrieval, rank fusion, and time-aware rescoring."""
+"""Read path: hybrid retrieval, rank fusion, time-aware rescoring, and traversal."""
 
 from .analyze import STOPWORDS, LexicalQuery, analyze, tokenize
 from .calibrate import FloorReport, calibrate_min_score
@@ -13,6 +13,7 @@ from .scoring import (
     relevance,
     vector_relevance,
 )
+from .traverse import HOP_DAMPING, Edge, GraphTraverser, Path
 
 __all__ = [
     "reciprocal_rank_fusion",
@@ -36,4 +37,9 @@ __all__ = [
     "kind_of",
     "CLAIM",
     "EPISODE",
+    # multi-hop traversal
+    "GraphTraverser",
+    "Path",
+    "Edge",
+    "HOP_DAMPING",
 ]
