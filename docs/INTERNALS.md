@@ -25,6 +25,16 @@ importable from the foundation modules:
    the claim came from, and `derivation` must reflect how it was produced.
 5. **Everything must run with no API key and no network.** `NullLLM` + `HashingEmbedder`
    is the default configuration and the one the tests use.
+6. **A multi-hop answer is evaluated at one instant.** Every edge on a returned path must
+   be checked against the same `as_of`, pinned once before the walk. A path stitched from
+   edges believed at different times is a connection that never simultaneously held, and
+   reporting it as a fact is the worst thing traversal can do — it is invisible in any
+   result that does not carry its timestamps.
+7. **A filter and a limit may not live in different layers.** Whatever narrows rows has to
+   run where the truncation runs, or the top-k is wrong: `Store.adjacent` shipped without
+   a `scopes` argument and with the caller filtering afterwards, and on a shared tenant a
+   question with 20 answers returned 8. This applies to any future store method that caps
+   rows the caller is expected to authorize.
 
 ---
 
@@ -182,6 +192,37 @@ Search must:
   including claims later invalidated;
 - populate `Explanation` on every `Result` — per-retriever rank and raw score, the fusion
   score, each scoring factor, and the final score. A result with no explanation is a bug.
+
+### `retrieve/traverse.py`
+
+```python
+class GraphTraverser:
+    def __init__(self, store, registry, *, damping: float = HOP_DAMPING,
+                 beam: int = 64, edge_limit: int = 1000) -> None
+
+    def neighborhood(self, entity: str, scope: Scope, *, depth: int = 2, k: int = 10,
+                     min_hops: int = 1, predicates: Sequence[str] | None = None,
+                     as_of: datetime | None = None,
+                     min_score: float = 0.0) -> list[Path]
+    def paths_between(self, source: str, target: str, scope: Scope, *,
+                      depth: int = 3, k: int = 3, ...) -> list[Path]
+```
+
+Traversal must:
+- **pin one instant before the first hop** and pass that same `datetime` to every
+  `Store.adjacent` call. `as_of=None` must *not* be forwarded — the store substitutes its
+  own clock per call, so a 3-hop walk would evaluate 3 hops at 3 instants and could
+  return a path that was true at none of them. This is invariant 6 below;
+- drop `polarity <= 0` before a claim becomes an edge, so the guarantee holds for every
+  store rather than for the ones that remembered;
+- pass `scope.ancestors()` to `adjacent` **and** re-check `Scope.sees` on what comes
+  back. The first is what makes the answer correct under a cap; the second is what makes
+  the guarantee ours rather than a third-party store's;
+- keep the score non-increasing along a path — a path may never outscore its own prefix,
+  which is what makes `min_score` prunable mid-walk exactly rather than approximately.
+  Salience is therefore excluded: it is unbounded above 1.0 by design;
+- bound everything (depth, beam, per-hop `edge_limit`, cycle check) and order totally,
+  with no `uuid4` deciding anything observable.
 
 ---
 

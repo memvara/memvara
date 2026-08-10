@@ -382,6 +382,48 @@ print(r.explain.summary())
 # vector#1(0.812) bm25#2(6.44) recency=0.98 conf=0.90 sal=1.25 -> 0.7431
 ```
 
+### The claims are a graph, and it can be walked at a point in time
+
+A claim is `(subject, predicate, object)` and entity resolution folds every spelling of a
+name onto one identity — so the store has been a labelled directed graph all along.
+`neighborhood()` and `paths_between()` query it transitively.
+
+```python
+mem.remember("alice", "reports_to", "Dana")
+mem.remember("dana", "works_at", "Kovac Labs")
+
+for path in mem.paths_between("Alice", "Kovac Labs"):
+    print(path.render(), round(path.score, 3))
+# -> alice -reports_to-> Dana -works_at-> Kovac Labs 0.75
+
+path.claims        # every hop, each one a claim you can pass to why()
+path.nodes         # ('alice', 'dana', 'kovac labs') — folded, so Acme / Acme Corp /
+                   # acme, inc. are one node. path.labels has the spellings as stored.
+```
+
+**Every edge on a path is evaluated at the same instant.** That is the point, and it is
+what a bitemporal store is uniquely able to offer. An agent that searches, then searches
+again on the result, is stitching two reads taken at two different times: if a write
+lands in between, the chain it reports was true at no instant. `bench/multihop.py`
+demonstrates exactly that — a write retires hop 1 and creates hop 2, and the loop happily
+reports a connection that never existed. A traversal pins one `as_of` before its first
+hop and passes it unchanged to every hop after, so it returns nothing at every instant.
+A caller can close the same hole by passing one `as_of` to both searches; the difference
+is that traversal cannot be called any other way.
+
+Negative polarity is never walked as a link — "Alice does *not* work at Acme" is a claim
+about Alice and Acme and is not a path between them. Scope is checked on every hop with
+the same rule `get()` uses, so a path can only ever be built from facts you could already
+have enumerated yourself; traversal joins what is readable, it does not widen it.
+
+Where it actually helps, measured on a synthetic set rather than asserted: at two hops a
+search-then-search loop already reaches 96.3%, so recall alone barely justifies the
+feature. At three hops that loop collapses to **4.7%**, against **34.7%** for traversal at its
+defaults and **48.7%** once `min_hops` stops one-hop answers spending the whole of `k`.
+LOCOMO's `multi-hop` category is *not* transitive multi-hop — its questions are
+single-fact lookups whose evidence spans a couple of turns — so the number in the table
+above cannot be improved by this, and is not claimed to be.
+
 ### Nothing is silently lost
 
 Superseding sets an end timestamp; it never deletes. So the audit trail is free:
@@ -514,6 +556,12 @@ mem.count(*, as_of=None, include_invalidated=False)        -> int
 mem.history(subject, predicate)                   -> list[Claim]    # timeline of one slot
 mem.why(claim_id)                                 -> Provenance | None
 mem.produced(episode_id)                          -> list[Claim]    # why(), backwards
+
+# traverse — the claims are a graph; walk it
+mem.neighborhood(entity, *, depth=2, k=10, min_hops=1, predicates=None,
+                 as_of=None, min_score=0.0)               -> list[Path]
+mem.paths_between(source, target, *, depth=3, k=3, predicates=None,
+                  as_of=None, min_score=0.0)              -> list[Path]
 
 # maintenance
 mem.consolidate()                                 -> dict[str, int]

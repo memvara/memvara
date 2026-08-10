@@ -11,6 +11,34 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **Multi-hop traversal** — `Memvara.neighborhood(entity)` and
+  `Memvara.paths_between(source, target)`, both returning `list[Path]`, plus
+  `Store.adjacent()` and `memvara/retrieve/traverse.py`. The store has been a labelled
+  directed graph since entity resolution landed — claims are `(subject, predicate,
+  object)` and the fold makes every spelling of a name one identity — and nothing could
+  query it transitively. "Where does Alice work" was one lookup; "who does Alice's
+  manager report to" was not expressible at any cost.
+
+  **Every edge on a path is evaluated at one `as_of` instant**, pinned before the first
+  hop. This is the property the feature exists for. A search-then-search agent loop with
+  a write landing between its two reads will report a chain that was true at no instant —
+  `bench/multihop.py` demonstrates one, where the write retired hop 1 and created hop 2 —
+  and traversal returns nothing at every instant. Negative polarity is never walked as a
+  link, scope is checked on every hop with `Scope.sees`, and the score is the product of
+  confidence and per-predicate recency damped 0.75 a hop, so a path can never outscore
+  its own prefix.
+
+  Honest about where the value is: at two hops a plain search-then-search loop already
+  reaches 96.3% on a synthetic set, so recall alone barely justifies this. At three hops
+  the loop collapses to 4.7%, against 34.7% for traversal at its defaults and 48.7% with
+  `min_hops`. LOCOMO's `multi-hop` category is **not** transitive multi-hop — its
+  questions are single-fact lookups — so the measured 36% there cannot be improved by
+  this, and is not claimed to be.
+- **`Path` and `Edge`** (`memvara.retrieve`) — a path carries its nodes, the spellings
+  actually stored, each claim and the direction it was walked, so every hop goes to
+  `why()`. A path the caller cannot inspect is an answer they cannot check.
+- **Windows is actually supported.** It was listed in CI and had never run there; the
+  first run reported 99 failures. See *Fixed*.
 - **Token accounting on the write path** — `WriteReceipt.tokens_in` / `tokens_out`,
   `ImportReceipt.tokens_in` / `tokens_out`, and the `write.tokens_in` /
   `write.tokens_out` series. `write.llm_calls` was the only cost signal and it cannot be
@@ -43,6 +71,43 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   on. Includes the call that raised — excluding it makes the p99 *improve* during a
   provider outage. Emitted only when a model was actually consulted, so a `NullLLM`
   deployment reports no series rather than a series of zeros.
+
+### Changed
+
+- **`Store.adjacent` takes `scopes`, and implementations must apply it inside `limit`.**
+  It shipped without one, with `GraphTraverser` filtering the page afterwards and
+  re-asking ten times wider on starvation. That was unsound rather than slow: on a tenant
+  two people share, another user's claims about the same entity fill the page and the
+  caller's own edges are cut before the filter can keep them. Measured with 20 readable
+  claims about one hub, 15,000 competing claims returned 19 and 40,000 returned **8**,
+  with nothing saying the answer was partial and its size set by a *different* user's
+  write volume. The retry was deleted rather than tuned, because no multiplier is
+  correct: a filter and a limit cannot be split across two layers and still give a
+  correct top-k. Also 44x faster at 15,000 competing claims, since the rows are no longer
+  fetched to be discarded.
+- **SQLite schema v6** — `claims.subject_key` / `object_key` with indexes. `fact_key` and
+  `value_key` both hash the predicate in, so no existing index could answer "which claims
+  touch entity X" in either direction. Backfilled on first open by one statement: **0.62 s
+  at 100k claims, 9.9 s at 1M**, once. Lazy backfill was rejected because `''` is a real
+  stored key, so an unfilled column would be indistinguishable from "mentions nothing"
+  and pre-v6 claims would silently answer "not connected".
+
+### Fixed
+
+- **The vector index could not open on Windows at all.** `os.pread`/`os.pwrite` are
+  POSIX-only and Python provides no equivalent there, so every store with a `.vecs`
+  sidecar raised `AttributeError` — 95 of the 99 failures in the first CI run, which is
+  one missing function rather than 95 bugs. Now `lseek` + `read`/`write`, as a single
+  code path rather than a `hasattr` branch: a fallback only one platform exercises is a
+  fallback nobody tests.
+- **A date before 1970 was a write the store accepted and could not read back — on
+  Windows.** `_ts` clamped only the upper bound, hard-coded to the POSIX year-9999 limit.
+  Windows' CRT stops at year 3001 *and* rejects negative timestamps outright, so the exact
+  defect the clamp exists to prevent — one accepted write permanently breaking every later
+  read of its scope — was alive at both ends. Both bounds are now probed from the C
+  library rather than assumed. Surfaced by an ordinary decay test dating a claim 600 years
+  back; on POSIX the floor is year 1, so a suite at 100% coverage on three platforms never
+  saw it.
 
 ## [0.1.0] — 2026-08-10
 
