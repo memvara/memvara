@@ -9,7 +9,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] — 2026-08-10
+
+First release. The sections below are the whole history to date, kept rather than
+flattened: several of these entries are the searchable record of a specific defect, and
+"initial release" would erase exactly the detail worth keeping.
+
 ### BREAKING
+
+Nothing to break — this is the first published version. The entries below describe
+changes made against unreleased code and are recorded because they document behaviour
+someone reading the store's semantics needs to know is deliberate.
 
 - **`get()` and `why()` are now scope-checked by the same rule as `get_all()`.** They
   authorized with `Scope.contains`, where an unset field is a wildcard reaching
