@@ -14,6 +14,14 @@ license-files = ["LICENSE"]
 # Core has exactly one hard dependency. Everything else is opt-in.
 dependencies = ["numpy>=1.24"]
 
+# What PyPI renders in the sidebar. Absent until now, so the project page would have
+# carried no links at all — the first thing anyone evaluating a memory layer looks for.
+[project.urls]
+Homepage = "https://github.com/memvara/memvara"
+Repository = "https://github.com/memvara/memvara"
+Issues = "https://github.com/memvara/memvara/issues"
+Changelog = "https://github.com/memvara/memvara/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.40"]

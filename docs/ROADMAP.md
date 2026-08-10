@@ -116,8 +116,14 @@ is unusual and worth saying out loud.
   terms: it is the standard neuroscience word for a memory trace, which makes it
   *descriptive* of the product's own function and the hardest class to register or
   defend. `memvara` is coined and means nothing in any language, which makes it a fanciful
-  mark — the strongest class — and it is free on PyPI, GitHub and npm (verified 404 on all
-  three). Do not let it drift: register the PyPI name before the first public mention.
+  mark — the strongest class. **The GitHub org `github.com/memvara` now exists** (verified,
+  created 2026-08-10, zero repos), and PyPI and npm *organizations* have been registered.
+  **An organization is not a name reservation on either**, which is the thing to act on:
+  PyPI's project namespace is flat and a project name is claimed only by the first upload
+  or a PEP 541 request, and an npm org gives you `@memvara/*` while the bare `memvara`
+  stays open. Verified this hour: `pypi.org/simple/memvara/` is 404 and
+  `registry.npmjs.org/memvara` is 404, so both bare names are still takeable by anyone.
+  Claiming them means publishing something, which is Phase 8's decision.
 - **PyPI publish.** Outward-facing and effectively irreversible — a name, once taken and
   published against, cannot be quietly un-published. Requires an explicit decision.
 

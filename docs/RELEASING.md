@@ -204,9 +204,17 @@ around.
 `memvara` is coined, means nothing in any language, and is therefore a **fanciful mark**,
 the strongest trademark class. Verified free (HTTP 404) on **PyPI, GitHub and npm**.
 
-**Register it before the first public mention.** An unregistered name on a public repo is
-an invitation, and the whole point of this section is that we already lost one name by
-assuming.
+**The org is not the name.** `github.com/memvara` exists and PyPI/npm organizations are
+registered, but on PyPI an organization does not reserve a project name — the flat project
+namespace is claimed by the first upload or a PEP 541 request — and an npm org reserves
+`@memvara/*`, not the bare `memvara`. Verified: `pypi.org/simple/memvara/` and
+`registry.npmjs.org/memvara` are both 404 right now.
+
+So the sequence matters. Publishing the GitHub repo is a public mention of a name that is
+still takeable on two registries, and we already lost `engram` by assuming a name was
+ours. **Claim both registry names before, or in the same sitting as, the first public
+push** — on PyPI that means uploading at least once, so the TestPyPI dry run below is the
+rehearsal, not the release.
 
 ### The rest
 
