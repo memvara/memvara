@@ -1809,10 +1809,24 @@ def test_a_timestamp_at_the_far_edge_does_not_poison_the_scope_it_lands_in(store
 ])
 def test_the_clamp_moves_only_the_value_that_could_not_round_trip(moment):
     """The fix must not quietly shift ordinary timestamps — a store that rounds every
-    write is worse than one that breaks on a value nobody sends."""
-    from memvara.store.sqlite import _dt, _ts
+    write is worse than one that breaks on a value nobody sends.
 
-    assert _dt(_ts(moment)) == moment
+    Stated as a property rather than as equality, because *which* values cannot round
+    trip is a property of the platform's C library: POSIX reaches year 1 and year 9999,
+    Windows rejects everything before 1970 and after 3001. Asserting equality for all
+    four passed on POSIX and failed on Windows for two of them — while the clamp was
+    doing exactly its job. What must hold everywhere is that a value the platform can
+    represent is untouched, and one it cannot is moved to the nearest that it can and is
+    still readable."""
+    from memvara.store.sqlite import _MAX_TS, _MIN_TS, _dt, _ts
+
+    stored = _ts(moment)
+    assert stored is not None
+    assert _dt(stored) is not None, "whatever was stored must read back"
+    if _MIN_TS <= moment.timestamp() <= _MAX_TS:
+        assert _dt(stored) == moment, "a representable moment must not be shifted"
+    else:
+        assert stored in (_MIN_TS, _MAX_TS), "clamped to a bound, not to something else"
 
 
 def test_a_turn_no_claim_came_from_can_be_erased(store, emb):
@@ -1881,9 +1895,12 @@ def test_the_posix_ceiling_keeps_its_sub_second_headroom():
     onto year 10000, which is the original defect — so the answer is one ulp below it,
     and an implementation that seeded a search from `int()` of that would land a whole
     second lower. It did, before this test."""
+    import sys
     from datetime import datetime, timezone
     from memvara.store.sqlite import _MAX_TS
 
+    if sys.platform == "win32":            # its CRT stops at 3001; nothing to preserve
+        pytest.skip("no sub-second headroom exists at this platform's ceiling")
     assert datetime.fromtimestamp(_MAX_TS, timezone.utc).year == 9999
     assert _MAX_TS != int(_MAX_TS), "the fractional headroom was rounded away"
 
@@ -1907,3 +1924,57 @@ def test_positional_file_io_does_not_depend_on_a_posix_only_call(tmp_path):
         assert _read_at(fd, 6, 0) == b"HEADER"
     finally:
         os.close(fd)
+
+
+def test_a_date_before_the_epoch_is_clamped_rather_than_left_unreadable():
+    """The lower half of the same defect, and the one that took a real test down.
+
+    Windows' CRT rejects negative timestamps, so every date before 1970 was a write the
+    store accepted and could not read back — `test_decay.py` dates a claim 600 years ago
+    from an ordinary half-life check and the whole scope became unreadable. POSIX reaches
+    year 1, so there was nothing there to find until CI ran somewhere else.
+
+    Simulated for the same reason the ceiling is: this suite usually runs on the platform
+    that cannot reach the branch."""
+    import datetime as dtmod
+    from memvara.store import sqlite as mod
+
+    real = dtmod.datetime
+
+    class NoNegatives(real):
+        @classmethod
+        def fromtimestamp(cls, ts, tz=None):
+            if ts < 0:
+                raise OSError(22, "Invalid argument")
+            return real.fromtimestamp(ts, tz)
+
+    original = mod.datetime
+    try:
+        mod.datetime = NoNegatives
+        probed = mod._min_roundtrip_ts()
+    finally:
+        mod.datetime = original
+
+    assert probed == 0.0, "the epoch is the floor when negatives are refused"
+    assert real.fromtimestamp(probed, dtmod.timezone.utc).year == 1970
+
+    # A floor that is negative but not the epoch — a CRT reaching 1900 but not year 1.
+    # Refusing every negative and refusing only some are different searches, and the
+    # second is the one that converges from above.
+    cutoff = real(1900, 1, 1, tzinfo=dtmod.timezone.utc).timestamp()
+
+    class Reaches1900(real):
+        @classmethod
+        def fromtimestamp(cls, ts, tz=None):
+            if ts < cutoff:
+                raise OSError(22, "Invalid argument")
+            return real.fromtimestamp(ts, tz)
+
+    try:
+        mod.datetime = Reaches1900
+        probed = mod._min_roundtrip_ts()
+    finally:
+        mod.datetime = original
+
+    assert probed == cutoff
+    assert real.fromtimestamp(probed, dtmod.timezone.utc).year == 1900

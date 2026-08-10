@@ -473,7 +473,37 @@ def _max_roundtrip_ts() -> float:
     return float(lo)
 
 
+def _min_roundtrip_ts() -> float:
+    """The smallest timestamp `_dt` can invert on this platform. The other end of
+    `_max_roundtrip_ts`, and a real bound rather than a symmetry: Windows' CRT rejects
+    **negative** timestamps outright, so every date before 1970 is unrepresentable there
+    while POSIX reaches year 1.
+
+    Found by the same CI run: a claim dated 600 years ago — which `consolidate` produces
+    from an ordinary half-life test — stored fine and raised on every later read of its
+    scope. Exactly the defect the upper clamp exists to prevent, at the end nobody had
+    looked at, because on POSIX there is nothing there to find.
+    """
+    floor = datetime.min.replace(tzinfo=timezone.utc).timestamp()
+    try:
+        datetime.fromtimestamp(floor, tz=timezone.utc)
+        return floor
+    except (OSError, OverflowError, ValueError):
+        pass
+    lo, hi = int(floor), 0           # 0 is the epoch, invertible wherever Python runs
+    while lo < hi:
+        mid = (lo + hi) // 2         # rounds toward -inf, so `lo` converges upward
+        try:
+            datetime.fromtimestamp(float(mid), tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            lo = mid + 1
+        else:
+            hi = mid
+    return float(hi)
+
+
 _MAX_TS = _max_roundtrip_ts()
+_MIN_TS = _min_roundtrip_ts()
 
 
 def _read_at(fd: int, n: int, offset: int) -> bytes:
@@ -513,7 +543,10 @@ def _ts(dt: datetime | None) -> float | None:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return min(dt.timestamp(), _MAX_TS)
+    # Both ends, because both are real. On POSIX the floor is year 1 and clamps nothing;
+    # on Windows it is the epoch, and without it an ordinary decay test dating a claim
+    # 600 years back writes a row the store cannot read.
+    return max(_MIN_TS, min(dt.timestamp(), _MAX_TS))
 
 
 def _dt(v: float | None) -> datetime | None:
