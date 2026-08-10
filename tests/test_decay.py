@@ -12,7 +12,7 @@ from memvara.consolidate import SALIENCE_FLOOR, Consolidator
 from memvara.embed.base import HashingEmbedder
 from memvara.retrieve.scoring import recency_factor
 from memvara.schema import PredicateRegistry
-from memvara.store.sqlite import SQLiteStore
+from memvara.store.sqlite import _MIN_TS, SQLiteStore, _dt
 from memvara.telemetry import (
     CONSOLIDATE_CLAIMS_PER_SLOT,
     CONSOLIDATE_CROWDED_SLOTS,
@@ -84,13 +84,27 @@ def test_volatility_decays_at_measurably_different_rates(consolidator):
 
 
 def test_salience_floors_at_005_after_years_and_never_reaches_zero(consolidator):
+    """Ages are capped to what the platform can store, which is not a formality.
+
+    `_ts` clamps both ends, because a timestamp the C library cannot invert is a write
+    that breaks every later read of its scope. Windows' floor is the epoch, so the 600
+    years this test used to ask for arrived as 1970 — about 56 years, which does not
+    bottom out a century half-life, and the assertion failed at 0.675 while decay was
+    working correctly. Asking for an age the store can actually hold keeps the test about
+    decay rather than about the clock."""
     store = consolidator.store
+    oldest = _dt(_MIN_TS)
+    assert oldest is not None
+    limit_days = (NOW - oldest).days
     # Enough elapsed time to bottom out each half-life: a week, two years, a century.
     claims = [
-        add(store, "working_on", "x", age_days=365 * 5),
-        add(store, "works_at", "acme", age_days=365 * 50),
-        add(store, "born_in", "lisbon", age_days=365 * 600),
+        add(store, "working_on", "x", age_days=min(365 * 5, limit_days)),
+        add(store, "works_at", "acme", age_days=min(365 * 50, limit_days)),
+        add(store, "born_in", "lisbon", age_days=min(365 * 600, limit_days)),
     ]
+    if limit_days < 365 * 600:
+        pytest.skip(f"this platform stores at most {limit_days} days of history, which "
+                    "cannot reach the floor of a century half-life")
     consolidator.decay(now=NOW)
 
     for claim in claims:
