@@ -659,6 +659,18 @@ class WriteReceipt:
     #: no-op (`llm.is_noop`): billing for a call that never left the process makes the
     #: one number this design exists to minimize into a lie.
     llm_calls: int = 0
+    #: Tokens this write consumed, across every call it made. Here for the reason
+    #: `llm_calls` is here — it is what the caller is actually charged for, and a cost a
+    #: caller can only discover by configuring a metrics backend is a cost most callers
+    #: never discover. `llm_calls` is the number the design drives toward zero; these are
+    #: the number the invoice is computed from, and they do not move together.
+    #:
+    #: Both stay 0 when the configured backend does not report usage, which is
+    #: indistinguishable from a write that made no calls — deliberately, because the
+    #: honest per-write answer in that case is "unknown" and inventing an estimate is
+    #: worse. `write.tokens_in`/`out` simply go unpublished; see `telemetry.py`.
+    tokens_in: int = 0
+    tokens_out: int = 0
     latency_ms: float = 0.0
     deferred: bool = False                                 # extraction queued, not yet run
 

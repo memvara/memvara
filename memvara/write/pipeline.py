@@ -54,7 +54,7 @@ from time import perf_counter
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..embed.base import Embedder
-from ..llm.base import LLM
+from ..llm.base import LLM, Usage
 from ..redact import Redactor, redact_claim, redact_episode
 from ..schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
 from ..store.base import Store
@@ -67,11 +67,14 @@ from ..telemetry import (
     PREDICATE_CAPPED,
     PREDICATE_LEARNED,
     WRITE_EMBEDDING_REJECTED,
+    WRITE_EXTRACT_MS,
     WRITE_LATENCY_MS,
     WRITE_LLM_CALLS,
     WRITE_LOCK_HELD_MS,
     WRITE_RECONCILE,
     WRITE_RETRACTION,
+    WRITE_TOKENS_IN,
+    WRITE_TOKENS_OUT,
     WRITE_TURNS,
     Recorder,
     script_of,
@@ -421,9 +424,26 @@ class WritePipeline:
 
         # One call for the whole batch, not one per turn. Turns share context, and the
         # per-request overhead dominates at this size.
+        rec, extract_t0 = self.telemetry, perf_counter()
+        # One accumulator for the whole batch, allocated only for a backend that says it
+        # will fill it — an older three-argument implementation must not be handed a
+        # keyword it does not accept. Not gated on `rec`: tokens land on the receipt too,
+        # and a caller who never configured telemetry still gets to see what they spent.
+        usage = Usage() if getattr(self.llm, "reports_usage", False) else None
         try:
-            raw = self.llm.extract(episodes, self.registry.prompt_vocabulary())
+            if usage is None:
+                raw = self.llm.extract(episodes, self.registry.prompt_vocabulary())
+            else:
+                raw = self.llm.extract(episodes, self.registry.prompt_vocabulary(),
+                                       usage=usage)
         except Exception:
+            if rec is not None:
+                rec.timing(WRITE_EXTRACT_MS, (perf_counter() - extract_t0) * 1000.0)
+            # A call that raised may still have burned tokens — a provider that timed out
+            # after generating, or a response rejected while being parsed. Publishing
+            # what it reported is the difference between an outage that shows up on the
+            # bill and one that shows up in the metrics too.
+            self._report_usage(receipt, usage)
             # A provider 429 is not a reason to lose a transcript. Episodes are already
             # committed and are the source of truth every provenance guarantee rests on,
             # and the same batch's fast-path claims are still in hand and still correct —
@@ -435,8 +455,14 @@ class WritePipeline:
             receipt.deferred = True
             receipt.unextracted = len(episodes)
             return out
+        if rec is not None:
+            rec.timing(WRITE_EXTRACT_MS, (perf_counter() - extract_t0) * 1000.0)
         receipt.llm_calls += 1
-        receipt.llm_calls += self._acquire_predicates(raw, episodes)
+        # Acquisition shares the accumulator: the caller is billed for a write, not for a
+        # round trip, and a novel surface form costing a second call is part of the same
+        # write. Reported after it, so those tokens are inside the total.
+        receipt.llm_calls += self._acquire_predicates(raw, episodes, usage)
+        self._report_usage(receipt, usage)
 
         for item in raw:
             claim = self._claim_from_dict(item, episodes, now)
@@ -447,8 +473,26 @@ class WritePipeline:
 
     # -- predicate identity ---------------------------------------------------
 
+    def _report_usage(self, receipt: WriteReceipt, usage: Usage | None) -> None:
+        """Put what a write consumed on its receipt, and on the two token series.
+
+        `reported == 0` is the case that must stay silent: the backend either does not
+        measure or came back without a usage block, and 0 is not the answer — a call that
+        reached a provider consumed something. Emitting a zero would understate a bill and
+        would drag the fleet-wide average toward it, which is the failure direction that
+        favours us and therefore the one to refuse.
+        """
+        if usage is None or usage.reported == 0:
+            return
+        receipt.tokens_in += usage.input_tokens
+        receipt.tokens_out += usage.output_tokens
+        if self.telemetry is not None:
+            self.telemetry.counter(WRITE_TOKENS_IN, usage.input_tokens)
+            self.telemetry.counter(WRITE_TOKENS_OUT, usage.output_tokens)
+
     def _acquire_predicates(self, raw: Sequence[Mapping[str, Any]],
-                            episodes: Sequence[Episode]) -> int:
+                            episodes: Sequence[Episode],
+                            usage: Usage | None = None) -> int:
         """Give every novel surface form a canonical home. Once per form, ever.
 
         The deterministic pre-pass runs first and answers for the large majority for
@@ -467,11 +511,11 @@ class WritePipeline:
             # Marked before the call, not after: if the model raises or answers with
             # nonsense we still must not ask again.
             self._resolved.add(surface)
-            calls += self._acquire(surface, item, episodes)
+            calls += self._acquire(surface, item, episodes, usage)
         return calls
 
     def _acquire(self, surface: str, item: Mapping[str, Any],
-                 episodes: Sequence[Episode]) -> int:
+                 episodes: Sequence[Episode], usage: Usage | None = None) -> int:
         tenant = self._tenant_of(item, episodes)
         if self.registry.at_capacity:
             # Unbounded schema growth is the root cause; this is the backstop for when
@@ -494,15 +538,19 @@ class WritePipeline:
             return 0
 
         resolve = getattr(self.llm, "resolve_predicate", None)
+        # `usage` is None for any backend that did not advertise `reports_usage`, and the
+        # keyword is then never sent — same courtesy the `classify_predicate` fallback
+        # below extends to a backend predating contract D.
+        kw: dict[str, Any] = {} if usage is None else {"usage": usage}
         try:
             if resolve is not None:
-                answer = resolve(surface, self.registry.candidates(surface))
+                answer = resolve(surface, self.registry.candidates(surface), **kw)
             else:
                 # A backend predating contract D. It cannot merge, so the best it can do
                 # is describe the new predicate — the pre-existing behaviour, kept so a
                 # third-party LLM implementation does not silently stop working.
                 answer = {**self.llm.classify_predicate(
-                    surface, self._example(item, episodes)), "canonical": None}
+                    surface, self._example(item, episodes), **kw), "canonical": None}
         except Exception:
             # Acquisition is an enrichment, not a precondition. A rate limit or a network
             # blip must not cost the caller the whole batch of facts — the predicate

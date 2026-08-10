@@ -120,6 +120,20 @@ WRITE_TURNS = "write.turns"
 #: answer; this is the one you alert on.
 WRITE_LLM_CALLS = "write.llm_calls"
 
+#: Tokens consumed, in and out, by every model call one write made — the extraction and
+#: any predicate acquisition it triggered. Emitted only by a backend that advertises
+#: `reports_usage` and actually came back with a usage block; a backend that cannot
+#: measure publishes no series rather than a run of zeros, because zero here is a
+#: quantity a real model call cannot consume and would read as free.
+#:
+#: **This is the series to bill on, not `write.llm_calls`.** Providers charge per token
+#: and the ratio between the two is unbounded: a one-line turn and a 40,000-token
+#: document are both exactly one call. Input and output are separate because they are
+#: priced separately, usually several-fold apart, so a single total cannot be costed
+#: without knowing the split.
+WRITE_TOKENS_IN = "write.tokens_in"
+WRITE_TOKENS_OUT = "write.tokens_out"
+
 #: What reconciliation decided, tagged `action=add|reinforce|supersede|retract|noop`.
 #: Row growth in a slot shows up here as `add` climbing while `supersede` stays flat.
 WRITE_RECONCILE = "write.reconcile"
@@ -145,6 +159,19 @@ WRITE_LATENCY_MS = "write.latency_ms"
 #: trip. Watch the gap between this and `write.latency_ms` — that gap is the work the
 #: rest of the process was *not* blocked by.
 WRITE_LOCK_HELD_MS = "write.lock_held_ms"
+
+#: The model round trip alone: `LLM.extract` in, out. Emitted only when a model was
+#: actually consulted, so a `NullLLM` deployment reports no series rather than a series
+#: of zeros — the same rule `is_noop` applies to `write.llm_calls`, and for the same
+#: reason. Includes the request that raised, because a provider timeout is latency the
+#: caller waited through and excluding it makes the p99 improve during an outage.
+#:
+#: This exists because "extraction time" was previously only recoverable as
+#: `write.latency_ms` minus `write.lock_held_ms`, and a difference of two aggregates is
+#: not a distribution: percentiles do not subtract, so that arithmetic has a mean and no
+#: recoverable p99. The slow tail of the model call is the thing worth alerting on and it
+#: was the one shape the write path could not show.
+WRITE_EXTRACT_MS = "write.extract_ms"
 
 #: Strings offered to the configured `Redactor`, and how many of them it rewrote. Both
 #: tagged `field` (one of `memvara.redact.FIELDS`) and `script`, and emitted only when a

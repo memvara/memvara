@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import LLM, NullLLM
+from .base import LLM, NullLLM, Usage
 
-__all__ = ["LLM", "NullLLM", "AnthropicLLM", "OpenAILLM"]
+# `Usage` is exported because implementing `LLM` outside this package requires it:
+# a backend that sets `reports_usage` is handed one and has to type against it.
+__all__ = ["LLM", "NullLLM", "Usage", "AnthropicLLM", "OpenAILLM"]
 
 
 def __getattr__(name: str) -> Any:

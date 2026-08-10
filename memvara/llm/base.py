@@ -28,9 +28,40 @@ rather than being detected by class name.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol, Sequence, runtime_checkable
 
 from ..types import Episode
+
+
+@dataclass(slots=True)
+class Usage:
+    """Tokens a backend consumed, accumulated across one write.
+
+    **The caller allocates this and passes it in; the backend fills it.** A `last_usage`
+    attribute read after the call would be smaller, and would be wrong: `pipeline.py`
+    deliberately moved the model round trip *outside* the store's transaction so reads
+    are not blocked by it, which means two `add()` calls can be inside `extract()` on one
+    backend instance at the same time. Shared mutable state on the backend would then
+    bill one caller for the other's tokens, intermittently, with no way to notice. A
+    per-call object cannot race because it is not shared.
+
+    One `Usage` spans a whole tier-2 batch — the extraction *and* any predicate
+    acquisition it triggers — because the unit a caller is billed for is the write, not
+    the round trip. `reported` is what separates "the model consumed nothing", which
+    cannot happen, from "this backend does not report usage", which is common; the write
+    path publishes no token series at all in the second case rather than a run of zeros.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    #: Calls that came back carrying a usage block. See the class docstring.
+    reported: int = 0
+
+    def add(self, input_tokens: int, output_tokens: int) -> None:
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        self.reported += 1
 
 
 @runtime_checkable
@@ -40,13 +71,28 @@ class LLM(Protocol):
     #: must count model consultations rather than method invocations - otherwise the one
     #: number the write path exists to minimize reports spend that never happened.
     is_noop: bool = False
+    #: True if this backend accepts a `usage=` accumulator and fills it. Advertised
+    #: rather than detected, for the reason `is_noop` is: a class-name check or a
+    #: signature probe guesses, and this is a claim the backend should have to make.
+    #:
+    #: The write path only passes `usage=` to a backend that sets this, so a third-party
+    #: implementation written against the older three-argument signature keeps working
+    #: untouched — the same courtesy `classify_predicate` still gets. What such a backend
+    #: loses is only the token series; `write.llm_calls` is unaffected.
+    reports_usage: bool = False
 
-    def extract(self, episodes: Sequence[Episode], known_predicates: Sequence[str]) -> list[dict[str, Any]]:
+    def extract(self, episodes: Sequence[Episode], known_predicates: Sequence[str],
+                *, usage: "Usage | None" = None) -> list[dict[str, Any]]:
         """Return claim dicts: subject, predicate, object, polarity, memory_type,
-        confidence, source_index (index into `episodes`, for provenance)."""
+        confidence, source_index (index into `episodes`, for provenance).
+
+        Add this call's tokens to `usage` when it is not None and this backend sets
+        `reports_usage`. See `Usage` for why it arrives as an argument.
+        """
         ...
 
-    def resolve_predicate(self, surface: str, candidates: Sequence[str]) -> dict[str, Any]:
+    def resolve_predicate(self, surface: str, candidates: Sequence[str],
+                          *, usage: "Usage | None" = None) -> dict[str, Any]:
         """Decide whether `surface` is a new predicate or a spelling of an existing one.
 
         Returns {'canonical': str | None, 'cardinality': 'one'|'many',
@@ -58,7 +104,8 @@ class LLM(Protocol):
         """
         ...
 
-    def classify_predicate(self, predicate: str, example: str) -> dict[str, str]:
+    def classify_predicate(self, predicate: str, example: str,
+                           *, usage: "Usage | None" = None) -> dict[str, str]:
         """Legacy acquisition call. Return {'cardinality': 'one'|'many',
         'volatility': 'static'|'slow'|'fast',
         'memory_type': 'episodic'|'semantic'|'procedural'}."""
@@ -70,18 +117,25 @@ class NullLLM:
 
     name = "null"
     is_noop = True
+    # Nothing is consumed, so there is nothing to report. Left False deliberately rather
+    # than set True with a zero: `reported` distinguishes a backend that measured nothing
+    # from one that cannot measure, and a no-op backend is neither — it never runs.
+    reports_usage = False
 
-    def extract(self, episodes: Sequence[Episode], known_predicates: Sequence[str]) -> list[dict[str, Any]]:
+    def extract(self, episodes: Sequence[Episode], known_predicates: Sequence[str],
+                *, usage: Usage | None = None) -> list[dict[str, Any]]:
         return []
 
-    def resolve_predicate(self, surface: str, candidates: Sequence[str]) -> dict[str, Any]:
+    def resolve_predicate(self, surface: str, candidates: Sequence[str],
+                          *, usage: Usage | None = None) -> dict[str, Any]:
         # With no model there is no evidence that two spellings mean the same thing, and
         # guessing one would merge slots on nothing but a hunch. The deterministic
         # pre-pass has already had its turn; whatever reaches here stays separate.
         return {"canonical": None, "cardinality": "many", "volatility": "slow",
                 "memory_type": "semantic"}
 
-    def classify_predicate(self, predicate: str, example: str) -> dict[str, str]:
+    def classify_predicate(self, predicate: str, example: str,
+                           *, usage: Usage | None = None) -> dict[str, str]:
         # Conservative default: multi-valued predicates never wrongly retire a fact.
         return {"cardinality": "many", "volatility": "slow", "memory_type": "semantic"}
 

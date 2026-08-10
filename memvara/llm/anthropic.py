@@ -19,6 +19,7 @@ from .base import (
     PREDICATE_SYSTEM,
     RESOLVE_SCHEMA,
     RESOLVE_SYSTEM,
+    Usage,
 )
 
 
@@ -42,6 +43,7 @@ class AnthropicLLM:
 
     #: A real backend, so every call it makes is billed to `WriteReceipt.llm_calls`.
     is_noop = False
+    reports_usage = True
 
     def __init__(
         self,
@@ -74,7 +76,8 @@ class AnthropicLLM:
 
     # -- request ------------------------------------------------------------
 
-    def _call(self, system: str, prompt: str, schema: dict[str, Any]) -> Any:
+    def _call(self, system: str, prompt: str, schema: dict[str, Any],
+              usage: Usage | None = None) -> Any:
         """One Messages request with constrained decoding.
 
         The parameter set here is load-bearing and narrower than it looks:
@@ -87,7 +90,7 @@ class AnthropicLLM:
         * `thinking` is omitted so adaptive thinking stays on, which is the default and
           the setting extraction accuracy depends on.
         """
-        return self._client.messages.create(
+        response = self._client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
             system=system,
@@ -97,11 +100,14 @@ class AnthropicLLM:
                 "format": {"type": "json_schema", "schema": schema},
             },
         )
+        _shape.record_usage(response, usage, "input_tokens", "output_tokens")
+        return response
 
     # -- LLM protocol -------------------------------------------------------
 
     def extract(
-        self, episodes: Sequence[Episode], known_predicates: Sequence[str]
+        self, episodes: Sequence[Episode], known_predicates: Sequence[str],
+        *, usage: Usage | None = None,
     ) -> list[dict[str, Any]]:
         if not episodes:
             return []  # nothing to extract from, and a call we should not pay for
@@ -109,20 +115,24 @@ class AnthropicLLM:
             EXTRACT_SYSTEM,
             _shape.extract_prompt(episodes, known_predicates),
             CLAIM_SCHEMA,
+            usage,
         )
         return _shape.shape_claims(
             _shape.parse_json_object(_first_text(response)), len(episodes))
 
-    def resolve_predicate(self, surface: str, candidates: Sequence[str]) -> dict[str, Any]:
+    def resolve_predicate(self, surface: str, candidates: Sequence[str],
+                          *, usage: Usage | None = None) -> dict[str, Any]:
         """Merge a novel surface form onto an existing predicate, or declare it new."""
         offered = _shape.bounded(candidates, _shape.MAX_CANDIDATES)
         response = self._call(
-            RESOLVE_SYSTEM, _shape.resolve_prompt(surface, offered), RESOLVE_SCHEMA)
+            RESOLVE_SYSTEM, _shape.resolve_prompt(surface, offered), RESOLVE_SCHEMA,
+            usage)
         return _shape.shape_resolution(
             _shape.parse_json_object(_first_text(response)), offered)
 
-    def classify_predicate(self, predicate: str, example: str) -> dict[str, str]:
+    def classify_predicate(self, predicate: str, example: str,
+                           *, usage: Usage | None = None) -> dict[str, str]:
         """Legacy acquisition call, kept for backends and callers that still use it."""
         prompt = f"predicate: {_shape.snake_case(predicate)}\nexample usage: {example}"
-        response = self._call(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA)
+        response = self._call(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA, usage)
         return _shape.spec_fields(_shape.parse_json_object(_first_text(response)))

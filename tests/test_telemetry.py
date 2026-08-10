@@ -33,6 +33,7 @@ import pytest
 from memvara.consolidate import Consolidator
 from memvara.embed import HashingEmbedder
 from memvara.retrieve import HybridRetriever
+from memvara.llm.base import NullLLM
 from memvara.schema import PredicateRegistry
 from memvara.store import SQLiteStore
 from memvara.telemetry import (
@@ -56,11 +57,14 @@ from memvara.telemetry import (
     RETRIEVAL_QUALITY_FACTOR,
     RETRIEVAL_QUERY,
     RETRIEVAL_RESULTS,
+    WRITE_EXTRACT_MS,
     WRITE_LATENCY_MS,
     WRITE_LLM_CALLS,
     WRITE_LOCK_HELD_MS,
     WRITE_RECONCILE,
     WRITE_RETRACTION,
+    WRITE_TOKENS_IN,
+    WRITE_TOKENS_OUT,
     WRITE_TURNS,
     MemoryRecorder,
     NullRecorder,
@@ -482,6 +486,50 @@ def test_the_write_and_read_paths_report_their_own_latency():
     rig.close()
 
 
+def test_the_model_round_trip_is_timed_on_its_own_not_only_as_a_difference():
+    """Before this, extraction time was only recoverable as `write.latency_ms` minus
+    `write.lock_held_ms`. Percentiles do not subtract, so that arithmetic yields a mean
+    and no p99 — and the slow tail of the model call is the thing worth alerting on."""
+    rec = MemoryRecorder()
+    llm = FakeLLM()
+    rig = Rig(rec, llm)
+    # Han text misses the fast path, which is what forces tier 2. See the script test.
+    rig.writer.add([ep("我住在北京")])
+    assert llm.extract_calls == 1
+    assert len(rec.values(WRITE_EXTRACT_MS)) == 1
+    # It measures the call, not the whole write, so it cannot exceed end-to-end latency.
+    assert rec.values(WRITE_EXTRACT_MS)[0] <= rec.values(WRITE_LATENCY_MS)[0]
+    rig.close()
+
+
+def test_an_extraction_that_raised_is_still_counted_as_time_the_caller_waited():
+    """A provider timeout is latency someone sat through. Timing only the successful
+    path makes the p99 *improve* during an outage — the metric moving the healthy way
+    for the unhealthiest reason, which is worse than having no metric."""
+    class Failing(FakeLLM):
+        def extract(self, episodes, known_predicates):
+            raise RuntimeError("provider 429")
+
+    rec = MemoryRecorder()
+    rig = Rig(rec, Failing())
+    receipt = rig.writer.add([ep("我住在北京")])
+    assert receipt.deferred and receipt.unextracted == 1
+    assert len(rec.values(WRITE_EXTRACT_MS)) == 1
+    rig.close()
+
+
+def test_a_backend_that_consults_no_model_reports_no_extraction_series_at_all():
+    """The `is_noop` rule `write.llm_calls` already follows, applied to the timing: a
+    `NullLLM` deployment must not publish a series of zeros. A zero here would read as a
+    model answering instantly, and would drag every percentile of a mixed fleet down."""
+    rec = MemoryRecorder()
+    rig = Rig(rec, NullLLM())
+    receipt = rig.writer.add([ep("我住在北京")])
+    assert receipt.unextracted == 1          # it did reach tier 2
+    assert rec.values(WRITE_EXTRACT_MS) == []
+    rig.close()
+
+
 def test_a_crowded_slot_is_visible_before_anyone_notices_the_bad_answers():
     """The reviewer's one-metric-if-only-one answer, on the shape of the actual bug:
     several live claims answering the same question, which is invisible from any
@@ -514,4 +562,128 @@ def test_the_observation_rank_correlation_is_positive_on_a_healthy_store():
     rig.reader.search("does the user enjoy cycling", SCOPE)
     values = rec.values(RETRIEVAL_OBSERVATION_RANK_CORR)
     assert len(values) == 1 and values[0] > 0.0
+    rig.close()
+
+
+# ===========================================================================
+# Token accounting — the input a bill is computed from
+# ===========================================================================
+
+class MeteredLLM(FakeLLM):
+    """A backend that reports usage, and counts how often it was asked to."""
+
+    reports_usage = True
+
+    def __init__(self, claims=(), *, per_call=(100, 20)) -> None:
+        super().__init__(claims)
+        self.per_call = per_call
+        self.saw_usage = 0
+
+    def _bill(self, usage):
+        if usage is not None:
+            self.saw_usage += 1
+            usage.add(*self.per_call)
+
+    def extract(self, episodes, known_predicates, *, usage=None):
+        self._bill(usage)
+        return super().extract(episodes, known_predicates)
+
+    def resolve_predicate(self, surface, candidates, *, usage=None):
+        self._bill(usage)
+        return super().resolve_predicate(surface, candidates)
+
+
+def test_a_write_reports_the_tokens_it_burned_not_only_the_calls_it_made():
+    """`write.llm_calls` cannot be billed on: a one-line turn and a 40,000-token document
+    are both exactly one call, and providers charge per token. This is the series an
+    invoice is computed from, and the receipt carries it so a caller who never configured
+    telemetry can still see what a write cost."""
+    rec = MemoryRecorder()
+    llm = MeteredLLM(per_call=(100, 20))
+    rig = Rig(rec, llm)
+    receipt = rig.writer.add([ep("我住在北京")])
+    assert llm.extract_calls == 1
+    assert (receipt.tokens_in, receipt.tokens_out) == (100, 20)
+    assert rec.total(WRITE_TOKENS_IN) == 100 and rec.total(WRITE_TOKENS_OUT) == 20
+    rig.close()
+
+
+def test_input_and_output_tokens_stay_separate_because_they_are_priced_separately():
+    # A single total cannot be costed: output is several times the price of input, so the
+    # split is the difference between a real number and an unusable one.
+    rec = MemoryRecorder()
+    rig = Rig(rec, MeteredLLM(per_call=(1000, 7)))
+    rig.writer.add([ep("我住在北京")])
+    assert rec.total(WRITE_TOKENS_IN) != rec.total(WRITE_TOKENS_OUT)
+    rig.close()
+
+
+def test_predicate_acquisition_is_billed_to_the_write_that_triggered_it():
+    """One accumulator spans the batch. A novel surface form costs a second model call,
+    and that call is part of the same write — billing it to nothing, or to the next
+    write, both misattribute it."""
+    rec = MemoryRecorder()
+    llm = MeteredLLM([{"subject": "user", "predicate": "enjoys_drinking",
+                       "object": "tea", "polarity": 1, "confidence": 0.9,
+                       "source_index": 0}], per_call=(50, 10))
+    rig = Rig(rec, llm)
+    receipt = rig.writer.add([ep("我住在北京")])
+    # extract() plus one resolve_predicate() for the novel surface form.
+    assert llm.saw_usage == 2 and receipt.llm_calls == 2
+    assert (receipt.tokens_in, receipt.tokens_out) == (100, 20)
+    rig.close()
+
+
+def test_a_backend_that_cannot_report_usage_publishes_no_token_series_at_all():
+    """Zero is not the answer — a call that reached a provider consumed something. A run
+    of zeros would understate a bill and drag a fleet-wide average toward it, which is
+    the failure direction that favours us and therefore the one to refuse. `FakeLLM`
+    leaves `reports_usage` at its default."""
+    rec = MemoryRecorder()
+    llm = FakeLLM()
+    rig = Rig(rec, llm)
+    receipt = rig.writer.add([ep("我住在北京")])
+    assert llm.extract_calls == 1                      # a real call was made
+    # On `rec.counters` rather than `rec.values()`/`rec.total()`: those answer [] and 0
+    # for a counter that was never emitted *and* for one emitted as zero, so either would
+    # pass against exactly the bug this test exists to catch. Absence of the key is the
+    # only assertion that distinguishes "unknown" from "free".
+    emitted = {name for name, _tags in rec.counters}
+    assert WRITE_TOKENS_IN not in emitted and WRITE_TOKENS_OUT not in emitted
+    assert (receipt.tokens_in, receipt.tokens_out) == (0, 0)
+    rig.close()
+
+
+def test_a_backend_that_never_gets_the_keyword_it_cannot_accept():
+    """The compatibility guarantee, as a test rather than a promise: a backend written
+    against the older three-argument signature must keep working untouched. `FakeLLM`
+    does not accept `usage=`, so passing it would be a TypeError — and that TypeError
+    would be caught by the extraction guard and reported as a deferred write, which is
+    the silent version of this failure."""
+    rec = MemoryRecorder()
+    llm = FakeLLM([{"subject": "user", "predicate": "lives_in", "object": "Beijing",
+                    "polarity": 1, "confidence": 0.9, "source_index": 0}])
+    rig = Rig(rec, llm)
+    receipt = rig.writer.add([ep("我住在北京")])
+    # A TypeError from the unexpected keyword would be swallowed by the extraction guard
+    # and surface as `deferred` with the claim missing — so asserting the claim landed is
+    # what actually distinguishes "compatible" from "silently broken".
+    assert not receipt.deferred and len(receipt.added) == 1
+    assert llm.extract_calls == 1
+    rig.close()
+
+
+def test_tokens_burned_by_a_call_that_then_raised_are_still_reported():
+    """A provider that timed out after generating still charges for it. Reporting only
+    the successful path is how an outage shows up on the invoice and nowhere else."""
+    class FailsAfterBilling(MeteredLLM):
+        def extract(self, episodes, known_predicates, *, usage=None):
+            self._bill(usage)
+            raise RuntimeError("provider 500 after generation")
+
+    rec = MemoryRecorder()
+    rig = Rig(rec, FailsAfterBilling(per_call=(80, 0)))
+    receipt = rig.writer.add([ep("我住在北京")])
+    assert receipt.deferred
+    assert receipt.tokens_in == 80 and rec.total(WRITE_TOKENS_IN) == 80
     rig.close()

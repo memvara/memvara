@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from memvara.llm import LLM, AnthropicLLM, NullLLM
+from memvara.llm import _shape
 from memvara.llm.base import (
     CLAIM_SCHEMA,
     EXTRACT_SYSTEM,
@@ -19,6 +20,7 @@ from memvara.llm.base import (
     PREDICATE_SYSTEM,
     RESOLVE_SCHEMA,
     RESOLVE_SYSTEM,
+    Usage,
 )
 from memvara.types import Episode, Scope
 
@@ -104,7 +106,7 @@ def test_exported_from_the_package_without_the_sdk_installed():
     import memvara.llm as pkg
 
     assert pkg.NullLLM is NullLLM
-    assert set(pkg.__all__) == {"LLM", "NullLLM", "AnthropicLLM", "OpenAILLM"}
+    assert set(pkg.__all__) == {"LLM", "NullLLM", "Usage", "AnthropicLLM", "OpenAILLM"}
     with pytest.raises(AttributeError):
         pkg.NotAThing
 
@@ -478,3 +480,73 @@ def test_classification_costs_exactly_one_call():
     llm = AnthropicLLM(client=client)
     llm.classify_predicate("drives", "I drive a Volvo")
     assert len(client.calls) == 1
+
+
+# ===========================================================================
+# record_usage — the token counts a bill is computed from
+# ===========================================================================
+
+@pytest.mark.parametrize("block", [
+    SimpleNamespace(input_tokens=120, output_tokens=8),   # an SDK object
+    {"input_tokens": 120, "output_tokens": 8},            # a plain dict
+])
+def test_usage_is_read_from_an_sdk_object_and_from_a_dict_alike(block):
+    # Same tolerance `_first_text` has, for the same reason: a test double should not
+    # have to reimplement the SDK's types to be exercised.
+    usage = Usage()
+    _shape.record_usage(SimpleNamespace(usage=block), usage, "input_tokens",
+                        "output_tokens")
+    assert (usage.input_tokens, usage.output_tokens, usage.reported) == (120, 8, 1)
+
+
+def test_usage_accumulates_across_the_calls_of_one_write():
+    usage = Usage()
+    for _ in range(3):
+        _shape.record_usage({"usage": {"input_tokens": 10, "output_tokens": 2}}, usage,
+                            "input_tokens", "output_tokens")
+    assert (usage.input_tokens, usage.output_tokens, usage.reported) == (30, 6, 3)
+
+
+def test_a_none_accumulator_is_the_no_usage_wanted_path_and_costs_nothing():
+    # What the pipeline passes for a backend that did not advertise `reports_usage`.
+    _shape.record_usage({"usage": {"input_tokens": 1, "output_tokens": 1}}, None,
+                        "input_tokens", "output_tokens")
+
+
+@pytest.mark.parametrize("response, why", [
+    (SimpleNamespace(), "no usage attribute at all"),
+    (SimpleNamespace(usage=None), "usage present but empty"),
+    ({"usage": {"output_tokens": 8}}, "input field missing"),
+    ({"usage": {"input_tokens": 120}}, "output field missing"),
+    ({"usage": {"input_tokens": "120", "output_tokens": 8}}, "a string, not an int"),
+    ({"usage": {"input_tokens": -1, "output_tokens": 8}}, "negative"),
+    ({"usage": {"input_tokens": True, "output_tokens": 8}}, "a bool, which is an int"),
+])
+def test_an_unreadable_usage_block_records_nothing_rather_than_a_zero(response, why):
+    """**This is the one that matters.** A provider that renames a field would otherwise
+    silently start reporting free writes, and free is the direction that flatters us.
+    `reported` staying 0 is what makes the write path publish no series at all instead of
+    a run of zeros — see `Usage` and `telemetry.WRITE_TOKENS_IN`."""
+    usage = Usage()
+    _shape.record_usage(response, usage, "input_tokens", "output_tokens")
+    assert usage.reported == 0, why
+    assert (usage.input_tokens, usage.output_tokens) == (0, 0), why
+
+
+def test_a_genuine_zero_output_is_recorded_rather_than_discarded():
+    # 0 output tokens is possible (a refusal, an empty structured result); 0 *reported*
+    # is not the same thing. The guard rejects unreadable, not small.
+    usage = Usage()
+    _shape.record_usage({"usage": {"input_tokens": 40, "output_tokens": 0}}, usage,
+                        "input_tokens", "output_tokens")
+    assert (usage.input_tokens, usage.output_tokens, usage.reported) == (40, 0, 1)
+
+
+def test_both_hosted_backends_advertise_that_they_report_usage():
+    """`reports_usage` is what the write path gates on. A backend that fills the
+    accumulator but forgets to advertise is never handed one, and reports nothing."""
+    from memvara.llm.anthropic import AnthropicLLM
+    from memvara.llm.openai import OpenAILLM
+
+    assert AnthropicLLM.reports_usage and OpenAILLM.reports_usage
+    assert NullLLM.reports_usage is False

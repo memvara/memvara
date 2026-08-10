@@ -35,6 +35,7 @@ from .base import (
     PREDICATE_SYSTEM,
     RESOLVE_SCHEMA,
     RESOLVE_SYSTEM,
+    Usage,
 )
 
 #: `json_schema` requires a name. It is echoed back in nothing we read, but the API
@@ -75,6 +76,7 @@ class OpenAILLM:
 
     #: A real backend, so every call it makes is billed to `WriteReceipt.llm_calls`.
     is_noop = False
+    reports_usage = True
 
     def __init__(
         self,
@@ -110,8 +112,9 @@ class OpenAILLM:
 
     # -- request ------------------------------------------------------------
 
-    def _call(self, system: str, prompt: str, schema: dict[str, Any]) -> Any:
-        return self._client.chat.completions.create(
+    def _call(self, system: str, prompt: str, schema: dict[str, Any],
+              usage: Usage | None = None) -> Any:
+        response = self._client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
@@ -128,11 +131,16 @@ class OpenAILLM:
                 },
             },
         )
+        # OpenAI names the same two quantities differently from Anthropic; the reading and
+        # the refusal-to-guess live in one place so the two backends cannot drift.
+        _shape.record_usage(response, usage, "prompt_tokens", "completion_tokens")
+        return response
 
     # -- LLM protocol -------------------------------------------------------
 
     def extract(
-        self, episodes: Sequence[Episode], known_predicates: Sequence[str]
+        self, episodes: Sequence[Episode], known_predicates: Sequence[str],
+        *, usage: Usage | None = None,
     ) -> list[dict[str, Any]]:
         if not episodes:
             return []  # nothing to extract from, and a call we should not pay for
@@ -140,22 +148,26 @@ class OpenAILLM:
             EXTRACT_SYSTEM,
             _shape.extract_prompt(episodes, known_predicates),
             CLAIM_SCHEMA,
+            usage,
         )
         return _shape.shape_claims(
             _shape.parse_json_object(_first_text(response)), len(episodes))
 
-    def resolve_predicate(self, surface: str, candidates: Sequence[str]) -> dict[str, Any]:
+    def resolve_predicate(self, surface: str, candidates: Sequence[str],
+                          *, usage: Usage | None = None) -> dict[str, Any]:
         """Merge a novel surface form onto an existing predicate, or declare it new."""
         offered = _shape.bounded(candidates, _shape.MAX_CANDIDATES)
         response = self._call(
-            RESOLVE_SYSTEM, _shape.resolve_prompt(surface, offered), RESOLVE_SCHEMA)
+            RESOLVE_SYSTEM, _shape.resolve_prompt(surface, offered), RESOLVE_SCHEMA,
+            usage)
         return _shape.shape_resolution(
             _shape.parse_json_object(_first_text(response)), offered)
 
-    def classify_predicate(self, predicate: str, example: str) -> dict[str, str]:
+    def classify_predicate(self, predicate: str, example: str,
+                           *, usage: Usage | None = None) -> dict[str, str]:
         """Legacy acquisition call, kept for backends and callers that still use it."""
         prompt = f"predicate: {_shape.snake_case(predicate)}\nexample usage: {example}"
-        response = self._call(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA)
+        response = self._call(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA, usage)
         return _shape.spec_fields(_shape.parse_json_object(_first_text(response)))
 
     def __repr__(self) -> str:

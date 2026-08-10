@@ -52,7 +52,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..core import Memvara
-from ..llm.base import LLM
+from ..llm.base import LLM, Usage
 from ..types import Claim, Derivation, Episode, Scope
 from ._notes import NOTE_PREDICATE, build_note, ensure_note_predicate, note_subject
 from ._notes import SUBJECT_PREFIX, write_note
@@ -206,6 +206,13 @@ class ImportReceipt:
     ignored: int = 0         # rows carrying no usable text, and events we do not model
     extracted: int = 0       # phase-2 structured claims
     llm_calls: int = 0       # phase-2 model calls; phase 1 is always 0
+    #: Phase-2 tokens, when the configured backend reports them (`LLM.reports_usage`);
+    #: 0 when it does not, which is indistinguishable from an import that made no calls.
+    #: An import is the largest single spend most callers ever make here — it pays once
+    #: for the whole history — and `llm_calls` cannot be costed, so this is the number a
+    #: migration write-up needs.
+    tokens_in: int = 0
+    tokens_out: int = 0
     contested: list[ContestedSlot] = field(default_factory=list)
 
     def __str__(self) -> str:
@@ -495,9 +502,13 @@ def _extract(mem: Memvara, sources: Sequence[Episode], llm: LLM, batch_size: int
     """
     vocabulary = mem.registry.prompt_vocabulary()
     extractor = getattr(llm, "name", "llm")
+    # One accumulator for the whole import, on the same terms as the write path: only for
+    # a backend that advertised it will fill one, and never sent to a backend that did not.
+    usage = Usage() if getattr(llm, "reports_usage", False) else None
     for start in range(0, len(sources), batch_size):
         chunk = list(sources[start:start + batch_size])
-        raw = llm.extract(chunk, vocabulary)
+        raw = llm.extract(chunk, vocabulary) if usage is None else llm.extract(
+            chunk, vocabulary, usage=usage)
         receipt.llm_calls += 1
         for item in raw:
             claim = _triple(mem, item, chunk, extractor)
@@ -505,6 +516,8 @@ def _extract(mem: Memvara, sources: Sequence[Episode], llm: LLM, batch_size: int
                 continue
             written = mem.writer.assert_claim(claim)
             receipt.extracted += len(written.added)
+    if usage is not None and usage.reported:
+        receipt.tokens_in, receipt.tokens_out = usage.input_tokens, usage.output_tokens
 
 
 # --- the pitch ----------------------------------------------------------------

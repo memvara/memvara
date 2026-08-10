@@ -779,3 +779,35 @@ def test_retiring_a_note_without_an_instant_does_not_erase_an_existing_valid_to(
     write_note(mem, second, ep2, retire=live)
 
     assert mem.store.get_claim(live.id).valid_to is not None
+
+
+def test_an_import_reports_the_tokens_it_paid_not_only_the_calls_it_made(mem, history_db):
+    """Phase 2's own docstring says it "pays tokens once" — and until now it reported
+    only `llm_calls`. An import is the largest single spend most callers ever make here,
+    it is the migration path off mem0, and `127 calls` cannot be turned into a number
+    anyone can put in a write-up. One accumulator spans the whole import."""
+    class Metered(FakeLLM):
+        reports_usage = True
+
+        def extract(self, episodes, known_predicates, *, usage=None):
+            if usage is not None:
+                usage.add(900, 40)
+            return super().extract(episodes, known_predicates)
+
+    llm = Metered({"Berlin": [{"subject": "user", "predicate": "lives_in",
+                               "object": "Berlin"}]})
+    receipt = import_mem0(mem, history_db=history_db, extract=True, llm=llm,
+                          batch_size=1)
+    assert receipt.llm_calls == llm.calls > 1          # several batches, one total
+    assert receipt.tokens_in == 900 * llm.calls
+    assert receipt.tokens_out == 40 * llm.calls
+
+
+def test_an_import_by_a_backend_that_cannot_report_usage_claims_no_tokens(mem, history_db):
+    # 0 here means "unknown", same as everywhere else — and `FakeLLM` does not accept a
+    # `usage=` keyword at all, so this also pins that it is never sent one.
+    llm = FakeLLM({"Berlin": [{"subject": "user", "predicate": "lives_in",
+                               "object": "Berlin"}]})
+    receipt = import_mem0(mem, history_db=history_db, extract=True, llm=llm)
+    assert receipt.llm_calls == 1
+    assert (receipt.tokens_in, receipt.tokens_out) == (0, 0)

@@ -9,7 +9,40 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Token accounting on the write path** — `WriteReceipt.tokens_in` / `tokens_out`,
+  `ImportReceipt.tokens_in` / `tokens_out`, and the `write.tokens_in` /
+  `write.tokens_out` series. `write.llm_calls` was the only cost signal and it cannot be
+  billed on: providers charge per token, and a one-line turn and a 40,000-token document
+  are both exactly one call, so the ratio between calls and spend is unbounded. Input and
+  output are separate because they are priced separately, usually several-fold apart.
+  On the receipt as well as in telemetry for the reason `llm_calls` is: a cost a caller
+  can only discover by configuring a metrics backend is a cost most callers never
+  discover.
+- **`LLM.Usage` and `LLM.reports_usage`** (`memvara.llm.Usage`). A backend that can report
+  usage advertises it and fills a **caller-allocated** accumulator passed as `usage=`.
+  Caller-allocated rather than a `last_usage` attribute because `pipeline.py` deliberately
+  runs the model round trip outside the store transaction, so two `add()` calls can be
+  inside `extract()` on one backend at once — shared mutable state would bill one caller
+  for the other's tokens, intermittently. One accumulator spans a whole write, including
+  the predicate acquisition an extraction triggers, because the unit billed is the write
+  and not the round trip.
+
+  **Backwards compatible**: the write path only sends `usage=` to a backend that sets
+  `reports_usage`, so an implementation written against the older three-argument
+  signature keeps working untouched and simply publishes no token series — the same
+  courtesy `classify_predicate` still gets. `AnthropicLLM` and `OpenAILLM` report; a
+  response whose usage block is missing or unreadable records **nothing rather than a
+  zero**, because a call that reached a provider consumed something and a run of zeros
+  would understate a bill while dragging a fleet-wide average toward it.
+- **`write.extract_ms`** — the model round trip timed on its own. Extraction time was
+  previously only recoverable as `write.latency_ms` minus `write.lock_held_ms`, and a
+  difference of two aggregates is not a distribution: percentiles do not subtract, so
+  that arithmetic had a mean and no recoverable p99, which is the shape worth alerting
+  on. Includes the call that raised — excluding it makes the p99 *improve* during a
+  provider outage. Emitted only when a model was actually consulted, so a `NullLLM`
+  deployment reports no series rather than a series of zeros.
 
 ## [0.1.0] — 2026-08-10
 

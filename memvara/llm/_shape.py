@@ -23,6 +23,7 @@ import re
 from typing import Any, Sequence
 
 from ..types import Episode, MemoryType
+from .base import Usage
 
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -207,3 +208,35 @@ def shape_resolution(parsed: dict[str, Any], offered: Sequence[str]) -> dict[str
     else:
         canonical = snake_case(canonical)
     return {"canonical": canonical, **spec_fields(parsed)}
+
+
+def record_usage(response: Any, usage: "Usage | None",
+                 input_field: str, output_field: str) -> None:
+    """Add one provider response's token counts to `usage`, if both are present.
+
+    Tolerates SDK objects and plain dicts, for the reason each backend's `_first_text`
+    does: a test double should not have to reimplement the SDK's types to be exercised.
+
+    **A response whose usage block is missing or unreadable records nothing** rather than
+    recording a zero, which is what keeps `Usage.reported` meaningful — see its docstring.
+    A provider that changed a field name would otherwise silently start reporting free
+    writes, and free is the direction that flatters us.
+
+    Cached-prompt tokens are deliberately *not* folded in. Providers report them in
+    separate fields and bill them at a different rate (an order of magnitude cheaper to
+    read), so adding them to `input_field` would overstate cost. Leaving them out
+    understates it instead, which is the same direction the metering layer chose: a
+    number that is low is revenue absorbed, and a number that is high is a false charge.
+    """
+    if usage is None:
+        return
+    block = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+    if block is None:
+        return
+    def _field(name: str) -> int | None:
+        raw = block.get(name) if isinstance(block, dict) else getattr(block, name, None)
+        return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0 else None
+    got_in, got_out = _field(input_field), _field(output_field)
+    if got_in is None or got_out is None:
+        return
+    usage.add(got_in, got_out)
