@@ -735,7 +735,8 @@ driver worth the name, and the work here is CPU and disk rather than network.
 ### MCP server
 
 ```bash
-MEMVARA_DB=/path/to/memory.db python3 -m memvara.server    # JSON-RPC 2.0 over stdio
+MEMVARA_DB=/path/to/memory.db memvara-mcp                   # JSON-RPC 2.0 over stdio
+MEMVARA_DB=/path/to/memory.db python3 -m memvara.server    # the same thing, no console script
 ```
 
 Eight tools — `memory_add`, `memory_remember`, `memory_recall`, `memory_search`,
