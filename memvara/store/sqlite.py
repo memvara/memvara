@@ -2657,6 +2657,11 @@ class SQLiteStore:
             }
 
     def close(self) -> None:
+        if self._closed:
+            # Idempotent. The shape that bites is an explicit `close()` inside a `with`
+            # suite, where the context manager then closes it again and the second call
+            # raised `Cannot operate on a closed database` from a line nobody wrote.
+            return
         with self._lock:
             # Commit unconditionally: closing inside an open batch would otherwise
             # discard it, and an explicit close is a stronger signal than the batch.

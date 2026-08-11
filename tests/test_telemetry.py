@@ -687,3 +687,21 @@ def test_tokens_burned_by_a_call_that_then_raised_are_still_reported():
     assert receipt.deferred
     assert receipt.tokens_in == 80 and rec.total(WRITE_TOKENS_IN) == 80
     rig.close()
+
+
+def test_reading_a_gauge_with_total_says_so_rather_than_answering_zero():
+    """`consolidate.claims_per_slot` is the most valuable series in the module and it is
+    a gauge. Read through `total` it returned 0 — a number a counter can legitimately
+    have — so a caller could not tell "nothing happened" from "wrong method", and
+    nothing pointed at `values()`."""
+    rec = MemoryRecorder()
+    rec.gauge(CONSOLIDATE_CLAIMS_PER_SLOT, 5.0)
+    rec.timing(WRITE_LATENCY_MS, 12.0)
+
+    for name in (CONSOLIDATE_CLAIMS_PER_SLOT, WRITE_LATENCY_MS):
+        with pytest.raises(TypeError, match="not a counter"):
+            rec.total(name)
+    assert rec.values(CONSOLIDATE_CLAIMS_PER_SLOT) == [5.0]
+    # A counter that genuinely recorded nothing still answers 0 rather than raising —
+    # the guard fires on the *kind* of series, not on the absence of one.
+    assert rec.total(WRITE_TURNS) == 0

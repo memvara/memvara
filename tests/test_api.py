@@ -1928,3 +1928,28 @@ def test_a_replacement_that_names_a_scope_is_left_alone(tmp_path):
         live = [c for c in deep.get_all() if c.state == "live"]
         assert [(c.object, c.scope.agent) for c in live] == [("Lisbon", "importer")]
         assert list(mem.store.iter_claims("default")) == []
+
+
+def test_closing_twice_is_not_an_error(tmp_path):
+    """The shape that bites is an explicit `close()` inside a `with` suite: the context
+    manager then closes it again and the second call raised `Cannot operate on a closed
+    database` from a line nobody wrote."""
+    with Memvara(str(tmp_path / "m.db"), embedder=HashingEmbedder(dim=32),
+                 llm=NullLLM()) as mem:
+        mem.remember("user", "likes", "tea")
+        mem.close()
+        mem.close()          # and again, outside the suite's own close
+
+
+def test_a_source_turn_answers_to_text_like_everything_beside_it(tmp_path):
+    """`why()` hands back `Provenance.episodes`, and `[e.text for e in prov.episodes]` —
+    the obvious audit query — was an AttributeError, because `Claim`, `Result` and
+    `Retrieved` say `.text` and `Episode` said only `.content`."""
+    with Memvara(str(tmp_path / "m.db"), embedder=HashingEmbedder(dim=32),
+                 llm=NullLLM(), user="alice") as mem:
+        receipt = mem.add("I live in Berlin.")
+        claim = receipt.added[0]
+        prov = mem.why(claim.id)
+        assert prov is not None
+        assert [e.text for e in prov.episodes] == [e.content for e in prov.episodes]
+        assert "Berlin" in prov.episodes[0].text

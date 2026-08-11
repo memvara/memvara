@@ -363,7 +363,20 @@ class MemoryRecorder:
         `total(GATE_DROP, script="han")` is one population's share of it, with no need
         to know which other dimensions the emission point happens to carry.
         """
-        return sum(v for k, v in self.counters.items() if _matches(k, name, tags))
+        hit = sum(v for k, v in self.counters.items() if _matches(k, name, tags))
+        if hit == 0 and not any(_matches(k, name, tags) for k in self.counters):
+            # A gauge or a timing read through `total` answered 0, which is a number a
+            # counter can legitimately have — so the caller could not tell "nothing
+            # happened" from "wrong method". `consolidate.claims_per_slot` is the most
+            # valuable series in this module and it is a gauge; reading it this way gave
+            # a plausible zero and nothing pointed anywhere else.
+            for store, how in ((self.gauges, "values"), (self.timings, "values")):
+                if any(_matches(k, name, tags) for k in store):
+                    raise TypeError(
+                        f"{name!r} is not a counter, so `total` cannot sum it — it would "
+                        f"answer 0 whatever was recorded. Use `{how}({name!r})` for the "
+                        "observations, or `len(...)` for how many there were.")
+        return hit
 
     def values(self, name: str, **tags: str) -> list[float]:
         """Every gauge or timing observation matching `name` and `tags`, in order.

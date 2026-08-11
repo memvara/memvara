@@ -122,8 +122,16 @@ def read_history_db(path: str | os.PathLike[str]) -> list[HistoryRow]:
 
     Opened read-only: an import must not be able to damage the store it is migrating
     off, and a half-migrated deployment still needs mem0 to work.
+
+    `~` is expanded. mem0's default location *is* `~/.mem0/history.db`, that is the path
+    the README documents on the first line of the migration story, and `sqlite3.connect`
+    does not expand it — so the documented call failed with "unable to open database
+    file", which reads like a permissions problem rather than a path problem. The MCP
+    server already expands `~` for `MEMVARA_DB` "because that is what people type in a
+    JSON file"; the same is true of a migration one-liner.
     """
-    con = sqlite3.connect(f"file:{os.fspath(path)}?mode=ro", uri=True)
+    con = sqlite3.connect(
+        f"file:{os.path.expanduser(os.fspath(path))}?mode=ro", uri=True)
     try:
         con.row_factory = sqlite3.Row
         raw = con.execute("SELECT * FROM history").fetchall()

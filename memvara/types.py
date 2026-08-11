@@ -291,6 +291,19 @@ class Episode:
     meta: dict[str, Any] = field(default_factory=dict)
 
     @property
+    def text(self) -> str:
+        """Alias of `content`.
+
+        `Claim`, `Result` and `Retrieved` all expose `.text`; this exposed only
+        `.content`. Those four are exactly what a caller holds while writing an audit
+        query — `why()` returns `Provenance.episodes`, and the obvious
+        `[e.text for e in prov.episodes]` was an `AttributeError` on the one member of
+        the set that spelled it differently. `content` stays the field; this is the
+        name the other three taught the reader to expect.
+        """
+        return self.content
+
+    @property
     def hash(self) -> str:
         return content_hash(self.scope.key(), self.role, self.content)
 
