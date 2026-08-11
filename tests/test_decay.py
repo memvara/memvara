@@ -24,6 +24,7 @@ from memvara.telemetry import (
     CROWDED_SLOT,
     MemoryRecorder,
 )
+from memvara.consolidate.sweep import Sweep
 from memvara.types import Claim, MemoryType, Scope, utcnow
 from memvara.write.reconcile import Reconciler
 
@@ -460,6 +461,38 @@ def test_the_snapshot_reports_how_crowded_the_slots_are(consolidator):
     assert rec.values(CONSOLIDATE_CLAIMS_PER_SLOT) == [4.0]
     assert rec.values(CONSOLIDATE_CROWDED_SLOTS) == [1.0]   # only the employer slot
     assert 4 > CROWDED_SLOT
+
+
+def test_a_slot_with_a_long_history_is_not_reported_as_crowded(consolidator):
+    """The metric counts *live* claims per concept, and a claim that has ended is not one.
+
+    Since supersession stopped closing transaction time, the belief-axis filter the
+    snapshot used to rely on lets every superseded version through — so a slot with one
+    current employer and five previous ones would report six, cross the crowding
+    threshold, and fire the alarm whose entire value is that it only fires on the real
+    thing. A metric that shouts at healthy stores gets muted, and then it is gone.
+
+    The same filter keeps the pass bounded by the store's live size rather than by its
+    whole history, which is the other reason it cannot be left to the belief axis alone.
+    """
+    rec = MemoryRecorder()
+    store = consolidator.store
+    reconciler = Reconciler(store, consolidator.registry)
+    employers = ("acme", "globex", "initech", "hooli", "stark", "umbrella")
+    for i, employer in enumerate(employers):
+        # One job change a year, oldest first, so the chain builds the way it would have.
+        at = NOW - timedelta(days=365 * (len(employers) - i))
+        reconciler.apply(Claim(subject="user", predicate="works_at", object=employer,
+                               scope=Scope(tenant="acme", user="u1"),
+                               valid_from=at, recorded_at=at), now=at)
+
+    sweep = Sweep(store, "acme", now=NOW, telemetry=rec)
+
+    on_disk = list(store.iter_claims("acme", include_invalidated=True))
+    assert len(on_disk) == len(employers), "every version is still on disk"
+    assert [c.object for c in sweep.claims] == ["umbrella"]
+    assert rec.values(CONSOLIDATE_CLAIMS_PER_SLOT) == [1.0]
+    assert rec.values(CONSOLIDATE_CROWDED_SLOTS) == [0.0]
 
 
 def test_an_empty_store_reports_a_maximum_of_zero_rather_than_nothing(consolidator):

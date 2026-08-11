@@ -1053,7 +1053,7 @@ def test_a_backfilled_fact_gets_its_interval_closed_at_the_next_value():
 
 
 def test_forward_supersession_is_unchanged_by_the_valid_time_rule():
-    """The ordinary case must keep working: a newer value still retires an older one."""
+    """The ordinary case must keep working: a newer value still displaces an older one."""
     from datetime import timedelta
 
     now = utcnow()
@@ -1062,7 +1062,11 @@ def test_forward_supersession_is_unchanged_by_the_valid_time_rule():
         mem.remember("user", "lives_in", "Lisbon", valid_from=now - timedelta(days=100))
         assert [c.object for c in mem.get_all()] == ["Lisbon"]
         berlin = [c for c in mem.history("user", "lives_in") if c.object == "Berlin"][0]
-        assert berlin.invalidated_at is not None
+        # Ended, and only ended. The backward case a few lines up already required
+        # `invalidated_at is None` for the same reason — "we still believe Berlin was
+        # true back then" — and the forward case is the same sentence about the same row.
+        assert berlin.valid_to is not None and berlin.invalidated_at is None
+        assert not berlin.is_live()
 
 
 # =============================================================================

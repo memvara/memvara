@@ -243,9 +243,62 @@ def test_superseding_never_deletes(rec, store):
 
     old = store.get_claim(berlin.id)
     assert old is not None                       # still on disk
-    assert old.invalidated_at is not None        # transaction time closed
-    assert old.valid_to is not None              # valid time closed
+    assert old.valid_to is not None              # valid time closed: it stopped being true
     assert old.invalidated_by == lisbon.id       # and it points at its successor
+
+
+def test_supersession_ends_a_claim_rather_than_calling_it_a_mistake(rec, store):
+    """The defect this whole rule exists to remove: `_retire` closed *both* clocks.
+
+    `valid_to` was right — Berlin stopped being true when Lisbon began. `invalidated_at`
+    was not: it says *we no longer believe this record*, and the record was never wrong.
+    Every superseded claim in every store this library wrote was therefore marked as an
+    error, which is what made "what do we now believe was true in June" return nothing.
+    """
+    berlin = rec.apply(claim("lives_in", "Berlin")).claim
+    rec.apply(claim("lives_in", "Lisbon"))
+
+    old = store.get_claim(berlin.id)
+    assert old.invalidated_at is None, "we were never wrong about Berlin"
+    assert old.state == "ended", "the world moved on, which is a different word"
+
+
+def test_a_correcting_caller_can_say_so_and_gets_the_other_axis(rec, store):
+    """The reading the reconciler cannot reach on its own, and the reason `close` exists.
+
+    "Lisbon is right and Berlin was never true" is a statement about the record, not
+    about the world — so belief stops and the valid interval is left exactly as written,
+    because a correction witnessed no world event and must not invent one.
+    """
+    berlin = rec.apply(claim("lives_in", "Berlin")).claim
+    rec.apply(claim("lives_in", "Lisbon"), close="retired")
+
+    old = store.get_claim(berlin.id)
+    assert old.state == "retired"
+    assert old.invalidated_at is not None
+    assert old.valid_to is None, "a correction saw nothing stop being true"
+    assert not old.is_live()
+
+
+@pytest.mark.parametrize("close,axes", [
+    ("ended", ("valid_to", "invalidated_at")),
+    ("retired", ("invalidated_at", "valid_to")),
+])
+def test_each_closure_moves_exactly_one_clock(rec, store, close, axes):
+    """Stated as the general rule, because it is the invariant and not two behaviours.
+
+    One write, one assertion, one clock. A closure that moved both would be saying two
+    things — "it stopped being true" *and* "we were mistaken" — and only one of them
+    can be what the caller meant.
+    """
+    moved, still = axes
+    first = rec.apply(claim("lives_in", "Berlin")).claim
+    rec.apply(claim("lives_in", "Lisbon"), close=close)
+
+    old = store.get_claim(first.id)
+    assert getattr(old, moved) is not None
+    assert getattr(old, still) is None
+    assert old.state == close
 
 
 def test_as_of_still_sees_the_superseded_claim(rec, store):
@@ -288,6 +341,52 @@ def test_retraction_invalidates_without_leaving_a_live_negative(rec, store):
     assert not res.claim.is_live()
     assert not res.claim.is_live(utcnow() + timedelta(days=365))
     assert store.get_claim(acme.id).invalidated_by == res.claim.id
+
+
+def test_a_retraction_ends_its_target_rather_than_calling_it_a_mistake(rec, store):
+    """"I no longer work at Acme" is news about the world, not a complaint about us.
+
+    The employment was real and it finished, so valid time closes and the record stays
+    believed — which is what keeps "where did they work in 2023" answerable after they
+    leave. Every negative form the write path can produce is of that shape ("no longer",
+    "used to", "not ... any more"), and `Claim.render` words a negative claim the same
+    way, so this is the reading the data supports rather than a preference.
+    """
+    acme = rec.apply(claim("works_at", "Acme")).claim
+    res = rec.apply(claim("works_at", "Acme", polarity=-1, sources=["ep_2"]))
+
+    old = store.get_claim(acme.id)
+    assert old.state == "ended"
+    assert old.invalidated_at is None
+    assert old.invalidated_by == res.claim.id, "and it still points at the retraction"
+
+
+def test_a_retraction_that_is_a_correction_says_so(rec, store):
+    """The other reading, reachable and different: "you misheard me, I never worked
+    there." Nothing about the world changed, so nothing on the world clock moves."""
+    acme = rec.apply(claim("works_at", "Acme")).claim
+    rec.apply(claim("works_at", "Acme", polarity=-1, sources=["ep_2"]), close="retired")
+
+    old = store.get_claim(acme.id)
+    assert old.state == "retired"
+    assert old.valid_to is None
+    assert live_objects(store, acme) == []
+
+
+def test_the_retraction_tombstone_is_unreachable_from_either_clock(rec, store):
+    """The one row that closes both axes, and the only one that may.
+
+    A tombstone is bookkeeping, not an assertion about the world, so it has no true
+    interval to preserve and nothing an audit loses by it never being live. It exists so
+    "why did you stop believing that?" has an answer with source episodes attached.
+    """
+    rec.apply(claim("works_at", "Acme"))
+    res = rec.apply(claim("works_at", "Acme", polarity=-1, sources=["ep_2"]))
+
+    assert res.claim.invalidated_at is not None and res.claim.valid_to is not None
+    for kw in ({}, {"as_of": utcnow() + timedelta(days=365)},
+               {"valid_at": utcnow() - timedelta(days=365)}):
+        assert not res.claim.is_live(**kw), kw
 
 
 def test_retraction_only_retires_the_value_it_names(rec, store):
@@ -413,7 +512,10 @@ def test_same_inputs_produce_the_same_actions(registry):
             # outcome cannot depend on how long the run took.
             res = r.apply(claim(pred, obj, polarity=pol, valid_from=now), now=now)
             actions.append((res.action, len(res.invalidated)))
-        live = sorted((c.predicate, c.object) for c in s.iter_claims("acme"))
+        # `is_live` and not `iter_claims`'s default filter: that one reads the belief
+        # axis alone, and a superseded claim now keeps its belief axis open.
+        live = sorted((c.predicate, c.object)
+                      for c in s.iter_claims("acme") if c.is_live())
         s.close()
         return actions, live
 
@@ -506,8 +608,9 @@ def test_a_backdated_supersession_closes_valid_time_where_the_new_value_begins(r
     berlin = store.get_claim(first.claim.id)
     assert berlin.valid_to == moved, "valid time closed at the wrong instant"
     # Transaction time is a different question with a different answer: we believed
-    # Berlin right up until today, and the record has to keep saying so.
-    assert berlin.invalidated_at == now
+    # Berlin then, we believe it now, and the record has to keep saying so. A
+    # supersession is never told the old value was wrong, so it never says it was.
+    assert berlin.invalidated_at is None
 
     # The intervals abut rather than overlap: Berlin ends exactly where Lisbon starts,
     # so no instant on the valid-time axis has two answers to a single-valued question.
@@ -532,9 +635,10 @@ def test_a_retraction_backdated_before_the_fact_collapses_rather_than_inverting(
 
 def test_the_two_axes_stay_distinct_even_without_explicit_backdating(rec, store):
     """The general contract, stated once: valid time follows the *new value*, and
-    transaction time follows the *apply instant*. They coincide only when a claim is
-    applied the moment it is built, which is the common case and precisely why stamping
-    one onto the other went unnoticed."""
+    transaction time is not the reconciler's to touch on a supersession at all.
+
+    The two instants coincide only when a claim is applied the moment it is built, which
+    is the common case and precisely why stamping one onto the other went unnoticed."""
     now = utcnow()
     first = rec.apply(claim("lives_in", "Berlin"), now=now)
     later = now + timedelta(minutes=5)
@@ -542,5 +646,27 @@ def test_the_two_axes_stay_distinct_even_without_explicit_backdating(rec, store)
 
     berlin = store.get_claim(first.claim.id)
     assert berlin.valid_to == second.claim.valid_from   # when it stopped being true
-    assert berlin.invalidated_at == later               # when we stopped believing it
-    assert berlin.valid_to < berlin.invalidated_at
+    assert berlin.invalidated_at is None                # we never stopped believing it
+    assert berlin.valid_to < later
+
+
+def test_a_superseded_claim_still_answers_what_was_true_back_then(rec, store):
+    """The question the conflation emptied out, at the layer that emptied it.
+
+    Berlin was true from 2023 and Lisbon from 2026. Asked what we *now* believe was true
+    in 2024, the store has to say Berlin — and it could not, because the write path had
+    marked Berlin as a record we no longer believe. `as_of` kept working the whole time,
+    which is exactly why this went unnoticed: it rewinds the belief clock to before the
+    supersession, so it never reads the stamp that was wrong.
+    """
+    then = utcnow() - timedelta(days=1200)
+    moved = utcnow() - timedelta(days=100)
+    mid = utcnow() - timedelta(days=600)
+    first = rec.apply(claim("lives_in", "Berlin", valid_from=then, recorded_at=then),
+                      now=then).claim
+    rec.apply(claim("lives_in", "Lisbon", valid_from=moved, recorded_at=moved), now=moved)
+
+    assert live_objects(store, first, as_of=mid) == ["Berlin"]
+    believed_now_about_then = [
+        c.object for c in store.competing_claims("acme", first.fact_key, valid_at=mid)]
+    assert believed_now_about_then == ["Berlin"]

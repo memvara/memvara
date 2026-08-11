@@ -56,6 +56,7 @@ from .types import (
     SALIENCE_BASE,
     SUBJECT_ENTITY,
     Claim,
+    Closure,
     Derivation,
     Episode,
     MemoryType,
@@ -64,6 +65,8 @@ from .types import (
     Scope,
     WriteReceipt,
     as_utc,
+    close_out,
+    closure,
     time_axes,
     utcnow,
 )
@@ -229,19 +232,25 @@ def _in_timeline(claim: Claim, valid_at: datetime | None,
             and (claim.valid_to is None or as_utc(claim.valid_to) > at))
 
 
-def _retired_by(claim: Claim, known_at: datetime | None) -> bool:
-    """Had this row already been superseded at `known_at`?
+def _displaced_by(claim: Claim, successor: Claim, known_at: datetime | None) -> bool:
+    """Had `successor` already displaced this row at `known_at`?
 
     Only `why()` uses it, for the `superseded` list. A supersession is a belief-clock
-    event — something we decided, not something the world did — so it is dated by
-    `invalidated_at` rather than by the superseded row's own `recorded_at`, which
-    usually predates the whole story and would let a July view report a replacement
-    that happened in August.
+    event — something we decided, not something the world did — so it is *never* dated by
+    the superseded row's own `recorded_at`, which usually predates the whole story and
+    would let a July view report a replacement that happened in August.
+
+    Which belief-clock instant depends on how the row was closed, and reading only
+    `invalidated_at` is what broke when supersession stopped writing one. An ordinary
+    supersession leaves `invalidated_at` unset — the row was never wrong, it was
+    overtaken — so the moment we decided is the moment we recorded the successor. A
+    *retired* row carries its own instant, because a correction is dated by when we
+    stopped believing it, which need not be when the replacement arrived.
     """
     if known_at is None:
         return True
-    return (claim.invalidated_at is not None
-            and as_utc(claim.invalidated_at) <= as_utc(known_at))
+    at = claim.invalidated_at if claim.invalidated_at is not None else successor.recorded_at
+    return as_utc(at) <= as_utc(known_at)
 
 
 def _had_happened(episode: Episode, valid_at: datetime | None,
@@ -267,8 +276,10 @@ class Memvara:
     >>> [r.text for r in mem.search("where do they live?", user="alice")][:1]
     ['user lives in Lisbon']
 
-    Berlin is not deleted by that second write — it is retired with an end timestamp, so
-    `search(..., as_of=<before the move>)` still returns it.
+    Berlin is not deleted by that second write — its valid time is closed where Lisbon's
+    begins, so `search(..., as_of=<before the move>)` still returns it, and so does
+    `search(..., valid_at=<before the move>)`. It is `ended`, not `retired`: we still
+    believe every word of it, the world simply moved on.
 
     The zero-argument form is fully functional offline and warns once about what it
     cannot do: with no `llm=`, only the deterministic fast path extracts, so most turns
@@ -637,6 +648,7 @@ class Memvara:
                  recorded_at: datetime | None = None,
                  sources: Sequence[str | Episode] | None = None,
                  text: str | None = None, extractor: str = "api",
+                 close: str = "ended",
                  **meta: Any) -> WriteReceipt:
         """Assert a structured fact directly, bypassing extraction.
 
@@ -668,6 +680,23 @@ class Memvara:
         of that name is no longer reachable here — it never meant anything anyway, since
         `Claim.extractor` is the field provenance actually reads.
 
+        `close` says what this assertion does to whatever it displaces, and the default
+        is the reading that keeps history readable:
+
+        * `"ended"` — the world changed. Berlin was true and Lisbon is true now, so
+          Berlin's valid time closes where Lisbon's begins and we go on believing every
+          word of it. `get_all(valid_at=<while Berlin held>)` still answers "Berlin".
+        * `"retired"` — the record was wrong. Berlin was never true, so *belief* in it
+          stops here and its valid interval is left exactly as it was written, because a
+          correction witnesses no world event and must not invent one.
+
+        Both readings keep the row, point `invalidated_by` at this claim, and stay
+        visible to `history()`; they differ in what they say happened, which is the
+        difference between "she moved" and "we misheard". `Claim.state` reports which one
+        a given row got. It applies to a retraction (`polarity=-1`) the same way — see
+        `Reconciler._retract`, where the default is argued from what a negative assertion
+        actually says.
+
         `**meta` is the caller's, with the exception of the keys the engine stores there
         itself — see `RESERVED_META`, and note that two of them are a ranking override.
         Rejected here at the boundary rather than stripped, because a silently dropped
@@ -694,7 +723,7 @@ class Memvara:
             text=text or "",   # empty means "render the triple"; see `Claim.__post_init__`
             derivation=Derivation.USER, extractor=extractor, meta=meta,
         )
-        return self._write_claim(claim, sources)
+        return self._write_claim(claim, sources, close=closure(close))
 
     @staticmethod
     def _cite(claim: Claim, sources: Sequence[str | Episode] | None) -> list[Episode]:
@@ -740,8 +769,9 @@ class Memvara:
 
     def _write_claim(self, claim: Claim, sources: Sequence[str | Episode] | None,
                      retire: Claim | None = None,
-                     at: datetime | None = None) -> WriteReceipt:
-        """Store new source turns, optionally retire a predecessor, assert the claim.
+                     at: datetime | None = None,
+                     close: Closure = "ended") -> WriteReceipt:
+        """Store new source turns, optionally close out a predecessor, assert the claim.
 
         One transaction over all of it. Separately committed, a crash between the turn
         and the claim leaves a claim citing a turn that does not exist — a dangling
@@ -752,6 +782,10 @@ class Memvara:
         reconciler gets there first and stamps it with the wall clock rather than `at`,
         which silently turns a backdated import into a pile of things that all changed
         today.
+
+        `close` names the clock that stops on `retire`, and is forwarded to the
+        reconciler for anything *it* displaces, so one call cannot say two different
+        things about the same slot.
         """
         episodes = self._cite(claim, sources)
         if self.redactor is not None:
@@ -771,16 +805,21 @@ class Memvara:
                 # `at` is never actually `None` here — `supersede`, the only caller that
                 # passes `retire`, defaults it to the new claim's `recorded_at` — but the
                 # signature cannot say "these two arrive together" and the consequence of
-                # a `None` slipping through is not a crash: `Store.invalidate` would
-                # write a NULL `invalidated_at`, which reads as *not retired*, and
-                # `set_valid_to(None)` would reopen the interval. A supersession that
-                # leaves two live values is the exact failure the transaction below
-                # exists to prevent, so the fallback is the same instant `supersede`
-                # computes rather than a cast.
+                # a `None` slipping through is not a crash: it would reopen an interval
+                # that was already closed, or write a NULL `invalidated_at` that reads as
+                # *not retired* beside an `invalidated_by` saying otherwise. A
+                # supersession that leaves two live values is the exact failure the
+                # transaction below exists to prevent, so the fallback is the same
+                # instant `supersede` computes rather than a cast.
                 when = at if at is not None else claim.recorded_at
-                self.store.invalidate(retire.id, when, claim.id)
-                self.store.set_valid_to(retire.id, when)
-            receipt = self.writer.assert_claim(claim)
+                close_out(retire, when, claim.id, close)
+                # One `put_claim` rather than `invalidate` + `set_valid_to`, for the
+                # reason `Reconciler._retire` gives: the Store protocol cannot write
+                # `invalidated_by` without also writing `invalidated_at`, and under
+                # `close="ended"` that pointer must be recorded while the belief clock
+                # keeps running.
+                self.store.put_claim(retire)
+            receipt = self.writer.assert_claim(claim, close=close)
             # Indexed on the same terms `add()` indexes its turns. Costs one encode per
             # turn, and skipping it would make a turn stored this way findable by text
             # and not by meaning — an asymmetry nothing at the call site could explain.
@@ -798,24 +837,40 @@ class Memvara:
     def supersede(self, old_claim_id: str, new_claim: Claim, *,
                   at: datetime | None = None,
                   sources: Sequence[str | Episode] | None = None,
+                  close: str = "ended",
                   tenant=None, user=None, agent=None,
                   session=None) -> WriteReceipt:
         """Replace a claim with a new one, recording that that is what happened.
 
-        `delete()` retires a claim and leaves the reason blank; asserting the new value
-        on its own retires the old one only when the two share a slot and the predicate
+        `delete()` closes a claim out and leaves the reason blank; asserting the new value
+        on its own displaces the old one only when the two share a slot and the predicate
         is single-valued. Neither writes `invalidated_by`, and without that pointer
         `why()` on the new claim reports nothing superseded — which is exactly the
         history an import of somebody else's mutation log exists to reconstruct.
 
-        The old claim is retired on both time axes, before the new one is written, all
-        inside one transaction — see `_write_claim` for why that order is the whole
-        point.
+        The old claim is closed out before the new one is written, all inside one
+        transaction — see `_write_claim` for why that order is the whole point.
+
+        **`close` is a real question here and the caller is the only one who can answer
+        it.** This method exists for replaying somebody else's mutation log, and a log
+        row does not say which of the two things happened. `close="ended"` (the default)
+        reads the row as *the value changed* — the old one was true until this instant
+        and is kept answering `valid_at` queries about that period. `close="retired"`
+        reads it as *the old value was wrong* — belief in it stops here and its valid
+        interval is left as written, because a correction saw no world event.
+
+        Defaulting rather than requiring it is the safe way round: an importer that has
+        not thought about the distinction gets the reading that preserves a true past,
+        and the mistake it can still make — treating a correction as a change — leaves
+        the row over-trusted rather than destroying a fact that was never wrong. mem0's
+        UPDATE rows genuinely are the first kind (see `compat/mem0_import.py`), which is
+        what the default is calibrated on.
 
         `at` defaults to the new claim's `recorded_at`, so a replay of historical events
-        needs to state its instant once rather than twice. `sources` means what it means
-        on `remember`, and is here for the same reason: a replayed update arrives as a
-        new turn *and* a new value, and the two have to land together.
+        needs to state its instant once rather than twice; it is read on whichever axis
+        `close` names. `sources` means what it means on `remember`, and is here for the
+        same reason: a replayed update arrives as a new turn *and* a new value, and the
+        two have to land together.
 
         Raises `KeyError` if `old_claim_id` names nothing this scope can see — the same
         error for "no such claim" as for "not yours", so it cannot be used to test
@@ -846,17 +901,35 @@ class Memvara:
         if new_claim.scope == Scope():
             new_claim = replace(new_claim, scope=old.scope)
         return self._write_claim(new_claim, sources, retire=old,
-                                 at=at or new_claim.recorded_at)
+                                 at=at or new_claim.recorded_at, close=closure(close))
 
     def forget(self, subject: str, predicate: str, *, tenant=None, user=None, agent=None,
-               session=None, at: datetime | None = None) -> list[Claim]:
+               session=None, at: datetime | None = None,
+               close: str = "retired") -> list[Claim]:
         """Retire everything currently believed in one slot.
 
         Retires rather than erases: the claims stop being returned by present-tense
         queries but remain visible to `as_of` and `history`. For true erasure (a GDPR
         deletion, say), use `purge`.
 
-        The claims handed back are stamped with the retirement, which they were not.
+        **This is the one write that defaults to `close="retired"`, and the name is the
+        argument.** Forgetting is something the holder of a memory does, not something
+        the world does. The call names no successor value and no end date for the fact,
+        carries no evidence that anything changed out there, and reads at the call site
+        as "stop holding this" — so closing valid time would have it assert, on the
+        caller's behalf, that the user stopped living somewhere at the instant they asked
+        us to drop the subject. Belief is what the caller controls and belief is what
+        stops. It is also the slot-level twin of `delete()` — "deletion here means what
+        `forget` means" — and a caller who forgets a slot must land in the same state as
+        one who deletes each of its claims, or the two doors disagree about one operation.
+
+        The world-change reading is still reachable and still says something different:
+        `close="ended"` records that everything in this slot finished being true at `at`,
+        which is right for "she left the company and we are closing out her record" and
+        keeps the facts answering `valid_at` queries about the period they held. What is
+        *not* offered is both at once, which is what this used to do.
+
+        The claims handed back are stamped with the closure, which they were not.
         `Store.invalidate` and `set_valid_to` update rows; the in-memory objects were
         read before either ran, so every claim this returned reported
         `invalidated_at=None` and `is_live()` true, while the same row re-read from the
@@ -868,6 +941,7 @@ class Memvara:
         """
         scope = self._scope(tenant, user, agent, session)
         now = at or utcnow()
+        how = closure(close)
         probe = Claim(subject=subject, predicate=self.registry.normalize(predicate),
                       object="", scope=scope)
         # `fact_key` intentionally ignores agent and session so a fact learned in a new
@@ -877,20 +951,14 @@ class Memvara:
         # broad callers reach downward, narrow callers never reach sideways.
         retired = [c for c in self.store.competing_claims(scope.tenant, probe.fact_key)
                    if scope.contains(c.scope)]
-        # Both time axes must move in one transaction. Committed separately, a concurrent
-        # reader can observe `invalidated_at` set while `valid_to` is still NULL — the
-        # split-brain state that `Reconciler._retire` explicitly avoids, and an
-        # inconsistency in the one invariant this library sells.
+        # One transaction over the whole slot. Committed row by row, a concurrent reader
+        # can see half a slot forgotten — and for the slot operation whose entire point is
+        # that the slot stops answering, a partial answer is worse than either outcome.
         batch = getattr(self.store, "batch", None)
         with (batch() if batch is not None else nullcontext()):
             for c in retired:
-                self.store.invalidate(c.id, now, None)
-                self.store.set_valid_to(c.id, now)
-                # Both axes on the object too, and both: `Claim.is_live` requires them to
-                # agree, so stamping one would produce a claim that reads as retired to
-                # `repr` and live to a bitemporal query.
-                c.invalidated_at = now
-                c.valid_to = now
+                close_out(c, now, None, how)
+                self.store.put_claim(c)
         return retired
 
     def purge(self, *, tenant=None, user=None, agent=None, session=None) -> dict[str, int]:
@@ -1012,7 +1080,8 @@ class Memvara:
             return None
         return claim
 
-    def delete(self, claim_id: str, *, at: datetime | None = None, tenant=None,
+    def delete(self, claim_id: str, *, at: datetime | None = None,
+               close: str = "retired", tenant=None,
                user=None, agent=None, session=None) -> bool:
         """Retire one claim by id. Returns whether anything was retired.
 
@@ -1022,19 +1091,25 @@ class Memvara:
         vanishes without a trace — and for the other reading, where the text itself must
         cease to exist, `purge()` is the call.
 
+        Closes **transaction time** by default, which is what "this record should not be
+        used" means: we stop believing it, from here on, at every world-time. It is the
+        opposite end of the write path from a supersession — nothing replaced this claim,
+        no new value arrived, and the caller reported no event out in the world — so
+        there is nothing to close valid time *at*. Doing it anyway would have `delete()`
+        assert that the fact stopped being true today, on evidence nobody supplied, and
+        that fabrication is observable: a query asking what we believed *before* the
+        delete about a world-time *after* it would lose a claim we did in fact hold.
+        `close="ended"` is there for the caller who really is recording that the fact
+        finished, which is a different statement and belongs to whoever can make it.
+
         Silently false rather than raising for an unknown or out-of-scope id, so the
         method cannot be used as an existence oracle.
         """
         claim = self.get(claim_id, tenant=tenant, user=user, agent=agent, session=session)
         if claim is None:
             return False
-        now = at or utcnow()
-        # Both axes in one transaction, exactly as `forget` does: committed separately,
-        # a concurrent reader observes a claim that is invalidated but still valid.
-        batch = getattr(self.store, "batch", None)
-        with (batch() if batch is not None else nullcontext()):
-            self.store.invalidate(claim.id, now, None)
-            self.store.set_valid_to(claim.id, now)
+        close_out(claim, at or utcnow(), None, closure(close))
+        self.store.put_claim(claim)
         return True
 
     def erase(self, claim_id: str, *, sources: bool = False, tenant=None, user=None,
@@ -1319,9 +1394,11 @@ class Memvara:
           event: it is a thing we decided, not a thing that happened in the world, so
           the world clock has no opinion about whether it had occurred.
 
-        Note the supersession filter reads `invalidated_at`, not `recorded_at`. The
-        superseded row usually predates the whole story — what is being dated is the
-        moment we replaced it, which is the only thing `superseded` is reporting.
+        Note the supersession filter never reads the superseded row's `recorded_at`: that
+        usually predates the whole story, and what is being dated is the moment we
+        replaced it, which is the only thing `superseded` is reporting. See
+        `_displaced_by` for which instant that is — it depends on whether the row was
+        *ended* or *retired*, and an ordinary supersession is the first.
 
         The claim itself is returned whatever the axes say; they describe the evidence
         around it, and withholding the row would turn this method into an existence
@@ -1342,7 +1419,7 @@ class Memvara:
                     if e is not None and _had_happened(e, valid_at, known_at)]
         superseded = [c for c in self.store.slot_history(claim.scope.tenant, claim.fact_key)
                       if c.invalidated_by == claim.id
-                      and _retired_by(c, known_at)]
+                      and _displaced_by(c, claim, known_at)]
         return Provenance(claim=claim, episodes=episodes, derivation=claim.derivation,
                           extractor=claim.extractor, superseded=superseded)
 
@@ -1638,20 +1715,22 @@ class ScopedMemvara:
         return self._mem.remember(subject, predicate, obj, **self._kw, **kw)
 
     def forget(self, subject: str, predicate: str, *,
-               at: datetime | None = None) -> list[Claim]:
-        return self._mem.forget(subject, predicate, at=at, **self._kw)
+               at: datetime | None = None, close: str = "retired") -> list[Claim]:
+        return self._mem.forget(subject, predicate, at=at, close=close, **self._kw)
 
-    def delete(self, claim_id: str, *, at: datetime | None = None) -> bool:
-        return self._mem.delete(claim_id, at=at, **self._kw)
+    def delete(self, claim_id: str, *, at: datetime | None = None,
+               close: str = "retired") -> bool:
+        return self._mem.delete(claim_id, at=at, close=close, **self._kw)
 
     def erase(self, claim_id: str, *, sources: bool = False) -> bool:
         return self._mem.erase(claim_id, sources=sources, **self._kw)
 
     def supersede(self, old_claim_id: str, new_claim: Claim, *,
                   at: datetime | None = None,
-                  sources: Sequence[str | Episode] | None = None) -> WriteReceipt:
+                  sources: Sequence[str | Episode] | None = None,
+                  close: str = "ended") -> WriteReceipt:
         return self._mem.supersede(old_claim_id, new_claim, at=at, sources=sources,
-                                   **self._kw)
+                                   close=close, **self._kw)
 
     def purge(self) -> dict[str, int]:
         return self._mem.purge(**self._kw)

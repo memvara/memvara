@@ -514,13 +514,70 @@ def test_delete_retires_a_claim_and_keeps_its_history(mem):
     assert mem.search("lives") == []
 
 
-def test_delete_closes_both_time_axes_together(mem):
+def test_delete_stops_belief_and_asserts_nothing_about_the_world(mem):
+    """"This record should not be used" is a statement about us, not about the world.
+
+    Nothing replaced the claim, no new value arrived, and the caller reported no event
+    out there — so there is nothing for valid time to close *at*. Closing it anyway had
+    `delete()` assert that the fact stopped being true today, on evidence nobody
+    supplied, which is the same fabrication a superseding write used to make in reverse.
+    """
     mem.remember("user", "lives_in", "Lisbon")
     claim = mem.get_all()[0]
     mem.delete(claim.id)
+
     stored = mem.store.get_claim(claim.id)
-    assert stored.invalidated_at is not None and stored.valid_to is not None, \
-        "a reader between the two commits would see an inconsistent claim"
+    assert stored.state == "retired"
+    assert stored.invalidated_at is not None
+    assert stored.valid_to is None, "delete witnessed no world event"
+    assert not stored.is_live() and mem.get_all() == []
+
+
+def test_a_delete_cannot_reach_back_and_edit_what_we_used_to_believe(mem):
+    """The lie closing valid time would tell, in the one query that can see it.
+
+    Ask what we believed *before* the delete about a world-time *after* it: we held that
+    claim, and we held it about that moment. With `valid_to` stamped at the delete the
+    row drops out of that view — a past belief silently rewritten by a present decision,
+    which is the one thing a bitemporal store may never do.
+    """
+    before = utcnow() - timedelta(days=2)
+    mem.remember("user", "lives_in", "Lisbon", valid_from=before, recorded_at=before)
+    claim = mem.get_all()[0]
+    mem.delete(claim.id)
+
+    ahead = utcnow() + timedelta(days=30)
+    still = mem.get_all(valid_at=ahead, known_at=utcnow() - timedelta(days=1))
+    assert [c.object for c in still] == ["Lisbon"]
+
+
+def test_delete_can_record_an_ending_instead_when_that_is_what_happened(mem):
+    """The other reading stays reachable and says something different: the fact
+    finished. Belief is untouched, so `valid_at` over the period it held still has it."""
+    began = utcnow() - timedelta(days=10)
+    mem.remember("user", "lives_in", "Lisbon", valid_from=began, recorded_at=began)
+    claim = mem.get_all()[0]
+    mem.delete(claim.id, close="ended")
+
+    stored = mem.store.get_claim(claim.id)
+    assert stored.state == "ended" and stored.invalidated_at is None
+    assert [c.object for c in mem.get_all(valid_at=began + timedelta(days=1))] == ["Lisbon"]
+    assert mem.get_all() == []
+
+
+@pytest.mark.parametrize("call", [
+    lambda m, cid: m.delete(cid, close="deleted"),
+    lambda m, cid: m.forget("user", "lives_in", close="gone"),
+    lambda m, cid: m.remember("user", "lives_in", "Rome", close="dropped"),
+])
+def test_an_unknown_closure_raises_rather_than_quietly_meaning_one_of_them(mem, call):
+    """The two values mean opposite things about whether a stored fact was ever true,
+    and a typo silently resolving to either is the one mistake here that cannot be found
+    by reading the data afterwards."""
+    mem.remember("user", "lives_in", "Lisbon")
+    cid = mem.get_all()[0].id
+    with pytest.raises(ValueError, match="is not a closure"):
+        call(mem, cid)
 
 
 def test_delete_is_visible_to_as_of_queries_from_before_it(mem):
@@ -1116,6 +1173,54 @@ def test_remember_still_renders_the_triple_when_no_text_is_given(mem):
     assert mem.get_all()[0].text == "user lives in Berlin"
 
 
+def test_the_receipt_hands_back_claims_carrying_the_closure_that_was_applied(mem):
+    """`WriteReceipt.invalidated` is the caller's record of what a write displaced, and
+    it is what a governance log renders. The name predates the two axes and now means
+    "closed out" rather than "`invalidated_at` was set" — so the claims in it have to say
+    which clock actually moved, or the field is a list of rows a reader will misread."""
+    mem.remember("user", "lives_in", "Berlin")
+    moved = mem.remember("user", "lives_in", "Lisbon")
+    corrected = mem.remember("user", "lives_in", "Porto", close="retired")
+
+    assert [(c.object, c.state) for c in moved.invalidated] == [("Berlin", "ended")]
+    assert [(c.object, c.state) for c in corrected.invalidated] == [("Lisbon", "retired")]
+    # Stamped objects, not rows read a half-step before the write, so what the caller
+    # logs is what the store holds.
+    for receipt in (moved, corrected):
+        for c in receipt.invalidated:
+            stored = mem.store.get_claim(c.id)
+            assert (c.valid_to, c.invalidated_at) == (stored.valid_to,
+                                                      stored.invalidated_at)
+
+
+def test_the_facade_and_the_reconciler_close_a_claim_the_same_way(mem):
+    """One rule, six callers. `Memvara.supersede` closes its predecessor itself, before
+    the reconciler runs, so the two are genuinely separate code paths reaching one shared
+    `types.close_out` — and if they drifted, the same slot would read differently
+    depending on whether the caller happened to know the old claim's id."""
+    began = utcnow() - timedelta(days=30)
+    moved = utcnow() - timedelta(days=5)
+
+    by_reconciler = mem.scope(user="r")
+    by_reconciler.remember("user", "lives_in", "Berlin", valid_from=began,
+                           recorded_at=began)
+    by_reconciler.remember("user", "lives_in", "Lisbon", valid_from=moved,
+                           recorded_at=moved)
+
+    by_facade = mem.scope(user="f")
+    by_facade.remember("user", "lives_in", "Berlin", valid_from=began, recorded_at=began)
+    old = by_facade.get_all()[0]
+    by_facade.supersede(old.id, Claim(subject="user", predicate="lives_in",
+                                      object="Lisbon", valid_from=moved,
+                                      recorded_at=moved), at=moved)
+
+    def shape(view):
+        return [(c.object, c.state, c.valid_from, c.valid_to, c.invalidated_at)
+                for c in view.history("user", "lives_in")]
+
+    assert shape(by_reconciler) == shape(by_facade)
+
+
 def test_remember_records_who_asserted_the_fact(mem):
     """An integration writing on someone else's behalf has to be able to say so, or a
     later audit cannot tell an imported memory from one this application asserted."""
@@ -1142,10 +1247,10 @@ def test_supersede_records_what_replaced_what(mem):
     assert [c.id for c in mem.why(replacement.id).superseded] == [old.id]
 
 
-def test_supersede_closes_both_time_axes_at_the_new_claims_instant(mem):
+def test_supersede_closes_the_old_claim_at_the_new_claims_instant(mem):
     """Retiring after the new claim is written lets the reconciler get there first and
-    stamp the retirement with the wall clock, which silently turns a backdated import
-    into a pile of things that all changed today."""
+    stamp the closure with the wall clock, which silently turns a backdated import into
+    a pile of things that all changed today."""
     then = utcnow() - timedelta(days=400)
     mem.remember("mem0:9f2c", "note", "Likes pizza", text="Likes pizza",
                  valid_from=then, recorded_at=then)
@@ -1156,20 +1261,76 @@ def test_supersede_closes_both_time_axes_at_the_new_claims_instant(mem):
                                 object="Likes calzone", text="Likes calzone",
                                 scope=mem.default_scope, valid_from=at, recorded_at=at))
 
-    retired = mem.get(old.id)
-    assert retired.invalidated_at == at and retired.valid_to == at
+    displaced = mem.get(old.id)
+    assert displaced.valid_to == at and displaced.invalidated_at is None
     as_of = mem.get_all(as_of=at - timedelta(days=1))
     assert [c.object for c in as_of] == ["Likes pizza"], "the past still reads correctly"
 
 
 def test_supersede_takes_an_explicit_instant_when_the_two_differ(mem):
-    mem.remember("user", "lives_in", "Berlin")
+    began = utcnow() - timedelta(days=30)
+    mem.remember("user", "lives_in", "Berlin", valid_from=began, recorded_at=began)
     old = mem.get_all()[0]
     at = utcnow() - timedelta(days=5)
 
     mem.supersede(old.id, Claim(subject="user", predicate="lives_in", object="Lisbon",
                                 scope=mem.default_scope), at=at)
-    assert mem.get(old.id).invalidated_at == at
+    assert mem.get(old.id).valid_to == at
+
+
+def test_a_supersession_dated_before_the_claim_it_replaces_collapses(mem):
+    """`valid_to` may meet `valid_from` and must never precede it. An interval that ends
+    before it starts is not a shorter fact, it is a row no `as_of` window can return
+    consistently — and `supersede()` used to write one, because it stamped `at` straight
+    onto the column without looking at where the claim began."""
+    mem.remember("user", "lives_in", "Berlin")
+    old = mem.get_all()[0]
+
+    mem.supersede(old.id, Claim(subject="user", predicate="lives_in", object="Lisbon",
+                                scope=mem.default_scope),
+                  at=utcnow() - timedelta(days=500))
+
+    collapsed = mem.get(old.id)
+    assert collapsed.valid_to == collapsed.valid_from
+    assert not collapsed.is_live()
+
+
+def test_supersede_lets_the_caller_say_which_kind_of_replacement_it_was(mem):
+    """A mutation log does not record *why* a value changed, and the two readings put
+    the row in different states — so the caller who has the log gets to choose, and the
+    default is the one that preserves a past that was true.
+
+    The mistake the default can still make (reading a correction as a change) leaves the
+    row over-trusted and correctable. The mistake it cannot make is the one that empties
+    out `valid_at`, which is unrecoverable from the data alone.
+    """
+    at = utcnow() - timedelta(days=5)
+    for close, expected in (("ended", "ended"), ("retired", "retired")):
+        view = mem.scope(user=close)
+        view.remember("user", "lives_in", "Berlin")
+        old = view.get_all()[0]
+        view.supersede(old.id, Claim(subject="user", predicate="lives_in",
+                                     object="Lisbon"), at=at, close=close)
+
+        after = view.get(old.id)
+        assert after.state == expected
+        assert after.invalidated_by is not None, "the pointer survives either closure"
+
+
+def test_a_superseded_claim_still_answers_for_the_period_it_held(mem):
+    """`supersede()`'s half of the headline fix, through the id-addressed door rather
+    than the slot. The old value is history, not an error, so it keeps answering "what
+    do we now believe was true then"."""
+    began = utcnow() - timedelta(days=400)
+    moved = utcnow() - timedelta(days=100)
+    mem.remember("user", "lives_in", "Berlin", valid_from=began, recorded_at=began)
+    old = mem.get_all()[0]
+    mem.supersede(old.id, Claim(subject="user", predicate="lives_in", object="Lisbon",
+                                valid_from=moved, recorded_at=moved), at=moved)
+
+    mid = began + timedelta(days=100)
+    assert [c.object for c in mem.get_all(valid_at=mid)] == ["Berlin"]
+    assert [c.object for c in mem.get_all()] == ["Lisbon"]
 
 
 def test_supersede_refuses_an_id_this_scope_cannot_see(mem):
@@ -1657,7 +1818,7 @@ def test_supersede_scopes_its_cited_turn_the_same_way(mem):
     assert mem.store.get_episode(fresh.id) is None
 
 
-def test_forget_returns_claims_stamped_with_the_retirement_it_just_did(mem):
+def test_forget_returns_claims_stamped_with_the_closure_it_just_did(mem):
     """Every claim this handed back said `invalidated_at=None` and `is_live()` true,
     while the same row re-read from the store read as retired — so a caller logging or
     rendering the result of the call that just retired them showed them live.
@@ -1671,10 +1832,48 @@ def test_forget_returns_claims_stamped_with_the_retirement_it_just_did(mem):
     assert [c.id for c in retired] == [mem.history("user", "lives_in")[0].id]
     for c in retired:
         assert c.invalidated_at is not None, "returned as live by the call that killed it"
-        assert c.valid_to is not None, "and both axes, or `is_live` disagrees with `repr`"
         assert not c.is_live()
         stored = mem.store.get_claim(c.id)
         assert (c.invalidated_at, c.valid_to) == (stored.invalidated_at, stored.valid_to)
+
+
+def test_forget_stops_belief_because_forgetting_is_something_we_do(mem):
+    """`forget` is about the holder of the memory, not about the world.
+
+    The call names no successor value, no end date and no evidence that anything changed
+    out there; it reads at the call site as "stop holding this". Closing valid time would
+    have it assert, on the caller's behalf, that the user stopped living somewhere at the
+    instant they asked us to drop the subject. It is also the slot-level twin of
+    `delete()` — "deletion here means what `forget` means" — and the two must land in the
+    same state or one operation has two doors that disagree.
+    """
+    mem.remember("user", "lives_in", "Berlin", user="alice")
+    mem.remember("user", "lives_in", "Paris", user="bob")
+
+    forgotten = mem.forget("user", "lives_in", user="alice")
+    deleted = mem.get_all(user="bob")[0]
+    mem.delete(deleted.id, user="bob")
+
+    assert [c.state for c in forgotten] == ["retired"]
+    assert forgotten[0].valid_to is None, "forget witnessed no world event"
+    assert mem.get(deleted.id, user="bob").state == forgotten[0].state, \
+        "one operation, two doors, one answer"
+
+
+def test_forget_can_close_out_a_slot_that_genuinely_finished(mem):
+    """The world-change reading, reachable and saying something else: everything in this
+    slot stopped being true at `at`, and we go on believing all of it."""
+    began = utcnow() - timedelta(days=30)
+    mem.remember("user", "works_at", "Acme", user="alice",
+                 valid_from=began, recorded_at=began)
+
+    ended = mem.forget("user", "works_at", user="alice", close="ended")
+
+    assert [c.state for c in ended] == ["ended"]
+    assert ended[0].invalidated_at is None
+    assert [c.object for c in mem.get_all(user="alice",
+                                          valid_at=began + timedelta(days=1))] == ["Acme"]
+    assert mem.get_all(user="alice") == []
 
 
 @pytest.mark.parametrize("key, value", [
@@ -1905,7 +2104,7 @@ def test_a_replacement_that_names_no_scope_does_not_land_in_another_tenant(tmp_p
 
         assert list(mem.store.iter_claims("default")) == [], "leaked out of the tenant"
         timeline = [(c.object, c.state) for c in mem.history("user", "lives_in")]
-        assert timeline == [("Berlin", "retired"), ("Lisbon", "live")]
+        assert timeline == [("Berlin", "ended"), ("Lisbon", "live")]
         # And it stayed Alice's: a sibling in the same tenant must not inherit it.
         assert mem.scope(user="bob").get_all() == []
 

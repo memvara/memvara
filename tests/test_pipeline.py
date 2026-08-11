@@ -120,7 +120,12 @@ def ep(content: str, role: str = "user", **kw) -> Episode:
 
 
 def live(store, tenant: str = "acme"):
-    return sorted((c.predicate, c.object) for c in store.iter_claims(tenant))
+    # `is_live` rather than `iter_claims`'s own filter. That one reads the belief axis
+    # alone — which is exactly what `include_invalidated` names — and a superseded claim
+    # now keeps its belief axis open, because it was true and we were never wrong about
+    # it. Without this the helper counted every city the user had ever lived in as live.
+    return sorted((c.predicate, c.object)
+                  for c in store.iter_claims(tenant) if c.is_live())
 
 
 # --- the headline number -----------------------------------------------------
@@ -214,8 +219,11 @@ def test_moving_city_supersedes_with_no_llm_call():
 
     berlin = first.added[0]
     stored = store.get_claim(berlin.id)
-    assert stored.invalidated_at is not None
-    assert stored.valid_to is not None
+    # Ended, not retired. The extraction path only ever reports what someone said about
+    # the world, so it is never in a position to mark a stored fact as an error — and
+    # a model deciding that on its own is the thing this write path exists not to do.
+    assert stored.state == "ended"
+    assert stored.valid_to is not None and stored.invalidated_at is None
     assert stored.invalidated_by == second.added[0].id
     assert [c.id for c in second.invalidated] == [berlin.id]
     store.close()
@@ -259,7 +267,11 @@ def test_retraction_leaves_no_live_negative_claim():
     assert [c.id for c in receipt.invalidated] == [added.added[0].id]
     assert receipt.added == []
     assert live(store) == []
-    assert store.get_claim(added.added[0].id).invalidated_at is not None
+    # "I no longer work at Acme" ends the employment; it does not say we were wrong to
+    # have recorded it. So the job is over on the world clock and still believed, which
+    # is what keeps "where did they work last year" answerable after they leave.
+    ended = store.get_claim(added.added[0].id)
+    assert ended.state == "ended" and ended.invalidated_at is None
     store.close()
 
 

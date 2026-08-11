@@ -55,7 +55,7 @@ Three more things differ and are handled rather than hidden:
   deletion that maps exactly — CrewAI means "wipe", memvara's `purge()` is a wipe.
 * **`update()` maps better than CrewAI's own contract.** "Replace the record with the
   same ID" becomes a supersession on a single-valued slot: the new text is asserted, the
-  old value is retired with `invalidated_by` pointing at its replacement, and
+  old value is ended with `invalidated_by` pointing at its replacement, and
   `history(subject, "note")` walks every version. CrewAI overwrites; nothing is kept.
 """
 
@@ -307,10 +307,16 @@ class MemvaraStorage:
         Through `history()` rather than a scan: the slot is an indexed lookup on
         `(subject, predicate)`, which is the same mechanism that makes contradiction
         resolution free.
+
+        `is_live` and not `invalidated_at is None`, which is what this used to test.
+        `history()` is oldest-first and a superseded version now keeps its transaction
+        time open — it was true, it is over — so that test matched the *first* version
+        this record ever had and every `update()` would have handed CrewAI back the text
+        it replaced.
         """
         subject = note_subject(record_id, prefix=SUBJECT_PREFIX)
         for claim in self.memory.history(subject, NOTE_PREDICATE, **self._kw):
-            if claim.invalidated_at is None:
+            if claim.is_live():
                 return claim
         return None
 
@@ -353,10 +359,11 @@ class MemvaraStorage:
         """Replace a record's text — as a supersession, keeping the version it replaced.
 
         CrewAI overwrites the row. Here the new text is asserted onto the same
-        single-valued slot, so the reconciler retires the old value and stamps
+        single-valued slot, so the reconciler ends the old value and stamps
         `invalidated_by` with the new claim's id; `Memvara.history(subject, "note")`
         then walks every version the record ever had, and `search(as_of=…)` still
-        returns the old one.
+        returns the old one. Ended rather than retired: an update says the record
+        changed, which is not the same as saying the previous text was wrong.
 
         Recorded at *now* rather than at `record.created_at`: CrewAI carries the
         original creation instant on an updated record, and using it as transaction time

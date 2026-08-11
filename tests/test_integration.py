@@ -65,14 +65,14 @@ def test_moving_city_retires_the_old_one(mem):
     assert [c.object for c in mem.get_all()] == ["Lisbon"]
 
 
-def test_the_retired_fact_is_kept_not_deleted(mem):
+def test_the_superseded_fact_is_kept_not_deleted(mem):
     mem.remember("user", "lives_in", "Berlin")
     mem.remember("user", "lives_in", "Lisbon")
     history = mem.history("user", "lives_in")
     assert [c.object for c in history] == ["Berlin", "Lisbon"]
-    assert history[0].invalidated_at is not None
+    # Ended, not retired: Berlin stopped being true, and we were never wrong about it.
+    assert [c.state for c in history] == ["ended", "live"]
     assert history[0].invalidated_by == history[1].id
-    assert history[1].invalidated_at is None
 
 
 def test_predicate_aliases_still_collide(mem):
@@ -105,8 +105,9 @@ def test_the_readme_walkthrough_holds_end_to_end(mem):
     mem.add("I live in Berlin and work at Acme")
     mem.add("Actually, I moved to Lisbon last month")
     assert [r.text for r in mem.search("where do they live?")][:1] == ["user lives in Lisbon"]
-    assert [(c.object, c.invalidated_at is not None)
-            for c in mem.history("user", "lives_in")] == [("Berlin", True), ("Lisbon", False)]
+    assert [(c.object, c.state)
+            for c in mem.history("user", "lives_in")] == [("Berlin", "ended"),
+                                                          ("Lisbon", "live")]
 
 
 def test_multi_valued_predicates_accumulate(mem):
@@ -464,9 +465,9 @@ def test_a_bound_scope_behaves_exactly_like_the_keywords_it_replaces(mem):
 
     assert [r.text for r in alice.search("where do they live?")][:1] == \
         ["user lives in Lisbon"]
-    assert [(c.object, c.invalidated_at is not None)
-            for c in alice.history("user", "lives_in")] == [("Berlin", True),
-                                                            ("Lisbon", False)]
+    assert [(c.object, c.state)
+            for c in alice.history("user", "lives_in")] == [("Berlin", "ended"),
+                                                            ("Lisbon", "live")]
     assert alice.get_all() == mem.get_all(user="alice")
 
 

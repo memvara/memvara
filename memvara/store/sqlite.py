@@ -2678,20 +2678,30 @@ class SQLiteStore:
 
         Counted in SQLite rather than in the index, because the index is a cache of a
         table that other processes also write to.
+
+        **`live_claims` is the full liveness predicate, not `invalidated_at IS NULL`.**
+        Those were the same number only while superseding closed both clocks. Now that it
+        closes valid time alone, the cheap test counts every superseded version of every
+        slot as live — so a store holding one address that has changed four times would
+        report four live claims, and `repr(Memvara)` would show `claims=5/5` for a store
+        with one current fact in it. The three totals therefore do not sum: a claim that
+        has *ended* is neither live nor invalidated, which is the whole point of there
+        being two axes, and `claims` is the only one that counts everything.
         """
         where = " WHERE tenant = ?" if tenant is not None else ""
         params: tuple = (tenant,) if tenant is not None else ()
         and_ = " AND" if tenant is not None else " WHERE"
+        live, lp = self._live_clause(None, None, include_invalidated=False)
 
         with self._read() as conn:
-            def q(sql: str) -> int:
-                return int(conn.execute(sql, params).fetchone()[0])
+            def q(sql: str, extra: Sequence[Any] = ()) -> int:
+                return int(conn.execute(sql, (*params, *extra)).fetchone()[0])
 
             return {
                 "episodes": q(f"SELECT COUNT(*) FROM episodes{where}"),
                 "claims": q(f"SELECT COUNT(*) FROM claims{where}"),
                 "live_claims": q(
-                    f"SELECT COUNT(*) FROM claims{where}{and_} invalidated_at IS NULL"),
+                    f"SELECT COUNT(*) FROM claims{where}{and_} {live}", lp),
                 "invalidated": q(
                     f"SELECT COUNT(*) FROM claims{where}{and_} invalidated_at IS NOT NULL"),
                 "embeddings": (

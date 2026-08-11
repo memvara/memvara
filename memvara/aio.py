@@ -129,27 +129,29 @@ class AsyncMemvara:
     async def supersede(self, old_claim_id: str, new_claim: Claim, *,
                         at: datetime | None = None,
                         sources: Sequence[str | Episode] | None = None,
+                        close: str = "ended",
                         tenant=None, user=None, agent=None,
                         session=None) -> WriteReceipt:
         """See `Memvara.supersede`."""
         return await asyncio.to_thread(
             self.memvara.supersede, old_claim_id, new_claim, at=at, sources=sources,
-            tenant=tenant, user=user, agent=agent, session=session)
+            close=close, tenant=tenant, user=user, agent=agent, session=session)
 
     async def forget(self, subject: str, predicate: str, *, tenant=None, user=None,
-                     agent=None, session=None,
-                     at: datetime | None = None) -> list[Claim]:
+                     agent=None, session=None, at: datetime | None = None,
+                     close: str = "retired") -> list[Claim]:
         """See `Memvara.forget`."""
         return await asyncio.to_thread(
             self.memvara.forget, subject, predicate, tenant=tenant, user=user,
-            agent=agent, session=session, at=at)
+            agent=agent, session=session, at=at, close=close)
 
-    async def delete(self, claim_id: str, *, at: datetime | None = None, tenant=None,
+    async def delete(self, claim_id: str, *, at: datetime | None = None,
+                     close: str = "retired", tenant=None,
                      user=None, agent=None, session=None) -> bool:
         """See `Memvara.delete` — retires, does not erase."""
         return await asyncio.to_thread(
-            self.memvara.delete, claim_id, at=at, tenant=tenant, user=user, agent=agent,
-            session=session)
+            self.memvara.delete, claim_id, at=at, close=close, tenant=tenant, user=user,
+            agent=agent, session=session)
 
     async def erase(self, claim_id: str, *, sources: bool = False, tenant=None,
                     user=None, agent=None, session=None) -> bool:

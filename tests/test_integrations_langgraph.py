@@ -1225,12 +1225,16 @@ def test_why_resolves_the_claim_and_has_no_source_turn_to_show(store, mem):
 
 def test_history_is_the_thing_no_other_key_value_store_can_answer(store):
     """`get()` is the current value; this is the timeline, each entry carrying when it
-    was believed, when belief ended and what replaced it."""
+    held, when it stopped holding and what replaced it.
+
+    Every superseded field reads `ended`: a `put` says the value changed, which is a
+    world event, and LangGraph has no way to express "the previous value was a mistake".
+    `_remove` is the call that stops belief, and it is a different call."""
     for city in ("Berlin", "Lisbon", "Porto"):
         store.put(NS, "m1", {"city": city})
     timeline = store.history(NS, "m1", "city")
     assert [c.object for c in timeline] == ["Berlin", "Lisbon", "Porto"]
-    assert [c.invalidated_at is None for c in timeline] == [False, False, True]
+    assert [c.state for c in timeline] == ["ended", "ended", "live"]
 
 
 # =====================================================================================

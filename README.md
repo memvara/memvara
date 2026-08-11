@@ -351,6 +351,21 @@ mem.remember("user", "born_in", "Osaka", valid_from=datetime(1990, 1, 1))
 # true since 1990, known since today — both recorded honestly
 ```
 
+Ending a claim moves **one** of those clocks, and which one is the whole distinction:
+
+```python
+mem.remember("user", "lives_in", "Lisbon")                    # she moved
+# -> Berlin: valid_to set, still believed          state == "ended"
+mem.remember("user", "lives_in", "Lisbon", close="retired")   # we misheard her
+# -> Berlin: invalidated_at set, interval untouched  state == "retired"
+```
+
+`ended` is the default, because a new value is news about the world, not a complaint
+about the record — so `get_all(valid_at=<while Berlin held>)` keeps answering `Berlin`.
+`close="retired"` is the caller stating a correction, and only a caller can know that.
+`forget()` and `delete()` default the other way: forgetting is something the holder of a
+memory does, so they stop belief and assert nothing about the world.
+
 ### Contradictions resolve without an LLM
 
 The insight: **contradiction is mostly a schema property, not a semantic one.** "Lives in"
@@ -508,11 +523,12 @@ above cannot be improved by this, and is not claimed to be.
 
 ### Nothing is silently lost
 
-Superseding sets an end timestamp; it never deletes. So the audit trail is free:
+Superseding sets an end timestamp; it never deletes, and it never records the old value
+as an error. So the audit trail is free:
 
 ```python
 for c in mem.history("user", "works_at"):
-    print(c.object, c.recorded_at.date(), "-> retired by", c.invalidated_by)
+    print(c.object, c.recorded_at.date(), c.state, "-> replaced by", c.invalidated_by)
 
 prov = mem.why(claim.id)
 prov.episodes      # the exact source turns this was derived from

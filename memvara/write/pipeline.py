@@ -79,7 +79,7 @@ from ..telemetry import (
     Recorder,
     script_of,
 )
-from ..types import Claim, Derivation, Episode, MemoryType, WriteReceipt, utcnow
+from ..types import Claim, Closure, Derivation, Episode, MemoryType, WriteReceipt, utcnow
 from .fast import FastExtractor
 from .gate import SalienceGate
 from .reconcile import ReconcileResult, Reconciler
@@ -231,8 +231,15 @@ class WritePipeline:
         batch = getattr(self.store, "batch", None)
         return batch() if batch is not None else nullcontext()
 
-    def assert_claim(self, claim: Claim) -> WriteReceipt:
-        """Write a caller-supplied claim. Never consults a model, by construction."""
+    def assert_claim(self, claim: Claim, *, close: Closure = "ended") -> WriteReceipt:
+        """Write a caller-supplied claim. Never consults a model, by construction.
+
+        `close` is forwarded to `Reconciler.apply` and decides which clock stops on
+        anything this claim displaces: `"ended"` (the world changed — the default) or
+        `"retired"` (the record was wrong). `add()` has no such parameter on purpose:
+        extraction only ever produces reports about the world, and a model is not
+        allowed to decide that something we already stored was a mistake.
+        """
         t0 = perf_counter()
         now = utcnow()
         receipt = WriteReceipt()
@@ -248,7 +255,8 @@ class WritePipeline:
             claim.extractor = "api/assert"
 
         to_embed: list[Claim] = []
-        self._absorb(claim, self.reconciler.apply(claim, now=now), receipt, to_embed)
+        self._absorb(claim, self.reconciler.apply(claim, now=now, close=close),
+                     receipt, to_embed)
         self._write_embeddings(to_embed)
         receipt.latency_ms = (perf_counter() - t0) * 1000.0
         if self.telemetry is not None:
@@ -320,11 +328,18 @@ class WritePipeline:
                                       if ep.id in c.sources)
         else:
             found = citing(ep.scope.tenant, ep.id)
-        # Retired claims are skipped, which is what the scan did — `iter_claims` excludes
-        # them by default — and is the behaviour worth keeping: reinforcement raises a
-        # claim's storage strength so retrieval ranks it higher, and a claim nothing
-        # believes any more has no ranking to raise.
-        return [(c, [ep.id], at) for c in found if c.invalidated_at is None]
+        # Claims that are no longer in force are skipped: reinforcement raises a claim's
+        # storage strength so retrieval ranks it higher, and neither a claim we have
+        # stopped believing nor one that has finished being true has a present-tense
+        # ranking to raise.
+        #
+        # `is_live` and not `invalidated_at is None`, which is what this read used to be.
+        # Once supersession stopped closing transaction time, that test started returning
+        # *every superseded version of the slot* — so a repeated turn would have walked
+        # back up the chain restating the storage strength and the observation stamp of
+        # every city the user had ever lived in. Same set as before the change; the
+        # predicate is now the one that actually means it.
+        return [(c, [ep.id], at) for c in found if c.is_live(now)]
 
     def _tier0_near_dupes(self, episodes: Sequence[Episode], receipt: WriteReceipt,
                           now, pending: list[_Reinforcement]) -> list[Episode]:

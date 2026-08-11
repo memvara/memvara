@@ -41,7 +41,9 @@ from typing import Any, Mapping
 
 from ..core import Memvara
 from ..schema import Cardinality, PredicateSpec, Volatility
-from ..types import Claim, Derivation, Episode, MemoryType, Scope, WriteReceipt
+from ..types import (
+    Claim, Closure, Derivation, Episode, MemoryType, Scope, WriteReceipt, close_out,
+)
 
 #: Predicate every note lands on. Deliberately generic: it is the *subject* that
 #: identifies the memory, so one predicate serves the whole corpus.
@@ -136,8 +138,9 @@ def build_note(
 
 
 def write_note(mem: Memvara, claim: Claim, episode: Episode, *,
-               retire: Claim | None = None, at: datetime | None = None) -> WriteReceipt:
-    """Persist the source turn, retire the value it replaces, assert the claim — atomic.
+               retire: Claim | None = None, at: datetime | None = None,
+               close: Closure = "ended") -> WriteReceipt:
+    """Persist the source turn, close out the value it replaces, assert the claim — atomic.
 
     Separately committed, a crash between the turn and the claim leaves a claim citing an
     episode that does not exist — a dangling `why()` in the one library whose pitch is
@@ -145,12 +148,14 @@ def write_note(mem: Memvara, claim: Claim, episode: Episode, *,
     assertion leaves the slot empty, which is worse: an import that drops a memory rather
     than updating it.
 
-    `retire` is the value this note replaces, and `at` the instant it stopped being
-    believed. The retirement records `claim.id` as what replaced it, which is the pointer
-    `Memvara.delete` cannot write and the whole reason an import reconstructs history
-    rather than just replaying its final state. It goes **before** the assertion, so the
-    reconciler cannot get there first and stamp the wall clock over `at` — which would
-    silently turn a backdated import into a pile of things that all changed today.
+    `retire` is the value this note replaces and `at` the instant it was replaced, read
+    on whichever clock `close` names — `"ended"` by default, because a mem0 UPDATE row
+    says the memory's text changed, not that the previous text had been a mistake. The
+    closure records `claim.id` as what replaced it, which is the pointer `Memvara.delete`
+    cannot write and the whole reason an import reconstructs history rather than just
+    replaying its final state. It goes **before** the assertion, so the reconciler cannot
+    get there first and stamp the wall clock over `at` — which would silently turn a
+    backdated import into a pile of things that all changed today.
 
     This is `Memvara._write_claim` minus one step, and the missing step is deliberate:
     the facade also *embeds* each source turn, and a note's episode is a byte-identical
@@ -164,17 +169,15 @@ def write_note(mem: Memvara, claim: Claim, episode: Episode, *,
         if retire is not None:
             # `retire` and `at` arrive as independent optionals, so `retire=old` with no
             # `at` is a legal call — and passing that `None` straight through is not a
-            # no-op, it is corruption in both directions. `invalidate(id, None)` writes a
-            # NULL `invalidated_at`, which reads as *not retired* while
-            # `invalidated_by` says otherwise; and `set_valid_to(id, None)` does not
-            # merely fail to close the interval, it **reopens** one that was already
-            # closed. The row then asserts "superseded by X" and "still live" at once.
-            # Today the reconciler happens to rescue the note path a moment later,
-            # because the note predicate is single-valued and `assert_claim` supersedes
-            # through the same slot — correct by accident, from two statements away.
+            # no-op, it is corruption: it would leave a NULL instant on whichever axis
+            # `close` names, which either reads as *not retired* beside an
+            # `invalidated_by` saying otherwise, or **reopens** an interval that was
+            # already closed. The row would then assert "superseded by X" and "still
+            # live" at once. Today the reconciler happens to rescue the note path a
+            # moment later, because the note predicate is single-valued and
+            # `assert_claim` supersedes through the same slot — correct by accident, from
+            # two statements away.
             when = at if at is not None else claim.recorded_at
-            mem.store.invalidate(retire.id, when, claim.id)
-            # Both axes together: committed separately, an `as_of` query between the two
-            # sees a claim that is retracted and still in force.
-            mem.store.set_valid_to(retire.id, when)
-        return mem.writer.assert_claim(claim)
+            close_out(retire, when, claim.id, close)
+            mem.store.put_claim(retire)
+        return mem.writer.assert_claim(claim, close=close)

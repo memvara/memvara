@@ -446,7 +446,11 @@ def test_an_update_supersedes_through_the_slot_and_records_what_replaced_it(mem,
     timeline = mem.history(note_subject("m1"), NOTE_PREDICATE)
     assert [c.text for c in timeline] == ["Lives in Berlin", "Lives in Lisbon"]
     old, new = timeline
-    assert old.invalidated_at == at(30) and old.valid_to == at(30)
+    # A mem0 UPDATE row says the memory's text changed on that date, not that the
+    # previous text had been a mistake — so the old value ends and stays believed, and
+    # `search(valid_at=<while Berlin held>)` over an imported store still answers Berlin.
+    assert old.valid_to == at(30) and old.invalidated_at is None
+    assert old.state == "ended"
     assert old.invalidated_by == new.id
     # Which is what makes the provenance chain answerable in the other direction.
     assert [c.id for c in mem.why(new.id).superseded] == [old.id]
@@ -735,11 +739,11 @@ def test_an_import_crash_cannot_leave_a_note_slot_empty(mem):
     assert still[0].invalidated_at is None and still[0].valid_to is None
 
 
-def test_retiring_a_note_without_an_explicit_instant_still_closes_both_axes(mem):
+def test_retiring_a_note_without_an_explicit_instant_still_closes_the_row(mem):
     """`write_note(retire=old)` with no `at` is a legal call, and passing that `None`
-    through is not a no-op in either direction: `invalidate(id, None)` writes a NULL
-    `invalidated_at` that reads as *not retired* while `invalidated_by` says otherwise,
-    and `set_valid_to(id, None)` reopens an interval that was already closed.
+    through is not a no-op: it leaves a NULL instant on whichever axis `close` names,
+    which either reads as *not retired* beside an `invalidated_by` saying otherwise, or
+    **reopens** an interval that was already closed.
 
     The note path survived it only because the note predicate is single-valued, so the
     reconciler superseded through the same slot two statements later. Correct by
@@ -756,11 +760,27 @@ def test_retiring_a_note_without_an_explicit_instant_still_closes_both_axes(mem)
                              scope=mem.default_scope, ts=at(1))
     write_note(mem, second, ep2, retire=live)      # deliberately no `at=`
 
-    retired = mem.store.get_claim(live.id)
-    assert retired.invalidated_at is not None, "row says superseded and not retired"
-    assert retired.invalidated_by == second.id
-    assert retired.valid_to is not None, "the valid interval was reopened"
-    assert retired.valid_to <= retired.invalidated_at
+    displaced = mem.store.get_claim(live.id)
+    assert displaced.valid_to == second.recorded_at, "fell back to the claim's own instant"
+    assert displaced.invalidated_by == second.id
+    assert not displaced.is_live(), "row says superseded and still in force"
+
+
+def test_an_importer_replaying_a_correction_can_say_so(mem):
+    """`write_note` carries the same `close` the facade does, because an importer is
+    exactly the caller who might know that a log row was a fix rather than a change."""
+    from memvara.compat._notes import build_note, write_note
+
+    ensure_note_predicate(mem, NOTE_PREDICATE, "default")
+    first, ep1 = build_note(memory_id="m3", text="Likes pizza",
+                            scope=mem.default_scope, ts=at(0))
+    live = write_note(mem, first, ep1).added[0]
+    second, ep2 = build_note(memory_id="m3", text="Likes calzone",
+                             scope=mem.default_scope, ts=at(1))
+    write_note(mem, second, ep2, retire=live, at=at(1), close="retired")
+
+    corrected = mem.store.get_claim(live.id)
+    assert corrected.state == "retired" and corrected.valid_to is None
 
 
 def test_retiring_a_note_without_an_instant_does_not_erase_an_existing_valid_to(mem):

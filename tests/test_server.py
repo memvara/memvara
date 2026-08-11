@@ -471,7 +471,7 @@ def test_history_shows_every_value_a_slot_has_held(server):
     body = text(server, "memory_history", {"predicate": "lives_in"})
     lines = body.splitlines()
     assert "2 recorded value(s)" in lines[0]
-    assert "Berlin" in lines[1] and "retired" in lines[1]
+    assert "Berlin" in lines[1] and "ended" in lines[1]
     assert "Lisbon" in lines[2] and "live" in lines[2]
 
 

@@ -715,11 +715,14 @@ def test_simulation_reports_only_real_job_changes(mem):
     # `_row_of` matches literal text, so this doubles as the display assertion: every
     # stored object is still a spelling the user actually used, not a canonical form.
     assert [_row_of(c.object) for c in history] == list(TIMELINE)
-    # Five retirements, one live claim.
+    # Five endings, one live claim — and *endings*, not retirements: the user really did
+    # work at each of those places, so none of those rows is an error. Counting them with
+    # `invalidated_at` was counting job changes as mistakes.
     assert sum(1 for c in history if c.is_live()) == 1
-    assert sum(1 for c in history if c.invalidated_at is not None) == len(TIMELINE) - 1
+    assert sum(1 for c in history if c.state == "ended") == len(TIMELINE) - 1
+    assert sum(1 for c in history if c.state == "retired") == 0
 
-    # Each retirement is explained by the claim that replaced it, and by nothing else.
+    # Each ending is explained by the claim that replaced it, and by nothing else.
     for older, newer in zip(history, history[1:]):
         assert older.invalidated_by == newer.id
         assert mem.why(newer.id).superseded == [older]

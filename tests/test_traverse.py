@@ -86,6 +86,43 @@ def test_a_path_is_never_stitched_from_edges_that_were_never_believed_together(w
         assert found == [], f"connected them at {instant}"
 
 
+def test_an_ended_edge_is_not_walked_as_live(mem):
+    """A hop whose *world* clock has closed is over, whatever its belief clock says.
+
+    Since supersession stopped closing transaction time, every superseded edge in a store
+    the library wrote itself carries `invalidated_at=None` — so a traversal that read
+    liveness off that column alone would happily walk "Alice reports to Dana" years after
+    Alice started reporting to someone else, and present it as a current connection.
+    `Store.adjacent` applies the full liveness predicate, which is what makes this hold;
+    the point of the test is that the write path can now *produce* the row that would
+    catch a backend that did not.
+
+    Written through `remember()` on purpose, unlike everything else in this file: the
+    shape being checked is exactly the one the ordinary write path emits.
+    """
+    from datetime import timedelta
+    from memvara.types import utcnow
+
+    then = utcnow() - timedelta(days=800)
+    moved = utcnow() - timedelta(days=100)
+    mem.remember("Alice", "reports_to", "Dana", valid_from=then, recorded_at=then)
+    mem.remember("Dana", "works_at", "Acme", valid_from=then, recorded_at=then)
+    assert mem.paths_between("Alice", "Acme"), "the chain held while Dana was at Acme"
+
+    mem.remember("Dana", "works_at", "Globex", valid_from=moved, recorded_at=moved)
+    acme = [c for c in mem.history("Dana", "works_at") if c.object == "Acme"][0]
+    assert acme.state == "ended" and acme.invalidated_at is None
+
+    assert mem.paths_between("Alice", "Acme") == [], "walked an edge that had finished"
+    assert rendered(mem.paths_between("Alice", "Globex")) == [
+        "Alice -reports_to-> Dana -works_at-> Globex"], "and the live one still walks"
+    # Still reachable where it genuinely held, which is the other half of the rule:
+    # ended is not deleted.
+    assert rendered(mem.paths_between("Alice", "Acme",
+                                      valid_at=moved - timedelta(days=1))) == [
+        "Alice -reports_to-> Dana -works_at-> Acme"]
+
+
 def test_a_chain_that_did_hold_at_once_is_returned_at_that_instant_and_not_after(walker,
                                                                                 store):
     """The other half of the same rule: `as_of` is not a filter on the newest edge, it is

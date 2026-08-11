@@ -14,9 +14,17 @@ no vector-store dump required, and `memories=` is there only to recover the enti
 
 **Phase 1 is lossless and costs zero tokens.** Each memory becomes a note (see
 `_notes`) written at its original timestamp on *both* axes, and the log is then replayed
-in `created_at` order: an UPDATE retires the old value through the same slot and asserts
-the new one with an `invalidated_by` pointer, and a DELETE closes both axes at the
+in `created_at` order: an UPDATE *ends* the old value through the same slot and asserts
+the new one with an `invalidated_by` pointer, and a DELETE closes transaction time at the
 instant mem0 stopped believing it.
+
+Those are two different clocks on purpose. An UPDATE says the memory's text changed, not
+that the previous text had been a mistake, so the old value keeps its interval and stays
+believed — which is what makes `search(valid_at=<while it held>)` work over an imported
+store. A DELETE says mem0 stopped holding the memory, which is a statement about the
+record and about nothing in the world, so belief is the only thing that stops.
+`import_mem0` has no `close=` because the log's two row types already name which is
+which; a caller replaying corrections by hand has `Memvara.supersede(close=...)`.
 
 That replay is the demo. mem0's own log is a transaction-time history it cannot answer
 questions about — `history(memory_id)` returns rows, not a queryable past — and running

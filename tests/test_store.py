@@ -806,6 +806,28 @@ def test_stats_counts_live_and_invalidated_separately(store, emb):
                  "invalidated": 1, "embeddings": 2}
 
 
+def test_live_claims_is_the_liveness_predicate_and_not_the_invalidated_column(store, emb):
+    """`live_claims` used to be `invalidated_at IS NULL`, which was the same number only
+    while superseding closed both clocks. It closes valid time alone now, so the cheap
+    test counts every superseded version of every slot as live — a store holding one
+    address that has changed four times would report four live claims, and
+    `repr(Memvara)` would show `claims=5/5` for a store with one current fact in it.
+
+    The three totals therefore do not sum, and that is the model rather than a rounding
+    error: a claim that has *ended* is neither live nor invalidated. Any backend
+    implementing `Store` has to count it the same way, or the same store reports a
+    different size depending on where its rows live.
+    """
+    put(store, emb, object="Berlin", valid_to=T1)      # ended: over, still believed
+    put(store, emb, object="Lisbon", predicate="p2")   # live
+    gone = put(store, emb, object="Rome", predicate="p3")
+    store.invalidate(gone.id, T1, None)                # retired: no longer believed
+
+    s = store.stats()
+    assert (s["claims"], s["live_claims"], s["invalidated"]) == (3, 1, 1)
+    assert s["live_claims"] + s["invalidated"] < s["claims"], "three states, not two"
+
+
 # --- Durability and concurrency --------------------------------------------
 
 def test_store_persists_across_reopen(tmp_path, emb):

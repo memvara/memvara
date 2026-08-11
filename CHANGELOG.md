@@ -9,7 +9,50 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Superseding a claim no longer records it as an error.** `Reconciler._retire` closed
+  *both* clocks when one value replaced another. `valid_to` was right — Berlin stopped
+  being true when Lisbon began — but `invalidated_at` means *we no longer believe this
+  record*, and the record was never wrong. Every superseded claim in every store this
+  library wrote was marked as a mistake.
+
+  The consequence was that one of the two readings the axes had just gained did not work
+  at all: **"what do we now believe was true in June" returned nothing on any history the
+  write path produced.**
+
+  ```python
+  mem.remember("user", "lives_in", "Berlin", valid_from=J23, recorded_at=J23)
+  mem.remember("user", "lives_in", "Lisbon", valid_from=J26, recorded_at=J26)
+  mem.get_all(as_of=MID)      # ['Berlin']  — worked, and hid the bug
+  mem.get_all(valid_at=MID)   # []          — now ['Berlin']
+  ```
+
+  `as_of` kept answering the whole time, because it rewinds the belief clock past the
+  supersession and so never reads the stamp that was wrong. `valid_at` worked only on
+  stores built by calling `store.put_claim` directly — which is what
+  `tests/test_bitemporal.py`'s fixture did, and its docstring said why.
+
+  The rule now, one line: **closing valid time says the world changed; closing
+  transaction time says the record was wrong, and no write asserts both.** Supersession
+  and retraction are always the first kind — the reconciler is told "here is the new
+  value", never "the old one was a mistake" — so they leave `invalidated_at` unset,
+  keep `invalidated_by`, and produce `Claim.state == "ended"`. `retired` now means what
+  its name says.
+
 ### Added
+
+- **`close=` on the four writes that end a claim**, so both readings are expressible and
+  neither is guessed: `remember`, `supersede`, `forget` and `delete`, on `Memvara`,
+  `ScopedMemvara` and `AsyncMemvara`, plus `Reconciler.apply`, `WritePipeline.assert_claim`
+  and `compat._notes.write_note`. It takes the two words `Claim.state` already uses.
+
+  `remember` and `supersede` default to `"ended"`: a new value is news about the world.
+  `forget` and `delete` default to `"retired"`: forgetting is something the holder of a
+  memory does, and neither call names a successor, an end date, or any evidence that
+  something changed out in the world — so closing valid time would assert a world event
+  on the caller's behalf. An unknown value raises rather than resolving to either, since
+  the two mean opposite things about whether a stored fact was ever true.
 
 - **Two independent time axes: `valid_at` and `known_at`.** Bitemporal data answers four
   questions and this library could express one of them. `as_of` moves both clocks to the

@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal, cast
 
 from .entities import OWNER_SEP, entity_key
 
@@ -144,6 +144,82 @@ MAX_SALIENCE = 5.0
 #: serialized, where `isinstance` cannot follow it.
 CLAIM = "claim"
 EPISODE = "episode"
+
+# --- closing a claim out --------------------------------------------------------
+
+#: Which clock stops when a write ends a claim's life, named by the state it leaves
+#: behind (see `Claim.state`). The two are not interchangeable and the difference is the
+#: whole bitemporal model:
+#:
+#: ``"ended"``    valid time closes. **The world changed.** The claim was true and is not
+#:                any more, and we still believe every word of it — which is what keeps it
+#:                answering `valid_at=<back then>`.
+#: ``"retired"``  transaction time closes. **The record was wrong.** We have stopped
+#:                believing it, so it answers nothing at any world-time from here on; the
+#:                row still says what it always said, which is what an audit reads.
+#:
+#: Each closure moves exactly one axis, and neither ever moves both. Closing valid time
+#: on a mistaken row would assert a world event nobody witnessed; closing transaction
+#: time on a superseded row calls a true record an error. Supersession — the only thing
+#: the reconciler is ever told about — is always the first kind, so ``"ended"`` is the
+#: default everywhere this appears.
+Closure = Literal["ended", "retired"]
+
+#: Every legal `Closure`, for validation and for error messages that can list the options.
+CLOSURES: tuple[Closure, ...] = ("ended", "retired")
+
+
+def closure(value: str) -> Closure:
+    """Validate a caller-supplied `close=`, or raise with both readings spelled out.
+
+    A typo would otherwise be silently indistinguishable from the default, and the two
+    values mean opposite things about whether a stored fact was ever true — which is the
+    one mistake in this library that cannot be found by reading the data afterwards.
+
+    >>> closure("retired")
+    'retired'
+    >>> closure("deleted")                       # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+    ValueError: close='deleted' is not a closure...
+    """
+    if value in CLOSURES:
+        return cast(Closure, value)
+    raise ValueError(
+        f"close={value!r} is not a closure. Use close='ended' when the world changed — "
+        "the claim was true and stopped being true, and we still believe it — or "
+        "close='retired' when the record was wrong and we no longer believe it at all."
+    )
+
+
+def close_out(claim: "Claim", at: datetime, by: str | None, close: Closure) -> None:
+    """Stamp one end-of-life onto a claim in memory. The caller persists it.
+
+    The single implementation of the rule above, shared by every path that ends a claim:
+    the reconciler's supersessions and retractions, `Memvara.forget`, `Memvara.delete`,
+    `Memvara.supersede` and the mem0 importer. Six callers wrote this out for themselves
+    before the axes were separated, and every one of them wrote it the same wrong way —
+    which is the argument for there being one of it.
+
+    `at` is the instant on whichever axis `close` names: when the world moved for
+    `"ended"`, when belief stopped for `"retired"`. `by` is the claim that displaced this
+    one, or `None` where nothing did (`forget`, `delete`); it is written under either
+    closure, because "this is what displaced me" is true whichever clock stopped.
+
+    The object is stamped, not just the database. `forget()` used to hand back claims
+    read *before* its update ran, so every claim the call had just closed out reported
+    itself live to anyone who logged or rendered the return value.
+    """
+    claim.invalidated_by = by
+    if close == "retired":
+        claim.invalidated_at = as_utc(at)
+        return
+    # Never before the claim's own start: a closure backdated past the fact it closes
+    # collapses the interval to zero length rather than inverting it. An interval that
+    # ends before it begins is not a shorter fact, it is a row no `as_of` window can
+    # return consistently.
+    edge = max(as_utc(at), as_utc(claim.valid_from))
+    if claim.valid_to is None or as_utc(claim.valid_to) > edge:
+        claim.valid_to = edge
 
 
 def _new_id(prefix: str) -> str:
@@ -734,6 +810,11 @@ class WriteReceipt:
 
     episode_ids: list[str] = field(default_factory=list)
     added: list[Claim] = field(default_factory=list)
+    #: Claims this write closed out, as they read *after* the write. The name predates
+    #: the two axes and is kept because it is on the published API: read it as "closed
+    #: out", not as "`invalidated_at` was set". Under the default `close="ended"` these
+    #: are claims whose *valid* time was closed — still believed, no longer in force —
+    #: and `Claim.state` on each is the field that says which axis actually moved.
     invalidated: list[Claim] = field(default_factory=list)
     reinforced: list[Claim] = field(default_factory=list)  # already known, salience bumped
     skipped: int = 0                                       # turns that carried no durable fact

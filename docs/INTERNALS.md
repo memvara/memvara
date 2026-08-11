@@ -19,9 +19,17 @@ importable from the foundation modules:
    `extract()` and `resolve_predicate()` may touch a model.
 2. **Unknown predicates default to `Cardinality.MANY`.** Wrongly retiring a true fact is
    worse than keeping two competing ones.
-3. **Nothing is ever hard-deleted by the engine.** Superseding a claim sets
-   `invalidated_at` / `invalidated_by`. History must stay queryable via `known_at` and
-   `as_of`.
+3. **Nothing is ever hard-deleted by the engine, and end-of-life moves exactly one
+   clock.** Closing valid time (`valid_to`) says *the world changed*; closing transaction
+   time (`invalidated_at`) says *the record was wrong*. They are different events and no
+   write may assert both. Superseding a claim therefore sets `valid_to` and
+   `invalidated_by` and leaves `invalidated_at` unset — the old value stopped being true,
+   and we were never mistaken about it. `Claim.state` names the outcome: `live`, `ended`,
+   `retired`. History must stay queryable via `known_at` **and** `valid_at`; the second
+   of those returned nothing on any history the engine wrote itself for as long as
+   supersession closed both clocks. The correcting reading is reachable, never guessed:
+   `close="retired"` on `remember`, `supersede`, `forget` and `delete`, defaulting to
+   `"ended"` everywhere except `forget`/`delete`, which are belief operations by name.
 4. **Every claim carries provenance.** `sources` must be populated with the episode ids
    the claim came from, and `derivation` must reflect how it was produced.
 5. **Everything must run with no API key and no network.** `NullLLM` + `HashingEmbedder`
@@ -76,9 +84,13 @@ nothing rather than a wrong triple; the LLM tier is the fallback. Set
 ```python
 class Reconciler:
     def __init__(self, store: Store, registry: PredicateRegistry) -> None
-    def apply(self, claim: Claim, *, now: datetime | None = None) -> ReconcileResult
+    def apply(self, claim: Claim, *, now: datetime | None = None,
+              close: Closure = "ended") -> ReconcileResult
 ```
-The contradiction engine. For a candidate claim:
+The contradiction engine. `close` decides which clock stops on whatever the candidate
+displaces, and `"ended"` is the only answer this class could reach on its own: it is
+told "here is the new value" and never "the old one was a mistake". For a candidate
+claim:
 
 1. **Exact duplicate** — a live claim with the same `value_key` exists: do not insert.
    Bump `observation_count`, raise the *storage* strength (`Claim.salience_base`) and
@@ -88,10 +100,18 @@ The contradiction engine. For a candidate claim:
    — 2.9 days for a FAST predicate, and permanently, since age only grows.
 2. **Conflict** — the predicate is `Cardinality.ONE` and live claims share the candidate's
    `fact_key` with a different `value_key`: insert the new claim, and for each superseded
-   claim set `invalidated_at=now`, `invalidated_by=<new id>`, and `valid_to=now`.
-   Return `action="supersede"` with the list.
-3. **Retraction** — candidate has `polarity == -1`: invalidate matching live claims and do
-   not store the negative claim as a live fact.
+   claim set `invalidated_by=<new id>` plus `valid_to=<the new claim's valid_from>`,
+   leaving `invalidated_at` unset. The old value stopped being true where the new one
+   begins; it was not an error, so nothing on the belief clock moves and
+   `get_all(valid_at=<back then>)` still returns it. Under `close="retired"` the axes
+   swap: `invalidated_at=now` and `valid_to` untouched, because a correction witnessed
+   no world event. Return `action="supersede"` with the list.
+3. **Retraction** — candidate has `polarity == -1`: close out matching live claims and
+   store the negative claim as a tombstone (invalidated *and* ended at `now`, so it can
+   never be live) rather than as a live fact. The matches are **ended**, not retired:
+   every negative form the write path produces is "no longer" / "used to" / "not any
+   more", which is the world moving on. `close="retired"` is the caller saying the
+   original was never true.
 4. **Accumulate** — otherwise insert. `action="add"`.
 
 ```python
@@ -296,6 +316,12 @@ because nothing retires a turn.
 of `_live_clause` and is held to the same wording clause for clause. Three copies of one
 predicate is three chances to disagree; `tests/test_bitemporal.py` checks the Python one
 against the SQL one row for row.
+
+`stats()["live_claims"]` is that same predicate at the wall clock, and **not**
+`invalidated_at IS NULL`. Those agreed only while superseding closed both clocks; since
+it closes valid time alone, the cheap test counts every superseded version of every slot
+as live. The three counts consequently do not sum — a claim that has *ended* is neither
+live nor invalidated — and `claims` is the only total that covers everything.
 
 ---
 

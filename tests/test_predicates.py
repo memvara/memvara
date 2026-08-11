@@ -306,7 +306,9 @@ def test_history_still_holds_every_superseded_value(resolved):
     timeline = mem.history("user", "works_at")
     assert len(timeline) > 100
     assert timeline[-1].object == expected_value(CONCEPTS[0])
-    assert all(c.invalidated_at is not None for c in timeline[:-1])
+    # `ended`, not `retired`: each of those employers was true in its turn, so the
+    # timeline is a hundred world events and not a hundred corrections.
+    assert all(c.state == "ended" for c in timeline[:-1])
 
 
 # --- the same drift, with nothing but the deterministic rules -----------------

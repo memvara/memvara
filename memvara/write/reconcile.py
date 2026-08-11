@@ -15,11 +15,21 @@ same inputs produce the same result on every run.
 
 Two invariants the implementation is built around:
 
-* Nothing is deleted. Superseding sets `invalidated_at`, `invalidated_by` and `valid_to`,
-  so `as_of` still returns what we believed at any past instant.
+* Nothing is deleted. Superseding closes the old claim's *valid* time and points
+  `invalidated_by` at its successor, so `as_of` still returns what we believed at any
+  past instant and `valid_at` still returns what was true at any past instant.
 * Unknown predicates are `Cardinality.MANY`. Keeping two competing facts degrades
   ranking; retiring a true one destroys information. Only errors of the first kind are
   recoverable.
+
+**Supersession ends a claim; it does not retire it.** The reconciler is only ever told
+"here is the new value" — never "the old one was a mistake" — and those are different
+events on different clocks. Berlin stopped being true when Lisbon began, so valid time
+closes; we were never wrong about Berlin, so transaction time does not. Closing both, as
+this module used to, marks every superseded claim as an error and empties out the one
+question the two axes exist to answer: *what do we now believe was true in June*. A
+caller who really is correcting the record says so with `close="retired"`; see
+`memvara.types.Closure`.
 """
 
 from __future__ import annotations
@@ -38,7 +48,9 @@ from ..types import (
     OBJECT_ENTITY,
     SUBJECT_ENTITY,
     Claim,
+    Closure,
     as_utc,
+    close_out,
     default_entity,
     fact_key_for,
     owner_key,
@@ -99,7 +111,17 @@ class Reconciler:
 
     # -- public ---------------------------------------------------------------
 
-    def apply(self, claim: Claim, *, now: datetime | None = None) -> ReconcileResult:
+    def apply(self, claim: Claim, *, now: datetime | None = None,
+              close: Closure = "ended") -> ReconcileResult:
+        """Reconcile one candidate against the claims already on record.
+
+        `close` decides which clock stops on whatever this candidate displaces, and
+        `"ended"` is the only answer the reconciler could reach on its own: a candidate
+        is a new value, and a new value is news about the world, not an accusation
+        against the record. `close="retired"` is the caller saying the thing they are
+        replacing was never true — a correction rather than a change — and only a caller
+        can know that. See `memvara.types.Closure`.
+        """
         t = now or utcnow()
         self._canonicalize(claim)
         if claim.recorded_at > t:
@@ -136,7 +158,7 @@ class Reconciler:
 
         # 2. Retraction: the user is taking something back.
         if claim.polarity < 0:
-            return self._retract(claim, t, owner)
+            return self._retract(claim, t, owner, close)
 
         # 3. Conflict, then 4. accumulate.
         superseded, newer = self._victims(claim, t, owner)
@@ -152,7 +174,7 @@ class Reconciler:
         if superseded:
             # The new value's `valid_from` is when the old one stopped being true — not
             # `t`, which is merely when we found out.
-            self._retire(superseded, t, claim.id, claim.valid_from)
+            self._retire(superseded, t, claim.id, claim.valid_from, close=close)
             return ReconcileResult("supersede", claim, superseded)
         return ReconcileResult("add", claim, [])
 
@@ -353,35 +375,49 @@ class Reconciler:
         return older, newer
 
     def _retire(self, victims: Sequence[Claim], t: datetime, by: str | None,
-                valid_to: datetime | None = None) -> None:
-        """Close out superseded claims on both time axes — which are not the same axis.
+                valid_to: datetime | None = None, *,
+                close: Closure = "ended") -> None:
+        """Close out displaced claims on **one** axis: the one that says why.
 
-        `t` is transaction time: when we stopped believing it. `valid_to` is valid time:
-        when it stopped being *true*. Collapsing the two is the mistake this signature
-        exists to prevent. A fact learned today about a move that happened in July has
-        `valid_to` in July and `invalidated_at` today, and stamping today on both leaves
-        the old value overlapping its own replacement — two live answers to a
-        single-valued question, which is the exact failure memvara is built to make
-        impossible. It shows up only on backdated writes, which is why it survived: with
-        `valid_from` defaulting to now, the two are equal and nothing looks wrong.
+        `close="ended"` stops the world clock at `valid_to`: the claim was true and is
+        not any more. `close="retired"` stops the belief clock at `t`: the claim was
+        never true and we have stopped holding it. Both are end-of-life and they are not
+        the same end, which is what this signature exists to keep apart.
 
-        `valid_to` defaults to `t` for callers where the distinction is genuinely absent.
+        Neither closure touches the other axis, and that restraint is the fix. Stamping
+        `invalidated_at` on a superseded claim says *we were mistaken* about a value that
+        was simply overtaken — so "what do we now believe was true in June" returned
+        nothing on any history this library wrote itself. Stamping `valid_to` on a
+        corrected claim is the same error mirrored: it asserts a world event ("and then
+        it stopped being true") that a correction never witnessed. One write, one
+        assertion, one clock.
+
+        `valid_to` is when the world moved, which is the *successor's* `valid_from` and
+        not `t` — a fact learned today about a move that happened in July closes in July.
+        Getting that wrong leaves the old value overlapping its own replacement: two live
+        answers to a single-valued question. It is invisible unless a write is backdated,
+        because `valid_from` otherwise defaults to now and the two instants coincide.
+        Defaults to `t` for callers where the distinction is genuinely absent.
+
+        `invalidated_by` is written under either closure. It is the *pointer*, not the
+        retirement — "this is what displaced me" is true whichever clock stopped, and
+        `why()` reads it to report the supersession chain.
+
+        The stamping itself is `types.close_out`, shared with `Memvara.forget`,
+        `Memvara.delete` and `Memvara.supersede`, so the two words cannot come to mean
+        one thing here and another at the facade.
         """
         boundary = t if valid_to is None else valid_to
         for v in victims:
-            v.invalidated_at = t
-            v.invalidated_by = by
-            # Never before the claim's own start: a retraction backdated past the fact it
-            # retracts collapses the interval to zero length rather than inverting it.
-            edge = max(boundary, v.valid_from)
-            if v.valid_to is None or v.valid_to > edge:
-                v.valid_to = edge
+            close_out(v, t if close == "retired" else boundary, by, close)
             # `put_claim` rather than `store.invalidate`, because the Store protocol has
-            # no way to set `valid_to` and both axes must move together or an `as_of`
-            # query lands between them and sees an inconsistent world.
+            # no way to set `valid_to`, and no way to write `invalidated_by` without also
+            # writing `invalidated_at` — which is exactly the conflation this method
+            # exists to stop making.
             self.store.put_claim(v)
 
-    def _retract(self, claim: Claim, t: datetime, owner: str) -> ReconcileResult:
+    def _retract(self, claim: Claim, t: datetime, owner: str,
+                 close: Closure = "ended") -> ReconcileResult:
         tenant = claim.scope.tenant
         slot = [c for c in self.store.competing_claims(tenant, claim.fact_key,
                                                        valid_at=t, known_at=t)
@@ -427,14 +463,29 @@ class Reconciler:
         # never be live and never answers a query, but "why did you stop believing that?"
         # still has an answer with source episodes attached. Discarding it would be the
         # only place in the system where evidence is thrown away.
+        #
+        # Both axes here, and this is the one row where that is right. A tombstone is not
+        # an assertion about the world at all — it is bookkeeping — so there is no true
+        # interval to preserve and nothing an audit loses by it being unreachable from
+        # either clock. Everything the retraction *says* lives on the claims below.
         claim.invalidated_at = t
         claim.valid_to = t
         self.store.put_claim(claim)
 
         if matches:
+            # **A retraction is a world event, not a correction**, so it ends its targets
+            # rather than retiring them. Every negative the write path can produce says
+            # the same kind of thing — "I no longer work at X", "I used to live in X",
+            # "I don't work at X any more" (see `write/fast.py`, where all eight negative
+            # rules are of that shape, and `Claim.render`, which words a negative claim as
+            # "no longer") — and each of those is the user reporting that the world moved,
+            # not that we misheard them. The employment was real; it finished. A caller
+            # who means "you recorded that wrongly, it was never true" says
+            # `close="retired"` and gets the other axis.
+            #
             # A retraction dated in the past ("I stopped working there in March") closes
             # the interval in March, not today — same distinction as a supersession.
-            self._retire(matches, t, claim.id, claim.valid_from)
+            self._retire(matches, t, claim.id, claim.valid_from, close=close)
         return ReconcileResult("retract", claim, matches)
 
 
@@ -519,10 +570,12 @@ def backfill_entities(reconciler: Reconciler, tenant: str, *, dry_run: bool = Tr
                 report.merged += 1
                 continue
             if functional and current is not None:
-                # Transaction *and* valid time move to the newer claim's recording
-                # instant, which is when we would have retired it had the identities
-                # been right at the time. Dating it `now` instead would claim we
-                # believed two employers simultaneously for however long the store is old.
+                # Valid time moves to the newer claim's recording instant, which is when
+                # the slot would have changed hands had the identities been right at the
+                # time. Dating it `now` instead would claim we believed two employers
+                # simultaneously for however long the store is old. Transaction time does
+                # not move at all: this is a supersession being reconstructed, and the
+                # rebuilt chain has to have the shape `Reconciler` would have written.
                 _supersede(current, claim, as_utc(claim.recorded_at))
                 report.retired += 1
                 # No longer a live occupant, so a *later* claim of that same value is a
@@ -563,8 +616,18 @@ def _fold_into(keeper: Claim, loser: Claim, at: datetime) -> None:
 
 
 def _supersede(older: Claim, newer: Claim, at: datetime) -> None:
-    older.invalidated_at = at
+    """One link of a rebuilt chain: the older value ends where the newer one begins.
+
+    The exact mirror of `_fold_into`, and the pair is worth reading together — they are
+    the two ways a backfill can displace a claim, and each closes the one axis that says
+    which. A duplicate that folds was never false, so only belief moves; a value that was
+    replaced was true until it was replaced, so only the world moves.
+    """
     older.invalidated_by = newer.id
-    if older.valid_to is None or older.valid_to > at:
-        older.valid_to = at
+    # Clamped exactly as `Reconciler._retire` clamps, so the rebuilt chain cannot produce
+    # a row `Reconciler` never could: an interval that ends before it starts is not a
+    # shorter fact, it is a row no `as_of` window can return consistently.
+    edge = max(at, as_utc(older.valid_from))
+    if older.valid_to is None or older.valid_to > edge:
+        older.valid_to = edge
     _note(older, at, "superseded", newer.id)

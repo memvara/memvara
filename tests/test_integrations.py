@@ -358,7 +358,11 @@ def test_result_metadata_carries_both_time_axes_not_one_timestamp(mem):
     assert "recency=" in meta["why"]
 
 
-def test_a_retired_value_still_reports_when_belief_in_it_ended(mem):
+def test_a_superseded_value_reports_when_it_stopped_being_true(mem):
+    """The adapter dict carries four timestamps because the two axes answer different
+    questions, and a superseded value is exactly where they diverge: its world interval
+    closed when the next value began, and we never stopped believing it. A consumer
+    reading only `invalidated_at` would render this as still current."""
     mem.remember("user", "lives_in", "Berlin", valid_from=T0, recorded_at=T0)
     mem.remember("user", "lives_in", "Lisbon", valid_from=T0 + timedelta(days=30),
                  recorded_at=T0 + timedelta(days=30))
@@ -366,7 +370,8 @@ def test_a_retired_value_still_reports_when_belief_in_it_ended(mem):
     meta = _common.result_metadata(
         [r for r in mem.search("where do they live?", include_invalidated=True)
          if r.claim.id == old.id][0])
-    assert meta["invalidated_at"] is not None and meta["valid_to"] is not None
+    assert meta["valid_to"] == (T0 + timedelta(days=30)).isoformat()
+    assert meta["invalidated_at"] is None
 
 
 def test_an_episode_result_gets_no_predicate_so_a_turn_cannot_pass_as_a_fact(mem):
@@ -884,8 +889,8 @@ def test_the_block_writes_through_memvaras_write_path_so_contradictions_resolve(
     run(block.aput([FakeChatMessage("I live in Berlin"),
                     FakeChatMessage("Noted.", role="assistant")]))
     run(block.aput([FakeChatMessage("Actually I moved to Lisbon")]))
-    timeline = [(c.object, c.invalidated_at is None) for c in mem.history("user", "lives_in")]
-    assert timeline == [("Berlin", False), ("Lisbon", True)]
+    timeline = [(c.object, c.state) for c in mem.history("user", "lives_in")]
+    assert timeline == [("Berlin", "ended"), ("Lisbon", "live")]
     assert block.last_receipt.llm_calls == 0
 
 

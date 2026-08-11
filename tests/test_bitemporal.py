@@ -43,6 +43,12 @@ JULY = datetime(2026, 7, 1, tzinfo=TZ)
 JULY_MID = datetime(2026, 7, 15, tzinfo=TZ)
 AUG = datetime(2026, 8, 1, tzinfo=TZ)
 
+# The reproduction below spans years rather than months, so it stays a past-tense story
+# whatever day the suite runs on.
+J23 = datetime(2023, 1, 1, tzinfo=TZ)
+MID = datetime(2024, 6, 1, tzinfo=TZ)
+J26 = datetime(2026, 1, 1, tzinfo=TZ)
+
 SCOPE = Scope("acme", "alice")
 
 
@@ -57,11 +63,16 @@ def put(mem, obj, *, valid_from, valid_to=None, recorded_at, invalidated_at=None
         predicate="lives_in", subject="user", scope=SCOPE, **kw):
     """One claim written straight to the store, with both axes stated exactly.
 
-    Deliberately not `remember()`: the point of this file is a slot holding four
-    versions whose valid and transaction intervals overlap in specific ways, and the
-    write path would reconcile several of them out of existence on the way in. The read
-    side has to be correct about whatever is on disk. `test_remember_backdates_both_axes`
-    covers the round trip through the facade.
+    Deliberately not `remember()`, and the reason has changed. It used to be that the
+    write path *could not* produce these rows — it closed both clocks on every
+    supersession, so several of the four were reconciled out of existence on the way in.
+    That was the bug, and `test_the_four_row_fixture_is_now_expressible_through_the_write_path`
+    writes exactly this fixture through the facade to show it is gone.
+
+    What is left is the ordinary reason a read test states its own rows: the read side
+    has to be correct about whatever is on disk, including rows some future write path
+    would never generate, and a fixture that goes through the writer tests the writer
+    twice and the reader not at all.
     """
     claim = Claim(subject=subject, predicate=predicate, object=obj, scope=scope,
                   valid_from=valid_from, valid_to=valid_to, recorded_at=recorded_at,
@@ -430,6 +441,26 @@ def test_why_dates_the_supersessions_it_reports(mem):
     assert mem.why(newer.id, known_at=MAR).superseded == [], "not recorded yet in March"
 
 
+def test_why_still_reports_a_supersession_that_never_closed_belief(mem):
+    """The filter used to read `invalidated_at` and nothing else, so once supersession
+    stopped writing one it reported *nothing* superseded at any dated `known_at` — on
+    every chain the write path produces, which is all of them.
+
+    A supersession is still a belief-clock event; the instant is simply the one we
+    recorded the successor at, because that is when we decided. The claim itself is what
+    carries that instant now, and `why()` already holds it.
+    """
+    mem.remember("user", "lives_in", "Berlin", valid_from=JAN, recorded_at=JAN)
+    mem.remember("user", "lives_in", "Lisbon", valid_from=JULY, recorded_at=JULY)
+    berlin, lisbon = mem.history("user", "lives_in")
+    assert berlin.invalidated_at is None, "the row this dating has to work without"
+
+    assert [c.object for c in mem.why(lisbon.id).superseded] == ["Berlin"]
+    assert [c.object for c in mem.why(lisbon.id, known_at=AUG).superseded] == ["Berlin"]
+    assert mem.why(lisbon.id, known_at=MAR).superseded == [], \
+        "the replacement had not been recorded in March"
+
+
 # =============================================================================
 # The facades mirror each other
 # =============================================================================
@@ -488,6 +519,81 @@ def test_the_async_facade_also_forwards_why_produced_and_the_traversal(mem):
 # =============================================================================
 # The round trip through the write path
 # =============================================================================
+
+def test_question_two_works_on_a_history_the_library_wrote_itself(mem):
+    """**The defect the whole fixture above was a workaround for.**
+
+    Two ordinary `remember()` calls, no `put_claim`, no hand-set stamps: Berlin from
+    2023, Lisbon from 2026. Asked what we *now* believe was true in 2024, the store has
+    to say Berlin — and it said nothing at all, because `Reconciler._retire` closed both
+    clocks and so recorded "we no longer believe Berlin" about a claim that was never
+    wrong. `as_of` kept answering the whole time, which is exactly why this survived: it
+    rewinds the belief clock past the supersession, so it never reads the stamp that was
+    wrong.
+
+    The consequence was that question #2 — the reading the two axes exist for — returned
+    nothing on *any* history this library produced. It worked only on stores built by
+    calling `store.put_claim` directly, which is what the fixture in this file does.
+    """
+    mem.remember("user", "lives_in", "Berlin", valid_from=J23, recorded_at=J23)
+    mem.remember("user", "lives_in", "Lisbon", valid_from=J26, recorded_at=J26)
+
+    assert cities(mem.get_all(as_of=MID)) == ["Berlin"], "what we believed then"
+    assert cities(mem.get_all(valid_at=MID)) == ["Berlin"], "what we believe now, about then"
+    assert cities(mem.get_all()) == ["Lisbon"], "and the present is unchanged"
+
+
+def test_the_superseded_row_says_the_world_moved_not_that_we_were_wrong(mem):
+    """The row behind the query above, stated as the rule rather than as a symptom.
+
+    `valid_to` was always right — Berlin stopped being true when Lisbon began.
+    `invalidated_at` was the lie: it means *we no longer believe this record*, and Alice
+    really did live in Berlin in 2024.
+    """
+    mem.remember("user", "lives_in", "Berlin", valid_from=J23, recorded_at=J23)
+    mem.remember("user", "lives_in", "Lisbon", valid_from=J26, recorded_at=J26)
+    berlin, lisbon = mem.history("user", "lives_in")
+
+    assert berlin.valid_to == J26 == lisbon.valid_from, "the intervals abut"
+    assert berlin.invalidated_at is None
+    assert berlin.invalidated_by == lisbon.id, "and it still names its successor"
+    assert (berlin.state, lisbon.state) == ("ended", "live")
+
+
+def test_the_four_row_fixture_is_now_expressible_through_the_write_path(mem):
+    """The fixture at the top of this file bypasses `remember()`, and its docstring says
+    why: the write path "would reconcile several of them out of existence on the way in".
+    That was this bug. The same four rows, written through the facade, land on the same
+    four pairs of intervals — so the workaround is a workaround and not a requirement.
+
+    Note which calls express which event, because that is the whole distinction:
+    the July move is a *change* and supersedes on its own, while the two August
+    corrections are `close="retired"`, since they say the earlier rows were never true.
+    """
+    mem.remember("user", "lives_in", "Berlin", valid_from=JAN, recorded_at=JAN)
+    mem.remember("user", "lives_in", "Paris", valid_from=JULY, recorded_at=JULY)
+    berlin, paris = mem.history("user", "lives_in")
+
+    mem.supersede(berlin.id, Claim(subject="user", predicate="lives_in", object="Rome",
+                                   valid_from=MAR, valid_to=JULY, recorded_at=AUG),
+                  at=AUG, close="retired")
+    mem.supersede(paris.id, Claim(subject="user", predicate="lives_in", object="Lisbon",
+                                  valid_from=JULY, recorded_at=AUG),
+                  at=AUG, close="retired")
+
+    rows = {c.object: c for c in mem.history("user", "lives_in")}
+    assert {k: (v.valid_from, v.valid_to, v.recorded_at, v.invalidated_at)
+            for k, v in rows.items()} == {
+        "Berlin": (JAN, JULY, JAN, AUG),
+        "Paris": (JULY, None, JULY, AUG),
+        "Rome": (MAR, JULY, AUG, None),
+        "Lisbon": (JULY, None, AUG, None),
+    }
+    # And therefore the four questions give the same four answers as the fixture does.
+    assert [cities(mem.get_all()), cities(mem.get_all(valid_at=JUNE)),
+            cities(mem.get_all(known_at=JULY_MID)), cities(mem.get_all(as_of=JUNE))] == [
+        ["Lisbon"], ["Rome"], ["Paris"], ["Berlin"]]
+
 
 def test_remember_backdates_both_axes_and_the_reads_agree(mem):
     """The end-to-end version: a historical import states a 2026-March valid time and a

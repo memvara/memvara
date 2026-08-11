@@ -70,8 +70,22 @@ class Sweep:
         #: the pass: every stage already takes one, and the shape of the snapshot is
         #: itself one of the measurements.
         self.telemetry = telemetry
-        self.claims: list[Claim] = list(
-            store.iter_claims(tenant, include_invalidated=False))
+        # `iter_claims` filters the belief axis — that is what `include_invalidated`
+        # names, and the store protocol has no cheaper predicate — so the world axis is
+        # filtered here. Both are needed and neither is optional:
+        #
+        # * A claim that has *ended* is not a live answer to anything, so it has no
+        #   present-tense ranking for decay to maintain and nothing to merge with. Since
+        #   supersession stopped closing transaction time, every superseded version of
+        #   every slot would otherwise stay in this snapshot forever, and the pass would
+        #   grow with the store's whole history rather than with its live size — in the
+        #   module whose entire subject is not holding the write lock for long.
+        # * `_observe_slots` measures *live claims per concept*, the one metric that
+        #   catches "thirteen simultaneously-live employers". Counting ended versions
+        #   would report every well-behaved slot as crowded and retire the alarm.
+        self.claims: list[Claim] = [
+            c for c in store.iter_claims(tenant, include_invalidated=False)
+            if c.is_live(self.now)]
         # Keyed by id, so a claim decay and merge both touched is written once. Insertion
         # order is preserved, which keeps the write order a function of the data rather
         # than of dict iteration.

@@ -138,11 +138,16 @@ WRITE_TOKENS_OUT = "write.tokens_out"
 #: Row growth in a slot shows up here as `add` climbing while `supersede` stays flat.
 WRITE_RECONCILE = "write.reconcile"
 
-#: A negative-polarity write, tagged `outcome=retired|noop`. **A retraction that
-#: retires zero claims is an anomaly**, and it is the signature of both halves of the
+#: A negative-polarity write, tagged `outcome=retired|noop`. **A retraction that closes
+#: out zero claims is an anomaly**, and it is the signature of both halves of the
 #: adversarial case: a poisoned assertion the user cannot take back, and a `forget()`
 #: whose predicate or object does not match what is actually on record. Silent today —
 #: the API returns a perfectly ordinary receipt either way.
+#:
+#: `outcome="retired"` predates the `ended`/`retired` split and means "it closed
+#: something out", not `Claim.state == "retired"` — a retraction ordinarily *ends* its
+#: targets. The label is kept as it is because it is what existing alerts match on, and
+#: the distinction this series exists to draw is hit-versus-miss, not which clock moved.
 WRITE_RETRACTION = "write.retraction"
 
 #: An embedding the store refused. The write path warns once per process and then goes
