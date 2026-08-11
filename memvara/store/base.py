@@ -7,6 +7,14 @@ is deliberately narrow enough that pgvector, Qdrant or LanceDB slot in behind it
 Note the shape of `competing_claims`: it is a keyed lookup, not a similarity search.
 That signature is the whole reason contradiction detection can be exact rather than
 best-effort.
+
+**Two time parameters, not one.** Every read that used to take `as_of` now takes
+`valid_at` (the world clock) and `known_at` (the belief clock), each defaulting to
+`None` for "now". They are independent because the interesting bitemporal question is
+the one where they differ — "what do we *now* believe was true in June" is
+`valid_at=June, known_at=None`, and no single instant expresses it. `as_of` survives
+only on the public facade, where it is exact sugar for `valid_at=known_at=T`; nothing
+below the facade sees it. See `memvara.types.time_axes`.
 """
 
 from __future__ import annotations
@@ -69,8 +77,16 @@ class Store(Protocol):
         """Context manager deferring commits to one transaction for bulk work."""
         ...
 
-    def competing_claims(self, tenant: str, fact_key: str, as_of: datetime | None = None) -> list[Claim]:
-        """Live claims occupying the same (subject, predicate) slot. Exact, indexed."""
+    def competing_claims(self, tenant: str, fact_key: str, *,
+                         valid_at: datetime | None = None,
+                         known_at: datetime | None = None) -> list[Claim]:
+        """Live claims occupying the same (subject, predicate) slot. Exact, indexed.
+
+        The write path passes the same instant to both axes, because a write happens at
+        one moment in both clocks — but the parameters stay separate so that this
+        predicate is literally the one `candidate_ids` applies, rather than a second
+        definition of liveness that could drift from it.
+        """
         ...
 
     def find_by_value(self, tenant: str, value_key: str) -> list[Claim]: ...
@@ -97,7 +113,8 @@ class Store(Protocol):
     def adjacent(self, tenant: str, keys: Sequence[str], *,
                  outgoing: bool = True, incoming: bool = True,
                  predicates: Sequence[str] | None = None,
-                 as_of: datetime | None = None,
+                 valid_at: datetime | None = None,
+                 known_at: datetime | None = None,
                  scopes: Sequence[Scope] | None = None,
                  limit: int = 1000) -> list[Claim]:
         """Claims whose folded subject (outgoing) or folded object (incoming) is in `keys`.
@@ -110,12 +127,13 @@ class Store(Protocol):
         `Claim.object_key`, i.e. `memvara.entities.entity_key` plus any write-time
         stamp), not surface forms.
 
-        `as_of` applies the ordinary liveness predicate — both time axes, retired and
-        expired claims excluded. A traversal passes one instant to every call it makes,
-        because a path stitched from edges believed at different times is a connection
-        that never simultaneously held. Implementations must therefore treat `as_of` as
-        an exact instant and must not substitute their own clock per call; the caller
-        pins it before the first hop precisely so they cannot.
+        `valid_at`/`known_at` apply the ordinary liveness predicate — retired and
+        expired claims excluded on the axis that ends them. A traversal passes the same
+        *pair* to every call it makes, because a path stitched from edges believed at
+        different times is a connection that never simultaneously held, and that is as
+        true of a pair of clocks as of one. Implementations must therefore treat both as
+        exact instants and must not substitute their own clock per call; the caller pins
+        the pair before the first hop precisely so they cannot.
 
         **`scopes` must be applied inside `limit`, not after it.** It is the same list
         `candidate_ids` takes — normally `Scope.ancestors()` — and `None` means "no scope
@@ -205,38 +223,56 @@ class Store(Protocol):
         """
         ...
 
-    def candidate_ids(self, scopes: Sequence[Scope], as_of: datetime | None = None,
+    # The three time-travelling primitives. `valid_at`, `known_at` and
+    # `include_invalidated` are keyword-only, deliberately: they replaced a positional
+    # `as_of`, and a call site that still passes an instant third would otherwise be
+    # silently reinterpreted as `valid_at` — a wrong answer with no error, which is the
+    # single failure mode this whole change exists to remove.
+
+    def candidate_ids(self, scopes: Sequence[Scope], *,
+                      valid_at: datetime | None = None,
+                      known_at: datetime | None = None,
                       include_invalidated: bool = False) -> list[str]: ...
 
-    def lexical_search(self, query: str, scopes: Sequence[Scope], limit: int,
-                       as_of: datetime | None = None,
+    def lexical_search(self, query: str, scopes: Sequence[Scope], limit: int, *,
+                       valid_at: datetime | None = None,
+                       known_at: datetime | None = None,
                        include_invalidated: bool = False) -> list[tuple[str, float]]: ...
 
-    def vector_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int,
-                      as_of: datetime | None = None,
+    def vector_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int, *,
+                      valid_at: datetime | None = None,
+                      known_at: datetime | None = None,
                       include_invalidated: bool = False) -> list[tuple[str, float]]: ...
 
     # --- episode retrieval ------------------------------------------------
     #
     # The same three primitives over raw turns. They take no `include_invalidated`:
     # episodes are not bitemporal — nothing retires or supersedes them — so there is no
-    # end-of-life to lift. `as_of` still applies, and means the one thing it can mean
-    # for a turn: it had already happened.
+    # end-of-life to lift.
+    #
+    # They still take both axes, and the reason is that a turn's single `ts` is *both* of
+    # them at once: the turn happened at `ts` and we knew of it at `ts`, so applying the
+    # claim rule to an episode gives `ts <= valid_at AND ts <= known_at`, i.e. the
+    # earlier of the two bounds. That falls out of the model rather than being imposed on
+    # it, and it degenerates to today's behaviour whenever the two agree.
     #
     # Scope filtering is *not* relaxed. It is the same question for raw text as for a
     # derived belief, and raw text is the more sensitive of the two: an unfiltered
     # episode search would hand one session's transcript to a sibling session and one
     # tenant's to another.
 
-    def episode_candidate_ids(self, scopes: Sequence[Scope],
-                              as_of: datetime | None = None) -> list[str]: ...
+    def episode_candidate_ids(self, scopes: Sequence[Scope], *,
+                              valid_at: datetime | None = None,
+                              known_at: datetime | None = None) -> list[str]: ...
 
-    def lexical_search_episodes(self, query: str, scopes: Sequence[Scope], limit: int,
-                                as_of: datetime | None = None
+    def lexical_search_episodes(self, query: str, scopes: Sequence[Scope], limit: int, *,
+                                valid_at: datetime | None = None,
+                                known_at: datetime | None = None
                                 ) -> list[tuple[str, float]]: ...
 
     def vector_search_episodes(self, qvec: np.ndarray, scopes: Sequence[Scope],
-                               limit: int, as_of: datetime | None = None
+                               limit: int, *, valid_at: datetime | None = None,
+                               known_at: datetime | None = None
                                ) -> list[tuple[str, float]]: ...
 
     def purge(self, scope: Scope) -> dict[str, int]:
@@ -328,3 +364,67 @@ class Store(Protocol):
         ...
 
     def close(self) -> None: ...
+
+
+class SQLStore(Protocol):
+    """The two clause builders every SQL-backed `Store` shares. Not part of `Store`.
+
+    Deliberately a second protocol. `Store` is what a third-party backend implements,
+    and the docstring at the top of this file promises Qdrant and LanceDB can slot in
+    behind it — neither of which generates SQL, so requiring a clause builder of them
+    would make `Store` describe an implementation rather than a capability, and would
+    change what `isinstance(x, Store)` accepts.
+
+    What it *is* for: SQLite and Postgres write the same predicate twice, in two
+    repositories, and the two must agree clause for clause or the same question answers
+    differently depending on where the rows live. Naming the shape once, here, is what
+    makes that checkable. `memvara.types.Claim.is_live` is the third copy — the Python
+    one — and it is held to the same wording.
+
+    Not `@runtime_checkable`: these are private-by-name members, and an `isinstance`
+    check that succeeds on a name beginning with an underscore is not a contract anyone
+    should be relying on at run time.
+    """
+
+    def _live_clause(self, valid_at: datetime | None, known_at: datetime | None,
+                     include_invalidated: bool, alias: str = "") -> tuple[str, list]:
+        """SQL and bind parameters for "believed at `known_at`, in force at `valid_at`".
+
+        Four constraints, two per axis, and each axis reads only its own clock:
+
+        ==========================  =========  ==================================
+        `recorded_at <= known_at`   belief     we had heard it
+        `invalidated_at > known_at` belief     we had not yet retracted it
+        `valid_from <= valid_at`    world      it had started being true
+        `valid_to > valid_at`       world      it had not yet stopped
+        ==========================  =========  ==================================
+
+        `None` on either axis means that axis reads the current clock. Substitute it
+        with **one** read serving both defaults, not one per axis: two reads put the
+        clocks microseconds apart, which is unobservable until the day it is not and
+        impossible for a caller to reproduce when it happens.
+
+        `include_invalidated` lifts end-of-life, and lifts more than the name suggests.
+        Stated in full here because it must be identical in every backend: the flag
+        drops the retirement clause **and the whole valid-time interval**, floor
+        included, leaving `recorded_at <= known_at` alone. Two consequences follow, and
+        both are intended — under the flag `valid_at` has no effect at all, and the
+        belief floor still holds, because returning something first heard in July when
+        asked what we believed in March is the one way a bitemporal read can lie.
+
+        `alias` prefixes every column with `"<alias>."` for use in a join, and is empty
+        for a single-table statement. The return is `(sql, params)`, with one bind
+        parameter per `?` in order — four when the flag is off, one when it is on.
+        """
+        ...
+
+    def _happened_clause(self, valid_at: datetime | None, known_at: datetime | None,
+                         alias: str = "") -> tuple[str, list]:
+        """The same, for episodes: one column, `ts`, bounded by the earlier of the two.
+
+        A turn has no separate record time — it happened and we knew it at the same
+        instant — so its `valid_from` and its `recorded_at` are both `ts`, and the four
+        clauses above collapse to `ts <= valid_at AND ts <= known_at`. Nothing retires a
+        turn, so there is no end-of-life half and no `include_invalidated`.
+        """
+        ...

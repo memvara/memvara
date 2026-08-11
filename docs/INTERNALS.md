@@ -20,16 +20,18 @@ importable from the foundation modules:
 2. **Unknown predicates default to `Cardinality.MANY`.** Wrongly retiring a true fact is
    worse than keeping two competing ones.
 3. **Nothing is ever hard-deleted by the engine.** Superseding a claim sets
-   `invalidated_at` / `invalidated_by`. History must stay queryable via `as_of`.
+   `invalidated_at` / `invalidated_by`. History must stay queryable via `known_at` and
+   `as_of`.
 4. **Every claim carries provenance.** `sources` must be populated with the episode ids
    the claim came from, and `derivation` must reflect how it was produced.
 5. **Everything must run with no API key and no network.** `NullLLM` + `HashingEmbedder`
    is the default configuration and the one the tests use.
-6. **A multi-hop answer is evaluated at one instant.** Every edge on a returned path must
-   be checked against the same `as_of`, pinned once before the walk. A path stitched from
-   edges believed at different times is a connection that never simultaneously held, and
-   reporting it as a fact is the worst thing traversal can do — it is invisible in any
-   result that does not carry its timestamps.
+6. **A multi-hop answer is evaluated at one clock pair.** Every edge on a returned path
+   must be checked against the same `(valid_at, known_at)`, pinned once before the walk.
+   A path stitched from edges believed at different times is a connection that never
+   simultaneously held, and reporting it as a fact is the worst thing traversal can do —
+   it is invisible in any result that does not carry its timestamps. Two axes widened
+   what has to be pinned; they did not weaken the rule.
 7. **A filter and a limit may not live in different layers.** Whatever narrows rows has to
    run where the truncation runs, or the top-k is wrong: `Store.adjacent` shipped without
    a `scopes` argument and with the caller filtering afterwards, and on a shared tenant a
@@ -180,7 +182,8 @@ class HybridRetriever:
                  w_salience: float = 0.10, candidate_multiplier: int = 5) -> None
 
     def search(self, query: str, scope: Scope, *, k: int = 10,
-               as_of: datetime | None = None, include_invalidated: bool = False,
+               as_of: datetime | None = None, valid_at: datetime | None = None,
+               known_at: datetime | None = None, include_invalidated: bool = False,
                memory_types: Sequence[MemoryType] | None = None) -> list[Result]
 ```
 
@@ -188,8 +191,12 @@ Search must:
 - expand `scope` via `scope.ancestors()` so a session query also sees user-level memory;
 - run vector and lexical retrieval over `k * candidate_multiplier` candidates each;
 - fuse with RRF, then rescore with recency/confidence/salience;
-- pass `as_of` through to the store so **time travel returns what we believed then**,
-  including claims later invalidated;
+- resolve the three time keywords through `types.time_axes` **before anything else**, so
+  `as_of` + `valid_at` raises whatever else the call would have done;
+- pass `valid_at` and `known_at` through to the store so **time travel returns what we
+  believed then, and what we now believe was true then**, including claims later
+  invalidated. Decay is measured at `known_at`, not `valid_at`: recency asks how long ago
+  we last heard something, and that is a question about the belief clock;
 - populate `Explanation` on every `Result` — per-retriever rank and raw score, the fusion
   score, each scoring factor, and the final score. A result with no explanation is a bug.
 
@@ -202,17 +209,20 @@ class GraphTraverser:
 
     def neighborhood(self, entity: str, scope: Scope, *, depth: int = 2, k: int = 10,
                      min_hops: int = 1, predicates: Sequence[str] | None = None,
-                     as_of: datetime | None = None,
+                     as_of: datetime | None = None, valid_at: datetime | None = None,
+                     known_at: datetime | None = None,
                      min_score: float = 0.0) -> list[Path]
     def paths_between(self, source: str, target: str, scope: Scope, *,
                       depth: int = 3, k: int = 3, ...) -> list[Path]
 ```
 
 Traversal must:
-- **pin one instant before the first hop** and pass that same `datetime` to every
-  `Store.adjacent` call. `as_of=None` must *not* be forwarded — the store substitutes its
-  own clock per call, so a 3-hop walk would evaluate 3 hops at 3 instants and could
-  return a path that was true at none of them. This is invariant 6 below;
+- **pin one clock pair before the first hop** and pass that same
+  `(valid_at, known_at)` to every `Store.adjacent` call. Neither axis may be forwarded as
+  `None` — the store substitutes its own clock per call, so a 3-hop walk would evaluate 3
+  hops at 3 instants and could return a path that was true at none of them. One clock read
+  fills both defaults, so an argument-free walk is still a single coherent moment. This is
+  invariant 6 below;
 - drop `polarity <= 0` before a claim becomes an edge, so the guarantee holds for every
   store rather than for the ones that remembered;
 - pass `scope.ancestors()` to `adjacent` **and** re-check `Scope.sees` on what comes
@@ -223,6 +233,69 @@ Traversal must:
   Salience is therefore excluded: it is unbounded above 1.0 by design;
 - bound everything (depth, beam, per-hop `edge_limit`, cycle check) and order totally,
   with no `uuid4` deciding anything observable.
+
+---
+
+## `memvara/store/`
+
+### The two time axes
+
+`as_of` exists on the public facade and **nowhere below it**. `Memvara`, `ScopedMemvara`
+and `AsyncMemvara` accept all three keywords and resolve them through
+`types.time_axes(as_of, valid_at, known_at)`, which returns the pair and raises if
+`as_of` was combined with either axis. Everything under the facade speaks in the pair.
+
+Every `Store` method that used to take `as_of` now takes `valid_at` and `known_at`, both
+**keyword-only**. That is deliberate: they replaced a positional argument, and a caller
+still passing an instant third would otherwise be silently reinterpreted as `valid_at` —
+a wrong answer with no error, which is the failure the split exists to remove.
+
+```python
+competing_claims(tenant, fact_key, *, valid_at=None, known_at=None)
+adjacent(tenant, keys, *, outgoing=True, incoming=True, predicates=None,
+         valid_at=None, known_at=None, scopes=None, limit=1000)
+candidate_ids(scopes, *, valid_at=None, known_at=None, include_invalidated=False)
+lexical_search(query, scopes, limit, *, valid_at=None, known_at=None,
+               include_invalidated=False)
+vector_search(qvec, scopes, limit, *, valid_at=None, known_at=None,
+              include_invalidated=False)
+episode_candidate_ids(scopes, *, valid_at=None, known_at=None)
+lexical_search_episodes(query, scopes, limit, *, valid_at=None, known_at=None)
+vector_search_episodes(qvec, scopes, limit, *, valid_at=None, known_at=None)
+```
+
+A SQL-backed store additionally implements `SQLStore`, a **second** protocol declared in
+`store/base.py` and deliberately not folded into `Store` — the clause builders are SQL
+generation, and `Store` promises a Qdrant or LanceDB backend can implement it without
+them:
+
+```python
+_live_clause(valid_at, known_at, include_invalidated, alias="") -> tuple[str, list]
+_happened_clause(valid_at, known_at, alias="")                  -> tuple[str, list]
+```
+
+`_live_clause` is four constraints, two per axis, each reading only its own clock:
+`recorded_at <= known_at`, `invalidated_at > known_at`, `valid_from <= valid_at`,
+`valid_to > valid_at`. `None` on an axis means that axis reads the clock, substituted
+once per call — and one read fills both defaults so the two cannot land microseconds
+apart.
+
+`include_invalidated` lifts the **whole valid-time interval** plus the retirement,
+leaving only `recorded_at <= known_at`. That is more than the name promises, it is
+existing behaviour, and it must stay identical across backends: under the flag,
+`valid_at` has no effect at all. The belief floor is the one clause that never lifts —
+returning something first heard in July when asked what we believed in March is the only
+way a bitemporal read can actively lie.
+
+`_happened_clause` is the episode form. A turn has no separate record time, so its single
+`ts` is both its `valid_from` and its `recorded_at`; substituting that into the four
+clauses above leaves `ts <= min(valid_at, known_at)`. There is no `include_invalidated`
+because nothing retires a turn.
+
+`types.Claim.is_live(as_of=None, *, valid_at=None, known_at=None)` is the Python mirror
+of `_live_clause` and is held to the same wording clause for clause. Three copies of one
+predicate is three chances to disagree; `tests/test_bitemporal.py` checks the Python one
+against the SQL one row for row.
 
 ---
 

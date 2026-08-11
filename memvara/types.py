@@ -33,6 +33,59 @@ def as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+def time_axes(as_of: datetime | None, valid_at: datetime | None,
+              known_at: datetime | None) -> tuple[datetime | None, datetime | None]:
+    """Resolve the three time keywords every read method takes into the two axes.
+
+    Bitemporal data answers four questions, and one instant can only ask for one of
+    them:
+
+    ======================================  ===========================
+    what do we now believe is true now      neither keyword
+    what do we now believe was true in June ``valid_at=June``
+    what did we believe on 1 August         ``known_at=August``
+    what did we believe in June, about June ``as_of=June``
+    ======================================  ===========================
+
+    `valid_at` is the world clock and `known_at` the belief clock; each defaults to
+    `None`, which every consumer reads as "now". `as_of` moves both together and is
+    therefore *exact* sugar for the fourth row — kept because it is the published
+    spelling, and correct because that row is a real question, just not the only one.
+
+    The row that motivated the split is the second. A correction learned in August
+    about June is invisible to `as_of=June`, because that call rewinds the belief clock
+    past the correction — so the late-arriving fact, which is the entire reason to keep
+    two axes, could not be asked about at all.
+
+    Mixing `as_of` with either axis raises. There is no reading of
+    `as_of=June, known_at=August` that is not one of the two being ignored, and
+    silently picking either would answer a question the caller did not ask, with
+    nothing in the result to say so.
+
+    >>> time_axes(None, None, None)
+    (None, None)
+    >>> june = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    >>> time_axes(june, None, None) == (june, june)
+    True
+    >>> time_axes(june, None, june)      # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+    ValueError: as_of cannot be combined with known_at...
+    """
+    if as_of is None:
+        return valid_at, known_at
+    if valid_at is None and known_at is None:
+        return as_of, as_of
+    clash = " and ".join(
+        name for name, value in (("valid_at", valid_at), ("known_at", known_at))
+        if value is not None
+    )
+    raise ValueError(
+        f"as_of cannot be combined with {clash}. as_of moves both clocks to one "
+        "instant and is exactly valid_at=known_at=as_of, so the two spellings "
+        "disagree about the question being asked; drop as_of to move the clocks apart."
+    )
+
+
 # --- memory dynamics -----------------------------------------------------------
 # Two `meta` keys, named here rather than in the subsystems that write them, because
 # three of them read these: the write path (reinforcement), consolidation (decay and
@@ -529,20 +582,42 @@ class Claim:
             f"sal={self.salience:.2f} {state}>"
         )
 
-    def is_live(self, as_of: datetime | None = None) -> bool:
-        """Was this claim part of our believed, in-force knowledge at `as_of`?
+    def is_live(self, as_of: datetime | None = None, *,
+                valid_at: datetime | None = None,
+                known_at: datetime | None = None) -> bool:
+        """Was this claim believed at `known_at`, and in force at `valid_at`?
 
-        Requires both axes to agree: we had recorded it and not yet retracted it
-        (transaction time), and it was in force in the world (valid time).
+        The Python mirror of the store's liveness predicate, and the two must agree
+        clause for clause — `SQLiteStore._live_clause` is the SQL of exactly this.
+
+        The two axes move independently. `known_at` is the belief clock: had we
+        recorded it, and not yet retracted it. `valid_at` is the world clock: had it
+        started being true, and not yet stopped. `as_of` sets both, which is why it can
+        only ask about a past belief *about* that same past — see `time_axes`.
+
+        >>> june = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        >>> august = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        >>> learned_late = Claim(subject="user", predicate="lived_in", object="Rome",
+        ...                      valid_from=june, recorded_at=august)
+        >>> learned_late.is_live(as_of=june)             # we had not heard it yet
+        False
+        >>> learned_late.is_live(valid_at=june, known_at=august)
+        True
         """
-        t = as_of or utcnow()
-        if self.recorded_at > t:
+        valid_at, known_at = time_axes(as_of, valid_at, known_at)
+        # One clock read serves both defaults. Reading it twice would put the axes
+        # microseconds apart on the commonest call of all — bare `is_live()` — which is
+        # a difference nothing should be able to observe.
+        now = utcnow()
+        v = valid_at if valid_at is not None else now
+        k = known_at if known_at is not None else now
+        if self.recorded_at > k:
             return False                                  # we didn't know it yet
-        if self.invalidated_at is not None and self.invalidated_at <= t:
+        if self.invalidated_at is not None and self.invalidated_at <= k:
             return False                                  # we'd already retracted it
-        if self.valid_from > t:
+        if self.valid_from > v:
             return False                                  # not true yet
-        if self.valid_to is not None and self.valid_to <= t:
+        if self.valid_to is not None and self.valid_to <= v:
             return False                                  # no longer true
         return True
 

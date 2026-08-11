@@ -55,7 +55,7 @@ def edge(store, subject, predicate, obj, *, scope=SCOPE, at=T0, **kw):
     starts later), and the traversal has to be correct about whatever is on disk.
     """
     claim = Claim(subject=subject, predicate=predicate, object=obj, scope=scope,
-                  recorded_at=at, valid_from=at, **kw)
+                  recorded_at=at, valid_from=kw.pop("valid_from", at), **kw)
     store.put_claim(claim)
     return claim
 
@@ -101,18 +101,53 @@ def test_a_chain_that_did_hold_at_once_is_returned_at_that_instant_and_not_after
     assert walker.between("Alice", "Acme", SCOPE, as_of=T3) == [], "after the first ended"
 
 
-def test_the_instant_is_pinned_before_the_first_hop_rather_than_read_per_hop(walker):
-    """`as_of=None` must not reach the store as None. `_live_clause` substitutes its own
+def test_the_clock_pair_is_pinned_before_the_first_hop_rather_than_read_per_hop(walker):
+    """Neither axis may reach the store as None. `_live_clause` substitutes its own
     `now()` for a missing instant, so a three-hop walk would evaluate three hops at three
     instants — and a claim recorded between hop one and hop two would join a path it was
     not part of when the question was asked. Pinning is what makes that impossible, and
-    the pin has to be a real datetime by the time the store sees it."""
-    assert walker._pin(T1) == T1
-    assert walker._pin(datetime(2024, 6, 1)) == T1, "naive input is UTC, as everywhere"
+    both axes have to be real datetimes by the time the store sees them."""
+    assert walker._pin(T1, T2) == (T1, T2)
+    assert walker._pin(datetime(2024, 6, 1), None)[0] == T1, \
+        "naive input is UTC, as everywhere"
 
     before = datetime.now(timezone.utc)
-    pinned = walker._pin(None)
-    assert before <= pinned <= datetime.now(timezone.utc)
+    valid_at, known_at = walker._pin(None, None)
+    after = datetime.now(timezone.utc)
+    assert before <= valid_at <= after and before <= known_at <= after
+
+
+def test_an_unset_axis_is_pinned_to_the_same_now_as_the_other_one(walker):
+    """One clock read fills both defaults. Two reads would put the axes microseconds
+    apart, so `neighborhood()` with no arguments would be evaluating "the world" and
+    "our belief" at two different moments — a split nothing can reproduce and nothing in
+    the result would show."""
+    valid_at, known_at = walker._pin(None, None)
+    assert valid_at == known_at
+    assert walker._pin(T1, None)[0] == T1, "a supplied axis is never overwritten"
+    assert walker._pin(None, T1)[1] == T1
+
+
+def test_the_pinned_pair_survives_every_hop_of_a_walk(walker, store, monkeypatch):
+    """The invariant the whole multi-hop feature rests on, asserted on the wire rather
+    than on `_pin` alone: every `adjacent` call a walk makes is handed the *same* pair.
+    A walk that re-read either clock per hop could return a chain no single moment ever
+    contained, and nothing in a `Path` would say so."""
+    edge(store, "Alice", "reports_to", "Dana")
+    edge(store, "Dana", "works_at", "Acme")
+    edge(store, "Acme", "founded_by", "Bob")
+
+    seen: list[tuple] = []
+    real = store.adjacent
+
+    def spy(*a, **kw):
+        seen.append((kw["valid_at"], kw["known_at"]))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(store, "adjacent", spy)
+    assert walker.neighborhood("Alice", SCOPE, depth=3, k=10)
+    assert len(seen) == 3, "one store call per hop"
+    assert len(set(seen)) == 1, "and one clock pair across all of them"
 
 
 def test_a_claim_recorded_after_the_pinned_instant_cannot_join_the_path(walker, store):
@@ -666,9 +701,28 @@ def test_adjacent_excludes_what_was_retired_or_not_yet_recorded(store):
     edge(store, "Alice", "knows", "Bob", at=T0, invalidated_at=T1)
     edge(store, "Alice", "knows", "Carol", at=T2)
 
-    assert [c.object for c in store.adjacent("acme", ["alice"], as_of=T0)] == ["Bob"]
-    assert [c.object for c in store.adjacent("acme", ["alice"], as_of=T1)] == []
-    assert [c.object for c in store.adjacent("acme", ["alice"], as_of=T3)] == ["Carol"]
+    def at(t):
+        return [c.object for c in store.adjacent("acme", ["alice"],
+                                                 valid_at=t, known_at=t)]
+
+    assert at(T0) == ["Bob"]
+    assert at(T1) == []
+    assert at(T3) == ["Carol"]
+
+
+def test_adjacent_reads_each_axis_from_its_own_clock(store):
+    """The two axes are not interchangeable inside one edge lookup. `Bob` is retired on
+    the belief clock at T1 and untouched on the world clock; `Carol` starts on the world
+    clock at T2 and was recorded at T0. Sharing one instant, no argument returns both;
+    with the clocks apart, `valid_at=T3, known_at=T0` does — the world as it is now,
+    judged with what we knew then."""
+    edge(store, "Alice", "knows", "Bob", at=T0, invalidated_at=T1)
+    edge(store, "Alice", "knows", "Carol", at=T0, valid_from=T2)
+
+    both = store.adjacent("acme", ["alice"], valid_at=T3, known_at=T0)
+    assert sorted(c.object for c in both) == ["Bob", "Carol"]
+    for t in (T0, T1, T2, T3):
+        assert len(store.adjacent("acme", ["alice"], valid_at=t, known_at=t)) < 2
 
 
 def test_adjacent_fails_closed_on_every_way_of_asking_for_nothing(store):

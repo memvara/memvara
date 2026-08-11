@@ -64,6 +64,7 @@ from ..types import (
     MemoryType,
     Result,
     Scope,
+    time_axes,
     utcnow,
 )
 from .analyze import analyze
@@ -230,7 +231,8 @@ class HybridRetriever:
     @overload
     def search(
         self, query: str, scope: Scope, *, k: int = ...,
-        as_of: datetime | None = ..., include_invalidated: bool = ...,
+        as_of: datetime | None = ..., valid_at: datetime | None = ...,
+        known_at: datetime | None = ..., include_invalidated: bool = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         include_episodes: Literal[False] = ...,
     ) -> list[Result]: ...
@@ -238,7 +240,8 @@ class HybridRetriever:
     @overload
     def search(
         self, query: str, scope: Scope, *, k: int = ...,
-        as_of: datetime | None = ..., include_invalidated: bool = ...,
+        as_of: datetime | None = ..., valid_at: datetime | None = ...,
+        known_at: datetime | None = ..., include_invalidated: bool = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         include_episodes: Literal[True],
     ) -> list[Retrieved]: ...
@@ -246,7 +249,8 @@ class HybridRetriever:
     @overload
     def search(
         self, query: str, scope: Scope, *, k: int = ...,
-        as_of: datetime | None = ..., include_invalidated: bool = ...,
+        as_of: datetime | None = ..., valid_at: datetime | None = ...,
+        known_at: datetime | None = ..., include_invalidated: bool = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         include_episodes: bool,
     ) -> list[Retrieved]: ...
@@ -258,6 +262,8 @@ class HybridRetriever:
         *,
         k: int = 10,
         as_of: datetime | None = None,
+        valid_at: datetime | None = None,
+        known_at: datetime | None = None,
         include_invalidated: bool = False,
         memory_types: Sequence[MemoryType] | None = None,
         min_score: float = 0.0,
@@ -265,10 +271,19 @@ class HybridRetriever:
     ) -> list[Any]:
         """Return the top `k` results for `query`, each with a populated `Explanation`.
 
-        `as_of` is transaction-time travel: the result is what we believed at that
-        instant, including claims we have since retracted. `include_invalidated`
-        additionally lifts the liveness filter, surfacing claims that were already
-        dead at `as_of` - useful for auditing, wrong for answering a question.
+        Two independent time axes, each defaulting to now. `known_at` is belief-time
+        travel: the result is what we believed at that instant, including claims we
+        have since retracted. `valid_at` is world-time travel: what was in force then,
+        judged with everything we know today — which is how a correction learned in
+        August about June becomes reachable at all. `as_of` sets both and is exact
+        sugar for `valid_at=known_at=T`; passing it alongside either raises. See
+        `memvara.types.time_axes`.
+
+        `include_invalidated` additionally lifts the end-of-life filters, surfacing
+        claims that were already dead - useful for auditing, wrong for answering a
+        question. It leaves the belief floor standing, so knowledge from after
+        `known_at` never leaks in; see `SQLiteStore._live_clause` for exactly what it
+        does and does not lift.
 
         `min_score` drops results below a normalized relevance (see
         `scoring.normalized_score`); at the default 0.0 nothing is dropped. The right
@@ -290,6 +305,7 @@ class HybridRetriever:
         name a return type narrower than every variant's; the overloads above are what
         a caller sees.
         """
+        valid_at, known_at = time_axes(as_of, valid_at, known_at)
         if k <= 0:
             return []
         rec = self.telemetry
@@ -303,8 +319,12 @@ class HybridRetriever:
         # another tenant.
         scopes = scope.ancestors()
 
-        # Decay is measured at the instant being asked about, not at wall-clock now.
-        now = _as_utc(as_of) if as_of is not None else utcnow()
+        # Decay is measured at the instant being asked about, not at wall-clock now —
+        # and that instant is `known_at`, the belief clock, because recency answers
+        # "how long ago did we last hear this, from where the question stands". Asking
+        # what we now believe about June must not score an August restatement as two
+        # months stale; asking what we believed on 1 August must score it from there.
+        now = _as_utc(known_at) if known_at is not None else utcnow()
 
         # Over-fetch per retriever: fusion can only rank what it was given, and a claim
         # that BM25 puts first is worthless if the vector list was cut before it and
@@ -313,7 +333,8 @@ class HybridRetriever:
         wanted = set(memory_types) if memory_types is not None else None
 
         results, saturated = self._gather(
-            query, scopes, limit, as_of, include_invalidated, wanted, now, min_score)
+            query, scopes, limit, valid_at, known_at, include_invalidated, wanted, now,
+            min_score)
 
         # Filter starvation. `memory_types` is applied after fusion truncated the pool,
         # so a rejected candidate has already consumed a slot and a narrow filter can
@@ -323,13 +344,14 @@ class HybridRetriever:
         # bounded and happens only when the shortfall could actually be an artefact.
         if wanted is not None and saturated and len(results) < k:
             results, _ = self._gather(
-                query, scopes, limit * self.filter_retry_multiplier, as_of,
+                query, scopes, limit * self.filter_retry_multiplier, valid_at, known_at,
                 include_invalidated, wanted, now, min_score)
 
         ranked: list[Retrieved] = list(self._rank(results, k))
         if include_episodes and wanted is None:
             ranked = self._interleave(
-                ranked, self._episodes(query, scopes, limit, as_of, min_score), k)
+                ranked,
+                self._episodes(query, scopes, limit, valid_at, known_at, min_score), k)
         if rec is not None:
             self._observe(rec, query, ranked, (perf_counter() - t0) * 1000.0)
         return ranked
@@ -397,7 +419,8 @@ class HybridRetriever:
         query: str,
         scopes: Sequence[Scope],
         limit: int,
-        as_of: datetime | None,
+        valid_at: datetime | None,
+        known_at: datetime | None,
         include_invalidated: bool,
         wanted: set[MemoryType] | None,
         now: datetime,
@@ -410,9 +433,10 @@ class HybridRetriever:
         trigger for a retry: a short result set from a leg that returned fewer than
         `limit` hits has nothing more to give, and re-asking would be pure cost.
         """
-        vector_hits = self._vector_search(query, scopes, limit, as_of, include_invalidated)
+        vector_hits = self._vector_search(
+            query, scopes, limit, valid_at, known_at, include_invalidated)
         lexical_hits, lexical_terms = self._lexical_search(
-            query, scopes, limit, as_of, include_invalidated)
+            query, scopes, limit, valid_at, known_at, include_invalidated)
 
         fused = reciprocal_rank_fusion(
             {VECTOR: vector_hits, LEXICAL: lexical_hits},
@@ -451,7 +475,7 @@ class HybridRetriever:
                 continue  # raced with a delete; a missing row is not a ranking error
             if wanted is not None and claim.memory_type not in wanted:
                 continue
-            if not self._believed_by(claim, as_of):
+            if not self._believed_by(claim, known_at):
                 continue
 
             result = self._explain(claim, fusion, legs, now)
@@ -465,7 +489,8 @@ class HybridRetriever:
         query: str,
         scopes: Sequence[Scope],
         limit: int,
-        as_of: datetime | None,
+        valid_at: datetime | None,
+        known_at: datetime | None,
         min_score: float,
     ) -> list[EpisodeResult]:
         """The same two legs over raw turns, discounted and capped.
@@ -477,8 +502,10 @@ class HybridRetriever:
         that actually finds things: BM25 over the words that were used, and cosine over
         what they meant.
         """
-        vector_hits = self._episode_vector_search(query, scopes, limit, as_of)
-        lexical_hits, terms = self._episode_lexical_search(query, scopes, limit, as_of)
+        vector_hits = self._episode_vector_search(
+            query, scopes, limit, valid_at, known_at)
+        lexical_hits, terms = self._episode_lexical_search(
+            query, scopes, limit, valid_at, known_at)
 
         fused = reciprocal_rank_fusion(
             {VECTOR: vector_hits, LEXICAL: lexical_hits},
@@ -539,7 +566,8 @@ class HybridRetriever:
         return {eid: e for eid in ids if (e := self.store.get_episode(eid)) is not None}
 
     def _episode_vector_search(
-        self, query: str, scopes: Sequence[Scope], limit: int, as_of: datetime | None,
+        self, query: str, scopes: Sequence[Scope], limit: int,
+        valid_at: datetime | None, known_at: datetime | None,
     ) -> list[tuple[str, float]]:
         """Vector leg over turns. Abstains on a zero-norm query, as the claim leg does.
 
@@ -554,10 +582,11 @@ class HybridRetriever:
         qvec = np.asarray(self.embedder.encode([query])[0], dtype=np.float32)
         if float(np.linalg.norm(qvec)) <= 0.0:
             return []
-        return list(search(qvec, scopes, limit, as_of))
+        return list(search(qvec, scopes, limit, valid_at=valid_at, known_at=known_at))
 
     def _episode_lexical_search(
-        self, query: str, scopes: Sequence[Scope], limit: int, as_of: datetime | None,
+        self, query: str, scopes: Sequence[Scope], limit: int,
+        valid_at: datetime | None, known_at: datetime | None,
     ) -> tuple[list[tuple[str, float]], int]:
         """BM25 over turns, reduced to content terms exactly as the claim leg is.
 
@@ -571,7 +600,8 @@ class HybridRetriever:
         reduced = analyze(query)
         if reduced.abstains:
             return [], 0
-        return list(search(reduced.text, scopes, limit, as_of)), len(reduced.terms)
+        hits = search(reduced.text, scopes, limit, valid_at=valid_at, known_at=known_at)
+        return list(hits), len(reduced.terms)
 
     @staticmethod
     def _interleave(claims: list[Retrieved], episodes: list[EpisodeResult],
@@ -650,7 +680,8 @@ class HybridRetriever:
         query: str,
         scopes: Sequence[Scope],
         limit: int,
-        as_of: datetime | None,
+        valid_at: datetime | None,
+        known_at: datetime | None,
         include_invalidated: bool,
     ) -> list[tuple[str, float]]:
         """Vector leg, skipped when the query embeds to nothing.
@@ -666,14 +697,17 @@ class HybridRetriever:
         qvec = np.asarray(self.embedder.encode([query])[0], dtype=np.float32)
         if float(np.linalg.norm(qvec)) <= 0.0:
             return []
-        return list(self.store.vector_search(qvec, scopes, limit, as_of, include_invalidated))
+        return list(self.store.vector_search(
+            qvec, scopes, limit, valid_at=valid_at, known_at=known_at,
+            include_invalidated=include_invalidated))
 
     def _lexical_search(
         self,
         query: str,
         scopes: Sequence[Scope],
         limit: int,
-        as_of: datetime | None,
+        valid_at: datetime | None,
+        known_at: datetime | None,
         include_invalidated: bool,
     ) -> tuple[list[tuple[str, float]], int]:
         """Lexical leg, reduced to content terms and skipped when none survive.
@@ -691,24 +725,30 @@ class HybridRetriever:
         if reduced.abstains:
             return [], 0
         hits = self.store.lexical_search(
-            reduced.text, scopes, limit, as_of, include_invalidated)
+            reduced.text, scopes, limit, valid_at=valid_at, known_at=known_at,
+            include_invalidated=include_invalidated)
         return list(hits), len(reduced.terms)
 
     @staticmethod
-    def _believed_by(claim: Claim, as_of: datetime | None) -> bool:
-        """Transaction-time floor, enforced here rather than left to the store.
+    def _believed_by(claim: Claim, known_at: datetime | None) -> bool:
+        """Belief-time floor, enforced here rather than left to the store.
 
-        `include_invalidated=True` drops the store's entire liveness predicate, which
-        also drops `recorded_at <= as_of` and lets claims recorded *after* the asked
-        instant leak into a historical answer. "What did we believe in March,
+        `include_invalidated=True` drops most of the store's liveness predicate, and a
+        third-party store may drop the rest too - letting claims recorded *after* the
+        asked instant leak into a historical answer. "What did we believe in March,
         including what we later retracted" must never include something we had not yet
         heard in March - that is knowledge from the future, and it is the one way a
         bitemporal query can lie. Re-applying the floor costs a comparison per
         candidate and makes the two flags orthogonal, which is what callers assume.
+
+        Only the belief axis is re-checked. The valid-time floor is deliberately *not*
+        mirrored here: `include_invalidated` lifts the whole valid-time interval by
+        design (see `SQLiteStore._live_clause`), so re-imposing half of it in Python
+        would make the flag mean something different depending on which layer answered.
         """
-        if as_of is None:
+        if known_at is None:
             return True
-        return _as_utc(claim.recorded_at) <= _as_utc(as_of)
+        return _as_utc(claim.recorded_at) <= _as_utc(known_at)
 
     def _explain(self, claim: Claim, fusion: float, legs: _Legs, now: datetime) -> Result:
         v = legs.vector.get(claim.id)

@@ -63,6 +63,8 @@ from .types import (
     Result,
     Scope,
     WriteReceipt,
+    as_utc,
+    time_axes,
     utcnow,
 )
 from .write import WritePipeline
@@ -190,6 +192,68 @@ def _drop_vectors(store: Store) -> None:
             "reset the index dimension."
         )
     clear()
+
+
+# --- audit-view time filters -------------------------------------------------------
+#
+# `history()`, `why()` and `produced()` are the three *record* reads, and they share one
+# rule that the retrieval reads do not: an unset axis means "no filter" rather than
+# "now". A timeline, a provenance trail and a turn's output are all documents whose
+# whole content is the versions that are no longer current, so defaulting either clock
+# to the present would empty them. All three predicates below therefore short-circuit
+# on `None` rather than substituting a clock, which is the one place they diverge from
+# `Claim.is_live` and from the store's `_live_clause`.
+#
+# Three of them and not one, because the three reads are dating three different kinds
+# of thing: a version of a fact, the moment a version was replaced, and a turn.
+
+
+def _in_timeline(claim: Claim, valid_at: datetime | None,
+                 known_at: datetime | None) -> bool:
+    """Was this row part of the record, seen from `(valid_at, known_at)`?
+
+    `known_at` is the belief clock: had we recorded this version yet. `valid_at` is the
+    world clock: did the interval this version asserts actually cover that moment.
+
+    Deliberately `Claim.is_live` *minus its retirement clause*. That one clause is the
+    difference between "what did we believe" and "what do we show an auditor" — a
+    retired version is exactly what a record read exists to return, and filtering it
+    out here would make `history()` a present-tense query with dates on it.
+    """
+    if known_at is not None and as_utc(claim.recorded_at) > as_utc(known_at):
+        return False
+    if valid_at is None:
+        return True
+    at = as_utc(valid_at)
+    return (as_utc(claim.valid_from) <= at
+            and (claim.valid_to is None or as_utc(claim.valid_to) > at))
+
+
+def _retired_by(claim: Claim, known_at: datetime | None) -> bool:
+    """Had this row already been superseded at `known_at`?
+
+    Only `why()` uses it, for the `superseded` list. A supersession is a belief-clock
+    event — something we decided, not something the world did — so it is dated by
+    `invalidated_at` rather than by the superseded row's own `recorded_at`, which
+    usually predates the whole story and would let a July view report a replacement
+    that happened in August.
+    """
+    if known_at is None:
+        return True
+    return (claim.invalidated_at is not None
+            and as_utc(claim.invalidated_at) <= as_utc(known_at))
+
+
+def _had_happened(episode: Episode, valid_at: datetime | None,
+                  known_at: datetime | None) -> bool:
+    """The episode half: a turn's one `ts` is both of its clocks at once.
+
+    Same derivation as `SQLiteStore._happened_clause` — a turn happened and was known
+    at the same instant, so it clears a bound only if it precedes *both*.
+    """
+    ts = as_utc(episode.ts)
+    return ((valid_at is None or ts <= as_utc(valid_at))
+            and (known_at is None or ts <= as_utc(known_at)))
 
 
 class Memvara:
@@ -866,6 +930,7 @@ class Memvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
+               valid_at: datetime | None = ..., known_at: datetime | None = ...,
                include_invalidated: bool = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: Literal[False] = ...) -> list[Result]: ...
@@ -873,6 +938,7 @@ class Memvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
+               valid_at: datetime | None = ..., known_at: datetime | None = ...,
                include_invalidated: bool = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: Literal[True]) -> list[Retrieved]: ...
@@ -880,16 +946,28 @@ class Memvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
+               valid_at: datetime | None = ..., known_at: datetime | None = ...,
                include_invalidated: bool = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0, tenant=None,
                user=None, agent=None, session=None, as_of: datetime | None = None,
+               valid_at: datetime | None = None, known_at: datetime | None = None,
                include_invalidated: bool = False,
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False) -> list[Any]:
-        """Hybrid retrieval over current belief, or over belief as of a past instant.
+        """Hybrid retrieval over current belief, or over any point on either time axis.
+
+        `valid_at` is the world clock and `known_at` the belief clock, each defaulting
+        to now, and the four combinations are the four questions bitemporal data can
+        answer — see `memvara.types.time_axes`. The one worth naming here is
+        `valid_at=June` on its own: what we believe *today* about June, which is the
+        only way to see a correction that arrived in August. `as_of=June` cannot show
+        it, because it rewinds the belief clock past the correction as well.
+
+        `as_of` remains exact sugar for `valid_at=known_at=T`. Passing it with either
+        axis raises rather than picking one.
 
         `min_score` is a floor on `Result.score`, which is normalized into [0, 1]. The
         right value is a property of *your store*, not of this library: it drifts with
@@ -912,9 +990,9 @@ class Memvara:
         """
         scope = self._scope(tenant, user, agent, session)
         return self.reader.search(
-            query, scope, k=k, as_of=as_of, min_score=min_score,
-            include_invalidated=include_invalidated, memory_types=memory_types,
-            include_episodes=include_episodes,
+            query, scope, k=k, as_of=as_of, valid_at=valid_at, known_at=known_at,
+            min_score=min_score, include_invalidated=include_invalidated,
+            memory_types=memory_types, include_episodes=include_episodes,
         )
 
     def get(self, claim_id: str, *, tenant=None, user=None, agent=None,
@@ -1000,17 +1078,26 @@ class Memvara:
         return erase(claim_id, sources=sources)
 
     def count(self, *, tenant=None, user=None, agent=None, session=None,
-              as_of: datetime | None = None, include_invalidated: bool = False) -> int:
+              as_of: datetime | None = None, valid_at: datetime | None = None,
+              known_at: datetime | None = None,
+              include_invalidated: bool = False) -> int:
         """How many claims are visible at this scope.
 
         Visible, not stored here: scopes inherit upward, so a session's count includes
         the user's durable facts, which is the number that matches what `search()` at
         that scope can return. `stats()` is the per-tenant row count, which is a
         different question.
+
+        Both time axes apply exactly as they do to `search()`, so this is the cheap way
+        to ask "how much did we know then" or "how much of what we know now was true in
+        June". Note `include_invalidated=True` makes `valid_at` inert — it lifts the
+        whole valid-time interval, not just its end; see `SQLiteStore._live_clause`.
         """
         scope = self._scope(tenant, user, agent, session)
+        valid_at, known_at = time_axes(as_of, valid_at, known_at)
         return len(self.store.candidate_ids(
-            scope.ancestors(), as_of=as_of, include_invalidated=include_invalidated))
+            scope.ancestors(), valid_at=valid_at, known_at=known_at,
+            include_invalidated=include_invalidated))
 
     def reset(self, *, tenant=None, user=None, agent=None, session=None) -> dict[str, int]:
         """Erase everything in scope. Irreversible, and defaults to the whole tenant.
@@ -1126,11 +1213,18 @@ class Memvara:
 
     def get_all(self, *, tenant=None, user=None, agent=None, session=None,
                 include_invalidated: bool = False,
-                as_of: datetime | None = None) -> list[Claim]:
-        """Every claim in scope, newest first."""
+                as_of: datetime | None = None, valid_at: datetime | None = None,
+                known_at: datetime | None = None) -> list[Claim]:
+        """Every claim in scope, newest first.
+
+        `valid_at` and `known_at` are the two time axes and behave exactly as they do
+        on `search()`; `as_of` sets both. See `memvara.types.time_axes`.
+        """
         scope = self._scope(tenant, user, agent, session)
+        valid_at, known_at = time_axes(as_of, valid_at, known_at)
         ids = self.store.candidate_ids(
-            scope.ancestors(), as_of=as_of, include_invalidated=include_invalidated)
+            scope.ancestors(), valid_at=valid_at, known_at=known_at,
+            include_invalidated=include_invalidated)
         claims = list(self.store.get_claims(ids).values())
         # Content first, id only to make the order total; the stable sort below then
         # breaks timestamp ties on that instead of on whatever order SQLite returned.
@@ -1147,21 +1241,53 @@ class Memvara:
         return claims
 
     def history(self, subject: str, predicate: str, *, tenant=None, user=None,
-                agent=None, session=None) -> list[Claim]:
+                agent=None, session=None, as_of: datetime | None = None,
+                valid_at: datetime | None = None,
+                known_at: datetime | None = None) -> list[Claim]:
         """The full timeline of one fact slot, oldest first.
 
         Every value ever believed, when it was recorded, and what superseded it.
+
+        **The axes default to "no filter" here, not to "now".** Everywhere else an
+        unset axis means the current instant; a timeline whose default was "now" would
+        drop every superseded value, which is the entire content of a timeline. So the
+        bare call is unchanged and returns the whole slot.
+
+        `known_at=T` is the audit query this method was missing: the timeline *as it
+        looked* on T, i.e. only the versions that had been recorded by then. Run
+        against a slot that was corrected later, it shows what an investigator reading
+        the audit trail on T would have seen — which is a different document from the
+        one they would read today, and the difference is the point.
+
+        `valid_at=T` narrows to the versions that were in force in the world at T: every
+        value ever asserted to hold at that moment, in the order we came to believe
+        them. Paired with `known_at` unset, that is "everything we have *ever* thought
+        about June", corrections included.
+
+        Retirement is deliberately not filtered on either axis — a retired version is
+        what a timeline is for. The rows come back exactly as stored, with their real
+        stamps: a claim retired last week reads as retired even in a March view, for
+        the reason `Claim.state` gives. Pair the row with the instant you asked for
+        (`c.is_live(known_at=T)`) rather than expecting the row to have been rewritten.
         """
         scope = self._scope(tenant, user, agent, session)
+        valid_at, known_at = time_axes(as_of, valid_at, known_at)
         probe = Claim(subject=subject, predicate=self.registry.normalize(predicate),
                       object="", scope=scope)
         # Same asymmetry as `forget`: the slot is keyed without agent/session, so the
         # scope filter is what stops a sibling session reading this slot's contents.
+        #
+        # Filtered here rather than pushed into `slot_history`: one slot holds the
+        # versions of one fact, so the row count is small by construction, and leaving
+        # the protocol method alone keeps every backend's audit trail one query with one
+        # meaning.
         return [c for c in self.store.slot_history(scope.tenant, probe.fact_key)
-                if scope.contains(c.scope)]
+                if scope.contains(c.scope) and _in_timeline(c, valid_at, known_at)]
 
     def why(self, claim_id: str, *, tenant=None, user=None, agent=None,
-            session=None) -> Provenance | None:
+            session=None, as_of: datetime | None = None,
+            valid_at: datetime | None = None,
+            known_at: datetime | None = None) -> Provenance | None:
         """Trace a claim back to the source turns it was derived from.
 
         Scope-checked, because this is the only id-addressed read in the API and it
@@ -1179,7 +1305,29 @@ class Memvara:
         than one per turn. That N+1 cost 2.79 ms for a claim with 365 sources against
         1.36 here, and it grew with the very claims most worth explaining: the ones the
         user keeps confirming.
+
+        The time axes default to "no filter", as `history()`'s do and for the same
+        reason: provenance is a record, and a record whose default view hid most of
+        itself would be useless. Given, they answer "what did this explanation look like
+        then", and they divide the payload between them:
+
+        * `known_at` dates both halves. Only the source turns we had heard by then, and
+          only the supersessions *recorded* by then — a claim that has since swallowed
+          three more restatements still explains itself the way it did on the day.
+        * `valid_at` dates the source turns only. A turn's single `ts` is on both of its
+          clocks (see `_had_happened`), but a supersession is purely a belief-clock
+          event: it is a thing we decided, not a thing that happened in the world, so
+          the world clock has no opinion about whether it had occurred.
+
+        Note the supersession filter reads `invalidated_at`, not `recorded_at`. The
+        superseded row usually predates the whole story — what is being dated is the
+        moment we replaced it, which is the only thing `superseded` is reporting.
+
+        The claim itself is returned whatever the axes say; they describe the evidence
+        around it, and withholding the row would turn this method into an existence
+        oracle it is explicitly not allowed to be.
         """
+        valid_at, known_at = time_axes(as_of, valid_at, known_at)
         claim = self.store.get_claim(claim_id)
         if claim is None:
             return None
@@ -1190,14 +1338,18 @@ class Memvara:
         # order a claim cites its turns in is the order they were observed. A turn that
         # has been erased is simply absent — `erase_claim` is allowed to leave provenance
         # dangling, and wave 3 settled that the read is not where that gets discovered.
-        episodes = [e for e in (found.get(s) for s in claim.sources) if e is not None]
+        episodes = [e for e in (found.get(s) for s in claim.sources)
+                    if e is not None and _had_happened(e, valid_at, known_at)]
         superseded = [c for c in self.store.slot_history(claim.scope.tenant, claim.fact_key)
-                      if c.invalidated_by == claim.id]
+                      if c.invalidated_by == claim.id
+                      and _retired_by(c, known_at)]
         return Provenance(claim=claim, episodes=episodes, derivation=claim.derivation,
                           extractor=claim.extractor, superseded=superseded)
 
     def produced(self, episode_id: str, *, tenant=None, user=None, agent=None,
-                 session=None) -> list[Claim]:
+                 session=None, as_of: datetime | None = None,
+                 valid_at: datetime | None = None,
+                 known_at: datetime | None = None) -> list[Claim]:
         """What one turn was turned into: every claim derived from it.
 
         `why()` run backwards. It answers the question an audit actually starts from —
@@ -1223,10 +1375,17 @@ class Memvara:
 
         Retired claims are included, because they were still derived from that turn.
         `[c for c in mem.produced(ep) if c.invalidated_at is None]` is the live view.
+
+        The time axes default to "no filter", as `history()`'s do. `known_at=T` gives
+        what this turn had produced by T, which is not the same set as today's: a turn
+        keeps acquiring claims as later turns restate it and reinforcement adds it to
+        their sources. That drift is exactly what an audit starting from "this
+        conversation happened" wants to see dated.
         """
         scope = self._scope(tenant, user, agent, session)
+        valid_at, known_at = time_axes(as_of, valid_at, known_at)
         return [c for c in self.store.claims_citing(scope.tenant, episode_id)
-                if scope.sees(c.scope)]
+                if scope.sees(c.scope) and _in_timeline(c, valid_at, known_at)]
 
     # -- traversal -----------------------------------------------------------
     #
@@ -1238,7 +1397,8 @@ class Memvara:
 
     def neighborhood(self, entity: str, *, depth: int = 2, k: int = 10,
                      min_hops: int = 1, predicates: Sequence[str] | None = None,
-                     as_of: datetime | None = None, min_score: float = 0.0,
+                     as_of: datetime | None = None, valid_at: datetime | None = None,
+                     known_at: datetime | None = None, min_score: float = 0.0,
                      tenant=None, user=None, agent=None,
                      session=None) -> list[Path]:
         """What is around `entity`: the best paths of `min_hops` to `depth` hops out of it.
@@ -1262,19 +1422,22 @@ class Memvara:
         relations, normalized through the registry so `works_at` also matches whatever
         was stored as `employed_by_company`.
 
-        `as_of` travels in transaction *and* valid time, exactly as `search()` does — and
-        the whole walk is evaluated at one instant, so a returned chain is one that held
-        all at once rather than one assembled from different mornings. With `as_of=None`
-        that instant is pinned when the call starts, not read again per hop.
+        `valid_at` and `known_at` are the two time axes, exactly as on `search()`, and
+        `as_of` sets both. The whole walk is evaluated at one *pair* of instants, so a
+        returned chain is one that held all at once rather than one assembled from
+        different mornings — and an axis left unset is pinned when the call starts,
+        never read again per hop. That pin is the invariant multi-hop rests on; see
+        `GraphTraverser._pin`.
         """
         scope = self._scope(tenant, user, agent, session)
         return self.traverser.neighborhood(
             entity, scope, depth=depth, k=k, min_hops=min_hops, predicates=predicates,
-            as_of=as_of, min_score=min_score)
+            as_of=as_of, valid_at=valid_at, known_at=known_at, min_score=min_score)
 
     def paths_between(self, source: str, target: str, *, depth: int = 3, k: int = 3,
                       predicates: Sequence[str] | None = None,
-                      as_of: datetime | None = None, min_score: float = 0.0,
+                      as_of: datetime | None = None, valid_at: datetime | None = None,
+                      known_at: datetime | None = None, min_score: float = 0.0,
                       tenant=None, user=None, agent=None,
                       session=None) -> list[Path]:
         """How two entities are connected: the best chains of at most `depth` hops.
@@ -1295,7 +1458,7 @@ class Memvara:
         scope = self._scope(tenant, user, agent, session)
         return self.traverser.between(
             source, target, scope, depth=depth, k=k, predicates=predicates,
-            as_of=as_of, min_score=min_score)
+            as_of=as_of, valid_at=valid_at, known_at=known_at, min_score=min_score)
 
     # -- scoped views --------------------------------------------------------
 
@@ -1503,27 +1666,32 @@ class ScopedMemvara:
     # and this is the one the MCP server and every integration holds.
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               as_of: datetime | None = ..., include_invalidated: bool = ...,
+               as_of: datetime | None = ..., valid_at: datetime | None = ...,
+               known_at: datetime | None = ..., include_invalidated: bool = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: Literal[False] = ...) -> list[Result]: ...
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               as_of: datetime | None = ..., include_invalidated: bool = ...,
+               as_of: datetime | None = ..., valid_at: datetime | None = ...,
+               known_at: datetime | None = ..., include_invalidated: bool = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               as_of: datetime | None = ..., include_invalidated: bool = ...,
+               as_of: datetime | None = ..., valid_at: datetime | None = ...,
+               known_at: datetime | None = ..., include_invalidated: bool = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
-               as_of: datetime | None = None, include_invalidated: bool = False,
+               as_of: datetime | None = None, valid_at: datetime | None = None,
+               known_at: datetime | None = None, include_invalidated: bool = False,
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False) -> list[Any]:
         return self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
+                                valid_at=valid_at, known_at=known_at,
                                 include_invalidated=include_invalidated,
                                 memory_types=memory_types,
                                 include_episodes=include_episodes, **self._kw)
@@ -1542,39 +1710,54 @@ class ScopedMemvara:
         return self._mem.get(claim_id, **self._kw)
 
     def get_all(self, *, include_invalidated: bool = False,
-                as_of: datetime | None = None) -> list[Claim]:
+                as_of: datetime | None = None, valid_at: datetime | None = None,
+                known_at: datetime | None = None) -> list[Claim]:
         return self._mem.get_all(include_invalidated=include_invalidated, as_of=as_of,
-                                 **self._kw)
+                                 valid_at=valid_at, known_at=known_at, **self._kw)
 
-    def history(self, subject: str, predicate: str) -> list[Claim]:
-        return self._mem.history(subject, predicate, **self._kw)
+    def history(self, subject: str, predicate: str, *, as_of: datetime | None = None,
+                valid_at: datetime | None = None,
+                known_at: datetime | None = None) -> list[Claim]:
+        return self._mem.history(subject, predicate, as_of=as_of, valid_at=valid_at,
+                                 known_at=known_at, **self._kw)
 
-    def why(self, claim_id: str) -> Provenance | None:
-        return self._mem.why(claim_id, **self._kw)
+    def why(self, claim_id: str, *, as_of: datetime | None = None,
+            valid_at: datetime | None = None,
+            known_at: datetime | None = None) -> Provenance | None:
+        return self._mem.why(claim_id, as_of=as_of, valid_at=valid_at,
+                             known_at=known_at, **self._kw)
 
-    def produced(self, episode_id: str) -> list[Claim]:
-        return self._mem.produced(episode_id, **self._kw)
+    def produced(self, episode_id: str, *, as_of: datetime | None = None,
+                 valid_at: datetime | None = None,
+                 known_at: datetime | None = None) -> list[Claim]:
+        return self._mem.produced(episode_id, as_of=as_of, valid_at=valid_at,
+                                  known_at=known_at, **self._kw)
 
     def neighborhood(self, entity: str, *, depth: int = 2, k: int = 10,
                      min_hops: int = 1, predicates: Sequence[str] | None = None,
-                     as_of: datetime | None = None,
+                     as_of: datetime | None = None, valid_at: datetime | None = None,
+                     known_at: datetime | None = None,
                      min_score: float = 0.0) -> list[Path]:
         return self._mem.neighborhood(entity, depth=depth, k=k, min_hops=min_hops,
                                       predicates=predicates, as_of=as_of,
+                                      valid_at=valid_at, known_at=known_at,
                                       min_score=min_score, **self._kw)
 
     def paths_between(self, source: str, target: str, *, depth: int = 3, k: int = 3,
                       predicates: Sequence[str] | None = None,
-                      as_of: datetime | None = None,
+                      as_of: datetime | None = None, valid_at: datetime | None = None,
+                      known_at: datetime | None = None,
                       min_score: float = 0.0) -> list[Path]:
         return self._mem.paths_between(source, target, depth=depth, k=k,
                                        predicates=predicates, as_of=as_of,
+                                       valid_at=valid_at, known_at=known_at,
                                        min_score=min_score, **self._kw)
 
     def count(self, *, as_of: datetime | None = None,
+              valid_at: datetime | None = None, known_at: datetime | None = None,
               include_invalidated: bool = False) -> int:
-        return self._mem.count(as_of=as_of, include_invalidated=include_invalidated,
-                               **self._kw)
+        return self._mem.count(as_of=as_of, valid_at=valid_at, known_at=known_at,
+                               include_invalidated=include_invalidated, **self._kw)
 
     # -- maintenance ---------------------------------------------------------
 

@@ -9,7 +9,8 @@ import numpy as np
 import pytest
 
 from memvara.embed import HashingEmbedder
-from memvara.store import SQLiteStore
+from memvara.store import SQLStore, SQLiteStore
+from memvara.store.base import Store
 from memvara.store.sqlite import SCHEMA_VERSION
 from memvara.types import Claim, Derivation, Episode, MemoryType, Scope
 
@@ -144,11 +145,14 @@ def test_competing_claims_does_not_cross_users(store):
     assert [c.id for c in store.competing_claims("acme", b.fact_key)] == [b.id]
 
 
-def test_competing_claims_respects_as_of(store):
+def test_competing_claims_respects_the_belief_clock(store):
+    """The conflict lookup is a liveness query like any other: a claim retired before
+    `known_at` is not competing for the slot at `known_at`."""
     a = put(store, object="Berlin")
     store.invalidate(a.id, T1, "cl_x")
-    assert [c.id for c in store.competing_claims("acme", a.fact_key, as_of=TMID)] == [a.id]
-    assert store.competing_claims("acme", a.fact_key, as_of=T2) == []
+    assert [c.id for c in store.competing_claims(
+        "acme", a.fact_key, valid_at=TMID, known_at=TMID)] == [a.id]
+    assert store.competing_claims("acme", a.fact_key, valid_at=T2, known_at=T2) == []
 
 
 def test_find_by_value_matches_exact_assertions_only(store):
@@ -241,11 +245,13 @@ def test_lexical_search_respects_scope(store):
     assert store.lexical_search("berlin", [Scope("acme", "bob")], limit=10) == []
 
 
-def test_lexical_search_respects_as_of(store):
+def test_lexical_search_respects_the_time_axes(store):
     a = put(store, object="Berlin")
     store.invalidate(a.id, T1, "cl_x")
-    assert store.lexical_search("berlin", [SCOPE], limit=10, as_of=TMID)[0][0] == a.id
-    assert store.lexical_search("berlin", [SCOPE], limit=10, as_of=T2) == []
+    assert store.lexical_search(
+        "berlin", [SCOPE], limit=10, valid_at=TMID, known_at=TMID)[0][0] == a.id
+    assert store.lexical_search(
+        "berlin", [SCOPE], limit=10, valid_at=T2, known_at=T2) == []
 
 
 def test_include_invalidated_reveals_retired_claims(store):
@@ -283,12 +289,13 @@ def test_vector_search_respects_scope(store, emb):
     assert store.vector_search(q, [Scope("acme", "bob")], limit=5) == []
 
 
-def test_vector_search_respects_as_of(store, emb):
+def test_vector_search_respects_the_time_axes(store, emb):
     a = put(store, emb, object="Berlin")
     store.invalidate(a.id, T1, "cl_x")
     q = emb.encode(["user lives in Berlin"])[0]
-    assert store.vector_search(q, [SCOPE], limit=5, as_of=TMID)[0][0] == a.id
-    assert store.vector_search(q, [SCOPE], limit=5, as_of=T2) == []
+    assert store.vector_search(
+        q, [SCOPE], limit=5, valid_at=TMID, known_at=TMID)[0][0] == a.id
+    assert store.vector_search(q, [SCOPE], limit=5, valid_at=T2, known_at=T2) == []
 
 
 def test_vector_search_limit_is_honored(store, emb):
@@ -480,18 +487,30 @@ def test_episode_search_inherits_upward_but_never_descends(store, emb):
     assert set(store.episode_candidate_ids([Scope("acme", "alice")])) == {broad.id}
 
 
-def test_episode_search_respects_as_of(store, emb):
+def test_episode_search_respects_the_time_axes(store, emb):
     """A turn that had not happened yet is not something we could have recalled."""
     old = turn(store, emb, content="kafka is fine", ts=T0)
     new = turn(store, emb, content="kafka is being sunset", ts=T1)
     q = emb.encode(["kafka"])[0]
-    assert set(store.episode_candidate_ids([SCOPE], as_of=TMID)) == {old.id}
+    assert set(store.episode_candidate_ids(
+        [SCOPE], valid_at=TMID, known_at=TMID)) == {old.id}
     assert [h[0] for h in store.lexical_search_episodes(
-        "kafka", [SCOPE], limit=10, as_of=TMID)] == [old.id]
+        "kafka", [SCOPE], limit=10, valid_at=TMID, known_at=TMID)] == [old.id]
     assert [h[0] for h in store.vector_search_episodes(
-        q, [SCOPE], limit=10, as_of=TMID)] == [old.id]
-    assert len(store.episode_candidate_ids([SCOPE], as_of=T2)) == 2
-    assert new.id in store.episode_candidate_ids([SCOPE], as_of=T2)
+        q, [SCOPE], limit=10, valid_at=TMID, known_at=TMID)] == [old.id]
+    later = store.episode_candidate_ids([SCOPE], valid_at=T2, known_at=T2)
+    assert len(later) == 2 and new.id in later
+
+
+def test_an_episode_is_bounded_by_the_earlier_of_the_two_clocks(store):
+    """A turn's single `ts` is both of its clocks at once — it happened and we knew of
+    it at the same instant — so either axis alone can hide it. Without the `min` in
+    `_happened_clause`, `valid_at=T0, known_at=T2` would return a turn that had not
+    happened yet, which is a search result from the future."""
+    turn(store, content="kafka is fine", ts=T1)
+    assert store.episode_candidate_ids([SCOPE], valid_at=T0, known_at=T2) == []
+    assert store.episode_candidate_ids([SCOPE], valid_at=T2, known_at=T0) == []
+    assert len(store.episode_candidate_ids([SCOPE], valid_at=T2, known_at=T2)) == 1
 
 
 def test_a_future_turn_is_invisible_to_a_present_query(store):
@@ -605,8 +624,9 @@ def test_include_invalidated_still_cannot_see_the_future(store):
     store.invalidate(old.id, T1, "cl_b")
     later = put(store, object="Lisbon", recorded_at=T1, valid_from=T1)
 
-    audit = set(store.candidate_ids([SCOPE], as_of=TMID, include_invalidated=True))
-    assert audit == {old.id}, "a claim recorded after as_of is not past belief"
+    audit = set(store.candidate_ids(
+        [SCOPE], valid_at=TMID, known_at=TMID, include_invalidated=True))
+    assert audit == {old.id}, "a claim recorded after known_at is not past belief"
     assert later.id not in audit
 
 
@@ -618,13 +638,59 @@ def test_include_invalidated_reveals_expired_and_retracted_claims(store):
     assert set(store.candidate_ids([SCOPE], include_invalidated=True)) == {a.id}
 
 
+def test_include_invalidated_lifts_the_whole_valid_interval_so_valid_at_is_inert(store):
+    """The exact semantics of the flag, pinned because a backend got them wrong and the
+    suite stayed green.
+
+    `include_invalidated` drops `valid_from <= ?` as well as the two end-of-life
+    constraints, so it lifts the **whole** valid-time interval and `valid_at` stops
+    filtering anything. That is surprising — the flag's name and its old docstring both
+    suggested the narrower reading, keeping the `valid_from` floor — and the Postgres
+    backend implemented the narrow one first. Mutating it either way left every test in
+    this file passing, which is how a documented cross-backend guarantee had nothing
+    behind it.
+
+    The claim below is *not yet valid* at the instant queried. Under the shipped
+    behaviour it comes back anyway; under the narrow reading it does not. Nothing else
+    here distinguishes them.
+    """
+    future = put(store, object="Lisbon", recorded_at=T0, valid_from=T2)
+
+    assert store.candidate_ids([SCOPE], valid_at=T0, known_at=T0) == [], \
+        "not valid yet, so the ordinary predicate excludes it"
+    assert set(store.candidate_ids([SCOPE], valid_at=T0, known_at=T0,
+                                   include_invalidated=True)) == {future.id}, \
+        "include_invalidated lifts the valid-time floor too, so valid_at cannot exclude it"
+    # The belief clock is *not* lifted, which is what keeps the flag from leaking the
+    # future — see the test above. Both halves are load-bearing and only together do they
+    # describe the flag.
+    assert store.candidate_ids([SCOPE], known_at=datetime(2023, 1, 1, tzinfo=timezone.utc),
+                               include_invalidated=True) == []
+
+
 def test_candidate_ids_applies_bitemporal_filter(store):
     a = put(store, object="Berlin", recorded_at=T0, valid_from=T0)
     store.invalidate(a.id, T1, "cl_b")
     b = put(store, object="Lisbon", recorded_at=T1, valid_from=T1)
-    assert set(store.candidate_ids([SCOPE], as_of=TMID)) == {a.id}
-    assert set(store.candidate_ids([SCOPE], as_of=T2)) == {b.id}
+    assert set(store.candidate_ids([SCOPE], valid_at=TMID, known_at=TMID)) == {a.id}
+    assert set(store.candidate_ids([SCOPE], valid_at=T2, known_at=T2)) == {b.id}
     assert set(store.candidate_ids([SCOPE], include_invalidated=True)) == {a.id, b.id}
+
+
+def test_the_two_axes_move_independently_in_candidate_ids(store):
+    """The store-level statement of the question `as_of` could not ask. `a` was true
+    from T0 and we retired it at T1; `b` corrects the same slot but asserts a *valid*
+    interval that also starts at T0. Asked with one instant the correction is either
+    unknown (TMID) or the world has moved on (T2); asked with the axes apart it is the
+    answer, which is what a late-arriving fact is for."""
+    a = put(store, object="Berlin", recorded_at=T0, valid_from=T0)
+    store.invalidate(a.id, T1, "cl_b")
+    store.set_valid_to(a.id, T1)
+    b = put(store, object="Lisbon", recorded_at=T1, valid_from=T0, valid_to=T1)
+
+    assert set(store.candidate_ids([SCOPE], valid_at=TMID, known_at=TMID)) == {a.id}
+    assert set(store.candidate_ids([SCOPE], valid_at=TMID, known_at=T2)) == {b.id}
+    assert store.candidate_ids([SCOPE], valid_at=T2, known_at=T2) == []
 
 
 # --- Maintenance ------------------------------------------------------------
@@ -1982,3 +2048,52 @@ def test_a_date_before_the_epoch_is_clamped_rather_than_left_unreadable():
     # what was asked for and that it reads back.
     assert probed >= cutoff
     assert real.fromtimestamp(probed, dtmod.timezone.utc) is not None
+
+
+# --- the protocol two backends have to agree on -----------------------------
+
+
+@pytest.mark.parametrize("name", ["_live_clause", "_happened_clause"])
+def test_the_clause_builders_match_the_signature_the_protocol_declares(name):
+    """`SQLStore` exists so SQLite and Postgres write the same predicate in two
+    repositories without drifting. A declaration nothing checks is a comment, and the
+    way this drifts is silent: a backend that renamed an argument still runs, still
+    returns SQL, and answers a different question.
+    """
+    import inspect
+
+    declared = inspect.signature(getattr(SQLStore, name))
+    assert inspect.signature(getattr(SQLiteStore, name)) == declared
+    # Positional-or-keyword throughout: `_live_clause` is called by position inside the
+    # store, so a backend that made the axes keyword-only would still satisfy a
+    # name-only comparison and then fail at the first call site.
+    kinds = [p.kind for p in declared.parameters.values()]
+    assert all(k is inspect.Parameter.POSITIONAL_OR_KEYWORD for k in kinds)
+
+
+@pytest.mark.parametrize("name", [
+    "competing_claims", "adjacent", "candidate_ids", "lexical_search", "vector_search",
+    "episode_candidate_ids", "lexical_search_episodes", "vector_search_episodes",
+])
+def test_every_time_travelling_protocol_method_takes_both_axes_and_no_as_of(name):
+    """`as_of` survives on the public facade and nowhere below it. A store method that
+    kept it would be reinterpreting a caller's single instant as one of two clocks —
+    the exact silent-wrong-answer this split exists to remove — and the store is where a
+    third-party backend copies its signatures from."""
+    import inspect
+
+    for owner in (Store, SQLiteStore):
+        params = inspect.signature(getattr(owner, name)).parameters
+        assert "as_of" not in params, owner
+        for axis in ("valid_at", "known_at"):
+            assert params[axis].kind is inspect.Parameter.KEYWORD_ONLY, (owner, axis)
+            assert params[axis].default is None
+
+
+def test_the_sqlite_store_still_satisfies_the_runtime_store_protocol(store):
+    """`SQLStore` is deliberately a *second* protocol: the clause builders are SQL
+    generation, and `Store` promises Qdrant and LanceDB can implement it. Folding them
+    into `Store` would have changed what `isinstance` accepts, which is why they are not
+    there."""
+    assert isinstance(store, Store)
+    assert not hasattr(Store, "_live_clause")

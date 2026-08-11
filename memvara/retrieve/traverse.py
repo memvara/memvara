@@ -10,14 +10,16 @@ them.
 What this module adds is the join, and four properties that decide whether the answer is
 worth anything.
 
-**One instant for the whole traversal.** Every edge on a returned path is evaluated at
-the same `as_of`, pinned once before the first hop and passed unchanged to every store
-call after it. Without that pin a three-hop walk asks the clock three times and can
-return a path whose first edge was believed in the morning and whose last was believed in
-the afternoon — a connection that was never simultaneously true, reported as a fact. That
-is the worst thing this feature could do, it is invisible in any result that does not
-carry its timestamps, and it is what a bitemporal store is uniquely able to refuse. It is
-also why `as_of=None` does not mean "let each hop use its own now": see `_pin`.
+**One instant *per axis* for the whole traversal.** Every edge on a returned path is
+evaluated at the same `(valid_at, known_at)` pair, pinned once before the first hop and
+passed unchanged to every store call after it. Without that pin a three-hop walk asks the
+clock three times and can return a path whose first edge was believed in the morning and
+whose last was believed in the afternoon — a connection that was never simultaneously
+true, reported as a fact. That is the worst thing this feature could do, it is invisible
+in any result that does not carry its timestamps, and it is what a bitemporal store is
+uniquely able to refuse. Two axes do not weaken it; they make it a pair that moves
+together. It is also why an unset axis does not mean "let each hop use its own now": see
+`_pin`.
 
 **A negation is not a link.** "Alice does not work at Acme" is a claim about Alice and
 Acme, and `Store.adjacent` returns it, because at that layer it genuinely is adjacency.
@@ -43,11 +45,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 from ..schema import PredicateRegistry
 from ..store.base import Store
-from ..types import Claim, Scope, as_utc, default_entity, utcnow
+from ..types import Claim, Scope, as_utc, default_entity, time_axes, utcnow
 from .scoring import recency_factor
 
 #: What one more hop costs, as a multiplier on the path's score.
@@ -146,7 +148,7 @@ class Path:
     @property
     def claims(self) -> tuple[Claim, ...]:
         """The underlying claims, in walk order. Every one of them is live at the
-        instant the traversal was evaluated at, and every one is individually readable
+        clock pair the traversal was evaluated at, and every one is individually readable
         at the scope that asked."""
         return tuple(e.claim for e in self.edges)
 
@@ -183,6 +185,18 @@ class Path:
         return f"<Path {self.score:.4f} {self.hops}h {self.render()}>"
 
 
+class _Pin(NamedTuple):
+    """The clock pair a whole traversal is evaluated at. See `GraphTraverser._pin`.
+
+    Named rather than a bare tuple because the two ends are not interchangeable and
+    `pin[1]` at a call site says nothing about which clock it is — and the one that
+    feeds `recency_factor` has to be the belief clock specifically.
+    """
+
+    valid_at: datetime
+    known_at: datetime
+
+
 def _order(path: Path) -> tuple:
     """The total order paths are ranked and truncated by.
 
@@ -195,7 +209,7 @@ def _order(path: Path) -> tuple:
 
 
 class GraphTraverser:
-    """Bounded, scope-checked, single-instant traversal over the claim graph.
+    """Bounded, scope-checked, single-clock-pair traversal over the claim graph.
 
     Constructed by `Memvara`; usable on its own against any `Store` that implements
     `adjacent`. Holds no state between calls, so one instance serves every scope.
@@ -241,6 +255,8 @@ class GraphTraverser:
         min_hops: int = 1,
         predicates: Sequence[str] | None = None,
         as_of: datetime | None = None,
+        valid_at: datetime | None = None,
+        known_at: datetime | None = None,
         min_score: float = 0.0,
     ) -> list[Path]:
         """What is around `entity`: every path of `min_hops`..`depth` hops out of it.
@@ -263,7 +279,8 @@ class GraphTraverser:
         reaches for first; this is the version that does not require knowing that size.
         """
         return self._walk(entity, None, scope, depth=depth, k=k, min_hops=min_hops,
-                          predicates=predicates, as_of=as_of, min_score=min_score)
+                          predicates=predicates, as_of=as_of, valid_at=valid_at,
+                          known_at=known_at, min_score=min_score)
 
     def between(
         self,
@@ -275,6 +292,8 @@ class GraphTraverser:
         k: int = 3,
         predicates: Sequence[str] | None = None,
         as_of: datetime | None = None,
+        valid_at: datetime | None = None,
+        known_at: datetime | None = None,
         min_score: float = 0.0,
     ) -> list[Path]:
         """How `source` and `target` are connected: the best paths of at most `depth` hops.
@@ -291,27 +310,38 @@ class GraphTraverser:
         concluding two entities are unrelated.
         """
         return self._walk(source, target, scope, depth=depth, k=k, min_hops=1,
-                          predicates=predicates, as_of=as_of, min_score=min_score)
+                          predicates=predicates, as_of=as_of, valid_at=valid_at,
+                          known_at=known_at, min_score=min_score)
 
     # -- internals ------------------------------------------------------------
 
     @staticmethod
-    def _pin(as_of: datetime | None) -> datetime:
-        """The one instant the whole traversal is evaluated at.
+    def _pin(valid_at: datetime | None, known_at: datetime | None) -> _Pin:
+        """The one pair of instants the whole traversal is evaluated at.
 
-        This is the load-bearing line of the module. `as_of=None` cannot be forwarded to
-        the store, because `Store.adjacent` with no instant reads the clock *per call* —
-        so a three-hop walk would evaluate its three hops at three different instants and
-        could return a chain that was never simultaneously believed. A claim retired
-        between hop one and hop two would still have been walked; a claim recorded
-        between them would appear as though it had been there all along.
+        This is the load-bearing line of the module. An unset axis cannot be forwarded
+        to the store, because `Store.adjacent` with a missing instant reads the clock
+        *per call* — so a three-hop walk would evaluate its three hops at three
+        different instants and could return a chain that was never simultaneously
+        believed. A claim retired between hop one and hop two would still have been
+        walked; a claim recorded between them would appear as though it had been there
+        all along.
 
         Pinning `utcnow()` here makes both impossible, and makes them impossible in the
         direction that is honest: everything recorded after the traversal began is
         excluded, and everything retired after it began is still walked, which is exactly
         "the world as it stood when you asked".
+
+        Splitting `as_of` into two axes did not weaken this, it widened what has to be
+        pinned: the invariant is now that the *pair* is fixed before the first hop, not
+        merely that each axis is. One clock read fills both defaults, so a walk with
+        neither axis given is still evaluated at a single coherent moment rather than at
+        two instants microseconds apart — which is what makes "what is around Alice
+        right now" mean the same thing on hop three as on hop one, on both clocks.
         """
-        return as_utc(as_of) if as_of is not None else utcnow()
+        now = utcnow()
+        return _Pin(as_utc(valid_at) if valid_at is not None else now,
+                    as_utc(known_at) if known_at is not None else now)
 
     def _predicates(self, predicates: Sequence[str] | None) -> list[str] | None:
         """Caller-supplied predicate names, folded onto the registry's canonical ones.
@@ -335,9 +365,13 @@ class GraphTraverser:
         min_hops: int,
         predicates: Sequence[str] | None,
         as_of: datetime | None,
+        valid_at: datetime | None,
+        known_at: datetime | None,
         min_score: float,
     ) -> list[Path]:
-        """Breadth-first, beam-pruned, one instant throughout. Both public calls land here.
+        """Breadth-first, beam-pruned, one clock pair throughout.
+
+        Both public calls land here.
 
         `min_score` prunes partial paths as they are built, and that is exact rather than
         approximate: `_extend` multiplies by two factors that are both at most 1.0, so a
@@ -345,7 +379,7 @@ class GraphTraverser:
         suffix above it, so pruning early discards exactly what a floor applied at the
         end would have discarded, and does it before those prefixes cost a hop.
         """
-        instant = self._pin(as_of)
+        pin = self._pin(*time_axes(as_of, valid_at, known_at))
         seed = default_entity(source)
         goal = default_entity(target) if target is not None else None
         if not seed or depth <= 0 or k <= 0:
@@ -362,7 +396,7 @@ class GraphTraverser:
         frontier = [Path(nodes=(seed,), edges=(), score=1.0)]
         found: dict[tuple[str, ...], Path] = {}
         for hops in range(1, depth + 1):
-            edges = self._edges(scope, [p.nodes[-1] for p in frontier], preds, instant)
+            edges = self._edges(scope, [p.nodes[-1] for p in frontier], preds, pin)
             grown: dict[tuple[str, ...], Path] = {}
             for path in frontier:
                 for edge in edges.get(path.nodes[-1], ()):
@@ -503,7 +537,7 @@ class GraphTraverser:
         return confidence * recency_factor(claim, self.registry, at)
 
     def _edges(self, scope: Scope, keys: Sequence[str], predicates: list[str] | None,
-               instant: datetime) -> dict[str, list[Edge]]:
+               pin: _Pin) -> dict[str, list[Edge]]:
         """Every walkable edge leaving the current frontier, indexed by the node it leaves.
 
         Three claims are dropped here rather than deeper, and each drop is a semantic:
@@ -520,20 +554,23 @@ class GraphTraverser:
         """
         wanted = {k for k in keys if k}
         out: dict[str, list[Edge]] = {}
-        for claim in self._visible(scope, sorted(wanted), predicates, instant):
+        for claim in self._visible(scope, sorted(wanted), predicates, pin):
             if claim.polarity <= 0:
                 continue
             subject, obj = claim.subject_key, claim.object_key
             if not subject or not obj or subject == obj:
                 continue
-            strength = self._strength(claim, instant)
+            # Decay from the *belief* clock, the same choice `HybridRetriever.search`
+            # makes: recency answers "how long ago did we last hear this, from where
+            # the question stands", and the question stands at `known_at`.
+            strength = self._strength(claim, pin.known_at)
             for key, backward in ((subject, False), (obj, True)):
                 if key in wanted:
                     out.setdefault(key, []).append(Edge(claim, backward, strength))
         return out
 
     def _visible(self, scope: Scope, keys: Sequence[str], predicates: list[str] | None,
-                 instant: datetime) -> list[Claim]:
+                 pin: _Pin) -> list[Claim]:
         """The frontier's claims, reduced to the ones this caller may actually read.
 
         `Scope.sees`, the reading rule — a handle sees its own scope and every broader
@@ -571,6 +608,7 @@ class GraphTraverser:
                 "traversal needs an index over folded subjects and objects, and a scan "
                 "of the tenant per hop is not a substitute"
             )
-        rows = fetch(scope.tenant, keys, predicates=predicates, as_of=instant,
+        rows = fetch(scope.tenant, keys, predicates=predicates,
+                     valid_at=pin.valid_at, known_at=pin.known_at,
                      scopes=scope.ancestors(), limit=self.edge_limit)
         return [c for c in rows if scope.sees(c.scope)]

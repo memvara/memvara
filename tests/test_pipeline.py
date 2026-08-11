@@ -1025,9 +1025,9 @@ def test_a_retry_after_that_crash_converges_instead_of_duplicating():
     assert store.stats()["episodes"] == 1
     assert live(store) == []
     # Still findable, as a turn rather than as a fact.
-    hits = store.lexical_search("Goldy", [SCOPE], 5, None)
-    assert [eid for eid, _ in store.lexical_search_episodes("Goldy", [SCOPE], 5, None)] \
-        == [broken.id]
+    hits = store.lexical_search("Goldy", [SCOPE], 5)
+    assert [eid for eid, _ in
+            store.lexical_search_episodes("Goldy", [SCOPE], 5)] == [broken.id]
     assert hits == []
     store.close()
 

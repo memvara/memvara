@@ -183,13 +183,15 @@ def test_retrieval_reapplies_the_transaction_floor_even_if_the_store_forgets():
     T = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
     class LeakyStore(SQLiteStore):
-        def lexical_search(self, query, scopes, limit, as_of=None,
-                           include_invalidated=False):
-            return super().lexical_search(query, scopes, limit, None, True)
+        def lexical_search(self, query, scopes, limit, *, valid_at=None,
+                           known_at=None, include_invalidated=False):
+            return super().lexical_search(query, scopes, limit,
+                                          include_invalidated=True)
 
-        def vector_search(self, qvec, scopes, limit, as_of=None,
-                          include_invalidated=False):
-            return super().vector_search(qvec, scopes, limit, None, True)
+        def vector_search(self, qvec, scopes, limit, *, valid_at=None,
+                          known_at=None, include_invalidated=False):
+            return super().vector_search(qvec, scopes, limit,
+                                         include_invalidated=True)
 
     mem = Memvara(store=LeakyStore(":memory:"), embedder=HashingEmbedder(dim=32),
                  user="alice")

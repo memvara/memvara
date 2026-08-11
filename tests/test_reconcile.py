@@ -51,7 +51,10 @@ def claim(predicate: str, obj: str, *, subject: str = "user", polarity: int = 1,
 
 
 def live_objects(store, c: Claim, as_of=None):
-    return sorted(x.object for x in store.competing_claims(c.scope.tenant, c.fact_key, as_of))
+    # The store speaks in two axes now; this helper still speaks in one, because every
+    # question the reconciler asks is about a single write instant.
+    return sorted(x.object for x in store.competing_claims(
+        c.scope.tenant, c.fact_key, valid_at=as_of, known_at=as_of))
 
 
 # --- accumulate --------------------------------------------------------------

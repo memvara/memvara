@@ -179,35 +179,40 @@ class AsyncMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      tenant=..., user=..., agent=..., session=...,
-                     as_of: datetime | None = ..., include_invalidated: bool = ...,
+                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
+                     known_at: datetime | None = ..., include_invalidated: bool = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: Literal[False] = ...) -> list[Result]: ...
 
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      tenant=..., user=..., agent=..., session=...,
-                     as_of: datetime | None = ..., include_invalidated: bool = ...,
+                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
+                     known_at: datetime | None = ..., include_invalidated: bool = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      tenant=..., user=..., agent=..., session=...,
-                     as_of: datetime | None = ..., include_invalidated: bool = ...,
+                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
+                     known_at: datetime | None = ..., include_invalidated: bool = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: bool) -> list[Retrieved]: ...
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                      tenant=None, user=None, agent=None, session=None,
-                     as_of: datetime | None = None, include_invalidated: bool = False,
+                     as_of: datetime | None = None, valid_at: datetime | None = None,
+                     known_at: datetime | None = None,
+                     include_invalidated: bool = False,
                      memory_types: Sequence[MemoryType] | None = None,
                      include_episodes: bool = False) -> list[Any]:
         """See `Memvara.search`. Encodes the query, so it belongs off the loop too."""
         return await asyncio.to_thread(
             self.memvara.search, query, k=k, min_score=min_score, tenant=tenant,
-            user=user, agent=agent, session=session, as_of=as_of,
-            include_invalidated=include_invalidated, memory_types=memory_types,
-            include_episodes=include_episodes)
+            user=user, agent=agent, session=session, as_of=as_of, valid_at=valid_at,
+            known_at=known_at, include_invalidated=include_invalidated,
+            memory_types=memory_types, include_episodes=include_episodes)
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                      header: str | None = None, tenant=None, user=None, agent=None,
@@ -230,64 +235,81 @@ class AsyncMemvara:
 
     async def get_all(self, *, tenant=None, user=None, agent=None, session=None,
                       include_invalidated: bool = False,
-                      as_of: datetime | None = None) -> list[Claim]:
+                      as_of: datetime | None = None, valid_at: datetime | None = None,
+                      known_at: datetime | None = None) -> list[Claim]:
         """See `Memvara.get_all`."""
         return await asyncio.to_thread(
             self.memvara.get_all, tenant=tenant, user=user, agent=agent, session=session,
-            include_invalidated=include_invalidated, as_of=as_of)
+            include_invalidated=include_invalidated, as_of=as_of, valid_at=valid_at,
+            known_at=known_at)
 
     async def history(self, subject: str, predicate: str, *, tenant=None, user=None,
-                      agent=None, session=None) -> list[Claim]:
+                      agent=None, session=None, as_of: datetime | None = None,
+                      valid_at: datetime | None = None,
+                      known_at: datetime | None = None) -> list[Claim]:
         """See `Memvara.history`."""
         return await asyncio.to_thread(
             self.memvara.history, subject, predicate, tenant=tenant, user=user,
-            agent=agent, session=session)
+            agent=agent, session=session, as_of=as_of, valid_at=valid_at,
+            known_at=known_at)
 
     async def why(self, claim_id: str, *, tenant=None, user=None, agent=None,
-                  session=None) -> Provenance | None:
+                  session=None, as_of: datetime | None = None,
+                  valid_at: datetime | None = None,
+                  known_at: datetime | None = None) -> Provenance | None:
         """See `Memvara.why`."""
         return await asyncio.to_thread(
             self.memvara.why, claim_id, tenant=tenant, user=user, agent=agent,
-            session=session)
+            session=session, as_of=as_of, valid_at=valid_at, known_at=known_at)
 
     async def produced(self, episode_id: str, *, tenant=None, user=None, agent=None,
-                       session=None) -> list[Claim]:
+                       session=None, as_of: datetime | None = None,
+                       valid_at: datetime | None = None,
+                       known_at: datetime | None = None) -> list[Claim]:
         """See `Memvara.produced`."""
         return await asyncio.to_thread(
             self.memvara.produced, episode_id, tenant=tenant, user=user, agent=agent,
-            session=session)
+            session=session, as_of=as_of, valid_at=valid_at, known_at=known_at)
 
     async def count(self, *, tenant=None, user=None, agent=None, session=None,
-                    as_of: datetime | None = None,
+                    as_of: datetime | None = None, valid_at: datetime | None = None,
+                    known_at: datetime | None = None,
                     include_invalidated: bool = False) -> int:
         """See `Memvara.count`."""
         return await asyncio.to_thread(
             self.memvara.count, tenant=tenant, user=user, agent=agent, session=session,
-            as_of=as_of, include_invalidated=include_invalidated)
+            as_of=as_of, valid_at=valid_at, known_at=known_at,
+            include_invalidated=include_invalidated)
 
     async def neighborhood(self, entity: str, *, depth: int = 2, k: int = 10,
                            min_hops: int = 1,
                            predicates: Sequence[str] | None = None,
-                           as_of: datetime | None = None, min_score: float = 0.0,
+                           as_of: datetime | None = None,
+                           valid_at: datetime | None = None,
+                           known_at: datetime | None = None, min_score: float = 0.0,
                            tenant=None, user=None, agent=None,
                            session=None) -> list[Path]:
         """See `Memvara.neighborhood`. One store round trip per hop, so it belongs off
         the loop for the same reason `search` does — more so at depth."""
         return await asyncio.to_thread(
             self.memvara.neighborhood, entity, depth=depth, k=k, min_hops=min_hops,
-            predicates=predicates, as_of=as_of, min_score=min_score, tenant=tenant,
-            user=user, agent=agent, session=session)
+            predicates=predicates, as_of=as_of, valid_at=valid_at, known_at=known_at,
+            min_score=min_score, tenant=tenant, user=user, agent=agent,
+            session=session)
 
     async def paths_between(self, source: str, target: str, *, depth: int = 3,
                             k: int = 3, predicates: Sequence[str] | None = None,
-                            as_of: datetime | None = None, min_score: float = 0.0,
+                            as_of: datetime | None = None,
+                            valid_at: datetime | None = None,
+                            known_at: datetime | None = None, min_score: float = 0.0,
                             tenant=None, user=None, agent=None,
                             session=None) -> list[Path]:
         """See `Memvara.paths_between`."""
         return await asyncio.to_thread(
             self.memvara.paths_between, source, target, depth=depth, k=k,
-            predicates=predicates, as_of=as_of, min_score=min_score, tenant=tenant,
-            user=user, agent=agent, session=session)
+            predicates=predicates, as_of=as_of, valid_at=valid_at, known_at=known_at,
+            min_score=min_score, tenant=tenant, user=user, agent=agent,
+            session=session)
 
     # -- maintenance ---------------------------------------------------------
 

@@ -555,6 +555,18 @@ def _dt(v: float | None) -> datetime | None:
     return datetime.fromtimestamp(v, tz=timezone.utc)
 
 
+def _clock(valid_at: datetime | None, known_at: datetime | None) -> tuple[float, float]:
+    """The two time axes as epoch seconds, each falling back to now when unset.
+
+    One read of the clock, not two. An absent axis means "now", and reading it once per
+    axis would put them microseconds apart — invisible almost always, and impossible for
+    a caller to reproduce on the day it is not.
+    """
+    now = datetime.now(timezone.utc).timestamp()
+    v, k = _ts(valid_at), _ts(known_at)
+    return (now if v is None else v, now if k is None else k)
+
+
 # The two halves of `Claim.subject_key` / `Claim.object_key`, spelled so SQLite can call
 # them. They exist for `_migrate_to_v6` and for nothing else: a live claim gets its keys
 # from the object, and only the rows already on disk have to be re-derived from the two
@@ -1485,44 +1497,68 @@ class SQLiteStore:
             params += [s.tenant, s.user, s.agent, s.session]
         return "(" + " OR ".join(parts) + ")", params
 
-    @staticmethod
-    def _live_clause(as_of: datetime | None, include_invalidated: bool,
-                     alias: str = "") -> tuple[str, list]:
+    def _live_clause(self, valid_at: datetime | None, known_at: datetime | None,
+                     include_invalidated: bool, alias: str = "") -> tuple[str, list]:
         """Both time axes must agree for a claim to count as believed-and-in-force.
 
-        `include_invalidated` lifts the two *end-of-life* constraints so retracted and
-        expired claims become visible for auditing. It deliberately does NOT lift the
-        transaction-time floor: a claim recorded after `as_of` was not knowledge we had
-        at `as_of`, and letting it through would answer "what did we believe in March?"
-        with something we first heard in July. That is the one way a bitemporal query
-        can actively lie, so the floor holds under every flag combination.
+        Two clocks, read independently: `known_at` bounds what we had heard and not yet
+        retracted, `valid_at` bounds what had started and not yet stopped being true.
+        A missing instant means that axis reads wall-clock now, substituted here so the
+        SQL always binds a real number.
+
+        Splitting them is what makes the late-arriving correction reachable. A fact
+        recorded in August about June satisfies `valid_from <= June` and
+        `recorded_at <= now` but never `recorded_at <= June`, so the single-instant
+        version could not return it under any argument — the query that asks for it
+        rewound the belief clock past the very correction it was asking about.
+
+        `include_invalidated` lifts the *whole valid-time interval* along with the
+        retirement, leaving only `recorded_at <= known_at`. That is more than the name
+        promises and it is deliberate, in both directions:
+
+        * The valid-time floor goes with the ceiling because the flag means "show me
+          this row whatever its world-time interval says" — an audit view of a
+          scheduled fact that is not in force yet is as legitimate as one of a fact
+          that has finished. A consequence worth stating plainly: under this flag
+          `valid_at` has no effect at all.
+        * The *belief* floor never goes. A claim recorded after `known_at` was not
+          knowledge we had then, and letting it through would answer "what did we
+          believe in March, including what we later retracted" with something we first
+          heard in July. That is the one way a bitemporal query can actively lie, so
+          the floor holds under every flag combination.
         """
         a = f"{alias}." if alias else ""
-        t = _ts(as_of) if as_of is not None else datetime.now(timezone.utc).timestamp()
+        v, k = _clock(valid_at, known_at)
         if include_invalidated:
-            return f"({a}recorded_at <= ?)", [t]
+            return f"({a}recorded_at <= ?)", [k]
         clause = (
             f"({a}recorded_at <= ? "
             f"AND ({a}invalidated_at IS NULL OR {a}invalidated_at > ?) "
             f"AND {a}valid_from <= ? "
             f"AND ({a}valid_to IS NULL OR {a}valid_to > ?))"
         )
-        return clause, [t, t, t, t]
+        return clause, [k, k, v, v]
 
-    @staticmethod
-    def _happened_clause(as_of: datetime | None, alias: str = "") -> tuple[str, list]:
+    def _happened_clause(self, valid_at: datetime | None, known_at: datetime | None,
+                         alias: str = "") -> tuple[str, list]:
         """An episode's one time axis: had this turn happened yet?
 
         Episodes are not bitemporal and have no liveness. Nothing retires them, nothing
         supersedes them, and `invalidated_at`/`valid_to` have no analogue — a turn that
-        was said was said. What survives from `_live_clause` is only its floor, and for
-        the same reason: returning a turn from July when asked what we knew in March is
-        the one way a time-travel query can lie, and it lies about raw source text
+        was said was said. What survives from `_live_clause` is only its floors.
+
+        There are still two of them, because a turn's single `ts` is its `valid_from`
+        and its `recorded_at` at once: it happened and we learned of it at the same
+        instant. Substituting that into `_live_clause` leaves `ts <= valid_at AND
+        ts <= known_at`, which is the earlier of the two — so the bound is derived from
+        the same model rather than picked. Both matter for the same reason the belief
+        floor matters above: returning a turn from July when asked what we knew in March
+        is the one way a time-travel query can lie, and it lies about raw source text
         rather than about a derived belief.
         """
         a = f"{alias}." if alias else ""
-        t = _ts(as_of) if as_of is not None else datetime.now(timezone.utc).timestamp()
-        return f"({a}ts <= ?)", [t]
+        v, k = _clock(valid_at, known_at)
+        return f"({a}ts <= ?)", [min(v, k)]
 
     # -- episodes ------------------------------------------------------------
 
@@ -1865,14 +1901,15 @@ class SQLiteStore:
                     out[r["id"]] = self._row_to_claim(r)
         return out
 
-    def competing_claims(self, tenant: str, fact_key: str,
-                         as_of: datetime | None = None) -> list[Claim]:
+    def competing_claims(self, tenant: str, fact_key: str, *,
+                         valid_at: datetime | None = None,
+                         known_at: datetime | None = None) -> list[Claim]:
         """Every live claim in the same (subject, predicate) slot.
 
         One indexed lookup. No embeddings, no top-k, so a contradiction cannot hide
         below a similarity cutoff the way it can in a vector-search-based updater.
         """
-        live, lp = self._live_clause(as_of, include_invalidated=False)
+        live, lp = self._live_clause(valid_at, known_at, include_invalidated=False)
         # `_read` keeps a thread inside `batch()` on the writer's connection, which this
         # method depends on absolutely: the reconciler asks it mid-transaction, and a
         # snapshot that predates the claim written two statements ago would report the
@@ -2253,7 +2290,8 @@ class SQLiteStore:
     def adjacent(self, tenant: str, keys: Sequence[str], *,
                  outgoing: bool = True, incoming: bool = True,
                  predicates: Sequence[str] | None = None,
-                 as_of: datetime | None = None,
+                 valid_at: datetime | None = None,
+                 known_at: datetime | None = None,
                  scopes: Sequence[Scope] | None = None,
                  limit: int = 1000) -> list[Claim]:
         """Claims whose folded subject (outgoing) or folded object (incoming) is in `keys`.
@@ -2298,7 +2336,7 @@ class SQLiteStore:
         # None/empty distinction is the same one `_scope_clause` fails closed on.
         if not wanted or not cols or limit <= 0 or preds == []:
             return []
-        live, lp = self._live_clause(as_of, include_invalidated=False)
+        live, lp = self._live_clause(valid_at, known_at, include_invalidated=False)
         pred_sql = ""
         if preds is not None:
             pred_sql = f" AND predicate IN ({','.join('?' * len(preds))})"
@@ -2492,10 +2530,12 @@ class SQLiteStore:
         """
         return self._get_vector(_EPISODE_VECS, episode_id)
 
-    def candidate_ids(self, scopes: Sequence[Scope], as_of: datetime | None = None,
+    def candidate_ids(self, scopes: Sequence[Scope], *,
+                      valid_at: datetime | None = None,
+                      known_at: datetime | None = None,
                       include_invalidated: bool = False) -> list[str]:
         sc, sp = self._scope_clause(scopes)
-        lv, lp = self._live_clause(as_of, include_invalidated)
+        lv, lp = self._live_clause(valid_at, known_at, include_invalidated)
         with self._read() as conn:
             cur = conn.cursor()
             # A whole-tenant scope returns every claim id; building a `Row` object for
@@ -2504,8 +2544,9 @@ class SQLiteStore:
             cur.execute(f"SELECT id FROM claims WHERE {sc} AND {lv}", sp + lp)
             return [r[0] for r in cur.fetchall()]
 
-    def episode_candidate_ids(self, scopes: Sequence[Scope],
-                              as_of: datetime | None = None) -> list[str]:
+    def episode_candidate_ids(self, scopes: Sequence[Scope], *,
+                              valid_at: datetime | None = None,
+                              known_at: datetime | None = None) -> list[str]:
         """Every turn visible at these scopes. The episode half of `candidate_ids`.
 
         No `include_invalidated`: episodes have no end-of-life to lift. Scope, though,
@@ -2515,21 +2556,22 @@ class SQLiteStore:
         is the more sensitive of the two.
         """
         sc, sp = self._scope_clause(scopes)
-        hp, hpp = self._happened_clause(as_of)
+        hp, hpp = self._happened_clause(valid_at, known_at)
         with self._read() as conn:
             cur = conn.cursor()
             cur.row_factory = None
             cur.execute(f"SELECT id FROM episodes WHERE {sc} AND {hp}", sp + hpp)
             return [r[0] for r in cur.fetchall()]
 
-    def lexical_search(self, query: str, scopes: Sequence[Scope], limit: int,
-                       as_of: datetime | None = None,
+    def lexical_search(self, query: str, scopes: Sequence[Scope], limit: int, *,
+                       valid_at: datetime | None = None,
+                       known_at: datetime | None = None,
                        include_invalidated: bool = False) -> list[tuple[str, float]]:
         m = _fts_query(query)
         if not m:
             return []
         sc, sp = self._scope_clause(scopes, alias="c")
-        lv, lp = self._live_clause(as_of, include_invalidated, alias="c")
+        lv, lp = self._live_clause(valid_at, known_at, include_invalidated, alias="c")
         sql = (
             "SELECT f.claim_id AS cid, bm25(claims_fts) AS s "
             "FROM claims_fts f JOIN claims c ON c.id = f.claim_id "
@@ -2541,8 +2583,10 @@ class SQLiteStore:
         # bm25() is negative-is-better; flip it so callers see a normal ascending score.
         return [(r["cid"], -float(r["s"])) for r in rows]
 
-    def lexical_search_episodes(self, query: str, scopes: Sequence[Scope], limit: int,
-                                as_of: datetime | None = None) -> list[tuple[str, float]]:
+    def lexical_search_episodes(self, query: str, scopes: Sequence[Scope], limit: int, *,
+                                valid_at: datetime | None = None,
+                                known_at: datetime | None = None
+                                ) -> list[tuple[str, float]]:
         """BM25 over raw turn text, scope-filtered inside the query.
 
         The leg that matters most for episodes: a decision, a reason or a constraint is
@@ -2553,7 +2597,7 @@ class SQLiteStore:
         if not m:
             return []
         sc, sp = self._scope_clause(scopes, alias="e")
-        hp, hpp = self._happened_clause(as_of, alias="e")
+        hp, hpp = self._happened_clause(valid_at, known_at, alias="e")
         sql = (
             "SELECT f.episode_id AS eid, bm25(episodes_fts) AS s "
             "FROM episodes_fts f JOIN episodes e ON e.id = f.episode_id "
@@ -2564,25 +2608,29 @@ class SQLiteStore:
             rows = conn.execute(sql, [m] + sp + hpp + [limit]).fetchall()
         return [(r["eid"], -float(r["s"])) for r in rows]
 
-    def vector_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int,
-                      as_of: datetime | None = None,
+    def vector_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int, *,
+                      valid_at: datetime | None = None,
+                      known_at: datetime | None = None,
                       include_invalidated: bool = False) -> list[tuple[str, float]]:
-        allowed = self.candidate_ids(scopes, as_of, include_invalidated)
+        allowed = self.candidate_ids(scopes, valid_at=valid_at, known_at=known_at,
+                                     include_invalidated=include_invalidated)
         if not allowed:
             return []
         self._ensure_index()
         return self._vec.search(qvec, allowed, limit)
 
     def vector_search_episodes(self, qvec: np.ndarray, scopes: Sequence[Scope],
-                               limit: int,
-                               as_of: datetime | None = None) -> list[tuple[str, float]]:
+                               limit: int, *, valid_at: datetime | None = None,
+                               known_at: datetime | None = None
+                               ) -> list[tuple[str, float]]:
         """Cosine over turn vectors, restricted to the ids this scope may see.
 
         Same matrix and same code path as `vector_search`; the candidate set is what
         differs, and it is what enforces isolation — an episode id the scope filter did
         not return is not passed to the index at all.
         """
-        allowed = self.episode_candidate_ids(scopes, as_of)
+        allowed = self.episode_candidate_ids(scopes, valid_at=valid_at,
+                                             known_at=known_at)
         if not allowed:
             return []
         self._ensure_index()

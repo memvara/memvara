@@ -321,7 +321,8 @@ class Reconciler:
         victims: dict[str, Claim] = {}
 
         if spec.functional:
-            for c in self.store.competing_claims(claim.scope.tenant, claim.fact_key, t):
+            for c in self.store.competing_claims(claim.scope.tenant, claim.fact_key,
+                                                 valid_at=t, known_at=t):
                 if owner_key(c.scope) == owner and c.value_key != claim.value_key:
                     victims[c.id] = c
         # else: Cardinality.MANY, including every predicate we have no spec for. Values
@@ -335,7 +336,8 @@ class Reconciler:
             # matching nothing.
             fk = fact_key_for(claim.scope, claim.subject_key,
                               self.registry.normalize(other))
-            for c in self.store.competing_claims(claim.scope.tenant, fk, t):
+            for c in self.store.competing_claims(claim.scope.tenant, fk,
+                                                 valid_at=t, known_at=t):
                 if owner_key(c.scope) == owner:
                     victims[c.id] = c
 
@@ -381,7 +383,8 @@ class Reconciler:
 
     def _retract(self, claim: Claim, t: datetime, owner: str) -> ReconcileResult:
         tenant = claim.scope.tenant
-        slot = [c for c in self.store.competing_claims(tenant, claim.fact_key, t)
+        slot = [c for c in self.store.competing_claims(tenant, claim.fact_key,
+                                                       valid_at=t, known_at=t)
                 if owner_key(c.scope) == owner]
 
         # Entity identity, the same notion `value_key` uses. It used to be a plain

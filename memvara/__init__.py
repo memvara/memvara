@@ -4,7 +4,10 @@ What it does differently from mem0 and friends:
 
 * **Facts are structured and bitemporal.** A memory is a `Claim` — a (subject, predicate,
   object) triple carrying both when it was true in the world and when we believed it.
-  That is what makes `search(..., as_of=T)` answer "what did we think in March?"
+  Two clocks, asked independently: `known_at=T` answers "what did we think in March?",
+  `valid_at=T` answers "what do we think *today* about how March was?", and `as_of=T`
+  moves both at once. The middle one is why the axes are separate — a correction that
+  arrives in August about June cannot be seen from a belief clock rewound to June.
 * **Contradictions resolve deterministically.** A predicate schema says whether a
   relation is single-valued, so a conflict is an indexed lookup on (subject, predicate)
   rather than a top-k similarity search plus an LLM adjudication that may miss it.
@@ -71,6 +74,7 @@ from .types import (
     Result,
     Scope,
     WriteReceipt,
+    time_axes,
     utcnow,
 )
 from .telemetry import MemoryRecorder, NullRecorder, Recorder
@@ -83,7 +87,7 @@ __all__ = [
     "Memvara", "ScopedMemvara", "AsyncMemvara",
     # data model
     "Claim", "Episode", "Scope", "Result", "Explanation", "Provenance",
-    "WriteReceipt", "MemoryType", "Derivation", "utcnow",
+    "WriteReceipt", "MemoryType", "Derivation", "utcnow", "time_axes",
     # schema
     "PredicateRegistry", "PredicateSpec", "Cardinality", "Volatility",
     # pluggable backends

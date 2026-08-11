@@ -32,6 +32,22 @@ mem.remember("user", "lives_in", "Lisbon",
 # -> ['Berlin']      # what was true a year ago
 ```
 
+Two axes means two clocks, and they move independently:
+
+```python
+mem.get_all(valid_at=T)   # what we believe TODAY about how the world was at T
+mem.get_all(known_at=T)   # what we believed at T, about the world as it is now
+mem.get_all(as_of=T)      # both clocks at T — what we believed at T, about T
+```
+
+The middle two are the ones a single instant cannot ask. A correction that arrives in
+August about June is invisible to `as_of=June`, because that call rewinds the belief
+clock past the correction; `valid_at=June` is how you see it. Every read that took
+`as_of` takes all three — `search`, `get_all`, `count`, `history`, `why`, `produced`,
+`neighborhood`, `paths_between` — and `as_of` is exact sugar for
+`valid_at=known_at=T`. Passing it alongside either axis raises rather than quietly
+picking one.
+
 Core requires **numpy and nothing else**. It runs offline, with no API key, no Docker,
 and no vector database.
 
@@ -471,9 +487,10 @@ what a bitemporal store is uniquely able to offer. An agent that searches, then 
 again on the result, is stitching two reads taken at two different times: if a write
 lands in between, the chain it reports was true at no instant. `bench/multihop.py`
 demonstrates exactly that — a write retires hop 1 and creates hop 2, and the loop happily
-reports a connection that never existed. A traversal pins one `as_of` before its first
-hop and passes it unchanged to every hop after, so it returns nothing at every instant.
-A caller can close the same hole by passing one `as_of` to both searches; the difference
+reports a connection that never existed. A traversal pins one `(valid_at, known_at)` pair
+before its first hop and passes it unchanged to every hop after, so it returns nothing at
+every instant.
+A caller can close the same hole by passing one instant to both searches; the difference
 is that traversal cannot be called any other way.
 
 Negative polarity is never walked as a link — "Alice does *not* work at Acme" is a claim
@@ -613,22 +630,24 @@ mem.purge()                                       -> dict[str, int] # a whole sc
 mem.reset()                                       -> dict[str, int] # scope + schema
 
 # read
-mem.search(query, *, k=10, min_score=0.0, as_of=None, memory_types=None,
+# every read below takes the same three time keywords, written `T=` here for width:
+#   valid_at=  the world clock   known_at=  the belief clock   as_of=  both at once
+mem.search(query, *, k=10, min_score=0.0, T=None, memory_types=None,
            include_invalidated=False, include_episodes=False)  -> list[Retrieved]
 mem.recall(query, *, k=8, min_score=0.0, header=None, include_episodes=False,
            episode_header=None)                   -> str
 mem.get(claim_id)                                 -> Claim | None
-mem.get_all(*, as_of=None, include_invalidated=False)      -> list[Claim]
-mem.count(*, as_of=None, include_invalidated=False)        -> int
-mem.history(subject, predicate)                   -> list[Claim]    # timeline of one slot
-mem.why(claim_id)                                 -> Provenance | None
-mem.produced(episode_id)                          -> list[Claim]    # why(), backwards
+mem.get_all(*, T=None, include_invalidated=False)          -> list[Claim]
+mem.count(*, T=None, include_invalidated=False)            -> int
+mem.history(subject, predicate, *, T=None)        -> list[Claim]    # timeline of one slot
+mem.why(claim_id, *, T=None)                      -> Provenance | None
+mem.produced(episode_id, *, T=None)               -> list[Claim]    # why(), backwards
 
 # traverse — the claims are a graph; walk it
 mem.neighborhood(entity, *, depth=2, k=10, min_hops=1, predicates=None,
-                 as_of=None, min_score=0.0)               -> list[Path]
+                 T=None, min_score=0.0)                    -> list[Path]
 mem.paths_between(source, target, *, depth=3, k=3, predicates=None,
-                  as_of=None, min_score=0.0)              -> list[Path]
+                  T=None, min_score=0.0)                   -> list[Path]
 
 # maintenance
 mem.consolidate()                                 -> dict[str, int]

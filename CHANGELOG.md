@@ -11,6 +11,42 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **Two independent time axes: `valid_at` and `known_at`.** Bitemporal data answers four
+  questions and this library could express one of them. `as_of` moves both clocks to the
+  same instant, so it only ever asked "what did we believe *then*, about *then*" — and the
+  reading it cannot reach is the one bitemporality exists for. A correction that arrives
+  in August about June is invisible to `as_of=June`, because that call rewinds the belief
+  clock past the correction it is asking about.
+
+  ```python
+  mem.get_all(valid_at=T)   # what we believe today about how the world was at T
+  mem.get_all(known_at=T)   # what we believed at T, about the world as it is now
+  mem.get_all(as_of=T)      # both clocks at T — unchanged, and still correct
+  ```
+
+  Every read that took `as_of` takes all three: `search`, `get_all`, `count`, `history`,
+  `why`, `produced`, `neighborhood`, `paths_between`, on `Memvara`, `ScopedMemvara` and
+  `AsyncMemvara` alike. `as_of` is **exact sugar** for `valid_at=known_at=T` — every
+  existing call, test and benchmark is untouched — and passing it alongside either axis
+  raises rather than quietly picking one, because there is no reading of the mix in which
+  one of the two is not being ignored.
+
+  On the three *record* reads — `history()`, `why()`, `produced()` — an unset axis means
+  "no filter" rather than "now". A timeline whose default was now would drop every
+  superseded version, which is the whole content of a timeline. `history(known_at=T)` is
+  the audit query that was missing: the trail *as it looked* on T, which for a slot
+  corrected later is a different document from the one you would read today.
+
+  `include_invalidated` is untouched and still lifts end-of-life. One consequence is now
+  documented rather than implicit: it lifts the whole valid-time interval, not only its
+  end, so under that flag `valid_at` has no effect. The belief floor never lifts.
+
+  Recency decay follows `known_at`, not `valid_at` — it asks how long ago we last heard
+  something, which is a question about the belief clock. Traversal now pins the
+  `(valid_at, known_at)` *pair* before its first hop, so the one-instant guarantee is
+  unweakened: one clock read fills both defaults, and every hop of a walk sees the same
+  pair.
+
 - **Multi-hop traversal** — `Memvara.neighborhood(entity)` and
   `Memvara.paths_between(source, target)`, both returning `list[Path]`, plus
   `Store.adjacent()` and `memvara/retrieve/traverse.py`. The store has been a labelled
@@ -74,6 +110,25 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Changed
 
+- **The `Store` protocol speaks in two axes; `as_of` survives on the facade only.**
+  Every protocol method that took `as_of` now takes `valid_at` and `known_at`, both
+  keyword-only: `competing_claims`, `adjacent`, `candidate_ids`, `lexical_search`,
+  `vector_search`, `episode_candidate_ids`, `lexical_search_episodes`,
+  `vector_search_episodes`. Keyword-only is the point — they replaced a positional
+  argument, and a call still passing an instant third would otherwise be silently
+  reinterpreted as `valid_at`, which is a wrong answer with no error.
+
+  A SQL-backed store also implements the new `SQLStore` protocol
+  (`_live_clause(valid_at, known_at, include_invalidated, alias="")` and
+  `_happened_clause(valid_at, known_at, alias="")`). It is deliberately a *second*
+  protocol rather than a widening of `Store`: those two are SQL generation, and `Store`
+  promises a Qdrant or LanceDB backend can implement it without them. `_happened_clause`
+  takes both axes because a turn's single `ts` is its `valid_from` and its `recorded_at`
+  at once, so the claim rule collapses to `ts <= min(valid_at, known_at)` rather than
+  that bound being chosen.
+
+  Third-party stores must update their signatures; third-party *callers* of the facade
+  are unaffected. Pre-`1.0.0`, per the note at the top of this file.
 - **`Store.adjacent` takes `scopes`, and implementations must apply it inside `limit`.**
   It shipped without one, with `GraphTraverser` filtering the page afterwards and
   re-asking ten times wider on starvation. That was unsound rather than slow: on a tenant

@@ -350,7 +350,8 @@ class WritePipeline:
     def _near_duplicate(self, vec, ep: Episode, now) -> tuple[Claim, datetime] | None:
         """The claim this turn merely restates, and when the restatement was uttered."""
         try:
-            hits = self.store.vector_search(vec, ep.scope.ancestors(), 1, now, False)
+            hits = self.store.vector_search(vec, ep.scope.ancestors(), 1,
+                                            valid_at=now, known_at=now)
         except ValueError:
             # The index was built by a different embedder. That is a real
             # misconfiguration, but it should surface where it matters (retrieval and
