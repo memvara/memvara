@@ -2152,3 +2152,23 @@ def test_a_source_turn_answers_to_text_like_everything_beside_it(tmp_path):
         assert prov is not None
         assert [e.text for e in prov.episodes] == [e.content for e in prov.episodes]
         assert "Berlin" in prov.episodes[0].text
+
+
+def test_deleting_a_superseded_claim_keeps_the_link_to_what_replaced_it(tmp_path):
+    """`close_out` wrote `invalidated_by` unconditionally, and `delete`/`forget` pass
+    `None` — meaning "nothing replaced this", not "forget what did". So deleting an
+    already-superseded claim erased the pointer and `why(successor).superseded` came back
+    empty: the audit link between a value and the one that replaced it, destroyed by the
+    operation documented as the reversible one, in a store whose premise is that nothing
+    vanishes without a trace."""
+    with Memvara(str(tmp_path / "m.db"), embedder=HashingEmbedder(dim=32),
+                 llm=NullLLM(), user="alice") as mem:
+        old = mem.remember("user", "lives_in", "Berlin").added[0]
+        new = mem.remember("user", "lives_in", "Lisbon").added[0]
+        assert mem.get(old.id).invalidated_by == new.id
+
+        assert mem.delete(old.id) is True
+        gone = mem.get(old.id)
+        assert gone.state == "retired", "the delete still stopped belief"
+        assert gone.invalidated_by == new.id, "and did not erase what replaced it"
+        assert [c.object for c in mem.why(new.id).superseded] == ["Berlin"]

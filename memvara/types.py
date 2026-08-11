@@ -201,15 +201,23 @@ def close_out(claim: "Claim", at: datetime, by: str | None, close: Closure) -> N
     which is the argument for there being one of it.
 
     `at` is the instant on whichever axis `close` names: when the world moved for
-    `"ended"`, when belief stopped for `"retired"`. `by` is the claim that displaced this
-    one, or `None` where nothing did (`forget`, `delete`); it is written under either
-    closure, because "this is what displaced me" is true whichever clock stopped.
+    `"ended"`, when belief stopped for `"retired"`.
+
+    `by` is the claim that displaced this one, and is written under either closure,
+    because "this is what displaced me" is true whichever clock stopped. **`None` means
+    "nothing replaced this", not "forget what did"** — `forget` and `delete` pass it
+    because they name no successor, and writing it through would erase a pointer set
+    earlier. That is not hypothetical: deleting an already-superseded claim cut the link
+    between a value and the one that replaced it, so `why(successor).superseded` came
+    back empty. In a store whose premise is that nothing vanishes without a trace, done
+    by the operation documented as the reversible one.
 
     The object is stamped, not just the database. `forget()` used to hand back claims
     read *before* its update ran, so every claim the call had just closed out reported
     itself live to anyone who logged or rendered the return value.
     """
-    claim.invalidated_by = by
+    if by is not None:
+        claim.invalidated_by = by
     if close == "retired":
         claim.invalidated_at = as_utc(at)
         return
