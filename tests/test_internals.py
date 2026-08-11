@@ -62,6 +62,7 @@ def test_unknown_package_attribute_still_raises_attribute_error():
 
 def test_anthropic_backend_builds_a_default_client_when_the_sdk_is_present(monkeypatch):
     """Covers the default-construction path without installing the real SDK."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")  # now checked at construction
     fake = types.ModuleType("anthropic")
     built = []
 

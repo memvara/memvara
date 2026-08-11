@@ -550,3 +550,24 @@ def test_both_hosted_backends_advertise_that_they_report_usage():
 
     assert AnthropicLLM.reports_usage and OpenAILLM.reports_usage
     assert NullLLM.reports_usage is False
+
+
+def test_a_missing_key_is_refused_at_construction_not_on_the_first_write(monkeypatch):
+    """`openai.OpenAI()` refuses to construct without a key and this did not, so the same
+    documented line — `Memvara(..., llm=XLLM())` — failed at two different moments
+    depending on the backend: one at startup, one on the first turn that reached tier 2,
+    which in a server is well after the deployment looked healthy."""
+    import sys
+    from types import SimpleNamespace as NS
+
+    monkeypatch.setitem(sys.modules, "anthropic", NS(Anthropic=lambda: NS(messages=None)))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="no ANTHROPIC_API_KEY"):
+        AnthropicLLM()
+
+    # With a key it constructs, and an injected client skips the check entirely — that is
+    # the escape hatch every test in this file already relies on.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert AnthropicLLM().name.startswith("anthropic/")
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    assert AnthropicLLM(client=FakeClient()).name.startswith("anthropic/")

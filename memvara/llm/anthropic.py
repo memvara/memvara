@@ -8,6 +8,7 @@ response made of typed content blocks.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Sequence
 
 from ..types import Episode
@@ -72,6 +73,22 @@ class AnthropicLLM:
                 "AnthropicLLM needs the `anthropic` package: pip install 'memvara[anthropic]'. "
                 "Pass `client=` to inject one, or use NullLLM to run without a model."
             ) from exc
+        # Validated here rather than left to the first write. `openai.OpenAI()` refuses
+        # to construct without a key and this did not, so the same documented line —
+        # `Memvara(..., llm=XLLM())` — failed at two different moments depending on the
+        # backend: one at startup, one on the first turn that reached tier 2, which in a
+        # server is after the deployment looked healthy. Fail-fast is the better of the
+        # two behaviours, so this is the one that moved.
+        #
+        # Checked rather than caught: the SDK reads the variable lazily, so there is no
+        # exception to catch until a request is already in flight.
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise ValueError(
+                "AnthropicLLM found no ANTHROPIC_API_KEY. Set it, pass `client=` to "
+                "inject a configured client, or use NullLLM to run without a model. "
+                "Checked at construction on purpose: the alternative is a server that "
+                "starts clean and fails on the first turn that needs extraction."
+            )
         return anthropic.Anthropic()
 
     # -- request ------------------------------------------------------------

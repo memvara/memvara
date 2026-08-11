@@ -756,6 +756,7 @@ def test_build_memvara_opens_an_offline_store_by_default(tmp_path):
 
 def test_the_anthropic_backend_is_opt_in(monkeypatch):
     """Selectable from the environment, and never constructed unless it is asked for."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")  # now checked at construction
     import types as pytypes
 
     monkeypatch.setitem(sys.modules, "anthropic",
