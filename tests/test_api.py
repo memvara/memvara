@@ -1880,3 +1880,51 @@ def test_supersede_reports_its_turn_too(mem):
     receipt = mem.supersede(first.added[0].id, replacement, sources=[ep])
 
     assert receipt.episode_ids == [ep.id]
+
+
+def test_a_replacement_that_names_no_scope_does_not_land_in_another_tenant(tmp_path):
+    """`supersede` retired the right claim and filed its successor in tenant `default`.
+
+    `Claim.scope` defaults to `Scope()`, whose tenant is the literal string "default",
+    and hand-building the replacement is the documented way to call this. So a handle
+    bound to `acme/alice` retired Alice's Berlin correctly and wrote Lisbon into a
+    *different tenant* — one shared by every other caller who had also never set one.
+    Nothing raised. `history()` went quiet rather than wrong, because a slot key hashes
+    the owner in, so the timeline simply split in two.
+
+    Same defect `_cite` fixes for a caller-built `Episode`, same cause, same fix:
+    inherit rather than guess.
+    """
+    from memvara.types import Claim
+
+    with Memvara(str(tmp_path / "m.db"), embedder=HashingEmbedder(dim=32),
+                 llm=NullLLM(), tenant="acme", user="alice") as mem:
+        old = mem.remember("user", "lives_in", "Berlin").added[0]
+        mem.supersede(old.id, Claim(subject="user", predicate="lives_in",
+                                    object="Lisbon"))
+
+        assert list(mem.store.iter_claims("default")) == [], "leaked out of the tenant"
+        timeline = [(c.object, c.state) for c in mem.history("user", "lives_in")]
+        assert timeline == [("Berlin", "retired"), ("Lisbon", "live")]
+        # And it stayed Alice's: a sibling in the same tenant must not inherit it.
+        assert mem.scope(user="bob").get_all() == []
+
+
+def test_a_replacement_that_names_a_scope_is_left_alone(tmp_path):
+    # Superseding into a different scope on purpose stays possible — the inheritance is
+    # for the claim that said nothing, not an override of the claim that did.
+    from memvara.types import Claim, Scope
+
+    with Memvara(str(tmp_path / "m.db"), embedder=HashingEmbedder(dim=32),
+                 llm=NullLLM(), tenant="acme", user="alice") as mem:
+        old = mem.remember("user", "lives_in", "Berlin").added[0]
+        stated = Scope(tenant="acme", user="alice", agent="importer")
+        mem.supersede(old.id, Claim(subject="user", predicate="lives_in",
+                                    object="Lisbon", scope=stated))
+        # Read from a handle that can see it: the stated scope is *deeper* than the one
+        # that wrote it, and `get_all` reaches upward only — so the alice handle not
+        # returning it is the scope rule working, not the write going astray.
+        deep = mem.scope(agent="importer")
+        live = [c for c in deep.get_all() if c.state == "live"]
+        assert [(c.object, c.scope.agent) for c in live] == [("Lisbon", "importer")]
+        assert list(mem.store.iter_claims("default")) == []

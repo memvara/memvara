@@ -46,6 +46,8 @@ from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retr
 from .schema import PredicateRegistry
 from .store import SQLiteStore, Store
 from .telemetry import Recorder
+from dataclasses import replace
+
 from .types import (
     RESERVED_META,
     ENTITY_REKEY,
@@ -764,6 +766,21 @@ class Memvara:
                 f"no claim {old_claim_id!r} in scope "
                 f"{self._scope(tenant, user, agent, session).key()}"
             )
+        # A replacement that names no scope adopts the one it replaces. `Claim.scope`
+        # defaults to `Scope()`, whose tenant is the literal string "default", so a
+        # hand-built claim — which is the documented way to call this — retired Alice's
+        # value correctly and then filed its successor in a *different tenant*. Measured:
+        # after one such call the handle's own tenant held nothing at all and the new
+        # value sat under `default/*/*/*`, readable by anyone else who had also never set
+        # a tenant. Nothing raised, and `history()` went quiet because a slot key hashes
+        # the owner in, so the timeline simply split.
+        #
+        # This is the same defect `_cite` fixes for a caller-built `Episode`, from the
+        # same cause, and the fix is deliberately the same shape: inherit rather than
+        # guess. A claim that *does* name a scope is left alone — superseding across
+        # scopes on purpose stays possible, and `_write_claim` still authorizes it.
+        if new_claim.scope == Scope():
+            new_claim = replace(new_claim, scope=old.scope)
         return self._write_claim(new_claim, sources, retire=old,
                                  at=at or new_claim.recorded_at)
 
