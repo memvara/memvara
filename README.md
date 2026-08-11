@@ -400,9 +400,17 @@ Four tiers, in order, each cheaper than the next one down:
 | 1b | rule-based extraction for common unambiguous forms | no LLM |
 | 2 | batched structured extraction for what survives | **one** call per batch |
 
-Most conversational turns carry nothing durable. mem0 pays two model calls for "sounds
-good"; Memvara pays zero. Every `add()` returns a receipt that reports the cost, because a
-number you can't see is a number nobody optimizes:
+Most conversational turns carry nothing durable. mem0 pays a model call for "sounds good";
+memvara pays zero — the salience gate drops it on a string comparison before anything is
+embedded or sent. That is the whole of the 105-vs-2 row measured above.
+
+(This sentence said *two* model calls until the correction at the top of this file landed.
+Two was mem0 1.x. 2.x makes one, which is still one more than zero, and quoting the older
+number here while correcting it forty lines earlier would have been the kind of thing that
+makes a reader stop trusting the rest.)
+
+Every `add()` returns a receipt that reports the cost, because a number you can't see is a
+number nobody optimizes:
 
 ```python
 receipt = mem.add(transcript)
