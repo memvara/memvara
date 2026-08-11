@@ -638,6 +638,38 @@ def test_include_invalidated_reveals_expired_and_retracted_claims(store):
     assert set(store.candidate_ids([SCOPE], include_invalidated=True)) == {a.id}
 
 
+def test_competing_claims_moves_its_two_axes_independently(store):
+    """Off the diagonal, where a transposed pair is observable.
+
+    Every other test of this method — in either repo — passes one instant to both axes,
+    because every production caller does: reconciliation and `forget` all ask about one
+    moment. So `_live_clause(valid, valid)` here was invisible to four suites at once,
+    and the Postgres backend could have collapsed the pair with nothing going red. The
+    code was correct on both; the coverage was absent, which is the harder thing to
+    notice.
+
+    It matters because this method's own docstring names the audit use — "what did we
+    think in August held the salary slot in June" — and that question is off-diagonal by
+    construction.
+
+    Two claims in one slot: one scheduled (recorded early, valid later) and one
+    backfilled (recorded later, valid early). Each is reachable from exactly one
+    off-diagonal reading, and neither diagonal reading separates them.
+    """
+    scheduled = put(store, object="Lisbon", recorded_at=T0, valid_from=TMID)
+    backfilled = put(store, object="Rome", recorded_at=TMID, valid_from=T0)
+    assert scheduled.fact_key == backfilled.fact_key, "not one slot; the test is void"
+
+    def slot(**kw):
+        return sorted(c.object for c in
+                      store.competing_claims("acme", scheduled.fact_key, **kw))
+
+    assert slot(valid_at=TMID, known_at=T0) == ["Lisbon"]
+    assert slot(valid_at=T0, known_at=TMID) == ["Rome"]
+    assert slot(valid_at=T0, known_at=T0) == []
+    assert slot(valid_at=TMID, known_at=TMID) == ["Lisbon", "Rome"]
+
+
 def test_include_invalidated_lifts_the_whole_valid_interval_so_valid_at_is_inert(store):
     """The exact semantics of the flag, pinned because a backend got them wrong and the
     suite stayed green.
