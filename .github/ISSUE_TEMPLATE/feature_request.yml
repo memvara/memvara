@@ -1,0 +1,50 @@
+name: Feature request
+description: Propose something the library should do
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before writing code, read
+        [Scope](https://github.com/memvara/memvara/blob/main/CONTRIBUTING.md#scope) in
+        CONTRIBUTING.md. It says what is likely to be accepted, and — with a four-question
+        test you can apply yourself — what belongs in the separate commercial layer and
+        will be declined here even if it is good. Better to find that out now than after
+        the PR.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What can't you do today
+      description: The problem, not the solution. What did you try, and where did it stop?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like instead
+      description: >
+        A sketch of the API is enough. If it changes bitemporal semantics, the predicate
+        schema, retrieval scoring, scope resolution, or what `why()` returns, say so —
+        those are load-bearing and the discussion is different.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: memvara version
+      description: So we know whether it already exists.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you ruled out
+      description: >
+        Including whether this can be done today behind one of the existing protocols
+        (`Store`, `Embedder`, `LLM`, `Recorder`, `Redactor`) without a change to the core.
+    validations:
+      required: false

@@ -1,0 +1,190 @@
+# Security policy
+
+## Reporting a vulnerability
+
+**Report privately, through GitHub, not in a public issue.**
+
+Open a draft advisory at
+<https://github.com/memvara/memvara/security/advisories/new> — the *Security* tab of this
+repository, then *Report a vulnerability*. That channel is private between you and the
+maintainers, it lets us work on a fix in a private fork, and it can request a CVE and
+publish the advisory when the fix ships. There is deliberately no email address in this file:
+an address rots, gets filtered, and ends up in one person's inbox while they are on a
+plane.
+
+If GitHub's advisory flow is unavailable to you for some reason, open a public issue that
+says only *"I have a security report and need a private channel"* — with **no details** —
+and we will open the advisory from our side and invite you to it.
+
+### What to put in the report
+
+- What an attacker gains, concretely. "Reads another user's claims" is a report; "scope
+  handling looks wrong" is a question.
+- A reproduction that runs offline, as a script or a failing test. Everything in this
+  library runs with no network and no API key, so a repro that needs neither is achievable
+  and is what gets a fix written fastest.
+- The version (`memvara.__version__`) or commit, the Python version, and the platform.
+- Whether you have disclosed it anywhere else, and any deadline you are working to.
+
+### What to expect
+
+This is a small project with no paid on-call, so these are honest targets rather than a
+guarantee: acknowledgement within **3 working days**, an assessment of whether we agree it
+is a vulnerability within **10**, and a fix or a public explanation of why not within
+**90**. If a date matters to you, say so in the report and we will tell you whether we can
+meet it rather than letting it pass quietly.
+
+We will credit you in the advisory and the changelog unless you ask us not to. There is no
+bug bounty, and we would rather say that here than have you find out after the work.
+
+## Supported versions
+
+`main`, and the most recent release. Nothing has been published to PyPI yet, so there is
+no older version to backport to — the fix goes to `main` and into the next release. If
+that changes, this section changes with it.
+
+## In scope
+
+These are the surfaces where a defect is a vulnerability rather than a bug. They are named
+specifically because each one is a place the design already made a decision, and the
+decision is the thing to attack.
+
+### Scope isolation
+
+`tenant > user > agent > session`, with inheritance downward and no leakage sideways.
+Anything that returns a claim, an episode, an entity, a path or a provenance record to a
+reader whose scope should not see it is in scope.
+
+The rule is `Scope.sees` in `memvara/types.py`: a handle sees its own scope and every
+**broader** one, never a deeper one. Its near-twin `Scope.contains` reaches *downward* and
+is deliberately used by `forget()` and `history()`, which are slot operations where a broad
+caller reaching down is the intent. Confusing the two is a real bug class here — it was one
+already, and `get()`/`why()` were fixed to use `sees` — so a case where an id-addressed
+read, a graph hop, or a new method authorizes with the downward rule is exactly the report
+we want.
+
+Two things that are **not** mitigations, so do not discount a finding for them:
+
+- **Claim ids are not secret.** Receipts, `invalidated_by` pointers, search results and
+  logs all leak them. "The attacker needed the id" is not a defence.
+- **Scope filters are supposed to fail closed.** A scope that resolves to nothing must
+  match nothing. A path where a filter degrades into an unfiltered query across every user
+  is a high-severity finding even if reaching it takes an unusual configuration.
+
+### Erasure completeness
+
+`erase()` and `purge()` are irreversible deletion, not retirement, and the guarantee is
+that everything derived from the text goes with it: the claim row, the FTS5 entries (which
+store the tokens directly), the embedding (which leaks content under inversion, and is
+zeroed in place in the `.vecs` sidecar), the entity rows in `entities.canonical` (which
+keep the first spelling ever seen of every subject and object), and — with `sources=True`,
+or always for `purge` — the source turns.
+
+**Recoverable text after a call that reported success is in scope**, and the reported
+per-table counts are part of the guarantee: a count that says the data is gone while it is
+not is worse than a call that refuses. That failure has happened here before — entity rows
+survived `purge()` while `stats()` reported zero — which is why this section is specific
+about which tables are covered.
+
+`forget()` and `delete()` **retire**; they are documented as leaving the text readable and
+are not in scope for erasure claims.
+
+### Provenance and the audit trail
+
+`why()`, `history()` and `search(as_of=…)` are the reason to use this library at all, so
+anything that lets a caller forge or corrupt them through a public API is in scope:
+
+- A claim that can be made to cite an episode it was not derived from, or to lose the
+  citation it had.
+- A write that reaches internal bookkeeping through a documented argument. `remember(**meta)`
+  accepting `salience_base` — a permanent ranking override reachable through no documented
+  parameter — was exactly this, and reserved keys are now rejected at the boundary. Another
+  one would be the same class.
+- A retirement that leaves both values live, or a backdated write that rewrites a history
+  it should only have appended to.
+
+### The prompt-injection surface in `recall()`
+
+`recall()` renders stored text straight into a system prompt, and stored text is
+attacker-controlled — a user can say anything, and `remember()` stores it verbatim. This is
+stored XSS against the agent, and the rendering boundary is where it is neutralised. Three
+defences, all in `memvara/core.py`, all worth attacking:
+
+- **`_safe_line`** collapses each claim to a single line and strips leading list and
+  heading markers, so stored text cannot open its own bullet list or repeat the header and
+  forge a block indistinguishable from the real one. Episodes are additionally truncated,
+  so a pasted stack trace cannot become the whole prompt.
+- **`RECALL_HEADER` and `RECALL_EPISODE_HEADER`** frame the block as retrieved data rather
+  than instructions, and the episode header says "said", not "true".
+- **The signature is explicit rather than `**kwargs`**, so `include_invalidated` and
+  `as_of` are not reachable from `recall()`. `include_invalidated=True` would resurrect
+  retired claims into a live prompt — an un-delete reachable by anyone who can influence a
+  parameter.
+
+A way to break out of that block, forge a header, or reach a retired claim through
+`recall()` is in scope. A model choosing to follow instructions that are correctly framed
+as data is a model behaviour, not a memvara vulnerability — but a case where the framing
+itself can be removed or spoofed is ours.
+
+### The redaction seam
+
+`memvara/redact.py` is the last place text can be changed before it becomes durable, and
+the ordering is the whole feature: the redactor runs **before** the content hash, the
+episode row, the FTS index, the embedder and the extraction model. Two of those leave the
+process. A code path where text reaches disk, an index, or a third party before the
+configured `Redactor` sees it is in scope, and so is one where a field listed in `FIELDS`
+is written without passing through it.
+
+The **rules** are not in scope — see below.
+
+### The MCP server
+
+`memvara/server/` speaks JSON-RPC 2.0 over stdio, and its security model is that the
+process *is* the user: scope is bound at startup from the environment and there is no
+caller-supplied scope string for a model to be talked into changing. In scope:
+
+- A tool call that reads or writes outside the bound scope.
+- A tool call that reaches an irreversible operation. `consolidate`, `purge`, `reset` and
+  `erase` are deliberately not tools, and a test asserts their absence; a route to one
+  through the eight that exist is a finding.
+- Anything written to stdout that is not a JSON-RPC message, which desynchronises a client.
+
+### Injection into the store
+
+SQL or FTS5 injection through any public method, path traversal through a store path, or
+input that leaves the store internally inconsistent. There is a fuzz corpus covering this
+(SQL and FTS5 syntax, path traversal, template injection, control characters, astral-plane
+codepoints, combining marks) driven through every public method — a case it misses is worth
+reporting with the input that does it.
+
+## Out of scope
+
+Not because they do not matter, but because they are known, documented, and deliberate.
+A report about one of these is a feature request, and we would rather you spend the effort
+on the list above.
+
+- **`PatternRedactor` failing to match a PII format.** It says in its own docstring that it
+  is not compliance-grade. It is a default and a demonstration of the seam, not a ruleset;
+  a serious deployment brings its own `Redactor`. The telemetry pair `redact.inspected` /
+  `redact.changed`, tagged by field and script, exists precisely because a rule set that
+  stops matching is otherwise silent.
+- **No encryption at rest.** Documented in the README with the reasoning: SQLCipher works
+  and costs +43–48% on writes, but the mmap-backed `.vecs` sidecar sits *outside* its
+  page-level boundary, and a plaintext vector beside encrypted text is a confirmation
+  oracle you can hill-climb. Encrypting one and not the other would be theatre. Full-disk
+  encryption is the honest answer today.
+- **On-disk residue after erasure.** Erasure deletes rows and index entries and zeroes the
+  vector slots; it does not scrub the SQLite pages they occupied, and the `-wal` may still
+  hold them. `VACUUM` and `PRAGMA secure_delete` are the deployment's levers, and
+  `docs/DEPLOY.md` says so.
+- **An attacker who already has the database file, the `.vecs` sidecar, or the process's
+  memory.** The store is a file with the filesystem's permissions and nothing more. It
+  makes no attempt to defend against someone who can read it.
+- **Resource exhaustion from input you supplied to your own process.** This is an
+  in-process library; a caller who passes a 500 MB string is doing it to themselves.
+- **Vulnerabilities in optional provider SDKs** (`anthropic`, `openai`,
+  `sentence-transformers`, the framework packages). Report those to their maintainers. A
+  way for *memvara* to hand one of them something dangerous is ours.
+- **The hosted commercial platform.** It is a separate product in a separate repository;
+  this file covers what is in this one. Report anything there through its own support
+  channel, not here.

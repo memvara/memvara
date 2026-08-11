@@ -1,0 +1,63 @@
+name: Bug report
+description: Something behaves differently from what the docs say
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Not for security issues.** Vulnerabilities go through the private advisory flow
+        in [SECURITY.md](https://github.com/memvara/memvara/blob/main/SECURITY.md), not here.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >
+        A script we can run. It must work offline with no API key — everything in this
+        library does, so a repro that needs a network call almost always means the bug is
+        somewhere else. Use `Memvara(":memory:")` and pass explicit `datetime` values
+        rather than relying on the clock.
+      render: python
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: memvara version
+      description: "`python3 -c 'import memvara; print(memvara.__version__)'`, or the commit if you installed from a checkout."
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: "`python3 -V`"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: "OS and architecture — e.g. macOS 15 arm64, Ubuntu 24.04 x86_64, Windows 11."
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Non-default configuration
+      description: >
+        Any `embedder=`, `llm=`, `store=`, `redactor=` or scope arguments, and whether the
+        store is on disk or `:memory:`. Skip if everything was default.
+    validations:
+      required: false

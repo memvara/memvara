@@ -37,6 +37,62 @@ and no vector database.
 
 ---
 
+## Open core, and exactly where the line is
+
+Everything in this repository is Apache-2.0, and it is the whole library: the bitemporal
+store, deterministic contradiction resolution, hybrid retrieval, consolidation,
+provenance, entity resolution, multi-hop traversal, the MCP server, the mem0 shim and
+importer, the LangChain / LlamaIndex / CrewAI / LangGraph adapters, and the SQLite
+backend. Nothing in it is gated, time-limited, keyed, or degraded into a demo. There is
+no free tier here, because there is no tier — the library runs on numpy, offline, with no
+account and no network call, and it is the same code we build everything else on.
+
+A commercial product is built around it. It is not a better version of this one:
+
+| in this repository, Apache-2.0 | commercial, separate product |
+|---|---|
+| SQLite store | Postgres / pgvector store |
+| in-process library; MCP over stdio | REST API and auth |
+| the `Redactor` and `Recorder` seams | governance: policy, retention, tamper-evident audit chain, RBAC |
+| one process, one store | multi-tenant control plane |
+| `WriteReceipt`, telemetry counters | usage metering, quotas, rate limiting, hosted console |
+
+The right column is the commercial product's *scope*, not a shipping manifest — some of it
+exists today and some is being built. The left column is what matters here, and the left
+column is complete.
+
+The pattern is that **the library is the product and the commercial layer is the
+operations around it.** Nothing in the right column changes what a claim is, how a
+contradiction resolves, what `why()` returns, or what `search()` finds — that is a
+constraint on what may be built there, not a slogan, because a paid layer that altered the
+semantics of the free one would make the free one untrustworthy. What is over there is what
+you need when memory becomes several machines' problem and several people's. For one
+application on one machine, nothing is missing.
+
+The uncomfortable half, stated here rather than discovered three weeks in: if you need
+Postgres or an HTTP endpoint, this repository does not have one and is not scheduled to
+grow one. That is a commercial boundary, not a backlog — saying "planned" would be the
+dishonest version. The line is drawn there because SQLite is genuinely sufficient for a
+single node, and needing more than one node correlates closely with being able to pay for
+it. The storage half of that sits behind the `Store` protocol in
+[`memvara/store/base.py`](memvara/store/base.py), which is public, documented, and
+implementable by anyone — a third-party Postgres backend is a legitimate thing to write,
+and neither the license nor the design objects to one.
+
+Two things stay open on purpose and are worth naming, because they are the ones a
+commercial reading would have closed. **The mem0 shim and the `history.db` importer are
+Apache-2.0** — they are the reason anyone can leave mem0 in an afternoon, and putting them
+behind a paywall would mean charging for the exit. **`erase()` and `purge()` are
+Apache-2.0** — real, irreversible deletion including the FTS tokens and the vectors. A
+GDPR Article 17 obligation is not a feature to upsell.
+
+The one thing to know before you count on "offline": with no `llm=`, `add()` runs the
+deterministic fast path only and drops the turns its rules do not recognise. `remember()`,
+retrieval, contradiction resolution and everything else are unaffected and need no model
+ever. See [Honest limitations](#honest-limitations).
+
+---
+
 ## Why this exists
 
 mem0 and its descendants store a memory as an opaque string with an embedding, and every
@@ -209,8 +265,9 @@ worth it only when model calls dominate, which is the normal case but not a univ
 same perfect extraction oracle, which neither would have in production. 9 of the 10
 predicates ship pre-seeded in the registry with the right cardinality, so the benchmark
 never exercises the path where an unknown predicate defaults to multi-valued and
-accumulates. And there are no LOCOMO or LongMemEval numbers yet — that is a gap in the
-work, not a limitation of the environment.
+accumulates. The LOCOMO and LongMemEval numbers above do not close that gap either: they
+measure retrieval, not answers. Nothing here has been scored end to end against a reader
+model, and that remains the honest hole in the evidence.
 
 ### Throughput
 
@@ -529,12 +586,13 @@ omitted below for readability.
 
 ```python
 mem = Memvara(path=":memory:", *, store=, embedder=, llm=, registry=, telemetry=,
-             redactor=, tenant=, user=, agent=, session=)
+             redactor=, tenant=, user=, agent=, session=, reembed=False, **tuning)
 
 # write
 mem.add(messages, *, role="user", ts=None)        -> WriteReceipt
-mem.remember(subject, predicate, obj, *, valid_from=, recorded_at=, sources=,
-             text=, confidence=, memory_type=, polarity=, **meta)  -> WriteReceipt
+mem.remember(subject, predicate, obj, *, valid_from=, valid_to=, recorded_at=, sources=,
+             text=, confidence=, memory_type=, polarity=, extractor=, **meta)
+                                                  -> WriteReceipt
 mem.supersede(old_claim_id, new_claim, *, at=, sources=)   -> WriteReceipt
 
 # retire — reversible, keeps history
@@ -549,7 +607,8 @@ mem.reset()                                       -> dict[str, int] # scope + sc
 # read
 mem.search(query, *, k=10, min_score=0.0, as_of=None, memory_types=None,
            include_invalidated=False, include_episodes=False)  -> list[Retrieved]
-mem.recall(query, *, k=8, header=None, include_episodes=False)  -> str
+mem.recall(query, *, k=8, min_score=0.0, header=None, include_episodes=False,
+           episode_header=None)                   -> str
 mem.get(claim_id)                                 -> Claim | None
 mem.get_all(*, as_of=None, include_invalidated=False)      -> list[Claim]
 mem.count(*, as_of=None, include_invalidated=False)        -> int
@@ -757,7 +816,18 @@ looking at a top-k, and nothing ever looks again.
   is left that way.
 - **`AsyncMemvara` is a thread-pool wrapper, not an async rewrite.** It keeps an asyncio
   event loop unblocked, which is what it is for; it does not make the store itself async.
-- **No REST server yet** — MCP over stdio is the shipped remote surface.
+- **With no `llm=`, `add()` keeps only what its rules recognise.** The default `NullLLM`
+  runs tiers 0, 1 and 1b and then stops, so high-precision sentence forms ("I live in X",
+  "I work at X") are extracted for nothing and an employer mentioned in passing is
+  dropped. It is loud rather than silent — `Memvara()` warns once with a
+  `DegradedExtractionWarning`, and `WriteReceipt.unextracted` counts the dropped turns on
+  every write — but it is the qualifier on the offline claim: the *library* runs with no
+  API key, extraction from arbitrary prose does not. `remember()`, retrieval,
+  contradiction resolution and consolidation never needed a model.
+- **No REST server in the open core.** MCP over stdio is the shipped remote surface. A
+  REST API is a component of the commercial product rather than a gap in this one — see
+  [Open core](#open-core-and-exactly-where-the-line-is), which says where that line is and
+  why it does not move.
 - **The framework adapters do not all preserve what makes memvara different.** LangChain
   and LlamaIndex *retrievers* keep everything, including `as_of=`, because "query in,
   documents out" is what `search()` already is. A LangChain `ChatMessageHistory` keeps
@@ -792,7 +862,7 @@ looking at a top-k, and nothing ever looks again.
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 2,231 tests, offline, no API key
+python3 -m pytest -q                              # 2,329 tests, offline, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison
 PYTHONPATH=. python3 bench/perf.py                # throughput and scaling
@@ -822,13 +892,16 @@ Coverage of the *lines* is the floor, not the goal. What the suite actually pins
 - **Executable docs** — the README walkthrough and the `Memvara` docstring run as tests, so
   the examples can't drift from the code.
 
-The ten remaining *branch* partials are verified-unreachable defensive guards — mostly
+The twelve remaining *branch* partials are verified-unreachable defensive guards — mostly
 `if valid_to is None or valid_to > t`, where a live claim always satisfies the first
 disjunct, so the second can never decide the branch. They are kept as guards rather than
 deleted, and documented as such.
 
 Design notes and the module-by-module contract live in [docs/INTERNALS.md](docs/INTERNALS.md).
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the bar a patch has to clear and what will and
+will not be accepted; [SECURITY.md](SECURITY.md) covers private vulnerability reporting.
 
 ## License
 
-Apache-2.0
+Apache-2.0, for everything in this repository. See
+[Open core](#open-core-and-exactly-where-the-line-is) for what is and is not in it.

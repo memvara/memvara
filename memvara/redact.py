@@ -7,13 +7,17 @@ turns. Most of the category cannot do that at all. This module is the other half
 deliberately only the *seam* of it: one injectable hook that sees every string on its way
 into the store and may hand back a different one.
 
-One caveat on that first half, found while building this one and stated here because it
-changes what this one is worth: neither call clears the `entities` table, whose
-`canonical` column keeps the first spelling ever seen of every subject and every object.
-After a full `purge()` the employers and cities are still there, verbatim. Redaction runs
-*upstream* of entity resolution, so with a policy configured the surviving row reads
-`[redacted:phone]` rather than the number — which makes this seam an accidental partial
-mitigation for a bug it did not cause, and no substitute at all for fixing that bug.
+That first half used to carry a caveat, and it is worth recording what it was because it
+is the reason this seam is placed where it is. `erase_claim` and `purge` did not clear the
+`entities` table, whose `canonical` column keeps the first spelling ever seen of every
+subject and object — so an erasure reported per-table counts as evidence while the
+employers and cities were still on disk, verbatim. That is fixed: `_gc_entities` is
+reference-counted and runs from both calls, and `tests/test_store.py` holds it fixed.
+
+Redaction still runs *upstream* of entity resolution, which is what made it an accidental
+partial mitigation while the bug existed. It is not a mitigation for erasure now and was
+never a substitute for one: this seam changes what gets written down, and erasure is about
+what happens to what already was.
 
 **What is deliberately not here.** A PII ruleset worth the name, a compliance mode,
 per-role policy, an audit report. Those are governance features; `docs/ROADMAP.md`

@@ -17,10 +17,18 @@ combination a memory layer can have.
 pip install -e .                   # numpy, and nothing else
 ```
 
-Not `pip install memvara`. Nothing has been published yet, and the name `memvara` on PyPI
-already belongs to an unrelated differentiable-rendering library — see
-[`RELEASING.md`](RELEASING.md#the-name-on-pypi-is-taken). Until that is resolved, install
-from this tree or from a wheel you built (`python3 -m build --wheel`).
+Not `pip install memvara`, yet — nothing has been published. The name is *available* on
+PyPI and verified so; see [`RELEASING.md`](RELEASING.md#the-name-is-available-and-that-was-not-free).
+Until the first upload, install from this tree or from a wheel you built
+(`python3 -m build --wheel`).
+
+<!-- This paragraph previously said the name "already belongs to an unrelated
+differentiable-rendering library". That was true of `engram`, the project's former name,
+and a blanket rename turned a true sentence into a false one that told every reader the
+package name was somebody else's. Kept as a note because it is the second time a rename
+has done exactly this here, and the lesson is that a search-and-replace cannot check
+whether a claim is still about the thing it now names. -->
+
 
 ```python
 from memvara import Memvara
