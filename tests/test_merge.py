@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import numpy as np
 import pytest
@@ -20,6 +20,11 @@ from memvara.telemetry import (
 )
 from memvara.types import Claim, Derivation, MemoryType, Scope, utcnow
 
+#: Import-time, and deliberately used only where drift cannot matter — a "one day ago"
+#: marker for an invalidation. **Do not anchor claim timestamps to it**: salience decays
+#: against the wall clock at read, so an import-time anchor makes every decay assertion
+#: in this file tolerate only the gap between collection and execution. `add()` calls
+#: `utcnow()` per claim for that reason.
 NOW = utcnow()
 SCOPE = Scope(tenant="acme", user="u1")
 
@@ -32,8 +37,20 @@ def consolidator():
 
 
 def add(store, claim_id: str, obj: str, *, predicate: str = "works_at",
-        obs: int = 1, age_days: float = 0.0, sources=(), **kw) -> Claim:
-    ts = NOW - timedelta(days=age_days)
+        obs: int = 1, age_days: float = 0.0, at: datetime | None = None,
+        sources=(), **kw) -> Claim:
+    # `utcnow()` per call by default, not the module-level `NOW`. Salience decays against
+    # the wall clock at *read* time while `age_days` is measured from claim creation, so
+    # anchoring to import time made every assertion in this file tolerate only the drift
+    # between collection and execution. At a 730-day half-life the default
+    # `pytest.approx` rel=1e-6 buys about 91 seconds of that — fine on a fast suite, and
+    # three tests here went red the day an optional install made the suite take ten
+    # minutes. Per call closes the window to the test's own duration.
+    #
+    # `at=` is for the tests that need two claims at the *same* instant — a tie is a
+    # premise there, not an accident, and per-call `utcnow()` would quietly settle it by
+    # recency and stop testing the tiebreak.
+    ts = (at or utcnow()) - timedelta(days=age_days)
     claim = Claim(
         id=claim_id,
         subject="user",
@@ -86,11 +103,17 @@ def test_equal_evidence_breaks_on_earliest_recorded_at(order):
 
 @pytest.mark.parametrize("order", [["cl_aaa", "cl_zzz"], ["cl_zzz", "cl_aaa"]])
 def test_a_dead_heat_is_settled_by_id(order):
-    """Same count, same instant: without a third key the winner would be arbitrary."""
+    """Same count, same instant: without a third key the winner would be arbitrary.
+
+    `at=` is passed so "same instant" is literally true. Letting each claim take its own
+    `utcnow()` would separate them by microseconds, recency would settle the contest, and
+    this test would pass without ever reaching the tiebreak it is named for.
+    """
     store = SQLiteStore(":memory:")
     c = Consolidator(store, HashingEmbedder(dim=256), PredicateRegistry())
+    tie = utcnow()
     for claim_id in order:
-        add(store, claim_id, "acme", obs=3, age_days=4.0)
+        add(store, claim_id, "acme", obs=3, age_days=4.0, at=tie)
 
     assert c.merge_duplicates() == 1
     assert live_ids(store) == {"cl_aaa"}
@@ -246,16 +269,10 @@ def test_pooling_leaves_the_survivor_on_the_decay_curve(consolidator):
     assert consolidator.run("acme") == {"decayed": 2, "merged": 1, "promoted": 0}
     survivor = store.get_claim("cl_win")
     assert survivor.salience_base == pytest.approx(2.0)
-    # `salience` is the only clock-dependent number here: `age_days` is measured from
-    # module-import `NOW`, while decay is evaluated against the wall clock when the test
-    # runs. At a 730-day half-life the default `rel=1e-6` tolerates about 91 seconds of
-    # drift, so a slow or contended run fails on arithmetic that is exactly right. `1e-3`
-    # tolerates ~25 hours and still fails the bug this test names by a mile: folding the
-    # decayed values instead of the base leaves the survivor near 1.5, not 1.0.
-    assert survivor.salience == pytest.approx(1.0, rel=1e-3)      # 2.0 * 0.5
+    assert survivor.salience == pytest.approx(1.0)      # 2.0 * 0.5
 
     assert consolidator.run("acme") == {"decayed": 0, "merged": 0, "promoted": 0}
-    assert store.get_claim("cl_win").salience == pytest.approx(1.0, rel=1e-3)
+    assert store.get_claim("cl_win").salience == pytest.approx(1.0)
 
 
 # -- bounded comparison -----------------------------------------------------

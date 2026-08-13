@@ -24,6 +24,15 @@ what a cross-encoder does. Use `CrossEncoderReranker` for that and pay for the m
 What this one is good for: reordering a candidate list with no download, no network and
 no new dependency, and being a control that isolates how much of a measured gain came
 from the reranking *stage* rather than from the model plugged into it.
+
+**It has been measured, and it is a control rather than a recommendation.** On LOCOMO it
+nets **−0.1 R@12** (62.0 → 61.9): it moves multi-hop, open-domain and temporal up as the
+theory above predicts, and pays for all of it on single-hop. A cross-encoder over the
+identical candidates is **+4.5**. That contrast is the useful thing this class produces —
+it is the row that proves the later gain belongs to the model and not to the stage, which
+is exactly the confusion it was written to prevent. Do not reach for it expecting the
+cross-encoder's numbers without the cross-encoder's dependency; that trade is not
+available. See `docs/ROADMAP.md`.
 """
 
 from __future__ import annotations

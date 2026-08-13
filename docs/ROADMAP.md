@@ -195,7 +195,7 @@ because it is a demonstration of the seam rather than a product.
 
 ---
 
-## The cross-encoder reranker — landed, opt-in, and not yet shown to help
+## The cross-encoder reranker — landed, opt-in, and worth +4.5 R@12 / +14.4 R@1
 
 This sat under "deliberately deferred" until now, on the argument that a reranker is a
 model and the default configuration is "numpy and nothing else, offline, no API key". That
@@ -213,43 +213,70 @@ left outside the caller's `k`. Every candidate it scores carries the number in
 record that the reranker never saw it.
 
 **What was measured**, on the LOCOMO retrieval harness that produced the R@12 = 62.0 in
-the README, all 1,531 evidence-labelled questions:
+the README, all 1,531 evidence-labelled questions, **vector leg pinned to
+`--embedder hashing`** so the only thing varying is the reranker:
 
-| configuration | R@1 | R@5 | **R@12** | R@20 | MRR |
-|---|---:|---:|---:|---:|---:|
-| no reranker (shipped default) | 30.5 | 51.7 | **62.0** | 67.4 | 44.9 |
-| `NullReranker`, `top_n=20` | 30.5 | 51.7 | **62.0** | 67.4 | 44.9 |
-| `CoverageReranker`, `top_n=20` | 31.5 | 50.5 | **61.9** | 67.4 | 45.0 |
-| `CoverageReranker`, `top_n=50` | 31.6 | 49.8 | **59.7** | 66.2 | 44.5 |
+| configuration | R@1 | R@5 | **R@12** | R@20 | MRR | run |
+|---|---:|---:|---:|---:|---:|---:|
+| no reranker (shipped default) | 30.5 | 51.7 | **62.0** | 67.4 | 44.9 | 10s |
+| `NullReranker`, `top_n=20` | 30.5 | 51.7 | **62.0** | 67.4 | 44.9 | 12s |
+| `CoverageReranker`, `top_n=20` | 31.5 | 50.5 | **61.9** | 67.4 | 45.0 | 12s |
+| `CoverageReranker`, `top_n=50` | 31.6 | 49.8 | **59.7** | 66.2 | 44.5 | 12s |
+| `cross-encoder/ms-marco-MiniLM-L-6-v2` | 44.9 | 62.1 | **66.5** | 67.4 | 59.2 | 2m19s |
+| `cross-encoder/ms-marco-MiniLM-L-12-v2` | 46.0 | 62.9 | **66.6** | 67.4 | 60.2 | 4m07s |
+| `BAAI/bge-reranker-base` | 42.8 | 60.3 | **65.9** | 67.4 | 56.9 | 12m33s |
 
 ```bash
 PYTHONPATH=. python3 bench/locomo.py --score retrieval --recall-at 1,5,12,20
-PYTHONPATH=. python3 bench/locomo.py --score retrieval --recall-at 1,5,12,20 --rerank 20
-```
-
-Read the second row first: `NullReranker` reproduces the baseline in every cell, which is
-what makes the third row attributable to the reranker rather than to the plumbing. Then
-read the third row honestly — **the lexical reranker does not improve the headline
-number.** It moves the weak rows the way the theory predicts (multi-hop 36.0 → 37.8,
-open-domain 30.7 → 31.1, temporal 71.0 → 71.5) and pays for it on the strong one
-(single-hop 70.7 → 69.6), netting −0.1. Reranking deeper makes it worse, not better.
-
-**The cross-encoder itself is unmeasured.** It needs `sentence-transformers` and a model
-download, neither of which was available in the environment this was built in, and an
-estimate of what it would score would be exactly the kind of unfalsifiable claim this
-project does not make. Someone holding the extra should run:
-
-```bash
 pip install 'memvara[rerank]'
 PYTHONPATH=. python3 bench/locomo.py --score retrieval --recall-at 1,5,12,20 \
     --rerank 20 --reranker cross-encoder
 ```
 
-Until that number exists, the honest statement is that the *stage* is built, proven not to
-perturb the ranking on its own, and bounded in cost — the reranking stage itself costs
-~3 µs per query and `CoverageReranker` ~250 µs at `top_n=20` over 168-character turns,
-against a ~3 ms search — and that the *model* which was supposed to be the lever has not
-been shown to move it.
+**Read `NullReranker` first.** It reproduces the baseline in every cell, which is what
+makes every row below it attributable to the reranker rather than to the plumbing.
+**Then check R@20**: it is 67.4 in all seven rows. Reranking the top 20 can only reorder
+within the top 20, so recall *at* 20 cannot move — and it does not, in any configuration.
+That invariant is the strongest self-check this harness has, and it holds.
+
+**The lever is real, and it is the model.** `CoverageReranker` — lexical, no download —
+nets **−0.1**, robbing single-hop to pay multi-hop. A cross-encoder over the identical
+stage, the identical candidates, is **+4.5 on R@12 and +14.4 on R@1**. An earlier revision
+of this section concluded from the lexical row alone that reranking "has not been shown to
+move" the number. That conclusion was wrong: it measured a keyword-overlap heuristic and
+generalised it to a class of model it never ran.
+
+**R@12 understates it.** Reranking cannot find evidence the retriever missed — R@20 proves
+that — so its whole effect is pulling the right evidence *upward*. That shows up at the
+top of the list, which is the part a caller actually puts in a prompt:
+
+| category | n | R@1 base → CE | R@12 base → CE | MRR base → CE |
+|---|---:|---:|---:|---:|
+| multi-hop | 279 | 7.4 → **16.2** | 36.0 → **42.2** | 31.6 → **51.5** |
+| temporal | 320 | 41.5 → **56.3** | 71.0 → **75.9** | 54.0 → **66.2** |
+| open-domain | 92 | 13.9 → **15.3** | 30.7 → **32.5** | 24.7 → **27.5** |
+| single-hop | 840 | 35.7 → **53.4** | 70.7 → **74.8** | 48.1 → **62.5** |
+| **all** | **1531** | 30.5 → **44.9** | 62.0 → **66.5** | 44.9 → **59.2** |
+
+**Every category improves.** That is the qualitative difference from the lexical row,
+which could only redistribute: multi-hop R@1 more than doubles and its MRR goes up
+twenty points.
+
+**Bigger is not better here.** `bge-reranker-base` is 278M parameters against
+MiniLM-L-6's 22M, and it is worse on every metric at **5× the runtime**. L-12 buys +0.1
+R@12 and +1.1 R@1 for 1.8× the time. `ms-marco-MiniLM-L-6-v2` stays `DEFAULT_MODEL`: it
+takes essentially all of the available gain at the lowest cost.
+
+**What it costs.** Roughly **84 ms per query** at `top_n=20` for L-6, against a ~3 ms
+search — so with reranking on, the reranker *is* the query latency, by more than an order
+of magnitude. (L-12 ≈ 155 ms, `bge-reranker-base` ≈ 485 ms. CPU only, no GPU, on a
+contended developer machine; treat them as ratios rather than absolutes.) The stage itself
+is still ~3 µs and `CoverageReranker` ~250 µs. This cost is the reason the default stays
+`None` — not the accuracy question, which is now settled.
+
+**Still not measured: whether any of this reaches an answer.** These are retrieval
+numbers. A reader model has never been run over either configuration, so "+14.4 R@1"
+is a claim about evidence placement and not about answer accuracy.
 
 ---
 

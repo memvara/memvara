@@ -14,6 +14,7 @@ the cross-encoder is exercised through an injected fake and through a fake modul
 
 from __future__ import annotations
 
+import ast
 import socket
 import subprocess
 import sys
@@ -124,8 +125,17 @@ def episodes_memvara(**kw) -> Memvara:
     are a short tail on a list of extracted facts; with `NullLLM` nothing is extracted,
     so here they are the entire candidate pool and a cap of 3 would make "rank 4" a
     thing that cannot exist.
+
+    **The embedder is pinned, not defaulted.** `default_embedder()` returns
+    `LocalEmbedder` when sentence-transformers is importable and `HashingEmbedder` when
+    it is not, so leaving it out made the fused ranking — and therefore which candidate
+    sits outside a given `k` — depend on what happened to be installed. That is not "the
+    shipped offline configuration", it is whichever one the machine has, and it silently
+    broke `test_the_reranker_can_promote_a_candidate_from_below_the_callers_k` the day
+    `memvara[rerank]` was installed to measure the cross-encoder.
     """
     kw.setdefault("read_max_episodes", 12)
+    kw.setdefault("embedder", HashingEmbedder(dim=512))
     mem = Memvara(llm=NullLLM(), user="alice", **kw)
     mem.add([{"role": "user", "content": t} for t in TURNS])
     return mem
@@ -340,8 +350,10 @@ def test_the_backends_are_lazy_attributes_rather_than_eager_imports() -> None:
 
     assert pkg.CoverageReranker is CoverageReranker
     assert pkg.CrossEncoderReranker is CrossEncoderReranker
+    assert pkg.DEFAULT_MODEL == DEFAULT_MODEL
     assert set(pkg.__all__) == {"Reranker", "NullReranker", "Rankable", "rerank",
-                                "CoverageReranker", "CrossEncoderReranker"}
+                                "CoverageReranker", "CrossEncoderReranker",
+                                "DEFAULT_MODEL"}
 
 
 def test_an_unknown_attribute_on_the_package_is_an_attribute_error() -> None:
@@ -355,22 +367,27 @@ def test_an_unknown_attribute_on_the_package_is_an_attribute_error() -> None:
 
 
 def test_the_default_configuration_never_imports_a_reranker_backend() -> None:
-    """**The test this feature exists to not break.**
+    """**The test this feature exists to not break** — split into the two properties it
+    used to conflate under one name.
 
-    A fresh interpreter that imports memvara, writes and reads must not have pulled in
-    `sentence_transformers`, `torch`, or even `memvara.rerank.cross` — the module that
-    would import them. A subprocess because by the time this file runs, pytest has
-    already imported half the package and every other test in it.
+    A subprocess because by the time this file runs, pytest has already imported half the
+    package and every other test in it.
 
-    Verified by breaking it: making `CrossEncoderReranker` an eager import in
-    `memvara/rerank/__init__.py` turns this red on `memvara.rerank.cross`, and adding
-    `sentence-transformers` to the core `dependencies` would turn it red on the SDK.
+    **The reranker half is unconditional.** A fresh interpreter that imports memvara,
+    writes and reads must not have pulled in `memvara.rerank.cross` or
+    `memvara.rerank.lexical`, whatever else is installed. Verified by breaking it: making
+    `CrossEncoderReranker` an eager import in `memvara/rerank/__init__.py` turns this red.
+
+    **The torch half is conditional, and pretending otherwise hid a real interaction.**
+    It holds only while nothing in the environment provides sentence-transformers — and
+    `memvara[rerank]` provides it, because a cross-encoder is one. `default_embedder()`
+    keys on whether the package is *importable* rather than on which extra was asked for,
+    so installing the reranker extra also makes the **default embedder** a torch model.
+    That is an interaction between two extras, not a reranker defect, so it is asserted
+    where it belongs: with the embedder pinned, the default read path still reaches no
+    model at all. The unpinned case is asserted as what it actually is.
     """
-    probe = (
-        "import sys\n"
-        "from memvara import Memvara\n"
-        "from memvara.llm import NullLLM\n"
-        "mem = Memvara(llm=NullLLM(), user='alice')\n"
+    body = (
         "mem.add('I live in Lisbon')\n"
         "mem.search('where do they live?', include_episodes=True)\n"
         "mem.close()\n"
@@ -378,10 +395,28 @@ def test_the_default_configuration_never_imports_a_reranker_backend() -> None:
         "           'memvara.rerank.cross', 'memvara.rerank.lexical'}\n"
         "print(sorted(watched & set(sys.modules)))\n"
     )
-    done = subprocess.run([sys.executable, "-c", probe], cwd=REPO_ROOT, check=False,
-                          capture_output=True, text=True)
-    assert done.returncode == 0, done.stderr
-    assert done.stdout.strip() == "[]", done.stdout
+    head = ("import sys\n"
+            "from memvara import Memvara\n"
+            "from memvara.llm import NullLLM\n")
+
+    def run(construct: str) -> str:
+        done = subprocess.run([sys.executable, "-c", head + construct + body],
+                              cwd=REPO_ROOT, check=False, capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+        return done.stdout.strip()
+
+    # Pinned: the whole watched set must be absent. This is the claim the README makes —
+    # "numpy and nothing else, offline, no API key" — and it is exactly true.
+    assert run("from memvara.embed import HashingEmbedder\n"
+               "mem = Memvara(llm=NullLLM(), user='alice',\n"
+               "              embedder=HashingEmbedder(dim=512))\n") == "[]"
+
+    # Unpinned: no reranker backend either way. Torch may or may not be there, depending
+    # on whether something in the environment installed sentence-transformers — so that
+    # is read off the environment rather than asserted as a constant.
+    reranker_backends = {"memvara.rerank.cross", "memvara.rerank.lexical"}
+    seen = set(ast.literal_eval(run("mem = Memvara(llm=NullLLM(), user='alice')\n")))
+    assert seen & reranker_backends == set(), seen
 
 
 def test_the_default_configuration_opens_no_socket(

@@ -117,6 +117,7 @@ from typing import Any, Callable, Sequence
 import evalkit as ek
 
 from memvara import Memvara, NullLLM
+from memvara.embed import embedder_name
 
 CATEGORIES = {
     1: "multi-hop",
@@ -352,7 +353,7 @@ def fixture() -> list[Sample]:
 
 def build_memory(sample: Sample, budget: ek.RetrievalBudget, llm: Any = None,
                  read_k: int | None = None, reranker: Any = None,
-                 rerank_top_n: int = 0) -> Memvara:
+                 rerank_top_n: int = 0, embedder: Any = None) -> Memvara:
     """A store per conversation, which is the unit a LOCOMO question is about.
 
     `read_max_episodes=k` because the library's default of 3 assumes raw turns are a
@@ -369,15 +370,46 @@ def build_memory(sample: Sample, budget: ek.RetrievalBudget, llm: Any = None,
     the episode cap has to rise with `rerank_top_n` as well: the reranker can only
     promote candidates the episode leg actually returned, so a cap left at `read_k`
     would silently make `--rerank 50` mean `--rerank 20`.
+
+    **`embedder` must be passed and must be recorded.** It used to be left to
+    `default_embedder()`, which prefers a sentence-transformers model when one is
+    installed and falls back to `HashingEmbedder` when it is not — so this harness
+    silently measured a different vector leg depending on what happened to be in the
+    environment, and the report said only that the numbers "reproduce exactly", which
+    was true on one machine and misleading everywhere else. The trap that makes it worse
+    than an ordinary configuration gap: `memvara[rerank]` pulls in sentence-transformers,
+    so installing the extra *in order to measure the reranker* also swaps the embedder,
+    and the whole difference lands on the reranker in the write-up. The other benches in
+    this directory (`perf.py`, `compare.py`, `mem0_real.py`, `multihop.py`) all pin
+    `HashingEmbedder` explicitly for exactly this reason; this one did not.
     """
     episodes = max(read_k or budget.k, rerank_top_n)
     return Memvara(
         user=sample.sample_id,
         llm=llm if llm is not None else NullLLM(),
+        embedder=embedder,
         read_max_episodes=episodes,
         read_reranker=reranker,
         read_rerank_top_n=rerank_top_n or 20,
     )
+
+
+#: The embedder every published LOCOMO number was produced with. Pinned rather than
+#: discovered, so the figure does not depend on what is installed. `HashingEmbedder` is
+#: also what the comparison benches use, which is what makes their numbers commensurable.
+BASELINE_EMBED_DIM = 512
+
+
+def build_embedder(name: str) -> Any:
+    """The vector leg, named explicitly. `hashing` is the published configuration."""
+    if name == "local":
+        from memvara.embed import CachedEmbedder
+        from memvara.embed.local import LocalEmbedder
+
+        return CachedEmbedder(LocalEmbedder())
+    from memvara import CachedEmbedder, HashingEmbedder
+
+    return CachedEmbedder(HashingEmbedder(dim=BASELINE_EMBED_DIM))
 
 
 def answer_one(
@@ -478,6 +510,7 @@ def run_retrieval(
     llm: Any = None,
     reranker: Any = None,
     rerank_top_n: int = 0,
+    embedder: Any = None,
 ) -> tuple[list[ek.RetrievalScore], ek.IngestStats, ek.RetrievalStats, Counter]:
     """The same ingest and the same retrieval as `run()`, scored with no reader.
 
@@ -494,7 +527,8 @@ def run_retrieval(
 
     for sample in samples:
         mem = build_memory(sample, budget, llm, read_k=plan.depth(budget),
-                           reranker=reranker, rerank_top_n=rerank_top_n)
+                           reranker=reranker, rerank_top_n=rerank_top_n,
+                           embedder=embedder)
         haystack = sample.haystack
         labels: dict[str, str] = {}
         try:
@@ -656,9 +690,14 @@ def build_reranker(args: argparse.Namespace) -> Any:
     if args.reranker == "null":
         return NullReranker()
     if args.reranker == "cross-encoder":
-        from memvara.rerank import CrossEncoderReranker
+        from memvara.rerank import DEFAULT_MODEL, CrossEncoderReranker
 
-        return CrossEncoderReranker()
+        # `--rerank-model` exists because "does reranking help" and "does *this model*
+        # help" are different questions, and a harness that can only ask the first will
+        # answer the second by accident. A cross-encoder trained on web-search passage
+        # ranking is not obviously the right judge of whether a conversational turn
+        # states a fact about a person.
+        return CrossEncoderReranker(args.rerank_model or DEFAULT_MODEL)
     return CoverageReranker()
 
 
@@ -678,6 +717,16 @@ def main(argv: Sequence[str] | None = None,
                         choices=["coverage", "null", "cross-encoder"],
                         help="which reranker --rerank uses; cross-encoder needs "
                              "pip install 'memvara[rerank]' and downloads a model")
+    # `hashing` is the default because it is what every published LOCOMO number was
+    # produced with, and because a default that changes when an unrelated extra is
+    # installed is not a default.
+    parser.add_argument("--embedder", default="hashing", choices=["hashing", "local"],
+                        help="vector leg: hashing (offline, the published "
+                             "configuration) or local (sentence-transformers)")
+    parser.add_argument("--rerank-model", default="", metavar="ID",
+                        help="cross-encoder model id (default: "
+                             "cross-encoder/ms-marco-MiniLM-L-6-v2). Only meaningful "
+                             "with --reranker cross-encoder.")
     args = parser.parse_args(argv)
 
     if args.download:
@@ -710,14 +759,20 @@ def main(argv: Sequence[str] | None = None,
 
     if args.score == "retrieval":
         plan = ek.build_plan(args)
+        embedder = build_embedder(args.embedder)
+        # Printed unconditionally, including for the default. A number whose vector leg
+        # is not stated is not reproducible, and this one used to be decided by whether
+        # sentence-transformers happened to be installed.
+        out(f"\n  --embedder {args.embedder}: {embedder_name(embedder)}")
         reranker = build_reranker(args)
         if reranker is not None:
-            out(f"\n  --rerank {args.rerank}: {args.reranker} reranker over the top "
+            out(f"  --rerank {args.rerank}: {args.reranker} reranker "
+                f"({getattr(reranker, 'name', type(reranker).__name__)}) over the top "
                 f"{args.rerank} fused candidates, cut to k afterwards. The default "
                 "configuration has no reranker at all.")
         scores, ingest_stats, read_stats, excluded = run_retrieval(
             samples, budget=budget, plan=plan, limit=args.limit,
-            reranker=reranker, rerank_top_n=args.rerank)
+            reranker=reranker, rerank_top_n=args.rerank, embedder=embedder)
         out(ek.retrieval_report(
             scores, ingest_stats, read_stats, title="LOCOMO", plan=plan, budget=budget,
             categories=[CATEGORIES[c] for c in ANSWERABLE],

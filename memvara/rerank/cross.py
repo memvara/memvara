@@ -24,6 +24,16 @@ from typing import Any, Sequence
 #: ms-marco MiniLM-L6: 22M parameters, ~90MB, and the standard baseline cross-encoder
 #: for passage reranking. Named as a default rather than hardcoded because the whole
 #: point of the protocol is that a deployment picks its own trade of cost for accuracy.
+#:
+#: Kept as the default after measuring three, on LOCOMO at `top_n=20` (R@12 / R@1 / run):
+#:
+#: * this one ............. 66.5 / 44.9 / 2m19s
+#: * ms-marco-MiniLM-L-12 . 66.6 / 46.0 / 4m07s  — +0.1 R@12 for 1.8x the time
+#: * BAAI/bge-reranker-base 65.9 / 42.8 / 12m33s — 12x the parameters, worse, 5x the time
+#:
+#: The last row is the one worth remembering: on this workload a bigger reranker was not
+#: a better one. Anyone swapping this should measure rather than assume, which is what
+#: `bench/locomo.py --rerank-model ID` exists for.
 DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 

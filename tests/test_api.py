@@ -208,6 +208,74 @@ def test_an_embedder_swap_is_refused_at_construction_not_discovered_at_read(tmp_
     assert "reembed=True" in message, "must name the migration that fixes it"
 
 
+class _renamed:
+    """A real embedder wearing a different `name`, since `name` is what the hint reads.
+
+    `HashingEmbedder.name` is a read-only property, and standing up a genuine
+    `LocalEmbedder` would make these tests skip on every machine without the extra —
+    which is exactly the set of machines where a regression here would go unnoticed
+    longest. Delegation keeps the encoder real so the store is genuinely written.
+    """
+
+    def __init__(self, inner, name: str) -> None:
+        self._inner, self.name = inner, name
+
+    def __getattr__(self, attr):
+        return getattr(self._inner, attr)
+
+
+def test_a_local_embedder_nobody_asked_for_says_so_and_names_the_extra(tmp_path):
+    """**The trap this message exists for.** `default_embedder()` returns `LocalEmbedder`
+    as soon as `sentence_transformers` is importable, using that as a proxy for "the user
+    installed `memvara[local-embed]`". `memvara[rerank]` installs the same package,
+    because a cross-encoder is one — so installing the *reranker* extra silently swaps the
+    *embedder*, and the next open of an existing store fails a dimension check nobody
+    connected to reranking.
+
+    The store is never at risk: this is a refusal before anything writes. What is at risk
+    is an afternoon, because an error naming two fixes and not the cause sends the reader
+    hunting through their own diff for a change they never made.
+
+    A renamed real embedder stands in for the model, so the assertion holds whether or
+    not sentence-transformers is installed — the message keys on the `local:` prefix
+    `LocalEmbedder` puts in its name, not on the class.
+    """
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=512), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+
+    unasked = _renamed(HashingEmbedder(dim=384),
+                       "local:sentence-transformers/all-MiniLM-L6-v2")
+
+    with pytest.raises(EmbedderMismatchError) as excinfo:
+        Memvara(path, embedder=unasked, llm=NullLLM())
+
+    message = str(excinfo.value)
+    assert "may not have chosen this embedder" in message
+    assert "memvara[rerank]" in message, "must name the extra that causes it"
+    assert "HashingEmbedder(dim=512)" in message, "must offer the store's own dimension"
+
+
+def test_the_swap_hint_is_silent_when_the_local_embedder_was_deliberate(tmp_path):
+    """A store already written by a local model, reopened with a different local model,
+    is an ordinary migration — the reader chose both. Guessing at a cause there would be
+    noise, and worse, it would be wrong."""
+    path = str(tmp_path / "m.db")
+    first = _renamed(HashingEmbedder(dim=512),
+                     "local:sentence-transformers/all-mpnet-base-v2")
+    with Memvara(path, embedder=first, llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+
+    second = _renamed(HashingEmbedder(dim=384),
+                      "local:sentence-transformers/all-MiniLM-L6-v2")
+    with pytest.raises(EmbedderMismatchError) as excinfo:
+        Memvara(path, embedder=second, llm=NullLLM())
+
+    message = str(excinfo.value)
+    assert "may not have chosen this embedder" not in message
+    assert "reembed=True" in message, "the ordinary migration advice still has to be there"
+
+
 def test_the_mismatch_is_detected_without_a_recorded_fingerprint(tmp_path):
     """A store copied without its sidecar, or written by an older build, must still be
     caught — the dimension is read back from the vectors themselves."""

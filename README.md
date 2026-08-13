@@ -222,7 +222,7 @@ random retrieval would score.
 
 **Read the weak rows first.** Multi-hop LOCOMO is 36% and open-domain is 31% — questions
 needing evidence stitched across sessions are where a top-k budget hurts most, and no
-amount of contradiction resolution helps. LongMemEval abstention is **1.7%**, essentially
+amount of contradiction resolution helps. A reranker does, though: see below. LongMemEval abstention is **1.7%**, essentially
 never: unanswerable questions retrieve nothing relevant, which is the right *outcome* by
 accident rather than by design. Preference questions score 23% because their golds are
 30-token meta-descriptions no single turn can contain — a metric artifact, visible in the
@@ -230,6 +230,39 @@ accident rather than by design. Preference questions score 23% because their gol
 
 `knowledge-update` at **91.0%** is the row that matters for the thesis: it is the category
 where a fact changes and the old value must not win.
+
+### What a reranker buys
+
+Every number above is the **shipped default, which has no reranker**. Turning one on is
+one constructor argument and an optional install, and on LOCOMO it is the largest single
+improvement available:
+
+| LOCOMO, 1,531 questions | R@1 | R@5 | **R@12** | R@20 | MRR |
+|---|---:|---:|---:|---:|---:|
+| default (no reranker) | 30.5 | 51.7 | **62.0** | 67.4 | 44.9 |
+| `+ cross-encoder/ms-marco-MiniLM-L-6-v2`, `top_n=20` | **44.9** | **62.1** | **66.5** | 67.4 | **59.2** |
+
+```python
+from memvara import Memvara
+from memvara.rerank import CrossEncoderReranker      # pip install 'memvara[rerank]'
+
+mem = Memvara("memory.db", read_reranker=CrossEncoderReranker(), read_rerank_top_n=20)
+```
+
+**R@12 understates it.** A reranker over the top 20 cannot find evidence retrieval
+missed — R@20 is identical in both rows, and must be — so the entire effect is moving the
+right evidence *upward*. That is why R@1 gains 14.4 points and MRR gains 14.3: the win
+lands exactly where a token budget spends. Multi-hop R@1 more than doubles, 7.4 → 16.2.
+
+Two things worth knowing before you reach for a bigger model. `BAAI/bge-reranker-base` is
+12× the parameters and scores **lower** on every metric at 5× the runtime. And a
+reranker is the query latency once it is on — roughly 84 ms at `top_n=20` against a ~3 ms
+search. That cost, not the accuracy, is why the default is still `None`.
+
+The dependency-free `CoverageReranker` is a **control, not a recommendation**: it is
+lexical, it measures what the *stage* does without a model, and on this suite it nets
+−0.1. Full table, per-category breakdown and the reproduce commands are in
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 Two findings from building this. **LongMemEval's `oracle` split cannot measure evidence
 retrieval at all** — in all 500 instances every haystack session *is* an evidence session,

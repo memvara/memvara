@@ -541,10 +541,43 @@ class Memvara:
             f"{origin}, but the configured embedder is {mine}. Every search would raise "
             f"'query dim {mine.dim} != index dim {actual}' while writes kept succeeding, "
             "so the store would keep growing and none of it would be retrievable.\n"
+            f"{self._unasked_swap_hint(mine, recorded, actual)}"
             "Either open it with the embedder it was built with:\n"
             f"    Memvara(..., embedder=<the {actual}-dimensional embedder>)\n"
             "or migrate it once, re-encoding every claim with the new one:\n"
             "    Memvara(..., embedder=<new>, reembed=True)   # or mem.reembed(<new>)"
+        )
+
+    @staticmethod
+    def _unasked_swap_hint(mine: EmbedderFingerprint,
+                           recorded: EmbedderFingerprint | None, actual: int) -> str:
+        """Name the cause when nobody asked for the embedder that is now configured.
+
+        `default_embedder()` returns `LocalEmbedder` whenever `sentence_transformers` is
+        *importable*, using that as a proxy for "the user installed `memvara[local-embed]`".
+        The proxy is wrong in one direction that matters: **`memvara[rerank]` installs the
+        same package**, because a cross-encoder is one. So installing the reranker extra —
+        an opt-in feature whose whole pitch is that it does not touch the default path —
+        silently changes the *embedder*, and the next open of an existing store fails with
+        a dimension mismatch nobody connected to reranking.
+
+        The store is safe either way: this is a refusal before anything writes, not a
+        corruption. But an error that names two fixes and not the cause sends the reader
+        looking at their own code for a change they never made, so when the shape fits,
+        the message says what probably happened.
+        """
+        if not mine.name.startswith("local:"):
+            return ""
+        if recorded is not None and recorded.name.startswith("local:"):
+            return ""
+        return (
+            "You may not have chosen this embedder. `default_embedder()` uses a local "
+            "sentence-transformers model as soon as that package is importable, and "
+            "`memvara[rerank]` installs it — so installing the reranker extra also swaps "
+            "the embedder. If that is what happened, pass the original one explicitly "
+            "rather than migrating:\n"
+            "    from memvara import HashingEmbedder\n"
+            f"    Memvara(..., embedder=HashingEmbedder(dim={actual}))\n"
         )
 
     # -- scope helpers -------------------------------------------------------

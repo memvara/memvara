@@ -100,6 +100,37 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
 
 ### Added
 
+- **An opt-in cross-encoder reranker: `memvara.rerank`.** Off by default, and "off" means
+  the stage does not exist — no import of a backend, no model, no network. A subprocess
+  test asserts that and goes red if the backend is ever made an eager import.
+
+  ```python
+  from memvara.rerank import CrossEncoderReranker      # pip install 'memvara[rerank]'
+  mem = Memvara("memory.db", read_reranker=CrossEncoderReranker(), read_rerank_top_n=20)
+  ```
+
+  Measured on LOCOMO's 1,531 evidence-labelled questions, vector leg pinned, identical
+  candidates: **R@12 62.0 → 66.5 and R@1 30.5 → 44.9**, MRR 44.9 → 59.2. R@20 is
+  unchanged at 67.4 and must be — reranking the top 20 can only reorder within it — so
+  the whole effect is evidence moving *upward*, which is where a token budget spends.
+  Every category improves; multi-hop R@1 more than doubles.
+
+  Two results worth carrying: `BAAI/bge-reranker-base` is 12× the parameters of the
+  default `ms-marco-MiniLM-L-6-v2` and scores **lower** on every metric at 5× the
+  runtime, and the dependency-free `CoverageReranker` nets **−0.1** — it is a control
+  that proves the gain belongs to the model rather than the stage, not a recommendation.
+  The default stays `None` because a cross-encoder is roughly 84 ms per query against a
+  ~3 ms search, which is a cost decision and no longer an accuracy one.
+
+- **`bench/locomo.py --embedder {hashing,local}` and `--rerank-model ID`.** The harness
+  never pinned its vector leg: it fell through to `default_embedder()`, which prefers
+  sentence-transformers when installed. Since `memvara[rerank]` *installs*
+  sentence-transformers, installing the extra in order to measure the reranker also
+  swapped the embedder underneath the measurement, and the whole difference landed on the
+  reranker. It now defaults to `hashing` — the configuration every published number was
+  produced with — and prints the embedder in its report unconditionally. Every other
+  bench in that directory already pinned one explicitly.
+
 - **A three-state read filter: `states=`.** `Memvara.search`, `get_all` and `count`, their
   `ScopedMemvara` mirrors and the `AsyncMemvara` / `AsyncScopedMemvara` ones take
   `states=`, any non-empty subset of `("live", "ended", "retired")` — `Claim.state`'s own
