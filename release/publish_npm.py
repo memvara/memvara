@@ -88,7 +88,7 @@ def published_versions(name: str) -> set[str]:
     return set(resp.json().get("versions", {}))
 
 
-def preflight(pkg: Path, allow_dirty: bool) -> tuple[str, str]:
+def preflight(pkg: Path, allow_dirty: bool, dry_run: bool) -> tuple[str, str]:
     manifest = pkg / "package.json"
     if not manifest.is_file():
         raise Abort(f"no package.json under {pkg}", "Pass --package PATH.")
@@ -103,7 +103,11 @@ def preflight(pkg: Path, allow_dirty: bool) -> tuple[str, str]:
                     "  site are applications and are private on purpose — if you meant to\n"
                     "  publish one, that is a decision to make in package.json, not here.")
 
-    if not (Path.home() / ".npmrc").is_file() and not os.environ.get("NPM_TOKEN"):
+    # Not checked under --dry-run: nothing is uploaded, so nothing needs authenticating,
+    # and a rehearsal you cannot run until you are already set up is a rehearsal nobody
+    # does. `npm pack` and `npm publish --dry-run` are both anonymous.
+    if not dry_run and not (Path.home() / ".npmrc").is_file() \
+            and not os.environ.get("NPM_TOKEN"):
         raise Abort("no ~/.npmrc and no NPM_TOKEN",
                     "npm login    (or set NPM_TOKEN for a CI-style publish)")
 
@@ -138,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pkg = args.package.resolve()
     print(f"\n  package : {pkg}")
-    name, version = preflight(pkg, args.allow_dirty)
+    name, version = preflight(pkg, args.allow_dirty, args.dry_run)
 
     # `npm pack --dry-run` lists exactly what would ship. Worth reading every time: npm's
     # default file selection is broad, and the usual accident is publishing a `.env`, a

@@ -72,20 +72,37 @@ python3 release/publish_npm.py --package PATH --dry-run
 python3 release/publish_npm.py --package PATH
 ```
 
-**There is nothing to publish yet, and that is the first thing to know.** Both
-`package.json` files in this project are applications marked `"private": true` — the
-console and the marketing site — and neither belongs in a registry. The script refuses
-them by name rather than letting `npm` produce a vaguer error.
+**npm is a name-reservation question here, not a release process.** There is no JavaScript
+client. The two other `package.json` files in this project are applications marked
+`"private": true` — the console and the marketing site — and neither belongs in a
+registry; the script refuses them by name rather than letting `npm` produce a vaguer error.
 
-So npm is currently a *name reservation* question, not a release process. `memvara` is
-unclaimed and an npm organisation reserves only `@memvara/*`, exactly as a PyPI
-organisation reserves no project name. Claiming the bare name requires publishing
-something real. A minimal placeholder that names the project and links to it is a
-legitimate reservation for a project that genuinely exists — npm's policy is against
-claiming names you have no relationship to — but the first publish is public and
-effectively permanent, so this script will not invent one.
+`memvara` on npm is unclaimed, and an npm organisation reserves only `@memvara/*`, exactly
+as a PyPI organisation reserves no project name. Claiming the bare name requires publishing
+something real, so [`npm/memvara/`](../npm/memvara) is a placeholder that names the
+project, links to it, and does nothing:
+
+```bash
+python3 release/publish_npm.py --package npm/memvara --dry-run
+```
+
+It exports `{implemented: false, notice, python, homepage}`. It has no side effects and
+**does not throw on import** — a placeholder that throws breaks a bundler's module graph
+and turns "you installed the wrong thing" into a build failure several layers from its
+cause. `implemented` is typed as the literal `false`, so a TypeScript caller who guards on
+it gets the branch narrowed to `never` at compile time, which is the earliest anyone can
+be told this package is empty.
+
+`npm/` is excluded from the Python sdist (`[tool.hatch.build.targets.sdist]` in
+`pyproject.toml`). Hatch ships every top-level directory by default, so without that the
+placeholder would have been bundled inside `pip install memvara`.
 
 When a JS client for the REST API exists, point `--package` at it and nothing changes.
+
+**`--dry-run` needs no npm account.** It runs every check, packs the tarball and calls
+`npm publish --dry-run`, all anonymously; only a real publish needs `npm login` or
+`NPM_TOKEN`. A rehearsal you cannot run until you are already set up is a rehearsal
+nobody does.
 
 `--access public` is passed always: a scoped package publishes as restricted by default,
 and a restricted package on a free account is refused with a billing error rather than a
