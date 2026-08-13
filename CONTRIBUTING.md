@@ -23,14 +23,21 @@ python3 -m coverage run -m pytest && python3 -m coverage report    # gated at 10
 python3 -m mypy -p memvara                                         # must be clean
 ```
 
-**If that run takes minutes rather than seconds, you have an extra installed.**
-`default_embedder()` returns a sentence-transformers model as soon as that package is
-importable, and it is importable if you installed `memvara[local-embed]` *or*
-`memvara[rerank]` — a cross-encoder is one. The tests that do not pin an embedder then
-load a real model. Nothing is wrong and nothing will fail, but the suite goes from
-seconds to minutes, and on macOS the process exits **139 (SIGSEGV)** at interpreter
-teardown after a fully green run — that is torch unloading, not your change. `[dev]`
-installs no extras, which is what CI runs.
+**Pass `embedder=` at every `Memvara()` you construct in a test.** `tests/conftest.py`
+fails the run otherwise, naming the file and line. `default_embedder()` returns a
+sentence-transformers model as soon as that package is importable — and it is importable
+if you installed `memvara[local-embed]` *or* `memvara[rerank]`, since a cross-encoder is
+one — so an unpinned construction makes that test's embedding space, and the suite's
+runtime, a property of what happens to be installed on the machine running it.
+
+`HashingEmbedder(dim=512)` is exactly what `default_embedder()` returns with
+sentence-transformers absent, so pinning it changes nothing about what a test measures.
+Under `bench/`, use `evalkit.build_embedder("hashing")`.
+
+A handful of doctests are exempt, because zero-config `Memvara()` is the thing they
+document; `conftest.py` says which and why. The server tests used to be exempt too — they
+build a `Memvara` through `build_memvara()` and had no keyword to pass it — and are not
+any more, now that `MEMVARA_EMBEDDER` gives them one.
 
 `[dev]` is pytest, pytest-asyncio, coverage and mypy — no provider SDKs. The suite runs
 entirely offline against `HashingEmbedder` and `NullLLM`; a test that needs a model uses a

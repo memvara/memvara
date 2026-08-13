@@ -100,9 +100,16 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
 
 ### Added
 
-- **`neighborhood()` and `history()` resolve learned aliases on the probe.** Previously a
-  probe carried no alias stamp, so `neighborhood("Big Blue")` folded deterministically and
-  missed every claim stamped `ibm`.
+- **`neighborhood()`, `history()` and `paths_between()` resolve learned aliases on the
+  probe.** Previously a probe carried no alias stamp, so `neighborhood("Big Blue")` folded
+  deterministically and missed every claim stamped `ibm`.
+
+  `paths_between()` resolves **both** ends, since both are probes and neither is more
+  stamped than the other; `[]` from it reads as "not connected", which makes asking under
+  the wrong name the quietest of the three failures. Where the two ends turn out to name
+  one entity the answer is `[]` — the same answer `paths_between(x, x)` has always given,
+  for the same reason. Intermediate nodes are **not** alias-resolved: an entity appearing
+  as `big blue` on one hop and `ibm` on another still does not join.
 
   Resolving the probe *to* the canonical — the obvious fix — would have made it worse: a
   merge never re-keys the past, so the store holds claims under both spellings and taking
@@ -112,6 +119,34 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
   probe with no learned alias behaves exactly as before. Nothing on disk is re-keyed; only
   the read is widened. Probes resolve under the reader's own `owner_key(scope)` and no
   further, so a merge in one tenant cannot redefine an entity for another.
+
+- **`MEMVARA_EMBEDDER` on the MCP server, and its default is `hashing`.** `ServerConfig`
+  had an `llm` lever and no embedder field, so `build_memvara` took whatever
+  `default_embedder()` returned — a sentence-transformers model as soon as that package is
+  importable, and `memvara[rerank]` installs one because a cross-encoder is one.
+
+  Since `Memvara.__init__` fingerprints the embedder against the store, **installing an
+  extra made the server refuse to open its own store at startup.** The error names the
+  extra as the likely cause and tells the reader to pass the original embedder explicitly;
+  through this door there was no way to. That unreachable remedy is what made it a bug
+  rather than a rough edge.
+
+  Values: `hashing` · `hashing:<dim>` · `local` · `local:<model>` · `auto`. They are
+  spelled the way `EmbedderMismatchError` and `memory.db.embedder.json` already spell
+  them, so an operator **copies** rather than composes — `written by hashing:512:3-5`
+  becomes `MEMVARA_EMBEDDER=hashing:512`. An unknown value is a `ConfigError` at startup
+  listing all five, matching `MEMVARA_LLM`.
+
+  **`hashing` rather than `auto` is the fix; `auto` would only have been a workaround** —
+  the defect is that the store's vector space was a property of the machine's package set,
+  and only a named default removes that. A deployment with no extras that sets nothing is
+  byte-identical to before: same class, same width, same `hashing:512:3-5` fingerprint.
+
+  **A deployment that deliberately installed `local-embed` now fails at startup** with the
+  dimension mismatch naming its own store's width, and recovers with
+  `MEMVARA_EMBEDDER=local` (or `auto` for the exact prior behaviour). Nothing is damaged —
+  the refusal happens before any write — and the CLI now catches that error and prints
+  where to type the fix, rather than the traceback that was the original complaint.
 
 - **`recall(include_history=True)`** appends, for each fact the call surfaced, the values
   it used to have — under their own header, after the live block.

@@ -95,7 +95,17 @@ def claims_memvara(**kw) -> Memvara:
     `episodes_memvara` builds one answers it with nothing at all — every turn is an
     episode and no claim was ever extracted. `remember()` writes claims directly, with
     no model, which is the offline way to get some.
+
+    Pinned for the reason `episodes_memvara` sets out at length, which applies here too
+    and was simply missed when that one was fixed: `default_embedder()` returns a
+    sentence-transformers model as soon as the package is importable, and
+    `memvara[rerank]` installs one. Nothing below depends on the vector ordering — three
+    claims are asked for at `top_k=4`, so the set comes back whole either way — but
+    "either way" is the point: an unpinned factory loads a transformer per call and makes
+    the run a property of the machine. `dim=512` is not a new choice, it is exactly what
+    `default_embedder()` returns when sentence-transformers is absent.
     """
+    kw.setdefault("embedder", HashingEmbedder(dim=512))
     mem = Memvara(llm=NullLLM(), user="alice", **kw)
     for predicate, obj in (("has_pet", "a calm greyhound dog"),
                            ("lives_in", "a small flat"),

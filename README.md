@@ -631,15 +631,21 @@ written with, so nothing on disk is re-keyed the day the model learns something;
 an alias retroactively is `backfill_entities()`, dry-run by default, which stamps every
 touched claim so `why()` can explain why history changed.
 
-What *is* widened is the read. `history()` and `neighborhood()` take a surface form as a
-**probe** rather than as a stored string, so once the owner has decided two names are one
-entity, either spelling reaches the claims written under both keys — `history("Big Blue",
-…)` and `history("IBM", …)` are the same question, merged back into one timeline in
-recorded order. Without that a probe would find one half of one entity and report it as
-the whole. The widening is owner-scoped (tenant plus user) and never climbs to a broader
-owner, so a tenant-level merge cannot redefine a user's entities underneath them; and a
-surface with nothing learned about it still resolves to exactly the single key the
-deterministic fold always gave it.
+What *is* widened is the read. `history()`, `neighborhood()` and `paths_between()` take a
+surface form as a **probe** rather than as a stored string, so once the owner has decided
+two names are one entity, either spelling reaches the claims written under both keys —
+`history("Big Blue", …)` and `history("IBM", …)` are the same question, merged back into
+one timeline in recorded order. Without that a probe would find one half of one entity and
+report it as the whole. The widening is owner-scoped (tenant plus user) and never climbs
+to a broader owner, so a tenant-level merge cannot redefine a user's entities underneath
+them; and a surface with nothing learned about it still resolves to exactly the single key
+the deterministic fold always gave it.
+
+`paths_between()` resolves both of its ends this way, and asking how two names of one
+entity are connected returns `[]` — one entity is not connected to itself. **Only the
+endpoints are resolved.** An entity that appears as `big blue` on one hop and `ibm` on
+another is still two nodes to the walk, so a chain does not join through a learned alias
+in the middle of itself.
 
 ### The write path avoids the model
 

@@ -118,12 +118,76 @@ transport is stdio and the configuration is entirely environment.
 | `MEMVARA_TENANT` | isolation boundary above the user. Default `default`. |
 | `MEMVARA_AGENT`, `MEMVARA_SESSION` | narrow further. Leave unset for durable facts — memory written at session scope is invisible to the next session. |
 | `MEMVARA_LLM` | `none` (default, offline) or `anthropic` (needs `ANTHROPIC_API_KEY` and `memvara[anthropic]`). |
+| `MEMVARA_EMBEDDER` | `hashing` (default, offline, 512-dimensional), `hashing:<dim>`, `local` or `local:<model>` (needs `memvara[local-embed]`), or `auto`. See [The embedder is named, not discovered](#the-embedder-is-named-not-discovered). |
 | `MEMVARA_READ_ONLY` | `1` hides every tool that writes. |
 
 The scope is bound at startup and **cannot be changed by a tool call**. That is the
 security property of the stdio transport: the process is the user, because the client
 launched it with the user's environment, so there is no caller-supplied scope string for
 a model to be talked into changing.
+
+### The embedder is named, not discovered
+
+`MEMVARA_EMBEDDER` decides which vector space this server's store lives in. Left unset it
+is `hashing` — 512 dimensions, offline, no download, no extra. That is a choice about your
+store rather than a fallback, and the reason it is named rather than detected is worth one
+paragraph, because the detected version was a bug:
+
+> `memvara[rerank]` installs `sentence-transformers`, because a cross-encoder is one. The
+> server used to take whatever `default_embedder()` returned, and that function returns a
+> local 384-dimensional model as soon as `sentence-transformers` is *importable*. So
+> `pip install memvara[rerank]` into a working deployment changed the embedder of a store
+> nobody had touched, and the next launch refused to open it.
+
+The refusal is correct — the alternative is a store that keeps growing and cannot be
+searched — but a server whose vector space is decided by the last `pip install` in the
+image is not configured, it is guessed. Hence a named default.
+
+| value | what it opens |
+|---|---|
+| `hashing` | `HashingEmbedder(dim=512)`. The default, and identical to what a deployment with no extras installed has always had. |
+| `hashing:<dim>` | The same at another width. `hashing:384`, `hashing:768` — this is how you name a store that was written at a width other than the default. |
+| `local` | `LocalEmbedder()`, i.e. `all-MiniLM-L6-v2` at 384 dimensions. Needs `memvara[local-embed]`; **fails at startup if it is missing** rather than quietly falling back. |
+| `local:<model>` | Any sentence-transformers model id, spelled exactly as `memory.db.embedder.json` records it — `local:BAAI/bge-small-en-v1.5`. Case-sensitive. |
+| `auto` | Whichever of the above happens to be installed. The old behaviour, available on request; it is the right answer only if you do not mind which vector space you get. |
+
+An unrecognised value is a startup error listing the ones that work, in the same place
+and the same shape as an unrecognised `MEMVARA_LLM`.
+
+#### If the server already refuses to start
+
+The symptom is a launch failure whose message contains `this store holds N-dimensional
+vectors`. Run the command by hand — the client will not show you the whole thing — and
+read the two numbers in it:
+
+```
+$ MEMVARA_DB=~/.memvara/memory.db python3 -m memvara.server
+memvara-mcp: /home/you/.memvara/memory.db: this store holds 384-dimensional vectors,
+written by local:sentence-transformers/all-MiniLM-L6-v2, but the configured embedder is
+hashing:512:3-5 (dim 512). ...
+From this server, set MEMVARA_EMBEDDER to match the store — 'hashing:<dim>' or
+'local:<model>', spelled as above — rather than editing code.
+```
+
+**Nothing is damaged.** This is a refusal taken before the process writes anything, which
+is the whole reason the check happens at construction. The fix is one variable, and which
+one is written in the message: the phrase after `written by` is the value to use.
+
+- `written by hashing:512:3-5` → `MEMVARA_EMBEDDER=hashing:512`
+- `written by local:sentence-transformers/all-MiniLM-L6-v2` →
+  `MEMVARA_EMBEDDER=local:sentence-transformers/all-MiniLM-L6-v2` (and keep
+  `memvara[local-embed]` installed)
+
+If the `written by` clause is absent, the store predates the fingerprint sidecar or was
+copied without it. The width is still there and is still enough: `MEMVARA_EMBEDDER=hashing:<N>`
+if you never installed an embedding extra, `local` if you did.
+
+Set the variable in the same `env` block as `MEMVARA_DB` — and note that under Docker it
+has to cross into the container like every other one, as `-e MEMVARA_EMBEDDER=...`.
+
+Migrating instead of matching is the other option, and it is a deliberate one rather than
+a fallback: it re-encodes the whole store. It is not reachable from the server, on
+purpose. See [Changing the embedder](#changing-the-embedder).
 
 `consolidate`, `purge`, `reset` and `erase` are deliberately not tools — see
 [Consolidation](#consolidation-is-a-job-you-have-to-schedule) for the half of that you
@@ -305,6 +369,13 @@ anything writes. This is the case that used to be a disaster: installing
 hashing embedder to a 384-dimensional model, so following the README's own upgrade advice
 made every read raise while every write kept succeeding — a store that grows and cannot
 be searched.
+
+Both shapes reach the MCP server too, where the answer is `MEMVARA_EMBEDDER` rather than a
+keyword argument — see [If the server already refuses to
+start](#if-the-server-already-refuses-to-start). Migration is deliberately *not* reachable
+from there: re-encoding a whole store is an operator action, and a server that did it on
+startup because its environment changed would be the same guess this section is about, one
+level up.
 
 **Same width, different model.** Nothing can raise, because nothing is wrong
 dimensionally and every similarity is nonsense. You get an `EmbedderChangedWarning`,

@@ -1541,11 +1541,12 @@ class Memvara:
     def _probe_entities(self, surface: str, scope: Scope) -> tuple[str, ...]:
         """Every stored identity a read's surface form is asking about.
 
-        The one place `history()` and `neighborhood()` share, because they had one bug:
-        a probe is not a written claim, so nothing ever stamped it, so it only ever got
-        the deterministic fold and missed whatever the owner had since learned was the
-        same entity. See `EntityRegistry.probe_keys` for why the answer is a set rather
-        than a replacement key.
+        The one place `history()`, `neighborhood()` and `paths_between()` share, because
+        they had one bug: a probe is not a written claim, so nothing ever stamped it, so
+        it only ever got the deterministic fold and missed whatever the owner had since
+        learned was the same entity. See `EntityRegistry.probe_keys` for why the answer
+        is a set rather than a replacement key. `paths_between()` calls it twice, once
+        per end — both ends are probes and neither is more resolved than the other.
 
         Resolved under `owner_key(scope)` — the reader's own tenant and user — and under
         nothing else. That is the same owner `Reconciler._stamp` wrote with, so a probe
@@ -1724,7 +1725,8 @@ class Memvara:
         claims filed under `ibm`, and reaches the ones filed under `big blue` before the
         merge was learned in the same answer. The deterministic fold is always among
         them, so a name nothing has been learned about behaves exactly as it always did.
-        `history()` resolves its subject the same way, for the same reason.
+        `history()` resolves its subject the same way, and `paths_between()` both of its
+        ends, for the same reason.
 
         Edges are followed in both directions, because "who works at Acme" and "where
         does Alice work" are one stored claim. `predicates` narrows to particular
@@ -1764,11 +1766,31 @@ class Memvara:
         rule `get()` uses — so a session-scoped handle is not told about a link that
         exists only through a sibling agent's claim, and traversal cannot be used to read
         what `get_all()` at the same handle would not return.
+
+        **Both ends are probes**, and neither carries a write-time stamp, so each is
+        resolved through this owner's learned aliases as well as the deterministic fold —
+        `_probe_entities`, exactly as `neighborhood()` and `history()` do it. The walk
+        starts from every identity that names the source and ends at every identity that
+        names the target, so `paths_between("Big Blue", "Armonk")` finds the chain filed
+        under `ibm` and the one filed under `big blue` before the merge was learned. The
+        fold is always among the keys, so an end nothing has been learned about is
+        connected to exactly what it was connected to before: this widens the question
+        and never narrows it. Resolving only the source would have fixed half of a
+        two-ended question, and `[]` from here reads as "not connected" rather than as
+        "asked under the other name", which is the worse failure of the two.
+
+        Once the owner has decided two names are one company, asking how they are
+        connected to *each other* is a question about one entity, and the answer is `[]` —
+        the loops leaving it and coming back are a fact about the size of the graph. That
+        is the same `[]` `paths_between(x, x)` has always given; see
+        `GraphTraverser.between`.
         """
         scope = self._scope(tenant, user, agent, session)
         return self.traverser.between(
             source, target, scope, depth=depth, k=k, predicates=predicates,
-            as_of=as_of, valid_at=valid_at, known_at=known_at, min_score=min_score)
+            as_of=as_of, valid_at=valid_at, known_at=known_at, min_score=min_score,
+            source_keys=self._probe_entities(source, scope),
+            target_keys=self._probe_entities(target, scope))
 
     # -- scoped views --------------------------------------------------------
 

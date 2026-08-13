@@ -21,12 +21,25 @@ about one of them:
 import io
 import json
 import sys
+import types
 from dataclasses import replace
 from datetime import timedelta
 
+import numpy as np
 import pytest
 
-from memvara import Memvara, HashingEmbedder, MemoryType, NullLLM, utcnow
+import memvara.core
+from memvara import (
+    CachedEmbedder,
+    EmbedderFingerprint,
+    EmbedderMismatchError,
+    HashingEmbedder,
+    MemoryType,
+    Memvara,
+    NullLLM,
+    utcnow,
+)
+from memvara.embed import default_embedder as real_default_embedder, fingerprint_of
 from memvara.server import (
     MemvaraMCPServer,
     ProtocolError,
@@ -798,6 +811,12 @@ def test_build_memvara_opens_an_offline_store_by_default(tmp_path):
                                     "MEMVARA_USER": "alice"})
     memory = build_memvara(config)
     assert isinstance(memory.llm, NullLLM)
+    # Offline in both legs, and both *named* rather than discovered. The embedder
+    # assertion is the pin: this test used to be one of four that reached
+    # `default_embedder()` through this door and so ran in whichever vector space the
+    # machine happened to have installed — see tests/conftest.py, which now fails any
+    # test that does.
+    assert fingerprint_of(memory.embedder) == EmbedderFingerprint("hashing:512:3-5", 512)
     assert memory.default_scope.user == "alice"
     memory.close()
 
@@ -820,6 +839,209 @@ def test_a_missing_anthropic_sdk_is_a_startup_error_not_a_crash(monkeypatch):
     with pytest.raises(ConfigError, match="needs the anthropic SDK"):
         build_memvara(ServerConfig.from_env({"MEMVARA_DB": ":memory:",
                                             "MEMVARA_LLM": "anthropic"}))
+
+
+# -- the embedder, and the extra that used to change it ------------------------
+
+def _fake_sentence_transformers(monkeypatch, dim=384):
+    """Stand the optional package up in `sys.modules`, at a chosen width.
+
+    Simulated rather than depended on, and deliberately at the level of the *package*
+    rather than of `default_embedder()`: the selection code under test is the real one,
+    and because `monkeypatch.setitem` replaces an installed `sentence_transformers` as
+    readily as it invents an absent one, the tests below hold on a machine with the extra
+    and on a machine without it. That matters here more than usual — the second kind of
+    machine is where a regression in this file would go unnoticed longest.
+    """
+    fake = types.ModuleType("sentence_transformers")
+
+    class FakeST:
+        def __init__(self, name):
+            self.name = name
+
+        def get_sentence_embedding_dimension(self):
+            return dim
+
+        def encode(self, texts, normalize_embeddings=True):
+            return np.ones((len(texts), dim), dtype=np.float32)
+
+    fake.SentenceTransformer = FakeST
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+
+
+def test_installing_the_rerank_extra_no_longer_shuts_the_server_out_of_its_store(
+        tmp_path, monkeypatch):
+    """**The bug.** `memvara[rerank]` installs sentence-transformers, because a
+    cross-encoder is one, and `default_embedder()` reads that package's presence as "the
+    user chose a local embedding model". The server passed no `embedder=`, so installing
+    the *reranker* extra into a working deployment silently swapped the *embedder*, and
+    the next launch refused to open the store it had been writing for months.
+
+    The refusal is right and the message is good — it even names the extra as the likely
+    cause. What was missing is that its advice, "pass the original one explicitly rather
+    than migrating", named a Python keyword argument, and an MCP server is configured by
+    an env block. There was no way to take it.
+
+    Three environments over one store, in the order an operator meets them.
+    """
+    path = str(tmp_path / "memory.db")
+    # Written by a deployment with no extras: CachedEmbedder(HashingEmbedder(dim=512)) is
+    # exactly what default_embedder() returns when sentence-transformers is absent.
+    with Memvara(path, embedder=CachedEmbedder(HashingEmbedder(dim=512)), llm=NullLLM(),
+                 user="alice") as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+
+    _fake_sentence_transformers(monkeypatch)
+    # `auto` is defined as "whatever Memvara() would pick", so this is the one test in the
+    # suite that is *about* what default_embedder() returns and the one that has to lift
+    # tests/conftest.py's guard on it.
+    monkeypatch.setattr(memvara.core, "default_embedder", real_default_embedder)
+
+    # 1. The old behaviour is still available — by name, which is the whole difference.
+    with pytest.raises(EmbedderMismatchError) as caught:
+        build_memvara(ServerConfig.from_env(
+            {"MEMVARA_DB": path, "MEMVARA_USER": "alice", "MEMVARA_EMBEDDER": "auto"}))
+    assert "memvara[rerank]" in str(caught.value)
+
+    # 2. The same deployment with nothing set — the upgrade that used to break it.
+    memory = build_memvara(ServerConfig.from_env({"MEMVARA_DB": path,
+                                                  "MEMVARA_USER": "alice"}))
+    assert "Lisbon" in memory.recall("where do they live")
+    memory.close()
+
+    # 3. And the remedy the error asks for, in the vocabulary the error prints it in.
+    memory = build_memvara(ServerConfig.from_env(
+        {"MEMVARA_DB": path, "MEMVARA_USER": "alice", "MEMVARA_EMBEDDER": "hashing:512"}))
+    assert "Lisbon" in memory.recall("where do they live")
+    memory.close()
+
+
+def test_a_deployment_with_no_extras_and_no_variable_is_unchanged(tmp_path, monkeypatch):
+    """The constraint the default had to satisfy.
+
+    `hashing` is not a third configuration invented for this lever: it is what
+    `default_embedder()` already returns when sentence-transformers is absent. So a
+    deployment that installed no extras and sets nothing gets the identical vector space
+    it had before `MEMVARA_EMBEDDER` existed — same class, same width, same fingerprint —
+    and every store it has written since day one keeps opening.
+
+    Asserted against the real function rather than against a written-out expectation, so
+    that a change to either side has to move both.
+    """
+    monkeypatch.setitem(sys.modules, "sentence_transformers", None)   # no extras
+    unchanged = fingerprint_of(real_default_embedder())
+
+    # Both doors to the default, because they are different lines of code: an unset
+    # variable, and a ServerConfig built in Python that never mentions an embedder.
+    assert ServerConfig(path=":memory:").embedder == "hashing"
+    assert ServerConfig.from_env({"MEMVARA_DB": ":memory:"}).embedder == "hashing"
+
+    memory = build_memvara(ServerConfig.from_env({"MEMVARA_DB": str(tmp_path / "m.db")}))
+    assert fingerprint_of(memory.embedder) == unchanged
+    assert unchanged == EmbedderFingerprint("hashing:512:3-5", 512)
+    memory.close()
+
+
+def test_a_width_the_default_cannot_read_is_reachable_from_the_environment(tmp_path):
+    """Why the value takes an argument at all.
+
+    An operator recovering a store has exactly one number — the width the refusal just
+    printed at them — and `HashingEmbedder(dim=...)` is the constructor that takes it.
+    Without `hashing:<dim>` the lever would only be able to name the two widths that
+    happen to be shipped defaults, which is not the set of widths that exist on disk.
+    """
+    path = str(tmp_path / "memory.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=384), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+
+    with pytest.raises(EmbedderMismatchError, match="384-dimensional"):
+        build_memvara(ServerConfig.from_env({"MEMVARA_DB": path}))
+
+    memory = build_memvara(ServerConfig.from_env({"MEMVARA_DB": path,
+                                                  "MEMVARA_EMBEDDER": "hashing:384"}))
+    assert "Lisbon" in memory.recall("where do they live")
+    memory.close()
+
+
+def test_the_local_embedder_is_selectable_and_keeps_its_model_id(monkeypatch):
+    """`local:<model>` for the same reason as `hashing:<dim>`, one failure shape over.
+
+    Two models of the same width are the swap no dimension check can see, which is why
+    the store records a model id rather than only a number. This is where that id is
+    typed back in — verbatim, since Hugging Face ids are case-sensitive.
+    """
+    _fake_sentence_transformers(monkeypatch, dim=8)
+    memory = build_memvara(ServerConfig.from_env(
+        {"MEMVARA_DB": ":memory:", "MEMVARA_EMBEDDER": "local:BAAI/bge-small-EN-v1.5"}))
+    assert fingerprint_of(memory.embedder) == EmbedderFingerprint(
+        "local:BAAI/bge-small-EN-v1.5", 8)
+    memory.close()
+
+
+def test_a_missing_local_embed_extra_is_a_startup_error_not_a_crash(monkeypatch):
+    """The mirror of the anthropic case, and the reason `local` and `auto` both exist:
+    `local` is a claim about the store and fails when it cannot be honoured, where `auto`
+    would quietly hand back the hashing embedder and let the mismatch surface later."""
+    monkeypatch.setitem(sys.modules, "sentence_transformers", None)
+    with pytest.raises(ConfigError, match="needs sentence-transformers"):
+        build_memvara(ServerConfig.from_env({"MEMVARA_DB": ":memory:",
+                                             "MEMVARA_EMBEDDER": "local"}))
+
+
+def test_an_unknown_embedder_is_a_startup_error_that_names_the_vocabulary():
+    """Matched to what MEMVARA_LLM does with a value it does not know."""
+    with pytest.raises(ConfigError) as caught:
+        ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_EMBEDDER": "bert"})
+    message = str(caught.value)
+    assert "'bert' is not an embedder" in message
+    for spelling in ("'hashing'", "'hashing:<dim>'", "'local'", "'local:<model>'",
+                     "'auto'"):
+        assert spelling in message, f"the error has to offer {spelling}"
+
+
+@pytest.mark.parametrize("value, fragment", [
+    ("bert", "is not an embedder"),
+    ("hashing:", "is not an embedder"),        # a colon and then nothing
+    ("local:", "is not an embedder"),
+    ("auto:384", "is not an embedder"),        # 'auto' takes no argument
+    ("hashing:wide", "does not name a width"),
+    ("hashing:0", "does not name a width"),
+    ("hashing:-8", "does not name a width"),
+])
+def test_every_unusable_embedder_value_fails_before_the_store_is_touched(value, fragment):
+    with pytest.raises(ConfigError) as caught:
+        ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_EMBEDDER": value})
+    message = str(caught.value)
+    assert fragment in message and repr(value) in message
+
+
+def test_the_width_error_says_where_the_number_comes_from():
+    """A rejected width is nearly always a recovery in progress, so the message points at
+    the two places the right number is already written down."""
+    with pytest.raises(ConfigError) as caught:
+        ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_EMBEDDER": "hashing:wide"})
+    message = str(caught.value)
+    assert "N-dimensional vectors" in message and "embedder.json" in message
+
+
+@pytest.mark.parametrize("raw, expected", [
+    (None, "hashing"),
+    ("", "hashing"),
+    ("  HASHING  ", "hashing"),
+    ("hashing:384", "hashing:384"),
+    ("Local", "local"),
+    ("local:Sentence-Transformers/All-MiniLM-L6-v2",
+     "local:Sentence-Transformers/All-MiniLM-L6-v2"),
+    ("AUTO", "auto"),
+])
+def test_the_kind_is_case_folded_and_the_argument_is_not(raw, expected):
+    """The kind is a keyword; the argument is a model id or a width copied out of the
+    store's own fingerprint, and lowercasing a Hugging Face id would break the one value
+    the operator has in front of them."""
+    env = {"MEMVARA_DB": ":memory:"}
+    if raw is not None:
+        env["MEMVARA_EMBEDDER"] = raw
+    assert ServerConfig.from_env(env).embedder == expected
 
 
 # -- the process ---------------------------------------------------------------
@@ -858,11 +1080,34 @@ def test_main_reports_a_broken_configuration_on_stderr():
     assert "MEMVARA_DB is not set" in err.getvalue()
 
 
+def test_main_reports_a_store_it_cannot_open_the_same_way(tmp_path):
+    """The last stretch of the recovery path.
+
+    `EmbedderMismatchError` is the library's, raised about the store, and from inside
+    this process it is nonetheless a configuration failure: the environment names an
+    embedder that cannot read the store the environment also names. Reported like every
+    other startup failure, because the alternative under stdio is a traceback in a log
+    the user has to know to go and find — and because the message is the one that carries
+    the width they now have to type into `MEMVARA_EMBEDDER`.
+    """
+    path = str(tmp_path / "memory.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=384), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+
+    err = io.StringIO()
+    assert main([], env={"MEMVARA_DB": path}, stdout=io.StringIO(), stderr=err) == 2
+    body = err.getvalue()
+    assert body.startswith("memvara-mcp: ")
+    assert "384-dimensional vectors" in body, "the width they need is in the message"
+    assert "MEMVARA_EMBEDDER" in body, "and where to put it"
+
+
 def test_main_help_documents_the_environment_not_a_flag_list():
     out = io.StringIO()
     assert main(["--help"], stdout=out) == 0
     body = out.getvalue()
     assert "MEMVARA_DB" in body and "MEMVARA_READ_ONLY" in body
+    assert "MEMVARA_EMBEDDER" in body, "the variable an operator arrives here looking for"
     assert "cannot be changed by a tool call" in body
 
 

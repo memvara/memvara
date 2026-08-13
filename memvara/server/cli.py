@@ -14,6 +14,7 @@ import sys
 from typing import Mapping, Sequence, TextIO
 
 from .. import __version__
+from ..core import EmbedderMismatchError
 from .config import EXAMPLE_CONFIG, ConfigError, ServerConfig, build_memvara
 from .mcp import MemvaraMCPServer
 
@@ -34,6 +35,12 @@ client, not run interactively. Configured entirely by environment:
                      other sessions, so leave it unset for durable facts.
   MEMVARA_LLM         'none' (default, offline, extracts only recognised sentence
                      forms) or 'anthropic' (needs ANTHROPIC_API_KEY).
+  MEMVARA_EMBEDDER    'hashing' (default, offline, 512-dimensional), 'hashing:<dim>',
+                     'local' or 'local:<model>' (needs memvara[local-embed]), or
+                     'auto' for whichever of those happens to be installed. A store
+                     can only be opened by the embedder that wrote it; if this server
+                     refuses to start with a dimension mismatch, this is the variable
+                     that fixes it, and the message names the width to give it.
   MEMVARA_READ_ONLY   '1' to hide every tool that writes.
 
 The scope above is bound at startup and cannot be changed by a tool call, which is
@@ -72,6 +79,17 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
         # which is the only moment they are looking. Exit 2, as for a usage error: the
         # invocation was wrong, not the program.
         print(f"memvara-mcp: {exc}", file=err)
+        return 2
+    except EmbedderMismatchError as exc:
+        # Not a ConfigError — the library raised it about the store — but from here it is
+        # one: this environment names an embedder that cannot read this store, and the
+        # remedy is a variable, not a code change. Reported the same way for the same
+        # reason, because the alternative under stdio is a traceback in a log the user
+        # has to go looking for. The message already carries the store's width and the
+        # name of whatever wrote it; all this adds is where to type them.
+        print(f"memvara-mcp: {exc}\nFrom this server, set MEMVARA_EMBEDDER to match the "
+              "store — 'hashing:<dim>' or 'local:<model>', spelled as above — rather "
+              "than editing code. See docs/DEPLOY.md.", file=err)
         return 2
 
     server = MemvaraMCPServer(memory, read_only=config.read_only, **config.scope_kwargs)

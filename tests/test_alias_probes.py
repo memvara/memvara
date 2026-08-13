@@ -15,11 +15,13 @@ dated and opt-in), so after "Big Blue" is learned to be IBM the store holds clai
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
 
 from memvara import Memvara, NullLLM
+from memvara.aio import AsyncMemvara
 from memvara.embed import HashingEmbedder
 from memvara.entities import EntityRegistry
 from memvara.retrieve.traverse import GraphTraverser
@@ -51,6 +53,12 @@ def learn(mem, canonical, surface, scope=ALICE):
 
 def objects(paths):
     return sorted(c.object for p in paths for c in p.claims)
+
+
+def rendered(paths):
+    """Whole chains rather than loose objects: `paths_between` is asked about a route,
+    so which spellings it ran through is part of the answer being checked."""
+    return [p.render() for p in paths]
 
 
 # --- neighborhood -------------------------------------------------------------
@@ -139,6 +147,81 @@ def test_history_of_an_unaliased_subject_is_unchanged(mem):
     assert [c.object for c in mem.history("user", "lives_in")] == ["Berlin", "Lisbon"]
 
 
+# --- paths_between ------------------------------------------------------------
+
+def test_paths_between_reaches_a_chain_hanging_off_the_learned_canonical(mem):
+    """The same defect one method further on, and the one with the worst failure mode:
+    a walk that starts nowhere near its own entity returns `[]`, and `[]` from
+    `paths_between` reads as "not connected" rather than as "asked under the wrong
+    name"."""
+    mem.remember("Dana", "works_at", "IBM")
+    mem.remember("Dana", "lives_in", "Armonk")
+    learn(mem, "IBM", "Big Blue")
+    assert rendered(mem.paths_between("Big Blue", "Armonk")) == [
+        "IBM <-works_at- Dana -lives_in-> Armonk"]
+
+
+def test_paths_between_resolves_the_target_end_as_well(mem):
+    """Both ends of this question are probes and neither carries a stamp, so resolving
+    only the source would fix half of it."""
+    mem.remember("Alice", "reports_to", "Dana")
+    mem.remember("Dana", "works_at", "IBM")
+    learn(mem, "IBM", "Big Blue")
+    assert rendered(mem.paths_between("Alice", "Big Blue")) == [
+        "Alice -reports_to-> Dana -works_at-> IBM"]
+
+
+def test_paths_between_still_reaches_an_end_keyed_before_the_merge(mem):
+    """No narrowing, on either end. The chain finishes at `big blue` because that is
+    what it was written under, and a target resolved *to* the canonical would have
+    reported the two as unconnected on the strength of having learned they are one
+    company."""
+    mem.remember("IBM", "headquartered_in", "Armonk")
+    mem.remember("Alice", "reports_to", "Dana")
+    mem.remember("Dana", "works_at", "Big Blue")        # keyed `big blue`
+    learn(mem, "IBM", "Big Blue")
+    assert rendered(mem.paths_between("Alice", "IBM")) == [
+        "Alice -reports_to-> Dana -works_at-> Big Blue"]
+
+
+def test_paths_between_ends_the_path_at_whichever_name_it_arrives_by(mem):
+    """Arrival is terminal, and a merged target does not make it twice-terminal: the
+    connection comes back once, at the spelling the store actually holds, rather than
+    once more with `-renamed_as-> IBM` glued on the end of it."""
+    mem.remember("IBM", "headquartered_in", "Armonk")
+    mem.remember("Big Blue", "renamed_as", "IBM")
+    mem.remember("Alice", "works_at", "Big Blue")
+    learn(mem, "IBM", "Big Blue")
+    assert rendered(mem.paths_between("Alice", "IBM")) == ["Alice -works_at-> Big Blue"]
+
+
+def test_paths_between_with_nothing_learned_about_either_end_is_unchanged(mem):
+    """The deterministic fold stays the fallback. This is a widening of what a probe
+    reaches and never a replacement of it, so a name nothing has been learned about
+    connects to exactly what it connected to before."""
+    mem.remember("Dana", "works_at", "IBM")
+    mem.remember("Dana", "lives_in", "Armonk")
+    assert rendered(mem.paths_between("IBM", "Armonk")) == [
+        "IBM <-works_at- Dana -lives_in-> Armonk"]
+    assert mem.paths_between("Big Blue", "Armonk") == []
+
+
+def test_the_scoped_and_async_views_resolve_a_probe_the_same_way(mem):
+    """All three facades forward to `Memvara.paths_between` and add nothing to it, which
+    is what makes one fix cover them — pinned rather than assumed, because "it only
+    delegates" is exactly the claim that stops being true without anyone noticing."""
+    mem.remember("Dana", "works_at", "IBM")
+    learn(mem, "IBM", "Big Blue")
+    expected = ["IBM <-works_at- Dana"]
+
+    assert rendered(mem.scope(user="alice").paths_between("Big Blue", "Dana")) == expected
+
+    amem = AsyncMemvara(mem)
+    assert rendered(asyncio.run(amem.paths_between("Big Blue", "Dana"))) == expected
+    assert rendered(asyncio.run(
+        amem.scope(user="alice").paths_between("Big Blue", "Dana"))) == expected
+
+
 # --- ambiguity ----------------------------------------------------------------
 
 def test_a_probe_that_names_several_learned_keys_takes_all_of_them(mem):
@@ -154,6 +237,19 @@ def test_a_probe_that_names_several_learned_keys_takes_all_of_them(mem):
     assert objects(mem.neighborhood("Big Blue")) == ["Armonk", "Endicott", "NYSE"]
 
 
+def test_paths_between_walks_from_every_key_a_probe_names(mem):
+    """Same rule at the ends of a route: the chain is filed under the one spelling
+    nobody asked with, and is still the answer. Taking the fold and the canonical but
+    not the siblings would make "are these connected" depend on which of three names
+    for one company the caller happened to type."""
+    mem.remember("IBM", "headquartered_in", "Armonk")
+    mem.remember("Dana", "works_at", "Armonk Giant")
+    learn(mem, "IBM", "Big Blue")
+    learn(mem, "IBM", "Armonk Giant")
+    assert rendered(mem.paths_between("Big Blue", "Dana")) == [
+        "Armonk Giant <-works_at- Dana"]
+
+
 def test_an_edge_between_two_names_of_one_entity_is_a_self_loop(mem):
     """`_edges` already drops `subject == object`. After a merge, an edge from `big
     blue` to `ibm` is that same self-loop spelled two ways, and walking it would return
@@ -162,6 +258,25 @@ def test_an_edge_between_two_names_of_one_entity_is_a_self_loop(mem):
     mem.remember("IBM", "headquartered_in", "Armonk")
     learn(mem, "IBM", "Big Blue")
     assert objects(mem.neighborhood("Big Blue")) == ["Armonk"]
+
+
+def test_paths_between_two_names_of_one_entity_is_not_a_path(mem):
+    """The self-loop question asked of a route: once the merge is learned, "how is IBM
+    connected to Big Blue" has one entity in it, and every chain that could be returned
+    for it is a loop leaving that entity and coming back — an answer about the size of
+    the graph rather than about the two names. `[]` is the honest answer, and it is the
+    same `[]` `paths_between(x, x)` has always given.
+
+    Widening the probe is what makes this reachable at all: before the merge these were
+    two entities, and the edge that says so was a real one-hop answer.
+    """
+    mem.remember("IBM", "headquartered_in", "Armonk")
+    mem.remember("Big Blue", "renamed_as", "IBM")
+    assert rendered(mem.paths_between("Big Blue", "IBM")) == ["Big Blue -renamed_as-> IBM"]
+
+    learn(mem, "IBM", "Big Blue")
+    assert mem.paths_between("IBM", "Big Blue") == []
+    assert mem.paths_between("Big Blue", "IBM") == []
 
 
 # --- scope --------------------------------------------------------------------
@@ -193,6 +308,21 @@ def test_an_alias_learned_by_one_user_does_not_fold_a_siblings_probe():
         assert objects(mem.neighborhood("Big Blue", user="alice")) == ["Yorktown"]
 
 
+def test_an_alias_learned_in_one_tenant_does_not_join_another_tenants_route():
+    """Both ends of `paths_between` are resolved under the reader's own owner and no
+    further. Identical graphs in two tenants, and only the tenant that learned the merge
+    is connected — the alias is what joins the two halves, so a probe that could reach
+    across owners would be inventing a connection out of a sibling's decision."""
+    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64)) as mem:
+        for tenant in ("t_a", "t_b"):
+            mem.remember("Dana", "works_at", "IBM", tenant=tenant, user="alice")
+        learn(mem, "IBM", "Big Blue", scope=Scope("t_a", "alice"))
+
+        assert rendered(mem.paths_between("Big Blue", "Dana", tenant="t_a",
+                                          user="alice")) == ["IBM <-works_at- Dana"]
+        assert mem.paths_between("Big Blue", "Dana", tenant="t_b", user="alice") == []
+
+
 # --- the registry lookup itself -----------------------------------------------
 
 def test_probe_keys_of_an_unknown_surface_is_the_fold_alone():
@@ -218,8 +348,11 @@ def test_probe_keys_puts_the_deterministic_fold_first():
 # --- the traverser on its own -------------------------------------------------
 
 def test_between_resolves_both_ends_of_the_question():
-    """`GraphTraverser.between` takes the same widening on either end. Exercised here
-    directly because `Memvara.paths_between` does not pass it yet."""
+    """`GraphTraverser.between` takes the same widening on either end. Exercised
+    directly as well as through `Memvara.paths_between`, because the traverser holds no
+    registry and is usable against any `Store` on its own: the keys are the whole of its
+    contract, and a caller that has some other way of knowing what an entity is called
+    gets the same widening without owning an `EntityRegistry`."""
     store = SQLiteStore(":memory:")
     try:
         for subject, predicate, obj in (

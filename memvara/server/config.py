@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ..core import Memvara
+from ..embed import CachedEmbedder, HashingEmbedder
 from ..llm import NullLLM
 
 __all__ = ["ConfigError", "ServerConfig", "build_memvara"]
@@ -29,6 +30,30 @@ _FALSE = {"0", "false", "no", "off", ""}
 #: a custom model, an injected client — is a reason to import `MemvaraMCPServer` and wire
 #: it in Python rather than to grow a configuration language here.
 _BACKENDS = ("none", "anthropic")
+
+#: Embedders selectable from the environment, as `kind` or `kind:argument`.
+#:
+#: The argument is the one exception to the rule above, and it is not a configuration
+#: language creeping in — it is the only fact about an *existing* store that cannot be
+#: known when this tuple is written. A store's vectors have a width and a model behind
+#: them; open it with anything else and `Memvara()` refuses, correctly, before anything
+#: writes. The refusal already prints both (`this store holds 512-dimensional vectors,
+#: written by hashing:512:3-5`) and `memory.db.embedder.json` records them, so these
+#: values are deliberately spelled the way those two already are: `hashing:512` and
+#: `local:sentence-transformers/all-MiniLM-L6-v2` are copied, not composed.
+_EMBEDDERS = ("hashing", "hashing:<dim>", "local", "local:<model>", "auto")
+_EMBEDDER_KINDS = {spec.partition(":")[0] for spec in _EMBEDDERS}
+_TAKES_ARGUMENT = {spec.partition(":")[0] for spec in _EMBEDDERS if ":" in spec}
+
+#: What `HashingEmbedder()` and `default_embedder()` both use, restated because
+#: `MEMVARA_EMBEDDER=hashing` has to keep meaning the same width forever: it is the width
+#: every store written by a deployment with no extras installed already has.
+_DEFAULT_DIM = 512
+
+#: Named once, because the field default and the unset-variable default have to be the
+#: same string and nothing else can enforce that. A `ServerConfig` built in Python and one
+#: read from an environment that sets nothing must open the same store.
+_DEFAULT_EMBEDDER = "hashing"
 
 EXAMPLE_CONFIG = """\
 {
@@ -60,6 +85,12 @@ class ServerConfig:
     session: str | None = None
     read_only: bool = False
     llm: str = "none"
+    #: Which vector space this server's store is opened in. Named rather than discovered,
+    #: for the same reason `llm` is: a store outlives the environment it was created in,
+    #: and a setting that reads "whatever happens to be installed" makes the store's
+    #: identity a property of the machine's package set. `pip install memvara[rerank]`
+    #: is the case that proves it — see `build_memvara`.
+    embedder: str = _DEFAULT_EMBEDDER
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ServerConfig":
@@ -77,7 +108,7 @@ class ServerConfig:
         if backend not in _BACKENDS:
             raise ConfigError(
                 f"MEMVARA_LLM={backend!r} is not a backend. Use "
-                f"{' or '.join(repr(b) for b in _BACKENDS)}. 'none' is the default and "
+                f"{_one_of(_BACKENDS)}. 'none' is the default and "
                 "works offline, but stores only the sentence forms the deterministic "
                 "extractor recognises.")
 
@@ -91,6 +122,7 @@ class ServerConfig:
             session=_optional(env.get("MEMVARA_SESSION")),
             read_only=_flag(env.get("MEMVARA_READ_ONLY"), "MEMVARA_READ_ONLY"),
             llm=backend,
+            embedder=_embedder_spec(env.get("MEMVARA_EMBEDDER")),
         )
 
     @property
@@ -108,6 +140,44 @@ def _optional(raw: str | None) -> str | None:
     """
     value = (raw or "").strip()
     return value or None
+
+
+def _one_of(values: Sequence[str]) -> str:
+    """`'a', 'b' or 'c'` — so both levers spell their vocabulary the same way."""
+    quoted = [repr(v) for v in values]
+    return f"{', '.join(quoted[:-1])} or {quoted[-1]}"
+
+
+def _embedder_spec(raw: str | None) -> str:
+    """Validate `MEMVARA_EMBEDDER` at startup, and normalise the case of its kind.
+
+    Only the kind is lowercased. The argument is a width or a model id, and
+    `local:sentence-transformers/all-MiniLM-L6-v2` is case-sensitive — it is copied out
+    of the store's own fingerprint, so mangling it would break the one value a
+    recovering operator has in front of them.
+
+    Checked here rather than in `build_memvara` for the same reason `MEMVARA_LLM` is: a
+    typo should be a startup error beside the rest of the configuration, not a stack
+    trace from somewhere inside the constructor.
+    """
+    value = (raw or _DEFAULT_EMBEDDER).strip()
+    kind, sep, argument = value.partition(":")
+    kind = kind.lower()
+    if (kind not in _EMBEDDER_KINDS or (sep and kind not in _TAKES_ARGUMENT)
+            or (sep and not argument)):
+        raise ConfigError(
+            f"MEMVARA_EMBEDDER={value!r} is not an embedder. Use "
+            f"{_one_of(_EMBEDDERS)}. 'hashing' is the default: it needs nothing, runs "
+            "offline, and is what a store written without any extra installed already "
+            "holds. 'auto' is the old behaviour — whichever embedder happens to be "
+            "installed — and is a choice about your store, not about your packages.")
+    if kind == "hashing" and argument and not (argument.isdigit() and int(argument) > 0):
+        raise ConfigError(
+            f"MEMVARA_EMBEDDER={value!r} does not name a width: {argument!r} is not a "
+            "positive integer. The number is the one the store already reports — "
+            "'this store holds N-dimensional vectors' in the error that sent you here, "
+            "or \"dim\" in memory.db.embedder.json.")
+    return f"{kind}:{argument}" if sep else kind
 
 
 def _flag(raw: str | None, name: str) -> bool:
@@ -132,6 +202,34 @@ def _anthropic() -> Any:
             f"MEMVARA_LLM=anthropic needs the anthropic SDK and a key: {exc}") from exc
 
 
+def _local(model: str) -> Any:
+    # Imported here so a hashing deployment — the default — never pays the torch import.
+    from ..embed.local import LocalEmbedder
+
+    try:
+        return CachedEmbedder(LocalEmbedder(model) if model else LocalEmbedder())
+    except ImportError as exc:
+        raise ConfigError(f"MEMVARA_EMBEDDER={model or 'local'} needs "
+                          f"sentence-transformers: {exc}") from exc
+
+
+def _embedder(spec: str) -> Any:
+    """Build the embedder named by `spec`, or `None` to let `Memvara()` pick one.
+
+    `None` is what `auto` means, and it routes through `Memvara.__init__` rather than
+    calling `default_embedder()` here on purpose: 'auto' is defined as "the constructor's
+    own default", so there is one implementation of that default and not two that can
+    drift.
+    """
+    kind, _, argument = spec.partition(":")
+    if kind == "auto":
+        return None
+    if kind == "local":
+        return _local(argument)
+    return CachedEmbedder(
+        HashingEmbedder(dim=int(argument) if argument else _DEFAULT_DIM))
+
+
 def build_memvara(config: ServerConfig) -> Memvara:
     """Open the store this server speaks for.
 
@@ -146,5 +244,16 @@ def build_memvara(config: ServerConfig) -> Memvara:
         # reads. `memory_stats` and the note on every lossy write say it where the model
         # and the user can actually see it.
         llm=NullLLM() if config.llm == "none" else _anthropic(),
+        # Explicit for a sharper reason than `llm`: the embedder decides whether this
+        # store can be opened at all. Left unset, `Memvara()` calls `default_embedder()`,
+        # which returns a sentence-transformers model as soon as that package is
+        # importable — and `memvara[rerank]` installs one, because a cross-encoder is
+        # one. So `pip install memvara[rerank]` into a working deployment used to make
+        # this server refuse to open its own store on the next launch, with a dimension
+        # mismatch nobody connected to reranking. The error was right and its advice —
+        # pass the original embedder rather than migrating — had no door to come through
+        # here. `MEMVARA_EMBEDDER` is that door, and naming a default rather than
+        # discovering one is what keeps the store's vector space out of `pip`'s hands.
+        embedder=_embedder(config.embedder),
         **config.scope_kwargs,
     )

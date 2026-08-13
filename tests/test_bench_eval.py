@@ -688,7 +688,15 @@ def test_the_question_is_placed_before_retrieved_text_that_a_user_controls():
 
 
 def _memory_with(lines, *, k=12):
-    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=k)
+    # `ek.build_embedder("hashing")` rather than nothing, for the reason its own docstring
+    # gives: `default_embedder()` prefers a sentence-transformers model whenever one is
+    # importable, so an unpinned store here measures whatever the machine has. It is also
+    # what `--embedder hashing` — the argparse default, and therefore what every
+    # `_run_cli` test in this file already runs — resolves to, so the direct-API tests and
+    # the CLI tests are finally on the same vector leg. The object is identical to what
+    # `default_embedder()` returns with sentence-transformers absent.
+    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=k,
+                  embedder=ek.build_embedder("hashing"))
     base = datetime(2023, 5, 1, tzinfo=UTC)
     mem.add([{"role": "user", "content": line, "ts": base + timedelta(days=i)}
              for i, line in enumerate(lines)])
@@ -762,7 +770,10 @@ def test_ingestion_keeps_each_turns_own_timestamp_so_time_travel_still_answers()
     Stamping the whole transcript with `utcnow()` would throw away the axis under test."""
     old = datetime(2021, 3, 1, tzinfo=UTC)
     new = datetime(2023, 3, 1, tzinfo=UTC)
-    mem = Memvara(user="t", llm=NullLLM())
+    # What decides this assertion is the `as_of` cutoff, not the ranking: one episode
+    # survives the filter and `k=5` is wider than the store. Pinned so the run does not
+    # load a transformer to prove a point about timestamps.
+    mem = Memvara(user="t", llm=NullLLM(), embedder=ek.build_embedder("hashing"))
     try:
         ek.ingest(mem, [[ek.Turn("user", "session one", old)],
                         [ek.Turn("user", "session two", new)]])
@@ -778,7 +789,9 @@ def test_ingestion_keeps_each_turns_own_timestamp_so_time_travel_still_answers()
 def test_ingestion_reports_the_write_paths_model_call_count():
     """The number this architecture exists to drive to zero. Reported next to accuracy,
     because an eval that prints only F1 hides it getting worse."""
-    mem = Memvara(user="t", llm=NullLLM())
+    # Counts only — no read happens here at all, so the vector leg is inert. Pinned for
+    # the runtime.
+    mem = Memvara(user="t", llm=NullLLM(), embedder=ek.build_embedder("hashing"))
     try:
         stats = ek.ingest(mem, [[ek.Turn("user", "I live in Berlin",
                                          datetime(2023, 1, 1, tzinfo=UTC))]])
@@ -790,7 +803,9 @@ def test_ingestion_reports_the_write_paths_model_call_count():
 
 
 def test_an_empty_session_is_skipped_rather_than_charged_as_an_add():
-    mem = Memvara(user="t", llm=NullLLM())
+    # Nothing is written and nothing is read; the embedder exists only so constructing
+    # the store does not download a model.
+    mem = Memvara(user="t", llm=NullLLM(), embedder=ek.build_embedder("hashing"))
     try:
         assert ek.ingest(mem, [[], []]).sessions == 0
     finally:
@@ -907,8 +922,17 @@ def test_locomo_reads_an_integer_gold_answer_as_a_string():
 def test_locomo_scores_an_adversarial_question_by_abstention_never_against_the_bait():
     """Category 5's `adversarial_answer` is the plausible wrong answer the question
     baits. Scoring against it would reward hallucinating exactly what it fishes for."""
+    # `embedder=` on every `run()`/`run_retrieval()` below, for the reason
+    # `locomo.build_memory` and `ek.build_embedder` both spell out: the parameter defaults
+    # to `None`, `None` means `default_embedder()`, and that returns a sentence-transformers
+    # model as soon as the package is importable — which `memvara[rerank]` makes it. So
+    # these built one real transformer per sample per test, while the `_run_cli` tests
+    # beside them ran hashing (argparse `--embedder` defaults to it). Same harness, two
+    # vector legs. What each of these tests asserts is a category, a count, a cap or the
+    # presence of a measure, never a ranking — the pin changes no outcome, only the clock.
     results, *_ = locomo.run(locomo.fixture(), reader=_ScriptedReader(
-        ["a", "b", "c", "d", "she enjoyed it"]))
+        ["a", "b", "c", "d", "she enjoyed it"]),
+        embedder=ek.build_embedder("hashing"))
     adversarial = [r for r in results if r.category == "adversarial"]
     assert len(adversarial) == 1
     assert adversarial[0].gold == ""
@@ -916,7 +940,8 @@ def test_locomo_scores_an_adversarial_question_by_abstention_never_against_the_b
     assert adversarial[0].f1 == 0.0
 
     declined, *_ = locomo.run(locomo.fixture(), reader=_ScriptedReader(
-        ["a", "b", "c", "d", "No information available."]))
+        ["a", "b", "c", "d", "No information available."]),
+        embedder=ek.build_embedder("hashing"))
     assert [r for r in declined if r.category == "adversarial"][0].judged is True
 
 
@@ -933,7 +958,8 @@ def test_locomo_reports_every_category_and_the_answerable_subtotal():
 def test_locomo_keeps_the_reader_inside_the_budget_on_a_whole_run():
     reader = _ScriptedReader(["x"] * 5)
     locomo.run(locomo.fixture(), reader=reader,
-               budget=ek.RetrievalBudget(k=12, max_chars=120))
+               budget=ek.RetrievalBudget(k=12, max_chars=120),
+               embedder=ek.build_embedder("hashing"))
     for _, prompt in reader.prompts:
         _, context = prompt.partition(ek.CONTEXT_MARKER)[0], \
             prompt.partition(ek.CONTEXT_MARKER)[2]
@@ -943,13 +969,17 @@ def test_locomo_keeps_the_reader_inside_the_budget_on_a_whole_run():
 def test_locomo_under_the_ceiling_source_shows_the_reader_the_whole_conversation():
     """The ceiling has to actually be a ceiling, or the triple it anchors is worthless."""
     reader = _ScriptedReader(["x"] * 5)
-    locomo.run(locomo.fixture(), reader=reader, source=ek.ContextSource.FULL)
+    # `ContextSource.FULL` bypasses retrieval altogether, so the embedder cannot reach
+    # this assertion even in principle.
+    locomo.run(locomo.fixture(), reader=reader, source=ek.ContextSource.FULL,
+               embedder=ek.build_embedder("hashing"))
     context = reader.prompts[0][1].partition(ek.CONTEXT_MARKER)[2]
     assert "half marathon" in context and "greyhound" in context
 
 
 def test_locomo_stops_at_the_question_limit():
-    results, *_ = locomo.run(locomo.fixture(), reader=_ScriptedReader(["x"] * 5), limit=2)
+    results, *_ = locomo.run(locomo.fixture(), reader=_ScriptedReader(["x"] * 5), limit=2,
+                             embedder=ek.build_embedder("hashing"))
     assert len(results) == 2
 
 
@@ -1019,7 +1049,8 @@ def test_locomo_unknown_category_codes_are_reported_rather_than_dropped():
     raw = json.loads(json.dumps(locomo.FIXTURE[0]))
     raw["qa"] = [{"question": "?", "answer": "x", "category": 9}]
     sample = locomo.parse_sample(raw)
-    results, *_ = locomo.run([sample], reader=_ScriptedReader(["x"]))
+    results, *_ = locomo.run([sample], reader=_ScriptedReader(["x"]),
+                             embedder=ek.build_embedder("hashing"))
     assert results[0].category == "category-9"
 
 
@@ -1077,7 +1108,13 @@ def test_longmemeval_gives_each_question_its_own_store_so_another_haystack_is_un
     A shared one lets retrieval reach a different question's evidence, which is a
     different and easier task."""
     reader = _ScriptedReader(["x"] * 3)
-    lme.run(lme.fixture(), reader=reader)
+    # The one test in this group whose assertion retrieval can actually reach: the second
+    # half is store isolation and holds under any embedder, but the first half needs the
+    # greyhound turn to come back inside the budget. Checked both ways before pinning —
+    # it holds under hashing and under the sentence-transformers model, because the
+    # fixture haystack is smaller than `k`. Pinned so that stays a property of the fixture
+    # rather than of what is installed.
+    lme.run(lme.fixture(), reader=reader, embedder=ek.build_embedder("hashing"))
     contexts = [p.partition(ek.CONTEXT_MARKER)[2] for _, p in reader.prompts]
     # The greyhound belongs to the first instance only.
     assert "greyhound" in contexts[0]
@@ -1087,7 +1124,8 @@ def test_longmemeval_gives_each_question_its_own_store_so_another_haystack_is_un
 def test_longmemeval_share_store_lets_retrieval_cross_questions_and_says_so():
     reader = _ScriptedReader(["x"] * 3)
     results, ingest_stats, read, ledger = lme.run(
-        lme.fixture(), reader=reader, share_store=True)
+        lme.fixture(), reader=reader, share_store=True,
+        embedder=ek.build_embedder("hashing"))
     assert len(results) == 3
     text = lme.report(results, ingest_stats, read, ledger, reader=reader, judge=None,
                       budget=ek.RetrievalBudget(), source=ek.ContextSource.MEMORY,
@@ -1100,8 +1138,10 @@ def test_longmemeval_share_store_writes_each_session_once():
     bug here would re-ingest every shared session per question."""
     doubled = lme.fixture() + lme.fixture()
     _, shared_stats, _, _ = lme.run(doubled, reader=_ScriptedReader(["x"] * 6),
-                                    share_store=True)
-    _, per_question, _, _ = lme.run(doubled, reader=_ScriptedReader(["x"] * 6))
+                                    share_store=True,
+                                    embedder=ek.build_embedder("hashing"))
+    _, per_question, _, _ = lme.run(doubled, reader=_ScriptedReader(["x"] * 6),
+                                    embedder=ek.build_embedder("hashing"))
     assert shared_stats.sessions * 2 == per_question.sessions
 
 
@@ -1109,7 +1149,15 @@ def test_longmemeval_resolves_a_knowledge_update_to_the_value_that_replaced_the_
     """The one place memvara's deterministic contradiction resolution is directly under
     test: two employers arrive in different sessions and only the second should be live."""
     item = [i for i in lme.fixture() if i.qid == "fx_knowledge_update"][0]
-    mem = lme.build_memory(item.qid, ek.RetrievalBudget())
+    # The one site here that the embedder reaches on the *write* path: near-duplicate
+    # detection is a vector lookup, so an embedder that called the two employers the same
+    # thing would change `stats.ended`. It does not — the two objects are lexically and
+    # semantically distinct, and supersession keys on the predicate — but that is a fact
+    # about this fixture worth pinning rather than re-deciding per machine. Verified: the
+    # counts, the live set and the history are identical under hashing and under the
+    # sentence-transformers model.
+    mem = lme.build_memory(item.qid, ek.RetrievalBudget(),
+                           embedder=ek.build_embedder("hashing"))
     try:
         stats = ek.ingest(mem, item.sessions)
         # `ended`, not `retired`: changing employer is the world moving on, so the old
@@ -1134,7 +1182,8 @@ def test_longmemeval_scores_abstention_without_a_judge_but_leaves_accuracy_unsco
     """With no judge there is still one thing gradeable offline. Faking answerable
     accuracy from token overlap would be the dishonest alternative."""
     results, *_ = lme.run(lme.fixture(),
-                          reader=_ScriptedReader(["x", "y", "I don't know."]))
+                          reader=_ScriptedReader(["x", "y", "I don't know."]),
+                          embedder=ek.build_embedder("hashing"))
     by_id = {r.qid: r for r in results}
     assert by_id["fx_temporal_abs"].judged is True
     assert by_id["fx_single_user"].judged is None
@@ -1204,7 +1253,8 @@ def test_longmemeval_synthesises_session_ids_when_the_file_omits_them():
     item = lme.parse_instance(raw)
     assert item.session_ids == []
     _, stats, _, _ = lme.run([item, item], reader=_ScriptedReader(["x", "y"]),
-                             share_store=True)
+                             share_store=True,
+                             embedder=ek.build_embedder("hashing"))
     assert stats.sessions == 2
 
 
@@ -1437,7 +1487,10 @@ def test_a_gold_with_no_content_tokens_covers_nothing_rather_than_dividing_by_ze
 def test_a_turn_label_reaches_the_store_and_comes_back_on_the_retrieved_episode():
     """The evidence measure rests entirely on this. If the label does not survive
     ingestion, "did we retrieve the marked turn" silently becomes unanswerable."""
-    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=5)
+    # One episode read back at `k=5`: what is under test is whether the label survives the
+    # round trip, not what order anything came back in.
+    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=5,
+                  embedder=ek.build_embedder("hashing"))
     labels: dict[str, str] = {}
     try:
         ek.ingest(mem, [[ek.Turn("user", "I moved to Lisbon", datetime(2023, 5, 1,
@@ -1453,7 +1506,9 @@ def test_a_turn_label_reaches_the_store_and_comes_back_on_the_retrieved_episode(
 def test_an_unlabelled_turn_writes_nothing_extra_so_the_default_path_is_unchanged():
     """`Turn.label` is opt-in. A run that does not need it must store byte-identical
     episodes to one from before the field existed."""
-    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=3)
+    # Asserts on `episode.meta`, which no embedder touches.
+    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=3,
+                  embedder=ek.build_embedder("hashing"))
     try:
         ek.ingest(mem, [[ek.Turn("user", "I moved to Lisbon",
                                  datetime(2023, 5, 1, tzinfo=UTC))]])
@@ -1469,7 +1524,10 @@ def test_a_repeated_identical_turn_does_not_shift_every_later_label_by_one():
     input turns would misattribute every label after the first duplicate — an off-by-one
     that makes a retrieval score look plausible and be wrong."""
     when = datetime(2023, 5, 1, tzinfo=UTC)
-    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=5)
+    # Two distinct episodes survive the hash-dedupe and `k=5` asks for more than that, so
+    # the result is looked up by text rather than by position.
+    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=5,
+                  embedder=ek.build_embedder("hashing"))
     labels: dict[str, str] = {}
     try:
         ek.ingest(mem, [[ek.Turn("user", "same text", when, label="D1:1"),
@@ -1485,7 +1543,9 @@ def test_a_repeated_identical_turn_does_not_shift_every_later_label_by_one():
 def test_a_retrieved_claim_is_attributed_through_the_turns_it_was_extracted_from():
     """A claim carries no label of its own — only the ids of its source turns — so the
     evidence measure has to resolve it, or every extracted fact scores as a miss."""
-    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=0)
+    # `read_max_episodes=0`, so the only candidate is the single extracted claim.
+    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=0,
+                  embedder=ek.build_embedder("hashing"))
     labels: dict[str, str] = {}
     try:
         ek.ingest(mem, [[ek.Turn("user", "I live in Lisbon",
@@ -1730,7 +1790,8 @@ def test_locomo_drops_a_question_whose_evidence_names_no_turn_rather_than_guessi
     raw = json.loads(json.dumps(locomo.FIXTURE[0]))
     raw["qa"] = [{"question": "Where does Ada live?", "answer": "Lisbon",
                   "evidence": ["D:11:26"], "category": 4}]
-    scores, _, _, excluded = locomo.run_retrieval([locomo.parse_sample(raw)])
+    scores, _, _, excluded = locomo.run_retrieval(
+        [locomo.parse_sample(raw)], embedder=ek.build_embedder("hashing"))
     assert scores[0].evidence_recall_at is None
     assert sum(excluded.values()) == 1
     assert "name" in " ".join(excluded)
@@ -1743,7 +1804,8 @@ def test_locomo_counts_a_question_the_annotators_left_no_evidence_for():
     raw = json.loads(json.dumps(locomo.FIXTURE[0]))
     raw["qa"] = [{"question": "Where does Ada live?", "answer": "Lisbon",
                   "evidence": [], "category": 4}]
-    scores, _, _, excluded = locomo.run_retrieval([locomo.parse_sample(raw)])
+    scores, _, _, excluded = locomo.run_retrieval(
+        [locomo.parse_sample(raw)], embedder=ek.build_embedder("hashing"))
     assert scores[0].answer_in_context is not None
     assert scores[0].evidence_recall_at is None
     assert any("annotators recorded" in reason for reason in excluded)
@@ -1777,7 +1839,8 @@ def test_an_answers_file_that_matches_nothing_is_refused_rather_than_scored(tmp_
 def test_locomo_leaves_the_adversarial_category_out_of_retrieval_scoring_entirely():
     """It has no gold answer, and retrieving the turns its bait was built from is
     neither success nor failure."""
-    scores, _, _, excluded = locomo.run_retrieval(locomo.fixture())
+    scores, _, _, excluded = locomo.run_retrieval(
+        locomo.fixture(), embedder=ek.build_embedder("hashing"))
     assert len(scores) == 4
     assert "adversarial" not in {s.category for s in scores}
     assert any("category 5" in reason for reason in excluded)
@@ -1800,7 +1863,8 @@ def test_locomo_retrieval_mode_writes_its_own_per_question_jsonl(tmp_path):
 
 
 def test_locomo_retrieval_mode_stops_at_the_question_limit():
-    scores, _, _, _ = locomo.run_retrieval(locomo.fixture(), limit=2)
+    scores, _, _, _ = locomo.run_retrieval(
+        locomo.fixture(), limit=2, embedder=ek.build_embedder("hashing"))
     assert len(scores) == 2
 
 
@@ -1835,7 +1899,8 @@ def test_longmemeval_labels_each_turn_with_the_session_the_share_store_dedupes_o
 
 
 def test_longmemeval_retrieval_mode_scores_the_unanswerable_question_on_evidence_only():
-    scores = {s.qid: s for s in lme.run_retrieval(lme.fixture())[0]}
+    scores = {s.qid: s for s in lme.run_retrieval(
+        lme.fixture(), embedder=ek.build_embedder("hashing"))[0]}
     assert scores["fx_temporal_abs"].answer_in_context is None
     assert scores["fx_single_user"].evidence_recall_at is not None
 
@@ -1846,7 +1911,8 @@ def test_longmemeval_drops_an_evidence_session_that_names_nothing_ingested():
     changing under us, not for a defect in it today."""
     raw = json.loads(json.dumps(lme.FIXTURE[0]))
     raw["answer_session_ids"] = ["a_session_that_is_not_here"]
-    scores, _, _, excluded = lme.run_retrieval([lme.parse_instance(raw)])
+    scores, _, _, excluded = lme.run_retrieval(
+        [lme.parse_instance(raw)], embedder=ek.build_embedder("hashing"))
     assert scores[0].evidence_recall_at is None
     assert any("names no" in reason or "no\n" in reason for reason in excluded)
 
@@ -1855,8 +1921,10 @@ def test_longmemeval_retrieval_under_a_shared_store_writes_each_session_once():
     """Same dedupe as `run()`, and it has to key on the same id the scorer grades
     against or the two disagree about what a session is."""
     doubled = lme.fixture() + lme.fixture()
-    _, shared, _, _ = lme.run_retrieval(doubled, share_store=True)
-    _, per_question, _, _ = lme.run_retrieval(doubled)
+    _, shared, _, _ = lme.run_retrieval(
+        doubled, share_store=True, embedder=ek.build_embedder("hashing"))
+    _, per_question, _, _ = lme.run_retrieval(
+        doubled, embedder=ek.build_embedder("hashing"))
     assert shared.sessions * 2 == per_question.sessions
 
 
@@ -1872,7 +1940,8 @@ def test_longmemeval_retrieval_mode_prints_the_chance_column_the_oracle_file_nee
 def test_longmemeval_retrieval_mode_under_a_shared_store_says_it_is_a_different_task():
     text = _run_cli(lme.main, ["--dry-run", "--score", "retrieval", "--share-store"])
     assert "Not a LongMemEval number" in text
-    scores, stats, _, _ = lme.run_retrieval(lme.fixture(), share_store=True)
+    scores, stats, _, _ = lme.run_retrieval(
+        lme.fixture(), share_store=True, embedder=ek.build_embedder("hashing"))
     assert len(scores) == 3
     # One store means one pool, so `chance` falls and the measure stops being vacuous.
     assert scores[0].evidence_pool > 1
