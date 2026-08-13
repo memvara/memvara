@@ -7,7 +7,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from memvara.types import (
+    CLOSURE,
     OBJECT_ENTITY,
+    RESERVED_META,
     Claim,
     Derivation,
     Episode,
@@ -17,6 +19,7 @@ from memvara.types import (
     Result,
     Scope,
     WriteReceipt,
+    close_out,
     content_hash,
     fact_key_for,
     utcnow,
@@ -32,6 +35,70 @@ def mk(**kw) -> Claim:
                 scope=Scope("acme", "alice"))
     base.update(kw)
     return Claim(**base)
+
+
+# --- the closure witness ----------------------------------------------------
+
+def test_each_closure_records_which_clock_stopped_and_what_displaced_it():
+    """The columns say a claim ended; only the witness says so in its own words."""
+    claim = mk(valid_from=T0)
+    close_out(claim, T1, "cl_next", "ended")
+
+    assert claim.meta[CLOSURE] == [
+        {"at": T1.timestamp(), "close": "ended", "by": "cl_next"}]
+    assert claim.valid_to == T1 and claim.invalidated_at is None
+
+
+def test_a_claim_that_ended_and_was_later_retired_keeps_both():
+    """**Why it is a list.** The world moves on, and afterwards we decide we should
+    never have recorded the fact at all. Both happened. A scalar would keep the second
+    and lose the first — and the first is the one that cannot be recovered from the
+    columns, because after a retraction both clocks are closed and they look identical
+    to a claim that was only ever retracted."""
+    claim = mk(valid_from=T0)
+    close_out(claim, T1, "cl_next", "ended")
+    close_out(claim, T2, None, "retired")
+
+    assert [e["close"] for e in claim.meta[CLOSURE]] == ["ended", "retired"]
+    assert [e["at"] for e in claim.meta[CLOSURE]] == [T1.timestamp(), T2.timestamp()]
+
+
+def test_the_successor_survives_a_later_delete_that_erases_the_column():
+    """**The bug this exists for**, reproduced. Before `0c88a92`, `delete()` overwrote
+    `invalidated_by` with `None`, so a superseded claim that was later deleted lost the
+    only record of what replaced it — and the cloud's closure backfill has to refuse
+    every row in that shape, because it cannot tell one from an ordinary retraction.
+
+    `close_out` no longer erases the column, so this reads as belt-and-braces. It is
+    not: the witness is what makes the row still classifiable if *any* future path
+    clears that pointer again, and a pointer held in one place has already been lost
+    once.
+    """
+    claim = mk(valid_from=T0)
+    close_out(claim, T1, "cl_next", "ended")
+    claim.invalidated_by = None                    # what the old delete() did
+    close_out(claim, T2, None, "retired")
+
+    assert claim.invalidated_by is None, "the column is gone, as it was in the bug"
+    assert [e["by"] for e in claim.meta[CLOSURE]] == ["cl_next", None]
+
+
+def test_the_witness_records_where_the_axis_landed_not_what_was_asked():
+    """A closure backdated before the claim's own start is clamped to `valid_from`, so
+    the requested instant and the stored one differ. Recording the request would put the
+    witness and the column it describes into disagreement over an ordinary clamp, and
+    spend the one signal that is supposed to mean corruption."""
+    claim = mk(valid_from=T1)
+    close_out(claim, T0, None, "ended")            # T0 is before valid_from
+
+    assert claim.valid_to == T1
+    assert claim.meta[CLOSURE][0]["at"] == T1.timestamp() == claim.valid_to.timestamp()
+
+
+def test_the_closure_key_is_reserved_so_no_caller_can_forge_one():
+    """`RESERVED_META` is what `Memvara.remember` rejects on the way in. A witness a
+    caller could write is not evidence of anything."""
+    assert CLOSURE in RESERVED_META
 
 
 # --- Scope ------------------------------------------------------------------

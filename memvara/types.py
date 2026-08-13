@@ -117,6 +117,29 @@ OBJECT_ENTITY = "object_entity"
 #: Timestamped record of every backfill that changed a claim's place in history.
 ENTITY_REKEY = "entity_rekey"
 
+# --- closure witness ------------------------------------------------------------
+#: Timestamped record of every closure applied to a claim: which clock stopped, when, and
+#: what displaced it. Written by `close_out`, which is the single place any claim ends.
+#:
+#: **The columns remain authoritative; this is a witness, not a second source of truth.**
+#: Every query reads the columns — `state_predicate` never consults `meta`, and nothing in
+#: the read path does. What this adds is evidence that survives the columns being wrong.
+#:
+#: That is not a hypothetical failure. Before commit `0c88a92`, `delete()` overwrote
+#: `invalidated_by` with `None`, so a claim that had been superseded and was later deleted
+#: lost the only record of what replaced it. Rows damaged that way are now permanently
+#: unclassifiable: both clocks are closed and nothing distinguishes a supersession whose
+#: pointer was erased from an ordinary retraction. The cloud's closure backfill has to
+#: refuse that entire population, and says so. A witness written at the moment of closure
+#: is what stops the set growing — a corrupted column can then *disagree* with the record,
+#: and the disagreement is the finding rather than the dead end.
+#:
+#: A list, appended to, because a claim can end and later be retired: the world moved on,
+#: and afterwards we decided we had been wrong to record it at all. A scalar would keep
+#: only the second and lose exactly the fact that is hardest to recover. Same shape as
+#: `ENTITY_REKEY` for the same reason.
+CLOSURE = "closure"
+
 #: The `meta` keys above, as one set: everything in `Claim.meta` that the engine owns
 #: rather than the caller. Two surfaces need it and they need it for opposite reasons —
 #: `Memvara.remember` **rejects** them on the way in, because `salience_base` reaching
@@ -125,7 +148,7 @@ ENTITY_REKEY = "entity_rekey"
 #: internal bookkeeping back as user data. Defined here, beside the five constants, so
 #: adding a sixth cannot leave one of those two surfaces behind.
 RESERVED_META = frozenset({
-    SALIENCE_BASE, LAST_OBSERVED, SUBJECT_ENTITY, OBJECT_ENTITY, ENTITY_REKEY,
+    SALIENCE_BASE, LAST_OBSERVED, SUBJECT_ENTITY, OBJECT_ENTITY, ENTITY_REKEY, CLOSURE,
 })
 
 #: Decimal places kept on a stored salience. Salience is a ranking weight, not an
@@ -220,14 +243,34 @@ def close_out(claim: "Claim", at: datetime, by: str | None, close: Closure) -> N
         claim.invalidated_by = by
     if close == "retired":
         claim.invalidated_at = as_utc(at)
+        _witness(claim, claim.invalidated_at, by, close)
         return
     # Never before the claim's own start: a closure backdated past the fact it closes
     # collapses the interval to zero length rather than inverting it. An interval that
     # ends before it begins is not a shorter fact, it is a row no `as_of` window can
     # return consistently.
     edge = max(as_utc(at), as_utc(claim.valid_from))
-    if claim.valid_to is None or as_utc(claim.valid_to) > edge:
-        claim.valid_to = edge
+    landed = claim.valid_to
+    if landed is None or as_utc(landed) > edge:
+        claim.valid_to = landed = edge
+    _witness(claim, as_utc(landed), by, close)
+
+
+def _witness(claim: "Claim", at: datetime, by: str | None, close: Closure) -> None:
+    """Append the closure to `meta[CLOSURE]`. See that constant for why this exists.
+
+    `at` is the instant that actually **landed on the axis**, not the one requested — the
+    valid-time clamp above can move it, and a witness that disagreed with the column it
+    describes would be worse than none. `by` is recorded even though `invalidated_by`
+    holds it, because that column is precisely the one a later `delete()` was found
+    overwriting; a pointer in two places survives one of them being erased.
+
+    Re-closing an already-ended claim at a later instant appends an entry whose `at` is
+    the *existing* `valid_to`, because that is still where the claim ends. The row says
+    a closure was applied and where the axis stands, which is what a reader needs.
+    """
+    claim.meta.setdefault(CLOSURE, []).append(
+        {"at": at.timestamp(), "close": close, "by": by})
 
 
 def _new_id(prefix: str) -> str:
