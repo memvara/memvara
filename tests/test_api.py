@@ -2172,3 +2172,47 @@ def test_deleting_a_superseded_claim_keeps_the_link_to_what_replaced_it(tmp_path
         assert gone.state == "retired", "the delete still stopped belief"
         assert gone.invalidated_by == new.id, "and did not erase what replaced it"
         assert [c.object for c in mem.why(new.id).superseded] == ["Berlin"]
+
+
+class _RefusesTargetedWrites(SQLiteStore):
+    """A store whose two single-column writes are wired to explode."""
+
+    def invalidate(self, claim_id, at, by):
+        raise AssertionError(
+            "invalidate() writes invalidated_at and invalidated_by in one statement")
+
+    def set_valid_to(self, claim_id, valid_to):
+        raise AssertionError("set_valid_to() cannot record what displaced the claim")
+
+
+def test_no_write_path_ends_a_claim_through_the_stores_targeted_column_writes():
+    """`Store.invalidate` and `Store.set_valid_to` are kept in the protocol and used by
+    nothing in the engine, and this is what keeps that true.
+
+    Closing a claim moves exactly one clock, and neither method can express that.
+    `invalidate` writes `invalidated_at` *and* `invalidated_by` together, so recording a
+    supersession through it marks a claim that was true — and is still believed — as an
+    error; that pairing is `Reconciler._retire`'s original bug written into a signature.
+    `set_valid_to` writes no pointer at all, so the pair of them was the old way to end a
+    claim and the reason both clocks moved. Every path now stamps the object with
+    `types.close_out` and upserts it.
+
+    A behavioural check rather than a search for call sites: a path that reached for
+    either one would still pass every test about what the store holds afterwards, since
+    the row ends up almost right — it is the extra column that is wrong.
+    """
+    store = _RefusesTargetedWrites(":memory:")
+    with Memvara(store=store, embedder=HashingEmbedder(dim=32), llm=NullLLM(),
+                 user="alice") as mem:
+        mem.add("I live in Berlin")
+        mem.remember("user", "lives_in", "Lisbon")             # reconciled supersession
+        old = mem.remember("user", "works_at", "Acme").added[0]
+        mem.supersede(old.id, Claim(subject="user", predicate="works_at",
+                                    object="Globex", scope=old.scope))
+        mem.supersede(old.id, Claim(subject="user", predicate="works_at",
+                                    object="Initech", scope=old.scope),
+                      close="retired")
+        mem.remember("user", "drinks", "tea")
+        assert mem.delete(mem.history("user", "lives_in")[-1].id) is True
+        assert mem.forget("user", "works_at") != []                # retires
+        assert mem.forget("user", "drinks", close="ended") != []   # ends

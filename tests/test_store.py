@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from memvara.embed import HashingEmbedder
-from memvara.store import SQLStore, SQLiteStore
+from memvara.store import SQLStore, SQLiteStore, live_predicate
 from memvara.store.base import Store
 from memvara.store.sqlite import SCHEMA_VERSION
 from memvara.types import Claim, Derivation, Episode, MemoryType, Scope
@@ -2142,6 +2142,67 @@ def test_every_time_travelling_protocol_method_takes_both_axes_and_no_as_of(name
         for axis in ("valid_at", "known_at"):
             assert params[axis].kind is inspect.Parameter.KEYWORD_ONLY, (owner, axis)
             assert params[axis].default is None
+
+
+@pytest.mark.parametrize("alias", ["", "c"])
+@pytest.mark.parametrize("include_invalidated", [False, True])
+def test_the_store_takes_its_liveness_sql_from_the_exported_predicate(
+        store, alias, include_invalidated):
+    """The predicate has to have exactly one home, and this is what makes the store use
+    it rather than keep a private copy that happens to agree today.
+
+    The bind order is asserted here because it is the half `live_predicate` cannot
+    enforce: it emits four identical markers, and a backend that bound the belief instant
+    onto the world columns would be wrong in a way no `as_of` query can reveal, since
+    that call passes the two axes equal and every transposition answers the same.
+
+    Stated in the backend's own paramstyle and units rather than in SQLite's, because
+    this file is another implementation's acceptance suite: what has to hold there is
+    that its clause *is* the exported predicate carrying its own marker.
+    """
+    sql, params = store._live_clause(TMID, T1, include_invalidated, alias)
+
+    marker = "?" if "?" in sql else "%s"
+    assert sql == live_predicate(marker, include_invalidated=include_invalidated,
+                                 alias=alias)
+    assert sql.count(marker) == len(params)
+    if not include_invalidated:
+        # Called as `_live_clause(valid_at=TMID, known_at=T1)`, and T1 is the later of
+        # the two — so this reads "belief instant on the belief columns" whether the
+        # backend binds epoch floats or timestamps.
+        known, valid = params[:2], params[2:]
+        assert known[0] == known[1] and valid[0] == valid[1]
+        assert known[0] > valid[0], "known, known, valid, valid — and not transposed"
+
+
+def test_the_liveness_predicate_builds_without_a_store_and_counts_what_stats_counts(
+        store, emb):
+    """The predicate's third copy was a billing gauge in another repository, sampling a
+    tenant through a caller-supplied raw connection — no store instance to borrow a
+    clause builder from, so it wrote `invalidated_at IS NULL` by hand and counted every
+    superseded version of every slot as live. A store whose one address had changed four
+    times billed five, and the step was unfalsifiable from inside the data because
+    nothing else in the series moved with it.
+
+    So the exported form has to work with no instance and no bind parameters: a server
+    clock substituted straight into the SQL is the shape a sampler on a raw connection
+    can actually use. Counted here against `stats()` on the same rows, because the two
+    agreeing is the whole point of there being one predicate.
+    """
+    put(store, emb, object="Berlin", valid_to=T1)      # ended: over, still believed
+    put(store, emb, object="Lisbon", predicate="p2")   # live
+    gone = put(store, emb, object="Rome", predicate="p3")
+    store.invalidate(gone.id, T1, None)                # retired: no longer believed
+
+    # SQLite's clock in the units this schema stores. `now()` is the Postgres spelling;
+    # what matters is that it is an expression rather than a marker.
+    clock = "CAST(strftime('%s','now') AS REAL)"
+    predicate = live_predicate(clock)
+    assert "?" not in predicate, "a raw-connection sampler has nothing to bind"
+
+    raw = store._db.execute(f"SELECT COUNT(*) FROM claims WHERE {predicate}").fetchone()[0]
+
+    assert raw == store.stats()["live_claims"] == 1
 
 
 def test_the_sqlite_store_still_satisfies_the_runtime_store_protocol(store):

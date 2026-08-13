@@ -419,10 +419,11 @@ def import_mem0(
             if current is None:
                 receipt.ignored += 1
                 continue
-            # Transaction time closes here: mem0 stopped believing it at this instant,
-            # and that is the fact being imported. `delete` closes both axes in one
-            # transaction and is scope-checked, which costs nothing — the claim was
-            # written by this import, into this event's scope.
+            # Transaction time closes here, and only transaction time: a mem0 DELETE
+            # records that mem0 stopped believing the memory, not that the world moved,
+            # and that distinction is the fact being imported. `delete` defaults to
+            # `close="retired"`, which is exactly that. It is scope-checked too, which
+            # costs nothing — the claim was written by this import, into this scope.
             mem.delete(current.id, at=event.ts, **_scope_kw(event.scope))
             receipt.deleted += 1
             continue

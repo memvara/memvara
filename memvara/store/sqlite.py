@@ -73,6 +73,7 @@ from ..types import (
     Scope,
     resolved_entity,
 )
+from .base import live_predicate
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..schema import PredicateSpec
@@ -1512,6 +1513,13 @@ class SQLiteStore:
         version could not return it under any argument — the query that asks for it
         rewound the belief clock past the very correction it was asking about.
 
+        The SQL itself is `base.live_predicate`, not written out here: three surfaces
+        outside this class count live rows and one of them cannot hold a store at all,
+        so the text has to exist somewhere an instance is not needed. What this method
+        owns is the *binding* — `[known, known, valid, valid]`, the order the four
+        markers come out in, and the one thing about this predicate that can be wrong
+        without any query noticing, because every `as_of` call passes the two axes equal.
+
         `include_invalidated` lifts the *whole valid-time interval* along with the
         retirement, leaving only `recorded_at <= known_at`. That is more than the name
         promises and it is deliberate, in both directions:
@@ -1527,17 +1535,10 @@ class SQLiteStore:
           heard in July. That is the one way a bitemporal query can actively lie, so
           the floor holds under every flag combination.
         """
-        a = f"{alias}." if alias else ""
         v, k = _clock(valid_at, known_at)
-        if include_invalidated:
-            return f"({a}recorded_at <= ?)", [k]
-        clause = (
-            f"({a}recorded_at <= ? "
-            f"AND ({a}invalidated_at IS NULL OR {a}invalidated_at > ?) "
-            f"AND {a}valid_from <= ? "
-            f"AND ({a}valid_to IS NULL OR {a}valid_to > ?))"
-        )
-        return clause, [k, k, v, v]
+        clause = live_predicate("?", include_invalidated=include_invalidated,
+                                alias=alias)
+        return clause, [k] if include_invalidated else [k, k, v, v]
 
     def _happened_clause(self, valid_at: datetime | None, known_at: datetime | None,
                          alias: str = "") -> tuple[str, list]:
@@ -2687,6 +2688,10 @@ class SQLiteStore:
         with one current fact in it. The three totals therefore do not sum: a claim that
         has *ended* is neither live nor invalidated, which is the whole point of there
         being two axes, and `claims` is the only one that counts everything.
+
+        Taken from `_live_clause`, and so from `base.live_predicate`, rather than spelled
+        out: a counter that writes its own copy of this is exactly how the cheap version
+        got into three files.
         """
         where = " WHERE tenant = ?" if tenant is not None else ""
         params: tuple = (tenant,) if tenant is not None else ()

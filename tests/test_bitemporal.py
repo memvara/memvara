@@ -49,6 +49,12 @@ J23 = datetime(2023, 1, 1, tzinfo=TZ)
 MID = datetime(2024, 6, 1, tzinfo=TZ)
 J26 = datetime(2026, 1, 1, tzinfo=TZ)
 
+# A supersession, a moment after it, and an unrelated retirement of the same row months
+# later. Back in 2023 for the same reason: a claim retired "next October" is not retired.
+AUG23 = datetime(2023, 8, 1, tzinfo=TZ)
+SEP23 = datetime(2023, 9, 1, tzinfo=TZ)
+OCT23 = datetime(2023, 10, 1, tzinfo=TZ)
+
 SCOPE = Scope("acme", "alice")
 
 
@@ -459,6 +465,37 @@ def test_why_still_reports_a_supersession_that_never_closed_belief(mem):
     assert [c.object for c in mem.why(lisbon.id, known_at=AUG).superseded] == ["Berlin"]
     assert mem.why(lisbon.id, known_at=MAR).superseded == [], \
         "the replacement had not been recorded in March"
+
+
+def test_retiring_a_superseded_row_does_not_re_date_the_supersession(mem):
+    """A row carrying *both* closures is dated by the wrong one if `invalidated_at` wins.
+
+    Berlin ended in August, when Lisbon replaced it. In October somebody deletes Berlin,
+    which retires it and leaves the row double-closed. `invalidated_at` now says October
+    — but that dates a different event, the end of belief in *Berlin*, not the moment
+    Lisbon displaced it. Reading it made `why(Lisbon, known_at=September)` report nothing
+    superseded: an October write silently changing what the audit says about September,
+    in the method whose entire promise is that the trail survives, by the operation
+    documented as the reversible one.
+
+    The shape is only ordinary because it is now reachable — before the closures split,
+    every supersession wrote `invalidated_at` too, so the two stamps never disagreed.
+    """
+    mem.remember("user", "lives_in", "Berlin", valid_from=J23, recorded_at=J23)
+    lisbon = mem.remember("user", "lives_in", "Lisbon",
+                          valid_from=AUG23, recorded_at=AUG23).added[0]
+    berlin = mem.history("user", "lives_in")[0]
+    assert berlin.state == "ended" and berlin.invalidated_by == lisbon.id
+    assert [c.object for c in mem.why(lisbon.id, known_at=SEP23).superseded] == ["Berlin"]
+
+    assert mem.delete(berlin.id, at=OCT23) is True
+    reread = mem.get(berlin.id)
+    assert reread.state == "retired" and reread.valid_to is not None, \
+        "both closures on one row — the shape this is about"
+
+    assert [c.object for c in mem.why(lisbon.id, known_at=SEP23).superseded] == ["Berlin"]
+    assert mem.why(lisbon.id, known_at=J23).superseded == [], \
+        "and the dating still works: Lisbon did not exist in January"
 
 
 # =============================================================================

@@ -1,4 +1,4 @@
-from .base import SQLStore, Store
+from .base import SQLStore, Store, live_predicate
 from .sqlite import SQLiteStore
 
-__all__ = ["SQLStore", "Store", "SQLiteStore"]
+__all__ = ["SQLStore", "Store", "SQLiteStore", "live_predicate"]

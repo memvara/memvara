@@ -232,25 +232,44 @@ def _in_timeline(claim: Claim, valid_at: datetime | None,
             and (claim.valid_to is None or as_utc(claim.valid_to) > at))
 
 
-def _displaced_by(claim: Claim, successor: Claim, known_at: datetime | None) -> bool:
-    """Had `successor` already displaced this row at `known_at`?
+def _displaced_by(successor: Claim, known_at: datetime | None) -> bool:
+    """Had `successor` displaced anything yet, at `known_at`?
 
     Only `why()` uses it, for the `superseded` list. A supersession is a belief-clock
     event — something we decided, not something the world did — so it is *never* dated by
     the superseded row's own `recorded_at`, which usually predates the whole story and
     would let a July view report a replacement that happened in August.
 
-    Which belief-clock instant depends on how the row was closed, and reading only
-    `invalidated_at` is what broke when supersession stopped writing one. An ordinary
-    supersession leaves `invalidated_at` unset — the row was never wrong, it was
-    overtaken — so the moment we decided is the moment we recorded the successor. A
-    *retired* row carries its own instant, because a correction is dated by when we
-    stopped believing it, which need not be when the replacement arrived.
+    The instant is the successor's `recorded_at`: the moment the thing that did the
+    displacing came to be believed. A claim cannot have been replaced before its
+    replacement existed, and nothing else in the store is closer to when the pointer was
+    written — `invalidated_by` carries no timestamp of its own.
+
+    It takes no displaced row, which is the shape of the answer rather than an economy:
+    a successor displaces its whole victim set in the single write that records it, so
+    `known_at` admits that write or it does not, and there is nothing to decide per row.
+
+    `invalidated_at` is deliberately *not* consulted, and that is a correction rather
+    than a simplification. It dates a different event — when we stopped believing the
+    **predecessor** — and on a row carrying both closures the two events are months
+    apart. Berlin ended in August when Lisbon replaced it, and was retired in October by
+    a `delete`; reading the later stamp made `why(Lisbon, known_at=September)` report
+    nothing superseded, so an October write silently changed what the audit said about
+    September. That is `0c88a92` again in a second guise: the operation documented as
+    the reversible one erasing the link between a value and its successor, this time by
+    re-dating it instead of clearing it.
+
+    Double-closed rows are the shape that exposes it and they are ordinary now — an
+    ended claim that is later deleted or forgotten is exactly the "supersede, then
+    correct" story. The old rule was wrong in both directions on them: a supersession
+    recorded *after* an earlier retirement was reported before its successor existed.
+    Dropping the stamp can only move a supersession's date earlier, never later, so the
+    change adds links to a dated audit view and removes none — the safe direction for the
+    method whose whole job is that the trail survives.
     """
     if known_at is None:
         return True
-    at = claim.invalidated_at if claim.invalidated_at is not None else successor.recorded_at
-    return as_utc(at) <= as_utc(known_at)
+    return as_utc(successor.recorded_at) <= as_utc(known_at)
 
 
 def _had_happened(episode: Episode, valid_at: datetime | None,
@@ -929,15 +948,15 @@ class Memvara:
         keeps the facts answering `valid_at` queries about the period they held. What is
         *not* offered is both at once, which is what this used to do.
 
-        The claims handed back are stamped with the closure, which they were not.
-        `Store.invalidate` and `set_valid_to` update rows; the in-memory objects were
-        read before either ran, so every claim this returned reported
-        `invalidated_at=None` and `is_live()` true, while the same row re-read from the
-        store read as retired. A caller logging or rendering the return value of the call
-        that just retired them showed them as live. `Reconciler._retire` has always
-        stamped its objects, which is why `WriteReceipt.invalidated` renders correctly
-        and this did not — the same operation, two implementations, one of them a
-        half-step behind the database.
+        The claims handed back are stamped with the closure, which they were not. This
+        used to call `Store.invalidate` and `set_valid_to`, which update rows and not the
+        objects; the in-memory ones were read before either ran, so every claim this
+        returned reported `invalidated_at=None` and `is_live()` true, while the same row
+        re-read from the store read as retired. A caller logging or rendering the return
+        value of the call that just retired them showed them as live. `Reconciler._retire`
+        has always stamped its objects, which is why `WriteReceipt.invalidated` renders
+        correctly and this did not — the same operation, two implementations, one of them
+        a half-step behind the database.
         """
         scope = self._scope(tenant, user, agent, session)
         now = at or utcnow()
@@ -1394,11 +1413,12 @@ class Memvara:
           event: it is a thing we decided, not a thing that happened in the world, so
           the world clock has no opinion about whether it had occurred.
 
-        Note the supersession filter never reads the superseded row's `recorded_at`: that
-        usually predates the whole story, and what is being dated is the moment we
-        replaced it, which is the only thing `superseded` is reporting. See
-        `_displaced_by` for which instant that is — it depends on whether the row was
-        *ended* or *retired*, and an ordinary supersession is the first.
+        Note the supersession filter reads neither timestamp on the superseded row. Its
+        `recorded_at` usually predates the whole story, and its `invalidated_at` dates
+        when we stopped believing *it*, which on a row that was superseded in August and
+        deleted in October is a different event two months later. What is being dated is
+        the moment we replaced it, and the row that carries that instant is the
+        replacement — see `_displaced_by`.
 
         The claim itself is returned whatever the axes say; they describe the evidence
         around it, and withholding the row would turn this method into an existence
@@ -1417,9 +1437,15 @@ class Memvara:
         # dangling, and wave 3 settled that the read is not where that gets discovered.
         episodes = [e for e in (found.get(s) for s in claim.sources)
                     if e is not None and _had_happened(e, valid_at, known_at)]
-        superseded = [c for c in self.store.slot_history(claim.scope.tenant, claim.fact_key)
-                      if c.invalidated_by == claim.id
-                      and _displaced_by(c, claim, known_at)]
+        # A gate on the list rather than a filter inside it: the supersessions this claim
+        # performed were all performed by the one write that recorded it, so `known_at`
+        # either admits that write or admits none of them. It also skips the history read
+        # in exactly the case where the read could return nothing.
+        superseded: list[Claim] = []
+        if _displaced_by(claim, known_at):
+            superseded = [c for c in self.store.slot_history(claim.scope.tenant,
+                                                             claim.fact_key)
+                          if c.invalidated_by == claim.id]
         return Provenance(claim=claim, episodes=episodes, derivation=claim.derivation,
                           extractor=claim.extractor, superseded=superseded)
 

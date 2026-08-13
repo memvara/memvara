@@ -300,6 +300,17 @@ _happened_clause(valid_at, known_at, alias="")                  -> tuple[str, li
 once per call — and one read fills both defaults so the two cannot land microseconds
 apart.
 
+The SQL itself is not written there. `store.live_predicate(at="?", *,
+include_invalidated=False, alias="") -> str` is the exported home for it, and
+`_live_clause` is that call plus the binding. `at` is the SQL *expression* for the
+instant, substituted at every axis — a bind marker (`"?"`, `"%s"`) or a server clock
+(`"now()"`) — so a counter with no store instance, on a raw connection, in another
+repository, can still ask the same question. One expression rather than one per axis
+because such a counter is always counting *now*, and two markers would let a caller bind
+the pair transposed, which no `as_of` query can reveal. Where markers are used the four
+bind **known, known, valid, valid**, and `_live_clause` is the only place in this
+repository that performs that binding.
+
 `include_invalidated` lifts the **whole valid-time interval** plus the retirement,
 leaving only `recorded_at <= known_at`. That is more than the name promises, it is
 existing behaviour, and it must stay identical across backends: under the flag,
@@ -322,6 +333,13 @@ against the SQL one row for row.
 it closes valid time alone, the cheap test counts every superseded version of every slot
 as live. The three counts consequently do not sum — a claim that has *ended* is neither
 live nor invalidated — and `claims` is the only total that covers everything.
+
+`invalidate()` and `set_valid_to()` are in `Store` and **no engine path calls either**.
+Closing a claim moves one clock; `invalidate` writes `invalidated_at` and
+`invalidated_by` together, which is the conflation that was removed, and `set_valid_to`
+writes no pointer. They remain as the protocol's only single-statement writes, and
+because `set_valid_to(id, None)` reopens an interval — the one thing `close_out` cannot
+do, deliberately, since a write path able to un-end a fact would do it by accident.
 
 ---
 

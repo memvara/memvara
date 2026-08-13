@@ -33,6 +33,55 @@ if TYPE_CHECKING:
     from ..schema import PredicateSpec
 
 
+def live_predicate(at: str = "?", *, include_invalidated: bool = False,
+                   alias: str = "") -> str:
+    """SQL for "believed and in force at `at`", built without a store instance.
+
+    The one exported spelling of the four-column liveness test. Three surfaces outside
+    the store had each written it by hand and all three had written the *cheap* version,
+    `invalidated_at IS NULL`. That selected the same rows only while superseding closed
+    both clocks. It closes valid time alone now, so the column test counts every
+    superseded version of every slot as live: a store whose one address has changed four
+    times reports five. Nothing fails when that happens — one of the three copies was a
+    billing gauge, where the step is unfalsifiable from inside the data because no other
+    series moves with it.
+
+    `at` is the **SQL expression** for the instant and is substituted at every axis: a
+    bind marker (`"?"` for SQLite, `"%s"` for psycopg) or a server clock (`"now()"`).
+    One expression rather than one per axis, deliberately. Every caller that cannot
+    reach a store instance is counting *now*, and two markers would let one bind the
+    pair transposed — belief instant onto the world columns — which is the single error
+    a diagonal query cannot reveal, since `valid_at == known_at` answers the same either
+    way.
+
+    With a bind marker, the four markers take their values in the order **known, known,
+    valid, valid**. That order is the half this function cannot enforce, so a backend
+    should bind it in `_live_clause` and nowhere else — `SQLiteStore._live_clause` is
+    the only place in this repository that does.
+
+    `include_invalidated` lifts end-of-life *and the whole valid-time interval* with it,
+    leaving one marker for the belief floor — see `SQLStore._live_clause` for why that
+    floor is the clause which never lifts. `alias` prefixes every column, for a join.
+
+    >>> print(live_predicate("now()").replace(" AND ", "\\n AND "))
+    (recorded_at <= now()
+     AND (invalidated_at IS NULL OR invalidated_at > now())
+     AND valid_from <= now()
+     AND (valid_to IS NULL OR valid_to > now()))
+    >>> live_predicate("%s", include_invalidated=True, alias="c")
+    '(c.recorded_at <= %s)'
+    """
+    a = f"{alias}." if alias else ""
+    if include_invalidated:
+        return f"({a}recorded_at <= {at})"
+    return (
+        f"({a}recorded_at <= {at} "
+        f"AND ({a}invalidated_at IS NULL OR {a}invalidated_at > {at}) "
+        f"AND {a}valid_from <= {at} "
+        f"AND ({a}valid_to IS NULL OR {a}valid_to > {at}))"
+    )
+
+
 @runtime_checkable
 class Store(Protocol):
     # --- episodes ---------------------------------------------------------
@@ -174,14 +223,47 @@ class Store(Protocol):
         """
         ...
 
-    def invalidate(self, claim_id: str, at: datetime, by: str | None) -> None: ...
+    # The two targeted column writes. **No engine path calls either one**, and that is a
+    # decision rather than an oversight: every write that ends a claim now goes through
+    # `types.close_out` plus `put_claim`, because closing a claim means moving exactly one
+    # clock and neither of these can express that on its own. They are kept because they
+    # are the only single-statement writes in the protocol — a whole-row upsert is a
+    # different cost and a different concurrency story on a server backend — and because
+    # `set_valid_to` can do one thing no write path can. Both are exercised by the store
+    # suites in this repository and in the Postgres backend, which is what keeps a
+    # third-party implementation of them honest.
+
+    def invalidate(self, claim_id: str, at: datetime, by: str | None) -> None:
+        """Stop believing a claim at `at`, recording `by` as what displaced it.
+
+        **Not the way to record a supersession.** It writes `invalidated_at` and
+        `invalidated_by` in one statement, and `invalidated_at` means *the record was
+        wrong* — so using it to note that a newer value arrived marks a claim that was
+        true, and is still believed, as an error. That was `Reconciler._retire`'s bug and
+        it is this signature's shape: the pointer and the belief stamp cannot be
+        separated here, which is precisely why the reconciler stopped using it. Closing
+        valid time instead is `types.close_out(claim, at, by, "ended")` followed by
+        `put_claim`.
+
+        What it *is* for: retiring a row in one statement, when the caller really does
+        mean "we no longer believe this" — a repair tool, a retention job, a backend's
+        own maintenance. `by=None` is the ordinary case there, since nothing replaced it.
+        """
+        ...
 
     def set_valid_to(self, claim_id: str, valid_to: datetime | None) -> None:
-        """Close (or reopen) a claim's valid-time interval.
+        """Close, move, or **reopen** a claim's valid-time interval.
 
-        Part of the protocol because `Memvara.forget` calls it directly: both time axes
-        must move together or an `as_of` query lands between them and sees an
-        inconsistent world.
+        The reopen is why this survives having no engine caller: `valid_to=None` clears
+        an end, and `close_out` cannot express that in either direction — it only ever
+        moves an end *earlier*, never clears one, because a write path that could reopen
+        an interval could silently un-end a fact. Undoing a mistaken end is therefore an
+        explicit, targeted act, which is the right shape for it.
+
+        Writes one column and no pointer, so unlike `invalidate` it cannot conflate the
+        two axes. It also cannot record *what* replaced the claim; a supersession needs
+        `invalidated_by` as well, and `put_claim` is the only way to write both without
+        also writing `invalidated_at`.
         """
         ...
 
@@ -360,7 +442,18 @@ class Store(Protocol):
 
     def stats(self, tenant: str | None = None) -> dict[str, int]:
         """Row counts, optionally for one tenant. `embeddings` counts what the store
-        holds, not what any one process has mapped."""
+        holds, not what any one process has mapped.
+
+        **`live_claims` is the full liveness predicate — `live_predicate()` in this
+        module — and not `invalidated_at IS NULL`.** The two counted the same rows only
+        while superseding closed both clocks; since it closes valid time alone, the
+        column test reports every version a slot ever held as live.
+
+        A consequence a backend must reproduce rather than round off: **the three counts
+        do not sum.** A claim that has *ended* is neither live nor invalidated, `claims`
+        is the only total that covers everything, and a store implementation that
+        "corrects" the arithmetic has reintroduced the conflation.
+        """
         ...
 
     def close(self) -> None: ...
@@ -389,6 +482,11 @@ class SQLStore(Protocol):
     def _live_clause(self, valid_at: datetime | None, known_at: datetime | None,
                      include_invalidated: bool, alias: str = "") -> tuple[str, list]:
         """SQL and bind parameters for "believed at `known_at`, in force at `valid_at`".
+
+        The parameterised form of `live_predicate` — the SQL should come from there
+        rather than be written out again, so that a backend and a counter that cannot
+        reach a store instance cannot drift apart. What this adds is the binding, and
+        the binding is the half with a silent failure mode: see `live_predicate`.
 
         Four constraints, two per axis, and each axis reads only its own clock:
 

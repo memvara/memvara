@@ -9,6 +9,56 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Upgrading
+
+- **"Live" is no longer `invalidated_at IS NULL`.** This is the sharp corner of the
+  closure split below, and the one thing to read before upgrading.
+
+  Superseding closes `valid_to` and leaves `invalidated_at` unset, so a superseded claim
+  is `ended`: **neither live nor invalidated**. The three counts a store reports no
+  longer sum, and `claims` is the only total that covers everything.
+
+  ```sql
+  -- was equivalent to "live". It is not any more.
+  SELECT count(*) FROM claims WHERE invalidated_at IS NULL
+
+  -- live: two clocks, four columns, both bounds on each
+  SELECT count(*) FROM claims
+   WHERE recorded_at <= now()
+     AND (invalidated_at IS NULL OR invalidated_at > now())
+     AND valid_from  <= now()
+     AND (valid_to IS NULL OR valid_to > now())
+  ```
+
+  **The shape of the mistake.** Every surface that had ever spelled "live" as the
+  one-column test was *correct before this release and wrong after it* — silently, with
+  no exception, no migration error and no red test, because the two spellings selected
+  the same rows for as long as superseding closed both clocks. Nothing about the code
+  changed; what it means did. The error is always in the same direction, counting too
+  many: a store whose one address has changed four times reports **five** live claims
+  instead of one, and every such number steps up on the day of the upgrade for something
+  no user did. On a usage-metered or billed surface that is money, and the step is
+  unfalsifiable from inside the data, because no other series moves with it.
+
+  **What to grep for** — in application code, dashboards, saved queries, alert
+  thresholds, and any third-party `Store`:
+
+  ```
+  invalidated_at IS NULL        # also `is null`, `ISNULL(`, `invalidated_at is None`
+  invalidated_at IS NOT NULL    # the mirror, and it is *not* the complement any more
+  ```
+
+  Every hit is one of three things. A **liveness** test is now wrong and must become the
+  four-column predicate. A **retirement** test — "which records did we stop believing" —
+  is still exactly right, and now selects a strictly smaller set than "not live". An
+  **audit** view that wants everything ever displaced should read `invalidated_by IS NOT
+  NULL`: the pointer is written under either closure, which is the whole reason it is a
+  separate column.
+
+  Three copies of the wrong test existed across this project's own repositories when the
+  change landed, one of them a billing gauge, and finding them was manual.
+  `memvara.store.live_predicate` is now the single exported home for the right one.
+
 ### Fixed
 
 - **Superseding a claim no longer records it as an error.** `Reconciler._retire` closed
@@ -42,6 +92,23 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`memvara.store.live_predicate(at="?", *, include_invalidated=False, alias="")`** —
+  the liveness predicate as SQL text, built without a store instance. `at` is the SQL
+  *expression* for the instant and is substituted at every axis: a bind marker (`"?"`,
+  `"%s"`) or a server clock (`"now()"`). It returns the parenthesised clause;
+  `SQLiteStore._live_clause` is now that call plus the binding.
+
+  It takes one expression rather than one per axis on purpose. Every caller that cannot
+  reach a store is counting *now*, and two markers would let one bind the belief instant
+  onto the world columns — the single error a diagonal query cannot reveal, since
+  `valid_at == known_at` answers the same either way. Where markers are used the four
+  bind in the order **known, known, valid, valid**, and `_live_clause` is the only place
+  in this repository that performs that binding.
+
+  A function rather than a constant because the paramstyle and the join alias both vary;
+  a module-level function rather than a method on `SQLStore` because the copy that
+  motivated it samples a tenant through a caller-supplied raw connection and has no
+  instance to borrow a builder from.
 - **`close=` on the four writes that end a claim**, so both readings are expressible and
   neither is guessed: `remember`, `supersede`, `forget` and `delete`, on `Memvara`,
   `ScopedMemvara` and `AsyncMemvara`, plus `Reconciler.apply`, `WritePipeline.assert_claim`
@@ -172,6 +239,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
   Third-party stores must update their signatures; third-party *callers* of the facade
   are unaffected. Pre-`1.0.0`, per the note at the top of this file.
+- **`Store.invalidate` and `Store.set_valid_to` stay in the protocol, and the engine
+  calls neither.** Every write that ends a claim now goes through `types.close_out` plus
+  `put_claim`, because closing a claim moves exactly one clock and neither method can
+  express that: `invalidate` writes `invalidated_at` and `invalidated_by` in one
+  statement — that pairing *is* the bug above, written into a signature — and
+  `set_valid_to` writes no pointer at all. They are kept because they are the protocol's
+  only single-statement writes, because `set_valid_to(id, None)` **reopens** an interval
+  and no write path can (`close_out` only ever moves an end earlier), and because both
+  store suites use them to build fixtures. Their docstrings now say which of the two
+  clocks each one stops, and a test refuses a store whose targeted writes are called
+  from any engine path — the row a mistaken caller leaves behind is almost right, and
+  it is the extra column that is wrong.
+- **`Store.stats` states that its three counts do not sum.** `live_claims` is the full
+  predicate; a backend that "corrects" the arithmetic has reintroduced the conflation.
 - **`Store.adjacent` takes `scopes`, and implementations must apply it inside `limit`.**
   It shipped without one, with `GraphTraverser` filtering the page afterwards and
   re-asking ten times wider on starvation. That was unsound rather than slow: on a tenant
@@ -192,6 +273,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A later retirement re-dated the supersession that preceded it.** `why()`'s
+  `superseded` list read `invalidated_at` when the row had one, which dates a different
+  event: when we stopped believing the *predecessor*, not when the successor displaced
+  it. On a row carrying both closures those are months apart — Berlin ended in August
+  when Lisbon replaced it, was deleted in October, and `why(Lisbon, known_at=September)`
+  then reported nothing superseded. An October write silently changed what the audit
+  said about September, in the method whose promise is that the trail survives, by the
+  operation documented as the reversible one. The instant is now the successor's
+  `recorded_at` throughout — the row that carries the moment we decided — which can only
+  move a supersession's date earlier and so never drops a link a dated view used to
+  show. Double-closed rows became an ordinary shape when the closures split, which is
+  why this surfaced now.
 - **The vector index could not open on Windows at all.** `os.pread`/`os.pwrite` are
   POSIX-only and Python provides no equivalent there, so every store with a `.vecs`
   sidecar raised `AttributeError` — 95 of the 99 failures in the first CI run, which is
