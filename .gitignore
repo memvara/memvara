@@ -7,3 +7,11 @@ __pycache__/
 # Local editor/agent scratch. `.claude/launch.json` names an absolute path on one
 # machine, so it is configuration for a workstation rather than for the project.
 .claude/
+
+# Secrets never belong in a repository, and this one is Apache-2.0 and public: a commit
+# here is a disclosure, not a mistake to be fixed by a later commit. Listed even though
+# nothing in this repo reads a `.env`, because the rule has to exist *before* the file
+# does — an ignore added after `git add -A` protects nothing.
+.env
+.env.*
+!.env.example
