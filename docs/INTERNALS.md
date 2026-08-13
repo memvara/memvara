@@ -271,6 +271,63 @@ Traversal must:
 
 ---
 
+## `memvara/core.py` — the prompt rendering boundary
+
+Only one method in this library renders stored text into something a model is asked to
+treat as its own knowledge, and its contract is a security contract rather than a
+formatting one. `SECURITY.md` names it as an in-scope attack surface; this is the
+implementation side of the same rule.
+
+```python
+class Memvara:
+    RECALL_HEADER: str            # frames the live block as data, not instructions
+    RECALL_HISTORY_HEADER: str    # "No longer true — ..." in the first three words
+    RECALL_EPISODE_HEADER: str    # says "said", not "true"
+    RECALL_EPISODE_CHARS: int     # 280 — a pasted stack trace cannot become the prompt
+
+    def _safe_line(self, text, limit=None) -> str
+    def recall(self, query, *, k=8, min_score=0.0, header=None, ...,
+               include_episodes=False, episode_header=None,
+               include_history=False, history_header=None) -> str
+    def _past_values(self, claims, tenant=None, user=None, agent=None,
+                     session=None) -> list[str]
+```
+
+`recall()` must:
+
+- **take an explicit signature, never `**kwargs`.** Forwarding arbitrary keywords into
+  `search()` would expose `as_of`, `states` and `include_invalidated` here, and the latter
+  two resurrect retired claims into a live prompt — an un-delete reachable by anyone who
+  can influence a parameter. `states=["retired"]` is the sharper form: a prompt built from
+  nothing but the records we stopped believing. Time travel and audit reads stay on
+  `search()`;
+- flatten every rendered line through `_safe_line`, which collapses whitespace and strips
+  leading list and heading markers, so stored text cannot open its own bullet list or
+  repeat a header and forge a block indistinguishable from the real one. Episodes are
+  additionally truncated to `RECALL_EPISODE_CHARS`;
+- keep the three blocks in order — claims, then history, then episodes — each under its own
+  header, and emit a header only when its block is non-empty.
+
+`_past_values` is the whole of `include_history`, and its contract is one line:
+
+> **The filter is `state == "ended"`, never `state != "live"`.**
+
+That is a security boundary, not a tidying step. `history()` returns every value a slot
+ever held, retired ones included. An `ended` value is the fact's own past and we still
+believe it was true while it was in force; a `retired` value is one we were wrong about or
+were asked to delete, and rendering it is exactly the un-delete the explicit signature
+exists to prevent. A claim that ended and was *later* retired reports `retired` and stays
+out — which is precisely the case the looser spelling would admit.
+`tests/test_api.py::test_recall_can_carry_the_past_of_a_fact_without_carrying_a_retired_one`
+holds a live, an ended and a retired value **in one slot**, so a `!= "live"` filter cannot
+pass it.
+
+It is also keyed on `fact_key` and deduplicated, so a multi-valued predicate returning
+four live values costs one `history()` call rather than four and renders its past once
+rather than four times.
+
+---
+
 ## `memvara/store/`
 
 ### The two time axes

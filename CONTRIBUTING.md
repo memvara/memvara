@@ -18,10 +18,19 @@ point of the project and it is also the development setup:
 python3 -m venv .venv && source .venv/bin/activate
 python3 -m pip install -e ".[dev]"
 
-python3 -m pytest -q                                              # 2,329 tests, ~21 s
+python3 -m pytest -q                                              # 2,734 tests
 python3 -m coverage run -m pytest && python3 -m coverage report    # gated at 100%
 python3 -m mypy -p memvara                                         # must be clean
 ```
+
+**If that run takes minutes rather than seconds, you have an extra installed.**
+`default_embedder()` returns a sentence-transformers model as soon as that package is
+importable, and it is importable if you installed `memvara[local-embed]` *or*
+`memvara[rerank]` — a cross-encoder is one. The tests that do not pin an embedder then
+load a real model. Nothing is wrong and nothing will fail, but the suite goes from
+seconds to minutes, and on macOS the process exits **139 (SIGSEGV)** at interpreter
+teardown after a fully green run — that is torch unloading, not your change. `[dev]`
+installs no extras, which is what CI runs.
 
 `[dev]` is pytest, pytest-asyncio, coverage and mypy — no provider SDKs. The suite runs
 entirely offline against `HashingEmbedder` and `NullLLM`; a test that needs a model uses a

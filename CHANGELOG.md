@@ -100,6 +100,38 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
 
 ### Added
 
+- **`neighborhood()` and `history()` resolve learned aliases on the probe.** Previously a
+  probe carried no alias stamp, so `neighborhood("Big Blue")` folded deterministically and
+  missed every claim stamped `ibm`.
+
+  Resolving the probe *to* the canonical — the obvious fix — would have made it worse: a
+  merge never re-keys the past, so the store holds claims under both spellings and taking
+  only the canonical trades one half of the entity for the other. `EntityRegistry.probe_keys`
+  returns **every** key naming the entity instead — the deterministic fold first, then the
+  canonical, then sibling aliases — and the deterministic fold remains the fallback, so a
+  probe with no learned alias behaves exactly as before. Nothing on disk is re-keyed; only
+  the read is widened. Probes resolve under the reader's own `owner_key(scope)` and no
+  further, so a merge in one tenant cannot redefine an entity for another.
+
+- **`recall(include_history=True)`** appends, for each fact the call surfaced, the values
+  it used to have — under their own header, after the live block.
+
+  Found by running the thing end to end: an agent asked "what plan were they on before?"
+  from a `recall()` prompt got the current value and no signal that the past was missing
+  rather than absent. `history()` had always answered it, but only for a caller who knew
+  to ask a second, differently-shaped question — which an agent reading a prompt cannot.
+
+  **Only `ended` values are rendered, never `retired` ones.** That bound is why this is
+  safe on a surface which deliberately refuses `states=`: an `ended` value is the fact's
+  own past and we still believe it was true while in force, whereas a `retired` one is
+  something we were wrong about, and putting that in a prompt is the un-delete the
+  signature exists to prevent. A claim that ended and was later retired is `retired` and
+  stays out. The filter is `state == "ended"`, never `state != "live"`, and a test holds
+  all three states in one slot so the looser spelling cannot pass. See `SECURITY.md`.
+
+  History is fetched once per fact slot, so a multi-valued predicate with four live
+  values costs one lookup rather than four.
+
 - **An opt-in cross-encoder reranker: `memvara.rerank`.** Off by default, and "off" means
   the stage does not exist — no import of a backend, no model, no network. A subprocess
   test asserts that and goes red if the backend is ever made an eager import.

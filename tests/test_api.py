@@ -208,6 +208,63 @@ def test_an_embedder_swap_is_refused_at_construction_not_discovered_at_read(tmp_
     assert "reembed=True" in message, "must name the migration that fixes it"
 
 
+def test_recall_can_carry_the_past_of_a_fact_without_carrying_a_retired_one(tmp_path):
+    """**The security boundary of `include_history`.**
+
+    `recall()` refuses `states=` because `states=["retired"]` builds a prompt out of
+    nothing but records we stopped believing. `include_history=True` looks like the same
+    door — it renders non-live claims — and it is safe only because of one filter: an
+    `ended` value is the fact's own past and we still believe it was true then, while a
+    `retired` one is a thing we were wrong about. Collapsing those two is the un-delete.
+
+    So the slot here holds all three at once: a live value, a value the world moved past,
+    and a value we retracted. Anything less than all three lets a `!= "live"` filter pass.
+    """
+    path = str(tmp_path / "m.db")
+    mem = Memvara(path, embedder=HashingEmbedder(dim=512), llm=NullLLM(), user="dara")
+    try:
+        home = mem.remember("account", "plan", "Home").added[0]
+        wrong = mem.remember("account", "plan", "Gold").added[0]
+        mem.delete(wrong.id)                                           # we were wrong
+        mem.supersede(home.id, Claim(subject="account", predicate="plan",
+                                     object="Pro", scope=mem.default_scope))
+        states = {c.object: c.state for c in mem.history("account", "plan")}
+        assert states == {"Home": "ended", "Pro": "live", "Gold": "retired"}, states
+
+        plain = mem.recall("plan", k=8)
+        assert "Pro" in plain
+        assert "Home" not in plain, "the live view must not carry the past unasked"
+
+        withhist = mem.recall("plan", k=8, include_history=True)
+        assert "Pro" in withhist
+        assert "Home" in withhist, "an ended value is the fact's own past"
+        assert "Gold" not in withhist, "a retired value must never reach a prompt"
+        assert "No longer true" in withhist
+    finally:
+        mem.close()
+
+
+def test_recall_history_asks_once_per_slot_however_many_values_are_live(tmp_path):
+    """A multi-valued predicate returning four live values must cost one history lookup,
+    not four — and must not print the slot's past four times over."""
+    path = str(tmp_path / "m.db")
+    mem = Memvara(path, embedder=HashingEmbedder(dim=512), llm=NullLLM(), user="dara")
+    try:
+        phone = mem.remember("account", "contact_preference", "phone").added[0]
+        mem.remember("account", "contact_preference", "text")
+        mem.supersede(phone.id, Claim(subject="account", predicate="contact_preference",
+                                      object="email", scope=mem.default_scope))
+
+        calls = []
+        real = mem.history
+        mem.history = lambda *a, **kw: (calls.append(a), real(*a, **kw))[1]  # type: ignore[method-assign]
+        out = mem.recall("contact preference", k=8, include_history=True)
+        assert len(calls) == 1, calls
+        assert out.count("phone") == 1, out
+    finally:
+        mem.close()
+
+
 class _renamed:
     """A real embedder wearing a different `name`, since `name` is what the hint reads.
 

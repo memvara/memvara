@@ -231,13 +231,16 @@ class AsyncMemvara:
                      header: str | None = None, tenant=None, user=None, agent=None,
                      session=None, memory_types: Sequence[MemoryType] | None = None,
                      include_episodes: bool = False,
-                     episode_header: str | None = None) -> str:
+                     episode_header: str | None = None,
+                     include_history: bool = False,
+                     history_header: str | None = None) -> str:
         """See `Memvara.recall`."""
         return await asyncio.to_thread(
             self.memvara.recall, query, k=k, min_score=min_score, header=header,
             tenant=tenant, user=user, agent=agent, session=session,
             memory_types=memory_types, include_episodes=include_episodes,
-            episode_header=episode_header)
+            episode_header=episode_header, include_history=include_history,
+            history_header=history_header)
 
     async def get(self, claim_id: str, *, tenant=None, user=None, agent=None,
                   session=None) -> Claim | None:
@@ -528,10 +531,13 @@ class AsyncScopedMemvara:
                      header: str | None = None,
                      memory_types: Sequence[MemoryType] | None = None,
                      include_episodes: bool = False,
-                     episode_header: str | None = None) -> str:
+                     episode_header: str | None = None,
+                     include_history: bool = False,
+                     history_header: str | None = None) -> str:
         return await self._amem.recall(
             query, k=k, min_score=min_score, header=header, memory_types=memory_types,
-            include_episodes=include_episodes, episode_header=episode_header, **self._kw)
+            include_episodes=include_episodes, episode_header=episode_header,
+            include_history=include_history, history_header=history_header, **self._kw)
 
     async def get(self, claim_id: str) -> Claim | None:
         return await self._amem.get(claim_id, **self._kw)

@@ -5,14 +5,17 @@ the commercial layer relate. Kept honest about status: an item is `done` only wh
 something in the tree does it, `deferred` when it was considered and declined with a
 reason, and `next` when it is actually queued.
 
-**Status as of `v0.1.0`.** 2,329 tests, 100% statement coverage, mypy clean, CI on
+**Status as of `v0.1.0`.** 2,734 tests, 100% statement coverage, mypy clean, CI on
 3.10–3.13 across Linux, macOS and Windows. The library does what the README says. Phase 4
 — the evidence phase that gated everything below — is **done**, which changes the shape of
 this document: the organizing risk was credibility, and it is no longer that every
 comparative number is self-authored.
 
-What has *not* changed: nothing here has been scored end to end against a reader model.
-See [What is still missing](#what-is-still-missing).
+What has changed since that line first read "nothing here has been scored end to end":
+`demo/` is an authored corpus, five arms and a blinded harness, and it has been run once
+with an agent as the reader. That is an apparatus and a sanity check, not a reader-model
+benchmark — the run is not reproducible and cannot rank systems. See
+[What is still missing](#what-is-still-missing).
 
 ---
 
@@ -57,11 +60,40 @@ Two findings worth keeping:
   Ties now break on a content hash and three full runs are byte-identical.
 
 **The half that is still open** is end-to-end judged accuracy, which does need a reader
-model and does cost money: ~$17.50 for LOCOMO and ~$5 for LongMemEval on a frontier model,
-or ~$2 for a stratified sample. The harness already reports a `none` / `memory` / `full`
+model and does cost money. The harness already reports a `none` / `memory` / `full`
 triple when a reader is configured, because a memory score with no reader-only floor and no
-whole-haystack ceiling beside it is uninterpretable. This is the single most valuable
-remaining item in the repository.
+whole-haystack ceiling beside it is uninterpretable. This remains the single most valuable
+remaining item in the repository — `demo/` built the apparatus and the corpus for it (see
+[What is still missing](#what-is-still-missing) and
+[`demo/README.md`](../demo/README.md)), but a run with an agent in the reader's seat is a
+sanity check, not the measurement.
+
+Exercising that path end to end offline — `--reader stub` and `--reader file` over both
+suites — found four defects in code that had never run, all now fixed:
+
+- **`--embedder` and `--rerank` were wired only into `--score retrieval`.** `run()` called
+  `build_memory(sample, budget, llm)` with neither, so the answer path silently used
+  `default_embedder()` — sentence-transformers wherever it happened to be installed — and
+  ignored `--rerank` outright while the banner said it had been applied. Two runs differing
+  only in those flags were byte-identical, which is how it was found; with the fix they
+  differ on 4 of 8 and 5 of 12 answers respectively.
+- **`bench/longmemeval.py` pinned no embedder at all** and had no flag to. So a LOCOMO
+  figure and a LongMemEval figure quoted in one paragraph were produced by different
+  vector legs. `--embedder` now lives in `evalkit.add_common_arguments` and both runners
+  print what they used.
+- **`stop_reason` was never read.** A `max_tokens` truncation or a `refusal` arrives as a
+  short or empty string, scores 0.0, and is averaged into a figure presented as answer
+  quality — so a budget that was too small reads as a memory layer that surfaced bad
+  evidence. Now counted and printed. Relatedly, `AnthropicReader` sent no `thinking` and
+  `max_tokens=1024`; on `claude-opus-5` thinking is on by default and shares that budget.
+- **The cost estimate was ~2× high on LOCOMO's input side and ignored thinking on the
+  output side.** Corrected against measured prompt sizes; the procedure and the numbers now
+  live in exactly one place, `bench/evalkit.py`'s module docstring.
+
+What a hosted run still cannot do is resume: `run()` issues its calls one at a time with no
+concurrency and no checkpoint, so LOCOMO is a 2–3 hour foreground process that writes
+nothing until it finishes. Slice it with `--shuffle SEED --limit N`, or use the
+`--reader file` dump/answers round trip, which is a resume mechanism that already exists.
 
 ---
 
@@ -231,7 +263,18 @@ PYTHONPATH=. python3 bench/locomo.py --score retrieval --recall-at 1,5,12,20
 pip install 'memvara[rerank]'
 PYTHONPATH=. python3 bench/locomo.py --score retrieval --recall-at 1,5,12,20 \
     --rerank 20 --reranker cross-encoder
+# the other rows of the table: --rerank-model picks which cross-encoder
+PYTHONPATH=. python3 bench/locomo.py --score retrieval --recall-at 1,5,12,20 \
+    --rerank 20 --reranker cross-encoder --rerank-model BAAI/bge-reranker-base
 ```
+
+Every run above pins `--embedder hashing`, which is now that flag's default. That pin is
+the reason these rows are comparable at all: `memvara[rerank]` installs
+sentence-transformers, and before the flag existed `bench/locomo.py` fell through to
+`default_embedder()` — so installing the extra in order to measure the reranker also
+swapped the embedder underneath the measurement, and the whole difference landed on the
+reranker. `bench/longmemeval.py` had no such flag at all. Both runners now print the
+embedder they used, unconditionally.
 
 **Read `NullReranker` first.** It reproduces the baseline in every cell, which is what
 makes every row below it attributable to the reranker rather than to the plumbing.
@@ -327,11 +370,19 @@ protocol as a choice a deployment makes, not in the default path.
 
 Stated plainly, because a roadmap that only lists what is done is an advertisement.
 
-1. **End-to-end answer quality has never been measured.** Every benchmark in the README
-   isolates architecture from model quality on purpose, and none of them says whether an
-   agent using memvara answers better than an agent using mem0. That is the number a
-   skeptical reader wants and the one we do not have.
-2. **No external user has run this in production.** 2,329 tests prove the code does what we
+1. **End-to-end answer quality has an apparatus and one non-reproducible run, and no
+   benchmark.** `demo/` closed the first half of this: an authored support corpus, twenty
+   questions with authored golds, five arms from a no-context floor to a whole-transcript
+   ceiling, and a blinded dump/answer harness. What it does not have is a reader behind an
+   API. The one run used an agent as the reader, so there is no model id, no seed and no
+   temperature to quote, and it cannot be repeated. Two things it did establish are worth
+   carrying: **at this corpus size the whole-transcript arm scored 100%**, so the memory
+   layer's argument here is 5.7× fewer tokens rather than a better answer; and the trap
+   metric — the column a before/after claim would rest on — produced **no signal at all**,
+   because the reader never gave a superseded value. Still missing: a hosted reader, a
+   second corpus size to turn the token argument from a slope into a measurement, and any
+   comparison against mem0 on answers rather than on architecture.
+2. **No external user has run this in production.** 2,734 tests prove the code does what we
    said it does. They prove nothing about what happens on someone else's data.
 3. **The English-centrism is measured, not fixed.** The salience gate and the fast extractor
    are English sentence forms; other scripts fall through to the model, which is correct

@@ -83,12 +83,121 @@ BLEU-1 here is clipped unigram precision times the standard brevity penalty, com
 directly rather than via `sacrebleu`, so it needs no dependency and no tokenizer
 version to match.
 
-## Cost
+## Running the answer path against a real model — the whole procedure
+
+This is the only place this is written down. The README, `docs/ROADMAP.md` and both
+runners point here rather than restating it, because the cost figure was stated in
+four places and three of them drifted.
+
+    export ANTHROPIC_API_KEY=...
+    PYTHONPATH=. python3 bench/locomo.py \
+        --score answer --reader anthropic --model claude-opus-5 \
+        --judge llm --context memory --shuffle 7 --limit 200 \
+        --out results/locomo-memory.jsonl
+
+Order of operations, and why each flag is there:
+
+1. `--download` once per dataset. Nothing fetches implicitly, and a missing file fails
+   with the URL and a `curl` line rather than a stack trace.
+2. **Rehearse offline first.** The same command with `--reader stub` exercises ingest,
+   retrieval, the prompt, the scorer, the ledger and the report, and costs nothing.
+   Every defect below was found that way. Do not skip it.
+3. `--shuffle SEED` before `--limit N`. Both files are grouped — LOCOMO by
+   conversation, LongMemEval by question type — so an unshuffled slice is one category,
+   and the runners print a warning saying so rather than quietly reporting it.
+4. `--context memory` is the measurement. Re-run with `--context none` and
+   `--context full` for the floor and the ceiling; a MEMORY number with neither beside
+   it is uninterpretable, which is why all three exist.
+5. `--out PATH` always. The tables are a summary; the JSONL is the run.
+
+**The key.** `ANTHROPIC_API_KEY` for `--reader anthropic`, `OPENAI_API_KEY` for
+`--reader openai`. Both are checked at construction, before the dataset is ingested,
+and the error names the variable and the flag — see `require_key`. That check exists
+because `anthropic.Anthropic()` constructs happily without a key and fails on the
+first request, which here is several minutes and one whole ingest later, reading like
+a network fault.
+
+**There is no key in this repository and none is needed to develop against this
+harness.** `--reader stub` runs the entire pipeline offline; `--reader file` runs it
+with a person or an agent in the loop.
+
+## What a run actually costs, measured rather than assumed
+
+Per-question input is the size of the prompt the harness really builds, measured by
+dumping a 120-question shuffled slice of each suite with `--reader file --dump` and
+counting the bytes of `system_prompt + prompt`:
+
+| suite                | questions | chars/question | ≈ input tokens | suite input |
+|----------------------|-----------|----------------|----------------|-------------|
+| LOCOMO               | 1,986     | 2,360          | ~640           | ~1.3M       |
+| LongMemEval (oracle) | 500       | 3,639          | ~985           | ~0.5M       |
+
+At `claude-opus-5` list prices ($5 / $25 per MTok, checked 2026-08-13, unchanged from
+the `PRICES` table) that is **$6.35 of input for LOCOMO** and **$2.46 for
+LongMemEval**. Token counts are chars ÷ 3.7, which is an estimate — the exact figure
+needs one `messages.count_tokens` call per prompt and therefore a key. The character
+counts are exact.
+
+**Output is the term that decides the bill, and it is thinking, not answers.** The
+visible answer is a phrase — the system prompts demand one — so at ten-odd tokens it
+rounds to nothing. But `claude-opus-5` thinks by default, thinking bills at the output
+rate, and $25/MTok against an unknown number of thinking tokens is the whole
+uncertainty:
+
+| output tokens/question | LOCOMO output | LOCOMO total | LongMemEval total |
+|------------------------|---------------|--------------|-------------------|
+| ~15 (thinking off)     | $0.74         | **$7.1**     | **$2.7**          |
+| 100                    | $4.97         | **$11.3**    | **$3.7**          |
+| 300                    | $14.90        | **$21.3**    | **$6.2**          |
+| 500                    | $24.83        | **$31.2**    | **$8.7**          |
+
+The `--judge llm` pass is a second call per question at a much smaller prompt (~100
+input tokens) but the *same* thinking exposure on a task — comparing two strings —
+where thinking buys nothing: budget $2–8 for LOCOMO rather than the $3–5 previously
+stated. Ingestion is free unless an extraction model is configured; see the runners.
 
 `TokenLedger` bills reader and judge calls separately, from the `usage` the provider
-returns rather than from an estimate. Prices are per million tokens as published on
-2026-06-24 and will drift; a model with no entry is counted and reported as *unpriced*
-rather than silently valued at zero.
+returns rather than from an estimate, so the run itself prints the true figure. Prices
+are per million tokens as published on the date in `PRICES_AS_OF` and will drift; a
+model with no entry is counted and reported as *unpriced* rather than silently valued
+at zero. The number that matters is the one the first hundred questions print — the
+table above is for deciding whether to start.
+
+## What a run actually takes, and the shape of the risk
+
+Local cost is nothing: ingesting all ten LOCOMO conversations is ~11 s and all 1,986
+retrievals total **4.8 s** (p50 2.4 ms). The wall clock is entirely the API calls, and
+**they are issued one at a time**. There is no concurrency, no checkpoint and no
+resume anywhere in `run()`. At a few seconds per call that is roughly 2–3 hours for
+LOCOMO, doubled with `--judge llm`, as a single foreground process whose partial work
+is not written anywhere until it finishes.
+
+Two mitigations that need no new machinery. Run it in slices — `--shuffle 7 --limit
+200` is a defensible stratified sample and finishes in twenty minutes. Or use the
+`--reader file` round trip as a resume mechanism: `--dump` once, fill the answers
+JSONL incrementally from whatever is answering, and `--answers` it back; a
+partly-filled file scores what it has and says how much was missing, above the tables
+it damaged.
+
+## These are public benchmarks, and a good score on them proves less than it looks
+
+LOCOMO and LongMemEval have been on the public internet for years. Any model used as a
+reader here may have seen the transcripts, the questions, or the gold answers in
+training, and neither the harness nor anyone running it can tell the difference
+between a model that retrieved an answer and a model that remembered it. The
+asymmetry is what to hold onto:
+
+* A **strong** end-to-end score is weak evidence. It is consistent with good retrieval
+  and equally consistent with a reader that already knew the answer — and the
+  `--context none` floor is the only thing that separates them, which is most of why
+  that mode exists. Report the floor next to the score or the score means nothing.
+* A **weak** score is strong evidence, and against us. Contamination can only inflate;
+  a low number was reached despite whatever the reader already knew.
+
+This is not a caveat that better methodology fixes — it is a property of using a
+public dataset. The purpose-written scenario being built elsewhere in this repository
+exists because it has no such confound; the two are complements, and neither replaces
+the other. Quote both or state which one you are quoting.
 """
 
 from __future__ import annotations
@@ -386,6 +495,17 @@ class Answer:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    #: Why the provider stopped. `""` for a reader that consults no model.
+    #:
+    #: Carried because the two interesting values are indistinguishable from a wrong
+    #: answer once the text is all you keep. `max_tokens` means the budget ran out —
+    #: on a model that thinks by default, thinking and the answer share `max_tokens`,
+    #: so a hard question can spend the budget reasoning and return a truncated
+    #: phrase. `refusal` means a safety classifier declined and `content` is empty.
+    #: Both scored 0.0 with nothing said, which is a wrong benchmark number rather
+    #: than a bad one: the reader never answered, and the report claimed it answered
+    #: badly. `degenerate_answers` counts them, and the report prints the count.
+    stop_reason: str = ""
 
 
 class Reader(Protocol):
@@ -536,10 +656,53 @@ class FileReader:
         self._pending: dict[str, dict[str, str]] = {}
         self._answers: dict[str, str] = {}
         if answers is not None:
-            for line in Path(answers).read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    row = json.loads(line)
-                    self._answers[str(row["id"])] = str(row.get("answer") or "")
+            self._load_answers(Path(answers))
+
+    def _load_answers(self, path: Path) -> None:
+        """Read the answers JSONL, refusing the shapes that would mis-score silently.
+
+        A duplicate id used to be last-write-wins with nothing said, which is the worst
+        of the three options: an answers file assembled by concatenating two passes, or
+        by an agent that retried an item, scored against whichever copy happened to be
+        last in the file. The reader cannot know which one was meant, so it refuses.
+
+        A malformed line or a row with no `id` used to surface as a bare
+        `json.JSONDecodeError` or `KeyError` from inside a comprehension, with no line
+        number — for a file a person or an agent hand-wrote, which is exactly the file
+        most likely to have a stray comma in it.
+        """
+        seen: dict[str, int] = {}
+        duplicates: list[str] = []
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(
+                    f"{path}:{number} is not valid JSON ({exc.msg}). The answers file is "
+                    'one object per line: {"id": "...", "answer": "..."}.'
+                ) from exc
+            if not isinstance(row, dict) or "id" not in row:
+                raise SystemExit(
+                    f'{path}:{number} has no "id" field. Every row needs the id from '
+                    "the dump, so the answer can be matched to the question it answers."
+                )
+            key = str(row["id"])
+            if key in seen:
+                duplicates.append(f"    {key} on lines {seen[key]} and {number}")
+            else:
+                seen[key] = number
+            self._answers[key] = str(row.get("answer") or "")
+        if duplicates:
+            raise SystemExit(
+                f"{path} answers {len(duplicates)} id(s) more than once:\n"
+                + "\n".join(duplicates[:10])
+                + ("\n    …" if len(duplicates) > 10 else "")
+                + "\n  Which answer was meant is not recoverable, and taking the last "
+                "one silently\n  scores a run nobody can reproduce. Remove the "
+                "duplicates and re-run."
+            )
 
     def answer(self, system: str, prompt: str) -> Answer:
         self.calls += 1
@@ -620,6 +783,33 @@ def _split_prompt(prompt: str) -> tuple[str, str]:
     return head, rest
 
 
+def require_key(variable: str, flag: str) -> None:
+    """Refuse a keyless API reader at construction, naming the variable.
+
+    Checked here rather than left to the SDK, for the reason `memvara/llm/anthropic.py`
+    gives for the same check: `openai.OpenAI()` refuses to construct without a key and
+    `anthropic.Anthropic()` does not, so the same command failed at two different
+    moments depending on the backend. In a benchmark run the second moment is worse than
+    in a server — the Anthropic path got all the way through ingesting 5,882 turns and
+    then raised `AuthenticationError` on the first question, which reads as a network
+    problem and costs a few minutes to disbelieve.
+
+    Naming the variable matters. Neither SDK's error names the flag that got you here,
+    and `--reader openai` failing with a message about `OPENAI_API_KEY` while the run is
+    called `bench/locomo.py` is not obviously the same thing to someone who has just
+    exported `ANTHROPIC_API_KEY` and expected it to be enough.
+    """
+    if not os.environ.get(variable):
+        raise SystemExit(
+            f"\n  {flag} found no {variable} in the environment.\n\n"
+            f"    export {variable}=...        # then re-run the same command\n\n"
+            "  Nothing has been spent and nothing was ingested. To exercise the whole\n"
+            "  pipeline with no key at all, use --reader stub; to answer the questions\n"
+            "  yourself or with an agent, use --reader file --dump PATH. Neither is a\n"
+            "  measurement — see the banner each of them prints."
+        )
+
+
 def build_prompt(question: str, context: str, *, asked_on: str | None = None) -> str:
     """The reader's user turn: the question first, then whatever retrieval produced.
 
@@ -667,6 +857,14 @@ def _usage(response: Any, model: str, text: str) -> Answer:
         return 0
 
     details = _attr(usage, "prompt_tokens_details") if usage is not None else None
+    # OpenAI reports the same idea as `finish_reason` on the choice rather than
+    # `stop_reason` on the response, and spells truncation `length`; both are
+    # normalised to the Anthropic spelling so one counter covers both providers.
+    stop = _attr(response, "stop_reason")
+    if not stop:
+        choices = _attr(response, "choices") or []
+        stop = _attr(choices[0], "finish_reason") if choices else None
+    stop = str(stop or "")
     return Answer(
         text=text,
         model=model,
@@ -675,6 +873,7 @@ def _usage(response: Any, model: str, text: str) -> Answer:
         cache_read_tokens=(field("cache_read_input_tokens")
                            or int(_attr(details, "cached_tokens") or 0)),
         cache_write_tokens=field("cache_creation_input_tokens"),
+        stop_reason="max_tokens" if stop == "length" else stop,
     )
 
 
@@ -689,6 +888,35 @@ class AnthropicReader:
     `effort` defaults to `low` because the task is extractive question answering over a
     short retrieved block, and paying for deep reasoning would measure the reader rather
     than the memory. Raise it deliberately, and say so when you quote a number.
+
+    ## Thinking, and why `max_tokens` is not 1024
+
+    Thinking is **on** here, and that is a decision rather than an omission. On
+    `claude-opus-5` a request with no `thinking` field thinks anyway — the default
+    changed from the Opus 4.x family, where omitting it meant no thinking — so this
+    class previously ran with adaptive thinking while its own docstring described an
+    extractive task with no deep reasoning, and while the cost note in
+    `bench/locomo.py` budgeted "under 100 output tokens per question". Thinking
+    tokens bill at the output rate. The parameter is now sent explicitly so the
+    configuration is a property of this file rather than of whichever model id was
+    passed.
+
+    `thinking=None` (the default) sends nothing and takes the model's own default,
+    which is the honest reading of "we did not configure this". Pass
+    `thinking={"type": "disabled"}` to turn it off — legal on `claude-opus-5` only at
+    effort `high` or below, which the default `low` satisfies — but read the trade
+    first: with thinking disabled that model sometimes writes `<thinking>` tags into
+    the visible response, and a leaked tag is scored as part of the answer by both F1
+    and the judge. Lowering `effort` is the safer lever than switching thinking off.
+
+    `max_tokens` defaults to 4096 rather than 1024 because on a thinking model the
+    budget is shared: thinking and the answer come out of the same allowance, so a
+    question the model reasons about at length can spend the budget and return a
+    truncated phrase — or nothing. The old 1024 was sized for an answer alone. The
+    waste is bounded (these answers are a phrase; unused budget is not billed) and
+    the failure it prevents is not, because a truncated answer scores 0.0 and looks
+    exactly like a reader that answered wrongly. `Answer.stop_reason` is what makes
+    the difference visible; see `degenerate_answers`.
     """
 
     is_stub = False
@@ -699,11 +927,13 @@ class AnthropicReader:
         model: str = "claude-opus-5",
         client: Any = None,
         effort: str = "low",
-        max_tokens: int = 1024,
+        max_tokens: int = 4096,
+        thinking: Mapping[str, Any] | None = None,
     ) -> None:
         self.model = model
         self.effort = effort
         self.max_tokens = max_tokens
+        self.thinking = dict(thinking) if thinking is not None else None
         self.name = f"anthropic/{model}"
         self._client = client if client is not None else self._default_client()
 
@@ -717,15 +947,18 @@ class AnthropicReader:
                 "pip install 'memvara[anthropic]'. Pass client= to inject one, or run "
                 "with --reader stub to exercise the harness offline."
             ) from exc
+        require_key("ANTHROPIC_API_KEY", "--reader anthropic")
         return anthropic.Anthropic()
 
     def answer(self, system: str, prompt: str) -> Answer:
+        extra = {"thinking": self.thinking} if self.thinking is not None else {}
         response = self._client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
             system=system,
             messages=[{"role": "user", "content": prompt}],
             output_config={"effort": self.effort},
+            **extra,
         )
         return _usage(response, self.model, _text_of_anthropic(response).strip())
 
@@ -759,6 +992,7 @@ class OpenAIReader:
                 "Pass client= to inject one, or run with --reader stub to exercise the "
                 "harness offline."
             ) from exc
+        require_key("OPENAI_API_KEY", "--reader openai")
         return openai.OpenAI()
 
     def answer(self, system: str, prompt: str) -> Answer:
@@ -900,6 +1134,13 @@ PRICES: dict[str, Price] = {
 PRICES_AS_OF = "2026-06-24"
 
 
+#: Stop reasons that mean the model finished saying what it meant to say. Everything
+#: else — `max_tokens`, `refusal`, `pause_turn`, whatever a provider adds next — is
+#: counted and printed rather than silently scored as a wrong answer. An allowlist
+#: rather than a blocklist so a stop reason nobody here has seen is loud by default.
+GOOD_STOPS = frozenset({"end_turn", "stop_sequence", "stop", "tool_use"})
+
+
 @dataclass
 class _Tally:
     calls: int = 0
@@ -932,9 +1173,14 @@ class TokenLedger:
     def __init__(self, prices: dict[str, Price] | None = None) -> None:
         self.prices = dict(PRICES if prices is None else prices)
         self.by_role: dict[str, dict[str, _Tally]] = {}
+        #: `(role, stop_reason) -> count`, for every stop reason that is not a
+        #: completed answer. See `Answer.stop_reason` and `degenerate_answers`.
+        self.stops: Counter = Counter()
 
     def record(self, role: str, answer: Answer) -> None:
         self.by_role.setdefault(role, {}).setdefault(answer.model, _Tally()).add(answer)
+        if answer.stop_reason and answer.stop_reason not in GOOD_STOPS:
+            self.stops[(role, answer.stop_reason)] += 1
 
     def override(self, model: str, price: Price) -> None:
         self.prices[model] = price
@@ -1605,7 +1851,39 @@ def cost_block(ledger: TokenLedger) -> str:
     if unpriced:
         out.append(f"  UNPRICED, and therefore missing from that total: "
                    f"{', '.join(unpriced)}")
+    out.append(degenerate_answers(ledger))
     return "\n".join(out) + "\n"
+
+
+def degenerate_answers(ledger: TokenLedger) -> str:
+    """Answers that were never finished, named as such.
+
+    A `max_tokens` stop is the reader running out of budget mid-answer; a `refusal` is
+    a safety classifier declining and returning no content at all. Both arrive as a
+    short or empty string, score 0.0 against the gold, and are then averaged into a
+    number presented as answer quality — so a run where the budget was too small reads
+    as a memory layer that surfaced the wrong evidence. Printed inside the cost block
+    because that is where the reader's own behaviour is already being reported, and
+    because the fix for the common case (`max_tokens`) is a cost decision.
+    """
+    if not ledger.stops:
+        return ""
+    lines = ["\n  ANSWERS THAT NEVER FINISHED — each scored 0.0 and is in the tables "
+             "above:"]
+    for (role, reason), count in sorted(ledger.stops.items()):
+        lines.append(f"    {count:,} {role} call(s) stopped on {reason!r}")
+    if any(reason == "max_tokens" for _, reason in ledger.stops):
+        lines.append(
+            "  max_tokens means the budget ran out. On a model that thinks, thinking "
+            "and the\n  answer share it — raise --max-tokens, or lower --effort, and "
+            "re-run before\n  quoting anything above.")
+    if any(reason == "refusal" for _, reason in ledger.stops):
+        lines.append(
+            "  refusal means a safety classifier declined and returned no content. "
+            "Those\n  questions were not answered badly; they were not answered. "
+            "Exclude them or\n  re-run them on another model rather than scoring them "
+            "as wrong.")
+    return "\n".join(lines)
 
 
 def retrieval_block(ingest_stats: IngestStats, read: RetrievalStats) -> str:
@@ -1913,6 +2191,39 @@ def dry_run_reader_note(args: Any) -> str:
     return "file reader." if args.reader == "file" else "stub reader."
 
 
+def answers_note(reader: Reader) -> str:
+    """What to say about a `--reader file` run's coverage, before the table is printed.
+
+    Returns "" for an API or stub reader, and for a complete answers file.
+
+    Not a footnote, and not always survivable. The note used to be printed *after* the
+    report, so an answers file that matched nothing at all — the wrong dump, a different
+    `--limit`, a different `--k`, anything that changes the prompt and therefore its
+    digest — produced a full table reading 0.0 on every row, with the explanation
+    underneath it. That table is a screenshot waiting to happen. A total mismatch is
+    never a result and is refused outright; a partial one is a real (if damaged) run and
+    is reported above the numbers it damaged.
+    """
+    missing = int(getattr(reader, "missing", 0) or 0)
+    calls = int(getattr(reader, "calls", 0) or 0)
+    if not missing:
+        return ""
+    if missing == calls:
+        raise SystemExit(
+            f"\n  None of the {calls:,} questions in this run had a row in the answers "
+            "file.\n"
+            "  Answers are matched by a digest of the whole prompt, so this means the "
+            "file\n  was produced by a different run — a different --limit, --shuffle, "
+            "--k,\n  --max-chars, --context or --embedder all change the prompt and "
+            "therefore\n  the id. Re-dump with the flags you are about to score with, "
+            "or score with\n  the flags the dump was made with. Scoring this would "
+            "report 0.0 everywhere\n  and mean nothing."
+        )
+    return (f"  {missing:,} of {calls:,} questions had no row in the answers file; each "
+            "was scored\n  as an empty answer, which drags every table below this line "
+            "down.\n")
+
+
 def write_jsonl(path: str | os.PathLike[str], results: Sequence[QuestionResult]) -> None:
     """Per-question output, so a run can be audited rather than trusted."""
     with Path(path).open("w", encoding="utf-8") as out:
@@ -1977,6 +2288,15 @@ def add_common_arguments(parser: Any) -> None:
     parser.add_argument("--context", default="memory",
                         choices=[s.value for s in ContextSource],
                         help="memory (measured) | none (floor) | full (reader ceiling)")
+    # `hashing` is the default because it is what every published number was produced
+    # with, and because a default that changes when an unrelated extra is installed is
+    # not a default. Shared rather than per-runner: `bench/longmemeval.py` had no such
+    # flag and no pin, so its vector leg was whichever `default_embedder()` found — and
+    # a LOCOMO figure and a LongMemEval figure quoted in one paragraph were produced by
+    # two different embedders on any machine with sentence-transformers installed.
+    parser.add_argument("--embedder", default="hashing", choices=["hashing", "local"],
+                        help="vector leg: hashing (offline, the published "
+                             "configuration) or local (sentence-transformers)")
     parser.add_argument("--k", type=int, default=12, help="retrieval budget, results")
     parser.add_argument("--max-chars", type=int, default=4000,
                         help="retrieval budget, characters of context")
@@ -2004,6 +2324,31 @@ def build_reader(args: Any, *, default_model: str = "claude-opus-5",
     if args.reader == "anthropic":
         return AnthropicReader(model=args.model or default_model, effort=args.effort)
     return OpenAIReader(model=args.model or "gpt-4.1")
+
+
+#: The embedder every published number was produced with. Pinned rather than
+#: discovered, so the figure does not depend on what is installed. `HashingEmbedder` is
+#: also what the comparison benches use, which is what makes their numbers commensurable.
+BASELINE_EMBED_DIM = 512
+
+
+def build_embedder(name: str) -> Any:
+    """The vector leg, named explicitly. `hashing` is the published configuration.
+
+    Never `default_embedder()`. That function prefers a sentence-transformers model
+    when one is installed and falls back to hashing when it is not, which makes the
+    measured configuration a property of the machine. Worse, `memvara[rerank]` pulls
+    sentence-transformers in, so installing the extra *in order to measure the
+    reranker* also swaps the embedder and the whole difference lands on the reranker.
+    """
+    if name == "local":
+        from memvara.embed import CachedEmbedder
+        from memvara.embed.local import LocalEmbedder
+
+        return CachedEmbedder(LocalEmbedder())
+    from memvara import CachedEmbedder, HashingEmbedder
+
+    return CachedEmbedder(HashingEmbedder(dim=BASELINE_EMBED_DIM))
 
 
 def build_plan(args: Any) -> RetrievalPlan:

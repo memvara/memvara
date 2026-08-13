@@ -122,6 +122,17 @@ defences, all in `memvara/core.py`, all worth attacking:
   parameter. `states=["retired"]` is the sharper form of the same attack: where
   `include_invalidated=True` at least returns live claims alongside the dead ones,
   `states=["retired"]` builds a prompt out of nothing *but* records we stopped believing.
+- **`include_history=True` is the one bounded exception, and the bound is the whole
+  point.** It renders non-live claims, so it is the same door — but only `ended` ones,
+  never `retired`. That is not a tidying rule: an `ended` value is the fact's own past and
+  we still believe it was true while it was in force, whereas a `retired` value is
+  something we were wrong about or were asked to delete, and putting one in a prompt is
+  the un-delete above. A claim that ended and was *later* retired is `retired` and stays
+  out. The filter is `state == "ended"`, never `state != "live"`, and
+  `tests/test_api.py::test_recall_can_carry_the_past_of_a_fact_without_carrying_a_retired_one`
+  holds all three states in one slot so the looser spelling cannot pass.
+
+  Reaching a retired claim through `recall(include_history=True)` is in scope.
 
 A way to break out of that block, forge a header, or reach a retired claim through
 `recall()` is in scope. A model choosing to follow instructions that are correctly framed

@@ -3,3 +3,7 @@ dist/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Local editor/agent scratch. `.claude/launch.json` names an absolute path on one
+# machine, so it is configuration for a workstation rather than for the project.
+.claude/

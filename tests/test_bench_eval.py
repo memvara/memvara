@@ -437,7 +437,31 @@ def test_the_anthropic_reader_builds_a_default_client_from_the_sdk(monkeypatch):
     sdk = type(sys)("anthropic")
     sdk.Anthropic = lambda: "client"
     monkeypatch.setitem(sys.modules, "anthropic", sdk)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     assert ek.AnthropicReader()._client == "client"
+
+
+def test_an_api_reader_refuses_a_missing_key_before_anything_is_ingested(monkeypatch):
+    """Named variable, named flag, at construction.
+
+    `anthropic.Anthropic()` constructs happily without a key and fails on the first
+    request, which on this harness is after ingesting the whole haystack — several
+    minutes in, reading like a network fault. `openai.OpenAI()` fails at construction
+    but names neither the flag nor the runner. Both now fail the same way, early.
+    """
+    for name, sdk_name, ctor, flag in (
+        ("ANTHROPIC_API_KEY", "anthropic", "Anthropic", "--reader anthropic"),
+        ("OPENAI_API_KEY", "openai", "OpenAI", "--reader openai"),
+    ):
+        sdk = type(sys)(sdk_name)
+        setattr(sdk, ctor, lambda: "client")
+        monkeypatch.setitem(sys.modules, sdk_name, sdk)
+        monkeypatch.delenv(name, raising=False)
+        with pytest.raises(SystemExit) as caught:
+            (ek.AnthropicReader if sdk_name == "anthropic" else ek.OpenAIReader)()
+        assert name in str(caught.value)
+        assert flag in str(caught.value)
+        assert "--reader stub" in str(caught.value)
 
 
 class _FakeOpenAI:
@@ -488,7 +512,67 @@ def test_the_openai_reader_builds_a_default_client_from_the_sdk(monkeypatch):
     sdk = type(sys)("openai")
     sdk.OpenAI = lambda: "client"
     monkeypatch.setitem(sys.modules, "openai", sdk)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     assert ek.OpenAIReader()._client == "client"
+
+
+def test_a_truncated_or_refused_answer_is_counted_rather_than_scored_as_a_wrong_one():
+    """The finding this whole counter exists for.
+
+    A `max_tokens` stop is the reader running out of budget; a `refusal` is a
+    classifier declining with empty content. Both arrive as a short or empty string,
+    score 0.0, and get averaged into a figure presented as answer quality — so a
+    budget that was too small reads as a memory layer that surfaced bad evidence.
+    """
+    ledger = ek.TokenLedger()
+    ledger.record("reader", ek.Answer("part", model="claude-opus-5",
+                                      stop_reason="max_tokens"))
+    ledger.record("reader", ek.Answer("", model="claude-opus-5",
+                                      stop_reason="refusal"))
+    ledger.record("reader", ek.Answer("Lisbon", model="claude-opus-5",
+                                      stop_reason="end_turn"))
+    block = ek.cost_block(ledger)
+    assert "ANSWERS THAT NEVER FINISHED" in block
+    assert "1 reader call(s) stopped on 'max_tokens'" in block
+    assert "1 reader call(s) stopped on 'refusal'" in block
+    assert "raise --max-tokens" in block
+    assert "were not answered" in block
+    # A completed answer is not in the count, and a run of only those says nothing.
+    clean = ek.TokenLedger()
+    clean.record("reader", ek.Answer("Lisbon", model="stub", stop_reason="end_turn"))
+    assert "NEVER FINISHED" not in ek.cost_block(clean)
+
+
+def test_an_unrecognised_stop_reason_is_loud_rather_than_assumed_benign():
+    """`GOOD_STOPS` is an allowlist so a stop reason a provider adds next surfaces
+    instead of being averaged into the score."""
+    ledger = ek.TokenLedger()
+    ledger.record("reader", ek.Answer("", model="stub", stop_reason="pause_turn"))
+    assert "stopped on 'pause_turn'" in ek.cost_block(ledger)
+
+
+def test_the_openai_finish_reason_is_normalised_onto_the_anthropic_spelling():
+    """Chat Completions says `length` where the Messages API says `max_tokens`, and a
+    counter that knew only one spelling would report zero truncations for whichever
+    provider it had not been written against."""
+    client = _FakeOpenAI()
+    client.create = lambda **kw: {"choices": [{"message": {"content": "part"},
+                                               "finish_reason": "length"}]}
+    assert ek.OpenAIReader(client=client).answer("s", "p").stop_reason == "max_tokens"
+
+
+def test_the_anthropic_reader_sends_thinking_only_when_it_was_configured():
+    """`None` means "we did not configure this" and must send nothing — anything else
+    would silently pin a default this file has no business choosing. A value is sent
+    verbatim, because the point of the parameter is that the run can state it."""
+    client = _FakeAnthropic()
+    ek.AnthropicReader(client=client).answer("sys", "prompt")
+    assert "thinking" not in client.seen
+    assert client.seen["max_tokens"] == 4096
+
+    client = _FakeAnthropic()
+    ek.AnthropicReader(client=client, thinking={"type": "disabled"}).answer("s", "p")
+    assert client.seen["thinking"] == {"type": "disabled"}
 
 
 # --- judges ---------------------------------------------------------------------
@@ -1561,6 +1645,39 @@ def test_an_unanswered_item_is_counted_rather_than_quietly_scored_as_a_blank(tmp
     assert reader.missing == 1
 
 
+def test_an_answers_file_with_a_duplicate_id_is_refused_rather_than_last_write_wins(
+        tmp_path):
+    """Two answers to one question, and no way to know which was meant.
+
+    The old behaviour kept whichever copy was last in the file and said nothing, so a
+    file assembled by concatenating two passes scored against an arbitrary one of
+    them.
+    """
+    prompt = ek.build_prompt("Where does Ada live?", "- Ada: Lisbon")
+    answers = tmp_path / "a.jsonl"
+    answers.write_text(
+        json.dumps({"id": ek.item_id(prompt), "answer": "Lisbon"}) + "\n"
+        + json.dumps({"id": ek.item_id(prompt), "answer": "Berlin"}) + "\n",
+        encoding="utf-8")
+    with pytest.raises(SystemExit) as caught:
+        ek.FileReader(answers=answers)
+    assert "more than once" in str(caught.value)
+    assert "lines 1 and 2" in str(caught.value)
+
+
+def test_a_malformed_answers_line_names_the_line_rather_than_raising_from_a_loop(
+        tmp_path):
+    """A hand-written file is the one most likely to have a stray comma in it."""
+    answers = tmp_path / "a.jsonl"
+    answers.write_text('{"id": "a", "answer": "x"}\n{"id": "b",}\n', encoding="utf-8")
+    with pytest.raises(SystemExit, match=r"a\.jsonl:2 is not valid JSON"):
+        ek.FileReader(answers=answers)
+
+    answers.write_text('{"answer": "x"}\n', encoding="utf-8")
+    with pytest.raises(SystemExit, match=r'a\.jsonl:1 has no "id"'):
+        ek.FileReader(answers=answers)
+
+
 def test_the_file_reader_refuses_a_configuration_with_no_phase_or_with_both(tmp_path):
     with pytest.raises(SystemExit, match="exactly one"):
         ek.FileReader()
@@ -1633,11 +1750,28 @@ def test_locomo_counts_a_question_the_annotators_left_no_evidence_for():
 
 
 def test_locomo_reports_how_many_questions_no_answer_came_back_for(tmp_path):
-    answers = tmp_path / "a.jsonl"
-    answers.write_text("", encoding="utf-8")
+    """A partly-answered file still scores, and says so above the tables it damaged."""
+    answers = _partial_answers(locomo.main, tmp_path, ["--dry-run"])
     text = _run_cli(locomo.main, ["--dry-run", "--reader", "file", "--answers",
                                   str(answers)])
-    assert "5 of 5 questions had no row" in text
+    assert "4 of 5 questions had no row" in text
+    # Above the report, not under it: the note has to be read before the numbers it
+    # damaged. Anchored on the scored row rather than on "category", which also
+    # appears in the `--dry-run` banner well above either.
+    assert text.index("had no row") < text.index("all answerable")
+
+
+def test_an_answers_file_that_matches_nothing_is_refused_rather_than_scored(tmp_path):
+    """Zero overlap means the wrong file, not a bad reader.
+
+    The old behaviour printed a full table reading 0.0 on every row and put the
+    explanation underneath it, which is a screenshot waiting to happen.
+    """
+    answers = tmp_path / "a.jsonl"
+    answers.write_text("", encoding="utf-8")
+    with pytest.raises(SystemExit, match="produced by a different run"):
+        _run_cli(locomo.main, ["--dry-run", "--reader", "file", "--answers",
+                               str(answers)])
 
 
 def test_locomo_leaves_the_adversarial_category_out_of_retrieval_scoring_entirely():
@@ -1794,14 +1928,30 @@ def test_a_longmemeval_dump_run_also_stops_before_reporting(tmp_path):
 
 
 def test_a_longmemeval_run_reports_how_many_questions_no_answer_came_back_for(tmp_path):
-    answers = tmp_path / "a.jsonl"
-    answers.write_text("", encoding="utf-8")
+    answers = _partial_answers(lme.main, tmp_path, ["--dry-run"])
     text = _run_cli(lme.main, ["--dry-run", "--reader", "file", "--answers",
                                str(answers)])
-    assert "3 of 3 questions had no row" in text
+    assert "2 of 3 questions had no row" in text
 
 
 # --- helpers --------------------------------------------------------------------
+
+
+def _partial_answers(main, tmp_path, argv) -> Path:
+    """Dump the questions this run would ask, then answer exactly the first one.
+
+    Written by round-tripping the runner rather than by hand-computing digests: the
+    id is a hash of the whole prompt, so a hand-written fixture would go stale the
+    moment anything upstream changed the prompt by a character, and would go stale
+    *silently* — as an unrelated all-missing run rather than a failing assertion.
+    """
+    dump = tmp_path / f"{main.__module__}.jsonl"
+    _run_cli(main, [*argv, "--reader", "file", "--dump", str(dump)])
+    first = json.loads(dump.read_text(encoding="utf-8").splitlines()[0])
+    answers = tmp_path / f"{main.__module__}.answers.jsonl"
+    answers.write_text(json.dumps({"id": first["id"], "answer": "Lisbon"}) + "\n",
+                       encoding="utf-8")
+    return answers
 
 
 def _run_cli(main, argv) -> str:

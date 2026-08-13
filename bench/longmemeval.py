@@ -84,9 +84,16 @@ slice taken without it prints a warning rather than quietly reporting a biased n
 
 ## What a real run costs
 
-The reader only ever sees the retrieval budget, so per question it is roughly 1.2k input
-and under 100 output tokens: across all 500 questions about **$4 on `claude-opus-5`**,
-plus roughly $1 for a `--judge llm` pass at much shorter prompts.
+**Measured: ~$3 to ~$9 on `claude-opus-5` for all 500 questions**, plus $1–2 for a
+`--judge llm` pass. See `evalkit`'s "What a run actually costs" section, which is the
+one place the procedure and the numbers live.
+
+The reader only ever sees the retrieval budget: 3,639 characters ≈ 985 input tokens
+per question, measured from a dumped slice rather than assumed. Unlike LOCOMO's, that
+figure is close to the 1.2k this file used to claim — these sessions are long enough to
+approach the `--max-chars` cap. The output side is the same correction as there: the
+old "under 100 output tokens" predates `claude-opus-5` thinking by default and billing
+thinking at the output rate, and thinking is what the bill turns on.
 
 Ingestion is the number that will surprise you. With no `llm=` configured it is free.
 With an extraction model on `--dataset s` it is 500 × ~115K tokens ≈ **57M input tokens
@@ -118,6 +125,7 @@ from typing import Any, Callable, Sequence
 import evalkit as ek
 
 from memvara import Memvara, NullLLM
+from memvara.embed import embedder_name
 
 QUESTION_TYPES = (
     "single-session-user",
@@ -318,16 +326,27 @@ def fixture() -> list[Instance]:
 
 
 def build_memory(user: str, budget: ek.RetrievalBudget, llm: Any = None,
-                 read_k: int | None = None) -> Memvara:
+                 read_k: int | None = None, embedder: Any = None) -> Memvara:
     """One store, scoped to a user.
 
     `read_max_episodes=k` for the same reason as in `bench/locomo.py`: raw turns are
     capped at 3 by default because they are meant to be a tail on a fact list, and a
     conversation benchmark needs them as a first-class result. `read_k` raises the cap
     for `--score retrieval`, whose recall curve reads deeper than the budget.
+
+    **`embedder` must be passed and must be recorded**, for the reason set out on
+    `locomo.build_memory`. This file was the last one in `bench/` that did not: it had
+    no `--embedder` flag and no pin, so its vector leg was whatever `default_embedder()`
+    happened to return — `LocalEmbedder` on any machine with sentence-transformers
+    installed, `HashingEmbedder` everywhere else. The pairing is what makes it bad
+    rather than merely unpinned: LOCOMO pinned hashing and this did not, so the two
+    figures quoted side by side in the README were produced by different embedders.
+    `None` is still accepted and still means `default_embedder()`, because
+    `build_memory(qid, budget)` is a documented two-argument call; `main()` always
+    passes one.
     """
     return Memvara(user=user, llm=llm if llm is not None else NullLLM(),
-                  read_max_episodes=read_k or budget.k)
+                  embedder=embedder, read_max_episodes=read_k or budget.k)
 
 
 def answer_one(
@@ -386,13 +405,14 @@ def run(
     ledger: ek.TokenLedger | None = None,
     stem: Callable[[str], str] | None = None,
     share_store: bool = False,
+    embedder: Any = None,
 ) -> tuple[list[ek.QuestionResult], ek.IngestStats, ek.RetrievalStats, ek.TokenLedger]:
     budget = budget or ek.RetrievalBudget()
     ledger = ledger or ek.TokenLedger()
     totals, read_stats, results = ek.IngestStats(), ek.RetrievalStats(), []
 
     if share_store:
-        shared = build_memory("shared", budget, llm)
+        shared = build_memory("shared", budget, llm, embedder=embedder)
         # Sessions are deduplicated by their dataset id, so a session that appears in
         # several questions' haystacks is written once. Whether that actually saves
         # anything depends on how much the haystacks overlap in `longmemeval_s`, which
@@ -419,7 +439,7 @@ def run(
         return results, totals, read_stats, ledger
 
     for item in items:
-        mem = build_memory(item.qid, budget, llm)
+        mem = build_memory(item.qid, budget, llm, embedder=embedder)
         try:
             stats = ek.ingest(mem, item.sessions)
             stats.undated_turns = item.undated
@@ -483,6 +503,7 @@ def run_retrieval(
     plan: ek.RetrievalPlan | None = None,
     llm: Any = None,
     share_store: bool = False,
+    embedder: Any = None,
 ) -> tuple[list[ek.RetrievalScore], ek.IngestStats, ek.RetrievalStats, Counter]:
     """`run()`'s ingest and retrieval, scored with no reader and no judge."""
     budget = budget or ek.RetrievalBudget()
@@ -492,7 +513,8 @@ def run_retrieval(
     excluded: Counter = Counter()
 
     if share_store:
-        shared = build_memory("shared", budget, llm, read_k=plan.depth(budget))
+        shared = build_memory("shared", budget, llm, read_k=plan.depth(budget),
+                              embedder=embedder)
         labels: dict[str, str] = {}
         seen: set[str] = set()
         try:
@@ -514,7 +536,8 @@ def run_retrieval(
         return scores, totals, read_stats, excluded
 
     for item in items:
-        mem = build_memory(item.qid, budget, llm, read_k=plan.depth(budget))
+        mem = build_memory(item.qid, budget, llm, read_k=plan.depth(budget),
+                           embedder=embedder)
         per_item: dict[str, str] = {}
         try:
             stats = ek.ingest(mem, item.sessions, per_item)
@@ -654,11 +677,17 @@ def main(argv: Sequence[str] | None = None,
 
     budget = ek.RetrievalBudget(k=args.k, max_chars=args.max_chars,
                                 include_episodes=not args.no_episodes)
+    # Printed unconditionally, in both scoring modes, including for the default. This
+    # file had no `--embedder` at all and took `default_embedder()`, so its vector leg
+    # was a property of what happened to be pip-installed and no report said which.
+    embedder = ek.build_embedder(args.embedder)
+    out(f"\n  --embedder {args.embedder}: {embedder_name(embedder)}")
 
     if args.score == "retrieval":
         plan = ek.build_plan(args)
         scores, ingest_stats, read_stats, excluded = run_retrieval(
-            items, budget=budget, plan=plan, share_store=args.share_store)
+            items, budget=budget, plan=plan, share_store=args.share_store,
+            embedder=embedder)
         out(ek.retrieval_report(
             scores, ingest_stats, read_stats,
             title=f"LongMemEval ({args.dataset})", plan=plan, budget=budget,
@@ -680,19 +709,19 @@ def main(argv: Sequence[str] | None = None,
         items, reader=reader, judge=judge, budget=budget,
         source=ek.ContextSource(args.context),
         ledger=ek.build_ledger(args, reader), stem=ek.build_stemmer(args),
-        share_store=args.share_store,
+        share_store=args.share_store, embedder=embedder,
     )
     if getattr(reader, "dumping", False):
         # No answers exist yet, so every result is empty. Printing the table would
         # print a run that scored zero on everything and looked like a finding.
         out(reader.finish())
         return 0
+    note = ek.answers_note(reader)
+    if note:
+        out("\n" + note)
     out(report(results, ingest_stats, read_stats, ledger, reader=reader, judge=judge,
                budget=budget, source=ek.ContextSource(args.context),
                dataset=args.dataset, share_store=args.share_store))
-    if getattr(reader, "missing", 0):
-        out(f"  {reader.missing:,} of {reader.calls:,} questions had no row in the "
-            f"answers file; each was scored as an empty answer.\n")
     if args.out:
         ek.write_jsonl(args.out, results)
         out(f"  per-question results: {args.out}\n")

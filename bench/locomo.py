@@ -83,13 +83,20 @@ prefixed into the text, one `add()` per session, timestamped from
 
 ## What a real run costs
 
-Per conversation the reader sees a question plus at most `--max-chars` of context, so
-roughly 1.2k input tokens and under 100 output tokens per question. Across all 1,986
-questions that is on the order of 2.5M input and 0.2M output tokens: about **$17 on
-`claude-opus-5`** at $5/$25 per MTok, or about $10 on `claude-sonnet-5`. Adding
-`--judge llm` roughly doubles the call count at much smaller prompts — budget another
-$3–5. The 1,540-question answerable subset is proportionally cheaper. Ingestion costs
-nothing unless an extraction model is configured.
+**Measured: ~$7 to ~$31 on `claude-opus-5` for all 1,986 questions**, plus $2–8 for a
+`--judge llm` pass. The spread is thinking, not answers — see `evalkit`'s "What a run
+actually costs" section, which is the one place the procedure and the numbers live.
+
+The figure here used to be a flat "$17", derived from an assumed 1.2k input tokens per
+question. The measured prompt is **2,360 characters, ≈640 tokens** — the retrieved
+block does not come close to filling `--max-chars 4000`, because LOCOMO turns are
+short. So the input estimate was about twice the truth, and the output estimate
+("under 100 tokens") predated `claude-opus-5` thinking by default and billing those
+tokens at the output rate. The two errors ran in opposite directions, which is how a
+wrong number survived: it landed in a plausible place.
+
+Ingestion costs nothing unless an extraction model is configured. The 1,540-question
+answerable subset is proportionally cheaper.
 
 ## What this does not establish
 
@@ -394,22 +401,11 @@ def build_memory(sample: Sample, budget: ek.RetrievalBudget, llm: Any = None,
     )
 
 
-#: The embedder every published LOCOMO number was produced with. Pinned rather than
-#: discovered, so the figure does not depend on what is installed. `HashingEmbedder` is
-#: also what the comparison benches use, which is what makes their numbers commensurable.
-BASELINE_EMBED_DIM = 512
-
-
-def build_embedder(name: str) -> Any:
-    """The vector leg, named explicitly. `hashing` is the published configuration."""
-    if name == "local":
-        from memvara.embed import CachedEmbedder
-        from memvara.embed.local import LocalEmbedder
-
-        return CachedEmbedder(LocalEmbedder())
-    from memvara import CachedEmbedder, HashingEmbedder
-
-    return CachedEmbedder(HashingEmbedder(dim=BASELINE_EMBED_DIM))
+#: Both moved to `evalkit` when `bench/longmemeval.py` turned out to have the same
+#: exposure and no flag at all. Re-exported rather than relocated silently, because
+#: `locomo.BASELINE_EMBED_DIM` is the name the write-ups use.
+BASELINE_EMBED_DIM = ek.BASELINE_EMBED_DIM
+build_embedder = ek.build_embedder
 
 
 def answer_one(
@@ -470,13 +466,29 @@ def run(
     llm: Any = None,
     ledger: ek.TokenLedger | None = None,
     stem: Callable[[str], str] | None = None,
+    reranker: Any = None,
+    rerank_top_n: int = 0,
+    embedder: Any = None,
 ) -> tuple[list[ek.QuestionResult], ek.IngestStats, ek.RetrievalStats, ek.TokenLedger]:
+    """The answer pipeline. Takes the same read-path configuration as `run_retrieval`.
+
+    `embedder`, `reranker` and `rerank_top_n` are parameters here for one reason: they
+    were not, and `main()` built them only on the `--score retrieval` branch. So
+    `--embedder hashing` — the documented, published configuration — reached
+    `build_memory(sample, budget, llm)` as nothing at all on the answer path, and
+    `Memvara` fell back to `default_embedder()`, which prefers sentence-transformers
+    when it is installed. `--rerank 20` was accepted, printed nowhere, and applied
+    never. Two runs differing only in those flags produced byte-identical answers,
+    which is how this was found. An answer-quality number is the expensive one to
+    produce, and it was the one whose read path could not be stated.
+    """
     budget = budget or ek.RetrievalBudget()
     ledger = ledger or ek.TokenLedger()
     totals, read_stats, results = ek.IngestStats(), ek.RetrievalStats(), []
 
     for sample in samples:
-        mem = build_memory(sample, budget, llm)
+        mem = build_memory(sample, budget, llm, reranker=reranker,
+                           rerank_top_n=rerank_top_n, embedder=embedder)
         # Once per conversation, not once per question: joining 590 turns for each of
         # ~200 questions is the kind of accidental O(n²) that turns a ten-minute run
         # into an hour and gets blamed on the memory layer.
@@ -717,12 +729,6 @@ def main(argv: Sequence[str] | None = None,
                         choices=["coverage", "null", "cross-encoder"],
                         help="which reranker --rerank uses; cross-encoder needs "
                              "pip install 'memvara[rerank]' and downloads a model")
-    # `hashing` is the default because it is what every published LOCOMO number was
-    # produced with, and because a default that changes when an unrelated extra is
-    # installed is not a default.
-    parser.add_argument("--embedder", default="hashing", choices=["hashing", "local"],
-                        help="vector leg: hashing (offline, the published "
-                             "configuration) or local (sentence-transformers)")
     parser.add_argument("--rerank-model", default="", metavar="ID",
                         help="cross-encoder model id (default: "
                              "cross-encoder/ms-marco-MiniLM-L-6-v2). Only meaningful "
@@ -757,19 +763,23 @@ def main(argv: Sequence[str] | None = None,
     budget = ek.RetrievalBudget(k=args.k, max_chars=args.max_chars,
                                 include_episodes=not args.no_episodes)
 
+    # Built for both scoring modes, and announced in both. These used to live inside
+    # the `--score retrieval` branch, so the answer path silently took whatever
+    # `default_embedder()` returned and ignored `--rerank` outright — see `run()`.
+    embedder = build_embedder(args.embedder)
+    # Printed unconditionally, including for the default. A number whose vector leg
+    # is not stated is not reproducible, and this one used to be decided by whether
+    # sentence-transformers happened to be installed.
+    out(f"\n  --embedder {args.embedder}: {embedder_name(embedder)}")
+    reranker = build_reranker(args)
+    if reranker is not None:
+        out(f"  --rerank {args.rerank}: {args.reranker} reranker "
+            f"({getattr(reranker, 'name', type(reranker).__name__)}) over the top "
+            f"{args.rerank} fused candidates, cut to k afterwards. The default "
+            "configuration has no reranker at all.")
+
     if args.score == "retrieval":
         plan = ek.build_plan(args)
-        embedder = build_embedder(args.embedder)
-        # Printed unconditionally, including for the default. A number whose vector leg
-        # is not stated is not reproducible, and this one used to be decided by whether
-        # sentence-transformers happened to be installed.
-        out(f"\n  --embedder {args.embedder}: {embedder_name(embedder)}")
-        reranker = build_reranker(args)
-        if reranker is not None:
-            out(f"  --rerank {args.rerank}: {args.reranker} reranker "
-                f"({getattr(reranker, 'name', type(reranker).__name__)}) over the top "
-                f"{args.rerank} fused candidates, cut to k afterwards. The default "
-                "configuration has no reranker at all.")
         scores, ingest_stats, read_stats, excluded = run_retrieval(
             samples, budget=budget, plan=plan, limit=args.limit,
             reranker=reranker, rerank_top_n=args.rerank, embedder=embedder)
@@ -790,6 +800,7 @@ def main(argv: Sequence[str] | None = None,
         samples, reader=reader, judge=judge, budget=budget,
         source=ek.ContextSource(args.context), limit=args.limit,
         ledger=ek.build_ledger(args, reader), stem=ek.build_stemmer(args),
+        reranker=reranker, rerank_top_n=args.rerank, embedder=embedder,
     )
     if getattr(reader, "dumping", False):
         # The dump phase has no answers yet, so every result is empty. Printing the
@@ -797,11 +808,13 @@ def main(argv: Sequence[str] | None = None,
         # finding.
         out(reader.finish())
         return 0
+    # Before the report, not after it: a damaged run has to be labelled above the
+    # numbers it damaged, and a run with no matching answers at all raises here.
+    note = ek.answers_note(reader)
+    if note:
+        out("\n" + note)
     out(report(results, ingest_stats, read_stats, ledger, reader=reader, judge=judge,
                budget=budget, source=ek.ContextSource(args.context), stemmed=args.stem))
-    if getattr(reader, "missing", 0):
-        out(f"  {reader.missing:,} of {reader.calls:,} questions had no row in the "
-            f"answers file; each was scored as an empty answer.\n")
     if args.out:
         ek.write_jsonl(args.out, results)
         out(f"  per-question results: {args.out}\n")
