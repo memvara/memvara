@@ -255,8 +255,10 @@ class Memory:
             )
         receipt = self.memvara.add(self._to_episodes(messages, scope, metadata))
         rows = [{"id": c.id, "memory": c.text, "event": "ADD"} for c in receipt.added]
+        # `closed`, not `ended`: mem0's vocabulary has one word for both readings, so a
+        # claim the world moved past and a claim we got wrong both land as DELETE here.
         rows += [{"id": c.id, "memory": c.text, "event": "DELETE"}
-                 for c in receipt.invalidated]
+                 for c in receipt.closed]
         # mem0 emits NONE for a turn that changed nothing. Memvara's equivalent is a
         # reinforcement: the fact was already believed and is now believed harder.
         rows += [{"id": c.id, "memory": c.text, "event": "NONE"}
@@ -383,14 +385,26 @@ class Memory:
 
         `explain=True` attaches memvara's retrieval explanation, which is per-leg (vector
         rank, BM25 rank, recency, salience) rather than mem0's prose.
+
+        `rerank=True` is a **requirement**, not a switch: it asserts that a cross-encoder
+        pass must have run, and it is satisfiable only when the wrapped `Memvara` was
+        built with one (`Memvara(read_reranker=...)`, see `memvara.rerank`). Reranking is
+        opt-in at construction because it is a model, and a keyword argument cannot
+        conjure one — so the honest answers are "it ran" and a refusal that says how to
+        make it run. `rerank=False`, mem0's default and what an unmodified call site
+        passes, expresses no opinion and leaves whatever the instance is configured with
+        exactly as it is.
         """
         _reject_entity_kwargs(legacy, "search")
-        if rerank:
+        if rerank and getattr(self.memvara.reader, "reranker", None) is None:
             raise Mem0CompatError(
-                "rerank=True asks for a cross-encoder pass; memvara has no reranker "
-                "model. Its ranking already fuses BM25 with vector search and rescores "
-                "by recency, confidence and salience — pass explain=True to see each "
-                "leg's contribution."
+                "rerank=True asks for a cross-encoder pass, and this Memvara has no "
+                "reranker configured. Reranking is a model, so it is opt-in at "
+                "construction: Memvara(read_reranker=CrossEncoderReranker()) after "
+                "pip install 'memvara[rerank]', or CoverageReranker() for a lexical one "
+                "that needs no download — see memvara.rerank. Without it the ranking "
+                "still fuses BM25 with vector search and rescores by recency, confidence "
+                "and salience — pass explain=True to see each leg's contribution."
             )
         results = self.memvara.search(
             query, k=top_k, min_score=0.0 if threshold is None else threshold,

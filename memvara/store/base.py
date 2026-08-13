@@ -21,7 +21,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Iterable, Protocol, Sequence, runtime_checkable
+from typing import (TYPE_CHECKING, Collection, Iterable, Literal, Protocol, Sequence,
+                    runtime_checkable)
 
 import numpy as np
 
@@ -31,6 +32,216 @@ if TYPE_CHECKING:
     # Only for annotations: a `Store` implementation should not have to import
     # the schema module to satisfy the protocol.
     from ..schema import PredicateSpec
+
+
+# --- the three states, and the SQL that selects them ----------------------------
+
+#: One of the three things a claim can be, in the order `Claim.state` decides them.
+#: `live` is neither clock closed, `ended` is valid time closed (the world changed) and
+#: `retired` is transaction time closed (the record was wrong). This is the vocabulary
+#: `states=` accepts everywhere it appears, and it must stay word-for-word what
+#: `Claim.state` returns — a filter naming a state the model does not have, or missing
+#: one it does, is a population nobody can ask for.
+ClaimState = Literal["live", "ended", "retired"]
+
+#: Every legal state, as one tuple. Doubles as the canonical *order*: a resolved
+#: `states=` is always sorted into this order, so one requested population always
+#: compiles to one string rather than to however many orderings the caller could have
+#: written it in.
+STATES: tuple[ClaimState, ...] = ("live", "ended", "retired")
+
+#: What `states=` means when nothing is passed, on the read path — and equally what
+#: `include_invalidated=False` means there. See `resolve_states`.
+LIVE_ONLY: tuple[ClaimState, ...] = ("live",)
+
+#: The same, for the maintenance walk `iter_claims`, whose unflagged view has always
+#: been "every row we still believe" rather than "every row in force right now". See
+#: `Store.iter_claims`.
+BELIEVED: tuple[ClaimState, ...] = ("live", "ended")
+
+
+def resolve_states(states: Collection[str] | None = None,
+                   include_invalidated: bool | None = None,
+                   *, default: Collection[str] = LIVE_ONLY) -> tuple[ClaimState, ...]:
+    """Turn a caller's `states=` / `include_invalidated=` into one canonical tuple.
+
+    The single place the alias is applied, so no surface can invent its own reading of
+    the older flag. `include_invalidated` is **not deprecated** and emits no warning:
+    the core is tagged v0.1.0, `pyproject.toml` sets
+    ``filterwarnings = ["error::DeprecationWarning"]``, and a warning here would turn
+    every existing call site in the suite red for a spelling that still works perfectly.
+    It is an alias, permanently, and nothing more.
+
+    `default` is what the method returns when neither is given, and equally what
+    `include_invalidated=False` means on it — they are the same view by definition, which
+    is why one parameter names both and they cannot drift apart. It is `("live",)` on the
+    read path and `("live", "ended")` on `iter_claims`, whose unflagged view has always
+    been the belief axis alone.
+
+    Passing both raises rather than picking one. There is no reading of
+    `states=["retired"], include_invalidated=False` in which one of the two is not being
+    ignored, and an ambiguous call is a bug at the call site rather than something to
+    resolve on the caller's behalf.
+
+    >>> resolve_states()
+    ('live',)
+    >>> resolve_states(include_invalidated=True)
+    ('live', 'ended', 'retired')
+    >>> resolve_states(["retired", "live"])          # canonical order, not call order
+    ('live', 'retired')
+    >>> resolve_states(["retired"], include_invalidated=True)   # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+    ValueError: pass states= or include_invalidated=, not both...
+    """
+    if states is not None and include_invalidated is not None:
+        raise ValueError(
+            "pass states= or include_invalidated=, not both. include_invalidated is an "
+            f"alias — False means states={tuple(default)!r} and True means "
+            f"states={STATES!r} — so the two spellings disagree about which population "
+            "is wanted, and picking either would answer a question you did not ask."
+        )
+    if include_invalidated is not None:
+        return _canonical(STATES if include_invalidated else default)
+    return _canonical(default if states is None else states)
+
+
+def _canonical(states: Collection[str]) -> tuple[ClaimState, ...]:
+    """Validate a requested population and put it in `STATES` order."""
+    wanted = set(states)
+    unknown = sorted((s for s in wanted if s not in STATES), key=repr)
+    if unknown:
+        raise ValueError(
+            f"{unknown[0]!r} is not a claim state. Use any non-empty subset of "
+            f"{STATES!r}: 'live' is neither clock closed, 'ended' is a fact that stopped "
+            "being true, 'retired' is a record we stopped believing."
+        )
+    if not wanted:
+        raise ValueError(
+            f"states= must name at least one of {STATES!r}. An empty set is a filter "
+            "that can only return nothing, and a read that silently returns nothing is "
+            "the failure this parameter exists to remove."
+        )
+    return tuple(s for s in STATES if s in wanted)
+
+
+def _either(*parts: str) -> str:
+    """`a OR b`, parenthesised inside *and* out so precedence is never load-bearing.
+
+    The outer parentheses are the ones that matter. `AND` binds tighter than `OR`, so a
+    bare disjunction dropped into a conjunction re-associates silently:
+    `floor AND retired OR in_force` is `(floor AND retired) OR in_force`, which lets a
+    row through on the world clause alone — the belief floor gone, and gone in the
+    direction that answers "what did we believe in March" with something first heard in
+    July. Nothing fails; the answer is merely from the future.
+    """
+    return (parts[0] if len(parts) == 1
+            else "(" + " OR ".join(f"({p})" for p in parts) + ")")
+
+
+def state_predicate(at: str = "?", *, states: Collection[str] | None = None,
+                    alias: str = "") -> tuple[str, tuple[str, ...]]:
+    """SQL for "in one of `states` at `at`", plus the axis each bind marker reads.
+
+    The general form of `live_predicate`, which is this called with one state. `at` is
+    the **SQL expression** for the instant and is substituted at every marker, exactly as
+    there: a bind marker (`"?"`, `"%s"`) or a server clock (`"now()"`).
+
+    The second element is the half `live_predicate` could only document. It names the
+    clock behind each marker in order — `("known", "known", "valid", "valid")` for the
+    live-only case, which is the bind order that function's docstring states — so a
+    backend binds by *reading* it rather than by knowing it, and the one error a diagonal
+    query cannot reveal (belief instant bound onto the world columns, invisible whenever
+    `valid_at == known_at`) stops being expressible. Every combination keeps the belief
+    markers ahead of the world markers, so the discipline generalises rather than
+    changing shape per subset.
+
+    **The three states do not tile the store, and asking for all three is the audit
+    view.** A claim recorded but not yet in force at `valid_at` — a fact scheduled to
+    start next month — is named by none of them, because `Claim.state` is absolute while
+    this predicate is as-of. So the complete set does not compile to the union of its
+    parts: it compiles to the belief floor alone, which readmits that row and leaves
+    `valid_at` with nothing to constrain. That is exactly, and deliberately, the
+    semantics `include_invalidated=True` has always had.
+
+    >>> sql, axes = state_predicate("now()")
+    >>> print(sql.replace(" AND ", "\\n AND "))
+    (recorded_at <= now()
+     AND (invalidated_at IS NULL OR invalidated_at > now())
+     AND valid_from <= now()
+     AND (valid_to IS NULL OR valid_to > now()))
+    >>> axes
+    ('known', 'known', 'valid', 'valid')
+    >>> state_predicate("?", states=["retired"])
+    ('(recorded_at <= ? AND invalidated_at IS NOT NULL AND invalidated_at <= ?)', ('known', 'known'))
+    >>> state_predicate("%s", states=STATES, alias="c")
+    ('(c.recorded_at <= %s)', ('known',))
+    """
+    a = f"{alias}." if alias else ""
+    wanted = resolve_states(states)
+    floor = f"{a}recorded_at <= {at}"
+    if len(wanted) == len(STATES):
+        return f"({floor})", ("known",)
+
+    # The world half, per requested subset of the two world-time states. `live ∪ ended`
+    # collapses to the valid-time *floor*: a closure never lands before the interval it
+    # closes (see `types.close_out`), so `valid_to <= V` already implies `valid_from <= V`
+    # and the two intervals between them cover everything that had started by `V`.
+    world, world_axes = {
+        ("live",): (f"{a}valid_from <= {at} "
+                    f"AND ({a}valid_to IS NULL OR {a}valid_to > {at})",
+                    ("valid", "valid")),
+        ("ended",): (f"{a}valid_to IS NOT NULL AND {a}valid_to <= {at}", ("valid",)),
+        ("live", "ended"): (f"{a}valid_from <= {at}", ("valid",)),
+        (): ("", ()),
+    }[tuple(s for s in wanted if s != "retired")]
+    axes = ("known", "known") + world_axes
+
+    if "retired" not in wanted:
+        not_retired = f"({a}invalidated_at IS NULL OR {a}invalidated_at > {at})"
+        return f"({floor} AND {not_retired} AND {world})", axes
+    # With `retired` wanted, the "still believed" guard on the other half is redundant:
+    # the two are exact complements, so `retired OR (believed AND in_force)` is just
+    # `retired OR in_force`. The retired disjunct is written first so its belief marker
+    # stays ahead of the world markers.
+    retired = f"{a}invalidated_at IS NOT NULL AND {a}invalidated_at <= {at}"
+    return f"({floor} AND {_either(*filter(None, (retired, world)))})", axes
+
+
+def stored_state_predicate(states: Collection[str] | None = None, *,
+                           prefix: str = "") -> str:
+    """`Claim.state` as SQL: the two closure columns, and no instant at all.
+
+    The member of this family for a walk that has no clock to read. `iter_claims` pages
+    over rows rather than answering a question about a moment, and its filter has always
+    been the *stored* state — which is what `Claim.state` reports, and which differs from
+    `state_predicate` exactly where a timestamp is in the future: a claim retired next
+    October is `retired` here and still believed there.
+
+    Returns `""` for the complete set, meaning "no filter" — the caller drops it rather
+    than emitting a tautology into a paged scan.
+
+    `prefix` is placed before every column name. `iter_claims` passes `"+"`, which is
+    load-bearing rather than decorative: see `SQLiteStore._iter_rows` for why an
+    index-usable term there makes a full walk quadratic.
+
+    >>> stored_state_predicate(["retired"])
+    'invalidated_at IS NOT NULL'
+    >>> stored_state_predicate(["live"], prefix="+")
+    '+invalidated_at IS NULL AND +valid_to IS NULL'
+    >>> stored_state_predicate(STATES)
+    ''
+    """
+    wanted = resolve_states(states)
+    if len(wanted) == len(STATES):
+        return ""
+    return _either(*(
+        {
+            "live": f"{prefix}invalidated_at IS NULL AND {prefix}valid_to IS NULL",
+            "ended": f"{prefix}invalidated_at IS NULL AND {prefix}valid_to IS NOT NULL",
+            "retired": f"{prefix}invalidated_at IS NOT NULL",
+        }[s]
+        for s in wanted
+    ))
 
 
 def live_predicate(at: str = "?", *, include_invalidated: bool = False,
@@ -63,6 +274,12 @@ def live_predicate(at: str = "?", *, include_invalidated: bool = False,
     leaving one marker for the belief floor — see `SQLStore._live_clause` for why that
     floor is the clause which never lifts. `alias` prefixes every column, for a join.
 
+    **This is now the two-state alias of `state_predicate`**, which takes the states
+    themselves and can therefore express the one population this spelling cannot: the
+    records we stopped believing, alone, which is what a correction audit reads. Both
+    remain supported and neither is deprecated; this one drops the axis list, so a
+    caller that needs to bind markers should prefer the general form.
+
     >>> print(live_predicate("now()").replace(" AND ", "\\n AND "))
     (recorded_at <= now()
      AND (invalidated_at IS NULL OR invalidated_at > now())
@@ -71,15 +288,9 @@ def live_predicate(at: str = "?", *, include_invalidated: bool = False,
     >>> live_predicate("%s", include_invalidated=True, alias="c")
     '(c.recorded_at <= %s)'
     """
-    a = f"{alias}." if alias else ""
-    if include_invalidated:
-        return f"({a}recorded_at <= {at})"
-    return (
-        f"({a}recorded_at <= {at} "
-        f"AND ({a}invalidated_at IS NULL OR {a}invalidated_at > {at}) "
-        f"AND {a}valid_from <= {at} "
-        f"AND ({a}valid_to IS NULL OR {a}valid_to > {at}))"
-    )
+    return state_predicate(
+        at, states=resolve_states(include_invalidated=include_invalidated), alias=alias,
+    )[0]
 
 
 @runtime_checkable
@@ -305,26 +516,41 @@ class Store(Protocol):
         """
         ...
 
-    # The three time-travelling primitives. `valid_at`, `known_at` and
+    # The three time-travelling primitives. `valid_at`, `known_at`, `states` and
     # `include_invalidated` are keyword-only, deliberately: they replaced a positional
     # `as_of`, and a call site that still passes an instant third would otherwise be
     # silently reinterpreted as `valid_at` — a wrong answer with no error, which is the
     # single failure mode this whole change exists to remove.
+    #
+    # **`states` names the population, `include_invalidated` is its two-valued alias.**
+    # The flag is one boolean over three states, so it can say "live" and "all of them"
+    # and nothing else — and the population it cannot name is the one a correction audit
+    # reads, the records we stopped believing. Client-side filtering is not the way out:
+    # these are paginated, so filtering after `limit` under-returns silently.
+    #
+    # `None` on `states` means the method's own default (`("live",)` here), `None` on the
+    # flag means "not passed", and passing both raises. Nothing is deprecated — see
+    # `resolve_states`, which is the one place either is interpreted.
 
     def candidate_ids(self, scopes: Sequence[Scope], *,
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
-                      include_invalidated: bool = False) -> list[str]: ...
+                      states: Collection[str] | None = None,
+                      include_invalidated: bool | None = None) -> list[str]: ...
 
     def lexical_search(self, query: str, scopes: Sequence[Scope], limit: int, *,
                        valid_at: datetime | None = None,
                        known_at: datetime | None = None,
-                       include_invalidated: bool = False) -> list[tuple[str, float]]: ...
+                       states: Collection[str] | None = None,
+                       include_invalidated: bool | None = None
+                       ) -> list[tuple[str, float]]: ...
 
     def vector_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int, *,
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
-                      include_invalidated: bool = False) -> list[tuple[str, float]]: ...
+                      states: Collection[str] | None = None,
+                      include_invalidated: bool | None = None
+                      ) -> list[tuple[str, float]]: ...
 
     # --- episode retrieval ------------------------------------------------
     #
@@ -385,9 +611,17 @@ class Store(Protocol):
         """
         ...
 
-    def erase_claim(self, claim_id: str, *, sources: bool = False) -> bool:
-        """Irreversibly erase one claim — row, text index, vector. Returns whether it
-        existed.
+    def erase_claim(self, claim_id: str, *, sources: bool = False) -> dict[str, int]:
+        """Irreversibly erase one claim — row, text index, vector. Returns per-table
+        counts, the same four keys `purge` returns: `claims`, `episodes`, `embeddings`,
+        `entities`.
+
+        **The same shape as `purge` because it is the same kind of answer.** Both are
+        erasure paths and both are asked to evidence what they erased; this one used to
+        report a bare `bool`, so of the two the per-claim path — the one an individual
+        erasure request actually names — gave the weaker evidence. `claims` is 0 or 1 and
+        is the "did anything happen" the boolean used to carry, so an unknown id erases
+        nothing and erasing twice erases once, in counts rather than in flags.
 
         In the protocol rather than left to `purge` because the gap between the two was
         an erasure request naming a single memory, which retirement cannot satisfy (the
@@ -397,7 +631,8 @@ class Store(Protocol):
 
         `sources=True` also erases the source turns no surviving claim still cites —
         correct for a memory that *is* its source text, wrong for a fact extracted from
-        a conversation turn that holds much else besides.
+        a conversation turn that holds much else besides. Those turns are what `episodes`
+        counts, so it is 0 without the flag.
         """
         ...
 
@@ -438,21 +673,48 @@ class Store(Protocol):
 
     # --- maintenance ------------------------------------------------------
     def iter_claims(self, tenant: str | None = None,
-                    include_invalidated: bool = False) -> Iterable[Claim]: ...
+                    include_invalidated: bool | None = None, *,
+                    states: Collection[str] | None = None) -> Iterable[Claim]:
+        """Every claim, optionally for one tenant, optionally in named states.
+
+        **This one filters the *stored* state, not the state at an instant** — see
+        `stored_state_predicate`. It is a walk over rows rather than a question about a
+        moment, so it has no clock to read and reports what `Claim.state` reports.
+
+        Its unflagged view is consequently `("live", "ended")`, not `("live",)`: the
+        default has always been "every row we still believe", and it must stay that way.
+        `reembed()` walks this, and a default that dropped ended claims would silently
+        stop re-encoding every superseded version in the store — which is the same walk
+        the whole method exists to make affordable. `include_invalidated=True` is
+        unchanged and still means all three.
+
+        `include_invalidated` stays positional here because it always was.
+        """
+        ...
 
     def stats(self, tenant: str | None = None) -> dict[str, int]:
         """Row counts, optionally for one tenant. `embeddings` counts what the store
         holds, not what any one process has mapped.
 
-        **`live_claims` is the full liveness predicate — `live_predicate()` in this
-        module — and not `invalidated_at IS NULL`.** The two counted the same rows only
-        while superseding closed both clocks; since it closes valid time alone, the
-        column test reports every version a slot ever held as live.
+        **`live_claims` and `ended_claims` are the full state predicates —
+        `state_predicate()` in this module — and not column tests.** `live_claims` and
+        `invalidated_at IS NULL` counted the same rows only while superseding closed both
+        clocks; since it closes valid time alone, the column test reports every version a
+        slot ever held as live.
 
-        A consequence a backend must reproduce rather than round off: **the three counts
-        do not sum.** A claim that has *ended* is neither live nor invalidated, `claims`
-        is the only total that covers everything, and a store implementation that
-        "corrects" the arithmetic has reintroduced the conflation.
+        `ended_claims` counts state `ended`: the world moved on and we still believe the
+        record. It is emphatically **not** `valid_to IS NOT NULL`, because a claim that
+        ended and was *later* retired is already inside `invalidated`, and counting it
+        twice is precisely how a caller trying to derive this number by subtraction
+        (`claims - live_claims - invalidated`) gets a wrong one. That subtraction is why
+        the key exists: the largest non-live population was the only one not reported,
+        and it was not derivable either.
+
+        A consequence a backend must reproduce rather than round off: **the counts do not
+        sum.** A claim recorded but not yet in force — scheduled to start next month — is
+        in none of the three populations, `claims` is the only total that covers
+        everything, and a store implementation that "corrects" the arithmetic has
+        reintroduced the conflation.
         """
         ...
 
@@ -460,7 +722,7 @@ class Store(Protocol):
 
 
 class SQLStore(Protocol):
-    """The two clause builders every SQL-backed `Store` shares. Not part of `Store`.
+    """The three clause builders every SQL-backed `Store` shares. Not part of `Store`.
 
     Deliberately a second protocol. `Store` is what a third-party backend implements,
     and the docstring at the top of this file promises Qdrant and LanceDB can slot in
@@ -478,6 +740,22 @@ class SQLStore(Protocol):
     check that succeeds on a name beginning with an underscore is not a contract anyone
     should be relying on at run time.
     """
+
+    def _state_clause(self, valid_at: datetime | None, known_at: datetime | None,
+                      states: Collection[str] | None = None,
+                      alias: str = "") -> tuple[str, list]:
+        """SQL and bind parameters for "in one of `states` at (`valid_at`, `known_at`)".
+
+        The parameterised form of `state_predicate`, and the method every read filter in
+        a SQL backend should route through. The SQL and the *axis list* both come from
+        there, so binding is a comprehension over the axes rather than a remembered
+        order — which is what makes the one silent error impossible to write. See
+        `state_predicate` for what each subset means, including why the complete set is
+        the belief floor alone rather than the union of its parts.
+
+        `_live_clause` below is this with the two-valued alias applied.
+        """
+        ...
 
     def _live_clause(self, valid_at: datetime | None, known_at: datetime | None,
                      include_invalidated: bool, alias: str = "") -> tuple[str, list]:

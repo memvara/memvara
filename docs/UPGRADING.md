@@ -1,0 +1,257 @@
+# Upgrading
+
+What breaks, and what to do about it. `CHANGELOG.md` is the full record; this file is
+the short list of things that will not announce themselves.
+
+Entries are newest first, and each one says how you find your own instances of it.
+
+---
+
+## `invalidated_at is None` no longer means "live"
+
+**This is the one to read.** It is the only change in this project's history that is
+wrong *silently*: no exception, no migration error, no red test, no deprecation warning.
+The expression is still valid Python and still valid SQL. It used to be right.
+
+### What changed
+
+Ending a claim closes **one** of two clocks:
+
+| you write | clock that closes | `Claim.state` | still believed? |
+|---|---|---|---|
+| a new value for a single-valued fact | valid time (`valid_to`) | `ended` | **yes** |
+| `close="retired"`, `forget()`, `delete()` | transaction time (`invalidated_at`) | `retired` | no |
+
+Superseding used to close both. It closes valid time alone now — the world changed, the
+record was never wrong — so a superseded claim has `valid_to` set and `invalidated_at`
+still `None`.
+
+That claim is `ended`: **neither live nor invalidated**. The two conditions used to
+select the same rows, and they no longer do.
+
+### How the mistake shows up
+
+Always in the same direction: too many. A store where one person's address has changed
+four times reports **five** live claims instead of one. Nothing else in the data moves
+with it, so the step is unfalsifiable from the inside — and on a metered or billed
+surface, it is money.
+
+### What to grep for
+
+In application code, dashboards, saved queries, alert thresholds, notebooks, and any
+third-party `Store` implementation:
+
+```
+invalidated_at is None        # Python
+invalidated_at is not None    # Python — the mirror, and no longer the complement
+invalidated_at IS NULL        # SQL, also `is null`, `ISNULL(`, `= NULL`
+invalidated_at IS NOT NULL
+```
+
+Every hit is one of three things:
+
+1. **A liveness test.** Now wrong. Replace it (below).
+2. **A retirement test** — "which records did we stop believing?" Still exactly right,
+   and now selects a strictly smaller set than "not live".
+3. **An audit view** that wants everything ever displaced, either way. Use
+   `invalidated_by IS NOT NULL`: the pointer is written under both closures, which is
+   the whole reason it is a separate column.
+
+Three copies of the wrong test existed across this project's own repositories when the
+change landed, one of them a billing gauge, and finding them was manual.
+
+### What to replace it with
+
+```python
+# one claim, in Python
+claim.is_live()                       # now
+claim.is_live(valid_at=T)             # in force at T, as we understand things today
+claim.is_live(known_at=T)             # as we understood things at T
+```
+
+```python
+# SQL, without needing a store instance
+from memvara.store import live_predicate
+
+sql = f"SELECT count(*) FROM claims WHERE {live_predicate('?')}"
+# four binds, in the order: known, known, valid, valid
+```
+
+`live_predicate(at="?", *, include_invalidated=False, alias="")` takes the SQL
+*expression* for the instant and substitutes it at every axis, so `"?"`, `"%s"` and
+`"now()"` all work. Spelled out, it is:
+
+```sql
+SELECT count(*) FROM claims
+ WHERE recorded_at   <= now()
+   AND (invalidated_at IS NULL OR invalidated_at > now())
+   AND valid_from    <= now()
+   AND (valid_to     IS NULL OR valid_to     > now())
+```
+
+Two clocks, four columns, both bounds on each. `stats()["live_claims"]` is that same
+predicate at the wall clock, and `stats()["ended_claims"]` is the population the old
+idiom was quietly folding into it. `claims` is the only total that covers everything,
+because the claim counts a store reports **no longer sum** — see the next entry.
+
+---
+
+## `stats()` gained `ended_claims`, and the counts still do not sum
+
+`live_claims`, `ended_claims` and `invalidated` are three *disjoint* populations, and
+their sum is not `claims`. A claim recorded but not yet in force — scheduled to start
+next month — is in none of them.
+
+Take a store with four claims: one live, one ended, one that ended and was *later*
+retired, and one scheduled for next year.
+
+```python
+mem.stats()
+# {'episodes': 0, 'claims': 4, 'live_claims': 1, 'ended_claims': 1,
+#  'invalidated': 1, 'embeddings': 0}
+```
+
+`ended_claims` was added because it was the largest non-live population, it had no key,
+and **it is not derivable**. Every cheaper way of getting it is wrong on that store:
+
+| you might write | gives | truth | why |
+|---|---|---|---|
+| `valid_to IS NOT NULL` | 2 | 1 | the ended-then-retired row is already inside `invalidated`; this counts it twice |
+| `claims - live_claims - invalidated` | 2 | 1 | the residual also holds the scheduled claim, which is in no state at all |
+
+If you derived an "ended" or "not live" number by subtraction, re-derive it from the key.
+If you are implementing a third-party `Store`, add `ended_claims` and resist the urge to
+make the arithmetic close: a backend that "corrects" it has put the conflation back.
+
+---
+
+## Read filters take `states=`, and `include_invalidated` is its alias
+
+Additive — every existing call keeps working — but it is the parameter to reach for now.
+`Memvara.search` / `get_all` / `count`, their `ScopedMemvara` mirrors and the
+`AsyncMemvara` / `AsyncScopedMemvara` ones all take `states=`, any non-empty subset of
+`("live", "ended", "retired")`, defaulting to `["live"]`.
+
+```python
+mem.get_all(states=["retired"])          # the correction audit — everything we stopped
+                                         # believing, and nothing that merely stopped
+                                         # being true
+mem.get_all(states=["ended"])            # the other half: still believed, no longer true
+mem.get_all(include_invalidated=True)    # unchanged: exactly states=("live","ended","retired")
+```
+
+`include_invalidated` is a permanent alias, **not** deprecated, and emits no warning —
+`filterwarnings = ["error::DeprecationWarning"]` would make a warning here fail every
+existing call site rather than notify anyone. `False` means `["live"]`, `True` means all
+three. Passing both raises `ValueError`; there is no reading of the mix in which one of
+them is not being ignored.
+
+Two things that will otherwise surprise you:
+
+**Asking for all three states makes `valid_at` inert.** The three do not tile the store —
+`Claim.state` is absolute while the query is as-of, so a claim recorded but not yet in
+force at `valid_at` is named by none of them. The complete set therefore compiles to the
+belief floor alone rather than to the union of its parts, which readmits that row and
+leaves the world clock nothing to constrain. This is not new behaviour: it is exactly
+what `include_invalidated=True` has always meant, now stated.
+
+**`iter_claims` is the exception, and its default is `("live", "ended")`.** It filters the
+*stored* state, not the state at an instant — it is a walk over rows with no moment to
+ask about — and its unflagged view has always meant "every row we still believe" rather
+than "every row in force right now". `include_invalidated=False` there is *not*
+live-only, and narrowing it would silently stop `reembed()` re-encoding every superseded
+version in the store. `include_invalidated` also stays positional there, because it
+always was.
+
+**Third-party `Store` implementations must widen their read-path signatures** —
+`candidate_ids`, `lexical_search`, `vector_search` and `iter_claims` now take
+`states: Collection[str] | None = None` alongside a widened
+`include_invalidated: bool | None = None`. Route both through
+`memvara.store.resolve_states`, which is the single place either spelling is
+interpreted, and build the SQL with `state_predicate` / `stored_state_predicate` rather
+than writing the clause again. `state_predicate` returns the axis behind every bind
+marker, so binding becomes a comprehension over that list rather than a remembered order.
+
+---
+
+## `Store.erase_claim` returns counts, not a bool
+
+```python
+store.erase_claim(claim_id, sources=False)
+# {'claims': 1, 'episodes': 0, 'embeddings': 1, 'entities': 1}
+store.erase_claim("cl_does_not_exist")
+# {'claims': 0, 'episodes': 0, 'embeddings': 0, 'entities': 0}
+```
+
+The same four keys `purge` returns, so the two erasure paths evidence themselves the same
+way — and the per-claim path is the one an erasure request naming a single memory
+actually takes. A missing id returns **all zeroes rather than an absent key**, so a caller
+totalling an erasure campaign never special-cases it. `counts["claims"]` is 0 or 1 and
+carries exactly what the boolean carried.
+
+**`Memvara.erase()` still returns `bool`, deliberately.** Widening it would change a
+published signature from a flag to a mapping, and every `if mem.erase(id):` in existence
+would start taking the branch unconditionally — a dict of zeroes is truthy. A caller who
+wants the evidence calls `store.erase_claim` or `purge()`.
+
+```python
+if mem.erase(claim_id):          # still correct
+    ...
+if store.erase_claim(claim_id):  # ALWAYS true — check ["claims"] instead
+    ...
+```
+
+---
+
+## `WriteReceipt.invalidated` is now `WriteReceipt.closed`
+
+Same list, better name, and two new derived views that answer the question the single
+field could not.
+
+```python
+receipt = mem.add(transcript)
+
+receipt.closed        # claims this write closed out, on either clock
+receipt.ended         # ... the ones the world moved past   (close="ended")
+receipt.retired       # ... the ones we stopped believing   (close="retired")
+receipt.invalidated   # the old name. Same list object. Still works.
+```
+
+`invalidated` is a deliberate alias and raises **no** `DeprecationWarning` — this
+package sets `filterwarnings = ["error::DeprecationWarning"]`, so a warning would break
+callers rather than notify them. It will be removed at `1.0.0`.
+
+The rename is worth making at your call sites for the reason the split exists: a receipt
+holds whichever closure the write applied, so code that renders `invalidated` with the
+word "retired" is wrong for every supersession — which is almost all of them.
+
+## The MCP server distinguishes the two closures
+
+`memory_add` and `memory_remember` used to report `added N, retired N, ...` where the
+second number counted every closure. A supersession is not a retirement, so a model
+reading its own memory tool was told the record had been wrong when only the world had
+moved on — while `memory_history` rendered the same claim as `ended` and `memory_forget`
+used "retired" for the thing that genuinely is one. Three names, two events.
+
+Captured from a live server, `MEMVARA_LLM` unset — two `memory_add` calls and a
+`memory_forget`, verbatim:
+
+```
+> memory_add {"text": "I live in Berlin"}
+added 1, ended 0, retired 0, already-known 0, no-fact 0 (0 model call(s))
++ [cl_047bac579e6d4ed680cc] user lives in Berlin
+
+> memory_add {"text": "I live in Lisbon"}
+added 1, ended 1, retired 0, already-known 0, no-fact 0 (0 model call(s))
++ [cl_44b2c5ad486f491d9d43] user lives in Lisbon
+- [cl_047bac579e6d4ed680cc ended 2026-08-13 06:58Z] user lives in Berlin
+
+> memory_forget {"subject": "user", "predicate": "lives_in"}
+Retired 1 value(s) of user/lives_in. They no longer answer questions; memory_history still shows them.
+- [cl_44b2c5ad486f491d9d43] user lives in Lisbon
+```
+
+Both counts always appear, and each displaced claim carries its own closure — so the
+second call says `ended`, the third says `Retired`, and they mean different things. This
+is tool output, not an API: nothing to migrate, but a transcript or an eval fixture that
+pins the old string needs updating.

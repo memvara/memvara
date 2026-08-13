@@ -366,6 +366,74 @@ about the record — so `get_all(valid_at=<while Berlin held>)` keeps answering 
 `forget()` and `delete()` default the other way: forgetting is something the holder of a
 memory does, so they stop belief and assert nothing about the world.
 
+#### Reading one population: `states=`
+
+Three states, so the read filter takes the three words rather than a boolean. `search`,
+`get_all` and `count` accept `states=`, any non-empty subset of `("live", "ended",
+"retired")`, defaulting to `["live"]`:
+
+```python
+mem.remember("user", "lives_in", "Berlin", valid_from=JAN, recorded_at=JAN)
+mem.remember("user", "lives_in", "Lisbon", valid_from=JUN, recorded_at=JUN)  # she moved
+mem.remember("user", "works_at", "Acme",   valid_from=JAN, recorded_at=JAN)
+mem.forget("user", "works_at")                       # we stopped believing it
+
+[c.object for c in mem.get_all(states=["live"])]     # ['Lisbon']
+[c.object for c in mem.get_all(states=["ended"])]    # ['Berlin']  — true once, still believed
+[c.object for c in mem.get_all(states=["retired"])]  # ['Acme']    — the correction audit
+```
+
+`states=["retired"]` is the one a boolean could never express, and it is the query a
+correction audit is made of. It cannot be recovered by filtering afterwards either:
+`search` is capped at `k`, so a client-side filter returns an empty audit whenever enough
+live claims fill the page, with nothing in the result to say the answer was truncated.
+
+`include_invalidated=` remains an exact alias — `False` is `["live"]`, `True` is all
+three — and is not deprecated. Passing both raises rather than picking one.
+
+**Asking for all three states is not the union of the three parts.** It is the audit
+view, and under it `valid_at` stops narrowing anything:
+
+```python
+from memvara.store import STATES                     # ("live", "ended", "retired")
+
+# `.object` of each result, in the order get_all returns them (newest recorded first)
+mem.get_all(valid_at=MARCH,  states=["live"])   # ['Berlin'] — where she lived in March
+mem.get_all(valid_at=MARCH,  states=STATES)     # ['Lisbon', 'Acme', 'Berlin']
+mem.get_all(valid_at=AUGUST, states=STATES)     # ['Lisbon', 'Acme', 'Berlin'] — same
+```
+
+The reason is that `Claim.state` is absolute while the query is as-of, so the three do
+not tile the store: a fact recorded but not yet in force at `valid_at` — scheduled to
+start next month — is named by none of them. The complete set therefore compiles to the
+belief floor alone, which readmits that row and leaves the world clock nothing to
+constrain. That is exactly what `include_invalidated=True` has always meant.
+
+#### Counting claims
+
+`stats()` reports each population separately because none of them is derivable from the
+others. Take a store holding four claims — one live, one ended, one that ended and was
+*later* retired, and one recorded now but not in force until next year:
+
+```python
+mem.stats()
+# {'episodes': 0, 'claims': 4, 'live_claims': 1, 'ended_claims': 1,
+#  'invalidated': 1, 'embeddings': 0}
+```
+
+Both claim filters are the full state predicate, not a column test, and on that store
+every cheaper spelling is wrong:
+
+| you might write | gives | truth | why |
+|---|---|---|---|
+| `invalidated_at IS NULL` | 3 | `live_claims` = 1 | counts every superseded version as live |
+| `valid_to IS NOT NULL` | 2 | `ended_claims` = 1 | counts the ended-then-retired row, already inside `invalidated` |
+| `claims - live_claims - invalidated` | 2 | `ended_claims` = 1 | the residual also holds the scheduled claim, which is in no state at all |
+
+`ended_claims` and `invalidated` are disjoint, and **the counts do not sum**: `1 + 1 + 1`
+against `claims = 4`. `claims` is the only total that covers everything, and a backend
+that "corrects" the arithmetic has put the conflation back.
+
 ### Contradictions resolve without an LLM
 
 The insight: **contradiction is mostly a schema property, not a semantic one.** "Lives in"
@@ -448,8 +516,18 @@ receipt = mem.add(transcript)
 print(receipt)   # <WriteReceipt +3 ~1 -1 skip=17 llm=1 42.3ms>
 #                    added ─┘  │  │      │      └─ one batched call for 21 turns
 #                 reinforced ──┘  │      └─ carried no durable fact
-#                    retired ─────┘
+#                 closed out ─────┘
 ```
+
+That third number is `receipt.closed`, and it is **not** a retirement count. A write
+closes one clock or the other, so it holds both kinds — `receipt.ended` (the world
+changed) and `receipt.retired` (the record was wrong) split it, and `Claim.state` says
+which on any one claim. The label here read "retired" until the two axes were separated,
+which named the rarer of the two for a number that is almost always the other one: the
+write above superseded, and superseding *ends*.
+
+The field is spelled `closed`. `receipt.invalidated` still works and is the same list —
+the old name, kept because it is on the published API, to be removed at `1.0.0`.
 
 ### Retrieval is hybrid, time-aware, and explains itself
 
@@ -644,17 +722,22 @@ mem.delete(claim_id, *, at=None)                  -> bool           # one claim
 mem.erase(claim_id, *, sources=False)             -> bool           # one claim
 mem.purge()                                       -> dict[str, int] # a whole scope
 mem.reset()                                       -> dict[str, int] # scope + schema
+#   `store.erase_claim` returns purge's four counts instead; `mem.erase` stays a bool
+#   so that `if mem.erase(id):` keeps working — a dict of zeroes is truthy
 
 # read
 # every read below takes the same three time keywords, written `T=` here for width:
 #   valid_at=  the world clock   known_at=  the belief clock   as_of=  both at once
+# the first three also take `states=`, any non-empty subset of ("live", "ended",
+# "retired"), defaulting to ["live"]; `include_invalidated=` is its two-valued alias.
 mem.search(query, *, k=10, min_score=0.0, T=None, memory_types=None,
-           include_invalidated=False, include_episodes=False)  -> list[Retrieved]
+           states=None, include_invalidated=None, include_episodes=False)
+                                                  -> list[Retrieved]
 mem.recall(query, *, k=8, min_score=0.0, header=None, include_episodes=False,
            episode_header=None)                   -> str
 mem.get(claim_id)                                 -> Claim | None
-mem.get_all(*, T=None, include_invalidated=False)          -> list[Claim]
-mem.count(*, T=None, include_invalidated=False)            -> int
+mem.get_all(*, T=None, states=None, include_invalidated=None)  -> list[Claim]
+mem.count(*, T=None, states=None, include_invalidated=None)    -> int
 mem.history(subject, predicate, *, T=None)        -> list[Claim]    # timeline of one slot
 mem.why(claim_id, *, T=None)                      -> Provenance | None
 mem.produced(episode_id, *, T=None)               -> list[Claim]    # why(), backwards
@@ -669,6 +752,8 @@ mem.paths_between(source, target, *, depth=3, k=3, predicates=None,
 mem.consolidate()                                 -> dict[str, int]
 mem.reembed(embedder=None)                        -> int            # after a model change
 mem.stats()                                       -> dict[str, int]
+#   episodes, claims, live_claims, ended_claims, invalidated, embeddings
+#   these do not sum — see "Counting claims" above; `claims` is the only total
 mem.scope(user="bob")                             -> ScopedMemvara   # same API, scope bound
 mem.close()                                       -> None           # or use as a context manager
 ```
@@ -763,10 +848,17 @@ from memvara import AsyncMemvara, Memvara
 mem = AsyncMemvara(Memvara("memory.db", user="alice"))
 await mem.add("I live in Berlin")
 [r.text for r in await mem.search("where do they live?")]
+
+bob = mem.scope(user="bob")          # -> AsyncScopedMemvara, the same API, scope bound
+await bob.add("I live in Oslo")
 ```
 
 It wraps an `Memvara` rather than constructing one, so the sync object stays available for
 setup and for the calls that have no async form.
+
+`scope()` is the one method that is not a coroutine — it binds four strings and touches
+no store — and it is the shape a server wants: one handle per request, with the four
+scope keywords written once instead of on every call.
 
 It is a thread-pool wrapper, not an async rewrite, and says so: SQLite has no async
 driver worth the name, and the work here is CPU and disk rather than network.
@@ -942,6 +1034,9 @@ disjunct, so the second can never decide the branch. They are kept as guards rat
 deleted, and documented as such.
 
 Design notes and the module-by-module contract live in [docs/INTERNALS.md](docs/INTERNALS.md).
+[docs/UPGRADING.md](docs/UPGRADING.md) is the short list of changes that do not announce
+themselves — read it before upgrading, starting with the one where `invalidated_at is
+None` stopped meaning "live" without breaking anything.
 [CONTRIBUTING.md](CONTRIBUTING.md) covers the bar a patch has to clear and what will and
 will not be accepted; [SECURITY.md](SECURITY.md) covers private vulnerability reporting.
 

@@ -84,7 +84,7 @@ EXTRAS = {name: value for name, value in _toml_table("project.optional-dependenc
 # work before, and *not* installing it must produce an error that names the extra —
 # because the person reading that traceback has no other way to learn that the fix is one
 # `pip install` away. `ModuleNotFoundError: No module named 'x'` is not that error.
-ADAPTER_EXTRAS = {"anthropic", "openai", "local-embed",
+ADAPTER_EXTRAS = {"anthropic", "openai", "local-embed", "rerank",
                   "langchain", "llama-index", "crewai", "langgraph"}
 # A **reserved** extra buys nothing yet and says so. `http` names the REST layer's
 # dependencies before the REST layer exists. That is defensible — it fixes the dependency
@@ -113,6 +113,12 @@ def _construct_local_embedder() -> None:
     from memvara.embed.local import LocalEmbedder
 
     LocalEmbedder()
+
+
+def _construct_cross_encoder_reranker() -> None:
+    from memvara.rerank.cross import CrossEncoderReranker
+
+    CrossEncoderReranker()
 
 
 # The adapters are lazy attributes on their own modules, so naming the class is the
@@ -149,6 +155,9 @@ ADAPTERS = {
     "anthropic": ("anthropic", _construct_anthropic_llm),
     "openai": ("openai", _construct_openai_llm),
     "local-embed": ("sentence_transformers", _construct_local_embedder),
+    # Same distribution as `local-embed`, different class behind it. Two extras may name
+    # one SDK; what the rule below forbids is an extra with *no* code behind it.
+    "rerank": ("sentence_transformers", _construct_cross_encoder_reranker),
     "langchain": ("langchain_core", _resolve_langchain_history),
     "llama-index": ("llama_index", _resolve_llamaindex_block),
     "crewai": ("crewai", _resolve_crewai_storage),
@@ -389,6 +398,7 @@ def test_every_adapter_extra_has_a_call_that_actually_needs_its_sdk() -> None:
     "anthropic",
     "openai",
     "local-embed",
+    "rerank",
 ])
 def test_an_adapter_whose_sdk_is_absent_raises_an_error_naming_the_extra(
         extra: str, monkeypatch: pytest.MonkeyPatch) -> None:

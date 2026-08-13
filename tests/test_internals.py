@@ -184,12 +184,12 @@ def test_retrieval_reapplies_the_transaction_floor_even_if_the_store_forgets():
 
     class LeakyStore(SQLiteStore):
         def lexical_search(self, query, scopes, limit, *, valid_at=None,
-                           known_at=None, include_invalidated=False):
+                           known_at=None, states=None, include_invalidated=None):
             return super().lexical_search(query, scopes, limit,
                                           include_invalidated=True)
 
         def vector_search(self, qvec, scopes, limit, *, valid_at=None,
-                          known_at=None, include_invalidated=False):
+                          known_at=None, states=None, include_invalidated=None):
             return super().vector_search(qvec, scopes, limit,
                                          include_invalidated=True)
 

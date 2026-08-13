@@ -1054,6 +1054,9 @@ class IngestStats:
     episodes: int = 0
     added: int = 0
     reinforced: int = 0
+    # The two closure axes, counted apart. One number over both would report a haystack
+    # of ordinary supersessions as if the extractor had contradicted itself that often.
+    ended: int = 0
     retired: int = 0
     skipped: int = 0
     unextracted: int = 0
@@ -1114,7 +1117,8 @@ def ingest(mem: Any, sessions: Iterable[Sequence[Turn]],
         stats.episodes += len(receipt.episode_ids)
         stats.added += len(receipt.added)
         stats.reinforced += len(receipt.reinforced)
-        stats.retired += len(receipt.invalidated)
+        stats.ended += len(receipt.ended)
+        stats.retired += len(receipt.retired)
         stats.skipped += receipt.skipped
         stats.unextracted += receipt.unextracted
         stats.llm_calls += receipt.llm_calls
@@ -1615,8 +1619,9 @@ def retrieval_block(ingest_stats: IngestStats, read: RetrievalStats) -> str:
         ("turns ingested", f"{ingest_stats.turns:,}"),
         ("sessions (one add() each)", f"{ingest_stats.sessions:,}"),
         ("haystack characters", f"{ingest_stats.haystack_chars:,}"),
-        ("claims added / reinforced / retired",
-         f"{ingest_stats.added:,} / {ingest_stats.reinforced:,} / {ingest_stats.retired:,}"),
+        ("claims added / reinforced / ended / retired",
+         f"{ingest_stats.added:,} / {ingest_stats.reinforced:,} / "
+         f"{ingest_stats.ended:,} / {ingest_stats.retired:,}"),
         ("turns carrying no durable fact", f"{ingest_stats.skipped:,}"),
         ("turns that reached extraction and yielded nothing",
          f"{ingest_stats.unextracted:,}"),

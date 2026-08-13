@@ -28,7 +28,8 @@ import warnings
 from contextlib import nullcontext
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Callable, ClassVar, Iterable, Literal, Mapping, Sequence, overload
+from typing import (Any, Callable, ClassVar, Collection, Iterable, Literal, Mapping,
+                    Sequence, overload)
 
 from .consolidate import Consolidator
 from .embed import Embedder, default_embedder
@@ -44,7 +45,7 @@ from .llm import LLM, NullLLM
 from .redact import Redactor, redact_episode
 from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retrieved
 from .schema import PredicateRegistry
-from .store import SQLiteStore, Store
+from .store import SQLiteStore, Store, resolve_states
 from .telemetry import Recorder
 from dataclasses import replace
 
@@ -67,6 +68,7 @@ from .types import (
     as_utc,
     close_out,
     closure,
+    owner_key,
     time_axes,
     utcnow,
 )
@@ -1018,7 +1020,8 @@ class Memvara:
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
                valid_at: datetime | None = ..., known_at: datetime | None = ...,
-               include_invalidated: bool = ...,
+               states: Collection[str] | None = ...,
+               include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: Literal[False] = ...) -> list[Result]: ...
 
@@ -1026,7 +1029,8 @@ class Memvara:
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
                valid_at: datetime | None = ..., known_at: datetime | None = ...,
-               include_invalidated: bool = ...,
+               states: Collection[str] | None = ...,
+               include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: Literal[True]) -> list[Retrieved]: ...
 
@@ -1034,14 +1038,16 @@ class Memvara:
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
                valid_at: datetime | None = ..., known_at: datetime | None = ...,
-               include_invalidated: bool = ...,
+               states: Collection[str] | None = ...,
+               include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0, tenant=None,
                user=None, agent=None, session=None, as_of: datetime | None = None,
                valid_at: datetime | None = None, known_at: datetime | None = None,
-               include_invalidated: bool = False,
+               states: Collection[str] | None = None,
+               include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False) -> list[Any]:
         """Hybrid retrieval over current belief, or over any point on either time axis.
@@ -1055,6 +1061,16 @@ class Memvara:
 
         `as_of` remains exact sugar for `valid_at=known_at=T`. Passing it with either
         axis raises rather than picking one.
+
+        `states` names the population, as any non-empty subset of
+        `("live", "ended", "retired")` — `Claim.state`'s own three words. It replaces the
+        arithmetic nobody could do with a boolean: `states=["retired"]` is a correction
+        audit, everything we stopped believing and nothing else, which
+        `include_invalidated` cannot express in either position and which client-side
+        filtering cannot recover because this method is capped at `k`. `states=["ended"]`
+        is the other half — facts that finished while we still believe every word of
+        them. `include_invalidated` remains an exact alias (`False` is `["live"]`, `True`
+        is all three) and is not deprecated; passing both raises.
 
         `min_score` is a floor on `Result.score`, which is normalized into [0, 1]. The
         right value is a property of *your store*, not of this library: it drifts with
@@ -1078,7 +1094,8 @@ class Memvara:
         scope = self._scope(tenant, user, agent, session)
         return self.reader.search(
             query, scope, k=k, as_of=as_of, valid_at=valid_at, known_at=known_at,
-            min_score=min_score, include_invalidated=include_invalidated,
+            min_score=min_score,
+            states=resolve_states(states, include_invalidated),
             memory_types=memory_types, include_episodes=include_episodes,
         )
 
@@ -1155,6 +1172,14 @@ class Memvara:
         Scope-checked like `why()`, and `False` rather than an exception for an unknown
         or out-of-scope id, so the method cannot be used to test whether an id exists in
         somebody else's tenant.
+
+        **Still a `bool`, though `Store.erase_claim` now returns per-table counts.** The
+        counts were added so the two *store* erasure paths evidence themselves alike;
+        widening this return would change a published v0.1.0 signature from a flag to a
+        mapping, and every `if mem.erase(id):` in existence would start taking the branch
+        unconditionally — a non-empty dict of zeroes is true. `counts["claims"]` is the
+        flag, so nothing is lost that this method ever reported; a caller wanting the
+        evidence calls `store.erase_claim` or `purge()`.
         """
         if self.get(claim_id, tenant=tenant, user=user, agent=agent,
                     session=session) is None:
@@ -1169,12 +1194,13 @@ class Memvara:
                 f"{type(self.store).__name__} does not implement erase_claim(); "
                 "erasure cannot be faked with retirement"
             )
-        return erase(claim_id, sources=sources)
+        return bool(erase(claim_id, sources=sources)["claims"])
 
     def count(self, *, tenant=None, user=None, agent=None, session=None,
               as_of: datetime | None = None, valid_at: datetime | None = None,
               known_at: datetime | None = None,
-              include_invalidated: bool = False) -> int:
+              states: Collection[str] | None = None,
+              include_invalidated: bool | None = None) -> int:
         """How many claims are visible at this scope.
 
         Visible, not stored here: scopes inherit upward, so a session's count includes
@@ -1184,14 +1210,17 @@ class Memvara:
 
         Both time axes apply exactly as they do to `search()`, so this is the cheap way
         to ask "how much did we know then" or "how much of what we know now was true in
-        June". Note `include_invalidated=True` makes `valid_at` inert — it lifts the
-        whole valid-time interval, not just its end; see `SQLiteStore._live_clause`.
+        June". `states` narrows to a population the same way, so `states=["retired"]`
+        sizes a correction audit before paging it. Note that asking for all three states
+        — which is what `include_invalidated=True` means — makes `valid_at` inert, since
+        it lifts the whole valid-time interval and not just its end; see
+        `store.state_predicate`.
         """
         scope = self._scope(tenant, user, agent, session)
         valid_at, known_at = time_axes(as_of, valid_at, known_at)
         return len(self.store.candidate_ids(
             scope.ancestors(), valid_at=valid_at, known_at=known_at,
-            include_invalidated=include_invalidated))
+            states=resolve_states(states, include_invalidated)))
 
     def reset(self, *, tenant=None, user=None, agent=None, session=None) -> dict[str, int]:
         """Erase everything in scope. Irreversible, and defaults to the whole tenant.
@@ -1252,10 +1281,13 @@ class Memvara:
         metadata in a prompt is noise the model has to ignore.
 
         The signature is explicit rather than `**kw` on purpose: forwarding arbitrary
-        keywords into `search()` would expose `as_of` and `include_invalidated` here, and
-        `include_invalidated=True` resurrects retired claims straight into a live prompt —
-        an un-delete reachable by anyone who can influence a parameter. Time travel and
-        audit reads stay on `search()`, where they are an explicit choice.
+        keywords into `search()` would expose `as_of`, `states` and `include_invalidated`
+        here, and both of the latter two resurrect retired claims straight into a live
+        prompt — an un-delete reachable by anyone who can influence a parameter.
+        `states=["retired"]` is the sharper of the pair: `include_invalidated=True` at
+        least returns the live claims alongside, while that one is a prompt built from
+        nothing but the records we stopped believing. Time travel and audit reads stay on
+        `search()`, where they are an explicit choice.
 
         `min_score` is here because this output goes into a prompt: a weak match is not
         neutral there, it is a confident-looking irrelevant fact the model will use.
@@ -1306,19 +1338,26 @@ class Memvara:
         return "\n".join(lines)
 
     def get_all(self, *, tenant=None, user=None, agent=None, session=None,
-                include_invalidated: bool = False,
+                states: Collection[str] | None = None,
+                include_invalidated: bool | None = None,
                 as_of: datetime | None = None, valid_at: datetime | None = None,
                 known_at: datetime | None = None) -> list[Claim]:
         """Every claim in scope, newest first.
 
         `valid_at` and `known_at` are the two time axes and behave exactly as they do
         on `search()`; `as_of` sets both. See `memvara.types.time_axes`.
+
+        `states` names which population to return — any non-empty subset of
+        `("live", "ended", "retired")`, defaulting to `["live"]`. `states=["retired"]` is
+        the correction audit: every record we stopped believing, and nothing that merely
+        stopped being true. `include_invalidated` stays the two-valued alias of the same
+        parameter and is not deprecated; see `search()`.
         """
         scope = self._scope(tenant, user, agent, session)
         valid_at, known_at = time_axes(as_of, valid_at, known_at)
         ids = self.store.candidate_ids(
             scope.ancestors(), valid_at=valid_at, known_at=known_at,
-            include_invalidated=include_invalidated)
+            states=resolve_states(states, include_invalidated))
         claims = list(self.store.get_claims(ids).values())
         # Content first, id only to make the order total; the stable sort below then
         # breaks timestamp ties on that instead of on whatever order SQLite returned.
@@ -1341,6 +1380,14 @@ class Memvara:
         """The full timeline of one fact slot, oldest first.
 
         Every value ever believed, when it was recorded, and what superseded it.
+
+        `subject` is a probe rather than a stored string, so it is resolved through this
+        owner's learned aliases as well as the deterministic fold — see
+        `_probe_entities`. Where a merge has happened that is more than one slot, and the
+        answer is all of them merged back into one timeline: `history("Big Blue", ...)`
+        and `history("IBM", ...)` are the same question once the owner has decided they
+        are the same company, and either spelling returns the versions written under both
+        keys. Nothing has been re-keyed on disk; only the read is widened.
 
         **The axes default to "no filter" here, not to "now".** Everywhere else an
         unset axis means the current instant; a timeline whose default was "now" would
@@ -1366,8 +1413,26 @@ class Memvara:
         """
         scope = self._scope(tenant, user, agent, session)
         valid_at, known_at = time_axes(as_of, valid_at, known_at)
-        probe = Claim(subject=subject, predicate=self.registry.normalize(predicate),
-                      object="", scope=scope)
+        pred = self.registry.normalize(predicate)
+        subjects = self._probe_entities(subject, scope)
+        rows: list[Claim] = []
+        for key in subjects:
+            probe = Claim(subject=key, predicate=pred, object="", scope=scope)
+            rows.extend(self.store.slot_history(scope.tenant, probe.fact_key))
+        if len(subjects) > 1:
+            # Two slots concatenated are not one timeline. `slot_history` promises
+            # oldest-first *within* a slot, so the merge has to re-establish it across
+            # them — on the same `(recorded_at, id)` order `SQLiteStore.slot_history`
+            # already sorts by, and only when there is more than one slot, so the
+            # ordinary answer is what it was before any alias existed rather than what a
+            # re-sort happens to agree with.
+            #
+            # The merged timeline can show two live values for a single-valued
+            # predicate, and that is the honest reading: a claim written under the old
+            # key never competed with one written under the new one, because
+            # supersession runs on `fact_key`. Making them compete retroactively is
+            # `backfill_entities`, which is dated, attributable and dry-run by default.
+            rows.sort(key=lambda c: (c.recorded_at, c.id))
         # Same asymmetry as `forget`: the slot is keyed without agent/session, so the
         # scope filter is what stops a sibling session reading this slot's contents.
         #
@@ -1375,8 +1440,34 @@ class Memvara:
         # versions of one fact, so the row count is small by construction, and leaving
         # the protocol method alone keeps every backend's audit trail one query with one
         # meaning.
-        return [c for c in self.store.slot_history(scope.tenant, probe.fact_key)
+        return [c for c in rows
                 if scope.contains(c.scope) and _in_timeline(c, valid_at, known_at)]
+
+    def _probe_entities(self, surface: str, scope: Scope) -> tuple[str, ...]:
+        """Every stored identity a read's surface form is asking about.
+
+        The one place `history()` and `neighborhood()` share, because they had one bug:
+        a probe is not a written claim, so nothing ever stamped it, so it only ever got
+        the deterministic fold and missed whatever the owner had since learned was the
+        same entity. See `EntityRegistry.probe_keys` for why the answer is a set rather
+        than a replacement key.
+
+        Resolved under `owner_key(scope)` — the reader's own tenant and user — and under
+        nothing else. That is the same owner `Reconciler._stamp` wrote with, so a probe
+        and the claims it is looking for agree by construction rather than by being kept
+        in step; and it is what keeps one tenant's merge, or one user's, out of a
+        sibling's reads. Identity here is owner-scoped, never tenant-scoped.
+
+        The owner ladder is deliberately not climbed. A reader at user scope *sees*
+        tenant-scoped claims, but those were stamped under the tenant's own owner
+        (`user=""`), so an alias learned there does not fold this probe. Widening to the
+        broader owner would let a tenant-level merge redefine a user's own entity
+        underneath them, which is the one direction `entities.py` refuses outright.
+
+        The registry is the writer's live one, so an alias learned this process applies
+        to the next read without a round trip through the store.
+        """
+        return self.writer.reconciler.entities.probe_keys(owner_key(scope), surface)
 
     def why(self, claim_id: str, *, tenant=None, user=None, agent=None,
             session=None, as_of: datetime | None = None,
@@ -1476,8 +1567,24 @@ class Memvara:
         see that some visible claim was derived from is exactly a case where the claim
         should still be returned.
 
-        Retired claims are included, because they were still derived from that turn.
-        `[c for c in mem.produced(ep) if c.invalidated_at is None]` is the live view.
+        Claims in every state come back — `ended` and `retired` alike — because all of
+        them were still derived from that turn. The live view is
+        `[c for c in mem.produced(ep) if c.is_live()]`.
+
+        **Not `c.invalidated_at is None`**, which is what this line recommended until the
+        closure split and which now quietly admits the `ended` ones as well: superseding
+        closes valid time and leaves `invalidated_at` unset, so the old filter reports a
+        fact that stopped being true as a current one. A turn whose facts have all since
+        been superseded is the case that shows it — every claim it produced passes the old
+        test and none of them is live. See `Claim.invalidated_at` and `docs/UPGRADING.md`.
+
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> ep = mem.add("I live in Berlin").episode_ids[0]
+        >>> _ = mem.add("I live in Lisbon")          # she moved
+        >>> [(c.object, c.state) for c in mem.produced(ep)]
+        [('Berlin', 'ended')]
+        >>> [c.object for c in mem.produced(ep) if c.is_live()]
+        []
 
         The time axes default to "no filter", as `history()`'s do. `known_at=T` gives
         what this turn had produced by T, which is not the same set as today's: a turn
@@ -1515,10 +1622,14 @@ class Memvara:
         Alice -reports_to-> Dana -works_at-> Acme, Inc.
 
         `entity` is a surface form and is folded exactly as a stored one is, so `"acme,
-        inc."` and `"ACME"` reach the same node. The fold is the deterministic one
-        (`entity_key`); an alias learned at write time is *not* consulted, which is the
-        same limitation `history()` has and for the same reason — a probe carries no
-        stamp.
+        inc."` and `"ACME"` reach the same node. Learned aliases are consulted too: a
+        probe carries no write-time stamp of its own, so it is resolved through this
+        owner's entity registry (`_probe_entities`) and the walk starts from *every*
+        identity that names the same thing — `neighborhood("Big Blue")` reaches the
+        claims filed under `ibm`, and reaches the ones filed under `big blue` before the
+        merge was learned in the same answer. The deterministic fold is always among
+        them, so a name nothing has been learned about behaves exactly as it always did.
+        `history()` resolves its subject the same way, for the same reason.
 
         Edges are followed in both directions, because "who works at Acme" and "where
         does Alice work" are one stored claim. `predicates` narrows to particular
@@ -1535,7 +1646,8 @@ class Memvara:
         scope = self._scope(tenant, user, agent, session)
         return self.traverser.neighborhood(
             entity, scope, depth=depth, k=k, min_hops=min_hops, predicates=predicates,
-            as_of=as_of, valid_at=valid_at, known_at=known_at, min_score=min_score)
+            as_of=as_of, valid_at=valid_at, known_at=known_at, min_score=min_score,
+            entity_keys=self._probe_entities(entity, scope))
 
     def paths_between(self, source: str, target: str, *, depth: int = 3, k: int = 3,
                       predicates: Sequence[str] | None = None,
@@ -1772,31 +1884,36 @@ class ScopedMemvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
-               known_at: datetime | None = ..., include_invalidated: bool = ...,
+               known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: Literal[False] = ...) -> list[Result]: ...
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
-               known_at: datetime | None = ..., include_invalidated: bool = ...,
+               known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
-               known_at: datetime | None = ..., include_invalidated: bool = ...,
+               known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                as_of: datetime | None = None, valid_at: datetime | None = None,
-               known_at: datetime | None = None, include_invalidated: bool = False,
+               known_at: datetime | None = None,
+               states: Collection[str] | None = None,
+               include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False) -> list[Any]:
         return self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
-                                valid_at=valid_at, known_at=known_at,
+                                valid_at=valid_at, known_at=known_at, states=states,
                                 include_invalidated=include_invalidated,
                                 memory_types=memory_types,
                                 include_episodes=include_episodes, **self._kw)
@@ -1814,10 +1931,12 @@ class ScopedMemvara:
     def get(self, claim_id: str) -> Claim | None:
         return self._mem.get(claim_id, **self._kw)
 
-    def get_all(self, *, include_invalidated: bool = False,
+    def get_all(self, *, states: Collection[str] | None = None,
+                include_invalidated: bool | None = None,
                 as_of: datetime | None = None, valid_at: datetime | None = None,
                 known_at: datetime | None = None) -> list[Claim]:
-        return self._mem.get_all(include_invalidated=include_invalidated, as_of=as_of,
+        return self._mem.get_all(states=states,
+                                 include_invalidated=include_invalidated, as_of=as_of,
                                  valid_at=valid_at, known_at=known_at, **self._kw)
 
     def history(self, subject: str, predicate: str, *, as_of: datetime | None = None,
@@ -1860,8 +1979,10 @@ class ScopedMemvara:
 
     def count(self, *, as_of: datetime | None = None,
               valid_at: datetime | None = None, known_at: datetime | None = None,
-              include_invalidated: bool = False) -> int:
+              states: Collection[str] | None = None,
+              include_invalidated: bool | None = None) -> int:
         return self._mem.count(as_of=as_of, valid_at=valid_at, known_at=known_at,
+                               states=states,
                                include_invalidated=include_invalidated, **self._kw)
 
     # -- maintenance ---------------------------------------------------------

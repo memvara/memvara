@@ -9,7 +9,8 @@ import numpy as np
 import pytest
 
 from memvara.embed import HashingEmbedder
-from memvara.store import SQLStore, SQLiteStore, live_predicate
+from memvara.store import (STATES, SQLStore, SQLiteStore, live_predicate,
+                           state_predicate, stored_state_predicate)
 from memvara.store.base import Store
 from memvara.store.sqlite import SCHEMA_VERSION
 from memvara.types import Claim, Derivation, Episode, MemoryType, Scope
@@ -757,7 +758,7 @@ def test_purge_erases_a_large_scope_in_one_pass(store, emb):
     assert counts["claims"] == 1500
     assert counts["embeddings"] == 1500
     assert store.stats() == {"episodes": 0, "claims": 0, "live_claims": 0,
-                             "invalidated": 0, "embeddings": 0}
+                             "ended_claims": 0, "invalidated": 0, "embeddings": 0}
     assert store.lexical_search("berlin", [SCOPE], limit=10) == []
 
 
@@ -802,7 +803,7 @@ def test_stats_counts_live_and_invalidated_separately(store, emb):
     put(store, emb, object="Lisbon")
     store.invalidate(a.id, T1, None)
     s = store.stats()
-    assert s == {"episodes": 0, "claims": 2, "live_claims": 1,
+    assert s == {"episodes": 0, "claims": 2, "live_claims": 1, "ended_claims": 0,
                  "invalidated": 1, "embeddings": 2}
 
 
@@ -826,6 +827,60 @@ def test_live_claims_is_the_liveness_predicate_and_not_the_invalidated_column(st
     s = store.stats()
     assert (s["claims"], s["live_claims"], s["invalidated"]) == (3, 1, 1)
     assert s["live_claims"] + s["invalidated"] < s["claims"], "three states, not two"
+
+
+def test_ended_claims_does_not_double_count_a_claim_that_ended_then_was_retired(
+        store, emb):
+    """The reason `ended_claims` had to be a key rather than a subtraction.
+
+    `claims - live_claims - invalidated` looks like it should give the ended population,
+    and it under-counts, because the two sets it subtracts overlap: a claim whose world
+    interval closed and which was *later* withdrawn is already inside `invalidated`, so
+    the subtraction removes it twice and reports one ended claim where there are two.
+
+    This is the row that proves it — ended in January, retired a year later — and it must
+    land in `invalidated` and nowhere else. Its `Claim.state` is `retired`, because
+    withdrawing a record supersedes the fact that it also finished: we are no longer
+    asserting anything about it, including when it stopped.
+    """
+    both = put(store, emb, object="Berlin", valid_to=T1)   # ended...
+    store.invalidate(both.id, T2, None)                    # ...and later retired
+    put(store, emb, object="Rome", predicate="p2", valid_to=T1)   # ended, still believed
+    put(store, emb, object="Lisbon", predicate="p3")              # live
+
+    s = store.stats()
+    assert store.get_claim(both.id).state == "retired"
+    assert (s["claims"], s["live_claims"], s["ended_claims"], s["invalidated"]) \
+        == (3, 1, 1, 1)
+    # The populations are disjoint, which is the property the subtraction assumed and
+    # did not have.
+    assert s["live_claims"] + s["ended_claims"] + s["invalidated"] == s["claims"]
+    # And the arithmetic it replaces gets the wrong answer on exactly this store.
+    assert s["claims"] - s["live_claims"] - s["invalidated"] == 1 != s["ended_claims"] + 1
+
+
+def test_ended_claims_is_taken_from_the_same_predicate_as_live_claims(store, emb):
+    """Not `valid_to IS NOT NULL`. The cheap column test is what put the wrong liveness
+    check into three files, and it is wrong here in the same direction — it counts the
+    retired-after-ending row, which `invalidated` already has.
+
+    Counted against the exported predicate on the same rows, with no store instance
+    involved, because that is the form another backend's counter can actually use.
+    """
+    both = put(store, emb, object="Berlin", valid_to=T1)
+    store.invalidate(both.id, T2, None)
+    put(store, emb, object="Rome", predicate="p2", valid_to=T1)
+
+    clock = "CAST(strftime('%s','now') AS REAL)"
+    ended, _ = state_predicate(clock, states=["ended"])
+    assert "?" not in ended, "a raw-connection sampler has nothing to bind"
+
+    raw = store._db.execute(f"SELECT COUNT(*) FROM claims WHERE {ended}").fetchone()[0]
+    cheap = store._db.execute(
+        "SELECT COUNT(*) FROM claims WHERE valid_to IS NOT NULL").fetchone()[0]
+
+    assert raw == store.stats()["ended_claims"] == 1
+    assert cheap == 2, "which is the count that double-counts, and why it is not used"
 
 
 # --- Durability and concurrency --------------------------------------------
@@ -1103,25 +1158,39 @@ def test_claims_and_turns_written_at_once_never_collide_on_a_row(tmp_path, emb):
 # it and report success — with the text, its source turn and its embedding all still on
 # disk. These pin that the gap is closed and closed completely.
 
-def test_erase_claim_reports_whether_there_was_anything_to_erase(store):
+def test_erase_claim_reports_what_it_erased_in_the_same_shape_purge_does(store):
+    """Per-table counts, not a flag. `purge` has always evidenced itself this way and
+    this is the path an erasure request naming one memory actually takes, so it was the
+    weaker witness of the two.
+
+    The two facts the boolean carried are unchanged and live in `claims`: erasing twice
+    is not two erasures, and an id that never existed erases nothing. `claims: 0` rather
+    than an absent key or an empty dict, so a caller totalling an erasure campaign never
+    special-cases the id that was not there."""
     c = put(store)
-    assert store.erase_claim(c.id) is True
-    assert store.erase_claim(c.id) is False, "erasing twice is not two erasures"
-    assert store.erase_claim("cl_never_existed") is False
+    nothing = {"claims": 0, "episodes": 0, "embeddings": 0, "entities": 0}
+
+    assert store.erase_claim(c.id) == {"claims": 1, "episodes": 0, "embeddings": 0,
+                                       "entities": 0}
+    assert store.erase_claim(c.id) == nothing, "erasing twice is not two erasures"
+    assert store.erase_claim("cl_never_existed") == nothing
+    assert set(nothing) == set(store.purge(Scope("acme", "nobody"))), \
+        "the same four keys as purge, or the two paths evidence themselves differently"
 
 
 def test_erase_claim_takes_the_row_the_index_and_the_vector(store, emb):
     c = put(store, emb, object="Berlin")
     survivor = put(store, emb, object="Lisbon", predicate="visited")
 
-    assert store.erase_claim(c.id) is True
+    assert store.erase_claim(c.id) == {"claims": 1, "episodes": 0, "embeddings": 1,
+                                       "entities": 0}
 
     assert store.get_claim(c.id) is None
     assert store.lexical_search("berlin", [SCOPE], limit=10) == []
     assert store.get_embedding(c.id) is None
     assert store._vec.get(c.id) is None, "the matrix row must be blanked, not just unmapped"
     assert store.stats() == {"episodes": 0, "claims": 1, "live_claims": 1,
-                             "invalidated": 0, "embeddings": 1}
+                             "ended_claims": 0, "invalidated": 0, "embeddings": 1}
     assert [h[0] for h in store.lexical_search("lisbon", [SCOPE], limit=10)] \
         == [survivor.id], "the neighbouring claim is untouched"
 
@@ -1175,7 +1244,10 @@ def test_erase_with_sources_takes_the_turn_its_index_and_its_vector(store, emb):
     c = put(store, emb, object="the kafka pipeline is being sunset",
             predicate="note", sources=[ep.id])
 
-    assert store.erase_claim(c.id, sources=True) is True
+    # Two vectors, because the claim's and the turn's both went — `embeddings` is the
+    # total across both tables here exactly as it is in `purge`.
+    assert store.erase_claim(c.id, sources=True) == {
+        "claims": 1, "episodes": 1, "embeddings": 2, "entities": 0}
 
     assert store.get_episode(ep.id) is None
     assert store.lexical_search_episodes("kafka", [SCOPE], limit=5) == []
@@ -1375,7 +1447,7 @@ def test_erasing_a_claim_takes_its_provenance_with_it(store, emb):
     ep = turn(store, emb, content="the kafka pipeline is being sunset")
     c = put(store, emb, sources=[ep.id])
 
-    assert store.erase_claim(c.id, sources=True) is True
+    assert store.erase_claim(c.id, sources=True)["episodes"] == 1
 
     assert provenance(store) == set() == implied(store)
     assert store.get_episode(ep.id) is None, "the last citer must take the turn with it"
@@ -1659,7 +1731,8 @@ def test_erase_with_sources_tolerates_a_turn_that_is_already_gone(store, emb):
     another scope citing it, and an import can arrive with source ids for turns nobody
     kept. Erasure is the wrong moment to discover that by raising."""
     c = put(store, emb, sources=["ep_never_stored"])
-    assert store.erase_claim(c.id, sources=True) is True
+    counts = store.erase_claim(c.id, sources=True)
+    assert (counts["claims"], counts["episodes"]) == (1, 0), "no turn, so none erased"
     assert store.get_claim(c.id) is None
 
 
@@ -2107,7 +2180,7 @@ def test_a_date_before_the_epoch_is_clamped_rather_than_left_unreadable():
 # --- the protocol two backends have to agree on -----------------------------
 
 
-@pytest.mark.parametrize("name", ["_live_clause", "_happened_clause"])
+@pytest.mark.parametrize("name", ["_state_clause", "_live_clause", "_happened_clause"])
 def test_the_clause_builders_match_the_signature_the_protocol_declares(name):
     """`SQLStore` exists so SQLite and Postgres write the same predicate in two
     repositories without drifting. A declaration nothing checks is a comment, and the
@@ -2203,6 +2276,158 @@ def test_the_liveness_predicate_builds_without_a_store_and_counts_what_stats_cou
     raw = store._db.execute(f"SELECT COUNT(*) FROM claims WHERE {predicate}").fetchone()[0]
 
     assert raw == store.stats()["live_claims"] == 1
+
+
+# --- the three states, as SQL -----------------------------------------------
+#
+# `live_predicate` is one boolean over three states, so it can name {live} and
+# {live, ended, retired} and nothing else. These pin the general form it is now the
+# alias of: every subset expressible, the belief floor standing under all of them, and
+# the bind order that a diagonal query can never reveal to be wrong.
+
+SUBSETS = [("live",), ("ended",), ("retired",), ("live", "ended"), ("live", "retired"),
+           ("ended", "retired"), ("live", "ended", "retired")]
+
+
+@pytest.mark.parametrize("subset", SUBSETS)
+def test_the_state_predicate_names_one_bind_axis_per_marker(store, subset):
+    """The half `live_predicate` could only document in prose, and the half with a silent
+    failure mode: four identical markers, and a backend that bound the belief instant
+    onto the world columns is wrong in a way no `as_of` call can show, because that call
+    passes the axes equal and every transposition answers the same.
+
+    So the predicate now carries its own bind order and the store reads it. Checked for
+    every subset, since the marker *count* varies with the population asked for — two for
+    a pure belief-time question, four for liveness — and a backend that assumed four
+    would bind past the end of a shorter one.
+    """
+    sql, axes = state_predicate("?", states=subset)
+    assert sql.count("?") == len(axes)
+    assert set(axes) <= {"known", "valid"}
+    # Belief markers first, always. That is what makes "known, known, valid, valid"
+    # generalise to seven populations rather than being a fact about one of them.
+    assert axes == tuple(sorted(axes, key=["known", "valid"].index))
+
+    clause, params = store._state_clause(TMID, T1, subset)
+    assert clause == sql and len(params) == len(axes)
+    # T1 is the later instant and is the *belief* one, so this reads "belief instant on
+    # the belief markers" without depending on how the backend stores a timestamp.
+    for axis, bound in zip(axes, params):
+        assert bound == (T1 if axis == "known" else TMID).timestamp(), axis
+
+
+@pytest.mark.parametrize("subset", SUBSETS)
+def test_every_state_subset_keeps_the_belief_floor_bound_to_the_whole_clause(
+        store, subset):
+    """`AND` binds tighter than `OR`. A subset wanting `retired` beside a world-time state
+    is a disjunction, so `floor AND retired OR in_force` parses as
+    `(floor AND retired) OR in_force` — the floor gone from half the predicate, and gone
+    in the direction that returns rows we had not yet heard of.
+
+    Asserted against the database rather than against the SQL text, because the text
+    looks entirely reasonable either way. One claim, recorded after the instant being
+    asked about: no population contains it, whatever it is otherwise.
+    """
+    future = put(store, object="Rome", predicate="p_future", recorded_at=T2,
+                 valid_from=T0, valid_to=T1)
+    store.invalidate(future.id, T2, None)
+
+    seen = store.candidate_ids([SCOPE], valid_at=T2, known_at=T1, states=subset)
+    assert future.id not in seen, subset
+
+
+@pytest.mark.parametrize("subset", SUBSETS)
+def test_the_state_filter_selects_exactly_the_claims_that_report_that_state(
+        store, subset):
+    """`states=` and `Claim.state` are one vocabulary written in two modules — a SQL
+    predicate here and a pair of `is None` tests there. They have to pick the same rows
+    or the store can be asked for a population nothing reports being in."""
+    put(store, object="Lisbon", predicate="p_live")
+    put(store, object="Berlin", predicate="p_ended", valid_to=T1)
+    retired = put(store, object="Rome", predicate="p_retired")
+    store.invalidate(retired.id, T1, None)
+
+    got = store.get_claims(store.candidate_ids([SCOPE], states=subset))
+    assert {c.state for c in got.values()} == set(subset), subset
+
+
+def test_live_predicate_is_now_the_two_state_alias_and_says_the_same_thing(store):
+    """Unchanged, and checked as an identity rather than by eye: the old spelling is the
+    new one with a fixed pair of arguments, so it cannot start disagreeing while both
+    exist."""
+    for flag, subset in ((False, ("live",)), (True, STATES)):
+        assert live_predicate("?", include_invalidated=flag) \
+            == state_predicate("?", states=subset)[0]
+        assert live_predicate("%s", include_invalidated=flag, alias="c") \
+            == state_predicate("%s", states=subset, alias="c")[0]
+
+
+def test_iter_claims_filters_the_stored_state_and_keeps_its_own_default(store):
+    """The maintenance walk is not a read at an instant: it pages over rows and has no
+    clock, so it filters what `Claim.state` reports.
+
+    Its unflagged view is `("live", "ended")` and must stay so. `reembed()` walks this,
+    and narrowing the default to `("live",)` would silently stop re-encoding every
+    superseded version in the store — a walk that returns a fraction of what it did,
+    from a call whose whole purpose is to visit everything we still believe.
+    """
+    live = put(store, object="Lisbon", predicate="p_live")
+    ended = put(store, object="Berlin", predicate="p_ended", valid_to=T1)
+    retired = put(store, object="Rome", predicate="p_retired")
+    store.invalidate(retired.id, T1, None)
+
+    def walked(**kw):
+        return sorted(c.id for c in store.iter_claims("acme", **kw))
+
+    assert walked(states=["retired"]) == [retired.id]
+    assert walked(states=["ended"]) == [ended.id]
+    assert walked(states=["live"]) == [live.id]
+    assert walked() == walked(include_invalidated=False) == sorted([live.id, ended.id])
+    assert walked(include_invalidated=True) == walked(states=STATES) \
+        == sorted([live.id, ended.id, retired.id])
+
+
+@pytest.mark.parametrize("subset", SUBSETS)
+def test_the_stored_state_clause_keeps_the_plus_the_paged_walk_depends_on(subset):
+    """`_iter_rows` writes every filter as `+column`, which is not decoration: the unary
+    plus is what stops the planner taking `cl_live` and re-sorting each page back into
+    rowid order, turning a full walk quadratic. A filter handed to it without the plus
+    still returns the right rows and makes `reembed()` unrunnable at scale."""
+    clause = stored_state_predicate(subset, prefix="+")
+    if len(subset) == len(STATES):
+        assert clause == "", "the complete set is no filter, not a tautology"
+        return
+    columns = [w for w in clause.replace("(", " ").split()
+               if w.endswith("invalidated_at") or w.endswith("valid_to")]
+    assert columns and all(c.startswith("+") for c in columns), clause
+
+
+def test_a_multi_state_walk_does_not_leak_another_tenants_rows(store):
+    """The precedence trap, on the walk instead of the read. A multi-state filter is a
+    disjunction and `_iter_rows` `AND`s the tenant on beside it, so an unparenthesised
+    clause parses as `stateA OR (stateB AND tenant=?)` — and the first disjunct then
+    matches every tenant. Cross-tenant, from a filter that looks like a narrowing."""
+    mine = put(store, object="Lisbon", predicate="p_retired")
+    store.invalidate(mine.id, T1, None)
+    # Live, and in the *other* tenant: it matches the first disjunct, which is the one an
+    # unparenthesised clause leaves with no tenant term attached to it.
+    put(store, object="Berlin", predicate="p_live", scope=Scope("globex", "bob"))
+
+    walked = list(store.iter_claims("acme", states=["live", "retired"]))
+    assert [c.id for c in walked] == [mine.id]
+
+
+def test_the_stored_state_walk_reports_a_future_closure_as_already_closed(store):
+    """Where the two predicates in this family genuinely differ, stated rather than left
+    to be discovered. A claim retired *next* October is `retired` to `Claim.state` and
+    still believed to a read at now — because one is a property of the row and the other
+    is a question about a moment. The walk follows the row."""
+    later = put(store, object="Rome", predicate="p_later")
+    store.invalidate(later.id, T2, None)          # T2 is after T0/T1, the read instants
+
+    assert [c.id for c in store.iter_claims("acme", states=["retired"])] == [later.id]
+    assert store.candidate_ids([SCOPE], valid_at=T1, known_at=T1,
+                               states=["retired"]) == []
 
 
 def test_the_sqlite_store_still_satisfies_the_runtime_store_protocol(store):

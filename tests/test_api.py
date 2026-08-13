@@ -1991,7 +1991,10 @@ def test_produced_still_names_a_claim_that_has_since_been_retired(mem):
     produced = mem.produced(ep.id)
 
     assert first.id in [c.id for c in produced]
-    assert [c.id for c in produced if c.invalidated_at is None] != [], "and the live one"
+    # Named rather than counted, and `is_live()` rather than `invalidated_at is None`:
+    # Berlin was *ended* by the supersession, so it passes the old filter too and the
+    # assertion held even when `produced` returned nothing but the dead claim.
+    assert [c.object for c in produced if c.is_live()] == ["Lisbon"], "and the live one"
 
 
 def test_produced_is_reachable_from_a_scoped_view_and_from_the_async_facade(mem):

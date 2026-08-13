@@ -33,6 +33,7 @@ import pytest
 
 from memvara import Claim, Episode, HashingEmbedder, Memvara, NullLLM, Scope, utcnow
 from memvara.aio import AsyncMemvara
+from memvara.store import STATES
 from memvara.types import time_axes
 
 TZ = timezone.utc
@@ -354,6 +355,183 @@ def test_include_invalidated_makes_valid_at_inert_and_that_is_deliberate(mem, fo
             == everything
     assert cities(mem.get_all(known_at=JULY, include_invalidated=True)) \
         == ["Berlin", "Paris"]
+
+
+# =============================================================================
+# `states`: one boolean was two answers over three populations
+# =============================================================================
+#
+# The four-row fixture holds one of each state and two of the interesting one, which is
+# what makes it the right fixture for this:
+#
+#     Berlin   retired   believed Jan-Aug, corrected away in August
+#     Paris    retired   believed Jul-Aug, corrected away in August
+#     Rome     ended     still believed; asserted to have held March to July
+#     Lisbon   live      still believed, still in force
+#
+# `include_invalidated` can name {live} and {live, ended, retired} and nothing else, so
+# the two rows an August correction audit is *about* cannot be asked for.
+
+def test_only_retired_is_the_audit_include_invalidated_could_never_ask_for(mem, four):
+    """The whole point. "Show me everything we stopped believing" is a correction audit,
+    and it is exactly the set the boolean cannot name: `False` hides the retired rows,
+    `True` returns them buried in everything else, and there is no third value."""
+    assert cities(mem.get_all(states=["retired"])) == ["Berlin", "Paris"]
+    for flag in (False, True):
+        assert cities(mem.get_all(include_invalidated=flag)) != ["Berlin", "Paris"]
+
+
+def test_ended_is_a_different_population_from_retired_not_a_shade_of_it(mem, four):
+    """The distinction the boolean collapsed. Rome stopped being true and we believe
+    every word of it; Berlin and Paris are records we withdrew. Asking for one must
+    never return the other, or the two closures are back to being one flag."""
+    assert cities(mem.get_all(states=["ended"])) == ["Rome"]
+    assert cities(mem.get_all(states=["live"])) == ["Lisbon"]
+    assert cities(mem.get_all(states=["ended", "retired"])) == ["Berlin", "Paris", "Rome"]
+
+
+def test_each_state_returns_exactly_the_claims_that_report_it(mem, four):
+    """The vocabulary guard. `states=` and `Claim.state` are two spellings of one set of
+    three words, in two modules, and a filter that drifted from the property would answer
+    a question about a state nothing reports being in."""
+    for state in STATES:
+        got = mem.get_all(states=[state])
+        assert got, state
+        assert {c.state for c in got} == {state}
+
+
+@pytest.mark.parametrize("subset", [
+    ("live",), ("ended",), ("retired",), ("live", "ended"), ("live", "retired"),
+    ("ended", "retired"), ("live", "ended", "retired"),
+])
+def test_the_belief_floor_holds_under_every_state_subset(mem, four, subset):
+    """The one clause no argument lifts, checked across all seven populations rather
+    than only the two the boolean could reach.
+
+    This is where a filter breaks silently. The subsets that want `retired` alongside a
+    world-time state are a disjunction, and `AND` binds tighter than `OR` — so a
+    predicate assembled as `floor AND retired OR in_force` parses as
+    `(floor AND retired) OR in_force` and lets rows through on the world clause with no
+    floor at all. Rome and Lisbon were first heard in August; a June audit that returns
+    either is answering with knowledge from the future, and nothing about the result says
+    so.
+    """
+    audit = cities(mem.get_all(known_at=JUNE, states=subset))
+    assert "Rome" not in audit and "Lisbon" not in audit, subset
+
+
+def test_include_invalidated_is_an_exact_alias_and_stays_one(mem, four):
+    """Not deprecated, not warned about, not approximately equivalent — the same rows.
+    Checked with the belief clock moved too, since the alias has to survive composition
+    with the axes and not merely match on the default call."""
+    for kw in ({}, {"known_at": JULY}, {"valid_at": JUNE}):
+        assert mem.get_all(include_invalidated=False, **kw) \
+            == mem.get_all(states=["live"], **kw), kw
+        assert mem.get_all(include_invalidated=True, **kw) \
+            == mem.get_all(states=STATES, **kw), kw
+
+
+def test_asking_for_all_three_states_is_the_audit_view_valid_at_cannot_narrow(mem, four):
+    """The documented discontinuity, pinned so it cannot drift into a surprise. The three
+    states do not tile the store — a fact recorded but not yet in force is named by none
+    of them — so the complete set is not the union of its parts. It is the belief floor,
+    which is what `include_invalidated=True` has always meant, and under it the world
+    clock has nothing left to constrain."""
+    everything = cities(mem.get_all(states=STATES))
+    assert everything == ["Berlin", "Lisbon", "Paris", "Rome"]
+    for instant in (JAN, JUNE, JULY, AUG):
+        assert cities(mem.get_all(valid_at=instant, states=STATES)) == everything
+    # And the parts really do not add up to it, which is why the collapse is stated.
+    assert sorted(
+        cities(mem.get_all(states=["live"])) + cities(mem.get_all(states=["ended"]))
+        + cities(mem.get_all(states=["retired"]))) == everything
+
+
+@pytest.mark.parametrize("subset", [
+    ("live",), ("ended",), ("retired",), ("live", "ended"), ("live", "retired"),
+    ("ended", "retired"), ("live", "ended", "retired"),
+])
+def test_count_never_disagrees_with_get_all_about_a_state(mem, four, subset):
+    """Same argument as the axes: two independent signatures reaching one store call, so
+    the way they drift is one of them forwarding a keyword the other drops — which
+    produces a plausible number rather than an error."""
+    assert mem.count(states=subset) == len(mem.get_all(states=subset)), subset
+
+
+def test_search_carries_the_state_filter_through_both_retrieval_legs(mem, four):
+    """`get_all` only proves the store filter works. Retrieval is where the parameter is
+    actually used, and it has to survive the vector leg, the lexical leg and the fusion
+    between them."""
+    def found(**kw):
+        return sorted(r.claim.object for r in mem.search("user lives in", k=10, **kw))
+
+    assert found(states=["retired"]) == ["Berlin", "Paris"]
+    assert found(states=["ended"]) == ["Rome"]
+    assert found() == found(states=["live"]) == ["Lisbon"]
+
+
+def test_the_state_filter_is_in_the_sql_not_applied_after_the_page(mem):
+    """The reason this could not have been a client-side filter, and the reason it is a
+    store parameter rather than a comprehension in the facade.
+
+    `search` is capped: it over-fetches `k * candidate_multiplier` candidates and ranks
+    those. Filter afterwards and the retired claim is only found when it happens to land
+    inside that window — so a store with enough live claims to fill the page returns an
+    empty audit, with nothing in the result to say the answer was truncated rather than
+    absent. Twelve live rows against `k=1` is a window of five.
+    """
+    for i in range(12):
+        put(mem, f"City{i}", predicate=f"lived_in_{i}", valid_from=JAN, recorded_at=JAN)
+    corrected = put(mem, "Atlantis", predicate="lived_in_99", valid_from=JAN,
+                    recorded_at=JAN, invalidated_at=JULY)
+
+    hits = mem.search("user lived in", k=1, states=["retired"])
+    assert [r.claim.id for r in hits] == [corrected.id]
+
+
+# =============================================================================
+# An ambiguous call is a bug at the call site
+# =============================================================================
+
+@pytest.mark.parametrize("call", [
+    lambda m, **kw: m.get_all(**kw),
+    lambda m, **kw: m.count(**kw),
+    lambda m, **kw: m.search("lives", **kw),
+    lambda m, **kw: m.scope(user="alice").get_all(**kw),
+    lambda m, **kw: m.store.candidate_ids([SCOPE], **kw),
+    lambda m, **kw: list(m.store.iter_claims("acme", **kw)),
+])
+def test_states_and_include_invalidated_together_raise_rather_than_pick_one(mem, call):
+    """There is no reading of `states=["retired"], include_invalidated=False` in which one
+    of the two is not being ignored. Silently honouring either answers a question the
+    caller did not ask, and the answer looks perfectly ordinary."""
+    with pytest.raises(ValueError, match="not both"):
+        call(mem, states=["retired"], include_invalidated=False)
+
+
+@pytest.mark.parametrize("bad", [[], ["live", "deleted"], ["invalidated"], ("LIVE",)])
+def test_a_state_the_model_does_not_have_raises_instead_of_matching_nothing(mem, bad):
+    """Both failure directions produce an empty page, which is indistinguishable from an
+    honest empty answer — so a typo in an audit filter would read as "we never corrected
+    anything"."""
+    with pytest.raises(ValueError):
+        mem.get_all(states=bad)
+
+
+async def _states_through_the_async_facade(mem, four):
+    view = AsyncMemvara(mem)
+    return (await view.get_all(states=["retired"]), await view.count(states=["retired"]),
+            await view.search("user lives in", k=10, states=["retired"]))
+
+
+def test_the_async_facade_carries_states_too(mem, four):
+    """`AsyncMemvara` promises the same name, the same arguments and the same return
+    value. A keyword that stops at the sync facade breaks that promise in the way that
+    costs most: the async caller gets a plausible answer to a different question."""
+    claims, count, hits = asyncio.run(_states_through_the_async_facade(mem, four))
+    assert cities(claims) == ["Berlin", "Paris"]
+    assert count == 2
+    assert sorted(r.claim.object for r in hits) == ["Berlin", "Paris"]
 
 
 # =============================================================================

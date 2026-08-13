@@ -195,6 +195,64 @@ because it is a demonstration of the seam rather than a product.
 
 ---
 
+## The cross-encoder reranker — landed, opt-in, and not yet shown to help
+
+This sat under "deliberately deferred" until now, on the argument that a reranker is a
+model and the default configuration is "numpy and nothing else, offline, no API key". That
+argument was right about the constraint and wrong about the conclusion: the constraint is
+satisfiable. `memvara.rerank` ships a `Reranker` protocol, a `NullReranker`, a
+dependency-free `CoverageReranker`, and a `CrossEncoderReranker` behind
+`pip install 'memvara[rerank]'`. `HybridRetriever(reranker=None)` is the default and
+`None` means the stage does not exist — no import, no model, no network. A subprocess test
+asserts exactly that, and it goes red if the backend is made an eager import.
+
+The stage runs **after** fusion, the recency half-lives and the diversity cap, reorders
+the top `rerank_top_n` and cuts to `k` afterwards — so it can promote a candidate fusion
+left outside the caller's `k`. Every candidate it scores carries the number in
+`Explanation.rerank_score`; everything past `top_n` keeps `None`, which is the accurate
+record that the reranker never saw it.
+
+**What was measured**, on the LOCOMO retrieval harness that produced the R@12 = 62.0 in
+the README, all 1,531 evidence-labelled questions:
+
+| configuration | R@1 | R@5 | **R@12** | R@20 | MRR |
+|---|---:|---:|---:|---:|---:|
+| no reranker (shipped default) | 30.5 | 51.7 | **62.0** | 67.4 | 44.9 |
+| `NullReranker`, `top_n=20` | 30.5 | 51.7 | **62.0** | 67.4 | 44.9 |
+| `CoverageReranker`, `top_n=20` | 31.5 | 50.5 | **61.9** | 67.4 | 45.0 |
+| `CoverageReranker`, `top_n=50` | 31.6 | 49.8 | **59.7** | 66.2 | 44.5 |
+
+```bash
+PYTHONPATH=. python3 bench/locomo.py --score retrieval --recall-at 1,5,12,20
+PYTHONPATH=. python3 bench/locomo.py --score retrieval --recall-at 1,5,12,20 --rerank 20
+```
+
+Read the second row first: `NullReranker` reproduces the baseline in every cell, which is
+what makes the third row attributable to the reranker rather than to the plumbing. Then
+read the third row honestly — **the lexical reranker does not improve the headline
+number.** It moves the weak rows the way the theory predicts (multi-hop 36.0 → 37.8,
+open-domain 30.7 → 31.1, temporal 71.0 → 71.5) and pays for it on the strong one
+(single-hop 70.7 → 69.6), netting −0.1. Reranking deeper makes it worse, not better.
+
+**The cross-encoder itself is unmeasured.** It needs `sentence-transformers` and a model
+download, neither of which was available in the environment this was built in, and an
+estimate of what it would score would be exactly the kind of unfalsifiable claim this
+project does not make. Someone holding the extra should run:
+
+```bash
+pip install 'memvara[rerank]'
+PYTHONPATH=. python3 bench/locomo.py --score retrieval --recall-at 1,5,12,20 \
+    --rerank 20 --reranker cross-encoder
+```
+
+Until that number exists, the honest statement is that the *stage* is built, proven not to
+perturb the ranking on its own, and bounded in cost — the reranking stage itself costs
+~3 µs per query and `CoverageReranker` ~250 µs at `top_n=20` over 168-character turns,
+against a ~3 ms search — and that the *model* which was supposed to be the lever has not
+been shown to move it.
+
+---
+
 ## Deliberately deferred
 
 Each of these was considered and declined for a reason. They are recorded here so they stop
@@ -223,16 +281,6 @@ levers and `docs/DEPLOY.md` says so. Doing it in the library would mean either a
 `secure_delete` pragma that taxes every write in the store or a `VACUUM` that rewrites the
 whole file inside what a caller thinks is a per-claim call — both are the deployment's
 trade to make, not ours.
-
-**A cross-encoder reranker.** This is the standard next move for the weak retrieval rows
-(LOCOMO multi-hop at 36%, open-domain at 31%) and it is declined for a specific reason: a
-reranker is a model, and the default configuration is "numpy and nothing else, offline, no
-API key". A reranker that only works once you have installed something is not the default
-path, and one wired in behind the default would quietly end the offline claim. The seam is
-already cut for it — `Explanation.rerank_score` is reserved and left `None` so a future
-reranker's absence stays distinguishable from a reranker that scored zero, and the mem0
-shim refuses `rerank=True` with an explanation rather than silently ignoring it. If this
-lands, it lands as an opt-in protocol implementation, like every other model in the tree.
 
 **Hosted embedders (OpenAI, Voyage).** `memvara[local-embed]` ships `LocalEmbedder` and the
 `Embedder` protocol is two members wide — `dim`, and `encode(texts) -> (n, dim)` — so a

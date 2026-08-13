@@ -246,10 +246,16 @@ def test_pooling_leaves_the_survivor_on_the_decay_curve(consolidator):
     assert consolidator.run("acme") == {"decayed": 2, "merged": 1, "promoted": 0}
     survivor = store.get_claim("cl_win")
     assert survivor.salience_base == pytest.approx(2.0)
-    assert survivor.salience == pytest.approx(1.0)      # 2.0 * 0.5
+    # `salience` is the only clock-dependent number here: `age_days` is measured from
+    # module-import `NOW`, while decay is evaluated against the wall clock when the test
+    # runs. At a 730-day half-life the default `rel=1e-6` tolerates about 91 seconds of
+    # drift, so a slow or contended run fails on arithmetic that is exactly right. `1e-3`
+    # tolerates ~25 hours and still fails the bug this test names by a mile: folding the
+    # decayed values instead of the base leaves the survivor near 1.5, not 1.0.
+    assert survivor.salience == pytest.approx(1.0, rel=1e-3)      # 2.0 * 0.5
 
     assert consolidator.run("acme") == {"decayed": 0, "merged": 0, "promoted": 0}
-    assert store.get_claim("cl_win").salience == pytest.approx(1.0)
+    assert store.get_claim("cl_win").salience == pytest.approx(1.0, rel=1e-3)
 
 
 # -- bounded comparison -----------------------------------------------------

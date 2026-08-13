@@ -1028,7 +1028,11 @@ def test_longmemeval_resolves_a_knowledge_update_to_the_value_that_replaced_the_
     mem = lme.build_memory(item.qid, ek.RetrievalBudget())
     try:
         stats = ek.ingest(mem, item.sessions)
-        assert stats.retired == 1
+        # `ended`, not `retired`: changing employer is the world moving on, so the old
+        # claim's *valid* time closes. Nothing here says we were wrong to have believed it,
+        # which is what `retired` would assert. One number over both axes reported a
+        # haystack of ordinary supersessions as if the extractor kept contradicting itself.
+        assert (stats.ended, stats.retired) == (1, 0)
         live = [c.object for c in mem.get_all() if c.predicate == "works_at"]
         assert live == ["Initech"]
         history = [c.object for c in mem.history("user", "works_at")]

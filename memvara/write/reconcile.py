@@ -82,7 +82,10 @@ MASSED_SHARE = 0.1
 class ReconcileResult:
     action: str                  # "add" | "reinforce" | "supersede" | "retract" | "noop"
     claim: Claim | None          # the stored/updated claim
-    invalidated: list[Claim] = field(default_factory=list)  # claims this one retired
+    # Claims this one closed out, on **whichever** clock `close=` stopped — a supersession
+    # ends them, a retraction retires them. Named `invalidated` for history; `WriteReceipt`
+    # spells the same thing `closed` and splits it into `ended` / `retired`.
+    invalidated: list[Claim] = field(default_factory=list)
 
 
 class Reconciler:

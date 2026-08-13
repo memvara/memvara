@@ -424,7 +424,7 @@ def test_clear_embeddings_drops_the_vectors_and_keeps_the_memory(tmp_path):
 
         assert s.clear_embeddings() == 4
         assert s.stats() == {"episodes": 1, "claims": 4, "live_claims": 4,
-                             "invalidated": 0, "embeddings": 0}
+                             "ended_claims": 0, "invalidated": 0, "embeddings": 0}
         assert s.get_embedding(kept[0].id) is None
         assert s.get_claim(kept[0].id).object == "Berlin"
         assert s.lexical_search("berlin", [SCOPE], limit=10)

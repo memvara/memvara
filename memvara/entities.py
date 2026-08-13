@@ -271,6 +271,59 @@ class EntityRegistry:
         return bool(key) and (key in self._specs.get(owner, {})
                               or key in self._alias.get(owner, {}))
 
+    def probe_keys(self, owner: str, surface: str) -> tuple[str, ...]:
+        """Every stored identity a *reader's* surface form is asking about.
+
+        `resolve` answers the writer's question — "which identity should this claim be
+        filed under" — and returns one key, because a claim occupies one slot. A reader
+        asks something different, and the difference is the whole of this method: a merge
+        does not re-key the past. `Reconciler._stamp` pins each claim to the identity it
+        was written with precisely so an alias learned in month six cannot restructure
+        month one, so once "Big Blue" is known to be IBM the store holds claims under
+        `big blue` (written before) *and* under `ibm` (written after, or written as
+        "IBM" all along). A probe resolved to either single key would find one half of
+        one entity and report it as the whole.
+
+        So it returns all of them, and the deterministic fold is always the first of
+        them. That ordering is not cosmetic: it is what makes this a widening of what a
+        reader finds rather than a change to it, since a surface with nothing learned
+        about it gets back exactly the single key `entity_key` always gave it.
+
+        >>> reg = EntityRegistry()
+        >>> owner = "acme" + OWNER_SEP + "alice"
+        >>> reg.probe_keys(owner, "Big Blue")
+        ('big blue',)
+        >>> _ = reg.resolve(owner, "IBM")
+        >>> _ = reg.learn_alias(owner, "IBM", "Big Blue")
+        >>> reg.probe_keys(owner, "Big Blue")
+        ('big blue', 'ibm')
+        >>> reg.probe_keys(owner, "ibm, inc.")
+        ('ibm', 'big blue')
+
+        Ambiguity is resolved by taking all of it, never by refusing: every key here
+        names one entity by the owner's own decision, so there is nothing to choose
+        between. Where the *store* is ambiguous — two rows for one owner both claiming
+        one alias fold, which contract E-1's absence of a delete permits — the winner is
+        whichever `_load` recorded, and that is the right one rather than merely the
+        available one: it is the same lookup `_stamp` resolved against, so it is the key
+        the claims were actually written under.
+
+        No side effects. `resolve` registers a novel fold on purpose; doing that here
+        would let any read populate an owner's entity table with whatever it was asked.
+        """
+        self._load(tenant_of(owner))
+        key = entity_key(surface)
+        # Deliberately `types.default_entity`, spelled out rather than imported: `types`
+        # imports *this* module, so the dependency cannot run the other way. An
+        # unfoldable surface ("...", an emoji) keeps its raw text instead of collapsing
+        # onto the one empty key every other unfoldable surface would share.
+        fold = key or surface
+        target = self._alias.get(owner, {}).get(key)
+        spec = self._specs.get(owner, {}).get(key if target is None else target)
+        if spec is None:
+            return (fold,)
+        return tuple(dict.fromkeys((fold, spec.key) + spec.aliases))
+
     def all(self, owner: str) -> list[EntitySpec]:
         self._load(tenant_of(owner))
         return sorted(self._specs.get(owner, {}).values(), key=lambda s: s.key)

@@ -289,13 +289,25 @@ to derive a key for a predicate other than a claim's own.**
 ### F-1. Per-claim erasure (C's highest-value gap)
 
 ```python
-store.erase_claim(claim_id: str) -> bool      # irreversible; claim + FTS + vector
-Memvara.erase(claim_id, *, tenant=, user=, ...) -> bool   # scope-checked like why()
+store.erase_claim(claim_id: str, *, sources: bool = False) -> dict[str, int]
+                                              # irreversible; claim + FTS + vector
+Memvara.erase(claim_id, *, sources=False, tenant=, user=, ...) -> bool
+                                              # scope-checked like why()
 ```
 
 Distinct from `delete()`, which retires. The mem0 shim currently warns that it cannot
 honour `delete(memory_id)` because retirement leaves the text readable — that warning
 should become unnecessary.
+
+**As shipped, the store half returns per-table counts rather than a `bool`** — the same
+four keys `purge` returns (`claims`, `episodes`, `embeddings`, `entities`), so the two
+erasure paths evidence themselves alike, and a missing id returns all zeroes rather than
+an absent key. `counts["claims"]` is 0 or 1 and carries what the boolean carried.
+
+The facade half stayed a `bool` on purpose. Widening it would turn a published v0.1.0
+flag into a mapping, and `if mem.erase(id):` would then take the branch unconditionally,
+because a dict of zeroes is truthy. `sources=True` additionally erases the source turns
+no surviving claim still cites.
 
 ### F-2. Provenance-preserving writes (C had to bypass the facade for these)
 

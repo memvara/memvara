@@ -26,6 +26,10 @@ Changelog = "https://github.com/memvara/memvara/blob/main/CHANGELOG.md"
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.40"]
 local-embed = ["sentence-transformers>=3.0"]
+# The cross-encoder reranker. Same distribution as `local-embed` and deliberately a
+# separate extra: they buy different classes, and someone who wants reranking should not
+# have to learn that the way to ask for it is to name the embedder's extra.
+rerank = ["sentence-transformers>=3.0"]
 # Framework adapters. The crewai floor is load-bearing rather than conservative: 1.0.0
 # through 1.9.3 ship the previous memory system with no `StorageBackend` protocol at all,
 # and 1.10.1 is the first release the adapter can bind to.

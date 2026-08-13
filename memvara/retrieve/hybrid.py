@@ -38,13 +38,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import perf_counter
-from typing import Any, ClassVar, Literal, Sequence, overload
+from typing import Any, ClassVar, Collection, Literal, Sequence, overload
 
 import numpy as np
 
 from ..embed.base import Embedder
+from ..rerank import Reranker, rerank
 from ..schema import PredicateRegistry
-from ..store.base import Store
+from ..store.base import Store, resolve_states
 from ..telemetry import (
     RETRIEVAL_LATENCY_MS,
     RETRIEVAL_OBSERVATION_RANK_CORR,
@@ -193,6 +194,8 @@ class HybridRetriever:
         filter_retry_multiplier: int = 10,
         w_episode: float = 0.5,
         max_episodes: int = 3,
+        reranker: "Reranker | None" = None,
+        rerank_top_n: int = 20,
         telemetry: Recorder | None = None,
     ) -> None:
         self.store = store
@@ -221,6 +224,15 @@ class HybridRetriever:
         # a single well-worded conversation crowd out everything the store knows.
         self.w_episode = w_episode
         self.max_episodes = max_episodes
+        #: A reranking pass over the head of the fused list, or `None` — the default,
+        #: and an absence rather than a no-op: with nothing configured the stage does not
+        #: run, imports nothing and costs nothing, which is what keeps the shipped
+        #: configuration offline. See `memvara.rerank`. `rerank_top_n` bounds what it
+        #: costs when it is configured: the retriever cuts that deep instead of at `k`,
+        #: reranks, and then cuts to `k` — so candidates that fusion put just past the
+        #: caller's `k` can be promoted into it, which is the whole point of the stage.
+        self.reranker = reranker
+        self.rerank_top_n = rerank_top_n
 
     # Three signatures for one method, because `include_episodes` decides what comes
     # back and the caller almost always knows which at the point of the call. Without
@@ -232,7 +244,8 @@ class HybridRetriever:
     def search(
         self, query: str, scope: Scope, *, k: int = ...,
         as_of: datetime | None = ..., valid_at: datetime | None = ...,
-        known_at: datetime | None = ..., include_invalidated: bool = ...,
+        known_at: datetime | None = ..., states: Collection[str] | None = ...,
+        include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         include_episodes: Literal[False] = ...,
     ) -> list[Result]: ...
@@ -241,7 +254,8 @@ class HybridRetriever:
     def search(
         self, query: str, scope: Scope, *, k: int = ...,
         as_of: datetime | None = ..., valid_at: datetime | None = ...,
-        known_at: datetime | None = ..., include_invalidated: bool = ...,
+        known_at: datetime | None = ..., states: Collection[str] | None = ...,
+        include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         include_episodes: Literal[True],
     ) -> list[Retrieved]: ...
@@ -250,7 +264,8 @@ class HybridRetriever:
     def search(
         self, query: str, scope: Scope, *, k: int = ...,
         as_of: datetime | None = ..., valid_at: datetime | None = ...,
-        known_at: datetime | None = ..., include_invalidated: bool = ...,
+        known_at: datetime | None = ..., states: Collection[str] | None = ...,
+        include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         include_episodes: bool,
     ) -> list[Retrieved]: ...
@@ -264,7 +279,8 @@ class HybridRetriever:
         as_of: datetime | None = None,
         valid_at: datetime | None = None,
         known_at: datetime | None = None,
-        include_invalidated: bool = False,
+        states: Collection[str] | None = None,
+        include_invalidated: bool | None = None,
         memory_types: Sequence[MemoryType] | None = None,
         min_score: float = 0.0,
         include_episodes: bool = False,
@@ -279,11 +295,17 @@ class HybridRetriever:
         sugar for `valid_at=known_at=T`; passing it alongside either raises. See
         `memvara.types.time_axes`.
 
-        `include_invalidated` additionally lifts the end-of-life filters, surfacing
-        claims that were already dead - useful for auditing, wrong for answering a
-        question. It leaves the belief floor standing, so knowledge from after
-        `known_at` never leaks in; see `SQLiteStore._live_clause` for exactly what it
-        does and does not lift.
+        `states` names the population, as any non-empty subset of
+        `("live", "ended", "retired")`. `include_invalidated` is its two-valued alias -
+        `False` is `["live"]`, `True` is all three - kept working and not deprecated;
+        passing both raises. The flag is what a caller reached for to audit, and it
+        cannot say "only the records we stopped believing", which is what an audit is.
+
+        Asking for all three lifts the end-of-life filters, surfacing claims that were
+        already dead - useful for auditing, wrong for answering a question. The belief
+        floor stands under every subset, so knowledge from after `known_at` never leaks
+        in; see `store.state_predicate` for exactly what each subset does and does not
+        lift.
 
         `min_score` drops results below a normalized relevance (see
         `scoring.normalized_score`); at the default 0.0 nothing is dropped. The right
@@ -306,6 +328,10 @@ class HybridRetriever:
         a caller sees.
         """
         valid_at, known_at = time_axes(as_of, valid_at, known_at)
+        # Resolved once, here, and carried as a tuple from this line down. The alias is
+        # a facade spelling; below it there is one parameter, so no inner call can pass
+        # both and no inner call can disagree about what the flag meant.
+        wanted_states = resolve_states(states, include_invalidated)
         if k <= 0:
             return []
         rec = self.telemetry
@@ -329,11 +355,18 @@ class HybridRetriever:
         # Over-fetch per retriever: fusion can only rank what it was given, and a claim
         # that BM25 puts first is worthless if the vector list was cut before it and
         # the final k is small.
-        limit = max(k * self.candidate_multiplier, k)
+        # How deep the pipeline ranks before the caller's `k` is applied. Identical to
+        # `k` unless a reranker is configured, in which case the stage needs candidates
+        # below the cut to have anything to promote: reranking the same `k` items the
+        # caller was going to get can only reorder them, which changes what is read
+        # first and cannot change what is present at all.
+        depth = k if self.reranker is None else max(k, self.rerank_top_n)
+
+        limit = max(depth * self.candidate_multiplier, depth)
         wanted = set(memory_types) if memory_types is not None else None
 
         results, saturated = self._gather(
-            query, scopes, limit, valid_at, known_at, include_invalidated, wanted, now,
+            query, scopes, limit, valid_at, known_at, wanted_states, wanted, now,
             min_score)
 
         # Filter starvation. `memory_types` is applied after fusion truncated the pool,
@@ -342,16 +375,24 @@ class HybridRetriever:
         # both retrievers would widen the `Store` protocol for a case that is rare;
         # noticing that the pool was full and re-asking once is not. The retry is
         # bounded and happens only when the shortfall could actually be an artefact.
-        if wanted is not None and saturated and len(results) < k:
+        if wanted is not None and saturated and len(results) < depth:
             results, _ = self._gather(
                 query, scopes, limit * self.filter_retry_multiplier, valid_at, known_at,
-                include_invalidated, wanted, now, min_score)
+                wanted_states, wanted, now, min_score)
 
-        ranked: list[Retrieved] = list(self._rank(results, k))
+        ranked: list[Retrieved] = list(self._rank(results, depth))
         if include_episodes and wanted is None:
             ranked = self._interleave(
                 ranked,
-                self._episodes(query, scopes, limit, valid_at, known_at, min_score), k)
+                self._episodes(query, scopes, limit, valid_at, known_at, min_score),
+                depth)
+        if self.reranker is not None:
+            # Last, deliberately. Everything above it — fusion, the recency half-lives,
+            # the per-slot diversity cap, the episode discount — is the ranking this
+            # library is arguing for, and the reranker is a second opinion on its head,
+            # not a replacement for it. Running before the diversity pass would let a
+            # model that likes one phrasing refill the slots the pass exists to spread.
+            ranked = rerank(self.reranker, query, ranked, top_n=self.rerank_top_n)[:k]
         if rec is not None:
             self._observe(rec, query, ranked, (perf_counter() - t0) * 1000.0)
         return ranked
@@ -421,7 +462,7 @@ class HybridRetriever:
         limit: int,
         valid_at: datetime | None,
         known_at: datetime | None,
-        include_invalidated: bool,
+        states: Sequence[str],
         wanted: set[MemoryType] | None,
         now: datetime,
         min_score: float,
@@ -434,9 +475,9 @@ class HybridRetriever:
         `limit` hits has nothing more to give, and re-asking would be pure cost.
         """
         vector_hits = self._vector_search(
-            query, scopes, limit, valid_at, known_at, include_invalidated)
+            query, scopes, limit, valid_at, known_at, states)
         lexical_hits, lexical_terms = self._lexical_search(
-            query, scopes, limit, valid_at, known_at, include_invalidated)
+            query, scopes, limit, valid_at, known_at, states)
 
         fused = reciprocal_rank_fusion(
             {VECTOR: vector_hits, LEXICAL: lexical_hits},
@@ -682,7 +723,7 @@ class HybridRetriever:
         limit: int,
         valid_at: datetime | None,
         known_at: datetime | None,
-        include_invalidated: bool,
+        states: Sequence[str],
     ) -> list[tuple[str, float]]:
         """Vector leg, skipped when the query embeds to nothing.
 
@@ -698,8 +739,7 @@ class HybridRetriever:
         if float(np.linalg.norm(qvec)) <= 0.0:
             return []
         return list(self.store.vector_search(
-            qvec, scopes, limit, valid_at=valid_at, known_at=known_at,
-            include_invalidated=include_invalidated))
+            qvec, scopes, limit, valid_at=valid_at, known_at=known_at, states=states))
 
     def _lexical_search(
         self,
@@ -708,7 +748,7 @@ class HybridRetriever:
         limit: int,
         valid_at: datetime | None,
         known_at: datetime | None,
-        include_invalidated: bool,
+        states: Sequence[str],
     ) -> tuple[list[tuple[str, float]], int]:
         """Lexical leg, reduced to content terms and skipped when none survive.
 
@@ -726,25 +766,25 @@ class HybridRetriever:
             return [], 0
         hits = self.store.lexical_search(
             reduced.text, scopes, limit, valid_at=valid_at, known_at=known_at,
-            include_invalidated=include_invalidated)
+            states=states)
         return list(hits), len(reduced.terms)
 
     @staticmethod
     def _believed_by(claim: Claim, known_at: datetime | None) -> bool:
         """Belief-time floor, enforced here rather than left to the store.
 
-        `include_invalidated=True` drops most of the store's liveness predicate, and a
-        third-party store may drop the rest too - letting claims recorded *after* the
-        asked instant leak into a historical answer. "What did we believe in March,
+        A `states` set covering all three drops most of the store's liveness predicate,
+        and a third-party store may drop the rest too - letting claims recorded *after*
+        the asked instant leak into a historical answer. "What did we believe in March,
         including what we later retracted" must never include something we had not yet
         heard in March - that is knowledge from the future, and it is the one way a
         bitemporal query can lie. Re-applying the floor costs a comparison per
         candidate and makes the two flags orthogonal, which is what callers assume.
 
         Only the belief axis is re-checked. The valid-time floor is deliberately *not*
-        mirrored here: `include_invalidated` lifts the whole valid-time interval by
-        design (see `SQLiteStore._live_clause`), so re-imposing half of it in Python
-        would make the flag mean something different depending on which layer answered.
+        mirrored here: the complete state set lifts the whole valid-time interval by
+        design (see `store.state_predicate`), so re-imposing half of it in Python would
+        make the filter mean something different depending on which layer answered.
         """
         if known_at is None:
             return True

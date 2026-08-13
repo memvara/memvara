@@ -116,10 +116,12 @@ defences, all in `memvara/core.py`, all worth attacking:
   so a pasted stack trace cannot become the whole prompt.
 - **`RECALL_HEADER` and `RECALL_EPISODE_HEADER`** frame the block as retrieved data rather
   than instructions, and the episode header says "said", not "true".
-- **The signature is explicit rather than `**kwargs`**, so `include_invalidated` and
-  `as_of` are not reachable from `recall()`. `include_invalidated=True` would resurrect
+- **The signature is explicit rather than `**kwargs`**, so `states`, `include_invalidated`
+  and `as_of` are not reachable from `recall()`. `include_invalidated=True` would resurrect
   retired claims into a live prompt — an un-delete reachable by anyone who can influence a
-  parameter.
+  parameter. `states=["retired"]` is the sharper form of the same attack: where
+  `include_invalidated=True` at least returns live claims alongside the dead ones,
+  `states=["retired"]` builds a prompt out of nothing *but* records we stopped believing.
 
 A way to break out of that block, forge a header, or reach a retired claim through
 `recall()` is in scope. A model choosing to follow instructions that are correctly framed

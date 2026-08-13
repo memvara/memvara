@@ -7,7 +7,9 @@ importable from the foundation modules:
 - `memvara/types.py` — `Claim`, `Episode`, `Scope`, `Result`, `Explanation`, `WriteReceipt`,
   `MemoryType`, `Derivation`, `utcnow()`, `content_hash()`
 - `memvara/schema.py` — `PredicateRegistry`, `PredicateSpec`, `Cardinality`, `Volatility`
-- `memvara/store/` — `Store` protocol, `SQLiteStore`
+- `memvara/store/` — `Store` and `SQLStore` protocols, `SQLiteStore`, `STATES`,
+  `ClaimState`, `resolve_states()`, `state_predicate()`, `stored_state_predicate()`,
+  `live_predicate()`
 - `memvara/embed/` — `Embedder` protocol, `HashingEmbedder`, `CachedEmbedder`, `default_embedder()`
 - `memvara/llm/base.py` — `LLM` protocol, `NullLLM`, `CLAIM_SCHEMA`, `PREDICATE_SCHEMA`,
   `EXTRACT_SYSTEM`, `PREDICATE_SYSTEM`
@@ -44,7 +46,11 @@ importable from the foundation modules:
    run where the truncation runs, or the top-k is wrong: `Store.adjacent` shipped without
    a `scopes` argument and with the caller filtering afterwards, and on a shared tenant a
    question with 20 answers returned 8. This applies to any future store method that caps
-   rows the caller is expected to authorize.
+   rows the caller is expected to authorize. It is why `states=` is a store parameter and
+   not a comprehension in the facade: `search` over-fetches `k * candidate_multiplier` and
+   ranks those, so a state filter applied afterwards finds a retired claim only when it
+   happens to land inside that window — twelve live rows against `k=1` is a window of
+   five, and the audit comes back empty with nothing saying it was truncated.
 
 ---
 
@@ -119,8 +125,13 @@ claim:
 class ReconcileResult:
     action: str                  # "add" | "reinforce" | "supersede" | "retract" | "noop"
     claim: Claim | None          # the stored/updated claim
-    invalidated: list[Claim]     # claims this one retired
+    invalidated: list[Claim]     # claims this one closed out — on whichever clock
+                                 # `close=` stopped, so `ended` by default, not retired
 ```
+
+`WritePipeline` copies that list onto `WriteReceipt.closed`, where `receipt.ended` and
+`receipt.retired` split it by `Claim.state`. Anything rendering the list as one word is
+wrong for one of the two closures; a supersession is `ended`.
 
 ### `write/pipeline.py`
 
@@ -203,8 +214,12 @@ class HybridRetriever:
 
     def search(self, query: str, scope: Scope, *, k: int = 10,
                as_of: datetime | None = None, valid_at: datetime | None = None,
-               known_at: datetime | None = None, include_invalidated: bool = False,
-               memory_types: Sequence[MemoryType] | None = None) -> list[Result]
+               known_at: datetime | None = None,
+               states: Collection[str] | None = None,
+               include_invalidated: bool | None = None,
+               memory_types: Sequence[MemoryType] | None = None,
+               min_score: float = 0.0,
+               include_episodes: bool = False) -> list[Result]
 ```
 
 Search must:
@@ -274,11 +289,12 @@ a wrong answer with no error, which is the failure the split exists to remove.
 competing_claims(tenant, fact_key, *, valid_at=None, known_at=None)
 adjacent(tenant, keys, *, outgoing=True, incoming=True, predicates=None,
          valid_at=None, known_at=None, scopes=None, limit=1000)
-candidate_ids(scopes, *, valid_at=None, known_at=None, include_invalidated=False)
-lexical_search(query, scopes, limit, *, valid_at=None, known_at=None,
-               include_invalidated=False)
-vector_search(qvec, scopes, limit, *, valid_at=None, known_at=None,
-              include_invalidated=False)
+candidate_ids(scopes, *, valid_at=None, known_at=None, states=None,
+              include_invalidated=None)
+lexical_search(query, scopes, limit, *, valid_at=None, known_at=None, states=None,
+               include_invalidated=None)
+vector_search(qvec, scopes, limit, *, valid_at=None, known_at=None, states=None,
+              include_invalidated=None)
 episode_candidate_ids(scopes, *, valid_at=None, known_at=None)
 lexical_search_episodes(query, scopes, limit, *, valid_at=None, known_at=None)
 vector_search_episodes(qvec, scopes, limit, *, valid_at=None, known_at=None)
@@ -290,9 +306,85 @@ generation, and `Store` promises a Qdrant or LanceDB backend can implement it wi
 them:
 
 ```python
+_state_clause(valid_at, known_at, states=None, alias="")        -> tuple[str, list]
 _live_clause(valid_at, known_at, include_invalidated, alias="") -> tuple[str, list]
 _happened_clause(valid_at, known_at, alias="")                  -> tuple[str, list]
 ```
+
+### The three states
+
+A claim is `live` (neither clock closed), `ended` (valid time closed — the world moved
+on) or `retired` (transaction time closed — the record was wrong). That is `Claim.state`,
+and `store/base.py` exports the vocabulary and the SQL that selects it:
+
+```python
+STATES            # ("live", "ended", "retired") — also the canonical order
+ClaimState        # Literal of the same three
+resolve_states(states=None, include_invalidated=None, *, default=("live",))
+state_predicate(at="?", *, states=None, alias="")   -> (sql, axes)
+stored_state_predicate(states=None, *, prefix="")   -> sql
+live_predicate(at="?", *, include_invalidated=False, alias="") -> sql
+```
+
+`resolve_states` is **the one place either spelling is interpreted**, so no surface can
+invent its own reading of the older flag. It returns a canonical tuple in `STATES` order,
+so one requested population compiles to one string however the caller spelled it.
+Passing `states=` and `include_invalidated=` together raises: there is no reading of the
+mix in which one of the two is not being ignored. Nothing is deprecated and nothing
+warns — `filterwarnings = ["error::DeprecationWarning"]` would turn a warning into a
+failure at every existing call site.
+
+`default=` is what the method returns when neither argument is given, *and* what
+`include_invalidated=False` means on it — one parameter names both, so they cannot drift
+apart. It is `("live",)` on the read path and `("live", "ended")` on `iter_claims`.
+
+`_state_clause` is the parameterised form of `state_predicate` and the method every read
+filter in a SQL backend routes through. **It is the binding site** — the only place in
+this repository that binds the state predicate's markers. `state_predicate` returns the
+SQL *and* an axis list naming the clock behind each marker in order (`("known", "known",
+"valid", "valid")` for the live-only case), so binding is a comprehension over that list
+rather than a remembered order. That is what makes the one silent error unwritable: a
+belief instant bound onto a world column answers identically to a correct one on every
+`as_of` call, because those pass the two axes equal.
+
+`_live_clause` is now `_state_clause` with the two-valued alias applied, and is neither
+deprecated nor changed in meaning. `live_predicate` is likewise the two-state alias of
+`state_predicate` — it drops the axis list, so a caller that binds markers should prefer
+the general form. Both remain exported.
+
+`stored_state_predicate` is the member of the family for a walk with no clock to read.
+`iter_claims` pages over rows rather than answering a question about a moment, so its
+filter is the *stored* state — what `Claim.state` reports — which differs from
+`state_predicate` exactly where a timestamp is in the future: a claim retired next
+October is `retired` here and still believed there. It returns `""` for the complete set,
+meaning "no filter", so the caller drops it rather than emitting a tautology into a paged
+scan. Its `prefix` is load-bearing, not decorative: `iter_claims` passes `"+"` to keep
+the planner off `cl_live`, which would otherwise sort every page back into rowid order.
+
+**`iter_claims`'s unflagged view is `("live", "ended")`, not live-only.** It has always
+meant "every row we still believe", and it must stay that way: `reembed()` walks it, and
+narrowing the default would silently stop re-encoding every superseded version in the
+store. `include_invalidated=True` is unchanged and still means all three.
+`include_invalidated` also stays *positional* there, because it always was.
+
+### The three states do not tile the store
+
+Asking for all three is not the union of the three parts. `Claim.state` is absolute while
+`state_predicate` is as-of, so a claim recorded but not yet in force at `valid_at` — a
+fact scheduled to start next month — is named by none of the three. The complete set
+therefore collapses to the belief floor alone:
+
+```python
+state_predicate("?", states=STATES)
+# ('(recorded_at <= ?)', ('known',))
+```
+
+which readmits that row and leaves `valid_at` with nothing to constrain. That is exactly,
+and deliberately, the semantics `include_invalidated=True` has always had, and
+`tests/test_bitemporal.py::test_asking_for_all_three_states_is_the_audit_view_valid_at_cannot_narrow`
+pins it so it cannot drift into a surprise.
+
+### The clauses themselves
 
 `_live_clause` is four constraints, two per axis, each reading only its own clock:
 `recorded_at <= known_at`, `invalidated_at > known_at`, `valid_from <= valid_at`,
@@ -300,39 +392,72 @@ _happened_clause(valid_at, known_at, alias="")                  -> tuple[str, li
 once per call — and one read fills both defaults so the two cannot land microseconds
 apart.
 
-The SQL itself is not written there. `store.live_predicate(at="?", *,
-include_invalidated=False, alias="") -> str` is the exported home for it, and
-`_live_clause` is that call plus the binding. `at` is the SQL *expression* for the
-instant, substituted at every axis — a bind marker (`"?"`, `"%s"`) or a server clock
+The SQL itself is not written in either clause builder. `at` is the SQL *expression* for
+the instant, substituted at every axis — a bind marker (`"?"`, `"%s"`) or a server clock
 (`"now()"`) — so a counter with no store instance, on a raw connection, in another
 repository, can still ask the same question. One expression rather than one per axis
 because such a counter is always counting *now*, and two markers would let a caller bind
 the pair transposed, which no `as_of` query can reveal. Where markers are used the four
-bind **known, known, valid, valid**, and `_live_clause` is the only place in this
-repository that performs that binding.
+bind **known, known, valid, valid**.
 
-`include_invalidated` lifts the **whole valid-time interval** plus the retirement,
-leaving only `recorded_at <= known_at`. That is more than the name promises, it is
-existing behaviour, and it must stay identical across backends: under the flag,
-`valid_at` has no effect at all. The belief floor is the one clause that never lifts —
-returning something first heard in July when asked what we believed in March is the only
-way a bitemporal read can actively lie.
+`include_invalidated=True` — equivalently `states=STATES` — lifts the **whole valid-time
+interval** plus the retirement, leaving only `recorded_at <= known_at`. That is more than
+the name promises, it is existing behaviour, and it must stay identical across backends:
+under it, `valid_at` has no effect at all. The belief floor is the one clause that never
+lifts, under any subset — returning something first heard in July when asked what we
+believed in March is the only way a bitemporal read can actively lie.
+
+A subset containing `retired` is written with the retired disjunct **first**, so its
+belief marker stays ahead of the world markers and the axis discipline generalises rather
+than changing shape per subset. `base._either` parenthesises each disjunction inside
+*and* out, because `AND` binds tighter than `OR` and a bare disjunction dropped into a
+conjunction re-associates silently — `floor AND retired OR in_force` is
+`(floor AND retired) OR in_force`, which drops the belief floor in the direction that
+answers "what did we believe in March" with something first heard in July.
 
 `_happened_clause` is the episode form. A turn has no separate record time, so its single
 `ts` is both its `valid_from` and its `recorded_at`; substituting that into the four
 clauses above leaves `ts <= min(valid_at, known_at)`. There is no `include_invalidated`
-because nothing retires a turn.
+and no `states` because nothing retires a turn.
 
 `types.Claim.is_live(as_of=None, *, valid_at=None, known_at=None)` is the Python mirror
 of `_live_clause` and is held to the same wording clause for clause. Three copies of one
 predicate is three chances to disagree; `tests/test_bitemporal.py` checks the Python one
 against the SQL one row for row.
 
-`stats()["live_claims"]` is that same predicate at the wall clock, and **not**
-`invalidated_at IS NULL`. Those agreed only while superseding closed both clocks; since
-it closes valid time alone, the cheap test counts every superseded version of every slot
-as live. The three counts consequently do not sum — a claim that has *ended* is neither
-live nor invalidated — and `claims` is the only total that covers everything.
+### `stats()`
+
+```python
+{"episodes", "claims", "live_claims", "ended_claims", "invalidated", "embeddings"}
+```
+
+`live_claims` and `ended_claims` are both taken from `_state_clause`, and so from
+`state_predicate`, rather than spelled out — a counter that writes its own copy of the
+predicate is exactly how the cheap version got into three files. Neither is a column
+test, and neither is derivable from the others. On a store holding one live claim, one
+ended claim, one that ended and was *later* retired, and one recorded but not in force
+until next year, `stats()` reports `claims=4, live_claims=1, ended_claims=1,
+invalidated=1` — and:
+
+| cheaper spelling | gives | truth | why |
+|---|---|---|---|
+| `invalidated_at IS NULL` | 3 | `live_claims` = 1 | counts every superseded version as live |
+| `valid_to IS NOT NULL` | 2 | `ended_claims` = 1 | the ended-then-retired row is already inside `invalidated` |
+| `claims - live_claims - invalidated` | 2 | `ended_claims` = 1 | the residual also holds the scheduled claim, which is in no state at all |
+
+`ended_claims` and `invalidated` are **disjoint** — the state predicate excludes the
+ended-then-retired row from the first, so it is counted once — which is why the key had
+to be added rather than left to subtraction. It was the largest non-live population and
+the only one with no key.
+
+**The counts do not sum**, and the leftover is not the ended rows: `1 + 1 + 1` against
+`claims = 4`. `claims` is the only total that covers everything, and a backend that
+"corrects" the arithmetic has reintroduced the conflation.
+
+That is the one change in this project that is wrong *silently* downstream: the old
+one-column test is still valid SQL and still valid Python, it used to be right, and it
+now over-counts with nothing to raise. [`docs/UPGRADING.md`](UPGRADING.md) carries the
+grep list for finding copies of it.
 
 `invalidate()` and `set_valid_to()` are in `Store` and **no engine path calls either**.
 Closing a claim moves one clock; `invalidate` writes `invalidated_at` and

@@ -54,9 +54,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Any, Literal, Sequence, overload
+from typing import Any, Collection, Literal, Sequence, overload
 
-from .core import Memvara, Messages
+from .core import Memvara, Messages, ScopedMemvara
 from .embed import Embedder
 from .retrieve import Path, Retrieved
 from .types import Claim, Episode, MemoryType, Provenance, Result, Scope, WriteReceipt
@@ -69,19 +69,22 @@ class AsyncMemvara:
     return value — so the sync docstring is the documentation for both, and there is no
     second set of semantics to keep in step.
 
-    The one omission is `scope()`. Every method here already takes the four scope
-    keywords, so nothing is unreachable without it, and an async binding would mean a
-    third facade to keep aligned with the other two for no new capability.
+    Nothing is omitted any more. `scope()` used to be, on the argument that every method
+    here already takes the four scope keywords so nothing was unreachable without it —
+    which was true, and which answered the wrong question: `ScopedMemvara` does not exist
+    to reach anything, it exists so that the four keywords are written once instead of on
+    every line, because the call site that repeats them is the call site that eventually
+    writes one user's fact into another user's scope.
 
-    The workaround has a price, and this docstring used to understate it. Holding one
-    `AsyncMemvara` per scope means holding one `Memvara` per scope — this class has no
-    scope of its own, it forwards the one it is given — and constructing a `Memvara` over
-    an existing store is *not* free even though the store is shared: it re-reads the
-    persisted predicate specs, re-runs the embedder fingerprint check, and builds a fresh
-    `PredicateRegistry` that starts empty of anything learned since. Per request, that is
-    several queries and a schema the process has already paid for. Pass `registry=` (and
-    `store=`) to share both if that shape is wanted; otherwise pass `user=` per call,
-    which really is free.
+    The workaround for that omission also had a price, and this docstring used to
+    understate it. Holding one `AsyncMemvara` per scope means holding one `Memvara` per
+    scope — this class has no scope of its own, it forwards the one it is given — and
+    constructing a `Memvara` over an existing store is *not* free even though the store
+    is shared: it re-reads the persisted predicate specs, re-runs the embedder
+    fingerprint check, and builds a fresh `PredicateRegistry` that starts empty of
+    anything learned since. Per request, that is several queries and a schema the process
+    has already paid for. `scope()` costs a `Scope` and two attribute writes; `registry=`
+    and `store=` are still there for the case that genuinely wants two instances.
     """
 
     __slots__ = ("memvara",)
@@ -182,7 +185,9 @@ class AsyncMemvara:
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      tenant=..., user=..., agent=..., session=...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
-                     known_at: datetime | None = ..., include_invalidated: bool = ...,
+                     known_at: datetime | None = ...,
+                     states: Collection[str] | None = ...,
+                     include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: Literal[False] = ...) -> list[Result]: ...
 
@@ -190,7 +195,9 @@ class AsyncMemvara:
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      tenant=..., user=..., agent=..., session=...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
-                     known_at: datetime | None = ..., include_invalidated: bool = ...,
+                     known_at: datetime | None = ...,
+                     states: Collection[str] | None = ...,
+                     include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: Literal[True]) -> list[Retrieved]: ...
 
@@ -198,7 +205,9 @@ class AsyncMemvara:
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      tenant=..., user=..., agent=..., session=...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
-                     known_at: datetime | None = ..., include_invalidated: bool = ...,
+                     known_at: datetime | None = ...,
+                     states: Collection[str] | None = ...,
+                     include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: bool) -> list[Retrieved]: ...
 
@@ -206,14 +215,16 @@ class AsyncMemvara:
                      tenant=None, user=None, agent=None, session=None,
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
-                     include_invalidated: bool = False,
+                     states: Collection[str] | None = None,
+                     include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType] | None = None,
                      include_episodes: bool = False) -> list[Any]:
         """See `Memvara.search`. Encodes the query, so it belongs off the loop too."""
         return await asyncio.to_thread(
             self.memvara.search, query, k=k, min_score=min_score, tenant=tenant,
             user=user, agent=agent, session=session, as_of=as_of, valid_at=valid_at,
-            known_at=known_at, include_invalidated=include_invalidated,
+            known_at=known_at, states=states,
+            include_invalidated=include_invalidated,
             memory_types=memory_types, include_episodes=include_episodes)
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
@@ -236,14 +247,15 @@ class AsyncMemvara:
             session=session)
 
     async def get_all(self, *, tenant=None, user=None, agent=None, session=None,
-                      include_invalidated: bool = False,
+                      states: Collection[str] | None = None,
+                      include_invalidated: bool | None = None,
                       as_of: datetime | None = None, valid_at: datetime | None = None,
                       known_at: datetime | None = None) -> list[Claim]:
         """See `Memvara.get_all`."""
         return await asyncio.to_thread(
             self.memvara.get_all, tenant=tenant, user=user, agent=agent, session=session,
-            include_invalidated=include_invalidated, as_of=as_of, valid_at=valid_at,
-            known_at=known_at)
+            states=states, include_invalidated=include_invalidated, as_of=as_of,
+            valid_at=valid_at, known_at=known_at)
 
     async def history(self, subject: str, predicate: str, *, tenant=None, user=None,
                       agent=None, session=None, as_of: datetime | None = None,
@@ -276,11 +288,12 @@ class AsyncMemvara:
     async def count(self, *, tenant=None, user=None, agent=None, session=None,
                     as_of: datetime | None = None, valid_at: datetime | None = None,
                     known_at: datetime | None = None,
-                    include_invalidated: bool = False) -> int:
+                    states: Collection[str] | None = None,
+                    include_invalidated: bool | None = None) -> int:
         """See `Memvara.count`."""
         return await asyncio.to_thread(
             self.memvara.count, tenant=tenant, user=user, agent=agent, session=session,
-            as_of=as_of, valid_at=valid_at, known_at=known_at,
+            as_of=as_of, valid_at=valid_at, known_at=known_at, states=states,
             include_invalidated=include_invalidated)
 
     async def neighborhood(self, entity: str, *, depth: int = 2, k: int = 10,
@@ -342,11 +355,288 @@ class AsyncMemvara:
     def __repr__(self) -> str:
         return f"<AsyncMemvara of {self.memvara!r}>"
 
+    # -- scoped views --------------------------------------------------------
+
+    def scope(self, *, tenant=None, user=None, agent=None,
+              session=None) -> "AsyncScopedMemvara":
+        """A view of this facade bound to one scope. See `Memvara.scope`.
+
+        Not a coroutine, and the one method here that is not: it binds four strings and
+        touches no store, so awaiting it would advertise I/O that does not happen.
+
+        This used to be the deliberate omission, on the grounds that every method here
+        already takes the four keywords so nothing was unreachable. Reachable is not the
+        same as safe. The argument for `ScopedMemvara` — that a call site repeating
+        `tenant/user/agent/session` on every line eventually gets one wrong, and in a
+        memory store that means writing one user's fact into another user's scope —
+        is not weakened by the methods being awaitable. It is strengthened: the async
+        facade exists for servers, and a server is precisely where one handle per request
+        per user is the shape, and where a mistake is someone else's data.
+        """
+        inner = self.memvara._scope(tenant, user, agent, session)
+        return AsyncScopedMemvara(self, inner)
+
+
+class AsyncScopedMemvara:
+    """An `AsyncMemvara` with its scope already filled in. See `ScopedMemvara`.
+
+    The async twin, method for method: same names, same arguments, same return values,
+    minus the four scope keywords and plus `await`. `ScopedMemvara`'s docstring is the
+    documentation for both.
+
+    It wraps the `AsyncMemvara` rather than the `Memvara`, so every call goes through the
+    one `asyncio.to_thread` that already exists on the facade. Wrapping the synchronous
+    object instead would mean a second copy of the threading, and two places for the two
+    facades to drift apart about what runs off the loop.
+    """
+
+    __slots__ = ("_amem", "scope")
+
+    def __init__(self, memvara: AsyncMemvara, scope: Scope) -> None:
+        # Deliberately **not** named `_mem`: `integrations._common.bind` sniffs for that
+        # attribute to recognise a `ScopedMemvara`, and finding one here would hand a
+        # synchronous adapter an `AsyncMemvara` typed as a `Memvara` — every call a
+        # coroutine nobody awaits, and nothing raised. Under this name that adapter
+        # raises `AttributeError` on `default_scope` instead, which is the right outcome
+        # for passing an async handle to a synchronous adapter.
+        self._amem = memvara
+        self.scope = scope
+
+    @property
+    def memvara(self) -> Memvara:
+        """The unscoped, **synchronous** `Memvara` underneath.
+
+        The same accessor `ScopedMemvara.memvara` is, resolving to the same kind of
+        object, so one name means one thing across all three facades: the real instance,
+        with the store and the registry on it, for the server layer that needs them.
+        `unscoped` is the async facade.
+        """
+        return self._amem.memvara
+
+    @property
+    def unscoped(self) -> AsyncMemvara:
+        """The `AsyncMemvara` this is a view of.
+
+        Has no synchronous counterpart, and is here because `close()` and `reembed()`
+        are deliberately absent from a scoped view (they are not scoped operations —
+        see `ScopedMemvara`), which on the sync side leaves `view.memvara.close()` as
+        the way to reach them. Doing that here would run a commit and an fsync on the
+        loop thread, which is the single thing this module exists to prevent. So:
+        `await view.unscoped.close()`.
+        """
+        return self._amem
+
+    # -- narrowing -----------------------------------------------------------
+
+    def bind(self, *, tenant=None, user=None, agent=None,
+             session=None) -> "AsyncScopedMemvara":
+        """A narrower view. Fields not given keep this view's values."""
+        s = self.scope
+        return AsyncScopedMemvara(self._amem, Scope(
+            tenant if tenant is not None else s.tenant,
+            user if user is not None else s.user,
+            agent if agent is not None else s.agent,
+            session if session is not None else s.session,
+        ))
+
+    @property
+    def _kw(self) -> dict[str, Any]:
+        s = self.scope
+        return {"tenant": s.tenant, "user": s.user, "agent": s.agent, "session": s.session}
+
+    # -- writing -------------------------------------------------------------
+
+    async def add(self, messages: Messages, *, role: str = "user",
+                  ts: datetime | None = None) -> WriteReceipt:
+        return await self._amem.add(messages, role=role, ts=ts, **self._kw)
+
+    async def remember(self, subject: str, predicate: str, obj: str,
+                       **kw: Any) -> WriteReceipt:
+        return await self._amem.remember(subject, predicate, obj, **self._kw, **kw)
+
+    async def forget(self, subject: str, predicate: str, *,
+                     at: datetime | None = None,
+                     close: str = "retired") -> list[Claim]:
+        return await self._amem.forget(subject, predicate, at=at, close=close, **self._kw)
+
+    async def delete(self, claim_id: str, *, at: datetime | None = None,
+                     close: str = "retired") -> bool:
+        return await self._amem.delete(claim_id, at=at, close=close, **self._kw)
+
+    async def erase(self, claim_id: str, *, sources: bool = False) -> bool:
+        return await self._amem.erase(claim_id, sources=sources, **self._kw)
+
+    async def supersede(self, old_claim_id: str, new_claim: Claim, *,
+                        at: datetime | None = None,
+                        sources: Sequence[str | Episode] | None = None,
+                        close: str = "ended") -> WriteReceipt:
+        return await self._amem.supersede(old_claim_id, new_claim, at=at,
+                                          sources=sources, close=close, **self._kw)
+
+    async def purge(self) -> dict[str, int]:
+        return await self._amem.purge(**self._kw)
+
+    async def reset(self) -> dict[str, int]:
+        return await self._amem.reset(**self._kw)
+
+    # -- reading -------------------------------------------------------------
+
+    # The same three variants as `ScopedMemvara.search`, for the reason given there and
+    # again on `AsyncMemvara.search`: this is the object a server layer holds, and it is
+    # the one that must not be the more-convenient facade that types worse.
+    @overload
+    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
+                     known_at: datetime | None = ...,
+                     states: Collection[str] | None = ...,
+                     include_invalidated: bool | None = ...,
+                     memory_types: Sequence[MemoryType] | None = ...,
+                     include_episodes: Literal[False] = ...) -> list[Result]: ...
+
+    @overload
+    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
+                     known_at: datetime | None = ...,
+                     states: Collection[str] | None = ...,
+                     include_invalidated: bool | None = ...,
+                     memory_types: Sequence[MemoryType] | None = ...,
+                     include_episodes: Literal[True]) -> list[Retrieved]: ...
+
+    @overload
+    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
+                     known_at: datetime | None = ...,
+                     states: Collection[str] | None = ...,
+                     include_invalidated: bool | None = ...,
+                     memory_types: Sequence[MemoryType] | None = ...,
+                     include_episodes: bool) -> list[Retrieved]: ...
+
+    async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
+                     as_of: datetime | None = None, valid_at: datetime | None = None,
+                     known_at: datetime | None = None,
+                     states: Collection[str] | None = None,
+                     include_invalidated: bool | None = None,
+                     memory_types: Sequence[MemoryType] | None = None,
+                     include_episodes: bool = False) -> list[Any]:
+        return await self._amem.search(
+            query, k=k, min_score=min_score, as_of=as_of, valid_at=valid_at,
+            known_at=known_at, states=states,
+            include_invalidated=include_invalidated,
+            memory_types=memory_types, include_episodes=include_episodes, **self._kw)
+
+    async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
+                     header: str | None = None,
+                     memory_types: Sequence[MemoryType] | None = None,
+                     include_episodes: bool = False,
+                     episode_header: str | None = None) -> str:
+        return await self._amem.recall(
+            query, k=k, min_score=min_score, header=header, memory_types=memory_types,
+            include_episodes=include_episodes, episode_header=episode_header, **self._kw)
+
+    async def get(self, claim_id: str) -> Claim | None:
+        return await self._amem.get(claim_id, **self._kw)
+
+    async def get_all(self, *, states: Collection[str] | None = None,
+                      include_invalidated: bool | None = None,
+                      as_of: datetime | None = None, valid_at: datetime | None = None,
+                      known_at: datetime | None = None) -> list[Claim]:
+        return await self._amem.get_all(
+            states=states, include_invalidated=include_invalidated, as_of=as_of,
+            valid_at=valid_at, known_at=known_at, **self._kw)
+
+    async def history(self, subject: str, predicate: str, *,
+                      as_of: datetime | None = None,
+                      valid_at: datetime | None = None,
+                      known_at: datetime | None = None) -> list[Claim]:
+        return await self._amem.history(subject, predicate, as_of=as_of,
+                                        valid_at=valid_at, known_at=known_at, **self._kw)
+
+    async def why(self, claim_id: str, *, as_of: datetime | None = None,
+                  valid_at: datetime | None = None,
+                  known_at: datetime | None = None) -> Provenance | None:
+        return await self._amem.why(claim_id, as_of=as_of, valid_at=valid_at,
+                                    known_at=known_at, **self._kw)
+
+    async def produced(self, episode_id: str, *, as_of: datetime | None = None,
+                       valid_at: datetime | None = None,
+                       known_at: datetime | None = None) -> list[Claim]:
+        return await self._amem.produced(episode_id, as_of=as_of, valid_at=valid_at,
+                                         known_at=known_at, **self._kw)
+
+    async def neighborhood(self, entity: str, *, depth: int = 2, k: int = 10,
+                           min_hops: int = 1,
+                           predicates: Sequence[str] | None = None,
+                           as_of: datetime | None = None,
+                           valid_at: datetime | None = None,
+                           known_at: datetime | None = None,
+                           min_score: float = 0.0) -> list[Path]:
+        return await self._amem.neighborhood(
+            entity, depth=depth, k=k, min_hops=min_hops, predicates=predicates,
+            as_of=as_of, valid_at=valid_at, known_at=known_at, min_score=min_score,
+            **self._kw)
+
+    async def paths_between(self, source: str, target: str, *, depth: int = 3,
+                            k: int = 3, predicates: Sequence[str] | None = None,
+                            as_of: datetime | None = None,
+                            valid_at: datetime | None = None,
+                            known_at: datetime | None = None,
+                            min_score: float = 0.0) -> list[Path]:
+        return await self._amem.paths_between(
+            source, target, depth=depth, k=k, predicates=predicates, as_of=as_of,
+            valid_at=valid_at, known_at=known_at, min_score=min_score, **self._kw)
+
+    async def count(self, *, as_of: datetime | None = None,
+                    valid_at: datetime | None = None,
+                    known_at: datetime | None = None,
+                    states: Collection[str] | None = None,
+                    include_invalidated: bool | None = None) -> int:
+        return await self._amem.count(as_of=as_of, valid_at=valid_at, known_at=known_at,
+                                      states=states,
+                                      include_invalidated=include_invalidated,
+                                      **self._kw)
+
+    # -- maintenance ---------------------------------------------------------
+
+    async def consolidate(self) -> dict[str, int]:
+        return await self._amem.consolidate(tenant=self.scope.tenant)
+
+    async def stats(self) -> dict[str, int]:
+        return await self._amem.stats(tenant=self.scope.tenant)
+
+    def __repr__(self) -> str:
+        return f"<AsyncScopedMemvara {self.scope.key()} of {self._amem!r}>"
+
+
+# --- surface parity, by introspection ------------------------------------------
+# Two facades wrap two others, and the failure mode of all four is the same: a method
+# lands on one and is forgotten on the next, so the promise "the whole public surface"
+# quietly becomes "most of it". A hand-written list of method names would have to be
+# edited by the same person who just forgot to edit the class, so both checks below
+# derive the surface from the classes themselves.
+
+def _public(obj: type) -> set[str]:
+    """The public callables of a class: its method surface, as names."""
+    return {n for n in dir(obj)
+            if not n.startswith("_") and callable(getattr(obj, n, None))}
+
+
+def _scoped_omissions() -> set[str]:
+    """What a scoped view legitimately does not carry, taken from the synchronous pair.
+
+    `close`, `reembed` and `scope` are not scoped operations — closing is per-store,
+    re-embedding rebuilds one index shared by every tenant, and a view that could hand
+    out further unscoped views would not be a narrowing. Read off `ScopedMemvara` rather
+    than written out, so the async view is held to whatever the sync one actually does:
+    the day `ScopedMemvara` grows `reembed`, this stops excusing its absence here.
+    """
+    return _public(Memvara) - _public(ScopedMemvara)
+
 
 #: Names `AsyncMemvara` deliberately does not wrap, checked by the test suite so that a
-#: method added to `Memvara` cannot quietly go missing here. `scope` is explained in the
-#: class docstring; the rest are not I/O and would only be `await`ed for symmetry.
-NOT_WRAPPED = frozenset({"scope"})
+#: method added to `Memvara` cannot quietly go missing here. Empty since `scope` landed;
+#: kept because the check needs somewhere to record a deliberate omission, and an empty
+#: set is the honest current answer.
+NOT_WRAPPED: frozenset[str] = frozenset()
 
 
 def _unwrapped(memvara_type: type = Memvara) -> set[str]:
@@ -356,9 +646,19 @@ def _unwrapped(memvara_type: type = Memvara) -> set[str]:
     and so a reader of this file can see what the promise "the whole public surface" is
     actually checked against.
     """
-    theirs = {n for n in dir(memvara_type)
-              if not n.startswith("_") and callable(getattr(memvara_type, n, None))}
-    return theirs - set(dir(AsyncMemvara)) - NOT_WRAPPED
+    return _public(memvara_type) - set(dir(AsyncMemvara)) - NOT_WRAPPED
 
 
-__all__ = ["AsyncMemvara"]
+def _unbound(async_type: type = AsyncMemvara,
+             scoped_type: type = AsyncScopedMemvara) -> set[str]:
+    """Public `async_type` methods with no `scoped_type` counterpart. For the suite.
+
+    The `_unwrapped` of the scoping axis. Called twice by the suite, because
+    `AsyncScopedMemvara` sits at the corner of a square and can fall off either edge: it
+    must cover `AsyncMemvara` (or a method is awaitable only unscoped) and it must cover
+    `ScopedMemvara` (or a method is scopable only synchronously).
+    """
+    return _public(async_type) - set(dir(scoped_type)) - _scoped_omissions()
+
+
+__all__ = ["AsyncMemvara", "AsyncScopedMemvara"]

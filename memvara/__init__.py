@@ -32,7 +32,7 @@ What it does differently from mem0 and friends:
     mem.history("user", "lives_in")     # -> Berlin (retired), Lisbon (current)
 """
 
-from .aio import AsyncMemvara
+from .aio import AsyncMemvara, AsyncScopedMemvara
 from .consolidate import Consolidator
 from .entities import EntityRegistry, EntityResolution, EntitySpec, entity_key
 from .redact import PatternRedactor, Redactor
@@ -85,7 +85,7 @@ from .write.reconcile import backfill_entities
 __version__ = "0.1.0"
 
 __all__ = [
-    "Memvara", "ScopedMemvara", "AsyncMemvara",
+    "Memvara", "ScopedMemvara", "AsyncMemvara", "AsyncScopedMemvara",
     # data model
     "Claim", "Episode", "Scope", "Result", "Explanation", "Provenance",
     "WriteReceipt", "MemoryType", "Derivation", "utcnow", "time_axes",

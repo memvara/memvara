@@ -274,13 +274,30 @@ def _claim_lines(prefix: str, claims: Sequence[Claim]) -> list[str]:
 
 
 def _receipt_summary(ctx: ToolContext, receipt: WriteReceipt) -> list[str]:
+    """The one-line account of a write, in the vocabulary the model is shown elsewhere.
+
+    This said `retired N` for `len(receipt.invalidated)`, which is the count of claims
+    the write *closed out* on either clock — and the write that produces it is a
+    supersession, which closes valid time. So the line reported "retired 1" for a fact
+    that had merely stopped being true, on the same transport where `memory_history`
+    renders the same claim as `ended` (see `_state`) and `memory_forget` uses "retired"
+    for the thing that genuinely is one. A model reading its own memory tool had three
+    names for two events.
+
+    Both counts, always, rather than only the non-zero one: the two are the whole reason
+    the field was split, `ended 0, retired 1` and `ended 1, retired 0` are the outcomes a
+    reader has to be able to tell apart, and a line whose shape depends on the answer is
+    harder to read than one number that is sometimes zero.
+    """
     lines = [
-        f"added {len(receipt.added)}, retired {len(receipt.invalidated)}, "
-        f"already-known {len(receipt.reinforced)}, no-fact {receipt.skipped} "
-        f"({receipt.llm_calls} model call(s))"
+        f"added {len(receipt.added)}, ended {len(receipt.ended)}, "
+        f"retired {len(receipt.retired)}, already-known {len(receipt.reinforced)}, "
+        f"no-fact {receipt.skipped} ({receipt.llm_calls} model call(s))"
     ]
     lines += _claim_lines("+", receipt.added)
-    lines += _claim_lines("-", receipt.invalidated)
+    # `_state` on each, because with both counts on the header line a bare "-" no longer
+    # says which of the two this particular claim was.
+    lines += [f"- [{c.id} {_state(c)}] {safe_line(c.text)}" for c in receipt.closed]
     if receipt.unextracted:
         lines.append(_unextracted_note(ctx, receipt.unextracted))
     return lines

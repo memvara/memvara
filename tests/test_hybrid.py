@@ -1060,11 +1060,11 @@ def test_the_retry_does_not_fire_when_the_pool_was_never_full(
 
     class CountingStore(SQLiteStore):
         def lexical_search(self, query, scopes, limit, *, valid_at=None,
-                           known_at=None, include_invalidated=False):
+                           known_at=None, states=None, include_invalidated=None):
             calls.append(limit)
             return super().lexical_search(
                 query, scopes, limit, valid_at=valid_at, known_at=known_at,
-                include_invalidated=include_invalidated)
+                states=states, include_invalidated=include_invalidated)
 
     counting = CountingStore(":memory:")
     add(counting, embedder, "alice lives in Lisbon", scope)

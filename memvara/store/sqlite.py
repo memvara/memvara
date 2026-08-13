@@ -59,7 +59,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from io import BufferedRandom
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Sequence, cast
+from typing import (TYPE_CHECKING, Any, Callable, Collection, Iterable, Iterator,
+                    Sequence, cast)
 
 import numpy as np
 
@@ -73,7 +74,7 @@ from ..types import (
     Scope,
     resolved_entity,
 )
-from .base import live_predicate
+from .base import BELIEVED, resolve_states, state_predicate, stored_state_predicate
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..schema import PredicateSpec
@@ -1498,6 +1499,27 @@ class SQLiteStore:
             params += [s.tenant, s.user, s.agent, s.session]
         return "(" + " OR ".join(parts) + ")", params
 
+    def _state_clause(self, valid_at: datetime | None, known_at: datetime | None,
+                      states: Collection[str] | None = None,
+                      alias: str = "") -> tuple[str, list]:
+        """SQL and binds for "in one of `states` at these two instants".
+
+        The general filter every read here routes through, and the only place in this
+        repository that binds the state predicate's markers. `_live_clause` below is this
+        with the two-valued alias applied; `base.state_predicate` is the SQL, which is
+        deliberately not written out again here.
+
+        The binding is the half with a silent failure mode — a belief instant bound onto
+        a world column answers identically to a correct one on every `as_of` call, since
+        those pass the two axes equal. So it is no longer remembered: `state_predicate`
+        returns the axis behind each marker, and this reads that list. Transposing the
+        pair is not a mistake this method can express any more, whatever subset of the
+        states is asked for and however many markers that subset happens to need.
+        """
+        v, k = _clock(valid_at, known_at)
+        clause, axes = state_predicate("?", states=states, alias=alias)
+        return clause, [k if axis == "known" else v for axis in axes]
+
     def _live_clause(self, valid_at: datetime | None, known_at: datetime | None,
                      include_invalidated: bool, alias: str = "") -> tuple[str, list]:
         """Both time axes must agree for a claim to count as believed-and-in-force.
@@ -1515,10 +1537,13 @@ class SQLiteStore:
 
         The SQL itself is `base.live_predicate`, not written out here: three surfaces
         outside this class count live rows and one of them cannot hold a store at all,
-        so the text has to exist somewhere an instance is not needed. What this method
-        owns is the *binding* — `[known, known, valid, valid]`, the order the four
-        markers come out in, and the one thing about this predicate that can be wrong
-        without any query noticing, because every `as_of` call passes the two axes equal.
+        so the text has to exist somewhere an instance is not needed. The binding —
+        `[known, known, valid, valid]`, the order the four markers come out in — is
+        `_state_clause`'s, which reads it off the predicate rather than knowing it.
+
+        Kept as its own method, and not deprecated, because `include_invalidated` is on
+        the published protocol and still means exactly what it always did. It is now one
+        line: the alias resolved, then the general clause.
 
         `include_invalidated` lifts the *whole valid-time interval* along with the
         retirement, leaving only `recorded_at <= known_at`. That is more than the name
@@ -1535,10 +1560,9 @@ class SQLiteStore:
           heard in July. That is the one way a bitemporal query can actively lie, so
           the floor holds under every flag combination.
         """
-        v, k = _clock(valid_at, known_at)
-        clause = live_predicate("?", include_invalidated=include_invalidated,
-                                alias=alias)
-        return clause, [k] if include_invalidated else [k, k, v, v]
+        return self._state_clause(
+            valid_at, known_at,
+            resolve_states(include_invalidated=include_invalidated), alias)
 
     def _happened_clause(self, valid_at: datetime | None, known_at: datetime | None,
                          alias: str = "") -> tuple[str, list]:
@@ -1955,8 +1979,14 @@ class SQLiteStore:
             ).fetchall()
         return [self._row_to_claim(r) for r in rows]
 
-    def _erase_row(self, table: str, fts: str, t: _VecTable, item_id: str) -> bool:
+    def _erase_row(self, table: str, fts: str, t: _VecTable,
+                   item_id: str) -> tuple[bool, int]:
         """Erase one row and everything derived from its text. Caller holds the lock.
+
+        Returns whether the row existed and how many vectors went with it — the second
+        because `erase_claim` and `purge` both evidence themselves per table, and the
+        vector count is the one number only this method sees. It is 0 or 1; a row is
+        indexed at most once.
 
         The order is the whole content of this method, and it is not recoverable if it
         is wrong. The FTS entry is keyed on the row's *rowid* — `claim_id` is UNINDEXED —
@@ -1968,18 +1998,19 @@ class SQLiteStore:
         row = self._db.execute(
             f"SELECT rowid FROM {table} WHERE id=?", (item_id,)).fetchone()
         if row is None:
-            return False
+            return False, 0
         self._db.execute(f"DELETE FROM {fts} WHERE rowid=?", (row["rowid"],))
         self._db.execute(
             f"INSERT OR IGNORE INTO vec_free (slot) SELECT slot FROM {t.name} "
             f"WHERE {t.key}=? AND slot IS NOT NULL", (item_id,))
-        self._db.execute(f"DELETE FROM {t.name} WHERE {t.key}=?", (item_id,))
+        vectors = self._db.execute(
+            f"DELETE FROM {t.name} WHERE {t.key}=?", (item_id,)).rowcount
         # Zeroes the matrix row as well as unmapping it: the file outlives the process,
         # and a vector left behind is the text left behind.
         self._vec.forget(item_id)
         self._mark(t, item_id)
         self._db.execute(f"DELETE FROM {table} WHERE id=?", (item_id,))
-        return True
+        return True, vectors
 
     def _orphan(self, episode_id: str) -> bool:
         """Whether no surviving claim still cites this turn as a source.
@@ -2015,13 +2046,21 @@ class SQLiteStore:
         with self._lock:
             if not cited and not self._orphan(episode_id):
                 return False
-            erased = self._erase_row("episodes", "episodes_fts", _EPISODE_VECS,
-                                     episode_id)
+            erased, _ = self._erase_row("episodes", "episodes_fts", _EPISODE_VECS,
+                                        episode_id)
             self._maybe_commit()
         return erased
 
-    def erase_claim(self, claim_id: str, *, sources: bool = False) -> bool:
-        """Irreversibly erase one claim. Returns whether it existed.
+    def erase_claim(self, claim_id: str, *, sources: bool = False) -> dict[str, int]:
+        """Irreversibly erase one claim. Returns per-table counts, exactly as `purge`
+        does — same four keys, same meaning, so the two erasure paths evidence themselves
+        the same way.
+
+        It used to return a bare `bool`, which made the per-claim path the weaker witness
+        of the two — and it is the path an erasure request naming one memory actually
+        takes, so it is the one asked to prove what it did. `claims` is 0 or 1 and
+        carries what the boolean carried: an unknown id erases nothing, and erasing twice
+        erases once.
 
         The per-claim counterpart to `purge`, and the reason it has to exist: `purge`
         erases a whole scope, `invalidate` retires without deleting anything, and an
@@ -2045,7 +2084,9 @@ class SQLiteStore:
             row = self._db.execute(
                 "SELECT tenant, sources FROM claims WHERE id=?", (claim_id,)).fetchone()
             if row is None:
-                return False
+                # Zeroes rather than an absent key, so a caller adding up an erasure
+                # campaign never has to special-case the id that was not there.
+                return {"claims": 0, "episodes": 0, "embeddings": 0, "entities": 0}
             tenant: str = row["tenant"]
             cited = json.loads(row["sources"]) if sources else []
             # Before the claim row goes, and not as housekeeping afterwards: these rows
@@ -2054,19 +2095,26 @@ class SQLiteStore:
             # to keep its own source turn alive — and `sources=True` quietly stops
             # erasing anything.
             self._db.execute("DELETE FROM claim_sources WHERE claim_id=?", (claim_id,))
-            # Nothing to test on the return: the row was there one statement ago, on this
-            # connection, under this lock.
-            self._erase_row("claims", "claims_fts", _CLAIM_VECS, claim_id)
+            # Nothing to test on the existence flag: the row was there one statement ago,
+            # on this connection, under this lock.
+            _, vectors = self._erase_row("claims", "claims_fts", _CLAIM_VECS, claim_id)
             # Orphan-checked after the claim is gone, so it cannot count itself a citer.
+            episodes = 0
             for episode_id in cited:
                 if self._orphan(episode_id):
-                    self._erase_row("episodes", "episodes_fts", _EPISODE_VECS, episode_id)
+                    gone, vecs = self._erase_row(
+                        "episodes", "episodes_fts", _EPISODE_VECS, episode_id)
+                    episodes += gone
+                    vectors += vecs
             # Same reason as `purge`: the entity row holds the subject's and object's
             # first-seen spelling verbatim, so leaving it behind erases the claim and
             # keeps the text. Reference-counted, because one entity is usually shared.
-            self._gc_entities(tenant)
+            entities = self._gc_entities(tenant)
             self._maybe_commit()
-        return True
+        # `embeddings` is the vector total across both tables, as in `purge`: it counts
+        # what was erased, not which table it sat in.
+        return {"claims": 1, "episodes": episodes, "embeddings": vectors,
+                "entities": entities}
 
     def purge(self, scope: Scope) -> dict[str, int]:
         """Irreversibly erase everything at `scope` and beneath it.
@@ -2534,9 +2582,18 @@ class SQLiteStore:
     def candidate_ids(self, scopes: Sequence[Scope], *,
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
-                      include_invalidated: bool = False) -> list[str]:
+                      states: Collection[str] | None = None,
+                      include_invalidated: bool | None = None) -> list[str]:
+        """Every claim id visible at these scopes, in the states asked for.
+
+        The state filter is in the SQL and not applied to the result, which is the whole
+        reason it is a parameter at all: this is what `get_all`, `count` and the vector
+        leg page over, so a caller narrowing the population afterwards loses whatever
+        fell past the page boundary and is told nothing about it.
+        """
         sc, sp = self._scope_clause(scopes)
-        lv, lp = self._live_clause(valid_at, known_at, include_invalidated)
+        lv, lp = self._state_clause(
+            valid_at, known_at, resolve_states(states, include_invalidated))
         with self._read() as conn:
             cur = conn.cursor()
             # A whole-tenant scope returns every claim id; building a `Row` object for
@@ -2567,12 +2624,17 @@ class SQLiteStore:
     def lexical_search(self, query: str, scopes: Sequence[Scope], limit: int, *,
                        valid_at: datetime | None = None,
                        known_at: datetime | None = None,
-                       include_invalidated: bool = False) -> list[tuple[str, float]]:
+                       states: Collection[str] | None = None,
+                       include_invalidated: bool | None = None
+                       ) -> list[tuple[str, float]]:
         m = _fts_query(query)
         if not m:
             return []
         sc, sp = self._scope_clause(scopes, alias="c")
-        lv, lp = self._live_clause(valid_at, known_at, include_invalidated, alias="c")
+        # Inside the `LIMIT`, like the scope filter beside it and for the same reason: a
+        # state filter applied to the returned page cannot see what the page cut off.
+        lv, lp = self._state_clause(
+            valid_at, known_at, resolve_states(states, include_invalidated), alias="c")
         sql = (
             "SELECT f.claim_id AS cid, bm25(claims_fts) AS s "
             "FROM claims_fts f JOIN claims c ON c.id = f.claim_id "
@@ -2612,9 +2674,12 @@ class SQLiteStore:
     def vector_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int, *,
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
-                      include_invalidated: bool = False) -> list[tuple[str, float]]:
-        allowed = self.candidate_ids(scopes, valid_at=valid_at, known_at=known_at,
-                                     include_invalidated=include_invalidated)
+                      states: Collection[str] | None = None,
+                      include_invalidated: bool | None = None
+                      ) -> list[tuple[str, float]]:
+        allowed = self.candidate_ids(
+            scopes, valid_at=valid_at, known_at=known_at,
+            states=resolve_states(states, include_invalidated))
         if not allowed:
             return []
         self._ensure_index()
@@ -2640,7 +2705,8 @@ class SQLiteStore:
     # -- maintenance ---------------------------------------------------------
 
     def iter_claims(self, tenant: str | None = None,
-                    include_invalidated: bool = False) -> Iterable[Claim]:
+                    include_invalidated: bool | None = None, *,
+                    states: Collection[str] | None = None) -> Iterable[Claim]:
         """Every claim, optionally for one tenant. What `reembed()` and a sweep walk.
 
         Paged through `_iter_rows`, like `iter_episodes`, and for the reason that method
@@ -2656,13 +2722,21 @@ class SQLiteStore:
         Nothing here is weakened by a mutation mid-walk anyway — the upsert preserves a
         claim's rowid, so a row rewritten behind the cursor keeps its place in the order
         this pages on.
+
+        `states` filters the **stored** state — `Claim.state`, the two closure columns,
+        no instant — because this is a walk over rows and there is no moment it is being
+        asked about. `include_invalidated=False` is unchanged and remains
+        `("live", "ended")`: the unflagged walk has always meant "every row we still
+        believe", and narrowing it to `("live",)` would quietly stop `reembed()` from
+        re-encoding every superseded version in the store. See `Store.iter_claims`.
         """
+        # `+`, for the reason `_iter_rows` gives: without it the planner takes `cl_live`
+        # and sorts every page back into rowid order.
+        clause = stored_state_predicate(
+            resolve_states(states, include_invalidated, default=BELIEVED), prefix="+")
         yield from (
             self._row_to_claim(r) for r in self._iter_rows(
-                # `+`, for the reason `_iter_rows` gives: without it the planner takes
-                # `cl_live` and sorts every page back into rowid order.
-                "claims", tenant,
-                () if include_invalidated else ("+invalidated_at IS NULL",))
+                "claims", tenant, (clause,) if clause else ())
         )
 
     def stats(self, tenant: str | None = None) -> dict[str, int]:
@@ -2685,18 +2759,29 @@ class SQLiteStore:
         closes valid time alone, the cheap test counts every superseded version of every
         slot as live — so a store holding one address that has changed four times would
         report four live claims, and `repr(Memvara)` would show `claims=5/5` for a store
-        with one current fact in it. The three totals therefore do not sum: a claim that
-        has *ended* is neither live nor invalidated, which is the whole point of there
-        being two axes, and `claims` is the only one that counts everything.
+        with one current fact in it.
 
-        Taken from `_live_clause`, and so from `base.live_predicate`, rather than spelled
-        out: a counter that writes its own copy of this is exactly how the cheap version
-        got into three files.
+        **`ended_claims` is state `ended`, and is not `valid_to IS NOT NULL`.** It is here
+        because it was the largest non-live population and the only one with no key, and
+        because subtracting for it gives the wrong answer: `claims - live_claims -
+        invalidated` under-counts, since a claim that ended and was *later* retired is
+        already inside `invalidated`. The state predicate excludes exactly that row from
+        this count, so the two populations never overlap and the subtraction is not
+        needed.
+
+        The counts still do not sum, and the leftover is no longer the ended rows: a
+        claim recorded but not yet in force — scheduled to start next month — is in none
+        of the three. `claims` is the only total that covers everything.
+
+        Both filters are taken from `_state_clause`, and so from `base.state_predicate`,
+        rather than spelled out: a counter that writes its own copy of this is exactly how
+        the cheap version got into three files.
         """
         where = " WHERE tenant = ?" if tenant is not None else ""
         params: tuple = (tenant,) if tenant is not None else ()
         and_ = " AND" if tenant is not None else " WHERE"
-        live, lp = self._live_clause(None, None, include_invalidated=False)
+        live, lp = self._state_clause(None, None, ("live",))
+        ended, ep = self._state_clause(None, None, ("ended",))
 
         with self._read() as conn:
             def q(sql: str, extra: Sequence[Any] = ()) -> int:
@@ -2707,6 +2792,8 @@ class SQLiteStore:
                 "claims": q(f"SELECT COUNT(*) FROM claims{where}"),
                 "live_claims": q(
                     f"SELECT COUNT(*) FROM claims{where}{and_} {live}", lp),
+                "ended_claims": q(
+                    f"SELECT COUNT(*) FROM claims{where}{and_} {ended}", ep),
                 "invalidated": q(
                     f"SELECT COUNT(*) FROM claims{where}{and_} invalidated_at IS NOT NULL"),
                 "embeddings": (

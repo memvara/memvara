@@ -531,9 +531,57 @@ def test_stats_answers_is_this_thing_connected(server):
 def test_add_reports_what_the_write_actually_did(server):
     text(server, "memory_add", {"text": "I live in Berlin"})
     body = text(server, "memory_add", {"text": "I live in Lisbon"})
-    assert body.startswith("added 1, retired 1, already-known 0, no-fact 0 "
+    assert body.startswith("added 1, ended 1, retired 0, already-known 0, no-fact 0 "
                            "(0 model call(s))")
     assert "+ [cl_" in body and "- [cl_" in body
+
+
+def test_a_supersession_is_not_reported_as_a_retirement(server):
+    """Moving house is not a correction, and this line used to call it one.
+
+    The summary printed `retired N` for `len(receipt.invalidated)` — the count of claims
+    closed on *either* clock. Superseding closes valid time, so the claim it names is
+    `ended`: still believed, no longer in force. The same server renders that claim as
+    `ended` under `memory_history` and reserves "retired" for `memory_forget`, so the
+    write summary was the one surface disagreeing with the other two, and the word it
+    chose is the one that means "we were wrong".
+    """
+    text(server, "memory_add", {"text": "I live in Berlin"})
+    body = text(server, "memory_add", {"text": "I live in Lisbon"})
+
+    assert "ended 1" in body and "retired 0" in body
+    # The claim line carries the closure too, so a reader of the list does not have to
+    # infer it from counts that happen to be 1 and 0.
+    displaced = [line for line in body.splitlines() if line.startswith("- [")]
+    assert len(displaced) == 1 and " ended " in displaced[0]
+    assert "retired" not in displaced[0]
+
+    # And the same claim, through the read tool, is still `ended` — which is the
+    # agreement that was broken.
+    claim = [c for c in server._ctx.memory.get_all(include_invalidated=True)
+             if c.object == "Berlin"][0]
+    assert claim.state == "ended"
+    assert "ended" in text(server, "memory_history",
+                           {"subject": "user", "predicate": "lives_in"})
+
+
+def test_a_retirement_is_still_reported_as_one(server):
+    """The other half: `retired` has to keep naming the belief-clock closure.
+
+    Reached through the renderer directly because no MCP tool takes `close=` — the
+    server's write tools always supersede. That is exactly why the count must be derived
+    from the claims rather than from which method was called: the day a `close` argument
+    lands, this line is already right.
+    """
+    from memvara.server.tools import _receipt_summary
+    from memvara.types import Claim, WriteReceipt
+
+    misheard = Claim(subject="user", predicate="lives_in", object="Berlin",
+                     invalidated_at=utcnow())
+    lines = _receipt_summary(server._ctx, WriteReceipt(closed=[misheard]))
+
+    assert lines[0].startswith("added 0, ended 0, retired 1, ")
+    assert lines[1].startswith(f"- [{misheard.id} retired ")
 
 
 def test_add_accepts_an_assistant_turn(server):

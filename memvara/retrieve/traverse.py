@@ -197,6 +197,30 @@ class _Pin(NamedTuple):
     known_at: datetime
 
 
+def _identities(surface: str, learned: Sequence[str]) -> tuple[str, ...]:
+    """The folded keys one end of a question stands for, deterministic fold first.
+
+    The fold is prepended here rather than trusted from `learned`, and that is the line
+    that makes alias resolution safe: a caller can *add* identities to a probe and can
+    never replace the one this module has always used, so a merge widens what a walk
+    reaches and can never trade one half of an entity for the other. A caller that passes
+    nothing gets the single key and the behaviour it had before any of this existed.
+
+    Falsy keys are dropped, so an unfoldable end still refuses to become the empty node
+    that every retraction in the tenant would hang off.
+
+    >>> _identities("Acme, Inc.", ())
+    ('acme',)
+    >>> _identities("Big Blue", ("big blue", "ibm"))
+    ('big blue', 'ibm')
+    >>> _identities("...", ())          # unfoldable, and still not the empty node
+    ('...',)
+    >>> _identities("", ())
+    ()
+    """
+    return tuple(dict.fromkeys(k for k in (default_entity(surface), *learned) if k))
+
+
 def _order(path: Path) -> tuple:
     """The total order paths are ranked and truncated by.
 
@@ -258,6 +282,7 @@ class GraphTraverser:
         valid_at: datetime | None = None,
         known_at: datetime | None = None,
         min_score: float = 0.0,
+        entity_keys: Sequence[str] = (),
     ) -> list[Path]:
         """What is around `entity`: every path of `min_hops`..`depth` hops out of it.
 
@@ -277,10 +302,19 @@ class GraphTraverser:
 
         Raising `k` past the size of the one-hop frontier works too and is what a caller
         reaches for first; this is the version that does not require knowing that size.
+
+        `entity_keys` are further folded identities that name the same entity as
+        `entity` — what an `EntityRegistry.probe_keys` lookup returns for the reader's
+        owner, which is how a probe spelled with a learned alias ("Big Blue") reaches the
+        claims filed under the canonical key (`ibm`). This module holds no registry and
+        resolves nothing itself; identity is owner-scoped and only the caller knows whose
+        question this is. See `_identities` for why passing them can only ever widen the
+        walk.
         """
         return self._walk(entity, None, scope, depth=depth, k=k, min_hops=min_hops,
                           predicates=predicates, as_of=as_of, valid_at=valid_at,
-                          known_at=known_at, min_score=min_score)
+                          known_at=known_at, min_score=min_score,
+                          source_keys=entity_keys, target_keys=())
 
     def between(
         self,
@@ -295,6 +329,8 @@ class GraphTraverser:
         valid_at: datetime | None = None,
         known_at: datetime | None = None,
         min_score: float = 0.0,
+        source_keys: Sequence[str] = (),
+        target_keys: Sequence[str] = (),
     ) -> list[Path]:
         """How `source` and `target` are connected: the best paths of at most `depth` hops.
 
@@ -308,10 +344,17 @@ class GraphTraverser:
         and, given the bounds, an answer about this search rather than about the store:
         a path can also be missed because the beam pruned its prefix. Widen `beam` before
         concluding two entities are unrelated.
+
+        `source_keys` and `target_keys` widen either end onto the other spellings of its
+        entity, exactly as `neighborhood`'s `entity_keys` does. When the two ends resolve
+        to the same entity the answer is `[]` — "how is IBM connected to Big Blue" is a
+        question about one thing, and the loops through everything it touches are not an
+        answer to it.
         """
         return self._walk(source, target, scope, depth=depth, k=k, min_hops=1,
                           predicates=predicates, as_of=as_of, valid_at=valid_at,
-                          known_at=known_at, min_score=min_score)
+                          known_at=known_at, min_score=min_score,
+                          source_keys=source_keys, target_keys=target_keys)
 
     # -- internals ------------------------------------------------------------
 
@@ -368,6 +411,8 @@ class GraphTraverser:
         valid_at: datetime | None,
         known_at: datetime | None,
         min_score: float,
+        source_keys: Sequence[str] = (),
+        target_keys: Sequence[str] = (),
     ) -> list[Path]:
         """Breadth-first, beam-pruned, one clock pair throughout.
 
@@ -378,30 +423,49 @@ class GraphTraverser:
         path's score can never rise. A prefix already below the floor cannot produce a
         suffix above it, so pruning early discards exactly what a floor applied at the
         end would have discarded, and does it before those prefixes cost a hop.
+
+        An end that resolves to several identities is walked from all of them at once
+        rather than once per identity, which is what keeps the beam, the diversification
+        and the per-level `[:k]` cap meaning what they say: they are properties of one
+        answer to one question, and running the walk twice and concatenating would
+        double whatever they bound.
         """
         pin = self._pin(*time_axes(as_of, valid_at, known_at))
-        seed = default_entity(source)
-        goal = default_entity(target) if target is not None else None
-        if not seed or depth <= 0 or k <= 0:
+        seeds = _identities(source, source_keys)
+        if not seeds or depth <= 0 or k <= 0:
             return []
-        if target is not None and (not goal or goal == seed):
-            # An entity is not connected *to itself* by a path, and a target that folds
-            # to nothing is not an entity at all. Both would otherwise return every
-            # cycle through the seed.
-            return []
+        goals: frozenset[str] = frozenset()
+        if target is not None:
+            goals = frozenset(_identities(target, target_keys))
+            if not goals or goals & frozenset(seeds):
+                # An entity is not connected *to itself* by a path, and a target that
+                # folds to nothing is not an entity at all. Both would otherwise return
+                # every cycle through the seed. Overlap rather than equality because two
+                # names of one merged entity are one endpoint, however they were spelled.
+                return []
         preds = self._predicates(predicates)
         if preds == []:
             return []       # "these predicates and no others", of which there are none
 
-        frontier = [Path(nodes=(seed,), edges=(), score=1.0)]
+        # One partial path per identity, all at depth zero, all scoring 1.0. They are the
+        # same node as far as the walk is concerned; only the store still keys them apart.
+        frontier = [Path(nodes=(s,), edges=(), score=1.0) for s in seeds]
+        started = frozenset(seeds)
         found: dict[tuple[str, ...], Path] = {}
         for hops in range(1, depth + 1):
             edges = self._edges(scope, [p.nodes[-1] for p in frontier], preds, pin)
             grown: dict[tuple[str, ...], Path] = {}
             for path in frontier:
                 for edge in edges.get(path.nodes[-1], ()):
-                    if edge.target_key in path.nodes:
-                        continue        # cycle: a path may not revisit an entity
+                    if edge.target_key in path.nodes or edge.target_key in started:
+                        # Cycle: a path may not revisit an entity. `started` is what
+                        # makes that true of a *merged* entity — an edge from `big blue`
+                        # to `ibm` is a self-loop wearing two names, and `_edges` already
+                        # drops the single-key kind. Without it every one-hop path came
+                        # back twice, once direct and once via the entity's other name.
+                        # A no-op when the probe resolved to one key, since `nodes[0]`
+                        # is then the whole of `started`.
+                        continue
                     nxt = self._extend(path, edge)
                     if nxt.score < min_score:
                         continue
@@ -411,7 +475,7 @@ class GraphTraverser:
             if not grown:
                 break
             ranked = self._diversify(sorted(grown.values(), key=_order))
-            if goal is None:
+            if target is None:
                 # `[:k]` and not the whole level: a level can be `beam` x fan-out wide,
                 # and without a cap here a hub keeps every candidate it ever generated
                 # alive to the final sort — the one collection in this walk that nothing
@@ -427,10 +491,10 @@ class GraphTraverser:
                 # Arrival is terminal. A path that has reached the target and keeps
                 # walking is answering a different question, and the cycle check would
                 # stop it returning anyway.
-                arrived = [p for p in ranked if p.nodes[-1] == goal]
+                arrived = [p for p in ranked if p.nodes[-1] in goals]
                 for path in arrived[:k]:
                     found.setdefault(path.signature, path)
-                ranked = [p for p in ranked if p.nodes[-1] != goal]
+                ranked = [p for p in ranked if p.nodes[-1] not in goals]
             frontier = ranked[:self.beam]
             if not frontier:
                 break

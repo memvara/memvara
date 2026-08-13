@@ -479,6 +479,25 @@ class Claim:
 
     # --- transaction time: when we believed it ---
     recorded_at: datetime = field(default_factory=utcnow)
+    #: When we stopped believing this record. **Not a liveness flag**, however much
+    #: `claim.invalidated_at is None` reads like one.
+    #:
+    #: It was one, once. Superseding used to close both clocks, so "we never retracted
+    #: it" and "it is in force" selected the same claims. Superseding now closes valid
+    #: time alone, so a superseded claim has `valid_to` set and this still `None` — it is
+    #: `ended`: neither live nor retired. The old idiom counts every such claim as live,
+    #: always erring in the same direction (too many), and nothing raises, because the
+    #: expression stays perfectly valid Python that used to be right.
+    #:
+    #: Ask the question you actually have:
+    #:
+    #: ``claim.is_live()``                   is it in force? (both clocks, four columns)
+    #: ``memvara.store.live_predicate()``    the same test, as SQL, for a query or a dashboard
+    #: ``claim.invalidated_at is not None``  did we stop *believing* it? — still exactly right
+    #: ``claim.invalidated_by is not None``  was it ever displaced, by either closure?
+    #:
+    #: See the "Live is no longer `invalidated_at IS NULL`" entry in `CHANGELOG.md` and
+    #: `docs/UPGRADING.md` for the grep list.
     invalidated_at: datetime | None = None
     invalidated_by: str | None = None    # claim id that superseded this one
 
@@ -818,12 +837,15 @@ class WriteReceipt:
 
     episode_ids: list[str] = field(default_factory=list)
     added: list[Claim] = field(default_factory=list)
-    #: Claims this write closed out, as they read *after* the write. The name predates
-    #: the two axes and is kept because it is on the published API: read it as "closed
-    #: out", not as "`invalidated_at` was set". Under the default `close="ended"` these
-    #: are claims whose *valid* time was closed — still believed, no longer in force —
-    #: and `Claim.state` on each is the field that says which axis actually moved.
-    invalidated: list[Claim] = field(default_factory=list)
+    #: Claims this write closed out, as they read *after* the write — on **whichever**
+    #: clock `close=` stopped. That is why the name is `closed` and not `ended`: under
+    #: the default `close="ended"` these are claims whose *valid* time was closed (still
+    #: believed, no longer in force), and under `close="retired"` they are claims we have
+    #: stopped believing. One write passes one `close=`, so a given list is homogeneous
+    #: in practice; the field as a whole is not, and a caller that renders it as one word
+    #: will be wrong half the time. `ended` and `retired` below split it, and
+    #: `Claim.state` says which axis moved on an individual claim.
+    closed: list[Claim] = field(default_factory=list)
     reinforced: list[Claim] = field(default_factory=list)  # already known, salience bumped
     skipped: int = 0                                       # turns that carried no durable fact
     #: Turns that got all the way to the extraction tier and yielded nothing. Distinct
@@ -851,13 +873,68 @@ class WriteReceipt:
     latency_ms: float = 0.0
     deferred: bool = False                                 # extraction queued, not yet run
 
+    # --- the two halves of `closed` -------------------------------------------
+    # Derived rather than stored, so they cannot disagree with the claims themselves.
+    # `Claim.state` is the single authority on which clock stopped, and it is a pure
+    # function of the two timestamps the write just stamped onto these objects.
+
+    @property
+    def ended(self) -> list[Claim]:
+        """The claims this write closed on the **valid** axis: the world changed.
+
+        Still believed, so they keep answering `valid_at=<back then>`. This is what a
+        supersession produces, and what `close="ended"` means everywhere it appears.
+
+        >>> moved = Claim(subject="user", predicate="lives_in", object="Berlin",
+        ...               valid_to=utcnow())
+        >>> receipt = WriteReceipt(closed=[moved])
+        >>> len(receipt.ended), len(receipt.retired)
+        (1, 0)
+        """
+        return [c for c in self.closed if c.state == "ended"]
+
+    @property
+    def retired(self) -> list[Claim]:
+        """The claims this write closed on the **transaction** axis: the record was wrong.
+
+        We have stopped believing them, so they answer nothing at any world-time from
+        here on. This is what `close="retired"`, `forget()` and `delete()` produce.
+
+        >>> misheard = Claim(subject="user", predicate="lives_in", object="Berlin",
+        ...                  invalidated_at=utcnow())
+        >>> [c.state for c in WriteReceipt(closed=[misheard]).retired]
+        ['retired']
+        """
+        return [c for c in self.closed if c.state == "retired"]
+
+    @property
+    def invalidated(self) -> list[Claim]:
+        """Deliberate alias of `closed`. Prefer `closed`, `ended` or `retired`.
+
+        The old name for the field, from before the two axes were separated, when a
+        closure really did set `invalidated_at` every time. It is kept — same list
+        object, not a copy — because it is on the published API and this is not worth an
+        `AttributeError` at somebody's call site.
+
+        **No `DeprecationWarning` on purpose.** `pyproject.toml` sets
+        `filterwarnings = ["error::DeprecationWarning"]`, so warning here would not warn
+        anyone, it would raise on every existing caller including this package's own
+        write path. Remove the alias at `1.0.0`, where the protocols are already allowed
+        to change; until then the cost of keeping it is this docstring.
+
+        >>> receipt = WriteReceipt()
+        >>> receipt.invalidated is receipt.closed
+        True
+        """
+        return self.closed
+
     def __str__(self) -> str:
         # `unextracted` appears only when it is non-zero, so it reads as an event rather
         # than as noise on the writes that lost nothing.
         lost = f" unextracted={self.unextracted}" if self.unextracted else ""
         return (
             f"<WriteReceipt +{len(self.added)} ~{len(self.reinforced)} "
-            f"-{len(self.invalidated)} skip={self.skipped}{lost} "
+            f"-{len(self.closed)} skip={self.skipped}{lost} "
             f"llm={self.llm_calls} "
             f"{self.latency_ms:.1f}ms{' deferred' if self.deferred else ''}>"
         )

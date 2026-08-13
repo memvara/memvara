@@ -20,11 +20,21 @@ testing.
 import asyncio
 import sqlite3
 import time
+from datetime import timedelta
 
 import pytest
 
-from memvara import Memvara, HashingEmbedder, NullLLM, Scope
-from memvara.aio import NOT_WRAPPED, AsyncMemvara, _unwrapped
+from memvara import Memvara, HashingEmbedder, NullLLM, Scope, utcnow
+from memvara.aio import (
+    NOT_WRAPPED,
+    AsyncMemvara,
+    AsyncScopedMemvara,
+    _public,
+    _scoped_omissions,
+    _unbound,
+    _unwrapped,
+)
+from memvara.core import ScopedMemvara
 from memvara.types import Claim
 
 
@@ -53,14 +63,56 @@ def test_every_public_memvara_method_has_an_awaitable_counterpart():
     assert _unwrapped() == set()
 
 
-def test_scope_is_the_one_deliberate_omission():
-    assert NOT_WRAPPED == {"scope"}
-    assert not hasattr(AsyncMemvara, "scope")
+def test_nothing_is_deliberately_omitted_any_more():
+    """`scope` was the one entry, and it is implemented. The set stays because the check
+    needs somewhere to record a deliberate omission; empty is the honest answer."""
+    assert NOT_WRAPPED == frozenset()
+    assert hasattr(AsyncMemvara, "scope")
 
 
 def test_a_method_added_to_memvara_and_not_here_is_reported():
     """The check above is only worth anything if it can fail."""
     assert _unwrapped(type("Fake", (), {"vaporize": lambda self: None})) == {"vaporize"}
+
+
+# --- the same surface, scoped -----------------------------------------------
+#
+# `AsyncScopedMemvara` sits at the corner of a square — sync/async on one axis, unscoped/
+# scoped on the other — and can fall off either edge. A method added to `AsyncMemvara`
+# and forgotten here is awaitable only unscoped; one added to `ScopedMemvara` and
+# forgotten here is scopable only synchronously. Neither raises: the caller reaches for
+# a method that is simply not there, at runtime, in whichever request first needs it.
+#
+# Both checks derive the surface with `dir()`. A list of method names written out by hand
+# would have to be updated by the same person who just forgot to update the class, which
+# makes it a copy of the mistake rather than a check on it.
+
+def test_the_scoped_view_covers_the_async_facade():
+    assert _unbound() == set()
+
+
+def test_the_scoped_view_covers_the_synchronous_scoped_view():
+    """The other edge. `ScopedMemvara` is the shape being mirrored, so anything it has
+    and this does not is a method you can scope in sync code and not in async code."""
+    assert _unbound(ScopedMemvara) == set()
+
+
+def test_a_method_added_to_the_async_facade_and_not_bound_here_is_reported():
+    """Both checks above are only worth anything if they can fail."""
+    assert _unbound(type("Fake", (), {"vaporize": lambda self: None})) == {"vaporize"}
+
+
+def test_what_a_scoped_view_legitimately_leaves_out_is_read_off_the_sync_pair():
+    """The excused names are not a literal in this file or in `aio.py`.
+
+    `close`, `reembed` and `scope` are absent from `ScopedMemvara` because they are not
+    scoped operations, and `_scoped_omissions()` reads that off the sync pair rather than
+    restating it — so the day `ScopedMemvara` grows one of them, the async view stops
+    being excused for not having it, without anyone remembering to edit a list.
+    """
+    assert _scoped_omissions() == {"close", "reembed", "scope"}
+    assert _scoped_omissions() <= _public(AsyncMemvara), \
+        "excusing a name the async facade does not even have would hide a real gap"
 
 
 def test_the_wrapper_says_what_it_wraps(amem):
@@ -181,6 +233,183 @@ def test_close_is_awaitable_because_it_commits():
     run(main())
     with pytest.raises(sqlite3.ProgrammingError):
         memvara.count()
+
+
+# --- the scoped view, exercised ---------------------------------------------
+
+def test_a_scoped_view_binds_the_four_keywords_once(amem):
+    """`ScopedMemvara`'s own first test, awaited. Same object, same guarantee."""
+    async def main():
+        alice = amem.scope(user="alice", session="s1")
+        await alice.remember("user", "lives_in", "Lisbon")
+        assert [c.object for c in await alice.get_all()] == ["Lisbon"]
+        assert await amem.get_all(user="alice", session="s1") == await alice.get_all()
+
+    run(main())
+
+
+def test_a_scoped_view_keeps_one_scope_out_of_another(amem):
+    """The reason the binding exists at all: four keywords repeated per call are four
+    chances to write one user's fact into another user's scope."""
+    async def main():
+        await amem.scope(user="bob").remember("user", "likes", "tea")
+        assert [c.object for c in await amem.get_all(user="bob")] == ["tea"]
+        assert await amem.get_all(user="carol") == []
+
+    run(main())
+
+
+def test_a_scoped_view_cannot_be_talked_out_of_its_scope(amem):
+    async def main():
+        with pytest.raises(TypeError):
+            await amem.scope(user="frank").remember("user", "lives_in", "Lisbon",
+                                                    user="mallory")
+
+    run(main())
+
+
+def test_a_scoped_view_narrows_but_never_widens(amem):
+    async def main():
+        session = amem.scope(user="erin").bind(session="s2")
+        await session.remember("user", "working_on", "auth refactor")
+        assert session.scope == Scope("default", "erin", None, "s2")
+        assert await amem.get_all(user="erin") == [], "session scratch stayed put"
+        assert len(await amem.get_all(user="erin", session="s2")) == 1
+
+    run(main())
+
+
+def test_a_scoped_view_says_what_it_is_bound_to(amem):
+    assert repr(amem.scope(user="grace", session="s3")).startswith(
+        "<AsyncScopedMemvara default/grace/*/s3 of <AsyncMemvara ")
+
+
+def test_binding_a_scope_touches_no_store(amem, monkeypatch):
+    """`scope()` is the one method here that is not a coroutine, and it has to stay that
+    way honestly: it binds four strings. If it ever reaches the store, it is lying about
+    what it costs on the loop thread."""
+    monkeypatch.setattr(amem.memvara.store, "get_claim",
+                        lambda *a, **kw: pytest.fail("scope() went to the store"))
+    assert amem.scope(user="ivan").scope == Scope("default", "ivan")
+
+
+def test_the_scoped_view_reaches_both_objects_underneath(amem, mem):
+    """`memvara` is the synchronous instance on all three facades — a server layer wants
+    the store off it. `unscoped` is the async one, and is where `close()` and `reembed()`
+    live, because a scoped view has neither and reaching them synchronously would put an
+    fsync back on the loop thread."""
+    view = amem.scope(user="alice")
+
+    assert view.memvara is mem
+    assert view.unscoped is amem
+    assert not hasattr(view, "close") and not hasattr(view, "reembed")
+
+
+def test_the_scoped_view_is_not_mistaken_for_a_synchronous_one(amem):
+    """`integrations._common.bind` recognises a `ScopedMemvara` by its `_mem` attribute.
+
+    Naming this class's slot the same thing would hand a synchronous adapter an
+    `AsyncMemvara` typed as an `Memvara`: every call a coroutine nobody awaits, no
+    exception anywhere, and memory that silently never gets written.
+    """
+    from memvara.integrations._common import bind
+
+    view = amem.scope(user="alice")
+    assert getattr(view, "_mem", None) is None
+    with pytest.raises(AttributeError):
+        bind(view)
+
+
+def test_the_scoped_write_and_read_surface(amem):
+    """Every bound method, once, against a real store — the forwarding is the whole of
+    what this class does, and a wrong `**self._kw` splice is invisible to a type checker.
+    """
+    async def main():
+        view = amem.scope(user="dave")
+        await view.add("I live in Berlin")
+        claim = (await view.get_all())[0]
+
+        assert (await view.get(claim.id)).object == "Berlin"
+        assert (await view.why(claim.id)) is not None
+        assert await view.count() == 1
+        assert [c.object for c in await view.history("user", "lives_in")] == ["Berlin"]
+        assert [c.id for c in await view.produced(claim.sources[0])] == [claim.id]
+        assert [r.claim.object for r in await view.search("where do they live")] \
+            == ["Berlin"]
+        assert "Berlin" in await view.recall("where do they live")
+        assert (await view.stats())["claims"] == 1
+
+        await view.remember("Berlin", "in_country", "Germany")
+        assert [p.render() for p in await view.paths_between("user", "Germany")] \
+            == ["user -lives_in-> Berlin -in_country-> Germany"]
+        assert await view.neighborhood("user") != []
+
+        await view.supersede(claim.id, Claim(subject="user", predicate="lives_in",
+                                             object="Lisbon", scope=view.scope))
+        assert (await view.get(claim.id)).state == "ended"
+
+        assert isinstance(await view.consolidate(), dict)
+        assert await view.delete((await view.get_all())[0].id) is True
+        await view.remember("user", "likes", "coffee")
+        assert len(await view.forget("user", "likes")) == 1
+        await view.remember("user", "speaks", "portuguese")
+        assert await view.erase((await view.get_all())[0].id) is True
+        await view.remember("user", "speaks", "portuguese")
+        assert (await view.purge())["claims"] >= 1
+        await view.remember("user", "speaks", "portuguese")
+        assert (await view.reset())["claims"] >= 1
+        assert await view.get_all() == []
+
+    run(main())
+
+
+def test_the_scoped_view_reads_the_bitemporal_keywords(amem):
+    """The time keywords and the claim-state filter have to survive the splice too: they
+    are the arguments a scoped server handle actually varies per request, and a `**_kw`
+    splice that dropped one would still typecheck and still return claims."""
+    async def main():
+        now = utcnow()
+        then, moved = now - timedelta(days=800), now - timedelta(days=30)
+        view = amem.scope(user="judy")
+        await view.remember("user", "lives_in", "Berlin",
+                            valid_from=then, recorded_at=then)
+        await view.remember("user", "lives_in", "Lisbon",
+                            valid_from=moved, recorded_at=moved)
+
+        back = now - timedelta(days=100)
+        assert [c.object for c in await view.get_all()] == ["Lisbon"]
+        assert [c.object for c in await view.get_all(valid_at=back)] == ["Berlin"]
+        # `known_at` alone is the *other* question — what we believed 100 days ago about
+        # the world as it is now — and Berlin has since ended in world time, so it is
+        # empty. Asserted because a splice that forwarded one axis under the other's name
+        # would pass every check above.
+        assert await view.get_all(known_at=back) == []
+        assert [c.object for c in await view.get_all(as_of=back)] == ["Berlin"]
+        assert len(await view.get_all(include_invalidated=True)) == 2
+        assert await view.count() == 1
+        assert await view.count(include_invalidated=True) == 2
+        assert [r.claim.object for r in
+                await view.search("lives", as_of=now - timedelta(days=100))] == ["Berlin"]
+
+    run(main())
+
+
+def test_a_slow_scoped_call_also_leaves_the_loop_free(amem, monkeypatch):
+    """The view forwards to the facade rather than re-implementing the threading, so
+    this is the property it inherits — and the assertion that says it really forwards."""
+    monkeypatch.setattr(amem.memvara, "consolidate",
+                        lambda **kw: time.sleep(0.2) or {"decayed": 0})
+
+    async def main():
+        ticks = 0
+        task = asyncio.ensure_future(amem.scope(user="alice").consolidate())
+        while not task.done():
+            await asyncio.sleep(0.001)
+            ticks += 1
+        await task
+        return ticks
+
+    assert run(main()) > 10, "the loop was pinned for the duration of the call"
 
 
 def test_the_async_context_manager_closes_the_store():

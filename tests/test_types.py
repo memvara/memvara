@@ -1,5 +1,7 @@
 """Core data model: scope hierarchy, claim identity, and the bitemporal predicate."""
 
+import inspect
+import warnings
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -186,6 +188,36 @@ def test_freshly_built_claim_is_live_now():
     assert mk().is_live()
 
 
+def test_an_ended_claim_is_not_retired_however_the_old_idiom_reads():
+    """`invalidated_at is None` stopped meaning "live" and nothing can warn a caller.
+
+    It is a valid expression that used to be right, so there is no exception, no
+    migration error and no red test anywhere downstream — only a count that steps up on
+    upgrade day, always in the same direction. The claim below is what every supersession
+    now produces: ended, still believed, and matched by the old idiom.
+    """
+    superseded = mk(recorded_at=T0, valid_from=T0, valid_to=T1)
+
+    assert superseded.invalidated_at is None, "the old idiom calls this live"
+    assert superseded.state == "ended" and not superseded.is_live(T2), "and it is not"
+
+
+def test_the_field_that_reads_like_a_liveness_check_says_that_it_is_not():
+    """The only defence against the bug above is a reader who looks the field up.
+
+    So the warning has to be *on the field*, naming the two replacements, or the person
+    most likely to have the bug — someone who went to check what `invalidated_at` means —
+    finds nothing. Asserted against the source because a `#:` comment leaves no runtime
+    trace, which is exactly why it is easy to delete by accident.
+    """
+    source = inspect.getsource(Claim)
+    doc = source.split("invalidated_at: datetime | None")[0].rsplit("recorded_at:", 1)[1]
+
+    assert "live_predicate" in doc, "the SQL answer"
+    assert "is_live" in doc, "the Python answer"
+    assert "not a liveness flag" in doc.lower()
+
+
 # --- Rendering and misc -----------------------------------------------------
 
 def test_render_produces_readable_text():
@@ -262,6 +294,50 @@ def test_receipt_reports_turns_that_reached_extraction_and_yielded_nothing():
 
 def test_receipt_stays_quiet_when_nothing_was_lost():
     assert "unextracted" not in str(WriteReceipt(added=[mk()]))
+
+
+def test_the_receipt_splits_what_it_closed_by_which_clock_stopped():
+    """One field could not answer "which of the two happened", and callers had to ask.
+
+    `closed` is claims this write ended *or* retired, because `close=` decides which and
+    the receipt carries both kinds under one name. Three consumers had already open-coded
+    the distinction — the MCP server, the mem0 shim and `bench/evalkit.py` — and two of
+    them got it wrong by calling every closure a retirement.
+    """
+    moved = mk(object="Berlin", valid_to=T1)                 # the world changed
+    misheard = mk(object="Porto", invalidated_at=T1)         # the record was wrong
+    receipt = WriteReceipt(closed=[moved, misheard])
+
+    assert [c.object for c in receipt.ended] == ["Berlin"]
+    assert [c.object for c in receipt.retired] == ["Porto"]
+    assert receipt.ended + receipt.retired == receipt.closed, "and nothing falls between"
+
+
+def test_a_claim_that_only_ended_is_not_counted_as_retired():
+    """The whole bug in one assertion: `valid_to` set and `invalidated_at` unset is the
+    shape every supersession produces, and it is *not* a retirement."""
+    assert WriteReceipt(closed=[mk(valid_to=T1)]).retired == []
+    assert WriteReceipt(closed=[mk(invalidated_at=T1)]).ended == []
+
+
+def test_invalidated_is_still_the_same_list_object_it_always_was():
+    """The old name is kept because it is on the published API — and kept as an alias of
+    the *same list*, not a copy: `WritePipeline._absorb` does
+    `receipt.invalidated.extend(...)`, so a property returning a new list every call
+    would silently drop everything the write closed out.
+
+    No `DeprecationWarning`: `pyproject.toml` turns those into errors, so warning here
+    would raise on every existing caller rather than warn one.
+    """
+    receipt = WriteReceipt()
+    assert receipt.invalidated is receipt.closed
+
+    receipt.invalidated.extend([mk(valid_to=T1)])
+    assert len(receipt.closed) == 1, "a mutation through the alias reached the field"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")     # any warning at all, not just Deprecation
+        assert receipt.invalidated == receipt.closed
 
 
 # --- Reprs ------------------------------------------------------------------
