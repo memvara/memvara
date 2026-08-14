@@ -300,13 +300,20 @@ def publish(pkg: Path, name: str, version: str, tag: str, yes: bool,
         raise Abort(
             f"{who} authenticated, but is not allowed to publish {name}",
             "The token works and the account is real, so this is scope, not identity:\n\n"
-            "  1. A **read-only** classic token cannot publish. Publishing needs\n"
-            "     'Automation' (no OTP) or 'Publish' (prompts for an OTP).\n\n"
-            "  2. A **granular** token must grant write to *all packages*. It cannot be\n"
-            "     scoped to `" + name + "` yet, because a token can only be scoped to a\n"
-            "     package that already exists — the same trap PyPI has, where the first\n"
-            "     upload of a new name requires an account-wide token. Narrow it after\n"
-            "     the name exists, not before.\n\n"
+            + ("  1. **An unscoped name belongs to no scope and no organisation.** If this\n"
+               f"     token is granular and lists a scope such as `@{name}` or an org named\n"
+               f"     `{name}`, it still cannot publish `{name}` — a scope and a bare name\n"
+               "     that share a word are unrelated namespaces. This is the same fact that\n"
+               "     makes the placeholder necessary at all: owning the org reserves\n"
+               f"     `@{name}/*` and leaves `{name}` itself open to anyone.\n"
+               "     Grant the token write on **all packages**, or use a classic token.\n\n"
+               if not name.startswith("@") else
+               "  1. A granular token must list this package's scope explicitly.\n\n")
+            + "  2. A **read-only** classic token cannot publish. Publishing needs\n"
+            "     'Automation' (no OTP) or 'Publish' (prompts for an OTP). A granular\n"
+            "     token cannot be scoped to `" + name + "` before it exists, so the first\n"
+            "     publish of a new name needs account-wide write either way — the same\n"
+            "     trap as PyPI. Narrow it afterwards, not before.\n\n"
             "  3. If 2FA is enforced for writes, pass the six digits: --otp 123456\n\n"
             "  4. If the account is a member of an org, check the org has not restricted\n"
             "     publishing of unscoped names.\n\n"
