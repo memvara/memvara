@@ -63,6 +63,7 @@ from ..telemetry import (
     FAST_MISS,
     GATE_DROP,
     GATE_PASS,
+    PREDICATE_ACCUMULATED,
     PREDICATE_ALIAS,
     PREDICATE_CAPPED,
     PREDICATE_LEARNED,
@@ -704,11 +705,23 @@ class WritePipeline:
             # claims it retired belong in the receipt's visible outcome.
             to_embed.append(res.claim)
         receipt.invalidated.extend(res.invalidated)
+        if res.accumulated is not None:
+            # Above the telemetry guard, not inside it: the receipt is the account of
+            # what this write did and must not depend on whether anyone wired a metrics
+            # backend. Same rule `unextracted` follows.
+            receipt.accumulated.append(res.accumulated)
 
         rec = self.telemetry
         if rec is None:
             return
         rec.counter(WRITE_RECONCILE, action=res.action)
+        if res.accumulated is not None:
+            # **A value that piled up under an undecided predicate**, which the receipt
+            # names one write at a time and this counts across a deployment. It is the
+            # aggregate half of the same signal `write.retraction{outcome="noop"}` is:
+            # an outcome the API reports as an ordinary success, because it is one — the
+            # row is fine and the schema is the thing that was never decided.
+            rec.counter(PREDICATE_ACCUMULATED)
         if candidate.polarity < 0:
             # **A retraction that retires nothing is an anomaly**, and the API cannot
             # tell you so: `forget()` returns an ordinary receipt whether it cleared the

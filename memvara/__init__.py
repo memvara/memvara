@@ -65,6 +65,7 @@ from .retrieve import (
 from .schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
 from .store import SQLiteStore, Store
 from .types import (
+    Accumulation,
     Claim,
     Closure,
     Derivation,
@@ -89,6 +90,10 @@ __all__ = [
     # data model
     "Claim", "Episode", "Scope", "Result", "Explanation", "Provenance",
     "WriteReceipt", "MemoryType", "Derivation", "utcnow", "time_axes",
+    # One entry of `WriteReceipt.accumulated`: a value written beside values already live
+    # in the same slot, under a predicate whose cardinality nobody has declared. Exported
+    # because a caller reading that field needs to be able to name its element type.
+    "Accumulation",
     # Which clock a write stops when it ends a claim: "ended" (the world changed) or
     # "retired" (the record was wrong). Exported because it is in `Reconciler.apply`'s
     # signature and in four facade methods, so a typed caller needs to be able to name it.

@@ -84,6 +84,131 @@ def test_unknown_predicates_default_to_many(rec, store, registry):
     assert live_objects(store, a.claim) == ["stamps", "vinyl"]
 
 
+# --- accumulation, reported --------------------------------------------------
+# The default above is right and it used to be silent, which is a separate defect. These
+# fix the trigger: an `add` onto an *unregistered* predicate whose slot already holds live
+# values, and nothing else.
+
+def test_a_second_value_under_an_undeclared_predicate_is_reported(rec, registry):
+    """The measured case, at the layer that knows what was already there.
+
+    `status` is not in the schema and never will be on this path, so the second write
+    accumulates instead of superseding and both values go on answering. That is defensible
+    behaviour and an indefensible silence: the receipt for it was byte-identical to the
+    receipt for a correct replacement."""
+    assert not registry.known("status")
+    first = rec.apply(claim("status", "not installed", subject="quota_gate"))
+    second = rec.apply(claim("status", "installed", subject="quota_gate"))
+
+    assert first.accumulated is None          # nothing was there to pile up beside
+    assert second.action == "add" and second.invalidated == []
+    assert second.accumulated is not None
+    assert second.accumulated.subject == "quota_gate"
+    assert second.accumulated.predicate == "status"
+    assert second.accumulated.existing == 1
+
+
+def test_the_first_write_to_an_empty_slot_is_silent(rec, registry):
+    """Nothing was displaced and nothing is competing. A report here would fire on every
+    first write in the store and would be pure noise."""
+    assert not registry.known("deployed_to")
+    assert rec.apply(claim("deployed_to", "staging")).accumulated is None
+
+
+def test_a_registered_many_predicate_is_silent(rec, registry):
+    """`likes` is declared MANY by a person, so accumulating is the decision rather than
+    the absence of one. This must not fire there, or the signal drowns in the predicates
+    that are working exactly as designed."""
+    assert registry.known("likes") and not registry.spec("likes").functional
+    rec.apply(claim("likes", "coffee"))
+    assert rec.apply(claim("likes", "tea")).accumulated is None
+
+
+def test_a_predicate_learned_at_runtime_stops_being_reported(rec, registry):
+    """The note is a request for a decision, so making the decision has to end it — in
+    *both* directions. Declared MANY, this goes quiet; declared ONE, the write supersedes
+    and there is nothing left to report. Either way one declaration settles the predicate
+    permanently, which is what makes the report worth reading rather than noise to filter."""
+    rec.apply(claim("stage", "canary"))
+    assert rec.apply(claim("stage", "beta")).accumulated is not None
+
+    registry.learn("stage", Cardinality.MANY)
+    assert rec.apply(claim("stage", "ga")).accumulated is None
+
+    registry.register(PredicateSpec("branch", Cardinality.ONE, Volatility.FAST))
+    rec.apply(claim("branch", "main"))
+    settled = rec.apply(claim("branch", "release"))
+    assert settled.action == "supersede" and settled.accumulated is None
+
+
+def test_re_stating_the_same_value_is_silent(rec, registry):
+    """A reinforcement is the slot's *own* value arriving again, not a second answer to
+    the question. `apply` returns before the slot is ever counted."""
+    assert not registry.known("status")
+    rec.apply(claim("status", "installed", subject="quota_gate"))
+    again = rec.apply(claim("status", "installed", subject="quota_gate"))
+    assert again.action == "reinforce" and again.accumulated is None
+
+
+def test_a_retraction_is_silent(rec, registry):
+    """A negative assertion removes an answer; it cannot pile one up."""
+    assert not registry.known("status")
+    rec.apply(claim("status", "installed", subject="quota_gate"))
+    gone = rec.apply(claim("status", "installed", subject="quota_gate", polarity=-1))
+    assert gone.action == "retract" and gone.accumulated is None
+
+
+def test_a_slot_whose_only_value_is_no_longer_live_is_silent(rec, registry):
+    """Two values a year apart, the first already ended, are history rather than a
+    pile-up — nothing is competing, so nothing is reported.
+
+    The occupancy question is asked of `competing_claims`, which is contractually
+    live-only, and not of `slot_history`, which is every claim the slot ever held. That
+    is the mistake this pins: a report built on the audit trail would fire on every
+    ordinary sequence of values in the store's history and mean nothing."""
+    assert not registry.known("status")
+    first = rec.apply(claim("status", "not installed", subject="quota_gate"))
+    first.claim.valid_to = utcnow() - timedelta(seconds=1)
+    rec.store.put_claim(first.claim)
+    assert rec.apply(claim("status", "installed", subject="quota_gate")).accumulated is None
+
+
+def test_another_users_value_in_the_same_named_slot_is_silent(rec, registry):
+    """The owner filter is the same one every other lookup here applies. Bob's
+    `quota_gate status` is not an answer competing with Alice's."""
+    assert not registry.known("status")
+    rec.apply(claim("status", "not installed", subject="quota_gate",
+                    scope=Scope("acme", "bob")))
+    assert rec.apply(claim("status", "installed",
+                           subject="quota_gate")).accumulated is None
+
+
+def test_a_store_predating_count_competing_still_reports(store, registry):
+    """The cheap count is an optional capability, reached through `getattr` exactly as
+    `batch` and `put_spec` are. A third-party `Store` that never heard of it must get the
+    same answer — it simply pays the hydration it was already paying."""
+    class OldStore(SQLiteStore):
+        count_competing = None
+
+    old = OldStore(":memory:")
+    older = Reconciler(old, registry)
+    older.apply(claim("status", "not installed", subject="quota_gate"))
+    second = older.apply(claim("status", "installed", subject="quota_gate"))
+    assert second.accumulated is not None and second.accumulated.existing == 1
+    # And the branch is genuinely the other one, not a method that happens to exist.
+    assert getattr(old, "count_competing", None) is None
+    old.close()
+
+
+def test_the_reported_count_grows_with_the_slot(rec):
+    """The number is the live occupants *before* this write, so a slot that keeps growing
+    reports a worse number each time rather than repeating "1"."""
+    rec.apply(claim("owner", "platform", subject="quota_gate"))
+    rec.apply(claim("owner", "payments", subject="quota_gate"))
+    third = rec.apply(claim("owner", "security", subject="quota_gate"))
+    assert third.accumulated.existing == 2
+
+
 # --- reinforce ---------------------------------------------------------------
 
 def test_identical_claim_reinforces_instead_of_inserting(rec, store):

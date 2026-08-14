@@ -29,6 +29,7 @@ from memvara.telemetry import (
     FAST_MISS,
     GATE_DROP,
     GATE_PASS,
+    PREDICATE_ACCUMULATED,
     PREDICATE_ALIAS,
     PREDICATE_CAPPED,
     PREDICATE_LEARNED,
@@ -1135,6 +1136,93 @@ def test_the_registry_cap_firing_is_counted_and_says_whether_it_folded():
     pipe.add([ep("Payroll moved again after the acquisition closed.")])
     assert rec.total(PREDICATE_CAPPED, folded="yes") == 1
     assert rec.total(PREDICATE_CAPPED, folded="no") == 1
+    store.close()
+
+
+def slot_claim(predicate: str, obj: str, subject: str = "user") -> Claim:
+    """One caller-asserted triple, the shape `remember()` builds and hands to the writer."""
+    return Claim(subject=subject, predicate=predicate, object=obj, scope=SCOPE,
+                 derivation=Derivation.USER, extractor="api")
+
+
+def test_a_value_piling_up_under_an_undeclared_predicate_is_counted():
+    """`predicate.accumulated`: one per write that adds a second live answer to a slot
+    whose predicate has no spec.
+
+    An unregistered predicate is MANY, MANY retires nothing, and `write.reconcile` reports
+    `add` — which is exactly what a correct *first* write reports too, so no existing
+    series moves when a slot quietly acquires a second simultaneous answer. This one does,
+    and the receipt carries the names the counter deliberately does not tag with."""
+    rec = MemoryRecorder()
+    pipe, store, _ = build(telemetry=rec)
+    pipe.assert_claim(slot_claim("status", "not installed", "quota_gate"))
+    second = pipe.assert_claim(slot_claim("status", "installed", "quota_gate"))
+
+    assert rec.total(PREDICATE_ACCUMULATED) == 1
+    assert [(a.subject, a.predicate, a.existing) for a in second.accumulated] == [
+        ("quota_gate", "status", 1)]
+    # Per triggering write, not per slot: the third value counts again, so the rate says
+    # how much of this a deployment is doing and not how many slots ever did it once.
+    third = pipe.assert_claim(slot_claim("status", "rolled back", "quota_gate"))
+    assert rec.total(PREDICATE_ACCUMULATED) == 2
+    assert third.accumulated[0].existing == 2
+    store.close()
+
+
+def test_the_counter_stays_at_zero_for_writes_that_are_working_as_designed():
+    """A first write to an empty slot, a declared multi-valued predicate accumulating on
+    purpose, and a declared single-valued predicate superseding. None of the three is the
+    defect, and a counter that fires on them is one nobody can alert on."""
+    rec = MemoryRecorder()
+    pipe, store, _ = build(telemetry=rec)
+    pipe.assert_claim(slot_claim("status", "installed", "quota_gate"))
+    pipe.assert_claim(slot_claim("likes", "coffee"))
+    pipe.assert_claim(slot_claim("likes", "tea"))
+    pipe.assert_claim(slot_claim("lives_in", "Berlin"))
+    superseded = pipe.assert_claim(slot_claim("lives_in", "Lisbon"))
+
+    assert len(superseded.closed) == 1
+    assert rec.total(PREDICATE_ACCUMULATED) == 0
+    # …and the series is genuinely wired here, so the zero above is an absence of the
+    # event rather than an absence of the emission point.
+    pipe.assert_claim(slot_claim("status", "rolled back", "quota_gate"))
+    assert rec.total(PREDICATE_ACCUMULATED) == 1
+    store.close()
+
+
+def test_the_receipt_reports_it_with_no_telemetry_configured():
+    """`telemetry=None` is the default and the fast path. The receipt is the account of
+    what a write did and cannot be contingent on whether anyone wired a metrics backend —
+    the same rule `unextracted` follows."""
+    pipe, store, _ = build()
+    pipe.assert_claim(slot_claim("status", "not installed", "quota_gate"))
+    receipt = pipe.assert_claim(slot_claim("status", "installed", "quota_gate"))
+    assert pipe.telemetry is None
+    assert [a.predicate for a in receipt.accumulated] == ["status"]
+    assert "accumulated=1" in str(receipt)
+    store.close()
+
+
+def test_extraction_that_acquires_a_spec_first_reports_nothing():
+    """The population that sees this is the whole point of the trigger. On the `add()`
+    path with a model configured, acquisition registers the predicate *before* its claim
+    reaches the reconciler, so the slot is governed by a real spec by the time anything
+    lands in it and nothing is reported. What is left is exactly where cardinality can
+    never be learned: `remember()`, and a deployment with no extraction model."""
+    rec = MemoryRecorder()
+    objs = iter(["not installed", "installed"])
+    llm = ResolvingLLM(classification={"cardinality": "one", "volatility": "fast",
+                                       "memory_type": "semantic"},
+                       responder=lambda episodes: [
+                           {"subject": "quota_gate", "predicate": "status",
+                            "object": next(objs), "polarity": 1, "source_index": 0}])
+    pipe, store, registry = build(llm, telemetry=rec)
+    pipe.add([ep("The quota gate has not been put in yet.")])
+    second = pipe.add([ep("The quota gate went in this morning.")])
+
+    assert registry.known("status") and registry.spec("status").functional
+    assert second.accumulated == [] and rec.total(PREDICATE_ACCUMULATED) == 0
+    assert len(second.closed) == 1        # it superseded, which is the whole point
     store.close()
 
 
