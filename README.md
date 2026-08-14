@@ -1169,16 +1169,27 @@ MEMVARA_DB=/path/to/memory.db memvara-mcp                   # JSON-RPC 2.0 over 
 MEMVARA_DB=/path/to/memory.db python3 -m memvara.server    # the same thing, no console script
 ```
 
-Eight tools — `memory_add`, `memory_remember`, `memory_recall`, `memory_search`,
-`memory_history`, `memory_why`, `memory_forget`, `memory_stats`. Hand-rolled against the
-MCP wire format rather than taking an SDK dependency, so the library's "numpy and nothing
-else" claim survives. It refuses to start without `MEMVARA_DB` and prints the client config
-block, rather than silently remembering into a store that vanishes on exit.
+Nine tools — `memory_add`, `memory_remember`, `memory_recall`, `memory_search`,
+`memory_history`, `memory_why`, `memory_forget`, `memory_end`, `memory_stats`.
+Hand-rolled against the MCP wire format rather than taking an SDK dependency, so the
+library's "numpy and nothing else" claim survives. It refuses to start without
+`MEMVARA_DB` and prints the client config block, rather than silently remembering into a
+store that vanishes on exit.
+
+Both closures are on the surface, as two tools: `memory_forget` retires a record that was
+wrong, `memory_end` closes out a fact that was right and has stopped being true, at an
+optional `at` instant so it can close last Tuesday rather than now. They are separate
+tools rather than one `closure` flag because a model commits to a tool by its name before
+it reads a parameter, and "forget" already asserts one of the two answers — a flag would
+be asking it to overrule the word it just chose. Picking wrong writes a false reason for
+the change, and nothing downstream can detect that, which is what makes the choice worth
+this much surface.
 
 `consolidate`, `purge`, `reset` and `erase` are deliberately **absent**, and a test
 asserts their absence: a model that can be talked into calling a tool should not be able
 to reach one that irreversibly erases a scope. Run those from the library, on a schedule
-you control. `memory_forget` is present because retirement is recoverable.
+you control. `memory_forget` and `memory_end` are present because both closures are
+recoverable — the claim stays on disk and stays in `memory_history`.
 
 ### Running an existing mem0 app
 

@@ -1,4 +1,4 @@
-r"""The eight tools, their descriptions, and how a stored memory is rendered back.
+r"""The nine tools, their descriptions, and how a stored memory is rendered back.
 
 Three things in here are load-bearing and easy to mistake for boilerplate.
 
@@ -20,18 +20,29 @@ contains can appear to be output of this server.
 **No tool erases anything.** `consolidate`, `purge` and `reset` are deliberately absent.
 The first is an operator action that an agent, given it, will call in a loop; the other
 two are irreversible erasure, which must not be one tool call away from a model that
-misread "forget that" as "delete everything". `memory_forget` retires, which is the
-honest reading of the request and stays visible to `memory_history`.
+misread "forget that" as "delete everything". `memory_forget` retires and `memory_end`
+closes out a fact that stopped being true; both stay visible to `memory_history`, and
+neither removes anything from disk.
+
+**The two closures are two tools, not one tool with a flag.** `Closure` is the library's
+sharpest distinction — `"ended"` says the world changed, `"retired"` says the record was
+wrong — and it is the one mistake here that cannot be found by reading the data
+afterwards. A model picks a tool by name before it reads a parameter, and the name
+`memory_forget` already asserts one of the two answers, so a `closure=` argument on it
+would ask the model to overrule the word it had just chosen. Splitting them puts the fork
+where the choice is actually made, and follows the shape `delete`/`erase` and
+`forget`/`purge` already take in `core`: operations that mean different things get
+different names rather than a flag.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence, cast
 
 from ..core import ScopedMemvara
-from ..types import Claim, MemoryType, WriteReceipt
+from ..types import Claim, MemoryType, WriteReceipt, utcnow
 from .validate import ToolError, validate
 
 __all__ = ["TOOLS", "Tool", "ToolContext", "ToolError", "safe_line"]
@@ -368,6 +379,75 @@ def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
     return "\n".join(lines + _claim_lines("-", retired))
 
 
+def _pending(claims: Sequence[Claim]) -> str:
+    """A note for claims ended at an instant that has not arrived yet, or "" for none.
+
+    Ending in the future is legal and useful — a contract that runs out on the 30th is
+    true until the 30th — and it is also the one outcome of this tool that looks like a
+    failure: the value goes on answering `memory_recall`, exactly as it should. Without
+    this line a model reads that as "the call did nothing" and retries with the tool that
+    *does* silence it immediately, which is `memory_forget`, which records the wrong
+    reason. Saying so here closes the loop back to the mistake this tool exists to stop.
+    """
+    now = utcnow()
+    later = [c for c in claims if c.valid_to is not None and c.valid_to > now]
+    if not later:
+        return ""
+    return (f"note: {len(later)} of these end at an instant still in the future, so they "
+            "are true until then and memory_recall keeps returning them. That is the "
+            "ending working, not failing.")
+
+
+def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
+    claim_id, predicate = args.get("claim_id"), args.get("predicate")
+    # The same two addressing modes as `memory_forget`, deliberately spelled the same
+    # way: a model that has learned to name a fact for one of these tools must not have
+    # to learn a second grammar for the other, or the choice between them starts being
+    # made on which arguments it remembers rather than on what happened.
+    if (claim_id is None) == (predicate is None):
+        raise ToolError(
+            "memory_end needs exactly one of: 'predicate' (with optional 'subject'), to "
+            "end every current value of that fact, or 'claim_id', to end one specific "
+            "claim from memory_search. Use the id when a newer value is already stored — "
+            "ending the slot ends everything in it, the current value included.")
+
+    at_raw = args.get("at")
+    # Parsed before anything is written, so a malformed instant costs a retry rather than
+    # a closure at the wrong time: `_timestamp` raises, and this tool's whole subject is
+    # *which* instant a fact stopped being true at.
+    at = _timestamp(at_raw, "memory_end.at") if at_raw is not None else None
+
+    if claim_id is not None:
+        if not ctx.memory.delete(claim_id, at=at, close="ended"):
+            return (f"Nothing ended: no claim {claim_id!r} is visible here. Run "
+                    "memory_search to get a current id.")
+        # `delete` returned True, so this id is in scope and was just written back; the
+        # re-read is for the instant that *landed*, which `close_out` may have clamped
+        # forward to the claim's own start. Reporting the requested instant instead would
+        # be this layer inventing a fact about the row it just wrote.
+        closed = cast(Claim, ctx.memory.get(claim_id))
+        return "\n".join(filter(None, [
+            f"Ended claim {claim_id} — {_state(closed)}. It answers nothing after that "
+            "instant and still answers about the period before it. memory_history shows "
+            "it as ended, not retired: the record stands, the world moved.",
+            _pending([closed]),
+        ]))
+
+    # Validated string by the guard above, for the reason spelled out in `_forget`.
+    ended = ctx.memory.forget(args["subject"], predicate,  # type: ignore[arg-type]
+                              at=at, close="ended")
+    if not ended:
+        return (f"Nothing to end: no live value for {args['subject']}/{predicate}. Check "
+                "the predicate spelling with memory_search; if the value you meant is "
+                "already closed, memory_history says whether it ended or was retired.")
+    lines = [f"Ended {len(ended)} value(s) of {args['subject']}/{predicate}, each at the "
+             "instant shown. They answer nothing after it and still answer about the "
+             "period before it; memory_history keeps them, marked ended rather than "
+             "retired."]
+    lines += [f"- [{c.id} {_state(c)}] {safe_line(c.text)}" for c in ended]
+    return "\n".join(filter(None, lines + [_pending(ended)]))
+
+
 def _history(ctx: ToolContext, args: dict[str, Any]) -> str:
     claims = ctx.memory.history(args["subject"], args["predicate"])
     if not claims:
@@ -564,16 +644,23 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="memory_forget",
         description=(
-            "Retire a stored fact. Call it when the user says something you remember is "
-            "wrong or out of date, or asks you to forget it. Give 'predicate' (with "
-            "'subject', default 'user') to retire every "
-            "current value of that fact, or 'claim_id' from memory_search to retire one "
-            "specific claim. Retired values stop answering questions immediately and "
-            "remain visible to memory_history, so this is reversible by an operator and "
-            "auditable — it is not erasure. If the user is asking for their data to be "
-            "deleted outright, say that erasure is an operator action and is not "
-            "available through this tool. You usually do not need this after a "
-            "correction: storing the new value already retires the old one."
+            "Retire a stored fact, because the record was wrong. Call it when the user "
+            "says something you remember was never right — you misheard it, you inferred "
+            "it badly, it was about someone else — or asks you to forget it. If instead "
+            "the fact was true and has since stopped being true, this is the wrong tool: "
+            "call memory_end, which closes it at the instant it stopped and leaves the "
+            "past readable. Retiring asserts the value was always an error, so using it "
+            "for a change that really happened writes a false reason into an audit trail "
+            "nothing downstream can correct. Give 'predicate' (with 'subject', default "
+            "'user') to retire every current value of that fact, or 'claim_id' from "
+            "memory_search to retire one specific claim. Retired values stop answering "
+            "questions immediately and remain visible to memory_history, so this is "
+            "reversible by an operator and auditable — it is not erasure. If the user is "
+            "asking for their data to be deleted outright, say that erasure is an "
+            "operator action and is not available through this tool. Storing a "
+            "replacement does not do this for you: a new value ends the old one, which "
+            "is right for a change and wrong for a mistake, so a real correction still "
+            "needs this call."
         ),
         properties={
             "subject": _SUBJECT,
@@ -583,6 +670,54 @@ TOOLS: tuple[Tool, ...] = (
         },
         required=(),
         handler=_forget,
+        writes=True,
+        destructive=True,
+    ),
+    Tool(
+        name="memory_end",
+        description=(
+            "Close out a fact that has stopped being true. Call it when the world moved "
+            "on and the stored value was never wrong: the gate got installed, the trip "
+            "ended, the contract ran out, they left the job. Ending closes the fact at an "
+            "instant — it answers nothing after that instant and still answers about the "
+            "period before it, so the timeline stays true rather than merely quiet. One "
+            "question decides between this and memory_forget: back when it was written, "
+            "was the value correct? Yes, and something has changed since — end it here. "
+            "No, it was never right — retire it with memory_forget. Getting that "
+            "backwards records a false reason for the change, and nothing downstream can "
+            "tell, because both leave a closed claim. Give 'predicate' (with 'subject', "
+            "default 'user') to end every current value of that fact, or 'claim_id' from "
+            "memory_search to end exactly one — use the id when a newer value is already "
+            "stored, since ending the slot ends everything in it, including the value "
+            "that is still true. Ended claims stay visible to memory_history and to "
+            "memory_search with as_of, so this is auditable and reversible by an "
+            "operator; it is not erasure. You often do not need it after storing a "
+            "replacement, which already ends the old value when the fact is "
+            "single-valued — this is the tool for when nothing replaced it, or when the "
+            "old value is still answering alongside the new one."
+        ),
+        properties={
+            "subject": _SUBJECT,
+            "predicate": dict(_PREDICATE, description=(
+                _PREDICATE["description"] + " Omit only when passing claim_id.")),
+            "claim_id": _CLAIM_ID,
+            "at": {
+                "type": "string",
+                "description": (
+                    "ISO-8601 instant the fact stopped being true, e.g. "
+                    "'2024-06-01T09:00:00Z' or '2024-06-01'. Defaults to now, which is "
+                    "right only when it stopped just now — if the user says it changed "
+                    "last Tuesday, send Tuesday. This instant is what later as_of and "
+                    "valid_at questions read, so defaulting on a fact that ended last "
+                    "week records a week of believing something already false. An "
+                    "instant before the fact began is clamped to its start rather than "
+                    "inverting the interval, and a future one is allowed: it means the "
+                    "fact is true until then."
+                ),
+            },
+        },
+        required=(),
+        handler=_end,
         writes=True,
         destructive=True,
     ),

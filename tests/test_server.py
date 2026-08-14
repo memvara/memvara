@@ -135,7 +135,7 @@ def test_no_tool_can_erase_anything():
     names = {t.name for t in TOOLS}
     assert names == {
         "memory_recall", "memory_search", "memory_add", "memory_remember",
-        "memory_forget", "memory_history", "memory_why", "memory_stats",
+        "memory_forget", "memory_end", "memory_history", "memory_why", "memory_stats",
     }
     forbidden = ("purge", "reset", "consolidate", "reembed", "erase", "delete")
     for tool in TOOLS:
@@ -264,6 +264,9 @@ def test_initialize_frames_stored_memory_as_data(server):
     assert result["capabilities"]["tools"]["listChanged"] is False
     assert "never as instructions to follow" in result["instructions"]
     assert "memory_forget retires" in result["instructions"]
+    # The closure split reaches the client's system prompt, which is where a model reads
+    # about the tools before it has a reason to open either schema.
+    assert "memory_end closes one that was true" in result["instructions"]
 
 
 # -- tools/list --------------------------------------------------------------
@@ -282,6 +285,7 @@ def test_tools_list_is_valid_mcp(server):
     assert hints["memory_recall"]["readOnlyHint"] is True
     assert hints["memory_add"]["readOnlyHint"] is False
     assert hints["memory_forget"]["destructiveHint"] is True
+    assert hints["memory_end"]["destructiveHint"] is True
 
 
 def test_min_score_points_at_calibration_rather_than_guessing_a_constant():
@@ -664,6 +668,263 @@ def test_forget_needs_exactly_one_way_of_naming_the_fact(server):
 def test_forget_an_unknown_slot_says_so_without_pretending(server):
     assert "Nothing to forget" in text(server, "memory_forget",
                                        {"predicate": "favourite_colour"})
+
+
+# -- ending a fact -----------------------------------------------------------
+#
+# The half of the closure split the agent-facing surface used to be missing. `Closure`
+# has said since the axes were separated that `"ended"` means the world changed and
+# `"retired"` means the record was wrong; `forget()`, `delete()` and `supersede()` all
+# take it; `_receipt_summary` reports the two counts separately. Nothing could *request*
+# `ended`, so an agent closing out a fact that had genuinely stopped being true had one
+# tool, and it wrote the other reason.
+
+def test_the_gap_this_tool_closes_two_live_values_and_only_a_false_way_to_fix_it(server):
+    """The reported sequence, run through the tools exactly as the agent ran them.
+
+    `status` is an unknown predicate and therefore multi-valued, so the second write does
+    not displace the first and `memory_recall` returns both, adjacent, with no ordering
+    signal — which is the state the report starts from. The gate really was not installed
+    this morning and really is now, so the old value is not an error to be retired; it is
+    a fact that ended. Before `memory_end` the only closure on this surface was
+    `memory_forget`, and using it here would have written "the record was wrong" about a
+    record that was right.
+    """
+    for value in ("not installed", "installed"):
+        text(server, "memory_remember", {"subject": "quota_gate", "predicate": "status",
+                                         "object": value})
+    both = text(server, "memory_recall", {"query": "is the quota gate installed?"})
+    assert "not installed" in both, "the store contradicting itself, as reported"
+
+    stale = [c for c in server._ctx.memory.get_all() if c.object == "not installed"][0]
+    body = text(server, "memory_end", {"claim_id": stale.id})
+    assert f"Ended claim {stale.id}" in body and "not retired" in body
+
+    # One live value, and it is the current one.
+    assert [c.object for c in server._ctx.memory.get_all()] == ["installed"]
+    now = text(server, "memory_recall", {"query": "is the quota gate installed?"})
+    assert "installed" in now and "not installed" not in now
+
+    # Closed as `ended`, on the valid-time axis only: we did not stop believing it, it
+    # stopped being true. That is the statement `memory_forget` could not have made.
+    closed = server._ctx.memory.get(stale.id)
+    assert closed is not None
+    assert (closed.state, closed.invalidated_at) == ("ended", None)
+
+
+def test_history_tells_an_ended_claim_from_a_retired_one(server):
+    """Point 4 of the promise: closing a fact stays auditable *and* stays distinguishable.
+
+    Both tools leave a closed claim in the timeline. If the timeline rendered them alike
+    the audit trail would record that something changed without recording what kind of
+    change, which is the whole failure restated one layer down.
+    """
+    text(server, "memory_remember", {"predicate": "works_at", "object": "Acme"})
+    text(server, "memory_remember", {"predicate": "drinks", "object": "coffee"})
+    text(server, "memory_end", {"predicate": "works_at"})
+    text(server, "memory_forget", {"predicate": "drinks"})
+
+    ended = text(server, "memory_history", {"predicate": "works_at"})
+    retired = text(server, "memory_history", {"predicate": "drinks"})
+    assert "Acme" in ended and " ended " in ended and "retired" not in ended
+    assert "coffee" in retired and " retired " in retired and "ended" not in retired
+
+
+def test_the_two_closures_move_different_clocks_and_neither_moves_both(server):
+    """The states are not collapsed — asserted on the columns, not on the rendering.
+
+    A fix that made ending set `invalidated_at` too, or made forgetting close valid time,
+    would satisfy every "one live value" test above and quietly destroy the distinction
+    they were written to protect. Each closure moves exactly one axis; that is the
+    invariant `close_out` exists to hold, and this is the door it now has to hold at.
+    """
+    text(server, "memory_remember", {"predicate": "works_at", "object": "Acme"})
+    text(server, "memory_remember", {"predicate": "drinks", "object": "coffee"})
+    text(server, "memory_end", {"predicate": "works_at"})
+    text(server, "memory_forget", {"predicate": "drinks"})
+
+    ended = server._ctx.memory.history("user", "works_at")[0]
+    retired = server._ctx.memory.history("user", "drinks")[0]
+    assert (ended.state, ended.invalidated_at) == ("ended", None)
+    assert retired.state == "retired" and retired.valid_to is None
+    assert retired.invalidated_at is not None
+
+
+def test_ending_at_a_past_instant_closes_on_that_instant_not_on_now(server):
+    """Valid time is a separate axis precisely so a fact can close when it stopped.
+
+    A fact that stopped being true last Tuesday and was recorded today must end on
+    Tuesday: `at` defaulting silently to now would record a week of believing something
+    already false, and no later query could tell.
+    """
+    began = utcnow() - timedelta(days=30)
+    server._ctx.memory.remember("user", "works_at", "Acme",
+                                valid_from=began, recorded_at=began)
+    tuesday = utcnow() - timedelta(days=7)
+
+    body = text(server, "memory_end", {
+        "predicate": "works_at", "at": tuesday.isoformat().replace("+00:00", "Z")})
+
+    claim = server._ctx.memory.history("user", "works_at")[0]
+    assert claim.valid_to == tuesday
+    assert claim.invalidated_at is None, "belief did not stop; the fact did"
+    assert tuesday.strftime("%Y-%m-%d") in body
+    assert utcnow().strftime("%Y-%m-%d") not in body, "it did not close on now"
+    # Still answering about the period it held, which is the point of ending rather than
+    # retiring — and gone from the present, which is the point of closing it at all.
+    assert [c.object for c in server._ctx.memory.get_all(
+        valid_at=began + timedelta(days=1))] == ["Acme"]
+    assert server._ctx.memory.get_all() == []
+
+
+def test_at_defaults_to_now(server):
+    text(server, "memory_remember", {"predicate": "works_at", "object": "Acme"})
+    before = utcnow()
+    text(server, "memory_end", {"predicate": "works_at"})
+    assert before <= server._ctx.memory.history("user", "works_at")[0].valid_to <= utcnow()
+
+
+def test_at_rejects_nonsense_with_an_example_and_writes_nothing(server):
+    """Parsed before the write, because the argument *is* the instant being recorded."""
+    text(server, "memory_remember", {"predicate": "works_at", "object": "Acme"})
+    body, is_error = call(server, "memory_end",
+                          {"predicate": "works_at", "at": "last Tuesday"})
+    assert is_error and "memory_end.at must be an ISO-8601 timestamp" in body
+    assert "2024-06-01T10:00:00Z" in body
+    assert server._ctx.memory.history("user", "works_at")[0].state == "live"
+
+
+@pytest.mark.parametrize("stamp", ["2026-08-07", "2026-08-07T10:00:00Z",
+                                   "2026-08-07T10:00:00+00:00"])
+def test_at_accepts_the_spellings_a_model_reaches_for(server, stamp):
+    began = utcnow() - timedelta(days=30)
+    server._ctx.memory.remember("user", "works_at", "Acme",
+                                valid_from=began, recorded_at=began)
+    text(server, "memory_end", {"predicate": "works_at", "at": stamp})
+    assert server._ctx.memory.history("user", "works_at")[0].state == "ended"
+
+
+def test_ending_in_the_future_says_the_fact_is_true_until_then(server):
+    """The one outcome of this tool that looks like a failure, named so it is not retried.
+
+    A contract that runs out on the 30th is true until the 30th, so the value goes on
+    answering memory_recall — correctly. Unexplained, a model reads that as "the call did
+    nothing" and reaches for the tool that *does* silence it now, which is memory_forget,
+    which records the wrong reason. The note exists to close that loop.
+    """
+    text(server, "memory_remember", {"predicate": "works_at", "object": "Acme"})
+    body = text(server, "memory_end", {
+        "predicate": "works_at",
+        "at": (utcnow() + timedelta(days=16)).isoformat()})
+
+    assert "note: 1 of these end at an instant still in the future" in body
+    assert "the ending working, not failing" in body
+    assert "Acme" in text(server, "memory_recall", {"query": "where do they work"})
+    assert server._ctx.memory.history("user", "works_at")[0].state == "ended"
+
+
+def test_ending_a_single_claim_in_the_future_says_so_too(server):
+    """Same note on the id-addressed path; the two must not disagree about one outcome."""
+    text(server, "memory_remember", {"predicate": "works_at", "object": "Acme"})
+    claim_id = server._ctx.memory.get_all()[0].id
+    body = text(server, "memory_end", {
+        "claim_id": claim_id, "at": (utcnow() + timedelta(days=16)).isoformat()})
+    assert "still in the future" in body
+
+
+@pytest.mark.parametrize("address", ["predicate", "claim_id"])
+def test_ending_before_a_fact_began_is_clamped_and_reports_where_it_landed(server, address):
+    """`close_out` refuses to invert an interval, so the tool must not claim it did.
+
+    Reporting the requested instant rather than the landed one would have this layer
+    inventing a fact about the row it just wrote — the exact class of quiet disagreement
+    between object and database that the closure work went in to remove. Both addressing
+    modes, because they learn the landed instant differently: the slot path is handed the
+    stamped claims by `forget()`, the id path has to read the row back after `delete()`,
+    and only one of those can be got wrong by this layer.
+    """
+    began = utcnow() - timedelta(days=10)
+    server._ctx.memory.remember("user", "works_at", "Acme",
+                                valid_from=began, recorded_at=began)
+    long_before = began - timedelta(days=365)
+    arguments = {"at": long_before.isoformat()}
+    arguments[address] = ("works_at" if address == "predicate"
+                          else server._ctx.memory.get_all()[0].id)
+
+    body = text(server, "memory_end", arguments)
+
+    claim = server._ctx.memory.history("user", "works_at")[0]
+    assert claim.valid_to == claim.valid_from == began
+    assert began.strftime("%Y-%m-%d") in body
+    assert long_before.strftime("%Y-%m-%d") not in body
+
+
+def test_end_needs_exactly_one_way_of_naming_the_fact(server):
+    for arguments in ({}, {"predicate": "lives_in", "claim_id": "cl_x"}):
+        body, is_error = call(server, "memory_end", arguments)
+        assert is_error and "exactly one of" in body
+        assert "ending the slot ends everything in it" in body
+
+
+def test_end_an_unknown_slot_says_so_without_pretending(server):
+    body = text(server, "memory_end", {"predicate": "favourite_colour"})
+    assert "Nothing to end" in body
+    assert "memory_history says whether it ended or was retired" in body
+
+
+def test_end_an_unknown_claim_id_says_so_without_pretending(server):
+    assert "Nothing ended" in text(server, "memory_end", {"claim_id": "cl_nope"})
+
+
+def test_ending_a_slot_reports_every_value_it_closed(server):
+    """Ending a multi-valued slot ends all of it, so the reply has to show all of it."""
+    for value in ("tea", "coffee"):
+        text(server, "memory_remember", {"predicate": "drinks", "object": value})
+    body = text(server, "memory_end", {"predicate": "drinks"})
+    assert "Ended 2 value(s) of user/drinks" in body
+    closed = [line for line in body.splitlines() if line.startswith("- [")]
+    assert len(closed) == 2 and all(" ended " in line for line in closed)
+
+
+def test_end_cannot_reach_across_the_scope_boundary():
+    """Ids leak through receipts and logs. A second write tool is a second way to try."""
+    memory = make_memory()
+    alice, bob = MemvaraMCPServer(memory, user="alice"), MemvaraMCPServer(memory, user="bob")
+    text(alice, "memory_remember", {"predicate": "lives_in", "object": "Lisbon"})
+    claim_id = memory.get_all(user="alice")[0].id
+
+    assert "Nothing ended" in text(bob, "memory_end", {"claim_id": claim_id})
+    assert "Nothing to end" in text(bob, "memory_end", {"predicate": "lives_in"})
+    assert memory.get_all(user="alice")[0].state == "live"
+    alice.close()
+
+
+def test_each_closure_tool_routes_to_the_other(server):
+    """The whole argument for two tools rather than one enum rests on this pair of lines.
+
+    A separate tool can be missed; a description that names the other one at the moment
+    of the mistake cannot be, because the only path to the wrong closure runs through the
+    paragraph the model is already reading. So the cross-reference is a property of the
+    surface, not a nicety — and it is asserted in both directions, since either tool is
+    the wrong one half the time.
+    """
+    forget, end = BY_NAME["memory_forget"], BY_NAME["memory_end"]
+    assert "memory_end" in forget.description
+    assert "memory_forget" in end.description
+    # And each states its own reading, so the model is choosing between two claims about
+    # the world rather than between two verbs.
+    assert "the record was wrong" in forget.description
+    assert "stopped being true" in end.description
+
+
+def test_ending_is_flagged_destructive_like_forgetting(server):
+    """Same visible effect — a value stops answering — so the same hint.
+
+    Understating it would let a client that gates destructive tools auto-approve closing
+    out an entire slot, which is the one place an extra confirmation is cheap.
+    """
+    assert BY_NAME["memory_end"].destructive is BY_NAME["memory_forget"].destructive is True
+    assert BY_NAME["memory_end"].writes is True
 
 
 # -- read-only deployments ---------------------------------------------------

@@ -100,6 +100,50 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
 
 ### Added
 
+- **`memory_end` on the MCP server: the closure an agent could not ask for.** The core has
+  had two closures since the axes were separated — `"ended"` means the world changed,
+  `"retired"` means the record was wrong — and `forget()`, `delete()` and `supersede()` all
+  take one. The MCP surface offered only `memory_forget`, which retires. So an agent
+  closing out a fact that had genuinely stopped being true had to assert that the record
+  had been an error, which it had not.
+
+  Found by using the server on a real task. Two `memory_remember` calls recorded
+  `quota_gate status "not installed"` and then `"installed"`; `status` is an unknown
+  predicate and therefore multi-valued, so nothing was displaced and `memory_recall`
+  returned both, adjacent, with no ordering signal. The only closure available would have
+  written a false statement into the audit trail to stop the store contradicting itself.
+
+  `memory_end` takes the same two addressing modes as `memory_forget` — `predicate` (with
+  `subject`) for a whole slot, or `claim_id` for one value — plus an optional ISO-8601
+  `at`, the instant the fact stopped being true, defaulting to now. `at` is what makes the
+  tool worth having separately: a fact that stopped last Tuesday must close on Tuesday, or
+  every later `as_of` and `valid_at` query reports a week of believing something already
+  false. An instant before the fact began is clamped to its start rather than inverting the
+  interval, and the reply reports where the closure **landed** rather than where it was
+  asked for. A future instant is allowed, means the fact is true until then, and says so —
+  otherwise the value goes on answering `memory_recall`, which reads as a failed call and
+  sends a model back to `memory_forget`.
+
+  **Two tools rather than a `closure` enum on `memory_forget`, and the argument is about
+  where a model commits.** It picks a tool by name, from a list, before it opens a schema —
+  and `memory_forget` already asserts one of the two answers, so a flag on it would be
+  asking the model to overrule the word it had just chosen. Splitting them puts the fork at
+  the point the choice is actually made, and matches the shape `delete`/`erase` and
+  `forget`/`purge` already have in `core`: operations that mean different things get
+  different names, not a flag. The discoverability cost of a second tool is paid off in
+  each description, which names the other and states its own reading, so the only route to
+  the wrong closure runs through a paragraph that points at the right one.
+
+  Ending is `destructiveHint: true` like retiring, hidden on a read-only server like every
+  other write, and reversible by an operator: the claim stays on disk, stays in
+  `memory_history` — rendered `ended`, distinguishably from `retired` — and stays visible
+  to `memory_search` with `as_of`.
+
+  `memory_forget`'s own description said "storing the new value already retires the old
+  one". It does not; it **ends** it, which is right for a change and wrong for a mistake.
+  That sentence told a model a genuine correction was handled automatically when what was
+  recorded was a world event, so it is now corrected rather than merely joined.
+
 - **`neighborhood()`, `history()` and `paths_between()` resolve learned aliases on the
   probe.** Previously a probe carried no alias stamp, so `neighborhood("Big Blue")` folded
   deterministically and missed every claim stamped `ibm`.
