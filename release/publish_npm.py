@@ -41,10 +41,13 @@ for an unscoped name it is a harmless no-op.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -88,6 +91,105 @@ def published_versions(name: str) -> set[str]:
     return set(resp.json().get("versions", {}))
 
 
+#: The only `.npmrc` key that authenticates a publish to the public registry. Writing a
+#: token under any other name is silently inert — npm does not warn that it found a token
+#: somewhere it does not look.
+AUTH_KEY = "//registry.npmjs.org/:_authToken"
+
+#: npm access tokens are `npm_` followed by 36 characters. Matching the shape is enough to
+#: recognise one filed under the wrong key; the value itself is never read or printed.
+TOKEN_SHAPE = re.compile(r'^"?npm_[A-Za-z0-9]{20,}"?$')
+
+
+def npmrc_entries(path: Path) -> list[tuple[int, str, str]]:
+    """`(line number, key, value)` for each assignment in an npmrc. Values stay local."""
+    out = []
+    for i, line in enumerate(path.read_text().splitlines(), 1):
+        s = line.strip()
+        if s and not s.startswith((";", "#")) and "=" in s:
+            k, v = s.split("=", 1)
+            out.append((i, k.strip(), v.strip()))
+    return out
+
+
+def check_npm_auth() -> None:
+    """Refuse unless a credential exists **where npm will actually look for it**.
+
+    Three ways this goes wrong, all of which produce errors that point elsewhere:
+
+    `NPM_TOKEN` alone does nothing. Unlike twine and `TWINE_PASSWORD`, the npm CLI has no
+    built-in knowledge of that variable; it is a convention that works only because CI
+    images write an npmrc line referencing it. Setting it and expecting a login gets
+    `ENEEDAUTH`, which reads as "your token is wrong" rather than "your token was never
+    consulted". This script now makes the variable work — see `npm_auth_flags`.
+
+    A token filed under the wrong key is worse than no token, because npm's own diagnostics
+    lead away from it. `key` and `cert` are npm's legacy *TLS client certificate* options,
+    so a token parked there is handed to OpenSSL as a PEM private key, and OpenSSL 3
+    refuses it with `ERR_OSSL_UNSUPPORTED: DECODER routines::unsupported` — a message with
+    no visible connection to authentication, emitted before any request is sent, which
+    breaks `npm login` itself and so removes the obvious way out.
+
+    And a `~/.npmrc` that merely exists proves nothing, which is what this used to check.
+    """
+    if os.environ.get("NPM_TOKEN"):
+        return
+
+    rc = Path.home() / ".npmrc"
+    entries = npmrc_entries(rc) if rc.is_file() else []
+    if any(k.endswith("_authToken") for _, k, _ in entries):
+        return
+
+    misfiled = [(i, k) for i, k, v in entries
+                if TOKEN_SHAPE.match(v) and not k.endswith("_authToken")]
+    if misfiled:
+        i, k = misfiled[0]
+        raise Abort(
+            f"~/.npmrc line {i} looks like an npm token stored under `{k}`, which is not\n"
+            f"  a key npm reads for authentication",
+            f"`key` and `cert` are npm's legacy TLS client-certificate options. A token\n"
+            f"  placed there is passed to OpenSSL as a private key, which is where\n"
+            f"  `ERR_OSSL_UNSUPPORTED ... DECODER routines::unsupported` comes from — and\n"
+            f"  because it fails before the request is sent, it breaks `npm login` too.\n\n"
+            f"  Replace that line with:\n\n"
+            f"      {AUTH_KEY}=<token>\n\n"
+            f"  Treat the misfiled token as exposed and issue a new one:\n"
+            f"  https://www.npmjs.com/settings/~/tokens")
+
+    raise Abort(
+        f"no npm credential: ~/.npmrc has no `{AUTH_KEY}` and $NPM_TOKEN is unset",
+        "Either:\n"
+        "      npm login\n"
+        "  or, to keep the token out of any file, export NPM_TOKEN for this shell only:\n"
+        "      read -rs NPM_TOKEN && export NPM_TOKEN")
+
+
+@contextlib.contextmanager
+def npm_auth_flags():
+    """npm flags that make `$NPM_TOKEN` authenticate, or nothing if it is unset.
+
+    npm expands `${VAR}` inside an npmrc, so the temporary file written here contains the
+    literal text `${NPM_TOKEN}` and never the token: the secret stays in the environment,
+    reaches npm through its own process environment, and touches no disk this script owns.
+
+    `--userconfig` *replaces* `~/.npmrc` for this invocation rather than merging, so any
+    registry or proxy settings there do not apply. That is why it is used only when
+    `NPM_TOKEN` is set, which is an explicit request for a self-contained CI-style publish.
+    """
+    if not os.environ.get("NPM_TOKEN"):
+        yield []
+        return
+    fd, name = tempfile.mkstemp(prefix="npmrc-publish-", suffix=".ini")
+    os.close(fd)
+    rc = Path(name)
+    rc.chmod(0o600)
+    rc.write_text(f"{AUTH_KEY}=${{NPM_TOKEN}}\n")
+    try:
+        yield ["--userconfig", str(rc)]
+    finally:
+        rc.unlink(missing_ok=True)
+
+
 def preflight(pkg: Path, allow_dirty: bool, dry_run: bool) -> tuple[str, str]:
     manifest = pkg / "package.json"
     if not manifest.is_file():
@@ -106,10 +208,8 @@ def preflight(pkg: Path, allow_dirty: bool, dry_run: bool) -> tuple[str, str]:
     # Not checked under --dry-run: nothing is uploaded, so nothing needs authenticating,
     # and a rehearsal you cannot run until you are already set up is a rehearsal nobody
     # does. `npm pack` and `npm publish --dry-run` are both anonymous.
-    if not dry_run and not (Path.home() / ".npmrc").is_file() \
-            and not os.environ.get("NPM_TOKEN"):
-        raise Abort("no ~/.npmrc and no NPM_TOKEN",
-                    "npm login    (or set NPM_TOKEN for a CI-style publish)")
+    if not dry_run:
+        check_npm_auth()
 
     # Publishing from a dirty or unpushed tree has the same consequence it has for PyPI:
     # a permanent artifact whose source is on no branch and in no history.
@@ -155,8 +255,15 @@ def main(argv: list[str] | None = None) -> int:
         print("\n  dry run only — nothing was published")
         return 0
 
-    if not args.yes:
-        prompt = (f"\n  Publish {name}@{version} to npm as '{args.tag}'."
+    with npm_auth_flags() as auth:
+        return publish(pkg, name, version, args.tag, args.yes, auth)
+
+
+def publish(pkg: Path, name: str, version: str, tag: str, yes: bool,
+            auth: list[str]) -> int:
+
+    if not yes:
+        prompt = (f"\n  Publish {name}@{version} to npm as '{tag}'."
                   f"  This cannot be undone after 72 hours."
                   f"\n  Type the version to confirm: ")
         if input(prompt).strip() != version:
@@ -165,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
     # `--access public` always: a scoped package is restricted by default, and a
     # restricted package on a free account is refused with a billing error rather than a
     # permissions one. Harmless for an unscoped name.
-    run("npm", "publish", "--access", "public", "--tag", args.tag, cwd=pkg)
+    run("npm", "publish", "--access", "public", "--tag", tag, *auth, cwd=pkg)
     print(f"\n  published {name}@{version}")
     print(f"  verify: npm view {name}@{version}")
     return 0
