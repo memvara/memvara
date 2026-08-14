@@ -1,7 +1,15 @@
 # Release
 
-Publishing scripts for the packages this project ships. Run them from the repository
-root: `python3 release/publish_pypi.py --test`.
+**Releases are automated.** Two workflows do it, and this directory holds the Python they
+run. [Automated releases](#automated-releases) is the part to read first; everything below
+it documents `publish_pypi.py` and `publish_npm.py`, which are now the manual fallback and
+the place most of the reasoning was first written down.
+
+| you want to | do this |
+|---|---|
+| cut a release | run **Version bump** from the Actions tab, review the pull request, merge, tag, create a GitHub Release |
+| publish | nothing — creating the release does it |
+| publish by hand anyway | `python3 release/publish_pypi.py --test` first, and read the whole of this file |
 
 ## Why they live here
 
@@ -14,9 +22,148 @@ tolerated. Nothing here is a secret: credentials are read from the environment a
 written, prompted for, or logged. What is here is the reasoning behind each refusal, which
 is worth more in the open than in a private repository where one person ever reads it.
 
-When one person releasing stops being enough, the next step is a GitHub Actions workflow
-using **PyPI Trusted Publishing** — OIDC, with no token existing anywhere. Every check
-below moves into it unchanged; only the upload step is replaced.
+That reasoning now applies to the workflows too, which is why the guards moved into them
+rather than being written afresh: `.github/workflows/` is public for the same reason this
+directory is.
+
+## Automated releases
+
+Two workflows, and the split between them is the design. **Version bump** proposes a
+release and a human merges it; **Release** publishes what a human then tagged. Neither one
+can do the other's half.
+
+### 1. `version-bump.yml` — run from the Actions tab
+
+Inputs: `part` (patch/minor/major), or `version` for an exact one such as `0.2.0rc1`;
+`npm` to move the placeholder as well; `allow_empty_changelog` for a release with no
+entries.
+
+1. **Refuses to run off the default branch.** Not stylistic: the next version is computed
+   from the version on the branch it runs from, so a stale branch produces a number that
+   has already been used, and every guard downstream would pass.
+2. **Refuses a version that does not go forwards, or that PyPI already has.** The registry
+   question belongs here, one HTTP request before anything is written — at publish time
+   the number is already in a tag, a release and a changelog heading, and the only remedy
+   is to bump again.
+3. **Writes the version to both places that state it** — `pyproject.toml` and
+   `memvara/__init__.py` — matching an anchored pattern confined to the `[project]` table,
+   and asserting exactly one hit in each file. A bump that runs, matches nothing and exits
+   0 is the failure being designed out.
+4. **Closes `## [Unreleased]` into `## [X.Y.Z] — YYYY-MM-DD`** and refuses if it is empty.
+   That section becomes the GitHub Release body verbatim, so the changelog entry *is* the
+   release notes and the pull request review is the review of them.
+5. **Runs the suite and mypy on the bumped tree**, then opens a pull request.
+
+Nothing is committed to `main`, nothing is tagged, nothing is published.
+
+> **The pull request will show no CI checks.** GitHub does not trigger workflows on events
+> raised by the built-in `GITHUB_TOKEN` — a documented guard against recursive runs, not a
+> misconfiguration. The suite and mypy already ran on that exact tree in the job that
+> opened it, and `release.yml` runs the full matrix on the tag before publishing. If the
+> missing checkmark matters, swap in a GitHub App token
+> (`actions/create-github-app-token`); do **not** swap in a personal access token, which is
+> a long-lived credential of the kind this pipeline exists to stop needing.
+
+After merging, on the default branch:
+
+```bash
+git tag -a v0.2.0 -m "memvara 0.2.0" && git push origin v0.2.0
+```
+
+then create a GitHub Release for that tag. That is the trigger.
+
+### 2. `release.yml` — on `release: published`
+
+| job | what it does | what it prevents |
+|---|---|---|
+| `guard` | tag ↔ version ↔ changelog ↔ registries | **a release tagged `v0.2.0` that ships `0.1.0`** |
+| `test` | calls `ci.yml` — the full matrix, on the tag | publishing from a red commit |
+| `build` | clean build, `twine check`, packaging tests, clean-venv install | a wheel that builds and cannot be installed |
+| `notes` | overwrites the release body from `CHANGELOG.md` | notes written twice and drifting |
+| `pypi` | Trusted Publishing, no token | a stored PyPI credential existing at all |
+| `npm` | trusted publishing, provenance, no token | ditto for npm |
+| `verify` | `pip install memvara==X` from the real index | a release that resolves for nobody |
+| `assets` | attaches the sdist and wheel to the release | the release page being only a pointer |
+
+`workflow_dispatch` re-runs it. Dispatch it **on the tag** — the dropdown lists tags — and
+`guard` refuses a dispatch standing on a branch.
+
+### The two packages do not share a version number
+
+`memvara` on PyPI is the library. `memvara` on npm is a name reservation that exports
+`{implemented: false}` and contains no client. So:
+
+- an ordinary release bumps the Python version and **leaves npm alone**;
+- the placeholder stays on a **`0.0.x`** line, which is reserved for "there is no
+  implementation", and moves only via the `npm` input;
+- `release.yml` publishes to npm only when that number changes, so a Python release does
+  not touch the registry at all.
+
+Three reasons, spelled out at length in [`versions.py`](versions.py). A matching number
+would state that `npm install memvara@0.4.0` and `pip install memvara==0.4.0` are the same
+software — one of them is an empty object. Every npm version is permanent and would be
+spent on nothing. And PEP 440 and semver disagree exactly where releases are most
+delicate: `0.2.0rc1` and `0.2.0-rc.1` are one intent spelled two ways, so a coupled
+pipeline needs a translation layer exercised only on pre-releases.
+
+A real JavaScript client, if one is written, starts its own semver line at `0.1.0`, and the
+coupling question gets asked again then — with an actual client to reason about.
+`tests/test_release.py` asserts the `0.0.x` rule, so changing it is a decision rather than
+a drift.
+
+### What has to be configured once, in each registry's UI
+
+Neither workflow can do this, and both fail loudly until it is done. **No secret is
+created by either procedure** — that is the point.
+
+**PyPI.** pypi.org → Your projects → **memvara** → Manage → **Publishing** → *Add a new
+publisher* → GitHub Actions:
+
+| field | value |
+|---|---|
+| Repository owner | `memvara` |
+| Repository name | `memvara` |
+| Workflow name | `release.yml` |
+| Environment name | `pypi` |
+
+The environment is optional and worth setting: it is part of the publisher's identity, so
+with it configured no other workflow in the repository can mint a token for this project —
+and it is where a required-reviewer rule goes if publishing should need a second pair of
+eyes. Create a matching environment under repository Settings → Environments.
+
+**npm.** npmjs.com → Packages → **memvara** → **Settings** → **Trusted publishing** →
+GitHub Actions:
+
+| field | value |
+|---|---|
+| Organization or user | `memvara` |
+| Repository | `memvara` |
+| Workflow filename | `release.yml` (case-sensitive, extension included) |
+| Environment | `npm` |
+| Allowed actions | `npm publish` |
+
+Then, on the same settings page, **Publishing access → "Require two-factor authentication
+and disallow tokens"**. That closes token publishing entirely while OIDC keeps working —
+which is the whole return on this pipeline, and the reason to do it in the same sitting.
+
+Two things that will bite otherwise:
+
+- **`release.yml` is a security-relevant filename.** Renaming it invalidates both
+  publishers; renaming some other workflow *to* it makes that workflow indistinguishable
+  from this one.
+- **npm trusted publishing cannot make a package that does not exist.** Both the UI and
+  `npm trust` require the package to be there already. `memvara@0.0.1` was published by
+  hand, so this is settled for this project — but a future `@memvara/*` package needs one
+  bootstrap publish before it can be configured.
+
+### On the tokens this replaces
+
+npm **permanently revoked all classic tokens** in December 2025 — they cannot authenticate,
+be recreated or be recovered — and granular write tokens now expire in at most 90 days. So
+the leaked npm token this project has been carrying is already dead rather than merely
+deprecated, and there is no maintenance-free token option left to choose instead of OIDC.
+The account-wide PyPI token in `~/.pypirc` is the one still worth deleting by hand: once
+the publisher above is configured, nothing needs it.
 
 ## The rule both scripts are built around
 

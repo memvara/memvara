@@ -1,0 +1,400 @@
+# Publishing, driven by creating a GitHub Release.
+#
+# The whole of this file exists to make one failure impossible and one failure survivable.
+#
+# **Impossible:** a release tagged `v0.2.0` that ships `0.1.0`. Nothing in the tooling
+# connects a git tag to a version — the tag is typed into GitHub's release form and the
+# version lives in two files — so `guard` compares them and refuses. It is the last moment
+# at which that comparison can be made, because the next thing that happens is permanent.
+#
+# **Survivable:** a half-published release. PyPI succeeds, npm fails on a misconfigured
+# publisher, and someone has to finish the job. So each registry is asked separately
+# whether it already has the version, and one that does is *skipped and reported* rather
+# than being an error. Re-running this workflow after a partial failure completes it; it
+# does not dead-end. The reasoning is written out at length in `release/check_release.py`.
+#
+# ## No registry token exists anywhere in here
+#
+# Both publishes are keyless, over OIDC:
+#
+# * **PyPI Trusted Publishing** — the `pypi` job mints a short-lived token from the
+#   `id-token: write` permission. Nothing is stored.
+# * **npm trusted publishing** — the same, and it additionally produces a signed provenance
+#   attestation for free, because npm generates one automatically for a public package
+#   published from a public repository over OIDC.
+#
+# That is worth more here than hygiene. This project has held a leaked npm token and an
+# account-wide PyPI token in a `~/.pypirc`; a pipeline with no token to leak retires both.
+# What has to be configured once, in each registry's own UI, is written down in
+# `release/README.md` — this file cannot do it and will fail loudly until it is done.
+#
+# ## Why the publish jobs are here and not in a reusable workflow
+#
+# PyPI's Trusted Publisher identity is a *workflow filename*, and reusable workflows are
+# not supported as that identity (pypi/warehouse#11096, open at the time of writing). So
+# the publish job has to live in a top-level workflow — this one. Reusing CI is still
+# fine: `test` below calls `ci.yml` as a reusable workflow, and only the publish jobs stay
+# here. Renaming this file invalidates the PyPI publisher and the npm one; treat
+# `release.yml` as a security-relevant name.
+name: Release
+
+on:
+  release:
+    types: [published]
+  # Re-running after a partial failure, and nothing else. Dispatch it **on the tag** —
+  # GitHub's "Run workflow" dropdown lists tags as well as branches — so every checkout in
+  # this file lands on the released commit without a single explicit `ref:`. `guard`
+  # refuses a dispatch from a branch rather than quietly publishing whatever is on it.
+  workflow_dispatch:
+
+# Read-only by default. The three jobs that need more say so themselves, at job level, so
+# that `id-token: write` is scoped to the two steps that use it — a job holding it can mint
+# an OIDC token for any audience, so it does not belong on jobs that run project code.
+permissions:
+  contents: read
+
+concurrency:
+  # Never cancel a publish in flight: the half-finished state of an interrupted upload is
+  # exactly what this file is built to avoid. Two runs for the same tag queue instead.
+  group: release-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: guard (tag, version, changelog, registries)
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+      pypi_needed: ${{ steps.check.outputs.pypi_needed }}
+      npm_needed: ${{ steps.check.outputs.npm_needed }}
+      npm_version: ${{ steps.check.outputs.npm_version }}
+      npm_tag: ${{ steps.check.outputs.npm_tag }}
+    steps:
+      - name: Refuse a dispatch that is not standing on a tag
+        if: github.event_name == 'workflow_dispatch' && github.ref_type != 'tag'
+        run: |
+          echo "::error::Run this workflow on the release tag, not on a branch."
+          echo "Everything below checks out the default ref. From a branch that is the"
+          echo "branch tip, which is not what was released."
+          exit 1
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      # `requests` and nothing else: the guard talks to two registries and reads three
+      # files. Installing the package here would mean the guard's answer depended on the
+      # package building, which is the next job's business.
+      - name: Install the guard's one dependency
+        run: python -m pip install --upgrade pip requests
+
+      - name: Check the release
+        id: check
+        env:
+          # Interpolated into the environment rather than into the shell script. A tag name
+          # is attacker-controlled by anyone who can cut a release, and `${{ }}` inside a
+          # `run:` block is textual substitution into the script itself.
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          REF_NAME: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${RELEASE_TAG:-$REF_NAME}"
+          if [ -n "$RELEASE_TAG" ]; then
+            PRE="$RELEASE_PRERELEASE"
+          else
+            # A dispatched re-run has no release payload; ask the API for the same fact.
+            PRE="$(gh release view "$TAG" --json isPrerelease --jq .isPrerelease)"
+          fi
+          python -m release.check_release \
+            --tag "$TAG" \
+            --github-prerelease "$PRE" \
+            --notes-file release-notes.md
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
+  test:
+    # The full matrix, on the released commit, before anything is uploaded. Calling `ci.yml`
+    # rather than restating it means there is one definition of "the tests pass" and a
+    # release cannot be held to a weaker one than a pull request is.
+    name: tests
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: build and prove the artefact installs
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - run: python -m pip install --upgrade pip build twine
+
+      - name: Build from clean
+        run: |
+          set -euo pipefail
+          # Never reuse `dist/`: `twine upload dist/*` ships whatever is in that directory,
+          # and the first time this project was published by hand the directory held an
+          # sdist built four days and forty commits earlier. A fresh runner makes this
+          # nearly redundant; "nearly" is not a property to rely on in a one-way action.
+          rm -rf dist
+          python -m build
+
+      - name: Check the metadata the way the index will
+        # `twine check` renders the README as PyPI renders it. A description that fails to
+        # render is not rejected at upload — it is accepted and displayed as raw text
+        # forever, on the page that is the project's front door.
+        run: python -m twine check dist/*
+
+      - name: Test the artefact rather than the tree
+        # Three tests in `tests/test_packaging.py` skip while `dist/` is empty and arm
+        # themselves once it is not: `py.typed` is in the wheel, every module is in the
+        # wheel, and the wheel's recorded version is the version the package reports. This
+        # ordering is the point — build first, then check what was built.
+        run: |
+          set -euo pipefail
+          python -m pip install -e ".[dev]"
+          python -m pytest tests/test_packaging.py -q
+
+      - name: Install the wheel into a clean venv and import it
+        # The check that was done by hand for 0.1.0 and is the only one exercising what a
+        # user actually gets: a package can build, pass `twine check` and still be
+        # uninstallable — a missing dependency, a `py.typed` that did not make it in, a
+        # module the build backend's file discovery dropped. `cd /tmp` matters: a source
+        # tree on `sys.path` will happily stand in for a module the wheel forgot. numpy
+        # resolves from the real index here, which is the half of `pip install memvara`
+        # that no local check covers.
+        env:
+          EXPECT: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/verify
+          /tmp/verify/bin/pip install --quiet dist/memvara-*.whl
+          cd /tmp
+          /tmp/verify/bin/python - "$EXPECT" <<'PY'
+          import sys
+          import memvara
+          from memvara import Memvara
+          assert memvara.__version__ == sys.argv[1], (memvara.__version__, sys.argv[1])
+          # A write and a read, so this is an install that works rather than an install
+          # that imports. Deliberately not asserting on what `search` ranks first: a
+          # retrieval assertion in the release gate would make a scoring change look like
+          # a broken package, and the suite already owns that question.
+          mem = Memvara(":memory:", user="release-check")
+          assert mem.remember("user", "lives_in", "Berlin") is not None
+          mem.search("where do they live?")
+          print("wheel installs, imports and runs:", memvara.__version__)
+          PY
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  notes:
+    # The release body is the changelog section, not a second copy of it. Notes typed into
+    # the release box are invisible to anyone reading the repository, notes written in the
+    # changelog are invisible to anyone reading the releases page, and keeping both in step
+    # by hand lasts about two releases.
+    name: release notes from CHANGELOG.md
+    needs: guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+
+      - name: Replace the release body
+        env:
+          TAG: ${{ needs.guard.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Whatever was there is printed into the run summary first. This overwrites, and
+          # an overwrite nobody can read afterwards is how a hand-written note disappears
+          # without anyone noticing it ever existed.
+          {
+            echo "### Release body before this job"
+            echo '```'
+            gh release view "$TAG" --json body --jq .body
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          gh release edit "$TAG" --notes-file release-notes.md
+
+  pypi:
+    name: publish to PyPI
+    needs: [guard, test, build]
+    # Skipped, not failed, when the index already has this version. See
+    # `release/check_release.py` for why that is the safe direction here.
+    if: needs.guard.outputs.pypi_needed == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      # The environment is part of the Trusted Publisher's identity on PyPI: configure the
+      # publisher with this exact name and no other workflow can mint a token for this
+      # project. It is also where a required-reviewer rule goes if publishing should ever
+      # need a second pair of eyes.
+      name: pypi
+      url: https://pypi.org/p/memvara
+    permissions:
+      # The entire credential. There is no `password`, no `TWINE_PASSWORD` and no secret
+      # for this job to read.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Upload
+        # `skip-existing` is deliberately NOT set. The action's own README advises against
+        # it on PyPI, and the reason applies exactly here: it would turn "the upload did
+        # not happen" into a green job. The decision about an already-published version is
+        # made once, in `guard`, where it can be explained in the run summary — not
+        # silently absorbed at the moment of upload.
+        #
+        # PEP 740 attestations are generated by default for Trusted Publishing uploads, so
+        # every file gets a signed statement tying it to this workflow run at no cost.
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  npm:
+    name: publish to npm
+    needs: [guard, test]
+    # False on every ordinary release: the npm package is a name reservation on its own
+    # `0.0.x` line, and only a deliberate `--npm-part` bump moves it. See
+    # `release/versions.py` for why the two packages do not share a number.
+    if: needs.guard.outputs.npm_needed == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/memvara
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          # Still required with OIDC: this is what points the generated `.npmrc` at the
+          # public registry. It writes no token.
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Require an npm new enough to authenticate over OIDC
+        # Trusted publishing needs npm >= 11.5.1 and Node >= 22.14.0. An older npm does not
+        # fail with "your npm is too old"; it looks for a token, does not find one, and
+        # reports ENEEDAUTH — which reads as a credentials problem and sends you looking
+        # for a secret that deliberately does not exist.
+        run: |
+          set -euo pipefail
+          have="$(npm --version)"
+          need="11.5.1"
+          if [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -n1)" != "$need" ]; then
+            echo "::error::npm $have is too old for OIDC trusted publishing; need >= $need"
+            exit 1
+          fi
+          echo "npm $have, node $(node --version)"
+
+      - name: Publish
+        # No `NODE_AUTH_TOKEN`. Provenance is not requested either: npm generates a signed
+        # attestation automatically for a public package published over OIDC from a public
+        # repository, and asking for it explicitly would only be a second place for the
+        # requirement to be stated.
+        #
+        # `--access public` always: a scoped package publishes as restricted by default and
+        # a restricted package on a free account is refused with a billing error rather
+        # than a permissions one. Harmless for an unscoped name.
+        working-directory: npm/memvara
+        env:
+          NPM_TAG: ${{ needs.guard.outputs.npm_tag }}
+        run: npm publish --access public --tag "$NPM_TAG"
+
+  verify:
+    # What `pip install memvara` actually resolves to, from the real index, once it is
+    # there. `build` proved the file installs; this proves the *published* artifact does,
+    # dependency resolution and all — the check that was done by hand for 0.1.0.
+    #
+    # Skipped automatically when `pypi` is skipped, which is the right shape: there is
+    # nothing new on the index to verify.
+    name: pip install memvara from PyPI
+    needs: [guard, pypi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install the published version and use it
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/published
+          # The index takes a little while to serve a file it has just accepted, and a
+          # release that failed here would be a release that is fine. Retry, then give up
+          # loudly — a silent give-up would turn this into a job that always passes.
+          installed=""
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if /tmp/published/bin/pip install --quiet "memvara==$VERSION"; then
+              installed=yes
+              break
+            fi
+            echo "attempt $attempt: not resolvable on the index yet, waiting 30s"
+            sleep 30
+          done
+          if [ -z "$installed" ]; then
+            echo "::error::memvara==$VERSION did not become installable from PyPI"
+            exit 1
+          fi
+          # From a directory that is not a checkout, so a source tree cannot stand in for
+          # a module the wheel forgot.
+          cd /tmp
+          got="$(/tmp/published/bin/python -c 'import memvara; print(memvara.__version__)')"
+          test "$got" = "$VERSION" || {
+            echo "::error::PyPI served $got for memvara==$VERSION"
+            exit 1
+          }
+          echo "pip install memvara==$VERSION resolves, installs and imports"
+
+  assets:
+    # The sdist and the wheel, attached to the release itself. Two reasons: the release
+    # page stops being a pointer to somewhere else, and the exact bytes that were uploaded
+    # stay checkable against the index later.
+    name: attach the built files to the release
+    needs: [guard, build, pypi]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.pypi.result != 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Upload
+        env:
+          TAG: ${{ needs.guard.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        # `--clobber` so that a re-run replaces the assets instead of failing on a name
+        # collision — the same idempotency this whole file is built around. Its documented
+        # risk is real: it deletes before it uploads, so an upload that fails mid-way loses
+        # the original. Acceptable here, because the originals are one `python -m build`
+        # away and the alternative is a re-run that cannot finish.
+        run: gh release upload "$TAG" dist/* --clobber

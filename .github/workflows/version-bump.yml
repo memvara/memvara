@@ -1,0 +1,218 @@
+# Bumping the version, run from GitHub, into a pull request.
+#
+# Two jobs are done here and they are deliberately not the same job as publishing:
+# this one *proposes* a release and a human approves it by merging. Cutting the tag and
+# creating the GitHub Release stay manual afterwards, which is the point — the moment a
+# version number becomes permanent should be a decision someone made, not a side effect of
+# a workflow they triggered.
+#
+# ## What it changes
+#
+#   pyproject.toml            version = "0.2.0"
+#   memvara/__init__.py       __version__ = "0.2.0"
+#   CHANGELOG.md              `## [Unreleased]` closed into `## [0.2.0] — 2026-08-14`
+#
+# and, only when asked, `npm/memvara/package.json`.
+#
+# ## The rule about the two packages, because it will be asked again
+#
+# **The Python package and the npm package do not share a version number.** `memvara` on
+# PyPI is the library; `memvara` on npm is a name reservation that exports
+# `{implemented: false}` and contains no client. So:
+#
+# * an ordinary release bumps the Python version and leaves npm alone;
+# * the npm placeholder stays on a `0.0.x` line, which is reserved for "there is no
+#   implementation", and moves only via the `npm` input below;
+# * `release.yml` publishes to npm only when that number changes, so a Python release does
+#   not touch the registry at all.
+#
+# The long form — including why a matching number would be a claim rather than a
+# convenience, and why PEP 440 and semver cannot be kept in step on pre-releases — is in
+# `release/versions.py`.
+#
+# ## One thing to know about the pull request this opens
+#
+# GitHub does not run workflows on events raised by the built-in `GITHUB_TOKEN`, so
+# **`ci.yml` will not start on this pull request by itself.** That is a documented
+# restriction against recursive runs, not a misconfiguration. It is handled twice over:
+# this job runs the suite and mypy on the bumped tree before opening the pull request, and
+# `release.yml` runs the full matrix on the tag before anything is published. If the
+# missing checkmark is bothersome anyway, the fix is a GitHub App token
+# (`actions/create-github-app-token`) in place of `GITHUB_TOKEN` — not a personal access
+# token, which is a long-lived credential of exactly the kind the release pipeline was
+# built to stop needing.
+name: Version bump
+
+on:
+  workflow_dispatch:
+    inputs:
+      part:
+        description: "Which component to bump. Ignored if `version` is given."
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: "An exact version instead, e.g. 0.2.0 or 0.2.0rc1. Overrides `part`."
+        type: string
+        default: ""
+      npm:
+        description: "Also bump npm/memvara, the name-reservation placeholder. Rarely."
+        type: choice
+        options: [none, patch, minor, major]
+        default: none
+      allow_empty_changelog:
+        description: "Release with no `## [Unreleased]` entries. Almost always a mistake."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: bump and open a pull request
+    runs-on: ubuntu-latest
+    permissions:
+      # Enough to push a branch and open a pull request against it, and nothing else. Note
+      # that the repository setting "Allow GitHub Actions to create and approve pull
+      # requests" must also be on; without it `gh pr create` fails with a permissions
+      # error that does not mention the setting.
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Refuse to cut a release from anything but the default branch
+        # Not stylistic. The bump computes the next version from the version on *this*
+        # branch, so a stale branch produces a number that goes backwards relative to
+        # `main` — and `sorts_after` cannot see that, because it is comparing against the
+        # stale value. Every guard downstream would pass.
+        if: github.ref_name != github.event.repository.default_branch
+        env:
+          REF: ${{ github.ref_name }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+        run: |
+          echo "::error::Run this on $DEFAULT, not $REF."
+          echo "The next version is computed from the version on the branch you run it"
+          echo "from, so a stale branch yields a number that has already been used."
+          exit 1
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pip install requests        # the bump asks PyPI whether the number is free
+
+      - name: Bump
+        id: bump
+        env:
+          PART: ${{ inputs.part }}
+          VERSION: ${{ inputs.version }}
+          NPM: ${{ inputs.npm }}
+          ALLOW_EMPTY: ${{ inputs.allow_empty_changelog }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "$VERSION" ]; then
+            args+=(--version "$VERSION")
+          else
+            args+=(--part "$PART")
+          fi
+          if [ "$NPM" != "none" ]; then
+            args+=(--npm-part "$NPM")
+          fi
+          # `[ x = y ] && ...` would be the short spelling and is wrong under `set -e`:
+          # when the test fails the whole line exits non-zero and the step dies silently
+          # having done nothing.
+          if [ "$ALLOW_EMPTY" = "true" ]; then
+            args+=(--allow-empty-changelog)
+          fi
+          python -m release.bump_version "${args[@]}"
+
+      - name: Prove the bumped tree is releasable
+        # The suite on one interpreter plus mypy. Not the full matrix — `release.yml` runs
+        # that on the tag, which is the commit that matters — but enough that a bump which
+        # breaks something never reaches a reviewer looking like a one-line change. The
+        # packaging test that compares the two version spellings is in here, and it is the
+        # one that catches a half-applied bump.
+        run: |
+          set -euo pipefail
+          python -m pytest -q
+          python -m mypy -p memvara
+
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.bump.outputs.version }}
+          PREVIOUS: ${{ steps.bump.outputs.previous }}
+          BRANCH: ${{ steps.bump.outputs.branch }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          PRERELEASE: ${{ steps.bump.outputs.prerelease }}
+          NPM_VERSION: ${{ steps.bump.outputs.npm_version }}
+          NPM_BUMPED: ${{ steps.bump.outputs.npm_bumped }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # The bot identity GitHub documents for Actions commits. Not a person's address,
+          # and this repository is public: nothing here should introduce one.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add pyproject.toml memvara/__init__.py CHANGELOG.md npm/memvara/package.json
+          git commit -m "Release $VERSION"
+          git push --set-upstream origin "$BRANCH"
+
+          npm_line="unchanged at \`$NPM_VERSION\` — the placeholder moves on its own \`0.0.x\` line and an ordinary release does not touch it."
+          if [ "$NPM_BUMPED" = "true" ]; then
+            npm_line="bumped to \`$NPM_VERSION\`, so \`release.yml\` **will** publish it."
+          fi
+          pre_line=""
+          if [ "$PRERELEASE" = "true" ]; then
+            pre_line=$'\n> This is a pre-release. Tick **Set as a pre-release** when you create the release, or the publish will refuse: it is what keeps the build off the npm `latest` dist-tag.\n'
+          fi
+
+          cat > /tmp/pr-body.md <<BODY
+          \`$PREVIOUS\` → \`$VERSION\`.
+
+          - \`pyproject.toml\` and \`memvara/__init__.py\` — the two places the version is spelled.
+          - \`CHANGELOG.md\` — \`## [Unreleased]\` closed into \`## [$VERSION]\`. **Read this section:** it becomes the GitHub Release body verbatim, so it is the release notes and this is the review.
+          - npm placeholder: $npm_line
+          $pre_line
+          ## Merging this does not publish anything
+
+          After merge, on \`$BASE\`:
+
+          \`\`\`
+          git tag -a $TAG -m "memvara $VERSION"
+          git push origin $TAG
+          \`\`\`
+
+          then create a GitHub Release for \`$TAG\`. That is what triggers \`release.yml\`, which re-checks the tag against the version, runs the full matrix, and publishes over OIDC with no stored token.
+
+          ## About the missing checks on this pull request
+
+          Workflows are not triggered by events raised by \`GITHUB_TOKEN\`, so \`ci.yml\` will not start here on its own. The suite and mypy already ran on this exact tree in the job that opened this pull request, and the full matrix runs again on the tag before anything is published.
+          BODY
+
+          gh pr create \
+            --base "$BASE" \
+            --head "$BRANCH" \
+            --title "Release $VERSION" \
+            --body-file /tmp/pr-body.md
+
+      - name: Say what happens next
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          {
+            echo "### Proposed release \`$VERSION\`"
+            echo
+            echo "Nothing has been published. Merge the pull request, tag \`$TAG\`, then"
+            echo "create a GitHub Release for that tag — that is what publishes."
+          } >> "$GITHUB_STEP_SUMMARY"

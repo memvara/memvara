@@ -14,12 +14,13 @@ combination a memory layer can have.
 ## 1. As a library
 
 ```bash
-pip install -e .                   # numpy, and nothing else
+pip install memvara                # numpy, and nothing else
+pip install -e .                   # or from a checkout, for development
 ```
 
-Not `pip install memvara`, yet — nothing has been published. The name is *available* on
-PyPI and verified so; see [`RELEASING.md`](RELEASING.md#the-name-is-available-and-that-was-not-free).
-Until the first upload, install from this tree or from a wheel you built
+`memvara` on PyPI is this package — the name was claimed rather than merely checked, and
+[`RELEASING.md`](RELEASING.md#why-the-project-is-called-memvara) records why it is called
+that. To run an unreleased commit, install from this tree or from a wheel you built
 (`python3 -m build --wheel`).
 
 <!-- This paragraph previously said the name "already belongs to an unrelated
