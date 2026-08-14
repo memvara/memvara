@@ -667,6 +667,47 @@ def test_remember_says_nothing_when_the_predicate_is_declared(server):
     assert "added 1, ended 0" in also and "note:" not in also
 
 
+def test_an_undeclared_predicate_that_is_genuinely_multi_valued_is_not_accused(server):
+    """The note fires here and *should*, and the slot is nonetheless perfectly correct.
+
+    Taken from a real store rather than invented: `agent-memory/rejected` held two live
+    values, recorded four minutes apart, both true — a project rejects many things. The
+    predicate is undeclared, so it defaults to many, and many is the right answer. The
+    trigger cannot tell this apart from `quota_gate/status` one test above, where two live
+    values are a contradiction, because the difference is intent and intent is not a
+    property of the row. That is not a fixable weakness in the rule; it *is* the missing
+    information, and it is what declaring cardinality supplies.
+
+    So the wording carries the whole load, and this test exists to stop it being tightened.
+    An accusing note — "contradiction", "conflict", "stale value" — reads as a bug report
+    on a write that did exactly the right thing, and a reader who is told twice that
+    correct behaviour is a defect stops reading the notes at all. That would cost the
+    `status` case its only warning, which is the regression this pins.
+
+    Asserted on the accommodating clause rather than on the absence of a blacklist of
+    words: a list of forbidden spellings is one synonym away from passing while the note
+    has become an accusation anyway.
+    """
+    text(server, "memory_remember", {"subject": "agent-memory", "predicate": "rejected",
+                                     "object": "auto as the embedder default"})
+    second = text(server, "memory_remember",
+                  {"subject": "agent-memory", "predicate": "rejected",
+                   "object": "blaming the code blocks for the docs overflow"})
+
+    # It fires — the trigger is right to, and a rule that stayed silent here would have to
+    # stay silent on `quota_gate/status` too.
+    assert "note:" in second
+    assert "agent-memory rejected — 1 already live, 2 now" in second
+
+    # …and it offers this reading, in these words, as a complete answer needing no action.
+    assert "If the fact really does hold several values at once" in second
+    assert "this is correct and needs nothing" in second
+
+    # Both values still answer, which here is the point rather than the problem.
+    recalled = text(server, "memory_recall", {"query": "agent-memory rejected"})
+    assert "embedder default" in recalled and "code blocks" in recalled
+
+
 def test_add_carries_the_same_note_as_remember(server):
     """One renderer for both write tools. `memory_remember` is where the structural case
     lives — it can never acquire a spec — but an LLM-free server extracts through the fast
