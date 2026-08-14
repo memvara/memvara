@@ -916,7 +916,11 @@ def test_the_dumped_prompt_names_no_arm_no_kind_no_gold_and_no_trap(tmp_path):
     """Everything the answerer must not see, asserted against the file on disk."""
     path = tmp_path / "dump.jsonl"
     hz.dump(QUESTIONS, CONVERSATION, path)
-    blob = path.read_text()
+    # `harness.dump` writes UTF-8 with `ensure_ascii=False`, so reading without naming
+    # the encoding decodes it as cp1252 on Windows and mangles the em-dash in `SYSTEM`.
+    # The writer is right and this read was wrong; the assertion below compares the
+    # round-tripped prompt against the constant, so it is exactly the check that breaks.
+    blob = path.read_text(encoding="utf-8")
     for leak in list(bl.ARMS) + ["correction", "unanswerable", "historical",
                                  "q_plan_now", "gold", "trap"]:
         assert leak not in blob, leak

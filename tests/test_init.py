@@ -193,7 +193,13 @@ def test_an_existing_mcp_json_is_never_rewritten(tmp_path) -> None:
     assert status == 0
     assert (tmp_path / ".mcp.json").read_text(encoding="utf-8") == original
     assert "kept" in out and "mcpServers" in out
-    assert str(tmp_path / "store" / "memory.db") in out, "the block to paste is complete"
+    # Compared as JSON rather than as a path: the block printed for pasting *is* JSON, so
+    # a Windows path arrives with its separators escaped (`C:\\Users\\…`) and never
+    # matches `str(WindowsPath)`. `json.dumps` is the same transform the block went
+    # through, quotes included, which also pins that the value is a complete string
+    # rather than a prefix of a longer one.
+    assert json.dumps(str(tmp_path / "store" / "memory.db")) in out, (
+        "the block to paste is complete")
 
 
 def test_an_existing_mcp_json_that_already_names_memvara_says_so(tmp_path) -> None:

@@ -1638,8 +1638,15 @@ class Memvara:
                 # one thing this must never do.
                 if past.state != "ended":
                     continue
-                group.append(f"{past.text} (until {past.valid_to:%-d %B %Y})"
-                             if past.valid_to else past.text)
+                # `{d.day}` rather than `%-d`: the dash modifier that suppresses zero
+                # padding is a glibc extension, and `strftime` on Windows raises
+                # `ValueError: Invalid format string` for it. Every other directive here
+                # is portable, so the day is the one field that has to be interpolated
+                # rather than formatted. Pre-existing and caught only by the Windows leg
+                # of CI, which is the leg nobody runs locally.
+                group.append(
+                    f"{past.text} (until {past.valid_to.day} {past.valid_to:%B %Y})"
+                    if past.valid_to else past.text)
         return out
 
     def get_all(self, *, tenant=None, user=None, agent=None, session=None,
