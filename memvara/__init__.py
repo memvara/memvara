@@ -68,11 +68,13 @@ from .types import (
     Accumulation,
     Claim,
     Closure,
+    Delta,
     Derivation,
     Episode,
     Explanation,
     MemoryType,
     Provenance,
+    RecallResult,
     Result,
     Scope,
     WriteReceipt,
@@ -98,6 +100,10 @@ __all__ = [
     # "retired" (the record was wrong). Exported because it is in `Reconciler.apply`'s
     # signature and in four facade methods, so a typed caller needs to be able to name it.
     "Closure",
+    # What `recall(with_ids=True)` and `since()` hand back. Exported for the same reason
+    # `Closure` is: both are return types on four facade methods each, so a caller who
+    # annotates anything cannot name them otherwise.
+    "RecallResult", "Delta",
     # schema
     "PredicateRegistry", "PredicateSpec", "Cardinality", "Volatility",
     # pluggable backends

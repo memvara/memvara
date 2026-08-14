@@ -1,4 +1,4 @@
-r"""The nine tools, their descriptions, and how a stored memory is rendered back.
+r"""The ten tools, their descriptions, and how a stored memory is rendered back.
 
 Three things in here are load-bearing and easy to mistake for boilerplate.
 
@@ -235,6 +235,14 @@ _MEMORY_TYPES_FILTER = {
     ),
 }
 
+#: There is deliberately no `close` property on any write tool here, and the reason is
+#: the module docstring's: the two closures are two tools. A `close=` on `memory_remember`
+#: was written and removed rather than never considered — it put the fork *after* the
+#: model had already committed to a tool name, behind a default that would have won most
+#: of the time and been silently wrong for exactly the case the distinction exists for.
+#: A correction with a replacement is `memory_forget` and then `memory_remember`, which is
+#: one call more and puts the choice where the model actually makes it.
+
 
 # -- handlers ----------------------------------------------------------------
 
@@ -272,12 +280,87 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
     # Returned verbatim: `recall()` already emits numbered plain facts under a header
     # that frames them as data, with no scores and no JSON, which is precisely the shape
     # an MCP text result should have. Reformatting it here would only weaken the framing.
+    #
+    # And called *without* `with_ids=True`, which is a decision and not an oversight —
+    # the next reader is asked not to "fix" it. `recall()` will hand back the ids of the
+    # claims it rendered, and this tool's whole pitch, the sentence a model reads before
+    # choosing it, is numbered plain-text notes with nothing to filter out. An id on
+    # every line is precisely the retrieval metadata that pitch promises is absent, so
+    # adding one would degrade the thing the tool is for, and it would buy nothing: an
+    # agent that needs a handle on a memory — to explain it, correct it, retire it — is
+    # sent to `memory_search`, which is the id-bearing tool and says so. `with_ids`
+    # stays a library API, for a programmatic caller that renders its own prompt and
+    # then has to cite it.
     return ctx.memory.recall(
         args["query"],
         k=args["k"],
         min_score=args["min_score"],
         memory_types=_memory_types(args.get("memory_types")),
+        budget=args.get("budget"),
     ) or _no_match(args["query"])
+
+
+def _delta_lines(mark: str, claims: Sequence[Claim]) -> list[str]:
+    """One row per changed claim: `_search`'s line with `relevance` replaced by state.
+
+    There is no query here to score anything against, and the state is the field a
+    caller actually has to see — on the `gone` side it is the difference between a
+    record we withdrew as wrong and a value the world simply moved past, which decides
+    whether the claim is worth raising with the user at all.
+
+    Metadata first and stored text last, as on every other line this server emits: the
+    untrusted span ends the row and so cannot be followed by anything it could
+    impersonate.
+    """
+    return [f"{mark} [id={c.id} {c.memory_type.value} {_state(c)}] {safe_line(c.text)}"
+            for c in claims]
+
+
+def _since(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """What changed while the agent was away, as records rather than as prompt text.
+
+    **This is `_search`'s shape and deliberately not `_recall`'s**, which is the one
+    decision in this handler worth arguing. A delta necessarily contains claims that
+    stopped being believed — `gone` is `states=["retired"]` arriving through a different
+    door — and rendering those as numbered notes under a header that says "known about
+    the user" is exactly the un-delete that `Memvara.recall`'s deliberately explicit
+    signature exists to prevent. Read that docstring before changing this: a
+    `recall`-shaped twin of this tool would resurrect every correction the store has
+    ever recorded, straight into a live prompt, and nothing downstream could tell.
+
+    So every line is a record with an id and a state on it, for the agent to decide
+    about, and the description tells it not to read the second list back as fact.
+
+    The two halves are headed apart *and* marked per line, because a reader who cannot
+    tell them apart has the delta exactly backwards — it would carry the value we
+    stopped believing forward as current and drop the one that replaced it. A
+    supersession puts one claim in each half, so the two are routinely adjacent and
+    routinely about the same fact, which is what makes the redundancy worth its width.
+
+    The instant echoed back is `Delta.since`, resolved, rather than the string that
+    arrived: `'2024-03-01'` is a legal argument and midnight UTC is what it meant, and a
+    reply that repeats the shorthand has not said which instant it answered.
+    """
+    delta = ctx.memory.since(_timestamp(args["since"], "memory_since.since"))
+    stamp = _stamp(delta.since)
+    if not delta.added and not delta.gone:
+        # Said plainly, because "nothing changed" is an answer and the alternative — an
+        # empty-looking result — reads as "the store is empty" or "the call failed",
+        # both of which are the wrong thing to tell the user you were away from.
+        return (f"Nothing has changed since {stamp}. Nothing was recorded in this scope "
+                "and nothing stopped being believed, so what you knew then still "
+                "stands.")
+
+    lines = [f"{len(delta.added)} arrived and {len(delta.gone)} left since {stamp}. "
+             f"{STORED_HEADER}"]
+    if delta.added:
+        lines.append("Believed now, not believed then:")
+        lines += _delta_lines("+", delta.added)
+    if delta.gone:
+        lines.append("Believed then, not believed now — not part of the current view, "
+                     "so do not read these back as things you know:")
+        lines += _delta_lines("-", delta.gone)
+    return "\n".join(lines)
 
 
 def _claim_lines(prefix: str, claims: Sequence[Claim]) -> list[str]:
@@ -379,6 +462,14 @@ def _add(ctx: ToolContext, args: dict[str, Any]) -> str:
 
 
 def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """The exact-fact write, which takes the library's default closure and no other.
+
+    A replacement written here **ends** the value it displaces — the world changed, and
+    the old value goes on answering questions about the period it held. It never retires
+    one, and that is the point rather than a gap: retiring asserts the record was always
+    wrong, which is a different claim about the past and belongs to `memory_forget`,
+    where the tool's own name says which of the two is being asserted.
+    """
     memory_type = args.get("memory_type")
     receipt = ctx.memory.remember(
         args["subject"], args["predicate"], args["object"],
@@ -567,7 +658,23 @@ TOOLS: tuple[Tool, ...] = (
             },
             "k": {
                 "type": "integer", "minimum": 1, "maximum": 50, "default": 8,
-                "description": "Most notes to return. 8 is a good context-window budget.",
+                "description": (
+                    "How many notes at most. 8 suits an ordinary turn. It caps how many "
+                    "come back and not how long they are — a stored postcode and a "
+                    "stored paragraph each cost one slot — so reach for 'budget' when "
+                    "the thing you are protecting is context space."
+                ),
+            },
+            "budget": {
+                "type": "integer", "minimum": 1,
+                "description": (
+                    "Roughly how many tokens the whole block may cost. Approximate on "
+                    "purpose: it is measured by a length heuristic rather than by a "
+                    "real tokenizer, and it reads non-Latin scripts as smaller than "
+                    "they are, so leave yourself headroom. Notes are dropped whole and "
+                    "weakest-match first, never trimmed, and the block says how many "
+                    "did not fit. Omit it unless context is tight."
+                ),
             },
             "min_score": _MIN_SCORE,
             "memory_types": _MEMORY_TYPES_FILTER,
@@ -606,6 +713,35 @@ TOOLS: tuple[Tool, ...] = (
         },
         required=("query",),
         handler=_search,
+    ),
+    Tool(
+        name="memory_since",
+        description=(
+            "What changed in this user's memory while you were away. Call it at the "
+            "start of a conversation you are picking back up, with the instant your "
+            "last turn finished — a resumed session, not a mid-turn lookup — and it "
+            "answers in two lists: what is believed now and was not believed then, and "
+            "what was believed then and is not now. A fact that was replaced appears in "
+            "both, which is how the replacement arrives with the thing it replaced. "
+            "Every row carries a claim id, a state and one line of text, so this is a "
+            "tool for working out what to do next — ask memory_why about a row that "
+            "surprises you — rather than for answering the user. Never read the second "
+            "list back as something you know: those records are out of the current "
+            "view, and quoting one puts a withdrawn fact in your answer. To answer from "
+            "memory, call memory_recall."
+        ),
+        properties={
+            "since": {
+                "type": "string",
+                "description": (
+                    "ISO-8601 instant, e.g. '2024-03-01T00:00:00Z' or '2024-03-01'. "
+                    "The moment you last saw this memory, usually the timestamp of your "
+                    "previous turn. A date with no time means midnight UTC."
+                ),
+            },
+        },
+        required=("since",),
+        handler=_since,
     ),
     Tool(
         name="memory_add",
@@ -647,9 +783,12 @@ TOOLS: tuple[Tool, ...] = (
             "extraction entirely. Use it when you already know the fact precisely — the "
             "user stated it flatly, you just confirmed it, or it came from structured "
             "data. This is the reliable way to write: it needs no model, it cannot "
-            "mis-parse, and an exact predicate is what lets the store retire the "
-            "previous value automatically when the fact changes. Example: subject "
-            "'user', predicate 'lives_in', object 'Lisbon'."
+            "mis-parse, and an exact predicate is what lets the store end the previous "
+            "value automatically when the fact changes. It **ends** that value — the "
+            "world moved on and the old one still answers about the period it held. If "
+            "the old value was never right, storing over it is not enough: call "
+            "memory_forget as well, which is the tool that says the record was wrong. "
+            "Example: subject 'user', predicate 'lives_in', object 'Lisbon'."
         ),
         properties={
             "subject": _SUBJECT,
@@ -770,11 +909,12 @@ TOOLS: tuple[Tool, ...] = (
         name="memory_history",
         description=(
             "Show every value one fact has ever held, oldest first, with when each was "
-            "recorded and when it was retired. Call it when the user asks what they told "
-            "you before, when something changed, or whether you still have an old value "
-            "— and before contradicting them about their own history. Needs the fact as "
-            "subject and predicate (e.g. 'user' and 'lives_in'); use memory_search first "
-            "if you do not know the predicate."
+            "recorded and when it stopped being current — 'ended' where a newer value "
+            "took over, 'retired' where the record was withdrawn as wrong. Call it when "
+            "the user asks what they told you before, when something changed, or "
+            "whether you still have an old value — and before contradicting them about "
+            "their own history. Needs the fact as subject and predicate (e.g. 'user' "
+            "and 'lives_in'); use memory_search first if you do not know the predicate."
         ),
         properties={"subject": _SUBJECT, "predicate": _PREDICATE},
         required=("predicate",),

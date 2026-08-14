@@ -59,6 +59,14 @@ memvara-mcp = "memvara.server.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["memvara"]
+# The skill `memvara init` writes out is data rather than code, so nothing above notices
+# it: `packages` sweeps the whole directory, and the skill ships only for as long as no
+# VCS ignore rule ever happens to match it — the same thin thread `py.typed` hangs on
+# (see tests/test_packaging.py). Naming it as an artifact takes it out of the exclusion
+# rules' reach entirely. It is worth the two lines because of how the failure presents:
+# not an ImportError in CI, but `memvara init` raising FileNotFoundError on a user's
+# machine, at the one moment they are deciding whether this package works.
+artifacts = ["memvara/skills/**/*.md"]
 
 # The sdist takes everything at the top level by default — `bench`, `demo`, `docs`,
 # `tests` are all in it deliberately, because a source distribution that cannot

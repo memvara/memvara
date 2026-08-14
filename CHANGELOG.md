@@ -100,6 +100,54 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
 
 ### Added
 
+- **`recall(with_ids=True)` returns the claim ids it rendered**, as `RecallResult`, in
+  render order and 1:1 with the numbered notes. `recall()` returns `str` exactly as before
+  unless asked; the overloads follow `search()`'s. Previously the prompt-shaped surface
+  returned text and nothing else, so a caller who wanted to cite what an answer rested on
+  had to re-run retrieval through `search()` and hope the two agreed. Ids only, never
+  scores — and live facts only, since episodes have no claim id and citing a past value as
+  the source of a present-tense answer is worse than citing nothing.
+
+- **`recall(budget=…)` bounds the block by size rather than by count.** `k` bounds the
+  number of notes and claim text is variable, so `k=8` was a context budget by convention
+  only. Notes are dropped **whole** — half a fact in a prompt is a false fact — and the
+  block says how many did not fit, so a model can tell a bounded answer from a complete
+  one. `counter=` takes a real tokenizer; the default is a length heuristic that is roughly
+  right for English prose and **under-counts CJK**, which is stated where it is defined
+  rather than discovered in production. Core's dependencies remain `numpy` and nothing else.
+
+- **`since(when)` — what changed while the agent was away**, as a `Delta` of `added` and
+  `gone`. A supersession lands in both halves. This needs no new `Store` method: it is two
+  `candidate_ids` calls with **both clocks** pinned to `when`, differenced. Pinning the
+  belief clock alone is the tempting version and is wrong — `valid_at` then defaults to
+  now, so a claim whose world-interval has since closed never enters the "then" set, and
+  the supersession reports an arrival with nothing beside it.
+
+- **`memory_since` on the MCP surface**, bringing the server to nine tools. It returns
+  structured rows rather than a prompt block, and the reason is the same one that keeps
+  `states=` off `recall()`: a delta necessarily carries claims that stopped being believed,
+  so a `recall`-shaped twin would be an un-delete reached through another door. The two
+  halves carry both a directional heading and a per-line `+`/`-`, because they fail
+  differently — the heading is what a model reads, the mark is what survives the heading
+  scrolling out of view.
+
+- **`memvara-mcp init --agent claude`** writes the client's server block, the packaged
+  skill and a CLAUDE.md snippet into a project, with `MEMVARA_DB` already absolute. It
+  never rewrites an existing `.mcp.json`: where one exists and names another server, it
+  prints the entry *without* enclosing braces, indented to paste inside `mcpServers`,
+  because a self-valid block is the one people paste whole and break the file. `command` is
+  `sys.executable` rather than the documented `python3` — the client launches without a
+  login profile, so `PATH` finds the wrong interpreter for anyone in a virtualenv.
+
+- **A packaged agent skill** (`memvara/skills/claude/SKILL.md`) carrying only what no single
+  tool description can: the correction protocol as a sequence, scope hygiene and the
+  `MEMVARA_SESSION` trap, what is worth storing at all, and what changes on a server with no
+  extraction model. A test asserts it shares no 6-gram with any tool or property
+  description, so the two cannot drift into two sources for one fact.
+
+- **`RecallResult` and `Delta` are exported** from the top-level package, for the same
+  reason `Closure` is: both are return types on four facade methods each.
+
 - **`memory_end` on the MCP server: the closure an agent could not ask for.** The core has
   had two closures since the axes were separated — `"ended"` means the world changed,
   `"retired"` means the record was wrong — and `forget()`, `delete()` and `supersede()` all
@@ -394,6 +442,28 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
   ```
 
 ### Fixed
+
+- **Two more tool descriptions called one closure by the other's name.** `memory_forget`'s
+  is fixed in the `memory_end` entry above; these two were still standing after it.
+  `memory_remember` said an exact predicate lets the store "*retire* the previous value" —
+  it **ends** it, and that sentence was on the one tool whose whole job is writing the
+  replacement. `memory_history` described every past value as "*retired*", though
+  `_history` renders `_state()`, which emits both words, so supersession — the common case
+  — was mislabelled to every model that read it.
+
+  This is the same bug `_receipt_summary`'s docstring was written about ("a model reading
+  its own memory tool had three names for two events"), now on its third and fourth
+  instance: that fix corrected the receipt line, `memory_end` corrected `memory_forget`,
+  and neither swept the rest. So two guards now exist rather than a third correction —
+  one asserting every handler reads every property its own schema declares, and one
+  asserting no description uses a retire-word for an operation that ends or the reverse.
+  Both were confirmed to fail against the pre-fix code before being kept, and the second
+  one is what found these two.
+
+- **A fact's past no longer outlives the fact under a budget.** `recall(include_history=…)`
+  built its past values in a flat list that was not index-aligned to the claims, so a
+  budget that dropped a note could leave that note's history rendered beneath a fact no
+  longer there.
 
 - **Superseding a claim no longer records it as an error.** `Reconciler._retire` closed
   *both* clocks when one value replaced another. `valid_to` was right — Berlin stopped

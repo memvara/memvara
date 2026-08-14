@@ -1,10 +1,15 @@
 """`python -m memvara.server` — process startup, and the one place that touches stdio.
 
-There are no options. Everything is environment configuration, because that is what an
-MCP client can actually set: the settings file gives a command, an argument list and an
-env block, and the env block is the only part a user edits per machine. `--help` exists
-for the moment someone runs the command by hand to find out why the client says it
-failed, and prints the variables rather than a flag list.
+The server takes no options. Everything is environment configuration, because that is
+what an MCP client can actually set: the settings file gives a command, an argument list
+and an env block, and the env block is the only part a user edits per machine. `--help`
+exists for the moment someone runs the command by hand to find out why the client says
+it failed, and prints the variables rather than a flag list.
+
+`init` is the one subcommand, and it does not weaken that. It is not a way to configure
+this process — it writes the settings file the *client* will launch this process from,
+which is a different program's configuration and the only place flags could have helped
+anyone. See `init.py`.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from typing import Mapping, Sequence, TextIO
 from .. import __version__
 from ..core import EmbedderMismatchError
 from .config import EXAMPLE_CONFIG, ConfigError, ServerConfig, build_memvara
+from .init import init
 from .mcp import MemvaraMCPServer
 
 __all__ = ["main"]
@@ -46,6 +52,13 @@ client, not run interactively. Configured entirely by environment:
 The scope above is bound at startup and cannot be changed by a tool call, which is
 what stops a model reaching another user's memory.
 
+Rather than writing that block by hand:
+
+  memvara-mcp init --agent claude
+                     Writes the client's server block, the memvara skill and a
+                     CLAUDE.md snippet into a project, with MEMVARA_DB already
+                     absolute. `memvara-mcp init --help` for its options.
+
 Client configuration:
 
 {EXAMPLE_CONFIG}
@@ -62,6 +75,10 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
     err = sys.stderr if stderr is None else stderr
 
     if args:
+        # Dispatched before the flags, and by first word rather than by whole argv,
+        # because `init` has a command line of its own and this one has none.
+        if args[0] == "init":
+            return init(args[1:], env=env, stdout=out, stderr=err)
         if args == ["--version"]:
             print(__version__, file=out)
             return 0
