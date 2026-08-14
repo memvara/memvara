@@ -102,9 +102,15 @@ python3 release/publish_npm.py --package npm/memvara --dry-run
 It exports `{implemented: false, notice, python, homepage}`. It has no side effects and
 **does not throw on import** — a placeholder that throws breaks a bundler's module graph
 and turns "you installed the wrong thing" into a build failure several layers from its
-cause. `implemented` is typed as the literal `false`, so a TypeScript caller who guards on
-it gets the branch narrowed to `never` at compile time, which is the earliest anyone can
-be told this package is empty.
+cause. For TypeScript callers the protection is that the type has four properties and no
+methods, so using it as a client — `memvara.recall(...)` — is a compile error (TS2339).
+`implemented` is the literal `false` rather than `boolean` as a secondary signal.
+
+An earlier version of this file claimed that `if (memvara.implemented)` errors because the
+branch narrows to `never`. It does not: TypeScript does not report type-dead branches, and
+`allowUnreachableCode: false` does not change it, being a syntactic check. Checked against
+tsc 5 after publishing, which is the wrong order — the claim was plausible, which is
+exactly the kind that survives unverified.
 
 `npm/` is excluded from the Python sdist (`[tool.hatch.build.targets.sdist]` in
 `pyproject.toml`). Hatch ships every top-level directory by default, so without that the
