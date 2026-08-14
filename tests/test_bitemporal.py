@@ -677,6 +677,128 @@ def test_retiring_a_superseded_row_does_not_re_date_the_supersession(mem):
 
 
 # =============================================================================
+# since(): what changed while the agent was away
+# =============================================================================
+#
+# The read a resuming agent has never had. `get_all()` shows the current view and cannot
+# say which of it is new; nothing at all showed what *left*, because by the time you look
+# there is no row left to notice the absence of. It is the query a store with one clock
+# cannot answer in either direction, and it needs no new store method — `candidate_ids`
+# already takes both clocks, so the delta is a set difference over two calls.
+
+
+def test_since_reports_what_arrived_and_what_left(mem, four):
+    """June believed Berlin; today believes Lisbon. Both halves, one call."""
+    delta = mem.since(JUNE)
+    assert cities(delta.added) == ["Lisbon"]
+    assert cities(delta.gone) == ["Berlin"]
+    assert delta.since == JUNE, "the answer carries the question it answers"
+
+
+def test_a_supersession_lands_in_both_halves(mem):
+    """The shape §8a names, written through the facade rather than into the store: the
+    retired id in `gone`, the replacement in `added`. Two entries for one event, because
+    a correction stated without the thing it corrected is not a correction."""
+    berlin = mem.remember("user", "lives_in", "Berlin", valid_from=JAN,
+                          recorded_at=JAN).added[0]
+    away = utcnow()
+    lisbon = mem.supersede(berlin.id, Claim(subject="user", predicate="lives_in",
+                                            object="Lisbon", scope=SCOPE),
+                           close="retired").added[0]
+
+    delta = mem.since(away)
+    assert [c.id for c in delta.added] == [lisbon.id]
+    assert [c.id for c in delta.gone] == [berlin.id]
+    assert [c.state for c in delta.gone] == ["retired"], \
+        "and the state is what says the record was wrong rather than merely over"
+
+
+def test_a_fact_the_world_moved_past_leaves_too(mem):
+    """`gone` is not "retired": a claim whose valid interval closed is equally absent
+    from the current view, and an agent told it while it held wants to know."""
+    put(mem, "Berlin", valid_from=JAN, valid_to=JULY, recorded_at=JAN)
+    delta = mem.since(JUNE)
+    assert cities(delta.gone) == ["Berlin"] and delta.added == ()
+    assert [c.state for c in delta.gone] == ["ended"]
+
+
+def test_since_pins_both_clocks_because_the_belief_clock_alone_is_a_different_question(
+        mem, four):
+    """The trap this method exists on the far side of, asserted rather than described.
+
+    `known_at=T` on its own means "what we believed at T, about the world *as it is
+    now*", so a value that has since been closed out in world time fails the
+    present-tense interval test and never enters the "then" set at all — the supersession
+    that is the whole point of the call would report an addition with nothing beside it.
+    """
+    scopes = SCOPE.ancestors()
+    belief_only = set(mem.store.candidate_ids(scopes, known_at=JUNE))
+    both = set(mem.store.candidate_ids(scopes, valid_at=JUNE, known_at=JUNE))
+    now = set(mem.store.candidate_ids(scopes))
+
+    assert belief_only == set(), "Berlin's world interval has closed since"
+    assert both - now == {four["Berlin"].id}
+    assert {c.id for c in mem.since(JUNE).gone} == both - now
+
+
+def test_since_costs_two_scope_wide_scans_and_not_one_read_per_claim(mem, four):
+    """The cost is stated in the docstring, so something has to hold it there. Two id
+    scans is what makes this acceptable for a session-start read; a per-claim probe would
+    make it a read nobody runs."""
+    calls = []
+    real = mem.store.candidate_ids
+    mem.store.candidate_ids = lambda *a, **kw: (calls.append(kw), real(*a, **kw))[1]
+
+    mem.since(JUNE)
+    assert len(calls) == 2
+    assert calls[0] == {"valid_at": JUNE, "known_at": JUNE} and calls[1] == {}
+
+
+def test_a_delta_with_nothing_in_it_is_still_a_delta(mem, four):
+    """Nothing changed is an answer, and an agent resuming needs to be able to tell it
+    from "the store is empty" — so it is two empty tuples and the instant, not None."""
+    delta = mem.since(AUG + timedelta(days=1))
+    assert delta.added == () and delta.gone == ()
+    assert delta.since == AUG + timedelta(days=1)
+    assert repr(delta).startswith("<Delta since 2026-08-02T00:00:00+00:00 +0 -0")
+
+
+def test_a_naive_instant_is_read_as_utc_rather_than_rejected(mem, four):
+    """Callers build these by hand at API edges. Every other read here follows the same
+    convention, and a TypeError from inside a set difference is a worse outcome."""
+    assert mem.since(JUNE.replace(tzinfo=None)).since == JUNE
+    assert cities(mem.since(JUNE.replace(tzinfo=None)).gone) == ["Berlin"]
+
+
+def test_since_is_ordered_rather_than_left_in_set_order(mem):
+    """A set difference discards even the backend's scan order, so without a sort the two
+    halves would come back differently between runs of one process."""
+    for i in range(6):
+        put(mem, f"City{i}", predicate=f"lived_in_{i}", valid_from=JAN, recorded_at=JAN)
+    order = [c.id for c in mem.since(JAN - timedelta(days=1)).added]
+    assert order == [c.id for c in mem.get_all()][:len(order)]
+    assert order == [c.id for c in mem.since(JAN - timedelta(days=1)).added]
+
+
+def test_since_stays_inside_the_scope_it_was_asked_about(mem):
+    """The delta is a scoped read like every other, and a session that could see a
+    sibling session's arrivals would be the scope leak in its most useful form."""
+    mem.scope(user="alice", session="s1").remember("user", "likes", "coffee")
+    then = JAN
+    assert cities(mem.since(then, user="alice", session="s1").added) == ["coffee"]
+    assert mem.since(then, user="bob").added == ()
+
+
+def test_the_scoped_view_carries_since(mem):
+    """`ScopedMemvara` is what the MCP server holds, and `memory_since` is the tool this
+    method exists for."""
+    view = mem.scope(user="alice", session="s2")
+    view.remember("user", "working_on", "auth refactor")
+    assert cities(view.since(JAN).added) == ["auth refactor"]
+    assert mem.scope(user="alice", session="s3").since(JAN).added == ()
+
+
+# =============================================================================
 # The facades mirror each other
 # =============================================================================
 

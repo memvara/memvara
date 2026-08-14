@@ -58,10 +58,12 @@ from .types import (
     SUBJECT_ENTITY,
     Claim,
     Closure,
+    Delta,
     Derivation,
     Episode,
     MemoryType,
     Provenance,
+    RecallResult,
     Result,
     Scope,
     WriteReceipt,
@@ -284,6 +286,46 @@ def _had_happened(episode: Episode, valid_at: datetime | None,
     ts = as_utc(episode.ts)
     return ((valid_at is None or ts <= as_utc(valid_at))
             and (known_at is None or ts <= as_utc(known_at)))
+
+
+# --- the default context-budget counter ---------------------------------------------
+
+#: Characters the heuristic below charges per token. Four is the usual figure quoted for
+#: English text under a byte-pair vocabulary, and it is the whole of the model.
+_CHARS_PER_TOKEN = 4
+
+
+def _approx_tokens(text: str) -> int:
+    """Roughly how many tokens `text` costs. The default counter for `recall(budget=)`.
+
+    **A length heuristic, and it is wrong in a direction worth naming.** It divides by
+    four and rounds up, which is close enough for English prose and materially wrong for
+    CJK, where a single character is often a token or more: this **under-counts** there,
+    by several times, so a block the heuristic certifies as fitting a 2,000-token budget
+    can be four thousand real tokens. The failure is silent and it is on the side that
+    overflows the caller's context rather than the side that wastes it. Cyrillic, Thai
+    and long code identifiers all lean the same way, less sharply.
+
+    There is no tokenizer here to do better with. Core's dependencies are `numpy` and
+    nothing else, and pulling a transformer stack into the zero-dependency package in
+    order to count characters would cost every user of the library a dependency tree so
+    that some of them could have an exact budget. So this is the default and the seam is
+    the answer: a caller who needs exactness passes their own `counter=` — `tiktoken`,
+    the Anthropic token-counting endpoint, whatever their model actually charges — and
+    pays for that dependency in their own project. It is the same seam as `Embedder`,
+    `AuditStore` and `Processor`, for the same reason.
+
+    A budget honoured approximately, with the approximation named, is worth having. One
+    that claims to be exact is not.
+
+    >>> _approx_tokens("the user lives in Lisbon")
+    6
+    >>> _approx_tokens("")
+    0
+    >>> _approx_tokens("我住在里斯本")           # really nearer six, and it says two
+    2
+    """
+    return -(-len(text) // _CHARS_PER_TOKEN)
 
 
 class Memvara:
@@ -1309,13 +1351,61 @@ class Memvara:
     #: its reason, short enough that a pasted stack trace cannot evict the facts.
     RECALL_EPISODE_CHARS = 280
 
+    #: The last line of a block `budget=` had to cut short. A model handed eight facts
+    #: and no note reads them as everything known and answers from the absence of the
+    #: ninth, so a bounded list has to say that it is bounded — the same reasoning that
+    #: gives episodes their own header rather than one undifferentiated list.
+    RECALL_DROPPED = ("({n} further note{s} matched and did not fit — this list is "
+                      "bounded, not everything known.)")
+
+    @classmethod
+    def _dropped_line(cls, n: int) -> str:
+        """`RECALL_DROPPED` for `n` notes. Plural because "1 further notes" reads as a
+        rendering bug, and a model that distrusts the framing distrusts the facts."""
+        return cls.RECALL_DROPPED.format(n=n, s="" if n == 1 else "s")
+
+    # `with_ids` decides what kind of thing comes back, so it decides the return type,
+    # exactly as `include_episodes` does on `search()` — and the three variants are the
+    # three there, for the third's reason as well: a wrapper holding a runtime bool
+    # (`ScopedMemvara.recall`, `AsyncMemvara.recall`, an MCP handler reading its own
+    # arguments dict) has to be able to pass the flag through without a type error.
+    @overload
+    def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+               header: str | None = ..., tenant=..., user=..., agent=..., session=...,
+               memory_types: Sequence[MemoryType] | None = ...,
+               include_episodes: bool = ..., episode_header: str | None = ...,
+               include_history: bool = ..., history_header: str | None = ...,
+               budget: int | None = ..., counter: Callable[[str], int] = ...,
+               with_ids: Literal[False] = ...) -> str: ...
+
+    @overload
+    def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+               header: str | None = ..., tenant=..., user=..., agent=..., session=...,
+               memory_types: Sequence[MemoryType] | None = ...,
+               include_episodes: bool = ..., episode_header: str | None = ...,
+               include_history: bool = ..., history_header: str | None = ...,
+               budget: int | None = ..., counter: Callable[[str], int] = ...,
+               with_ids: Literal[True]) -> RecallResult: ...
+
+    @overload
+    def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+               header: str | None = ..., tenant=..., user=..., agent=..., session=...,
+               memory_types: Sequence[MemoryType] | None = ...,
+               include_episodes: bool = ..., episode_header: str | None = ...,
+               include_history: bool = ..., history_header: str | None = ...,
+               budget: int | None = ..., counter: Callable[[str], int] = ...,
+               with_ids: bool) -> str | RecallResult: ...
+
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                header: str | None = None, tenant=None, user=None, agent=None,
                session=None, memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False,
                episode_header: str | None = None,
                include_history: bool = False,
-               history_header: str | None = None) -> str:
+               history_header: str | None = None,
+               budget: int | None = None,
+               counter: Callable[[str], int] = _approx_tokens,
+               with_ids: bool = False) -> Any:
         """Retrieval formatted for dropping straight into a system prompt.
 
         The output is deliberately plain — numbered facts, no scores, no JSON. Retrieval
@@ -1382,30 +1472,146 @@ class Memvara:
 
         History is fetched once per fact slot rather than once per result, so a
         multi-valued predicate returning four live values costs one lookup, not four.
+
+        `budget` bounds the **size** of the block, which `k` never did. `k` bounds the
+        number of notes, and claim text is variable — a stored paragraph and a stored
+        postcode both cost one slot — so `k=8` was a context budget by convention and by
+        nothing else, and the convention was being stated to callers as a guarantee.
+        `budget` is a ceiling on `counter(block)`, defaulting to no ceiling so the
+        unbudgeted call renders exactly what it always did, byte for byte.
+
+        `counter` is how the budget is measured, and the default `_approx_tokens` is a
+        length heuristic that **under-counts CJK by several times** — read its docstring
+        before trusting a budget against non-Latin text. There is no tokenizer in this
+        package to do better with and adding one is not on the table; a caller who needs
+        exactness passes their own.
+
+        Notes are dropped **whole, from the end of the priority order** — live facts by
+        descending score, then the past values belonging to the facts still standing,
+        then the episode tail. Never truncated: half a fact in a prompt is a false fact,
+        and "user is allergic to" is a worse artefact than a missing line. A fact's past
+        drops with the fact, because the history header says "earlier values of the facts
+        above" and a past value whose present value was cut belongs to nothing.
+
+        A budgeted block that had to stop ends with `RECALL_DROPPED`, naming how many
+        notes did not fit. Without it the model reads a bounded list as a complete one
+        and answers from the absence of what was cut, which is the failure this library
+        exists to remove, arriving through the fix for a different one. The line is
+        counted against the budget like everything else, so a block that reports the cut
+        still fits inside it; the only imprecision left is the counter's own.
+
+        **That notice is the floor.** A budget too small to hold even the first note
+        returns it alone, over budget, rather than an empty block — because an empty
+        block is indistinguishable from "nothing is stored about this", and a prompt that
+        quietly says nothing is known is the exact failure a memory layer exists to
+        prevent. Content never overruns the budget; the sentence saying there was content
+        can.
+
+        `with_ids=True` returns a `RecallResult` — the same text, plus the ids of the
+        claims it rendered, in render order. **`recall()` still returns `str` by
+        default** and will keep doing so.
+
+        It resurrects nothing. The signature above is explicit so that `as_of`, `states`
+        and `include_invalidated` cannot be forwarded into a live prompt; ids are not a
+        fourth member of that list, because they name claims this same call has *already
+        rendered into the prompt*. The text was the disclosure. Handing back the handle to
+        text the caller is holding forwards no claim, no state and no instant that the
+        default return did not. What it fixes is that an agent on this surface could read
+        a stored fact back to someone and, asked which record that came from, had nothing
+        to name — `search()` has always been citable and this, the surface built for
+        prompts, was not.
+
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> _ = mem.remember("user", "lives_in", "Lisbon")
+        >>> block = mem.recall("where do they live", with_ids=True)
+        >>> block.text.splitlines()[1]
+        '- user lives in Lisbon'
+        >>> block.claim_ids == (mem.get_all()[0].id,)
+        True
         """
         results = self.search(query, k=k, min_score=min_score, tenant=tenant, user=user,
                               agent=agent, session=session, memory_types=memory_types,
                               include_episodes=include_episodes)
         claims = [r for r in results if not isinstance(r, EpisodeResult)]
         episodes = [r for r in results if isinstance(r, EpisodeResult)]
+        # Fetched for every claim, not just the surviving ones: the slot lookups are the
+        # same ones the unbudgeted call already makes, and grouping them per claim is
+        # what lets the fit below take a prefix without re-reading the store per trial.
+        past = (self._past_by_claim(claims, tenant, user, agent, session)
+                if include_history else [[] for _ in claims])
+        headers = (header or self.RECALL_HEADER,
+                   history_header or self.RECALL_HISTORY_HEADER,
+                   episode_header or self.RECALL_EPISODE_HEADER)
+
+        keep = len(claims) + len(episodes)
+        if budget is not None:
+            # Downwards from the whole block, not upwards from nothing, and measuring the
+            # assembled string each time rather than summing per-line costs. Two reasons,
+            # and the first is a bug the other direction has: the notice below is itself
+            # a line, so a block one note short is not always smaller than the complete
+            # one, and filling upwards stops at the note whose trial first overshoots —
+            # which can leave three notes rendered where all five would have fitted. From
+            # the top the complete block is the first thing tried, so the ordinary call
+            # costs one measurement and the answer is the largest prefix that fits.
+            # Second: a caller's own tokenizer is not additive over a join, so the number
+            # that has to fit is the one for the string actually returned.
+            while keep and counter(self._recall_block(claims, past, episodes, keep,
+                                                      headers)) > budget:
+                keep -= 1
+
+        text = self._recall_block(claims, past, episodes, keep, headers)
+        if not with_ids:
+            return text
+        kept = min(keep, len(claims))
+        return RecallResult(
+            text=text,
+            claim_ids=tuple(r.claim.id for r in claims[:kept]),
+            dropped=len(claims) + len(episodes) - keep,
+        )
+
+    def _recall_block(self, claims: Sequence[Result], past: Sequence[Sequence[str]],
+                      episodes: Sequence[EpisodeResult], keep: int,
+                      headers: tuple[str, str, str]) -> str:
+        """Render the first `keep` notes, and say so if that was not all of them.
+
+        The priority order is the argument order: every claim is placed before any
+        episode, so a turn can never cost a fact its place in a squeezed block — the same
+        rule the unbudgeted render already follows by putting the tail last, applied to
+        which notes survive rather than only to where they sit.
+
+        A section's header appears only if something under it did. A header with nothing
+        beneath it tells a model there are stored facts and then shows it none, which is
+        worse than the section being absent.
+        """
+        n = min(keep, len(claims))
+        m = max(0, keep - len(claims))
+        fact_header, history_header, episode_header = headers
         lines: list[str] = []
-        if claims:
-            lines.append(header or self.RECALL_HEADER)
-            lines += [f"- {self._safe_line(r.text)}" for r in claims]
-        if include_history:
-            past = self._past_values(claims, tenant, user, agent, session)
-            if past:
-                lines.append(history_header or self.RECALL_HISTORY_HEADER)
-                lines += [f"- {self._safe_line(line)}" for line in past]
-        if episodes:
-            lines.append(episode_header or self.RECALL_EPISODE_HEADER)
+        if n:
+            lines.append(fact_header)
+            lines += [f"- {self._safe_line(r.text)}" for r in claims[:n]]
+        tail = [line for group in past[:n] for line in group]
+        if tail:
+            lines.append(history_header)
+            lines += [f"- {self._safe_line(line)}" for line in tail]
+        if m:
+            lines.append(episode_header)
             lines += [f"- {self._safe_line(r.text, self.RECALL_EPISODE_CHARS)}"
-                      for r in episodes]
+                      for r in episodes[:m]]
+        dropped = len(claims) + len(episodes) - n - m
+        if dropped:
+            lines.append(self._dropped_line(dropped))
         return "\n".join(lines)
 
-    def _past_values(self, claims: Sequence[Result], tenant=None, user=None,
-                     agent=None, session=None) -> list[str]:
-        """Rendered `ended` predecessors of the slots `claims` occupies, oldest first.
+    def _past_by_claim(self, claims: Sequence[Result], tenant=None, user=None,
+                       agent=None, session=None) -> list[list[str]]:
+        """Rendered `ended` predecessors of the slots `claims` occupies, oldest first,
+        grouped by the claim that pulled them in — one list per claim, aligned by index.
+
+        Grouped rather than flat because `budget=` drops facts, and a past value whose
+        present value was cut belongs to nothing: the history header says "earlier values
+        of the facts above". Alignment is what lets the fit take a prefix of the claims
+        and the matching prefix of their pasts without going back to the store.
 
         **The `state == "ended"` filter is the security boundary**, not a tidying step:
         `history()` returns every value the slot ever held, retired ones included, and
@@ -1413,11 +1619,15 @@ class Memvara:
         safe there and `retired` is not.
 
         Keyed on `fact_key` so a multi-valued predicate costs one lookup rather than one
-        per live value, and so two live values in one slot cannot render its past twice.
+        per live value, and so two live values in one slot cannot render its past twice —
+        the second of the pair gets an empty group, which is also what keeps this aligned
+        with `claims` position for position rather than only in total.
         """
         seen: set[str] = set()
-        out: list[str] = []
+        out: list[list[str]] = []
         for r in claims:
+            group: list[str] = []
+            out.append(group)
             if r.claim.fact_key in seen:
                 continue
             seen.add(r.claim.fact_key)
@@ -1428,8 +1638,8 @@ class Memvara:
                 # one thing this must never do.
                 if past.state != "ended":
                     continue
-                out.append(f"{past.text} (until {past.valid_to:%-d %B %Y})"
-                           if past.valid_to else past.text)
+                group.append(f"{past.text} (until {past.valid_to:%-d %B %Y})"
+                             if past.valid_to else past.text)
         return out
 
     def get_all(self, *, tenant=None, user=None, agent=None, session=None,
@@ -1467,6 +1677,82 @@ class Memvara:
         claims.sort(key=lambda c: (c.value_key, c.id))
         claims.sort(key=lambda c: c.recorded_at, reverse=True)
         return claims
+
+    def since(self, when: datetime, *, tenant=None, user=None, agent=None,
+              session=None) -> Delta:
+        """What changed in this scope since `when`. The resumed-session read.
+
+        An agent that comes back to a conversation after a day has no way to ask what it
+        missed. `get_all()` shows the current view and cannot say which of it is new;
+        nothing at all shows what *left*, because by the time you look, the thing to
+        notice is the absence of a row you never saw. This is the query a store without a
+        belief clock cannot answer in either direction, and it is two lines over one it
+        already has.
+
+        `added` is believed now and was not believed then. `gone` is the reverse — a
+        record retired since, or a fact the world moved past since. **A supersession lands
+        in both**, the retired value in `gone` and its replacement in `added`, which is
+        the correction stated in the only form that carries what it corrected.
+
+        Both clocks are pinned to `when`, and that is the decision worth stating, because
+        pinning only the belief clock is the plausible version and it is wrong. `known_at`
+        alone means "what we believed then, about the world *as it is now*" — so a value
+        that has since been closed out in world time fails the present-tense interval test
+        and never appears in the "then" set at all, and the supersession that is the whole
+        point of the call reports an addition with nothing beside it. Asking both clocks
+        for `when` asks the one question a returning agent is actually asking: what did
+        this scope look like when I left.
+
+        It needs no new store method: `Store.candidate_ids` already takes both clocks, so
+        the delta is a set difference over two calls. That costs two scope-wide id scans
+        per call, which is acceptable for a read taken once at the start of a session and
+        not per turn; if it ever binds, the fix is an indexed `recorded_at > T` predicate
+        and a new store method, and that is a later decision rather than this one.
+
+        **It returns claims, not prompt text, and there is no `recall`-shaped twin.** A
+        delta necessarily contains claims that stopped being believed, and rendering those
+        into a system prompt is precisely the un-delete `recall()`'s explicit signature
+        exists to prevent — `gone` is `states=["retired"]` arriving through a different
+        door. The caller reads ids, states and text and decides; see `Claim.state`, which
+        is the word that says whether a `gone` claim was wrong or merely over.
+
+        Ordered newest-first on `recorded_at`, ties broken on content, exactly as
+        `get_all()` is — note that for `gone` that dates when each claim was *written*,
+        not when it left, because the two closures stamp different fields and one order
+        cannot sort by both.
+
+        >>> from datetime import timezone
+        >>> jan = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        >>> feb = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> _ = mem.remember("user", "lives_in", "Berlin", valid_from=jan,
+        ...                  recorded_at=jan)
+        >>> _ = mem.remember("user", "lives_in", "Lisbon")      # while we were away
+        >>> delta = mem.since(feb)
+        >>> [c.object for c in delta.added], [c.object for c in delta.gone]
+        (['Lisbon'], ['Berlin'])
+        """
+        scope = self._scope(tenant, user, agent, session)
+        at = as_utc(when)
+        scopes = scope.ancestors()
+        then = set(self.store.candidate_ids(scopes, valid_at=at, known_at=at))
+        now = set(self.store.candidate_ids(scopes))
+        return Delta(since=at, added=self._ordered_claims(now - then),
+                     gone=self._ordered_claims(then - now))
+
+    def _ordered_claims(self, ids: Collection[str]) -> tuple[Claim, ...]:
+        """Claims by id, in `get_all()`'s order.
+
+        A set difference discards even the backend's own scan order, so without this the
+        two halves of a `Delta` would come back in whatever order a hash happened to
+        produce — different between runs of one process. Same two-key sort as `get_all`,
+        for the reason given there: `value_key` is derived from content, so two stores
+        holding the same data answer identically.
+        """
+        claims = list(self.store.get_claims(list(ids)).values())
+        claims.sort(key=lambda c: (c.value_key, c.id))
+        claims.sort(key=lambda c: c.recorded_at, reverse=True)
+        return tuple(claims)
 
     def history(self, subject: str, predicate: str, *, tenant=None, user=None,
                 agent=None, session=None, as_of: datetime | None = None,
@@ -2035,19 +2321,53 @@ class ScopedMemvara:
                                 memory_types=memory_types,
                                 include_episodes=include_episodes, **self._kw)
 
+    # The same three variants as `Memvara.recall`, and this is the facade that makes the
+    # third one load-bearing rather than decorative: the MCP server holds one of these
+    # and reads `with_ids` out of an arguments dict, where it is a runtime `bool`.
+    @overload
+    def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+               header: str | None = ..., memory_types: Sequence[MemoryType] | None = ...,
+               include_episodes: bool = ..., episode_header: str | None = ...,
+               include_history: bool = ..., history_header: str | None = ...,
+               budget: int | None = ..., counter: Callable[[str], int] = ...,
+               with_ids: Literal[False] = ...) -> str: ...
+
+    @overload
+    def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+               header: str | None = ..., memory_types: Sequence[MemoryType] | None = ...,
+               include_episodes: bool = ..., episode_header: str | None = ...,
+               include_history: bool = ..., history_header: str | None = ...,
+               budget: int | None = ..., counter: Callable[[str], int] = ...,
+               with_ids: Literal[True]) -> RecallResult: ...
+
+    @overload
+    def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+               header: str | None = ..., memory_types: Sequence[MemoryType] | None = ...,
+               include_episodes: bool = ..., episode_header: str | None = ...,
+               include_history: bool = ..., history_header: str | None = ...,
+               budget: int | None = ..., counter: Callable[[str], int] = ...,
+               with_ids: bool) -> str | RecallResult: ...
+
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                header: str | None = None,
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False,
                episode_header: str | None = None,
                include_history: bool = False,
-               history_header: str | None = None) -> str:
+               history_header: str | None = None,
+               budget: int | None = None,
+               counter: Callable[[str], int] = _approx_tokens,
+               with_ids: bool = False) -> Any:
         return self._mem.recall(query, k=k, min_score=min_score, header=header,
                                 memory_types=memory_types,
                                 include_episodes=include_episodes,
                                 episode_header=episode_header,
                                 include_history=include_history,
-                                history_header=history_header, **self._kw)
+                                history_header=history_header, budget=budget,
+                                counter=counter, with_ids=with_ids, **self._kw)
+
+    def since(self, when: datetime) -> Delta:
+        return self._mem.since(when, **self._kw)
 
     def get(self, claim_id: str) -> Claim | None:
         return self._mem.get(claim_id, **self._kw)

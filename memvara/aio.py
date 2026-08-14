@@ -54,12 +54,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Any, Collection, Literal, Sequence, overload
+from typing import Any, Callable, Collection, Literal, Sequence, overload
 
-from .core import Memvara, Messages, ScopedMemvara
+from .core import Memvara, Messages, ScopedMemvara, _approx_tokens
 from .embed import Embedder
 from .retrieve import Path, Retrieved
-from .types import Claim, Episode, MemoryType, Provenance, Result, Scope, WriteReceipt
+from .types import (Claim, Delta, Episode, MemoryType, Provenance, RecallResult, Result,
+                    Scope, WriteReceipt)
 
 
 class AsyncMemvara:
@@ -227,20 +228,61 @@ class AsyncMemvara:
             include_invalidated=include_invalidated,
             memory_types=memory_types, include_episodes=include_episodes)
 
+    # Mirrored from `Memvara.recall`, overloads included, for the reason given above
+    # `search`: a return type that is precise on one facade and a union on the other is
+    # the promise broken where it costs most.
+    @overload
+    async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+                     header: str | None = ..., tenant=..., user=..., agent=...,
+                     session=..., memory_types: Sequence[MemoryType] | None = ...,
+                     include_episodes: bool = ..., episode_header: str | None = ...,
+                     include_history: bool = ..., history_header: str | None = ...,
+                     budget: int | None = ..., counter: Callable[[str], int] = ...,
+                     with_ids: Literal[False] = ...) -> str: ...
+
+    @overload
+    async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+                     header: str | None = ..., tenant=..., user=..., agent=...,
+                     session=..., memory_types: Sequence[MemoryType] | None = ...,
+                     include_episodes: bool = ..., episode_header: str | None = ...,
+                     include_history: bool = ..., history_header: str | None = ...,
+                     budget: int | None = ..., counter: Callable[[str], int] = ...,
+                     with_ids: Literal[True]) -> RecallResult: ...
+
+    @overload
+    async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+                     header: str | None = ..., tenant=..., user=..., agent=...,
+                     session=..., memory_types: Sequence[MemoryType] | None = ...,
+                     include_episodes: bool = ..., episode_header: str | None = ...,
+                     include_history: bool = ..., history_header: str | None = ...,
+                     budget: int | None = ..., counter: Callable[[str], int] = ...,
+                     with_ids: bool) -> str | RecallResult: ...
+
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                      header: str | None = None, tenant=None, user=None, agent=None,
                      session=None, memory_types: Sequence[MemoryType] | None = None,
                      include_episodes: bool = False,
                      episode_header: str | None = None,
                      include_history: bool = False,
-                     history_header: str | None = None) -> str:
+                     history_header: str | None = None,
+                     budget: int | None = None,
+                     counter: Callable[[str], int] = _approx_tokens,
+                     with_ids: bool = False) -> Any:
         """See `Memvara.recall`."""
         return await asyncio.to_thread(
             self.memvara.recall, query, k=k, min_score=min_score, header=header,
             tenant=tenant, user=user, agent=agent, session=session,
             memory_types=memory_types, include_episodes=include_episodes,
             episode_header=episode_header, include_history=include_history,
-            history_header=history_header)
+            history_header=history_header, budget=budget, counter=counter,
+            with_ids=with_ids)
+
+    async def since(self, when: datetime, *, tenant=None, user=None, agent=None,
+                    session=None) -> Delta:
+        """See `Memvara.since`. Two scope-wide id scans, so it belongs off the loop."""
+        return await asyncio.to_thread(
+            self.memvara.since, when, tenant=tenant, user=user, agent=agent,
+            session=session)
 
     async def get(self, claim_id: str, *, tenant=None, user=None, agent=None,
                   session=None) -> Claim | None:
@@ -527,17 +569,52 @@ class AsyncScopedMemvara:
             include_invalidated=include_invalidated,
             memory_types=memory_types, include_episodes=include_episodes, **self._kw)
 
+    # The same three variants again, for the reason given on `ScopedMemvara.recall`.
+    @overload
+    async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+                     header: str | None = ...,
+                     memory_types: Sequence[MemoryType] | None = ...,
+                     include_episodes: bool = ..., episode_header: str | None = ...,
+                     include_history: bool = ..., history_header: str | None = ...,
+                     budget: int | None = ..., counter: Callable[[str], int] = ...,
+                     with_ids: Literal[False] = ...) -> str: ...
+
+    @overload
+    async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+                     header: str | None = ...,
+                     memory_types: Sequence[MemoryType] | None = ...,
+                     include_episodes: bool = ..., episode_header: str | None = ...,
+                     include_history: bool = ..., history_header: str | None = ...,
+                     budget: int | None = ..., counter: Callable[[str], int] = ...,
+                     with_ids: Literal[True]) -> RecallResult: ...
+
+    @overload
+    async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+                     header: str | None = ...,
+                     memory_types: Sequence[MemoryType] | None = ...,
+                     include_episodes: bool = ..., episode_header: str | None = ...,
+                     include_history: bool = ..., history_header: str | None = ...,
+                     budget: int | None = ..., counter: Callable[[str], int] = ...,
+                     with_ids: bool) -> str | RecallResult: ...
+
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                      header: str | None = None,
                      memory_types: Sequence[MemoryType] | None = None,
                      include_episodes: bool = False,
                      episode_header: str | None = None,
                      include_history: bool = False,
-                     history_header: str | None = None) -> str:
+                     history_header: str | None = None,
+                     budget: int | None = None,
+                     counter: Callable[[str], int] = _approx_tokens,
+                     with_ids: bool = False) -> Any:
         return await self._amem.recall(
             query, k=k, min_score=min_score, header=header, memory_types=memory_types,
             include_episodes=include_episodes, episode_header=episode_header,
-            include_history=include_history, history_header=history_header, **self._kw)
+            include_history=include_history, history_header=history_header,
+            budget=budget, counter=counter, with_ids=with_ids, **self._kw)
+
+    async def since(self, when: datetime) -> Delta:
+        return await self._amem.since(when, **self._kw)
 
     async def get(self, claim_id: str) -> Claim | None:
         return await self._amem.get(claim_id, **self._kw)

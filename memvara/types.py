@@ -869,6 +869,89 @@ class Result:
                 f"{'+'.join(legs) or 'no-retriever'} {self.claim.id}>")
 
 
+@dataclass(frozen=True, slots=True)
+class RecallResult:
+    """What `recall(with_ids=True)` returns: the prompt block, and what is in it.
+
+    `recall()` renders claims into text and threw the identities away, which made the
+    prompt-shaped surface the one surface an agent could not cite from — it could read
+    "user lives in Lisbon" back to someone and had nothing to name if asked which stored
+    record that came from. `search()` returns `Result` objects and has always been
+    citable; the block did not, so anything built on "what did the model actually lean
+    on" had to abandon the surface it was built for or re-run retrieval and hope the
+    second answer matched the first.
+
+    **`claim_ids` is in render order and 1:1 with the claim notes**, so note *n* of the
+    block under `Memvara.RECALL_HEADER` is `claim_ids[n - 1]`. Nothing else in the block
+    is covered, and both omissions are deliberate: an episode is a verbatim turn rather
+    than a claim and has no claim id to give, and a past value under
+    `RECALL_HISTORY_HEADER` is a fact's *former* value, so citing it as the source of a
+    present-tense answer would be a worse error than not citing at all.
+
+    This carries no read that `recall()` did not already perform. Its signature is
+    explicit precisely so `as_of`, `states` and `include_invalidated` cannot be forwarded
+    into a live prompt — see `Memvara.recall` — and handing back the ids of claims the
+    call has already rendered forwards nothing new: the text was the disclosure, and the
+    id is the handle on text the caller is holding.
+
+    >>> block = RecallResult(text="Known:\\n- user lives in Lisbon", claim_ids=("cl-1",))
+    >>> block.text.splitlines()[1]
+    '- user lives in Lisbon'
+    >>> block
+    <RecallResult 1 cited, 29 chars>
+    """
+
+    #: Exactly what `recall()` returns without `with_ids`, byte for byte.
+    text: str
+    #: The claims rendered as notes, in the order they appear.
+    claim_ids: tuple[str, ...] = ()
+    #: How many further notes `budget=` cut. `0` whenever no budget was given, and the
+    #: machine-readable twin of the line the block ends with — a caller that had to
+    #: parse that prose to learn its answer was bounded would be reading a sentence
+    #: written for a model.
+    dropped: int = 0
+
+    def __repr__(self) -> str:
+        # Not the dataclass repr: `text` is a whole system prompt, and printing one at a
+        # REPL buries the two numbers a caller is actually checking.
+        cut = f", {self.dropped} dropped" if self.dropped else ""
+        return f"<RecallResult {len(self.claim_ids)} cited, {len(self.text)} chars{cut}>"
+
+
+@dataclass(frozen=True, slots=True)
+class Delta:
+    """What `since()` returns: what arrived and what left while the caller was away.
+
+    Two populations rather than one list, because "changed" is not a single event here.
+    A claim in `added` is one this scope believes now and did not believe then. A claim
+    in `gone` is the reverse — retired since, or finished in world time since — and it is
+    the half a store without a belief clock cannot report at all, because by the time you
+    ask, there is nothing left in the current view to notice the absence of.
+
+    A supersession appears in **both**: the value we stopped holding in `gone`, the one
+    that replaced it in `added`. That is not double-counting, it is the correction stated
+    in the only way that carries the fact it corrected.
+
+    `since` is the instant asked about, carried back so a caller logging or paging the
+    result cannot separate the answer from the question it answers.
+
+    >>> from datetime import datetime, timezone
+    >>> Delta(since=datetime(2026, 8, 1, tzinfo=timezone.utc))
+    <Delta since 2026-08-01T00:00:00+00:00 +0 -0>
+    """
+
+    #: The instant the caller asked about, resolved to UTC.
+    since: datetime
+    #: Believed now, not believed then. Newest first.
+    added: tuple["Claim", ...] = ()
+    #: Believed then, not believed now. Newest first.
+    gone: tuple["Claim", ...] = ()
+
+    def __repr__(self) -> str:
+        return (f"<Delta since {self.since.isoformat()} "
+                f"+{len(self.added)} -{len(self.gone)}>")
+
+
 @dataclass(slots=True)
 class WriteReceipt:
     """What `add()` returns. Explicit about what the write path actually did.

@@ -1175,6 +1175,244 @@ def test_purging_a_user_takes_their_transcript_out_of_the_index(mem):
 
 
 # =============================================================================
+# recall() returns what it rendered
+# =============================================================================
+#
+# The block is the surface an agent is meant to put in front of a model, and it was the
+# one surface the agent could not cite from: it read a stored fact back to someone and,
+# asked which record that came from, had nothing to name. `search()` has always returned
+# `Result` objects with ids on them. This is the same retrieval, already rendered, saying
+# which claims it rendered.
+
+
+@pytest.fixture()
+def five_cities(mem):
+    """Five live facts and one raw turn, so a block has notes to drop and a tail to
+    drop them before. Distinct predicates because a single-valued one would supersede."""
+    for city in ("Lisbon", "Berlin", "Porto", "Madrid", "Vienna"):
+        mem.remember("user", f"lived_in_{city.lower()}", city)
+    mem.add(KAFKA)
+    return mem
+
+
+def test_recall_still_returns_a_string_unless_asked_otherwise(mem):
+    """The compatibility half of the change, and the reason `with_ids` is a keyword
+    rather than a new return type: every existing caller renders this straight into a
+    prompt."""
+    mem.remember("user", "lives_in", "Lisbon")
+    assert isinstance(mem.recall("where do they live"), str)
+
+
+def test_recall_with_ids_returns_the_same_block_and_the_claims_in_it(mem):
+    """1:1 with the notes, in render order. A citation that is off by one is worse than
+    no citation: it names a real stored claim that the sentence did not come from."""
+    mem.remember("user", "lives_in", "Lisbon")
+    mem.remember("user", "allergic_to", "penicillin")
+
+    plain = mem.recall("where do they live, and what are they allergic to")
+    block = mem.recall("where do they live, and what are they allergic to", with_ids=True)
+
+    assert block.text == plain, "the rendered block is untouched by asking for the ids"
+    notes = [line[2:] for line in block.text.splitlines() if line.startswith("- ")]
+    assert len(block.claim_ids) == len(notes) == 2
+    for note, claim_id in zip(notes, block.claim_ids):
+        assert mem.get(claim_id).text == note, "note n has to be id n"
+
+
+def test_recall_ids_name_the_facts_and_never_the_turns_or_the_past(tmp_path):
+    """The two things in the block that are not live claims, and neither is citable.
+
+    An episode is a verbatim turn, not a claim, and has no claim id to give. A past value
+    under the history header is a fact's *former* value — citing one as the source of a
+    present-tense answer would be a worse error than not citing at all, which is the same
+    reasoning that keeps `retired` values out of the block entirely.
+    """
+    path = str(tmp_path / "m.db")
+    mem = Memvara(path, embedder=HashingEmbedder(dim=512), llm=NullLLM(), user="dara")
+    try:
+        home = mem.remember("account", "plan", "Home").added[0]
+        mem.supersede(home.id, Claim(subject="account", predicate="plan", object="Pro",
+                                     scope=mem.default_scope))
+        mem.add(KAFKA)
+
+        block = mem.recall("plan kafka", k=8, include_episodes=True,
+                           include_history=True, with_ids=True)
+
+        assert "Home" in block.text and "kafka" in block.text.lower()
+        assert block.claim_ids == tuple(c.id for c in mem.get_all())
+        assert len(block.claim_ids) == 1, "one live fact; the rest are not claims"
+    finally:
+        mem.close()
+
+
+def test_recall_with_ids_on_an_empty_result_is_empty_rather_than_absent(mem):
+    """An empty block is an answer — see `min_score`. It has to stay one here, with no
+    ids rather than no result, or a caller has two spellings of "nothing matched"."""
+    block = mem.recall("nothing was ever stored about this", with_ids=True)
+    assert block.text == "" and block.claim_ids == () and block.dropped == 0
+
+
+# =============================================================================
+# recall(budget=): k bounds the number of notes, not their size
+# =============================================================================
+#
+# `k=8` was a context budget by convention and by nothing else — claim text is variable,
+# so eight notes is eight stored postcodes or eight stored paragraphs. The tool
+# description shipped the convention as a guarantee.
+
+
+def test_a_budget_large_enough_renders_exactly_what_no_budget_renders(five_cities):
+    """Byte for byte. A budget nobody hits must not be a second rendering path — and
+    filling from the top rather than from nothing is what makes this true, since one note
+    short of complete costs an extra line rather than saving one."""
+    plain = five_cities.recall("where has the user lived", include_episodes=True)
+    generous = five_cities.recall("where has the user lived", include_episodes=True,
+                                  budget=10_000)
+    assert generous == plain
+    assert "did not fit" not in generous, "nothing was cut, so nothing is reported"
+
+
+def test_a_budget_drops_whole_notes_and_never_half_of_one(five_cities):
+    """Half a fact in a prompt is a false fact: "user is allergic to" asserts something
+    no one ever said. So the note is the unit, and the block is short of notes rather
+    than short of a note."""
+    plain = five_cities.recall("where has the user lived", include_episodes=True)
+    tight = five_cities.recall("where has the user lived", include_episodes=True,
+                               budget=60)
+
+    kept = [line for line in tight.splitlines() if line.startswith("- ")]
+    everything = [line for line in plain.splitlines() if line.startswith("- ")]
+    assert 0 < len(kept) < len(everything)
+    assert kept == everything[:len(kept)], "a prefix of the ranking, not a resample"
+    assert all(note in everything for note in kept), "no note was rewritten to fit"
+
+
+def test_a_budget_says_how_many_notes_it_dropped(five_cities):
+    """A model handed five facts and no note reads them as everything known, and answers
+    from the absence of the sixth. The block has to say it is bounded."""
+    tight = five_cities.recall("where has the user lived", include_episodes=True,
+                               budget=60)
+    plain = five_cities.recall("where has the user lived", include_episodes=True)
+
+    kept = sum(1 for line in tight.splitlines() if line.startswith("- "))
+    total = sum(1 for line in plain.splitlines() if line.startswith("- "))
+    assert tight.splitlines()[-1] == Memvara._dropped_line(total - kept)
+    assert "not everything known" in tight
+
+
+def test_the_dropped_line_counts_one_note_in_the_singular(five_cities):
+    """"1 further notes" reads as a rendering bug, and a model that distrusts the framing
+    has no reason to trust the facts under it."""
+    assert Memvara._dropped_line(1).startswith("(1 further note matched")
+    assert Memvara._dropped_line(2).startswith("(2 further notes matched")
+
+
+def test_the_line_reporting_the_cut_is_itself_inside_the_budget(five_cities):
+    """The notice is a line like any other, so a block that reports the cut and then
+    overruns the ceiling because of the reporting would have honoured nothing."""
+    for budget in range(45, 100, 5):
+        block = five_cities.recall("where has the user lived", include_episodes=True,
+                                   budget=budget)
+        assert core_module._approx_tokens(block) <= budget, budget
+
+
+def test_a_budget_too_small_for_one_note_still_says_something_was_there(five_cities):
+    """The floor, and the one place a block may exceed its budget. An empty block is
+    indistinguishable from "nothing is stored about this", and a prompt that quietly says
+    nothing is known is the failure a memory layer exists to prevent."""
+    block = five_cities.recall("where has the user lived", include_episodes=True,
+                               budget=1)
+    assert block == Memvara._dropped_line(6)
+    assert Memvara.RECALL_HEADER not in block, "no header over an empty list"
+
+
+def test_a_budget_spends_on_facts_before_it_spends_on_turns(five_cities):
+    """The same priority the unbudgeted render states by putting the tail last, applied
+    to which notes survive: a turn that is twice as good an answer may take a slot, but
+    it may never be the last thing standing when facts were cut."""
+    tight = five_cities.recall("where has the user lived kafka", include_episodes=True,
+                               budget=60)
+    assert Memvara.RECALL_EPISODE_HEADER not in tight
+    assert Memvara.RECALL_HEADER in tight
+
+
+def test_a_budget_drops_a_facts_past_along_with_the_fact(tmp_path):
+    """The history header says "earlier values of the facts above". A past value whose
+    present value was cut belongs to nothing, and reads as a live fact with a date on
+    it."""
+    path = str(tmp_path / "m.db")
+    mem = Memvara(path, embedder=HashingEmbedder(dim=512), llm=NullLLM(), user="dara")
+    try:
+        for slot in ("plan", "tier", "seat"):
+            first = mem.remember("account", slot, f"{slot}-old").added[0]
+            mem.supersede(first.id, Claim(subject="account", predicate=slot,
+                                          object=f"{slot}-new", scope=mem.default_scope))
+
+        full = mem.recall("account", k=8, include_history=True)
+        assert full.count("-old") == 3, "three slots, three past values"
+
+        tight = mem.recall("account", k=8, include_history=True, budget=90)
+        kept = [line for line in tight.splitlines() if line.endswith("-new")]
+        assert 0 < len(kept) < 3
+        assert tight.count("-old") == len(kept), "one past per surviving fact"
+    finally:
+        mem.close()
+
+
+def test_the_budget_is_measured_with_the_counter_the_caller_passes(five_cities):
+    """The seam, and the reason there is no tokenizer in this package. A caller who needs
+    exactness passes `tiktoken` or their model's own counter and pays for the dependency
+    in their own project — so one budget under two counters has to give two answers, or
+    the parameter is decoration."""
+    seen = []
+
+    def free(text):
+        seen.append(text)
+        return 0
+
+    plain = five_cities.recall("where has the user lived")
+    assert five_cities.recall("where has the user lived", budget=1, counter=free) == plain
+    assert seen, "the default counter was used instead of the one passed"
+    assert five_cities.recall("where has the user lived", budget=1, counter=len) \
+        == Memvara._dropped_line(5), "characters, at the same budget, fit nothing"
+
+
+def test_the_default_counter_names_the_direction_it_is_wrong_in():
+    """It divides by four. That is roughly right for English and several times short for
+    CJK, so a budget it certifies can overflow the real one — which is worth having only
+    because the docstring says so."""
+    assert core_module._approx_tokens("the user lives in Lisbon") == 6
+    assert core_module._approx_tokens("") == 0
+    assert core_module._approx_tokens("我住在里斯本") == 2, "under-counts, materially"
+    assert "under-counts" in core_module._approx_tokens.__doc__
+
+
+def test_with_ids_reports_the_notes_a_budget_cut(five_cities):
+    """The machine-readable twin of the line the model reads. A caller that had to parse
+    that prose to learn its answer was bounded would be reading a sentence written for
+    someone else."""
+    block = five_cities.recall("where has the user lived", include_episodes=True,
+                               budget=60, with_ids=True)
+
+    notes = [line for line in block.text.splitlines() if line.startswith("- ")]
+    assert len(block.claim_ids) == len(notes) > 0
+    assert block.dropped == 6 - len(notes)
+    assert repr(block).startswith(f"<RecallResult {len(notes)} cited,")
+    assert "dropped" in repr(block)
+
+
+def test_a_scoped_view_carries_the_budget_and_the_ids_through(five_cities):
+    """`**self._kw` splices are invisible to a type checker, and this is the object the
+    MCP server and every integration actually holds."""
+    view = five_cities.scope(user="alice")
+    block = view.recall("where has the user lived", include_episodes=True, budget=60,
+                        with_ids=True)
+    assert block.claim_ids and block.dropped
+    assert view.recall("where has the user lived", include_episodes=True,
+                       budget=60) == block.text
+
+
+# =============================================================================
 # Per-claim erasure: the other reading of "delete this memory"
 # =============================================================================
 

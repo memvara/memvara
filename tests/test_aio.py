@@ -213,6 +213,66 @@ def test_the_read_surface(amem):
     run(main())
 
 
+def test_the_delta_read_is_awaitable(amem):
+    """`since()` is two scope-wide id scans over SQLite, which is exactly the shape this
+    module exists to keep off the loop thread."""
+    async def main():
+        await amem.remember("user", "lives_in", "Berlin")
+        berlin = (await amem.get_all())[0]
+        away = utcnow()
+        await amem.supersede(berlin.id, Claim(subject="user", predicate="lives_in",
+                                              object="Lisbon",
+                                              scope=amem.default_scope),
+                             close="retired")
+        delta = await amem.since(away)
+        return [c.object for c in delta.added], [c.object for c in delta.gone]
+
+    assert run(main()) == (["Lisbon"], ["Berlin"])
+
+
+def test_the_scoped_view_carries_the_delta_read_too(amem):
+    """The other edge of the square. A method that is awaitable only unscoped is missing
+    from the object a server layer actually holds per request."""
+    async def main():
+        view = amem.scope(user="karl")
+        await view.remember("user", "working_on", "auth refactor")
+        return [c.object for c in (await view.since(utcnow() - timedelta(days=1))).added]
+
+    assert run(main()) == ["auth refactor"]
+
+
+def test_the_prompt_block_returns_its_ids_through_both_async_facades(amem):
+    """`recall()` still returns `str` by default on all four surfaces, and `with_ids`
+    has to reach the two here or the citation is available only in synchronous code."""
+    async def main():
+        await amem.remember("user", "lives_in", "Lisbon")
+        view = amem.scope(user="alice")
+        return (await amem.recall("where do they live"),
+                await amem.recall("where do they live", with_ids=True),
+                await view.recall("where do they live", with_ids=True))
+
+    plain, block, scoped = run(main())
+    assert isinstance(plain, str)
+    assert block.text == plain == scoped.text
+    assert block.claim_ids == scoped.claim_ids
+    assert len(block.claim_ids) == 1
+
+
+def test_the_context_budget_reaches_both_async_facades(amem):
+    """A `**self._kw` splice that dropped `budget` would still typecheck and still return
+    a block — one that quietly overruns the caller's context window."""
+    async def main():
+        for city in ("Lisbon", "Berlin", "Porto", "Madrid", "Vienna"):
+            await amem.remember("user", f"lived_in_{city.lower()}", city)
+        view = amem.scope(user="alice")
+        return (await amem.recall("where has the user lived", budget=40),
+                await view.recall("where has the user lived", budget=40, with_ids=True))
+
+    unscoped, scoped = run(main())
+    assert "did not fit" in unscoped
+    assert unscoped == scoped.text and scoped.dropped > 0
+
+
 def test_maintenance_is_awaitable(amem):
     async def main():
         await amem.add("I live in Berlin")

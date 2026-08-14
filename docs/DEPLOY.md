@@ -65,7 +65,7 @@ every write. `remember()` is unaffected — a structured write never needed a mo
 MEMVARA_DB=~/.memvara/memory.db python3 -m memvara.server
 ```
 
-JSON-RPC 2.0 over stdio, eight tools, no SDK dependency. It refuses to start without
+JSON-RPC 2.0 over stdio, nine tools, no SDK dependency. It refuses to start without
 `MEMVARA_DB` and prints the client configuration block instead — so if you have arrived
 here because your client said the server failed, run the command by hand and read what it
 says.

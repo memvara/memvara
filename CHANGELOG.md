@@ -100,6 +100,69 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
 
 ### Added
 
+- **`memory_remember` takes `close`, so an agent can finally say *which* clock it stopped.**
+  `Memvara.remember` has always taken it and `Memvara.forget` has always defaulted to
+  `"retired"`, but the MCP handler forwarded neither the argument nor a schema property for
+  it — so every correction made through the tool surface recorded `"ended"`, *the world
+  changed*, whether the user had moved house or the record had simply been wrong since
+  March. The two populations that a correction audit exists to separate were
+  indistinguishable in everything written through that transport.
+
+  Deliberately **not** offered on `memory_add`: extraction picks the closure per fact
+  server-side, so one agent-supplied override would apply to every fact a prose turn
+  produced, including ones the agent did not know it was writing. It defaults rather than
+  being required, which buys accuracy on corrections at no cost to ordinary facts — and the
+  honest limit is that this makes the distinction *reachable*, not *reliable*: a model that
+  misreads the turn mislabels the correction, and nothing downstream can tell.
+
+- **`recall(with_ids=True)` returns the claim ids it rendered**, as `RecallResult`, in
+  render order and 1:1 with the numbered notes. `recall()` returns `str` exactly as before
+  unless asked; the overloads follow `search()`'s. Previously the prompt-shaped surface
+  returned text and nothing else, so a caller who wanted to cite what an answer rested on
+  had to re-run retrieval through `search()` and hope the two agreed. Ids only, never
+  scores — and live facts only, since episodes have no claim id and citing a past value as
+  the source of a present-tense answer is worse than citing nothing.
+
+- **`recall(budget=…)` bounds the block by size rather than by count.** `k` bounds the
+  number of notes and claim text is variable, so `k=8` was a context budget by convention
+  only. Notes are dropped **whole** — half a fact in a prompt is a false fact — and the
+  block says how many did not fit, so a model can tell a bounded answer from a complete
+  one. `counter=` takes a real tokenizer; the default is a length heuristic that is roughly
+  right for English prose and **under-counts CJK**, which is stated where it is defined
+  rather than discovered in production. Core's dependencies remain `numpy` and nothing else.
+
+- **`since(when)` — what changed while the agent was away**, as a `Delta` of `added` and
+  `gone`. A supersession lands in both halves. This needs no new `Store` method: it is two
+  `candidate_ids` calls with **both clocks** pinned to `when`, differenced. Pinning the
+  belief clock alone is the tempting version and is wrong — `valid_at` then defaults to
+  now, so a claim whose world-interval has since closed never enters the "then" set, and
+  the supersession reports an arrival with nothing beside it.
+
+- **`memory_since` on the MCP surface**, bringing the server to nine tools. It returns
+  structured rows rather than a prompt block, and the reason is the same one that keeps
+  `states=` off `recall()`: a delta necessarily carries claims that stopped being believed,
+  so a `recall`-shaped twin would be an un-delete reached through another door. The two
+  halves carry both a directional heading and a per-line `+`/`-`, because they fail
+  differently — the heading is what a model reads, the mark is what survives the heading
+  scrolling out of view.
+
+- **`memvara-mcp init --agent claude`** writes the client's server block, the packaged
+  skill and a CLAUDE.md snippet into a project, with `MEMVARA_DB` already absolute. It
+  never rewrites an existing `.mcp.json`: where one exists and names another server, it
+  prints the entry *without* enclosing braces, indented to paste inside `mcpServers`,
+  because a self-valid block is the one people paste whole and break the file. `command` is
+  `sys.executable` rather than the documented `python3` — the client launches without a
+  login profile, so `PATH` finds the wrong interpreter for anyone in a virtualenv.
+
+- **A packaged agent skill** (`memvara/skills/claude/SKILL.md`) carrying only what no single
+  tool description can: the correction protocol as a sequence, scope hygiene and the
+  `MEMVARA_SESSION` trap, what is worth storing at all, and what changes on a server with no
+  extraction model. A test asserts it shares no 6-gram with any tool or property
+  description, so the two cannot drift into two sources for one fact.
+
+- **`RecallResult` and `Delta` are exported** from the top-level package, for the same
+  reason `Closure` is: both are return types on four facade methods each.
+
 - **`neighborhood()`, `history()` and `paths_between()` resolve learned aliases on the
   probe.** Previously a probe carried no alias stamp, so `neighborhood("Big Blue")` folded
   deterministically and missed every claim stamped `ibm`.
@@ -350,6 +413,25 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
   ```
 
 ### Fixed
+
+- **Three tool descriptions called one closure by the other's name.** `memory_forget` said
+  "storing the new value already *retires* the old one" — it ends it; `memory_remember`
+  said an exact predicate lets the store "*retire* the previous value", on the very tool
+  that now takes `close`; and `memory_history` described every past value as "*retired*",
+  though `_history` renders `_state()`, which emits both words, so the common case —
+  supersession — was mislabelled.
+
+  This is the second instance of the bug `_receipt_summary`'s docstring was written about
+  ("a model reading its own memory tool had three names for two events"). That fix
+  corrected the receipt line and never swept the descriptions. Two guards now exist: one
+  asserting every handler reads every property its own schema declares, and one asserting
+  no description uses a retire-word for an operation that ends or the reverse. Both were
+  confirmed to fail against the pre-fix code before being kept.
+
+- **A fact's past no longer outlives the fact under a budget.** `recall(include_history=…)`
+  built its past values in a flat list that was not index-aligned to the claims, so a
+  budget that dropped a note could leave that note's history rendered beneath a fact no
+  longer there.
 
 - **Superseding a claim no longer records it as an error.** `Reconciler._retire` closed
   *both* clocks when one value replaced another. `valid_to` was right — Berlin stopped

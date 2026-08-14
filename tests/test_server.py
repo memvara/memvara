@@ -20,6 +20,7 @@ about one of them:
 
 import io
 import json
+import re
 import sys
 import types
 from dataclasses import replace
@@ -134,8 +135,9 @@ def test_no_tool_can_erase_anything():
     """
     names = {t.name for t in TOOLS}
     assert names == {
-        "memory_recall", "memory_search", "memory_add", "memory_remember",
-        "memory_forget", "memory_history", "memory_why", "memory_stats",
+        "memory_recall", "memory_search", "memory_since", "memory_add",
+        "memory_remember", "memory_forget", "memory_history", "memory_why",
+        "memory_stats",
     }
     forbidden = ("purge", "reset", "consolidate", "reembed", "erase", "delete")
     for tool in TOOLS:
@@ -163,6 +165,164 @@ def test_every_tool_description_says_when_to_call_it():
         assert any(cue in tool.description for cue in cues), tool.name
         for prop in tool.properties.values():
             assert prop.get("description") or prop.get("enum"), tool.name
+
+
+# -- every declared argument reaches the store -------------------------------
+
+#: Handlers are called with *validated* arguments, so a case needs only the required
+#: properties plus anything the schema gives no default — `validate()` fills the rest,
+#: and a case that named them all would drift from the schema it is checking.
+#:
+#: `memory_forget` gets two, because it refuses both of its addressing modes at once: no
+#: single call can touch all three of its properties, and the union of two can.
+_FORWARDING_CASES = {
+    "memory_recall": [{"query": "anything", "memory_types": ["semantic"]}],
+    "memory_search": [{"query": "anything", "memory_types": ["semantic"],
+                       "as_of": "2024-03-01"}],
+    "memory_since": [{"since": "2024-03-01"}],
+    "memory_add": [{"text": "I live in Lisbon"}],
+    "memory_remember": [{"predicate": "lives_in", "object": "Lisbon",
+                         "memory_type": "semantic"}],
+    "memory_forget": [{"predicate": "lives_in"}, {"claim_id": "cl_absent"}],
+    "memory_history": [{"predicate": "lives_in"}],
+    "memory_why": [{"claim_id": "cl_absent"}],
+    "memory_stats": [{}],
+}
+
+
+class _Recording(dict):
+    """The validated arguments, remembering which keys the handler actually looked at."""
+
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        self.read = set()
+
+    def __getitem__(self, key):
+        self.read.add(key)
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        # Overridden as well as `__getitem__`: `dict.get` does not route through it, so
+        # without this every `args.get("memory_types")` would read as a dropped argument.
+        self.read.add(key)
+        return super().get(key, default)
+
+
+@pytest.mark.parametrize("tool", TOOLS, ids=lambda t: t.name)
+def test_every_handler_forwards_every_property_it_declares(server, tool):
+    """**The bug.** `memory_remember`'s handler forwarded five of its six arguments.
+
+    `close` — "the world changed" versus "the record was wrong" — had no property on the
+    schema and no line in `_remember`, so every correction written through this transport
+    was recorded as the world moving on, and the two populations a corrections report
+    exists to separate arrived indistinguishable. Nothing failed: a dropped argument is
+    invisible from both ends, since the model gets a successful write and the store gets
+    a plausible one.
+
+    So the schema is walked rather than trusted. Each handler is called with its own
+    arguments wrapped in a dict that records reads, and every property it declares has to
+    be one of them.
+
+    Two honest limits. It proves the handler *read* the value, not that it passed it on
+    unmangled — a handler that read `close` and dropped it on the floor still passes, and
+    only a behavioural test (`test_a_correction_is_recorded_as_one`, below) covers that.
+    And it can only exercise argument sets someone wrote down, which is why an unlisted
+    tool fails here rather than being skipped.
+    """
+    cases = _FORWARDING_CASES.get(tool.name)
+    assert cases is not None, (
+        f"{tool.name} is new: add argument set(s) covering its schema to "
+        "_FORWARDING_CASES, or this guard quietly stops covering it.")
+
+    read = set()
+    for arguments in cases:
+        args = _Recording(validate(tool.properties, tool.required, arguments,
+                                   tool=tool.name))
+        tool.handler(server._ctx, args)
+        read |= args.read
+
+    dropped = sorted(set(tool.properties) - read)
+    assert not dropped, (
+        f"{tool.name} declares {dropped} in its schema, and its handler never reads "
+        f"{'them' if len(dropped) > 1 else 'it'}. A model can spell the argument, the "
+        "validator will accept it, and nothing carries it to the store."
+    )
+
+
+# -- one word per clock, in the prose too ------------------------------------
+
+#: Prose, so the unit is the clause: the marks below end one. Splitting on them keeps
+#: "storing the new value already retires the old one" whole while keeping it apart from
+#: the sentence next to it, which is what makes the pairing below mean anything.
+_CLAUSE = re.compile(r"[.;:,()—]")
+_RETIRE = re.compile(r"\bretir\w*", re.I)
+_END = re.compile(r"\bend(?:s|ed|ing)?\b", re.I)
+#: Phrases naming a write that closes the **valid** clock — a supersession. The word for
+#: this is "ended"; "retired" here is the bug.
+_SUPERSESSION = re.compile(
+    r"new value|previous value|the old one|supersed\w*|the fact changes|"
+    r"the world changed|took over", re.I)
+#: Phrases naming a record that was never true, which closes the **belief** clock. The
+#: word is "retired"; "ended" here is the same bug pointing the other way.
+_CORRECTION = re.compile(
+    r"\bwrong\b|never true|mistake|mishear\w*|correct(?:ing|ion)", re.I)
+
+
+def _mislabelled(prose):
+    """Clauses that describe one closure and use the other one's word for it."""
+    return [clause for clause in _CLAUSE.split(prose)
+            if (_RETIRE.search(clause) and _SUPERSESSION.search(clause))
+            or (_END.search(clause) and _CORRECTION.search(clause))]
+
+
+def test_no_description_uses_one_closure_word_for_the_other():
+    """The vocabulary bug, swept for rather than fixed one sighting at a time.
+
+    `_receipt_summary`'s docstring records the first instance: the write summary printed
+    `retired 1` for a fact that had merely stopped being true. That line was fixed and
+    the tool descriptions were not swept, so `memory_forget` went on telling the model
+    that "storing the new value already retires the old one" while the receipt beside it
+    in the same turn said `ended 1, retired 0`, and `memory_remember` said the store
+    "retires the previous value when the fact changes". A model reading its own memory
+    tool had two words for two events and no way to tell which was which.
+
+    Crude on purpose, and the limits are worth stating because they bound what a green
+    run means. It only fires where a clause names the operation *and* misnames its
+    closure, so `memory_history`'s "when it was retired" — retired standing in for both
+    outcomes of a timeline — was found by reading and not by this. And the cue lists are
+    the vocabulary these descriptions happen to use today; a new phrasing for "the world
+    changed" is a phrasing this test cannot see.
+    """
+    for tool in TOOLS:
+        prose = {tool.name: tool.description}
+        prose.update({f"{tool.name}.{name}": spec.get("description", "")
+                      for name, spec in tool.properties.items()})
+        for label, text_ in prose.items():
+            assert not _mislabelled(text_), (
+                f"{label} calls one closure by the other's name: {_mislabelled(text_)}. "
+                "A superseded value is 'ended' — it was true and stopped being true. A "
+                "'retired' one was never true at all. See Claim.state and "
+                "memvara.types.closure, which are where the two words are defined."
+            )
+
+
+@pytest.mark.parametrize("prose", [
+    # memory_forget's closing sentence, verbatim as it shipped.
+    "storing the new value already retires the old one",
+    # memory_remember's, likewise: a supersession, called a retirement.
+    "an exact predicate is what lets the store retire the previous value "
+    "automatically when the fact changes",
+    # And the mirror, which has never shipped but is the same error reversed.
+    "the record was wrong so its valid time ends here",
+])
+def test_the_closure_vocabulary_check_is_not_vacuous(prose):
+    """A crude checker is worth having only if it is shown to fire.
+
+    The first two were live in `TOOLS` the day this was written, which is the only
+    evidence that the guard above watches the door it was built for; the third is the
+    error reversed, so that half of the rule is not merely asserted to exist.
+    """
+    assert _mislabelled(prose)
 
 
 # -- protocol framing --------------------------------------------------------
@@ -424,6 +584,94 @@ def test_recall_returns_prompt_ready_text(server):
     assert "relevance" not in body and "{" not in body
 
 
+#: Long enough that dropping one saves more than the "did not fit" line costs. With
+#: four stored postcodes the complete block is cheaper than any prefix of it plus the
+#: notice, so a budget either fits everything or nothing — which is `recall()` filling
+#: downwards working correctly, and useless for showing a partial block.
+_LODGINGS = (
+    "Lisbon and keeps a flat in Alfama near the river",
+    "Berlin and kept a flat in Kreuzberg for eleven years",
+    "Porto and rents a room above a bakery in Cedofeita",
+    "Madrid and stayed six months in a sublet in Lavapies",
+)
+
+
+def _lodgings(server):
+    for i, where in enumerate(_LODGINGS):
+        text(server, "memory_remember", {"predicate": f"lived_in_{i}", "object": where})
+
+
+def test_recall_takes_a_token_budget_and_says_what_it_dropped(server):
+    """`k` bounds the number of notes and never bounded their size.
+
+    Claim text is variable — a stored postcode and a stored paragraph each cost one
+    slot — so `k=8` was a context-window budget by convention and by nothing else, and
+    this tool's own schema was stating the convention as though it were a guarantee.
+    `budget` is the ceiling that was missing, and it is the library's, forwarded: the
+    counting, the fill order and the notice all belong to `recall()`, and what is
+    asserted here is that an agent can reach them.
+
+    Both halves of the property, because either alone is a worse feature. Notes leave
+    whole, so no line is a truncated fact; and the block says how many left, so a model
+    reads a bounded list as bounded rather than as everything known.
+    """
+    _lodgings(server)
+    plain = text(server, "memory_recall", {"query": "where has the user lived"})
+    tight = text(server, "memory_recall", {"query": "where has the user lived",
+                                           "budget": 70})
+
+    kept = [line for line in tight.splitlines() if line.startswith("- ")]
+    everything = [line for line in plain.splitlines() if line.startswith("- ")]
+    assert 0 < len(kept) < len(everything)
+    assert kept == everything[:len(kept)], "a prefix of the ranking, and never a rewrite"
+    assert tight.splitlines()[-1] == Memvara._dropped_line(len(everything) - len(kept))
+
+
+def test_an_unbudgeted_recall_is_the_call_it_always_was(server):
+    """No default on the property, so an agent that does not ask for a ceiling does not
+    get one — and the block it gets back is byte for byte the one it got before this
+    argument existed."""
+    _lodgings(server)
+    assert "default" not in BY_NAME["memory_recall"].properties["budget"]
+
+    args = validate(BY_NAME["memory_recall"].properties, ("query",),
+                    {"query": "where has the user lived"}, tool="memory_recall")
+    assert "budget" not in args
+    assert "did not fit" not in text(server, "memory_recall",
+                                     {"query": "where has the user lived"})
+
+
+def test_k_and_budget_say_that_they_bound_different_things():
+    """Two limits on one call is a trap unless each says what the other does not cover.
+    `k` counts notes, `budget` measures them, and a reader who thinks 8 notes is a size
+    is the reader this pair exists for."""
+    props = BY_NAME["memory_recall"].properties
+    assert props["k"]["default"] == 8
+    assert "budget" in props["k"]["description"], "k has to point at the size limit"
+    for word in ("token", "heuristic", "did not fit"):
+        assert word in props["budget"]["description"], f"budget must admit {word!r}"
+
+
+def test_recall_hands_back_no_claim_ids_and_that_is_the_decision(server):
+    """Not an oversight, and the next reader is asked not to "fix" it.
+
+    `recall(with_ids=True)` exists and returns the ids of the claims it rendered, and
+    this tool deliberately does not ask for them. What it sells, in the one paragraph a
+    model reads before choosing it, is numbered plain-text notes with no scores or JSON
+    to filter out — an id on every line is exactly the retrieval metadata that sentence
+    promises is absent. An agent that needs a handle on a memory has somewhere to go:
+    `memory_search` carries ids over the same claims, which is what it is for.
+    """
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Lisbon"})
+    body = text(server, "memory_recall", {"query": "where do they live"})
+
+    assert "user lives in Lisbon" in body
+    assert "cl_" not in body and "id=" not in body
+    assert "with_ids" not in json.dumps(BY_NAME["memory_recall"].schema)
+    assert "id=cl_" in text(server, "memory_search", {"query": "where do they live"}), \
+        "the same claim, from the tool whose job is to be citable"
+
+
 def test_recall_and_search_report_absence_as_absence(server):
     for name in ("memory_recall", "memory_search"):
         body = text(server, name, {"query": "my mother's maiden name"})
@@ -476,6 +724,151 @@ def test_as_of_accepts_the_spellings_a_model_reaches_for(server, stamp):
 def test_as_of_rejects_nonsense_with_an_example(server):
     body, is_error = call(server, "memory_search", {"query": "x", "as_of": "last March"})
     assert is_error and "ISO-8601" in body and "2024-06-01T10:00:00Z" in body
+
+
+# -- what changed while the agent was away -----------------------------------
+
+def _left_yesterday(server, predicate, obj):
+    """Put a fact on the books before the agent went away, and return when it left.
+
+    Backdated on both clocks rather than merely written first: a claim recorded a
+    millisecond ago is inside every delta a test could ask for, so a tool that returned
+    the store's whole contents would pass. Returns an instant after the write and before
+    anything the caller does next, which is the "away" the tool is answering about.
+    """
+    day = utcnow() - timedelta(days=1)
+    server._ctx.memory.remember("user", predicate, obj, valid_from=day, recorded_at=day)
+    return utcnow() - timedelta(hours=1)
+
+
+def test_since_reports_a_supersession_as_both_halves(server):
+    """The delta a resumed session is for, in the shape that carries a correction.
+
+    Berlin was believed when the agent left and is not believed now; Lisbon is the
+    reverse. One write produced both, and a delta that showed only the arrival would be
+    telling the agent a new fact while leaving it holding the old one — which is the
+    failure a returning agent has no other way to detect, because by the time it looks
+    there is no row left in the current view to notice the absence of.
+    """
+    away = _left_yesterday(server, "lives_in", "Berlin")
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Lisbon",
+                                     "close": "retired"})
+
+    body = text(server, "memory_since", {"since": away.isoformat()})
+    added = [line for line in body.splitlines() if line.startswith("+ ")]
+    gone = [line for line in body.splitlines() if line.startswith("- ")]
+
+    assert body.splitlines()[0].startswith("1 arrived and 1 left since ")
+    assert len(added) == 1 and "Lisbon" in added[0]
+    assert len(gone) == 1 and "Berlin" in gone[0]
+    # The state is the word that says the record was withdrawn rather than overtaken,
+    # and it is the whole reason a row is worth raising with the user.
+    assert " retired " in gone[0] and " live] " in added[0]
+
+
+def test_since_carries_ids_the_next_call_can_use(server):
+    """Rows, not prose, means every line names something the agent can then ask about."""
+    away = _left_yesterday(server, "lives_in", "Berlin")
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Lisbon"})
+
+    body = text(server, "memory_since", {"since": away.isoformat()})
+    everything = server._ctx.memory.get_all(include_invalidated=True)
+    for claim in everything:
+        assert f"[id={claim.id} " in body
+    lisbon = [c for c in everything if c.object == "Lisbon"][0]
+    assert "Lisbon" in text(server, "memory_why", {"claim_id": lisbon.id})
+
+
+def test_since_keeps_the_two_halves_apart(server):
+    """A reader who cannot tell the halves apart has the delta precisely backwards.
+
+    Two signals rather than one, because they fail differently: a heading is what a
+    model reads, and a per-line mark is what survives the heading scrolling out of a
+    truncated result. Asserted by position, so a rendering that grouped the rows under
+    swapped headings fails here rather than reading plausibly.
+    """
+    away = _left_yesterday(server, "lives_in", "Berlin")
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Lisbon"})
+
+    body = text(server, "memory_since", {"since": away.isoformat()})
+    assert (body.index("Believed now, not believed then")
+            < body.index("Lisbon")
+            < body.index("Believed then, not believed now")
+            < body.index("Berlin"))
+    assert "do not read these back as things you know" in body
+
+
+def test_since_returns_records_and_never_a_prompt(server):
+    """**The decision this tool's shape turns on.**
+
+    A delta necessarily contains claims that stopped being believed, so a `recall`-shaped
+    twin of this tool would render retired records as facts under a header that says
+    they are known about the user — the un-delete `recall()`'s explicit signature exists
+    to prevent, arriving through a tool that never mentions `states`. So Berlin comes
+    back as a row with an id and a state on it, and never as the note `recall()` would
+    have made of it.
+    """
+    away = _left_yesterday(server, "lives_in", "Berlin")
+    text(server, "memory_forget", {"predicate": "lives_in"})
+
+    body = text(server, "memory_since", {"since": away.isoformat()})
+    assert "Berlin" in body and " retired " in body
+    assert not body.startswith(Memvara.RECALL_HEADER)
+    assert Memvara.RECALL_HEADER not in body
+    assert "- user lives in Berlin" not in body, "that line is a recall note, not a row"
+    # And the surface that does build prompts still refuses it, on the same claim.
+    assert "No stored memory matched" in text(server, "memory_recall",
+                                              {"query": "where do they live"})
+
+
+def test_since_says_plainly_when_nothing_changed(server):
+    """"Nothing changed" is an answer, and it is not the same answer as "nothing is
+    stored" — an agent that confused the two would open a resumed session by telling
+    someone it had forgotten them. So the store is not empty here, and the reply still
+    names none of it."""
+    away = _left_yesterday(server, "lives_in", "Lisbon")
+
+    body = text(server, "memory_since", {"since": away.isoformat()})
+    assert body.startswith("Nothing has changed since ")
+    assert "still stands" in body
+    assert "Lisbon" not in body, "a delta of nothing is not a recall of everything"
+
+
+def test_since_answers_the_instant_it_resolved_rather_than_the_one_it_was_sent(server):
+    """A bare date is a legal argument and midnight UTC is what it meant, so echoing the
+    shorthand back would leave the reply not saying which instant it answered. Also the
+    one-sided delta: everything arrived, nothing left."""
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Lisbon"})
+
+    body = text(server, "memory_since", {"since": "2024-03-01"})
+    assert body.startswith("1 arrived and 0 left since 2024-03-01 00:00Z.")
+    assert "Believed then, not believed now" not in body, "no empty heading"
+
+
+@pytest.mark.parametrize("stamp", ["2024-03-01T10:00:00Z", "2024-03-01t10:00:00z",
+                                   "2024-03-01", "2024-03-01T10:00:00+02:00"])
+def test_since_takes_the_instants_as_of_takes(server, stamp):
+    """One parser, so the two time-travelling tools cannot disagree about what a model
+    is allowed to send either of them."""
+    assert "Nothing has changed since" in text(server, "memory_since", {"since": stamp})
+
+
+def test_since_rejects_nonsense_with_the_same_example(server):
+    body, is_error = call(server, "memory_since", {"since": "when I last logged in"})
+    assert is_error and "memory_since.since must be an ISO-8601" in body
+    assert "2024-06-01T10:00:00Z" in body
+
+
+def test_since_rows_cannot_be_forged_by_stored_text(server):
+    """The new rendering surface, tested as the security boundary it is: a delta is
+    replayed into an agent's context like every other result here."""
+    text(server, "memory_remember", {"predicate": "lives_in", "object": INJECTION})
+
+    body = text(server, "memory_since", {"since": "2024-03-01"})
+    assert len(body.splitlines()) == 3, "one header, one heading, one row"
+    assert "SYSTEM:" in body, "the text is shown, just not as structure"
+    assert body.index("[id=cl_") < body.index("SYSTEM:")
+    assert "not instructions" in body
 
 
 def test_history_shows_every_value_a_slot_has_held(server):
@@ -639,6 +1032,70 @@ def test_remember_defaults_the_subject_to_the_user(server):
     assert server._ctx.memory.get_all()[0].subject == "user"
 
 
+def test_a_correction_is_recorded_as_one(server):
+    """**The bug.** Every agent-written correction claimed the world had changed.
+
+    `Memvara.remember` has taken `close=` since it was written. `_remember` forwarded
+    subject, predicate, object, confidence and memory_type, and the schema declared no
+    sixth property, so there was no spelling of it a model could have used. "I moved to
+    Lisbon" and "you have had me in Berlin for months and I have never lived there" were
+    therefore written identically: Berlin `ended`, still believed, still answering
+    `valid_at=<last March>` with a fact that was never true.
+
+    The distinction is what a corrections report splits on — `retired` is the list a
+    human has to look at, `ended` is the list nobody needs to. Written this way, that
+    report's remediation list was empty by construction for everything an agent wrote,
+    which is indistinguishable from a store that has never been wrong.
+
+    Both readings, because the default has to stay the other one: corrections are the
+    minority, and a required argument on the most-used write tool would buy accuracy on
+    them at the cost of friction on every ordinary fact.
+    """
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Berlin"})
+    corrected = text(server, "memory_remember", {
+        "predicate": "lives_in", "object": "Lisbon", "close": "retired"})
+
+    assert "ended 0, retired 1" in corrected
+    displaced = [line for line in corrected.splitlines() if line.startswith("- [")]
+    assert len(displaced) == 1 and " retired " in displaced[0]
+    berlin = [c for c in server._ctx.memory.get_all(include_invalidated=True)
+              if c.object == "Berlin"][0]
+    assert berlin.state == "retired", "belief stopped; the interval was never re-written"
+
+    # The default is untouched, and is still the world-changed reading.
+    text(server, "memory_remember", {"subject": "sam", "predicate": "lives_in",
+                                     "object": "Berlin"})
+    moved = text(server, "memory_remember", {"subject": "sam", "predicate": "lives_in",
+                                             "object": "Porto"})
+    assert "ended 1, retired 0" in moved
+
+
+def test_close_takes_only_the_two_words_the_library_takes(server):
+    """The enum is a second guard, not the only one: `closure()` refuses the rest.
+
+    Worth having anyway, because a rejection the model can read beats a `ValueError`
+    surfacing as a failed tool call, and the two spellings are the whole vocabulary.
+    """
+    body, is_error = call(server, "memory_remember", {
+        "predicate": "lives_in", "object": "Lisbon", "close": "deleted"})
+    assert is_error and "must be one of 'ended', 'retired'" in body
+
+
+def test_the_prose_write_path_takes_no_closure(server):
+    """`close` is deliberately absent from memory_add, and that is not an oversight.
+
+    Extraction picks the closure server-side, one turn at a time, so an agent-supplied
+    override would apply to every fact that turn produced — including the ones it did
+    not know were being written. The cost is stated in the same breath: most agent writes
+    go through `add`, so most writes stay unlabelled by intent even now, and a report
+    built on this field is a partial view at its best.
+    """
+    assert "close" not in BY_NAME["memory_add"].properties
+    body, is_error = call(server, "memory_add",
+                          {"text": "I have never lived in Berlin", "close": "retired"})
+    assert is_error and "unknown argument(s)" in body
+
+
 def test_forget_retires_a_slot_and_keeps_the_history(server):
     text(server, "memory_remember", {"predicate": "lives_in", "object": "Lisbon"})
     body = text(server, "memory_forget", {"predicate": "lives_in"})
@@ -679,8 +1136,8 @@ def read_only():
 def test_read_only_hides_the_write_tools(read_only):
     """Hidden, not listed-and-refused: a visible tool is a turn the model will spend."""
     names = [t["name"] for t in request(read_only, "tools/list")["result"]["tools"]]
-    assert names == ["memory_recall", "memory_search", "memory_history", "memory_why",
-                     "memory_stats"]
+    assert names == ["memory_recall", "memory_search", "memory_since", "memory_history",
+                     "memory_why", "memory_stats"]
     assert "Lisbon" in text(read_only, "memory_recall", {"query": "Lisbon"})
 
 
@@ -696,7 +1153,8 @@ def test_read_only_explains_itself_rather_than_erroring(read_only):
 
 def test_unknown_argument_suggests_the_real_one(server):
     body, is_error = call(server, "memory_recall", {"query": "x", "kk": 3})
-    assert is_error and "did you mean 'k'" in body and "Accepted: k, memory_types" in body
+    assert is_error and "did you mean 'k'" in body
+    assert "Accepted: budget, k, memory_types" in body
 
 
 def test_missing_required_argument(server):
