@@ -172,6 +172,20 @@ def check_credential_matches_target(test: bool) -> None:
     token = os.environ.get("TWINE_PASSWORD")
     source = "$TWINE_PASSWORD"
 
+    if token:
+        # Say so when the variable is shadowing a file that also has a credential. An
+        # `export` persists for the life of a shell, so this outranks ~/.pypirc in every
+        # later command in that terminal — including ones run days later, by someone who
+        # has long since stopped thinking of the variable as set. The file looking correct
+        # is then perfectly consistent with every upload failing.
+        rc = Path.home() / ".pypirc"
+        if rc.is_file():
+            shadowed = configparser.ConfigParser()
+            shadowed.read(rc)
+            if shadowed.has_option(section, "password"):
+                print(f"  note      : $TWINE_PASSWORD is set and overrides "
+                      f"~/.pypirc [{section}], which is being ignored")
+
     if not token:
         rc = Path.home() / ".pypirc"
         if not rc.is_file():
