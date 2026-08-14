@@ -196,12 +196,30 @@ def check_credential_matches_target(test: bool) -> None:
         source = f"~/.pypirc [{section}]"
 
     issuer = token_issuer(token)
-    if issuer and issuer != want:
+    if issuer is None:
+        # Not an API token. This must refuse rather than warn: PyPI stopped accepting
+        # account passwords for uploads, and what it returns instead is the same bare 403
+        # with an empty body that a wrong-service token gets. Letting it through only moves
+        # the failure to after the build, the confirmation prompt and the upload.
+        raise Abort(
+            f"the credential in {source} is not a PyPI API token — an API token begins\n"
+            f"  with `pypi-` and this does not",
+            "If it is an account password: PyPI no longer accepts one for uploading, and\n"
+            f"  refuses with exactly the empty 403 you saw. Create a token at\n"
+            f"  https://{want}/manage/account/token/ and use that.\n\n"
+            "  If you believe it IS a token, it is probably truncated or quoted — `read`\n"
+            "  stops at the first newline, so a token that wraps in the terminal loses its\n"
+            "  tail, and pasted surrounding quotes end up inside the value. Check the shape\n"
+            "  without revealing it:\n\n"
+            "      python3 -c 'import os; t=os.environ[\"TWINE_PASSWORD\"]; "
+            "print(len(t), t.startswith(\"pypi-\"), t.isascii(), t.strip()==t)'\n\n"
+            "  A working token is ~180 chars, starts `pypi-`, is ASCII, and has no spaces.")
+    if issuer != want:
         raise Abort(
             f"the token in {source} was issued by {issuer}, but this uploads to {want}",
             f"{service} needs a token created at https://{want}/manage/account/token/ .\n"
             "  Using the other one gets you a 403 whose body does not say why.")
-    print(f"  credential: {source}" + (f", issued by {issuer}" if issuer else ""))
+    print(f"  credential: {source}, issued by {issuer}")
 
 
 def preflight(test: bool, allow_dirty: bool) -> tuple[str, str]:
