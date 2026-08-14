@@ -1946,6 +1946,25 @@ class SQLiteStore:
             ).fetchall()
         return [self._row_to_claim(r) for r in rows]
 
+    def count_competing(self, tenant: str, fact_key: str, *,
+                        valid_at: datetime | None = None,
+                        known_at: datetime | None = None) -> int:
+        """How many live claims occupy the slot. The same query, counted in SQLite.
+
+        Deliberately built from `_live_clause` and the same `WHERE` as
+        `competing_claims`, so the two cannot come to disagree about what "live" means —
+        which is the failure a hand-written count clause invites and the reason
+        `_live_clause` exists at all. `cl_fact` covers (tenant, fact_key), so the count
+        walks index entries and never touches a row.
+        """
+        live, lp = self._live_clause(valid_at, known_at, include_invalidated=False)
+        with self._read() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM claims WHERE tenant=? AND fact_key=? AND {live}",
+                [tenant, fact_key] + lp,
+            ).fetchone()
+        return int(row[0])
+
     def claims_citing(self, tenant: str, episode_id: str) -> list[Claim]:
         """Every claim whose `sources` names this turn — provenance, run backwards.
 
