@@ -47,6 +47,8 @@ credentials".
 from __future__ import annotations
 
 import argparse
+import base64
+import configparser
 import os
 import shutil
 import subprocess
@@ -125,6 +127,83 @@ def released_versions(name: str, *, test: bool) -> set[str]:
     return set(resp.json().get("releases", {}))
 
 
+#: `.pypirc` section name and expected token issuer, keyed on whether `--test` was passed.
+#: These are two unrelated services that happen to run the same software: separate
+#: accounts, separate tokens, separate name namespaces.
+_TARGET = {False: ("pypi", "pypi.org"), True: ("testpypi", "test.pypi.org")}
+
+
+def token_issuer(token: str) -> str | None:
+    """Which service issued a PyPI API token, or None if it is not one.
+
+    A token is `pypi-` followed by a base64url macaroon, and a macaroon carries its issuing
+    location in the clear. Reading that single field is what lets this distinguish a
+    pypi.org token from a test.pypi.org one locally. **The token is never printed, logged,
+    stored or sent anywhere** — the only value that leaves this function is a domain name.
+    """
+    if not token.startswith("pypi-"):
+        return None                     # a legacy username/password; nothing to check
+    raw = token[5:]
+    try:
+        blob = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+    except Exception:
+        return None
+    # "test.pypi.org" contains "pypi.org", so the longer host has to be tested first.
+    return next((h for h in ("test.pypi.org", "pypi.org") if h.encode() in blob), None)
+
+
+def check_credential_matches_target(test: bool) -> None:
+    """Refuse unless a credential exists for *the service being uploaded to*.
+
+    This used to check only whether `TWINE_PASSWORD` or `~/.pypirc` existed **at all**, and
+    that is precisely how the first real run of this script failed. A `.pypirc` holding
+    only a `[pypi]` section, `--test` on the command line, and TestPyPI answered with a
+    bare `403 Forbidden` carrying no message — after building, checking and uploading half
+    a megabyte. Holding *a* credential is not holding *the* one.
+
+    The module docstring warned about this in prose the whole time. It made no difference,
+    because the guard passed and nobody reads a warning about a problem they do not yet
+    know they have. A rule the code does not enforce is a rule that is not in effect.
+    """
+    section, want = _TARGET[test]
+    service = "TestPyPI" if test else "PyPI"
+
+    # Twine's own precedence: TWINE_PASSWORD wins over .pypirc, for either target.
+    token = os.environ.get("TWINE_PASSWORD")
+    source = "$TWINE_PASSWORD"
+
+    if not token:
+        rc = Path.home() / ".pypirc"
+        if not rc.is_file():
+            raise Abort(f"no $TWINE_PASSWORD and no ~/.pypirc — nothing to authenticate to "
+                        f"{service} with",
+                        'read -rs TWINE_PASSWORD && export TWINE_PASSWORD && '
+                        'export TWINE_USERNAME=__token__')
+        parser = configparser.ConfigParser()
+        parser.read(rc)
+        if not parser.has_option(section, "password"):
+            raise Abort(
+                f"~/.pypirc has no [{section}] section, which is the one {service} needs\n"
+                f"  (it has: {parser.sections() or 'no sections at all'})",
+                f"{service} is a separate service with its own account and its own token —\n"
+                f"  a {'PyPI' if test else 'TestPyPI'} token does not work against it. Register at\n"
+                f"  https://{want}/account/register/ , create a token, and add:\n\n"
+                f"      [{section}]\n"
+                f"      username = __token__\n"
+                f"      password = <the {service} token>\n\n"
+                f"  Or export TWINE_PASSWORD for this shell only, which leaves it on no disk.")
+        token = parser.get(section, "password")
+        source = f"~/.pypirc [{section}]"
+
+    issuer = token_issuer(token)
+    if issuer and issuer != want:
+        raise Abort(
+            f"the token in {source} was issued by {issuer}, but this uploads to {want}",
+            f"{service} needs a token created at https://{want}/manage/account/token/ .\n"
+            "  Using the other one gets you a 403 whose body does not say why.")
+    print(f"  credential: {source}" + (f", issued by {issuer}" if issuer else ""))
+
+
 def preflight(test: bool, allow_dirty: bool) -> tuple[str, str]:
     if not (REPO / "pyproject.toml").is_file():
         raise Abort(f"no pyproject.toml under {REPO}",
@@ -132,10 +211,7 @@ def preflight(test: bool, allow_dirty: bool) -> tuple[str, str]:
     meta = tomllib.load((REPO / "pyproject.toml").open("rb"))["project"]
     name, version = meta["name"], meta["version"]
 
-    if not os.environ.get("TWINE_PASSWORD") and not (Path.home() / ".pypirc").is_file():
-        raise Abort("no TWINE_PASSWORD and no ~/.pypirc",
-                    'read -rs TWINE_PASSWORD && export TWINE_PASSWORD && '
-                    'export TWINE_USERNAME=__token__')
+    check_credential_matches_target(test)
 
     dirty = git("status", "--porcelain")
     if dirty and not allow_dirty:

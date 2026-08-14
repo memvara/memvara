@@ -41,8 +41,9 @@ python3 release/publish_pypi.py --test     # TestPyPI first, always
 python3 release/publish_pypi.py            # the real thing
 ```
 
-It refuses to run on an uncommitted tree, on an unpushed commit, without credentials, or
-when the version already exists on the index. It then builds from clean, runs
+It refuses to run on an uncommitted tree, on an unpushed commit, without a credential *for
+the service being uploaded to*, or when the version already exists on the index. It then
+builds from clean, runs
 `twine check` (which renders the README the way PyPI will — a description that fails to
 render is *accepted* and displayed as raw text forever), asks you to type the version to
 confirm, uploads, and installs the result into a throwaway virtualenv to prove that what
@@ -52,8 +53,20 @@ a user gets actually imports.
 cannot scope a token to a project that does not exist yet. Replace it with a
 project-scoped token straight afterwards.
 
-**TestPyPI is a separate service** with its own account and its own token. A PyPI token
-fails against it with nothing more helpful than "invalid credentials".
+**TestPyPI is a separate service** with its own account, its own token and its own
+namespace. A `.pypirc` holding only a `[pypi]` section will not authenticate `--test`, and
+what comes back is a bare `403 Forbidden` with **no message at all** — after the build,
+the checks and half a megabyte of upload have already happened.
+
+The script now refuses that combination up front, in under a second, and names the fix. It
+reads the issuing domain out of the token's macaroon to do it, so a pypi.org token aimed at
+TestPyPI is caught even when the section name looks right. The token itself is never
+printed, logged, or sent anywhere; the only value derived from it is a domain name.
+
+This is worth stating plainly, because the prose above already said "separate account,
+separate token" before any of it happened, and that made no difference whatsoever: the
+guard passed, so nobody read the warning. **A rule the code does not enforce is not in
+effect**, however clearly it is written down.
 
 ### Sequencing that matters for the first release
 
