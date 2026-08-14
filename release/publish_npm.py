@@ -238,6 +238,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tag", default="latest",
                     help="dist-tag; use 'next' or 'beta' to publish without moving 'latest'")
     ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--otp", metavar="CODE",
+                    help="2FA code, if the account enforces 2FA for writes. Only a classic"
+                         " 'Publish' token needs one; an 'Automation' token bypasses 2FA.")
     args = ap.parse_args(argv)
 
     pkg = args.package.resolve()
@@ -256,11 +259,25 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     with npm_auth_flags() as auth:
+        if args.otp:
+            auth = [*auth, "--otp", args.otp]
         return publish(pkg, name, version, args.tag, args.yes, auth)
 
 
 def publish(pkg: Path, name: str, version: str, tag: str, yes: bool,
             auth: list[str]) -> int:
+
+    # Resolve the identity before asking anyone to confirm anything. It costs one request,
+    # it proves the credential authenticates at all, and it turns npm's "these credentials"
+    # — which names nothing — into an account you can go and look at.
+    try:
+        who = run("npm", "whoami", *auth, cwd=pkg, capture=True)
+    except Abort:
+        raise Abort("the credential does not authenticate to the registry at all",
+                    "`npm whoami` failed, so this is not a permissions problem: the token\n"
+                    "  is wrong, revoked, or expired. Issue a new one at\n"
+                    "  https://www.npmjs.com/settings/~/tokens")
+    print(f"  identity  : {who}")
 
     if not yes:
         prompt = (f"\n  Publish {name}@{version} to npm as '{tag}'."
@@ -272,7 +289,28 @@ def publish(pkg: Path, name: str, version: str, tag: str, yes: bool,
     # `--access public` always: a scoped package is restricted by default, and a
     # restricted package on a free account is refused with a billing error rather than a
     # permissions one. Harmless for an unscoped name.
-    run("npm", "publish", "--access", "public", "--tag", tag, *auth, cwd=pkg)
+    try:
+        run("npm", "publish", "--access", "public", "--tag", tag, *auth, cwd=pkg)
+    except Abort:
+        # npm's own text for this is "You may not perform that action with these
+        # credentials", which describes the outcome and none of the causes. Since
+        # `npm whoami` already succeeded above, the token is real and the account is
+        # known — so what is missing is write permission, and there are only a few ways
+        # for a token that authenticates to lack it.
+        raise Abort(
+            f"{who} authenticated, but is not allowed to publish {name}",
+            "The token works and the account is real, so this is scope, not identity:\n\n"
+            "  1. A **read-only** classic token cannot publish. Publishing needs\n"
+            "     'Automation' (no OTP) or 'Publish' (prompts for an OTP).\n\n"
+            "  2. A **granular** token must grant write to *all packages*. It cannot be\n"
+            "     scoped to `" + name + "` yet, because a token can only be scoped to a\n"
+            "     package that already exists — the same trap PyPI has, where the first\n"
+            "     upload of a new name requires an account-wide token. Narrow it after\n"
+            "     the name exists, not before.\n\n"
+            "  3. If 2FA is enforced for writes, pass the six digits: --otp 123456\n\n"
+            "  4. If the account is a member of an org, check the org has not restricted\n"
+            "     publishing of unscoped names.\n\n"
+            "  Tokens: https://www.npmjs.com/settings/~/tokens")
     print(f"\n  published {name}@{version}")
     print(f"  verify: npm view {name}@{version}")
     return 0
