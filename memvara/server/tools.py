@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence, cast
 
 from ..core import ScopedMemvara
-from ..types import Claim, MemoryType, WriteReceipt, utcnow
+from ..types import Accumulation, Claim, MemoryType, WriteReceipt, utcnow
 from .validate import ToolError, validate
 
 __all__ = ["TOOLS", "Tool", "ToolContext", "ToolError", "safe_line"]
@@ -311,6 +311,8 @@ def _receipt_summary(ctx: ToolContext, receipt: WriteReceipt) -> list[str]:
     lines += [f"- [{c.id} {_state(c)}] {safe_line(c.text)}" for c in receipt.closed]
     if receipt.unextracted:
         lines.append(_unextracted_note(ctx, receipt.unextracted))
+    if receipt.accumulated:
+        lines.append(_accumulated_note(receipt.accumulated))
     return lines
 
 
@@ -330,6 +332,45 @@ def _unextracted_note(ctx: ToolContext, count: int) -> str:
             "operator to set MEMVARA_LLM=anthropic on the server."
         )
     return note
+
+
+def _accumulated_note(items: Sequence[Accumulation]) -> str:
+    """Say when a write added a value beside one that is still answering.
+
+    The sibling of `_unextracted_note`, and the same failure shape one step further in:
+    there, content was accepted and quietly not stored; here, a value was stored and the
+    value it was probably meant to replace quietly stayed live. Both report a clean
+    success on this transport — `added 1, ended 0` is exactly what a correct replacement
+    returns — and neither has any other symptom until a later `memory_recall` answers the
+    same question two ways.
+
+    Addressed to the model, because on this transport the model *is* the writer, it is
+    the only party that knows whether it meant to replace or to add, and it is holding
+    both tools that fix it. So the note ends in an instruction it can act on this turn
+    rather than in a diagnosis for somebody else's dashboard.
+
+    Deliberately not a warning. A predicate with no spec is undecided, not wrong, and
+    telling an agent that a legitimate `tagged_with` write was a mistake would teach it to
+    stop reading these. It says what happened and offers both readings.
+
+    >>> note = _accumulated_note([Accumulation("quota_gate", "status", 1)])
+    >>> "quota_gate status" in note, "1 already live, 2 now" in note
+    (True, True)
+    """
+    slots = "; ".join(
+        f"{safe_line(a.subject)} {safe_line(a.predicate)} — {a.existing} already live, "
+        f"{a.existing + 1} now" for a in items)
+    return (
+        f"note: {len(items)} value(s) landed in a slot that already had live values, "
+        f"replacing nothing: {slots}. This store has no cardinality recorded for that "
+        "predicate, and a predicate with none holds many values at once, so the old "
+        "value and the new one now both answer memory_recall and both count in "
+        "memory_stats. If the new value replaces the old one, end the old one with "
+        "memory_end — pass the claim_id from memory_search, since ending the whole slot "
+        "would end the value you just wrote. If the fact really does hold several values "
+        "at once, this is correct and needs nothing. Either way the operator can settle "
+        "it permanently by declaring the predicate's cardinality in the schema."
+    )
 
 
 def _add(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -655,7 +696,11 @@ TOOLS: tuple[Tool, ...] = (
             "'user') to retire every current value of that fact, or 'claim_id' from "
             "memory_search to retire one specific claim. Retired values stop answering "
             "questions immediately and remain visible to memory_history, so this is "
-            "reversible by an operator and auditable — it is not erasure. If the user is "
+            "auditable — it is not erasure. It is not reversible, though, and that is the "
+            "asymmetry to weigh when the choice is close: a mistaken memory_end can be "
+            "reopened, while nothing in this server or in the library un-retires a claim, "
+            "so putting one back means an operator rewriting the stored row by hand. If "
+            "the user is "
             "asking for their data to be deleted outright, say that erasure is an "
             "operator action and is not available through this tool. Storing a "
             "replacement does not do this for you: a new value ends the old one, which "
