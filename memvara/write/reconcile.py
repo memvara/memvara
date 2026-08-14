@@ -22,6 +22,16 @@ Two invariants the implementation is built around:
   ranking; retiring a true one destroys information. Only errors of the first kind are
   recoverable.
 
+**The second invariant is right and it was silent, which is a different problem.** MANY
+is the safe default for a predicate nobody has decided about, but the write that lands on
+one reported nothing: `remember("quota_gate", "status", "installed")` over `"not
+installed"` returned the same `added 1, ended 0` a correct replacement returns, and both
+values went on answering `recall()`. So `_accumulation` reports the case — an `add` onto
+an *unregistered* predicate whose slot already holds live values — on the receipt and on
+`predicate.accumulated`. It changes no cardinality and refuses nothing; it says what the
+default just did, at the moment and to the caller that caused it. Read its docstring for
+the trigger and for what the rule knowingly cannot separate.
+
 **Supersession ends a claim; it does not retire it.** The reconciler is only ever told
 "here is the new value" — never "the old one was a mistake" — and those are different
 events on different clocks. Berlin stopped being true when Lisbon began, so valid time
@@ -47,6 +57,7 @@ from ..types import (
     MAX_SALIENCE,
     OBJECT_ENTITY,
     SUBJECT_ENTITY,
+    Accumulation,
     Claim,
     Closure,
     as_utc,
@@ -86,6 +97,10 @@ class ReconcileResult:
     # ends them, a retraction retires them. Named `invalidated` for history; `WriteReceipt`
     # spells the same thing `closed` and splits it into `ended` / `retired`.
     invalidated: list[Claim] = field(default_factory=list)
+    #: Set when this `add` landed in an already-occupied slot addressed by a predicate the
+    #: registry has no spec for — see `Reconciler._accumulation`. `None` on every other
+    #: action and on the overwhelming majority of adds.
+    accumulated: Accumulation | None = None
 
 
 class Reconciler:
@@ -165,6 +180,10 @@ class Reconciler:
 
         # 3. Conflict, then 4. accumulate.
         superseded, newer = self._victims(claim, t, owner)
+        # Before `put_claim`, or this claim is itself an occupant of the slot it is
+        # asking about. `superseded` first, so the ordinary single-valued write —
+        # registered predicate, victim found — short-circuits without a lookup.
+        accumulated = None if superseded else self._accumulation(claim, t, owner)
         if newer:
             # This claim is history: something already on record was true *later*. Close
             # its valid interval where the next value begins, so it is retrievable via
@@ -179,7 +198,7 @@ class Reconciler:
             # `t`, which is merely when we found out.
             self._retire(superseded, t, claim.id, claim.valid_from, close=close)
             return ReconcileResult("supersede", claim, superseded)
-        return ReconcileResult("add", claim, [])
+        return ReconcileResult("add", claim, [], accumulated)
 
     def reinforce(self, claim: Claim, sources: Sequence[str],
                   observed_at: datetime | None = None) -> Claim:
@@ -376,6 +395,78 @@ class Reconciler:
         for c in sorted(victims.values(), key=lambda c: (c.recorded_at, c.id)):
             (newer if c.valid_from > claim.valid_from else older).append(c)
         return older, newer
+
+    def _accumulation(self, claim: Claim, t: datetime,
+                      owner: str) -> Accumulation | None:
+        """Report a value landing beside live values in a slot with no declared schema.
+
+        **The trigger, exactly.** All four, on the write itself, where what was already
+        there is knowable:
+
+        1. the action is `add` — not a reinforcement (same value, already ours), not a
+           retraction, not a supersession;
+        2. the registry has **no spec** for the predicate, so its `MANY` is a default and
+           not a decision anyone made;
+        3. the slot already holds at least one live claim for the same owner;
+        4. and, implied by (1), not one of those occupants carries this value — step 1 of
+           `apply` would have reinforced instead. So the slot now answers a present-tense
+           question with two different answers.
+
+        (2) is what makes it worth reading, and it is the whole of the noise control.
+        A *registered* `MANY` predicate accumulates on purpose and says nothing here; a
+        predicate the extractor met and acquired a spec for is registered before its claim
+        is ever reconciled, so on the `add()` path with a model configured this fires
+        essentially never. What is left is exactly the population where cardinality can
+        never be learned at all: `remember()`, which does not run acquisition, and any
+        deployment with no extraction model. The signal appears only where the defect can
+        actually live.
+
+        **What it deliberately misses.** It cannot tell `status` from `tagged_with`. A
+        genuinely multi-valued undeclared predicate trips this on every write after its
+        first and is behaving perfectly, and nothing available at write time separates the
+        two — intent is not a property of the row. Two things make that acceptable rather
+        than merely admitted. The report is *symmetric*: it does not accuse the write of
+        being wrong, it says the predicate has never been decided. And it is
+        self-extinguishing in **both** directions — declaring the predicate `ONE` makes
+        the next write supersede, declaring it `MANY` makes this go quiet forever, and
+        either way one declaration ends it for that predicate permanently. A note you
+        silence by doing the right thing is a request for a decision, not a complaint.
+
+        It also misses, on purpose, the case with no live occupant: two values written a
+        year apart with the first already ended are not competing, and calling that a
+        pile-up would fire on ordinary history.
+
+        **Cost.** A registered predicate pays one memoized `normalize` and a dict
+        membership test — 0.13µs measured, against a ~125µs write — and a single-valued
+        one that displaced something pays not even that, because the caller
+        short-circuits on `superseded`. An *unregistered* one pays one indexed count.
+
+        That count is `Store.count_competing` and not `len(competing_claims(...))`
+        deliberately, and the difference is not a micro-optimisation: the number wanted
+        here is the occupancy of a multi-valued slot, which is the one number in the
+        system with no upper bound, and hydrating a `Claim` per occupant made the write
+        cost rise in proportion to the pathology being reported — 20µs at one occupant,
+        1.8ms at 200, 29ms at 3,000, per write, forever. A store predating the method
+        falls back to counting the claims and simply pays what it used to.
+
+        The counting branch applies no owner filter and does not need one: `fact_key`
+        hashes tenant and user, so the slot it names already belongs to exactly one
+        person — the same reason `_live`'s own owner check is described there as
+        redundant with the keys. The fallback keeps that check anyway, because it is
+        reading claims and the invariant should stay readable where the rows are.
+        """
+        if self.registry.known(claim.predicate):
+            return None
+        count = getattr(self.store, "count_competing", None)
+        if count is not None:
+            existing = count(claim.scope.tenant, claim.fact_key, valid_at=t, known_at=t)
+        else:
+            existing = len(self._live(
+                self.store.competing_claims(claim.scope.tenant, claim.fact_key,
+                                            valid_at=t, known_at=t), t, owner))
+        if not existing:
+            return None
+        return Accumulation(claim.subject, claim.predicate, existing)
 
     def _retire(self, victims: Sequence[Claim], t: datetime, by: str | None,
                 valid_to: datetime | None = None, *,

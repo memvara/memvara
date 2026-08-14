@@ -1,0 +1,36 @@
+{
+  "name": "memvara",
+  "version": "0.0.1",
+  "description": "Name reservation. memvara is a bitemporal memory layer for AI agents, currently a Python package — there is no JavaScript client yet. See the repository.",
+  "keywords": [
+    "memvara",
+    "memory",
+    "bitemporal",
+    "agents",
+    "llm",
+    "placeholder"
+  ],
+  "homepage": "https://github.com/memvara/memvara#readme",
+  "bugs": {
+    "url": "https://github.com/memvara/memvara/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/memvara/memvara.git",
+    "directory": "npm/memvara"
+  },
+  "license": "Apache-2.0",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "private": false
+}

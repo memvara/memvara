@@ -100,21 +100,6 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
 
 ### Added
 
-- **`memory_remember` takes `close`, so an agent can finally say *which* clock it stopped.**
-  `Memvara.remember` has always taken it and `Memvara.forget` has always defaulted to
-  `"retired"`, but the MCP handler forwarded neither the argument nor a schema property for
-  it — so every correction made through the tool surface recorded `"ended"`, *the world
-  changed*, whether the user had moved house or the record had simply been wrong since
-  March. The two populations that a correction audit exists to separate were
-  indistinguishable in everything written through that transport.
-
-  Deliberately **not** offered on `memory_add`: extraction picks the closure per fact
-  server-side, so one agent-supplied override would apply to every fact a prose turn
-  produced, including ones the agent did not know it was writing. It defaults rather than
-  being required, which buys accuracy on corrections at no cost to ordinary facts — and the
-  honest limit is that this makes the distinction *reachable*, not *reliable*: a model that
-  misreads the turn mislabels the correction, and nothing downstream can tell.
-
 - **`recall(with_ids=True)` returns the claim ids it rendered**, as `RecallResult`, in
   render order and 1:1 with the numbered notes. `recall()` returns `str` exactly as before
   unless asked; the overloads follow `search()`'s. Previously the prompt-shaped surface
@@ -162,6 +147,50 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
 
 - **`RecallResult` and `Delta` are exported** from the top-level package, for the same
   reason `Closure` is: both are return types on four facade methods each.
+
+- **`memory_end` on the MCP server: the closure an agent could not ask for.** The core has
+  had two closures since the axes were separated — `"ended"` means the world changed,
+  `"retired"` means the record was wrong — and `forget()`, `delete()` and `supersede()` all
+  take one. The MCP surface offered only `memory_forget`, which retires. So an agent
+  closing out a fact that had genuinely stopped being true had to assert that the record
+  had been an error, which it had not.
+
+  Found by using the server on a real task. Two `memory_remember` calls recorded
+  `quota_gate status "not installed"` and then `"installed"`; `status` is an unknown
+  predicate and therefore multi-valued, so nothing was displaced and `memory_recall`
+  returned both, adjacent, with no ordering signal. The only closure available would have
+  written a false statement into the audit trail to stop the store contradicting itself.
+
+  `memory_end` takes the same two addressing modes as `memory_forget` — `predicate` (with
+  `subject`) for a whole slot, or `claim_id` for one value — plus an optional ISO-8601
+  `at`, the instant the fact stopped being true, defaulting to now. `at` is what makes the
+  tool worth having separately: a fact that stopped last Tuesday must close on Tuesday, or
+  every later `as_of` and `valid_at` query reports a week of believing something already
+  false. An instant before the fact began is clamped to its start rather than inverting the
+  interval, and the reply reports where the closure **landed** rather than where it was
+  asked for. A future instant is allowed, means the fact is true until then, and says so —
+  otherwise the value goes on answering `memory_recall`, which reads as a failed call and
+  sends a model back to `memory_forget`.
+
+  **Two tools rather than a `closure` enum on `memory_forget`, and the argument is about
+  where a model commits.** It picks a tool by name, from a list, before it opens a schema —
+  and `memory_forget` already asserts one of the two answers, so a flag on it would be
+  asking the model to overrule the word it had just chosen. Splitting them puts the fork at
+  the point the choice is actually made, and matches the shape `delete`/`erase` and
+  `forget`/`purge` already have in `core`: operations that mean different things get
+  different names, not a flag. The discoverability cost of a second tool is paid off in
+  each description, which names the other and states its own reading, so the only route to
+  the wrong closure runs through a paragraph that points at the right one.
+
+  Ending is `destructiveHint: true` like retiring, hidden on a read-only server like every
+  other write, and reversible by an operator: the claim stays on disk, stays in
+  `memory_history` — rendered `ended`, distinguishably from `retired` — and stays visible
+  to `memory_search` with `as_of`.
+
+  `memory_forget`'s own description said "storing the new value already retires the old
+  one". It does not; it **ends** it, which is right for a change and wrong for a mistake.
+  That sentence told a model a genuine correction was handled automatically when what was
+  recorded was a world event, so it is now corrected rather than merely joined.
 
 - **`neighborhood()`, `history()` and `paths_between()` resolve learned aliases on the
   probe.** Previously a probe carried no alias stamp, so `neighborhood("Big Blue")` folded
@@ -414,19 +443,22 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
 
 ### Fixed
 
-- **Three tool descriptions called one closure by the other's name.** `memory_forget` said
-  "storing the new value already *retires* the old one" — it ends it; `memory_remember`
-  said an exact predicate lets the store "*retire* the previous value", on the very tool
-  that now takes `close`; and `memory_history` described every past value as "*retired*",
-  though `_history` renders `_state()`, which emits both words, so the common case —
-  supersession — was mislabelled.
+- **Two more tool descriptions called one closure by the other's name.** `memory_forget`'s
+  is fixed in the `memory_end` entry above; these two were still standing after it.
+  `memory_remember` said an exact predicate lets the store "*retire* the previous value" —
+  it **ends** it, and that sentence was on the one tool whose whole job is writing the
+  replacement. `memory_history` described every past value as "*retired*", though
+  `_history` renders `_state()`, which emits both words, so supersession — the common case
+  — was mislabelled to every model that read it.
 
-  This is the second instance of the bug `_receipt_summary`'s docstring was written about
-  ("a model reading its own memory tool had three names for two events"). That fix
-  corrected the receipt line and never swept the descriptions. Two guards now exist: one
-  asserting every handler reads every property its own schema declares, and one asserting
-  no description uses a retire-word for an operation that ends or the reverse. Both were
-  confirmed to fail against the pre-fix code before being kept.
+  This is the same bug `_receipt_summary`'s docstring was written about ("a model reading
+  its own memory tool had three names for two events"), now on its third and fourth
+  instance: that fix corrected the receipt line, `memory_end` corrected `memory_forget`,
+  and neither swept the rest. So two guards now exist rather than a third correction —
+  one asserting every handler reads every property its own schema declares, and one
+  asserting no description uses a retire-word for an operation that ends or the reverse.
+  Both were confirmed to fail against the pre-fix code before being kept, and the second
+  one is what found these two.
 
 - **A fact's past no longer outlives the fact under a budget.** `recall(include_history=…)`
   built its past values in a flat list that was not index-aligned to the claims, so a

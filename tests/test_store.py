@@ -156,6 +156,40 @@ def test_competing_claims_respects_the_belief_clock(store):
     assert store.competing_claims("acme", a.fact_key, valid_at=T2, known_at=T2) == []
 
 
+def test_count_competing_answers_exactly_what_competing_claims_would(store):
+    """One number, one query, and it must not become a second definition of "live".
+
+    The write path asks this on every write to an undeclared predicate, so a count that
+    drifted from `competing_claims` would report a slot as crowded that reconciliation
+    reads as empty, or the reverse — and nothing downstream could tell. Both are built
+    from `_live_clause` for that reason; this asserts they agree across every axis the
+    clause has: an ordinary slot, a retirement, an ending, another user's slot of the
+    same name, and both clocks read in the past.
+    """
+    a = put(store, object="Berlin")
+    put(store, object="Lisbon")
+    put(store, predicate="works_at", object="Acme")
+    other = put(store, scope=Scope("acme", "bob"))
+    ended = put(store, object="Porto")
+    store.set_valid_to(ended.id, T1)
+    retired = put(store, object="Rome")
+    store.invalidate(retired.id, T1, a.id)
+
+    for tenant, key, axes in (
+            ("acme", a.fact_key, {}),
+            ("acme", other.fact_key, {}),
+            ("acme", a.fact_key, {"valid_at": TMID, "known_at": TMID}),
+            ("acme", a.fact_key, {"valid_at": T2, "known_at": T2}),
+            ("acme", "no_such_slot", {}),
+    ):
+        assert (store.count_competing(tenant, key, **axes)
+                == len(store.competing_claims(tenant, key, **axes))), (key, axes)
+    # …and the numbers are not all trivially equal, or the agreement above proves nothing.
+    assert store.count_competing("acme", a.fact_key) == 2
+    assert store.count_competing("acme", other.fact_key) == 1
+    assert store.count_competing("acme", "no_such_slot") == 0
+
+
 def test_find_by_value_matches_exact_assertions_only(store):
     a = put(store, object="Berlin")
     put(store, object="Lisbon")

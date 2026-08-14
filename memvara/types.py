@@ -952,6 +952,35 @@ class Delta:
                 f"+{len(self.added)} -{len(self.gone)}>")
 
 
+@dataclass(frozen=True, slots=True)
+class Accumulation:
+    """One value that landed beside values already live in the same slot.
+
+    Recorded when the write path *accumulated* where it might have been meant to
+    replace: the predicate has no spec in the registry, so it is `Cardinality.MANY` by
+    default, so the slot already holding `existing` live values simply gained another.
+    Nothing is wrong with the row that was written — it is the absence of a decision
+    about the predicate that this reports.
+
+    Only the count is carried, not the claims. The occupants are already reachable by
+    `get_all(subject=..., predicate=...)` and holding them here would make a receipt for
+    a one-triple write grow with the size of the slot it landed in.
+
+    >>> Accumulation("quota_gate", "status", 1)
+    <Accumulation quota_gate status +1 beside 1>
+    """
+
+    subject: str
+    predicate: str
+    #: Live values in the slot **before** this write. One or more, always: a first write
+    #: to an empty slot is an ordinary write and produces no `Accumulation` at all.
+    existing: int
+
+    def __repr__(self) -> str:
+        return (f"<Accumulation {self.subject} {self.predicate} "
+                f"+1 beside {self.existing}>")
+
+
 @dataclass(slots=True)
 class WriteReceipt:
     """What `add()` returns. Explicit about what the write path actually did.
@@ -998,6 +1027,23 @@ class WriteReceipt:
     tokens_out: int = 0
     latency_ms: float = 0.0
     deferred: bool = False                                 # extraction queued, not yet run
+    #: Values this write added *beside* live values already in the same slot, because the
+    #: predicate has no spec and an unspecified predicate is multi-valued. Empty on
+    #: virtually every write, which is what makes a non-empty one worth reading.
+    #:
+    #: This is the one outcome the receipt could not previously distinguish. `added 1,
+    #: ended 0` is what a successful supersession-that-did-not-supersede looks like, and
+    #: it is also what an ordinary first write looks like, so `remember("quota_gate",
+    #: "status", "installed")` over `"not installed"` reported exactly what a correct
+    #: replacement reports while leaving both values answering `recall()`. Nothing else in
+    #: the system says otherwise — `status` is not in the schema, acquisition never runs
+    #: on this path, and MANY retires nothing by design.
+    #:
+    #: It is a report, not a verdict. A genuinely multi-valued predicate nobody has
+    #: declared (`tagged_with`, `attended`) fills this in on every write after the first
+    #: and is behaving correctly; see `memvara.write.reconcile` for why the write path
+    #: cannot tell the two apart and deliberately does not try.
+    accumulated: list[Accumulation] = field(default_factory=list)
 
     # --- the two halves of `closed` -------------------------------------------
     # Derived rather than stored, so they cannot disagree with the claims themselves.
@@ -1055,12 +1101,13 @@ class WriteReceipt:
         return self.closed
 
     def __str__(self) -> str:
-        # `unextracted` appears only when it is non-zero, so it reads as an event rather
-        # than as noise on the writes that lost nothing.
+        # `unextracted` and `accumulated` appear only when non-zero, so they read as
+        # events rather than as noise on the writes that lost and piled up nothing.
         lost = f" unextracted={self.unextracted}" if self.unextracted else ""
+        piled = f" accumulated={len(self.accumulated)}" if self.accumulated else ""
         return (
             f"<WriteReceipt +{len(self.added)} ~{len(self.reinforced)} "
-            f"-{len(self.closed)} skip={self.skipped}{lost} "
+            f"-{len(self.closed)} skip={self.skipped}{lost}{piled} "
             f"llm={self.llm_calls} "
             f"{self.latency_ms:.1f}ms{' deferred' if self.deferred else ''}>"
         )

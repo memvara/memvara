@@ -68,6 +68,15 @@ packages = ["memvara"]
 # machine, at the one moment they are deciding whether this package works.
 artifacts = ["memvara/skills/**/*.md"]
 
+# The sdist takes everything at the top level by default — `bench`, `demo`, `docs`,
+# `tests` are all in it deliberately, because a source distribution that cannot
+# reproduce a test run is not a source distribution. `npm/` is the exception: it is a
+# JavaScript name-reservation package, it has nothing to do with installing this library,
+# and shipping it inside the Python sdist would be a small piece of nonsense that nobody
+# would notice until they went looking for why the tarball has a package.json in it.
+[tool.hatch.build.targets.sdist]
+exclude = ["npm"]
+
 [tool.coverage.run]
 source = ["memvara"]
 

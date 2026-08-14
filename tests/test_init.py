@@ -556,11 +556,15 @@ def test_the_skill_does_not_restate_a_tool_description() -> None:
 
 @pytest.mark.parametrize("carries, marker", [
     ("the correction protocol as a sequence", "memory_why"),
-    ("the closure vocabulary that sequence ends in", '`"retired"`'),
     ("the scope trap only the CLI help mentions", "MEMVARA_SESSION"),
     ("what a degraded extractor is called", "fast-path-only"),
     ("the judgment call about what to store", "embarrassing"),
     ("never asserting a memory unread", "in the current\nturn"),
+    # Not a closure *word* any more: the two closures are two tools, so what the skill
+    # has to carry is the judgment that picks between them — the excerpt from step 3 is
+    # the evidence, not the user's phrasing. That is the one thing no tool description
+    # can say, because it is about a different tool's output.
+    ("which closure the evidence decides", "evidence for"),
 ])
 def test_the_skill_carries_what_no_single_description_can(carries: str, marker: str) -> None:
     """The spec's list of five, one assertion each, so a failure names what went missing.
@@ -572,19 +576,24 @@ def test_the_skill_carries_what_no_single_description_can(carries: str, marker: 
     assert marker in skill_text(), f"the skill no longer carries {carries}"
 
 
-def test_every_closure_value_the_skill_names_is_one_the_tool_accepts() -> None:
-    """The skill tells a model to pass `close`; the schema decides what that word can be.
+def test_every_tool_the_skill_names_is_one_the_server_serves() -> None:
+    """The skill routes a model between tools by name; `TOOLS` decides which exist.
 
-    Two files, one vocabulary — which is the shape of the bug this whole section of the
-    spec was written about, where a tool description said "retire" for an operation that
-    ends. A skill naming a third value would be the same mistake with a longer fuse,
-    because a rejected argument is a failed turn rather than a wrong record.
+    Two files, one vocabulary — the shape of the bug this whole line of work started
+    from, where a tool description said "retire" for an operation that ends. A skill
+    naming a tool that is not served is the same mistake with a longer fuse: the model
+    follows the instruction, the call fails, and the turn is spent finding that out.
+
+    It bites hardest on the correction protocol, which is the one part of the skill that
+    names three tools in sequence and is worth nothing if any of them is wrong.
     """
-    accepted = set(BY_NAME["memory_remember"].properties["close"]["enum"])
-    named = set(re.findall(r'`"([a-z]+)"`', skill_text()))
+    named = set(re.findall(r"`(memory_[a-z_]+)`", skill_text()))
 
-    assert named, "the skill no longer names a closure at all"
-    assert named <= accepted, f"the skill names {named - accepted}, memory_remember takes {accepted}"
+    assert named, "the skill no longer names a tool at all"
+    assert named <= set(BY_NAME), f"the skill names {named - set(BY_NAME)}, which is not served"
+    assert {"memory_forget", "memory_remember"} <= named, (
+        "the correction protocol needs both halves: a replacement says the world changed "
+        "and only memory_forget says the record was wrong")
 
 
 def test_the_skill_directory_is_the_name_the_front_matter_declares() -> None:

@@ -234,6 +234,38 @@ PREDICATE_LEARNED = "predicate.learned"
 PREDICATE_ALIAS = "predicate.alias"
 PREDICATE_CAPPED = "predicate.capped"
 
+#: A value written into a slot that already held live values, under a predicate the
+#: registry has no spec for. One per such write, and untagged for the reason
+#: `predicate.learned` is: there is one outcome here, and the dimension anyone would
+#: actually want to slice by — the predicate name — is unbounded and would be a
+#: cardinality bomb in every backend this is likely to be pointed at. The names are on
+#: the write receipts (`WriteReceipt.accumulated`), which is where a per-slot question
+#: belongs.
+#:
+#: **What a non-zero value means.** Somewhere in this deployment, writes are landing on
+#: predicates whose cardinality nobody ever decided, in slots that were already occupied.
+#: Unregistered means MANY, MANY retires nothing, so each of those slots now answers a
+#: present-tense question with two or more simultaneous answers — and `predicate.capped`
+#: aside, no other series moves when it happens: `write.reconcile{action="add"}` is what a
+#: correct first write looks like too.
+#:
+#: **What to do about it.** Read the predicate names off the receipts, then decide each
+#: one, which is a decision this library deliberately will not make for you: declare it
+#: `Cardinality.ONE` if the slot holds one value at a time (`status`, `version`, `owner`,
+#: `stage` — the vocabulary an agent recording project state reaches for, and all of them
+#: single-valued in meaning), or `Cardinality.MANY` if it genuinely accumulates
+#: (`tagged_with`, `attended`). Either declaration silences this for that predicate
+#: permanently; the first one also makes the next write supersede instead of pile up.
+#:
+#: **The pair that names the cause.** This climbing while `predicate.learned` stays at
+#: zero is the structural case rather than a slow vocabulary: acquisition is not running
+#: at all. Two deployments do that — one with no extraction model, where there is no
+#: acquisition to run, and one where the writes arrive through `remember()`, which reaches
+#: the reconciler without ever passing the tier that learns a spec. Neither will ever
+#: register a predicate on its own, so for both the schema has to be declared by hand and
+#: this counter will not fall until it is.
+PREDICATE_ACCUMULATED = "predicate.accumulated"
+
 #: One per `search()`, tagged `script`. Pairs with the gate slices: a script with query
 #: volume and no `gate.pass` is a population whose writes are being dropped.
 RETRIEVAL_QUERY = "retrieval.query"

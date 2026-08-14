@@ -34,16 +34,22 @@ records the wrong history.
    step, and it usually settles the matter either way — they recognise what they said, or
    the excerpt shows the fact was misread out of something else. Those two endings need
    different writes in step 4, which is why this comes before it and not after.
-4. **`memory_remember`** the correct value, picking `close` — `"ended"` or `"retired"` —
-   from what step 3 showed rather than from how the complaint was worded. The parameter's
-   own description defines the two; what it cannot tell you is that the source turn is
-   your evidence for which one applies. "That is wrong" about an excerpt the user does
-   recognise is a change; the same words about an excerpt that misquotes them is a
-   mistake. Skip step 3 and you are guessing, and a guess here writes a history saying the
-   world moved when the truth is that nobody was ever right about it.
+4. **Write the correction**, and let step 3 decide the shape rather than the wording of
+   the complaint. Storing a replacement on its own says *the world changed*. Only
+   `memory_forget` says *the record was wrong*, and only `memory_end` says a fact that
+   was right has stopped being true. Each tool's description defines its own case; what
+   none of them can tell you is that **the source turn from step 3 is your evidence for
+   which case this is**. "That is wrong" about an excerpt the user recognises is a
+   change; the same words about an excerpt that misquotes them is a mistake.
 
-Reach for `memory_forget` only when there is no replacement — the fact should stop being
-believed and nothing takes its place.
+   So: where the excerpt shows a value that was accurate at the time, `memory_remember`
+   alone is the whole correction. Where it shows one that was never accurate, add a
+   `memory_forget` call — a replacement by itself cannot make that statement, whatever
+   the user's wording implied. Skip step 3 and you are guessing, and a guess writes a
+   history saying the world moved when the truth is that nobody was ever right about it.
+
+The second call is the point rather than an inconvenience: retiring cannot be undone from
+here, so it is worth arriving at with the excerpt already in front of you.
 
 ## Which scope you are writing into
 
