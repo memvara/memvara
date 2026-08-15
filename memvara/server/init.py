@@ -68,7 +68,7 @@ rest.
 """
 
 INIT_USAGE = f"""\
-memvara init — write the MCP server block, the agent skill and a CLAUDE.md snippet.
+memvara-mcp init — write the MCP server block, the agent skill and a CLAUDE.md snippet.
 
   --agent NAME  which client to configure. {AGENTS[0]!r} (Claude Code) is the only one
                 today, and naming it is required rather than defaulted: a second client
@@ -310,7 +310,7 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
                 "process — a settings file pointing at it would remember nothing between "
                 "launches. Pass --db with a path to a file.")
     except _Usage as exc:
-        print(f"memvara init: {exc}\n\n{INIT_USAGE}", file=err)
+        print(f"memvara-mcp init: {exc}\n\n{INIT_USAGE}", file=err)
         return 2
 
     db = _absolute(raw_db)
@@ -322,7 +322,7 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
     guidance = _claude_md(root)
     store = _store_directory(db)
 
-    lines = [f"memvara init — {agent}, in {root}", ""]
+    lines = [f"memvara-mcp init — {agent}, in {root}", ""]
     lines += _report([skill, settings, guidance, store])
     if settings.paste:
         # Printed without the enclosing braces, indented as it will sit. What the user has

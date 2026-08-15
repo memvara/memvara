@@ -1026,13 +1026,16 @@ mem.search(query, *, k=10, min_score=0.0, T=None, memory_types=None,
                                                   -> list[Retrieved]
 mem.recall(query, *, k=8, min_score=0.0, header=None, include_episodes=False,
            episode_header=None, include_history=False, history_header=None,
-           budget=None, counter=approx_tokens, with_ids=False)
+           budget=None, counter=<internal>, with_ids=False)
                                                   -> str | RecallResult
 #   no `T=`, no `states=`, no `include_invalidated=` — deliberately; see recall() below
 #   budget= caps the block by size rather than by count: `k` bounds how many notes,
 #     this bounds how much text. Notes drop whole and the block says how many did not
-#     fit. `counter=` takes a real tokenizer; the default is a length heuristic that
-#     under-counts CJK, so a budget it meets can still overflow the real one.
+#     fit. `counter=` is any `(str) -> int`; pass `tiktoken`'s or Anthropic's to
+#     measure exactly. The default is deliberately not exported — it is a length
+#     heuristic that under-counts CJK, so a budget it meets can still overflow the
+#     real one, and code that reaches for it by name is usually code that wanted a
+#     real tokenizer.
 #   with_ids=True returns RecallResult(text, claim_ids, dropped) instead of `str`.
 #     `text` is byte-identical to what you would have got; `claim_ids` is in render
 #     order, 1:1 with the notes, so note n is claim_ids[n - 1]. Live facts only —
