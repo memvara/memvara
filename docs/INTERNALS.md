@@ -288,9 +288,11 @@ class Memvara:
     def _safe_line(self, text, limit=None) -> str
     def recall(self, query, *, k=8, min_score=0.0, header=None, ...,
                include_episodes=False, episode_header=None,
-               include_history=False, history_header=None) -> str
-    def _past_values(self, claims, tenant=None, user=None, agent=None,
-                     session=None) -> list[str]
+               include_history=False, history_header=None,
+               budget=None, counter=_approx_tokens,
+               with_ids=False) -> str | RecallResult
+    def _past_by_claim(self, claims, tenant=None, user=None, agent=None,
+                       session=None) -> list[list[str]]
 ```
 
 `recall()` must:
@@ -306,9 +308,17 @@ class Memvara:
   repeat a header and forge a block indistinguishable from the real one. Episodes are
   additionally truncated to `RECALL_EPISODE_CHARS`;
 - keep the three blocks in order — claims, then history, then episodes — each under its own
-  header, and emit a header only when its block is non-empty.
+  header, and emit a header only when its block is non-empty;
+- under `budget=`, **drop whole notes and never part of one**, filling downward from the
+  complete block rather than upward from nothing. Downward because the line that reports
+  the drop is itself a line: a block one note short can be *larger* than the complete one,
+  so filling upward stops at the first overshoot and can render three notes where five
+  would have fitted. The drop-notice is also the floor — a budget too small for even the
+  first note returns the notice alone, over budget, because an empty block is
+  indistinguishable from "nothing is stored". Content never overruns; only the sentence
+  saying there was content can.
 
-`_past_values` is the whole of `include_history`, and its contract is one line:
+`_past_by_claim` is the whole of `include_history`, and its contract is one line:
 
 > **The filter is `state == "ended"`, never `state != "live"`.**
 
@@ -325,6 +335,13 @@ pass it.
 It is also keyed on `fact_key` and deduplicated, so a multi-valued predicate returning
 four live values costs one `history()` call rather than four and renders its past once
 rather than four times.
+
+**It returns one list per claim, index-aligned, rather than one flat list** — which is
+what the name says and is why the name changed. Flat, the past of note three could
+outlive note three: `budget=` drops notes from the end, and history lines that did not
+know which claim they belonged to stayed behind, leaving a fact's former values rendered
+under a fact no longer in the block. Grouping costs nothing — the same one lookup per
+slot — and makes the drop take the two together.
 
 ---
 

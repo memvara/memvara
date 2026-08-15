@@ -1025,14 +1025,31 @@ mem.search(query, *, k=10, min_score=0.0, T=None, memory_types=None,
            states=None, include_invalidated=None, include_episodes=False)
                                                   -> list[Retrieved]
 mem.recall(query, *, k=8, min_score=0.0, header=None, include_episodes=False,
-           episode_header=None, include_history=False, history_header=None)   -> str
+           episode_header=None, include_history=False, history_header=None,
+           budget=None, counter=approx_tokens, with_ids=False)
+                                                  -> str | RecallResult
 #   no `T=`, no `states=`, no `include_invalidated=` — deliberately; see recall() below
+#   budget= caps the block by size rather than by count: `k` bounds how many notes,
+#     this bounds how much text. Notes drop whole and the block says how many did not
+#     fit. `counter=` takes a real tokenizer; the default is a length heuristic that
+#     under-counts CJK, so a budget it meets can still overflow the real one.
+#   with_ids=True returns RecallResult(text, claim_ids, dropped) instead of `str`.
+#     `text` is byte-identical to what you would have got; `claim_ids` is in render
+#     order, 1:1 with the notes, so note n is claim_ids[n - 1]. Live facts only —
+#     an episode has no claim id, and a past value is not the source of a
+#     present-tense answer.
 mem.get(claim_id)                                 -> Claim | None
 mem.get_all(*, T=None, states=None, include_invalidated=None)  -> list[Claim]
 mem.count(*, T=None, states=None, include_invalidated=None)    -> int
 mem.history(subject, predicate, *, T=None)        -> list[Claim]    # timeline of one slot
 mem.why(claim_id, *, T=None)                      -> Provenance | None
 mem.produced(episode_id, *, T=None)               -> list[Claim]    # why(), backwards
+mem.since(when)                                   -> Delta          # what changed since
+#   Delta(since, added, gone): believed now and not then, believed then and not now.
+#   A supersession lands in **both** halves, which is the point — an agent coming back
+#   to a delta that showed only the arrival would hold the replaced value as well.
+#   Both clocks pin to `when`: the belief clock alone leaves `valid_at` at now, so a
+#   claim whose world-interval has since closed never enters the "then" set at all.
 
 # traverse — the claims are a graph; walk it
 mem.neighborhood(entity, *, depth=2, k=10, min_hops=1, predicates=None,
@@ -1169,12 +1186,38 @@ MEMVARA_DB=/path/to/memory.db memvara-mcp                   # JSON-RPC 2.0 over 
 MEMVARA_DB=/path/to/memory.db python3 -m memvara.server    # the same thing, no console script
 ```
 
-Nine tools — `memory_add`, `memory_remember`, `memory_recall`, `memory_search`,
-`memory_history`, `memory_why`, `memory_forget`, `memory_end`, `memory_stats`.
+Ten tools — `memory_add`, `memory_remember`, `memory_recall`, `memory_search`,
+`memory_since`, `memory_history`, `memory_why`, `memory_forget`, `memory_end`,
+`memory_stats`.
 Hand-rolled against the MCP wire format rather than taking an SDK dependency, so the
 library's "numpy and nothing else" claim survives. It refuses to start without
 `MEMVARA_DB` and prints the client config block, rather than silently remembering into a
 store that vanishes on exit.
+
+```bash
+memvara-mcp init --agent claude          # writes the config, the skill and a CLAUDE.md note
+```
+
+`init` writes the client's server block with `MEMVARA_DB` already absolute, which is the
+setting most people get wrong on the first attempt. It never rewrites an existing
+`.mcp.json`: where one exists and names another server it prints the entry *without* its
+enclosing braces, indented to paste inside `mcpServers`, because a self-valid block is
+the one people paste whole and break the file. `command` is the running interpreter
+rather than `python3`, since the client launches with no login profile and `PATH` there
+is not your shell's.
+
+It also writes a **skill** — the judgment a tool description cannot carry, because it
+spans tools: the sequence to follow when a user disputes a memory (and why the `why()`
+excerpt has to come *before* the write that acts on it), which scope your writes are
+landing in, what is worth storing at all, and what changes on a server with no extraction
+model. A test asserts it shares no six-word run with any tool or parameter description,
+so the two cannot quietly become two sources for one fact.
+
+`memory_since` is the read a resumed session wants: what arrived and what left while the
+agent was away, rather than the whole store again. It returns rows rather than a prompt
+block, because a delta necessarily carries claims that stopped being believed and
+rendering those into a system prompt is the un-delete `recall()`'s signature exists to
+prevent.
 
 Both closures are on the surface, as two tools: `memory_forget` retires a record that was
 wrong, `memory_end` closes out a fact that was right and has stopped being true, at an
