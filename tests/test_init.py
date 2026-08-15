@@ -602,6 +602,30 @@ def test_every_tool_the_skill_names_is_one_the_server_serves() -> None:
         "and only memory_forget says the record was wrong")
 
 
+def test_the_usage_names_a_command_that_exists() -> None:
+    """The help text is what a user retypes, so it has to name the real console script.
+
+    It said `memvara init`, and there is no `memvara` command — `[project.scripts]`
+    declares `memvara-mcp` and nothing else, so anyone copying the first line of the
+    usage got "command not found" at the one moment they were following instructions.
+    The same class as a README naming an unexported symbol: prose that resolves to
+    nothing, invisible to every test that only compares the string against itself.
+
+    Read out of `pyproject.toml` rather than hard-coded, so renaming the script fails
+    here instead of silently making the usage wrong again.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    scripts = re.findall(r"^([A-Za-z0-9_-]+)\s*=",
+                         pyproject.split("[project.scripts]")[1].split("[")[0],
+                         flags=re.MULTILINE)
+
+    assert scripts, "pyproject declares no console script"
+    first = INIT_USAGE.splitlines()[0]
+    assert any(first.startswith(f"{name} init") for name in scripts), (
+        f"usage opens with {first!r}, which names no script in {scripts}")
+
+
 def test_the_skill_directory_is_the_name_the_front_matter_declares() -> None:
     """Claude Code indexes a skill by its directory; a mismatch is a skill that is never
     loaded, and nothing anywhere reports it."""
