@@ -2,6 +2,26 @@
 # exactly one developer machine running one Python — which is not enforcement, it is a
 # local habit. The matrix is the point: `requires-python = ">=3.10"` is a promise, and
 # 3.10 through 3.12 had never executed a line of this library.
+#
+# The action pins below are majors, and they are the *current* majors rather than the
+# oldest ones that happen to be new enough. Node 20 went out of support, and the runner had
+# started forcing `actions/checkout@v4` and `actions/setup-python@v5` onto Node 24 with a
+# deprecation warning on every run. That forcing is a courtesy and it will be withdrawn;
+# on the day it is, every job in this file fails at its first step, with nothing in the
+# repository having changed. `checkout@v5` and `setup-python@v6` were the first majors to
+# declare `runs.using: node24` and would have silenced the warning, but pinning to a major
+# that is already two behind only schedules this same change again. What the newer majors
+# break is not reachable from here, which is the part worth checking rather than assuming:
+# checkout v7 refuses fork checkouts under `pull_request_target` and `workflow_run`, and
+# this repository triggers on neither; setup-python v7 removed the `pip-install` input, and
+# nothing here passes it.
+#
+# `cache: pip` is the part of that bump to watch, because its failure mode is a *passing*
+# build. setup-python v6 downgraded "the cache directory does not exist" from an error to a
+# warning, and a cache that quietly stops being restored looks exactly like a green run
+# that got slower — and nobody investigates a green run. If these jobs start taking minutes
+# longer, read the setup-python step's log for `Cache restored from key:` before looking
+# anywhere else.
 name: CI
 
 on:
@@ -9,6 +29,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # `release.yml` calls this workflow instead of restating the matrix, so the release gate
+  # and the everyday gate cannot drift apart — there is only one list of interpreters in
+  # this repository. Purely additive: a tag push matches none of the triggers above, so
+  # nothing about what runs on an ordinary push or pull request changes.
+  workflow_call:
 
 concurrency:
   # A second push to the same branch makes the first run's answer irrelevant.
@@ -36,9 +61,9 @@ jobs:
             os: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -57,8 +82,8 @@ jobs:
     name: coverage (gated at 100%)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -79,8 +104,8 @@ jobs:
     name: mypy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -97,8 +122,8 @@ jobs:
     name: core imports with no extras
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - run: |
