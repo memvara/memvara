@@ -133,6 +133,16 @@ class ReconcileResult:
 `receipt.retired` split it by `Claim.state`. Anything rendering the list as one word is
 wrong for one of the two closures; a supersession is `ended`.
 
+The reconciler is not the only contributor. `Memvara._write_claim` and
+`compat/_notes.write_note` close their predecessor *themselves*, before `assert_claim`,
+so that the reconciler cannot stamp the wall clock over a caller's `at` — which means the
+reconciler then finds no live victim there and reports none. Both therefore append what
+they closed onto the receipt after the transaction commits, and both do it conditionally:
+a supersession dated in the *future* leaves the predecessor in force at `now`, so the
+reconciler does reach it and has already recorded it, and an unconditional append would
+name one claim twice. A write path that closes a claim outside `assert_claim` owns saying
+so.
+
 ### `write/pipeline.py`
 
 ```python

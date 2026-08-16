@@ -2447,6 +2447,47 @@ def test_supersede_reports_its_turn_too(mem):
     assert receipt.episode_ids == [ep.id]
 
 
+@pytest.mark.parametrize("close, other", [("retired", "ended"), ("ended", "retired")])
+def test_supersede_reports_the_claim_it_closed_out(mem, close, other):
+    """The predecessor is closed *before* `assert_claim`, so the reconciler that fills in
+    `closed` arrives to find no live victim and reports none — and `supersede()`, the one
+    facade method whose entire purpose is closing a claim out, returned an empty list from
+    a call that had just closed one.
+
+    That is the wrong surface to be silent on. A caller replaying somebody else's mutation
+    log checks `receipt.retired` to confirm the retraction landed, got `[]`, and had to
+    re-read the store to learn it had worked. `forget()` hands its closed claims straight
+    back, so the two closure surfaces disagreed about the same event.
+
+    `close` doubles as the expected `state` here, which is the point: the receipt promises
+    these claims read as they do *after* the write, so the axis the caller asked to stop
+    is the axis the returned object reports — and `ended`/`retired` derive from it.
+    """
+    old_id = mem.remember("user", "lives_in", "Berlin").added[0].id
+
+    receipt = mem.supersede(old_id, Claim(subject="user", predicate="lives_in",
+                                          object="Lisbon"), close=close)
+
+    assert [c.id for c in receipt.closed] == [old_id]
+    assert [c.id for c in getattr(receipt, close)] == [old_id]
+    assert getattr(receipt, other) == [], "the other axis did not move"
+    assert receipt.closed[0].state == close == mem.get(old_id).state
+
+
+def test_a_future_dated_supersession_names_its_predecessor_once(mem):
+    """Dated forward, the old value is still in force *now*, so the reconciler does reach
+    it and has already recorded it. Appending unconditionally would then list one claim
+    twice and double every count taken off `closed` — a supersession reporting two
+    retirements where one claim exists."""
+    old_id = mem.remember("user", "lives_in", "Berlin").added[0].id
+
+    receipt = mem.supersede(old_id, Claim(subject="user", predicate="lives_in",
+                                          object="Lisbon"),
+                            at=utcnow() + timedelta(days=30))
+
+    assert [c.id for c in receipt.closed] == [old_id]
+
+
 def test_a_replacement_that_names_no_scope_does_not_land_in_another_tenant(tmp_path):
     """`supersede` retired the right claim and filed its successor in tenant `default`.
 

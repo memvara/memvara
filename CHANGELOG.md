@@ -9,7 +9,41 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **`supersede()` reported closing nothing, from the one call whose whole purpose is
+  closing a claim out.** `receipt.closed` came back empty — and with it `receipt.ended`
+  and `receipt.retired` — while the predecessor was closed correctly on disk. Only the
+  report of it was missing.
+
+  The cause is an ordering the transaction requires. `_write_claim` closes the
+  predecessor **before** `assert_claim`, because afterwards the reconciler gets there
+  first and stamps the wall clock over `at`, which turns a backdated import into a pile
+  of things that all changed today. But `closed` is filled in by that same reconciler
+  from the victims it finds, and by then the predecessor is no longer live: it finds
+  none, reports none, and the receipt went back to the caller as `assert_claim` built it.
+
+  Two closure surfaces disagreed as a result. `forget()` returns its closed claims
+  directly, so a caller replaying somebody else's mutation log had the retraction
+  confirmed through one door and got silence from the other, with no way to tell that
+  silence from "nothing was closed" short of re-reading the store. `WriteReceipt.closed`
+  is documented as "claims this write closed out, as they read *after* the write", and
+  that is now what it returns: `close_out` has already stamped the object, so
+  `Claim.state` names the axis that actually stopped and `ended`/`retired` split it.
+
+  **If you meter on `len(receipt.closed)`**, supersede-heavy workloads will report more
+  closures than before. The old number was an undercount, not a different definition.
+
+- **`compat/_notes.write_note` had the same defect, and dropped `episode_ids` as well.**
+  Same ordering, one layer below the facade — so *every* note write, including ones that
+  retire nothing, reported storing no turn while the turn sat committed on disk. That is
+  the door `Mem0Memory.add(infer=False)` and every row of a mem0 import go through. It
+  was latent rather than live: the importer counts its own rows and reads only `added`
+  and `reinforced`, which is the argument for fixing it before something trusts it
+  rather than after.
+
+  Both receipts are now completed after their transaction commits, so neither can
+  describe a write that rolled back.
 
 ## [0.2.0] — 2026-08-16
 

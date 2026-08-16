@@ -882,6 +882,11 @@ class Memvara:
         `close` names the clock that stops on `retire`, and is forwarded to the
         reconciler for anything *it* displaces, so one call cannot say two different
         things about the same slot.
+
+        The receipt is completed at the end rather than taken as `assert_claim` returns
+        it: the turns stored here and the predecessor closed here both happen outside
+        that call, so neither is in the receipt it hands back, and a receipt that omits
+        what the write did is read as a write that did not do it.
         """
         episodes = self._cite(claim, sources)
         if self.redactor is not None:
@@ -928,6 +933,26 @@ class Memvara:
         # Extended rather than assigned: `assert_claim` may already have recorded turns.
         known = set(receipt.episode_ids)
         receipt.episode_ids.extend(ep.id for ep in episodes if ep.id not in known)
+        # And the claim it closed out, for the same reason. The closure above happens
+        # *before* `assert_claim`, so by the time the reconciler looks for what this
+        # write displaces the predecessor is already closed, it finds no victims and
+        # reports none — leaving `supersede()`, the one method whose entire purpose is
+        # closing a claim out, returning an empty `closed`. A caller replaying somebody
+        # else's mutation log and checking `receipt.retired` to confirm the retraction
+        # landed got `[]` from a call that had just retired the claim, and had to re-read
+        # the store to discover it had worked. `forget()` returns its closed claims
+        # directly, so the two closure surfaces disagreed about the same kind of event.
+        #
+        # `close_out` has already stamped `retire`, so `Claim.state` reads whichever axis
+        # actually stopped and `.ended`/`.retired` split it correctly — the receipt's
+        # documented promise that these claims read as they do *after* the write.
+        #
+        # Appended only if absent, not unconditionally: a supersession dated in the
+        # future leaves the predecessor still in force *now*, so the reconciler does
+        # reach it and has already recorded it. Its copy is the one written last, and
+        # naming the same claim twice would double every count taken off this list.
+        if retire is not None and not any(c.id == retire.id for c in receipt.closed):
+            receipt.closed.append(retire)
         return receipt
 
     def supersede(self, old_claim_id: str, new_claim: Claim, *,
@@ -967,6 +992,10 @@ class Memvara:
         `close` names. `sources` means what it means on `remember`, and is here for the
         same reason: a replayed update arrives as a new turn *and* a new value, and the
         two have to land together.
+
+        The receipt names the predecessor in `closed`, on the axis `close` chose — so
+        `retired` under `close="retired"` and `ended` under the default — which is how a
+        caller confirms the closure landed without re-reading the store.
 
         Raises `KeyError` if `old_claim_id` names nothing this scope can see — the same
         error for "no such claim" as for "not yours", so it cannot be used to test
