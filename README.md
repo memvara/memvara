@@ -688,6 +688,11 @@ write above superseded, and superseding *ends*.
 The field is spelled `closed`. `receipt.invalidated` still works and is the same list —
 the old name, kept because it is on the published API, to be removed at `1.0.0`.
 
+Every write path fills it, not only `add()`. `supersede()` names the claim it replaced
+there, on whichever axis its `close=` stopped — so a caller replaying somebody else's
+mutation log confirms the closure landed by reading the receipt, rather than by asking
+the store a second question.
+
 #### What the fast path does not catch, measured
 
 With no `llm=` there is no tier 2, so tier 1b is the last stop and everything it does not
