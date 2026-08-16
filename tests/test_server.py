@@ -20,6 +20,7 @@ about one of them:
 
 import io
 import json
+import pathlib
 import re
 import sys
 import types
@@ -211,6 +212,78 @@ class _Recording(dict):
         # without this every `args.get("memory_types")` would read as a dropped argument.
         self.read.add(key)
         return super().get(key, default)
+
+
+#: Number words large enough to be a claim about the size of the tool surface. Below
+#: five they are prose about a handful — "the two closures are two tools" appears five
+#: times across these files and is not a total — so the check starts where a total
+#: could plausibly begin. The surface has never been smaller than eight.
+_COUNT_WORDS = {
+    "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+}
+
+#: Every file that states how many tools there are, and the reason this test exists:
+#: all four disagreed at once. The count went eight to nine to ten as `memory_end` and
+#: then `memory_since` landed, and each surface moved on a different commit, so for a
+#: while the package docstring, the module docstring, the README and the deploy guide
+#: gave three different answers with no red build anywhere.
+_COUNT_SURFACES = (
+    "memvara/server/tools.py",
+    "memvara/server/__init__.py",
+    "README.md",
+    "docs/DEPLOY.md",
+)
+
+
+@pytest.mark.parametrize("relative", _COUNT_SURFACES)
+def test_every_stated_tool_count_matches_the_tool_surface(relative):
+    """A number in prose is a claim, and this is the only thing that checks it.
+
+    `len(TOOLS)` is the fact; these four files each assert it in English, and English
+    does not get type-checked. Adding a tool is a one-line change to a tuple and a
+    four-file change to prose, which is exactly the shape of edit where the prose gets
+    forgotten — it did, twice, and the second time it was found by a reader rather than
+    by a test.
+
+    The count is read out of the file and compared against the tuple, so this fails on
+    the *stale* surface by name rather than reporting that something, somewhere,
+    disagrees. It also fails when a file stops stating a count at all: a guard that
+    passes because the sentence it guards was deleted is worse than no guard, since it
+    reads as coverage.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent
+    text = (root / relative).read_text(encoding="utf-8")
+
+    stated = [w for w in re.findall(r"\b([A-Za-z]+) tools\b", text)
+              if w.lower() in _COUNT_WORDS]
+
+    assert stated, f"{relative} no longer states a tool count — the guard has nothing to hold"
+    for word in stated:
+        assert _COUNT_WORDS[word.lower()] == len(TOOLS), (
+            f"{relative} says {word!r} tools; there are {len(TOOLS)}: "
+            + ", ".join(t.name for t in TOOLS))
+
+
+def test_the_tool_count_guard_is_not_vacuous():
+    """The check above is only worth anything if a wrong number fails it.
+
+    Both directions, because the failure that actually happened was a *stale* count —
+    a file left saying nine after a tenth tool landed — and a guard that only noticed
+    counts that were too high would have slept through it.
+    """
+    for prose, wrong in (("Nine tools, and no way to erase.", "nine"),
+                         ("The eleven tools, their descriptions.", "eleven")):
+        stated = [w for w in re.findall(r"\b([A-Za-z]+) tools\b", prose)
+                  if w.lower() in _COUNT_WORDS]
+        assert stated == [wrong.capitalize()] or stated == [wrong]
+        assert _COUNT_WORDS[stated[0].lower()] != len(TOOLS)
+
+    # And the phrase that must never be read as a total, or the guard cries wolf on
+    # every file that argues why the two closures are two tools.
+    assert not [w for w in re.findall(r"\b([A-Za-z]+) tools\b",
+                                      "the two closures are two tools, not one tool")
+                if w.lower() in _COUNT_WORDS]
 
 
 @pytest.mark.parametrize("tool", TOOLS, ids=lambda t: t.name)
