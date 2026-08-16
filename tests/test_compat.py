@@ -801,6 +801,40 @@ def test_retiring_a_note_without_an_instant_does_not_erase_an_existing_valid_to(
     assert mem.store.get_claim(live.id).valid_to is not None
 
 
+@pytest.mark.parametrize("close, other", [("ended", "retired"), ("retired", "ended")])
+def test_a_note_write_reports_the_turn_and_the_claim_it_closed(mem, close, other):
+    """The turn is stored and the predecessor closed *outside* `assert_claim`, so its
+    receipt knew about neither and this handed that receipt straight back: a call that had
+    just written an episode and closed a claim reported storing no turns and closing
+    nothing.
+
+    Latent rather than live — the importer counts its own rows and reads only `added` and
+    `reinforced` — which is the argument for fixing it now rather than after somebody
+    trusts it. `Memvara._write_claim` is the same function one facade up and answers both
+    questions; an adapter that reconciles what it wrote by receipt would have got zeroes
+    from this door and the truth from that one.
+    """
+    from memvara.compat._notes import build_note, write_note
+
+    ensure_note_predicate(mem, NOTE_PREDICATE, "default")
+    first, ep1 = build_note(memory_id="m5", text="Likes pizza",
+                            scope=mem.default_scope, ts=at(0))
+    opened = write_note(mem, first, ep1)
+    live = opened.added[0]
+    assert opened.episode_ids == [ep1.id], "a write that closes nothing still stored a turn"
+    assert opened.closed == []
+
+    second, ep2 = build_note(memory_id="m5", text="Likes calzone",
+                             scope=mem.default_scope, ts=at(1))
+    receipt = write_note(mem, second, ep2, retire=live, at=at(1), close=close)
+
+    assert receipt.episode_ids == [ep2.id]
+    assert [c.id for c in receipt.closed] == [live.id]
+    assert [c.id for c in getattr(receipt, close)] == [live.id]
+    assert getattr(receipt, other) == [], "the other axis did not move"
+    assert receipt.closed[0].state == close == mem.store.get_claim(live.id).state
+
+
 def test_an_import_reports_the_tokens_it_paid_not_only_the_calls_it_made(mem, history_db):
     """Phase 2's own docstring says it "pays tokens once" — and until now it reported
     only `llm_calls`. An import is the largest single spend most callers ever make here,

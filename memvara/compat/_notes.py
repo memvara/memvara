@@ -163,6 +163,13 @@ def write_note(mem: Memvara, claim: Claim, episode: Episode, *,
     vectors in the index for every note, return the same sentence twice under
     `include_episodes=True`, and double the encode bill of an import for no recall
     anyone can name. The turn is still stored and still BM25-indexed by `add_episode`.
+
+    The receipt is completed here rather than returned as `assert_claim` hands it back —
+    the same repair, for the same reason, as the one at the end of `_write_claim`. The
+    turn and the retirement are both written *outside* that call, so its receipt knows
+    about neither, and this used to return one reporting that it had stored no turns and
+    closed nothing while both sat committed on disk. An importer reconciling what it
+    wrote against what it was told it wrote reconciled against zeroes.
     """
     with mem.store.batch():
         mem.store.add_episode(episode)
@@ -180,4 +187,17 @@ def write_note(mem: Memvara, claim: Claim, episode: Episode, *,
             when = at if at is not None else claim.recorded_at
             close_out(retire, when, claim.id, close)
             mem.store.put_claim(retire)
-        return mem.writer.assert_claim(claim, close=close)
+        receipt = mem.writer.assert_claim(claim, close=close)
+    # After the transaction commits, so a receipt never describes a write that rolled
+    # back. `close_out` has already stamped `retire`, so `Claim.state` names the axis
+    # that actually stopped and `ended`/`retired` split it correctly.
+    #
+    # Both are conditional for the reason `_write_claim` gives: a supersession dated
+    # forward leaves the predecessor in force at `now`, so the reconciler reaches it and
+    # records it itself, and naming one claim twice would double every count taken off
+    # this list.
+    if episode.id not in receipt.episode_ids:
+        receipt.episode_ids.append(episode.id)
+    if retire is not None and not any(c.id == retire.id for c in receipt.closed):
+        receipt.closed.append(retire)
+    return receipt
