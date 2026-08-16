@@ -14,9 +14,9 @@
 # guarded against by somebody remembering to `rm -rf dist` first.
 #
 # What it deliberately does not automate: the version bump, the changelog, and the
-# decision. `docs/RELEASING.md` step 9 says "the real publish is a decision, not a step",
-# and the `pypi` environment below is how that survives automation — the upload job waits
-# for a human reviewer before it runs.
+# decision. `docs/RELEASING.md` says "the real publish is a decision, not a step", and the
+# `pypi` environment below is how that survives automation — the upload job waits for a
+# human reviewer before it runs.
 #
 # Limits worth stating. This proves the artifact is built from the tagged commit and that
 # the tagged commit is green; it cannot prove the tag is on the commit anyone intended,
@@ -27,10 +27,10 @@ name: Release
 
 on:
   push:
-    # A tag, not every push to main. `docs/RELEASING.md` step 7 already ends a release
-    # with `git push origin v0.2.0`; this makes that push the trigger rather than a note
-    # to go and do something else afterwards. Publishing on every commit to main would be
-    # the opposite of a decision.
+    # A tag, not every push to main. The manual procedure in `docs/RELEASING.md` already
+    # ended with `git push origin v0.2.0`; this makes that push the trigger rather than a
+    # note to go and do something else afterwards. Publishing on every commit to main
+    # would be the opposite of a decision.
     tags: ["v*"]
   workflow_dispatch:
     # For the re-run: CI was green, the build was fine, and the upload failed on a network
@@ -131,10 +131,10 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   build:
-    # `docs/RELEASING.md` steps 4-6, in order, in a runner that has never built this
-    # package before. The ordering is the substance: build first, then test the artifact
-    # rather than the tree, because a source tree on `sys.path` will happily stand in for
-    # a module the wheel forgot.
+    # The artifact checks from `docs/RELEASING.md`'s manual procedure, in order, in a
+    # runner that has never built this package before. The ordering is the substance:
+    # build first, then test the artifact rather than the tree, because a source tree on
+    # `sys.path` will happily stand in for a module the wheel forgot.
     name: build the artifact and check the artifact
     needs: [version, ci]
     runs-on: ubuntu-latest

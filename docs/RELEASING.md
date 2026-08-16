@@ -343,8 +343,8 @@ namespace is claimed by the first upload or a PEP 541 request — and an npm org
 So the sequence matters. Publishing the GitHub repo is a public mention of a name that is
 still takeable on two registries, and we already lost `engram` by assuming a name was
 ours. **Claim both registry names before, or in the same sitting as, the first public
-push** — on PyPI that means uploading at least once, so the TestPyPI dry run below is the
-rehearsal, not the release.
+push** — on PyPI that means uploading at least once, so the TestPyPI rehearsal in step 4 is
+the rehearsal, not the release.
 
 ### The rest
 
