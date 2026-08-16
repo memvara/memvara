@@ -151,6 +151,12 @@ is rejected at upload. So that one field does two jobs — it is where the human
 lives, and it narrows what the publisher will trust from "any workflow run in this
 repository" to "a run that got past the environment's rules".
 
+The rehearsal job needs its own. **TestPyPI is a separate service** with a separate account
+and a separate publisher registry, so repeat the same form at
+<https://test.pypi.org/manage/account/publishing/> with `testpypi` as the environment name.
+Skipping this does not break a release — it breaks the rehearsal, at the upload, which is
+the last place anyone thinks to look for a missing registration.
+
 Then, in GitHub, **Settings → Environments**:
 
 * **`pypi`** — add at least one *Required reviewer*. That is the approval gate; without it
