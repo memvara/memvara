@@ -15,3 +15,11 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Finder writes one of these into any directory it is asked to display, so they arrive
+# without anyone editing anything, in whichever directory somebody happened to open. No
+# slash, so this matches at every depth rather than only at the root. Listed here for the
+# same reason as the line above even though none has appeared yet: this repository is
+# public, and a stray binary file in a release tarball is a question every reader has to
+# stop and answer.
+.DS_Store
