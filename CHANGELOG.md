@@ -9,6 +9,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] — 2026-08-16
+
+The first release with an agent-facing surface: a prompt block that can say what it
+rested on and how big it is, a delta for a resumed session, and a skill that ships with
+the package. Ten MCP tools, up from eight.
+
+**`0.1.0` shipped eight tools and none of the below.** A reader who installed it before
+today has `true_since`/`true_until` on `memory_remember` and no `close`, no `memory_end`,
+no `memory_since`, and no `memvara-mcp init`.
+
 ### Upgrading
 
 The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRADING.md).

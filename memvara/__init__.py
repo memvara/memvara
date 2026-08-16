@@ -85,7 +85,7 @@ from .telemetry import MemoryRecorder, NullRecorder, Recorder
 from .write import FastExtractor, Reconciler, SalienceGate, WritePipeline
 from .write.reconcile import backfill_entities
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Memvara", "ScopedMemvara", "AsyncMemvara", "AsyncScopedMemvara",
