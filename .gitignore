@@ -23,3 +23,13 @@ __pycache__/
 # public, and a stray binary file in a release tarball is a question every reader has to
 # stop and answer.
 .DS_Store
+
+# Where working files live: a script somebody ran by hand, a captured response, a harness
+# that reproduces the bug being chased. Kept, but never committed. It exists because the
+# alternatives both fail — a temporary directory is deleted without warning, which is what
+# temporary means, and an untracked file at the root is one the next `git add -A` commits.
+# Leading slash, so it means this one directory and cannot also match a `local/` somewhere
+# under `memvara/`: hatchling builds the sdist from what VCS does not ignore, so a pattern
+# matching at every depth is a pattern that can quietly drop files out of a release. See
+# `pyproject.toml`'s note on `artifacts` for the same thread, pulled the other way.
+/local/
