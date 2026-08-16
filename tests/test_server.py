@@ -20,6 +20,7 @@ about one of them:
 
 import io
 import json
+import pathlib
 import re
 import sys
 import types
@@ -211,6 +212,118 @@ class _Recording(dict):
         # without this every `args.get("memory_types")` would read as a dropped argument.
         self.read.add(key)
         return super().get(key, default)
+
+
+#: Every number word this project might write, not merely the ones that could be a
+#: total. The distinction matters: a word missing from here is invisible to the scan,
+#: so a file saying "sixteen tools" against a map that stopped at fifteen would report
+#: *no count at all* and send the reader looking for a deleted sentence. Unknown words
+#: must be impossible rather than quietly skipped, which is what `_WORD_FOR` below
+#: enforces from the other end.
+_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19, "twenty": 20,
+}
+
+#: Spelling, for deriving a wrong-but-plausible count in the non-vacuity check and for
+#: refusing to run at all once the surface outgrows what this table can say.
+_WORD_FOR = {value: word for word, value in _NUMBER_WORDS.items()}
+
+#: Below this, a number word is prose about a handful rather than a total: "the two
+#: closures are two tools" appears five times across these files and is not a claim
+#: about the size of anything. The surface has never been smaller than eight.
+_MIN_TOTAL = 5
+
+#: Every file that states how many tools there are, and the reason this test exists:
+#: all four disagreed at once. The count went eight to nine to ten as `memory_end` and
+#: then `memory_since` landed, and each surface moved on a different commit, so for a
+#: while the package docstring, the module docstring, the README and the deploy guide
+#: gave three different answers with no red build anywhere.
+_COUNT_SURFACES = (
+    "memvara/server/tools.py",
+    "memvara/server/__init__.py",
+    "README.md",
+    "docs/DEPLOY.md",
+)
+
+
+@pytest.mark.parametrize("relative", _COUNT_SURFACES)
+def test_every_stated_tool_count_matches_the_tool_surface(relative):
+    """A number in prose is a claim, and this is the only thing that checks it.
+
+    `len(TOOLS)` is the fact; these four files each assert it in English, and English
+    does not get type-checked. Adding a tool is a one-line change to a tuple and a
+    four-file change to prose, which is exactly the shape of edit where the prose gets
+    forgotten — it did, twice, and the second time it was found by a reader rather than
+    by a test.
+
+    The count is read out of the file and compared against the tuple, so this fails on
+    the *stale* surface by name rather than reporting that something, somewhere,
+    disagrees. It also fails when a file stops stating a count at all: a guard that
+    passes because the sentence it guards was deleted is worse than no guard, since it
+    reads as coverage.
+    """
+    assert len(TOOLS) in _WORD_FOR, (
+        f"there are now {len(TOOLS)} tools and _NUMBER_WORDS cannot spell that, so this "
+        "guard can no longer check anything — extend it rather than deleting the test")
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    text = (root / relative).read_text(encoding="utf-8")
+
+    expected = _WORD_FOR[len(TOOLS)]
+    words = [w.lower() for w in re.findall(r"\b([A-Za-z]+) tools\b", text)]
+    totals = [w for w in words if _NUMBER_WORDS.get(w, 0) >= _MIN_TOTAL]
+
+    # Stated positively, and that is what makes an unreadable count impossible to miss.
+    # Scanning only for *wrong* numbers passes when the count is spelled in a way this
+    # regex cannot see — "twenty-one tools", a digit, a rewritten sentence — because
+    # there is nothing left to object to. Requiring the right word to be present turns
+    # every one of those into the same failure as deleting it.
+    assert expected in totals, (
+        f"{relative} does not state {expected!r} tools anywhere. It states "
+        f"{totals or 'no count this guard can read'} — either the count is stale, or it "
+        "is written in a form the scan cannot see and the guard has stopped holding.")
+
+    wrong = sorted({w for w in totals if w != expected})
+    assert not wrong, (
+        f"{relative} says {wrong} tools; there are {len(TOOLS)}: "
+        + ", ".join(t.name for t in TOOLS))
+
+
+def test_the_tool_count_guard_is_not_vacuous():
+    """The check above is only worth anything if a wrong number fails it.
+
+    Both directions, because the failure that actually happened was a *stale* count —
+    a file left saying nine after a tenth tool landed — and a guard that only noticed
+    counts that were too high would have slept through it.
+
+    The wrong numbers are derived from `len(TOOLS)` rather than written down. Hard-coding
+    "nine" and "eleven" would have made this test fail on the day the surface reached
+    either, for a guard that was still perfectly sound — a self-inflicted version of
+    exactly the staleness it exists to catch.
+    """
+    expected = _WORD_FOR[len(TOOLS)]
+
+    for delta in (-1, +1):
+        wrong = _WORD_FOR[len(TOOLS) + delta]
+        totals = [w.lower() for w in re.findall(r"\b([A-Za-z]+) tools\b",
+                                                f"The {wrong} tools, and no way to erase.")
+                  if _NUMBER_WORDS.get(w.lower(), 0) >= _MIN_TOTAL]
+        assert totals == [wrong]
+        assert expected not in totals, "a wrong count must not satisfy the positive check"
+
+    # A count the scan cannot read must fail too, or the guard passes on prose it never
+    # understood — the failure mode the positive assertion exists for.
+    assert expected not in [w.lower() for w in re.findall(r"\b([A-Za-z]+) tools\b",
+                                                          "twenty-one tools, hand-rolled")]
+
+    # And the phrase that must never be read as a total, or the guard cries wolf on
+    # every file that argues why the two closures are two tools.
+    assert not [w for w in re.findall(r"\b([A-Za-z]+) tools\b",
+                                      "the two closures are two tools, not one tool")
+                if _NUMBER_WORDS.get(w.lower(), 0) >= _MIN_TOTAL]
 
 
 @pytest.mark.parametrize("tool", TOOLS, ids=lambda t: t.name)
