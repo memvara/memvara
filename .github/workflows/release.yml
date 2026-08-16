@@ -22,6 +22,16 @@
 # the tagged commit is green; it cannot prove the tag is on the commit anyone intended,
 # and it does not check PyPI for whether the version is already taken (the upload does
 # that, and it is the one check that cannot be wrong).
+#
+# On the action pins, see the note at the top of `ci.yml`: they are the current majors, off
+# the deprecated Node 20 runtime, and identical in both files because two different pins
+# either side of `uses: ./.github/workflows/ci.yml` would reintroduce exactly the drift
+# that calling the CI workflow exists to prevent. The two artifact actions are only in this
+# file, and they were the same Node 20 problem with a worse tell: nothing here runs on an
+# ordinary push, so their deprecation would have first shown up on the day of a release —
+# the day with the least appetite for a surprise. `download-artifact@v8` also promotes a
+# digest mismatch from a warning to an error, which is the right default for the one
+# download in this repository whose bytes go on to become a permanent PyPI release.
 
 name: Release
 
@@ -71,7 +81,7 @@ jobs:
     outputs:
       version: ${{ steps.read.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Compare the tag against both places the version is written
         id: read
@@ -139,9 +149,9 @@ jobs:
     needs: [version, ci]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -169,12 +179,22 @@ jobs:
       - name: Install the dev extra, so the packaging tests can run
         run: python -m pip install -e ".[dev]"
 
-      - name: The packaging tests, now that dist/ exists
-        # Three tests in this file skip when `dist/` is empty and arm themselves once it is
-        # not: `py.typed` is in the wheel, every module in the tree is in the wheel, and
-        # the wheel's metadata version matches `memvara.__version__`. Running them before
-        # the build step above would have been three silent skips reported as a pass.
-        run: python -m pytest tests/test_packaging.py -q
+      - name: The whole suite again, now that dist/ exists
+        # The `ci` job already ran this suite six ways — and every dist-gated test skipped
+        # in all six, because a checkout has no `dist/`. This is the only run in which they
+        # execute: `py.typed` is in the wheel, every module in the tree is in the wheel, the
+        # wheel's metadata version matches `memvara.__version__`, and the skill `memvara
+        # init` writes out reached the wheel.
+        #
+        # The whole suite rather than the two files that hold those four tests, and that is
+        # deliberate. This step first read `tests/test_packaging.py` alone, which is what
+        # `docs/RELEASING.md` names — and it missed
+        # `tests/test_init.py::test_the_skill_reaches_the_wheel`, which gates on a built
+        # wheel from a different file. A list of filenames here is a list that goes stale
+        # the next time someone adds a wheel test somewhere new, and it goes stale as a
+        # *skip*, which pytest reports inside a passing run. That is the same shape as the
+        # failure this whole file exists to prevent: not a red build, an absence.
+        run: python -m pytest -q
 
       - name: Install the wheel into a clean venv that is not the repository
         # From `$RUNNER_TEMP`, because the repository on `sys.path` hides exactly the bug
@@ -238,7 +258,7 @@ jobs:
         # would almost certainly be identical, and "almost certainly" is not the standard
         # for the thing that gets uploaded: what is published is what was checked above,
         # byte for byte.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
@@ -269,7 +289,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
@@ -319,7 +339,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/

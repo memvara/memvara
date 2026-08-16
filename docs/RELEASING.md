@@ -87,7 +87,7 @@ That push is the whole trigger. `.github/workflows/release.yml` then runs, in or
 |---|---|
 | `version` | Refuses unless the tag, `pyproject.toml`'s `version` and `memvara/__init__.py`'s `__version__` are the same string. First and fastest, so a one-sided bump fails in seconds rather than after the matrix — or, the failure it really exists for, not at all, leaving a wheel on PyPI whose metadata disagrees with its tag. |
 | `ci` | Calls `.github/workflows/ci.yml` **on the tagged commit**: 3.10–3.13 on Linux plus macOS and Windows, coverage gated at 100%, mypy, and the no-extras import job. It calls rather than restates, so there is one matrix in this repository and it cannot drift. A tag push starts nothing else, so without this job the release would be gated on whatever CI last happened to run. |
-| `build` | `python -m build`, `twine check`, then `tests/test_packaging.py` *after* the build so its three dist-gated tests arm themselves — and then installs the wheel into a fresh venv outside the repository and checks that the dependency set is exactly memvara and numpy, that the library works, and that `reveal_type` reports `str` rather than `Any`. |
+| `build` | `python -m build`, `twine check`, then the whole suite again *after* the build, which is the only run in which the four dist-gated tests execute at all — three in `tests/test_packaging.py` and one in `tests/test_init.py`. Then it installs the wheel into a fresh venv outside the repository and checks that the dependency set is exactly memvara and numpy, that the library works, and that `reveal_type` reports `str` rather than `Any`. |
 | `publish-pypi` | Uploads the artifact `build` produced — those bytes, not a rebuild — over PyPI trusted publishing. Waits for a human first; see step 4. |
 
 The runner has no `dist/`, no second checkout and no earlier build, and that is the point
@@ -205,13 +205,17 @@ because 3.10 through 3.12 had never executed a line of this library until it did
 ```bash
 rm -rf dist
 python3 -m build                      # wheel and sdist
-python3 -m pytest tests/test_packaging.py -q
+python3 -m pytest -q                  # not just tests/test_packaging.py — see below
 ```
 
-Three tests in that file skip when `dist/` is empty and run once it is not — the
-`py.typed` marker is in the wheel, every module in the tree is in the wheel, and the
-wheel's metadata version matches `memvara.__version__`. This ordering is the whole point:
-build first, then test the artifact rather than the tree.
+Four tests skip while `dist/` is empty and run once it is not: three in
+`tests/test_packaging.py` — the `py.typed` marker is in the wheel, every module in the
+tree is in the wheel, and the wheel's metadata version matches `memvara.__version__` — and
+`tests/test_init.py::test_the_skill_reaches_the_wheel`, which is the one that catches the
+skill `memvara init` writes out failing to ship. This step named only the packaging file
+until the release workflow was written and the fourth one was found still skipping, so run
+the suite rather than a file list. This ordering is the whole point: build first, then test
+the artifact rather than the tree.
 
 ```bash
 python3 -m pip install twine
