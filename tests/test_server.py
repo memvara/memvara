@@ -1631,6 +1631,353 @@ def test_ending_is_flagged_destructive_like_forgetting(server):
     assert BY_NAME["memory_end"].writes is True
 
 
+# -- when a fact became true -------------------------------------------------
+#
+# The other half of the same gap. `memory_end` could always say *when* a fact stopped
+# being true; nothing could say when one started, so `Claim.valid_from` took its
+# `default_factory=utcnow` and every fact was stamped as beginning at the instant it was
+# written. A store whose whole pitch is two independent clocks let an agent set one end
+# of the valid interval and not the other.
+
+def test_the_write_that_was_false_at_every_instant_of_its_own_interval(server):
+    """The reported failure, with its real numbers, and the argument that repairs it.
+
+    Recording project state, an agent wrote `quota_gate status "not installed"` at
+    00:50:13Z to represent a belief it had held earlier that morning. The gate had been
+    installed at 00:04:07Z, 46 minutes before. `valid_from` defaulted to the write
+    instant, so the stored claim asserted *"not installed, from 00:50:13Z onward"* — false
+    at every instant of the interval it claimed. Nothing warned; `added 1` is what a
+    correct write says too.
+
+    The symptom arrived later and was misread. Closing it out at the install instant put
+    `valid_to` before `valid_from`, and `close_out` clamped — which was the store
+    correctly refusing to represent a fact that ended before it began, read as an
+    obstacle rather than as the diagnosis.
+
+    So the assertion that matters is not that `true_since` is stored. It is that the
+    interval afterwards contains only instants at which the claim was true, and that
+    ending it at the instant it really stopped is no longer clamped.
+    """
+    now = utcnow()
+    began = now - timedelta(minutes=50, seconds=13)     # earlier that morning
+    installed = now - timedelta(minutes=46, seconds=6)  # 00:04:07Z
+
+    text(server, "memory_remember",
+         {"subject": "quota_gate", "predicate": "status", "object": "not installed",
+          "true_since": began.isoformat().replace("+00:00", "Z")})
+
+    stale = server._ctx.memory.get_all()[0]
+    assert stale.valid_from == began
+    # Transaction time is untouched and is now: we really did only just record it.
+    assert now <= stale.recorded_at <= utcnow()
+    assert stale.recorded_at - stale.valid_from >= timedelta(minutes=50)
+
+    body = text(server, "memory_end", {
+        "claim_id": stale.id, "at": installed.isoformat().replace("+00:00", "Z")})
+
+    closed = server._ctx.memory.get(stale.id)
+    assert closed.valid_to == installed, "the clamp is what the default caused"
+    assert closed.valid_to > closed.valid_from
+    assert installed.strftime("%Y-%m-%d %H:%M") in body
+
+    # The interval now contains only instants at which the gate really was not installed,
+    # on both sides of the boundary. This is the property the defaulted write could not
+    # have: there, every instant of the interval was one where the gate *was* installed.
+    inside = [c.object for c in server._ctx.memory.get_all(
+        valid_at=began + timedelta(minutes=1))]
+    after = [c.object for c in server._ctx.memory.get_all(
+        valid_at=installed + timedelta(seconds=1))]
+    assert inside == ["not installed"] and after == []
+
+
+def test_omitting_true_since_still_stamps_the_write_instant_and_still_clamps(server):
+    """The bug, still exactly reproducible with the argument left off.
+
+    Two things at once, and both are needed. Omitting the new argument must behave as it
+    did — a default that quietly moved would be a silent rewrite of every existing
+    caller's valid time — and the failure above must be attributable to the *default*
+    rather than to something the fix happened to repair on the side. If this test ever
+    goes green by itself, the clamp stopped clamping and the test above proves nothing.
+    """
+    before = utcnow()
+    text(server, "memory_remember", {"subject": "quota_gate", "predicate": "status",
+                                     "object": "not installed"})
+    claim = server._ctx.memory.get_all()[0]
+    assert before <= claim.valid_from <= utcnow()
+    assert claim.valid_from == claim.recorded_at   # one clock read, both axes
+    assert claim.valid_to is None
+
+    text(server, "memory_end", {
+        "claim_id": claim.id,
+        "at": (before - timedelta(minutes=46)).isoformat().replace("+00:00", "Z")})
+    closed = server._ctx.memory.get(claim.id)
+    assert closed.valid_to == closed.valid_from, "an interval of zero length: the report"
+
+
+def test_a_finished_fact_can_be_written_closed_in_one_call(server):
+    """`true_until` exists because the two-call form is wrong in between, not just longer.
+
+    Write-then-`memory_end` leaves the store answering the present-tense question with a
+    value already known to be false for as long as the two calls are apart — and forever,
+    if the turn ends before the second one. The backfill of a fact that is already over
+    is exactly the motivating case, so the one-call form is the shape that case wants.
+    """
+    now = utcnow()
+    began, installed = now - timedelta(minutes=50), now - timedelta(minutes=46)
+    body = text(server, "memory_remember", {
+        "subject": "quota_gate", "predicate": "status", "object": "not installed",
+        "true_since": began.isoformat().replace("+00:00", "Z"),
+        "true_until": installed.isoformat().replace("+00:00", "Z")})
+
+    claim = server._ctx.memory.get_all(states=("live", "ended"))[0]
+    assert (claim.valid_from, claim.valid_to) == (began, installed)
+    assert claim.invalidated_at is None, "it finished; it was never wrong"
+
+    # It never answers a present-tense question — not for one microsecond — and the reply
+    # says so, because `added 1` beside a memory_recall that returns nothing is the shape
+    # a model reads as a failed write.
+    assert "already stopped being true" in body
+    assert "memory_history shows it" in body
+    assert server._ctx.memory.get_all() == []
+
+    # …and the period it held still answers, which is the difference between a backfill
+    # and a write that was thrown away.
+    assert [c.object for c in server._ctx.memory.get_all(
+        valid_at=began + timedelta(minutes=1))] == ["not installed"]
+
+
+def test_the_repaired_sequence_leaves_one_answer_and_no_accumulation_note(server):
+    """The whole reported episode, replayed as it should have been written.
+
+    `status` is undeclared and therefore multi-valued, so the two values do not displace
+    each other — which is what produced the store contradicting itself, and what
+    `_accumulated_note` was added to report. Written with their real intervals, the
+    contradiction never happens: the first value is not live when the second lands, so
+    there is nothing to accumulate beside and nothing to warn about. The note going quiet
+    here is the evidence that this fixes the cause rather than adding a second warning.
+    """
+    now = utcnow()
+    began, installed = now - timedelta(minutes=50), now - timedelta(minutes=46)
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+
+    text(server, "memory_remember", {
+        "subject": "quota_gate", "predicate": "status", "object": "not installed",
+        "true_since": stamp(began), "true_until": stamp(installed)})
+    second = text(server, "memory_remember", {
+        "subject": "quota_gate", "predicate": "status", "object": "installed",
+        "true_since": stamp(installed)})
+
+    assert "already live" not in second, "nothing was live to land beside"
+    recalled = text(server, "memory_recall", {"query": "is the quota gate installed?"})
+    assert "installed" in recalled and "not installed" not in recalled
+    assert len(server._ctx.memory.history("quota_gate", "status")) == 2
+
+
+def test_the_instant_argument_cannot_be_read_as_transaction_time(server):
+    """The name, which is the decision this rests on.
+
+    `memory_end` spells its instant `at`, and symmetry argues for `at` here too. It is the
+    wrong answer, and the reason is the verb each name attaches to. On a tool whose verb
+    is *end*, "at" can only mean the instant of the ending — the tool name has already
+    fixed which event is being timed. On a tool whose verb is *record*, "at" attaches to
+    the recording, so it reads as transaction time at least as readily as valid time. The
+    same spelling on the two tools would name two different clocks, and one of those
+    readings writes forged history with a correctly-spelled call that nothing detects.
+    `true_since` cannot take the transaction-time reading: a record is not "true since".
+
+    Pinned on the surface rather than only on behaviour, because the failure this prevents
+    happens in the model before the call is made, where no behavioural test can reach.
+    """
+    props = BY_NAME["memory_remember"].properties
+    assert "true_since" in props and "at" not in props
+    # Not by any other spelling of the belief clock either.
+    assert not {"recorded_at", "known_at", "as_of", "believed_at", "asserted_at"} & set(props)
+    # And the description says which clock it is, in the place a model reads before it
+    # fills the argument in.
+    since = props["true_since"]["description"]
+    assert "in the world" in since
+    assert "always now" in since and "forge an audit trail" in since
+
+
+def test_true_since_cannot_be_used_to_set_transaction_time(server):
+    """The boundary, asserted behaviourally as well: valid time moves, belief time does not.
+
+    Valid time is a claim about the world and the caller is entitled to it. Transaction
+    time is a claim about the *record* — when this system came to believe it — and a
+    caller who can backdate that can write an audit trail saying it knew a fact before it
+    did, which nothing downstream can falsify. `Memvara.remember` does accept
+    `recorded_at`; no tool offers it, and this is what stops that being quietly undone.
+    """
+    before = utcnow()
+    text(server, "memory_remember", {
+        "predicate": "lives_in", "object": "Lisbon",
+        "true_since": "2019-03-04T10:00:00Z"})
+    claim = server._ctx.memory.get_all()[0]
+
+    assert claim.valid_from.year == 2019            # the world clock did move
+    assert before <= claim.recorded_at <= utcnow()  # the belief clock did not
+
+    # The argument is not reachable under its own name either, and the rejection names
+    # what is accepted rather than leaving the model to guess.
+    body, is_error = call(server, "memory_remember", {
+        "predicate": "lives_in", "object": "Lisbon", "recorded_at": "2019-03-04T10:00:00Z"})
+    assert is_error and "unknown argument(s)" in body
+    assert "true_since" in body
+
+    # `as_of` rewinds both clocks, so a 2019 view of a fact recorded today must be empty:
+    # we did not believe it in 2019 however long it has been true.
+    assert server._ctx.memory.get_all(as_of=claim.valid_from + timedelta(days=1)) == []
+
+
+def test_a_past_dated_write_ends_the_old_value_where_the_new_one_began(server):
+    """Not "now" — the instant the successor became true. Read from the reconciler.
+
+    `Reconciler.apply` hands `claim.valid_from` to `_retire` as the boundary, and
+    `_retire`'s docstring gives the reason: the successor's start *is* when the world
+    moved, and `t` is merely when we found out. Ending the old value at `now` would leave
+    a window in which both values were true — the seven days below — which for a
+    single-valued slot is two answers to one question. There was already an answer here;
+    this pins it through the tool rather than inventing a second one.
+    """
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Berlin",
+                                     "true_since": stamp(now - timedelta(days=30))})
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Lisbon",
+                                     "true_since": stamp(now - timedelta(days=7))})
+
+    berlin, lisbon = server._ctx.memory.history("user", "lives_in")
+    assert berlin.object == "Berlin" and lisbon.object == "Lisbon"
+    assert berlin.valid_to == lisbon.valid_from == now - timedelta(days=7)
+    assert berlin.valid_to < now, "it ended when the move happened, not when we heard"
+    assert berlin.invalidated_at is None, "the world moved; the record was fine"
+
+    # No instant answers twice, and none answers not at all.
+    for day, expected in ((8, ["Berlin"]), (6, ["Lisbon"]), (0, ["Lisbon"])):
+        assert [c.object for c in server._ctx.memory.get_all(
+            valid_at=now - timedelta(days=day))] == expected
+
+
+def test_a_past_dated_write_behind_a_later_value_is_history_not_news(server):
+    """The mirror, and the other reconciler path: an import must not rewrite the present.
+
+    `_victims` splits the slot by valid time rather than arrival order, so a fact
+    backfilled today but true from last month lands *behind* the value that replaced it:
+    the newcomer is closed where the existing value begins, and the existing value is not
+    touched. A test that only covered the forward direction would survive an injection
+    that broke this one.
+    """
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Lisbon",
+                                     "true_since": stamp(now - timedelta(days=7))})
+    body = text(server, "memory_remember", {"predicate": "lives_in", "object": "Berlin",
+                                            "true_since": stamp(now - timedelta(days=30))})
+
+    assert "ended 0" in body, "the current value was not displaced by its own history"
+    lisbon = [c for c in server._ctx.memory.history("user", "lives_in")
+              if c.object == "Lisbon"][0]
+    berlin = [c for c in server._ctx.memory.history("user", "lives_in")
+              if c.object == "Berlin"][0]
+    assert lisbon.state == "live" and lisbon.valid_to is None
+    assert berlin.valid_to == lisbon.valid_from
+    assert [c.object for c in server._ctx.memory.get_all()] == ["Lisbon"]
+    assert "already stopped being true" in body
+
+
+def test_a_future_dated_write_is_stored_and_says_it_is_not_in_force_yet(server):
+    """A fact that becomes true tomorrow is legitimate, and invisible unless it says so.
+
+    The store has a state for this — recorded, believed, not yet in force — and it is the
+    outcome most easily mistaken for a failed write: the receipt says `added 1` and
+    `memory_recall` returns the *old* value, correctly. Unexplained, a model reads that as
+    a call that did nothing and rewrites it with the argument removed, which is the
+    original defect reached through the fix. Both halves of the handover are asserted,
+    because the displaced value keeping its answer until then is the same fact seen from
+    the other side.
+    """
+    starts = utcnow() + timedelta(days=16)
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Lisbon"})
+    body = text(server, "memory_remember", {
+        "predicate": "lives_in", "object": "Berlin",
+        "true_since": starts.isoformat().replace("+00:00", "Z")})
+
+    assert "added 1, ended 1" in body
+    assert "not in force until" in body and starts.strftime("%Y-%m-%d") in body
+    assert "this write working rather than failing" in body
+    # And the other side of the same instant: Lisbon is true until then and keeps saying so.
+    assert "still in the future" in body
+
+    assert [c.object for c in server._ctx.memory.get_all()] == ["Lisbon"]
+    assert "Lisbon" in text(server, "memory_recall", {"query": "where do they live"})
+    assert [c.object for c in server._ctx.memory.get_all(
+        valid_at=starts + timedelta(days=1))] == ["Berlin"]
+    # Not invisible in the meantime: it is on record now, under both tools that show
+    # something other than the present.
+    assert "Berlin" in text(server, "memory_history", {"predicate": "lives_in"})
+    assert "Berlin" in text(server, "memory_search", {
+        "query": "where do they live",
+        "as_of": (starts + timedelta(days=1)).isoformat().replace("+00:00", "Z")})
+
+
+@pytest.mark.parametrize("arguments, expected", [
+    ({"true_since": "-1d", "true_until": "-2d"}, "true_since as well"),
+    ({"true_until": "-2d"}, "which is now because true_since was omitted"),
+    ({"true_since": "-1d", "true_until": "-1d"}, "interval of no length"),
+])
+def test_an_interval_that_ends_before_it_begins_is_refused_not_squashed(
+        server, arguments, expected):
+    """`memory_end` clamps and this refuses, and the difference is which facts are known.
+
+    There, the claim already exists and the instant is a second-hand fact about a row on
+    disk; refusing would leave the caller no way to close it at all. Here both ends arrive
+    in one sentence, so "true from Tuesday until Monday" is not a partially-recoverable
+    request. Clamping would store a zero-length claim — true at no instant, returned by no
+    query, and identical at the call site to a successful write — which is the defect
+    `true_since` exists to prevent, wearing a different hat.
+    """
+    now = utcnow()
+    sent = {k: (now - timedelta(days=int(v[1]))).isoformat().replace("+00:00", "Z")
+            for k, v in arguments.items()}
+    body, is_error = call(server, "memory_remember",
+                          dict(sent, predicate="lives_in", object="Lisbon"))
+
+    assert is_error and expected in body
+    assert "use memory_forget" in body, "the tool for a record that was never true"
+    assert server._ctx.memory.get_all(states=("live", "ended", "retired")) == []
+
+
+@pytest.mark.parametrize("field", ["true_since", "true_until"])
+def test_the_instants_reject_nonsense_with_an_example_and_write_nothing(server, field):
+    """Parsed before the write, for the reason `memory_end.at` is: the argument *is* the
+    instant being recorded, so a malformed one must cost a retry rather than a claim
+    stamped with the wrong time."""
+    body, is_error = call(server, "memory_remember",
+                          {"predicate": "lives_in", "object": "Lisbon",
+                           field: "last Tuesday"})
+    assert is_error and f"memory_remember.{field} must be an ISO-8601 timestamp" in body
+    assert "2024-06-01T10:00:00Z" in body
+    assert server._ctx.memory.get_all(states=("live", "ended", "retired")) == []
+
+
+@pytest.mark.parametrize("stamp", ["2019-03-04", "2019-03-04T10:00:00Z",
+                                    "2019-03-04T10:00:00+00:00"])
+def test_true_since_accepts_the_spellings_a_model_reaches_for(server, stamp):
+    """The same three `memory_end.at` accepts, through the same parser. A model that has
+    learned one grammar for naming an instant must not need a second."""
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Lisbon",
+                                     "true_since": stamp})
+    assert server._ctx.memory.get_all()[0].valid_from.year == 2019
+
+
+def test_remembering_is_not_flagged_destructive_by_the_new_arguments(server):
+    """Backdating a fact still only ever *adds* one. It can end a value it supersedes —
+    which `memory_remember` could always do — so the hints must not move just because the
+    boundary is now nameable."""
+    assert BY_NAME["memory_remember"].destructive is False
+    assert BY_NAME["memory_remember"].writes is True
+
+
 # -- read-only deployments ---------------------------------------------------
 
 @pytest.fixture()

@@ -1,6 +1,6 @@
 r"""The ten tools, their descriptions, and how a stored memory is rendered back.
 
-Three things in here are load-bearing and easy to mistake for boilerplate.
+Four things in here are load-bearing and easy to mistake for boilerplate.
 
 **The descriptions are the product.** A model chooses a tool by reading one paragraph,
 once, with no ability to experiment first. So each description says *when to call this*
@@ -23,6 +23,20 @@ two are irreversible erasure, which must not be one tool call away from a model 
 misread "forget that" as "delete everything". `memory_forget` retires and `memory_end`
 closes out a fact that stopped being true; both stay visible to `memory_history`, and
 neither removes anything from disk.
+
+**Valid time is the caller's; transaction time is never offered.** `memory_remember`
+takes `true_since` and `true_until` — when the fact began and stopped being true in the
+world — because that is a claim *about the world* and the caller is the only party that
+knows it. `Memvara.remember` also accepts `recorded_at`, and it is deliberately not
+reachable from any tool: transaction time is a claim about *the record*, the instant this
+system came to believe something, and a caller who can set it can write an audit trail
+that says it knew a fact before it did, which nothing downstream can falsify. The two
+axes are only worth having because one of them is not the caller's to move. This is the
+same boundary `memory_forget` and `memory_end` already keep — `memory_end.at` closes
+valid time and there is no argument anywhere here that touches belief time — and it is
+also why the new argument is not called `at`: on a tool whose verb is *record*, "at"
+reads as the recording instant at least as easily as the world instant, and a model that
+reads it that way forges history with a correctly-spelled call.
 
 **The two closures are two tools, not one tool with a flag.** `Closure` is the library's
 sharpest distinction — `"ended"` says the world changed, `"retired"` says the record was
@@ -220,6 +234,45 @@ _PREDICATE = {
 _CLAIM_ID = {
     "type": "string",
     "description": "A claim id as shown by memory_search, e.g. 'cl_1a2b3c...'.",
+}
+
+_TRUE_SINCE = {
+    "type": "string",
+    "description": (
+        "ISO-8601 instant the fact became true **in the world**, e.g. "
+        "'2024-06-01T09:00:00Z' or '2024-06-01'. Defaults to now, which is right only "
+        "when you are writing down something as it happens. Send it whenever the fact "
+        "started earlier — the user is telling you about last month, you are recording "
+        "state you observed before this turn, you are backfilling from a log or a "
+        "transcript. The default is not a harmless approximation: it makes the stored "
+        "claim assert that the fact began at this instant, so a fact that had already "
+        "stopped being true is recorded as true from now onward and is false at every "
+        "instant of its own interval. Nothing detects that afterwards — it reads as a "
+        "clean write, and the first symptom is that closing it at the instant it really "
+        "stopped is refused as an interval that ends before it begins. This is the "
+        "world clock only. It does not, and no argument here does, change when this "
+        "system recorded the fact: that instant is always now, deliberately, because a "
+        "caller who could backdate it could forge an audit trail nothing downstream "
+        "could falsify — the same boundary memory_forget and memory_end respect."
+    ),
+}
+
+_TRUE_UNTIL = {
+    "type": "string",
+    "description": (
+        "ISO-8601 instant the fact stopped being true, for a fact that was already over "
+        "before you wrote it down: 'the gate was missing from 23:00 until 00:04:07'. "
+        "One call instead of a write plus a memory_end, and the difference is not only "
+        "keystrokes — split into two calls, the store answers the present-tense "
+        "question wrongly in between, and goes on doing so if the second call never "
+        "happens. Omit it for a fact that is still true. An instant in the future is "
+        "allowed and means the fact is true until then. It must be **after** true_since "
+        "— or after now, if you omitted true_since — and an interval that ends before "
+        "or exactly when it begins is refused rather than squashed to zero length, "
+        "because a claim true at no instant answers nothing and is the failure "
+        "true_since exists to prevent. If the fact was never true at all, that is not "
+        "an interval: use memory_forget."
+    ),
 }
 
 _MEMORY_TYPE_VALUES = [m.value for m in MemoryType]
@@ -461,6 +514,85 @@ def _add(ctx: ToolContext, args: dict[str, Any]) -> str:
     return "\n".join(_receipt_summary(ctx, receipt))
 
 
+def _interval(args: Mapping[str, Any]) -> tuple[datetime | None, datetime | None]:
+    """Parse `true_since`/`true_until` into a valid interval, or refuse the call.
+
+    Both are parsed before anything is written, for the reason `_end` gives about `at`:
+    the arguments *are* the instants being recorded, so a malformed one has to cost a
+    retry rather than a claim stamped with the wrong time.
+
+    **An inverted interval is refused here rather than clamped, and that is a deliberate
+    difference from `memory_end`.** `close_out` clamps because there the claim already
+    exists and the requested instant is a second-hand fact about a row already on disk;
+    refusing would leave the caller no way to close it at all. Here both ends arrive in
+    one sentence, so "true from Tuesday until Monday" is not a partially-recoverable
+    request — it is self-contradictory, and the caller can restate it. Clamping would
+    store a zero-length claim: true at no instant, returned by no query, indistinguishable
+    at the call site from a successful write. That is precisely the defect `true_since`
+    exists to stop, in a second costume.
+
+    `true_until` on its own pins `valid_from` explicitly rather than letting `remember()`
+    default it. The two clock reads are microseconds apart, and this guard would otherwise
+    pass on an interval that inverts between here and the write.
+
+    The refusal echoes both instants in ISO-8601 rather than through `_stamp`, which
+    renders to the minute. The motivating case turns on 00:04:07 against 00:50:13, and a
+    message reading "00:04Z is not after 00:04Z" for two instants fifty seconds apart
+    would describe a zero-length interval that the caller did not send — sending it back
+    in the spelling it arrived in is the one rendering that cannot mislead here.
+    """
+    since_raw, until_raw = args.get("true_since"), args.get("true_until")
+    since = (_timestamp(since_raw, "memory_remember.true_since")
+             if since_raw is not None else None)
+    if until_raw is None:
+        return since, None
+    until = _timestamp(until_raw, "memory_remember.true_until")
+    began = since if since is not None else utcnow()
+    if until <= began:
+        raise ToolError(
+            f"memory_remember.true_until ({until.isoformat()}) is not after the instant "
+            f"the fact began ({began.isoformat()}"
+            + ("" if since is not None else ", which is now because true_since was "
+                                            "omitted")
+            + "). A fact cannot stop being true before it starts, and an interval of no "
+              "length is true at no instant, so nothing would ever return it. If the fact "
+              "began earlier than you said, send true_since as well; if it is still true, "
+              "omit true_until; if it was never true at all, that is a wrong record "
+              "rather than a finished one — use memory_forget.")
+    return began, until
+
+
+def _interval_note(claims: Sequence[Claim]) -> str:
+    """Say when a stored value is deliberately not answering yet, or not any more.
+
+    The sibling of `_pending`, one tool over. Both cover the same shape of failure: a
+    write that worked, whose visible effect is indistinguishable from a write that did
+    not. A value dated forward does not answer `memory_recall` until its instant arrives,
+    and a value written already-closed never answers it at all — and in both cases the
+    receipt above says `added 1`, so a model that checks its own work sees a stored fact
+    it cannot find and reaches for the tool that would "fix" it, which is a second write
+    with the argument left off. That is the original defect, arrived at through the fix.
+    """
+    now = utcnow()
+    lines = []
+    for c in claims:
+        if c.valid_from > now:
+            lines.append(
+                f"note: stored, and not in force until {_stamp(c.valid_from)} — it is "
+                "true from then, not from now, so memory_recall will not return it "
+                "before that instant and that is this write working rather than "
+                "failing. memory_history shows it immediately, and memory_search with "
+                "as_of set past that instant finds it.")
+        elif c.valid_to is not None and c.valid_to <= now:
+            lines.append(
+                f"note: stored as a fact that had already stopped being true at "
+                f"{_stamp(c.valid_to)}, so memory_recall will not return it — a "
+                "backfilled interval that is over answers about the period it held, not "
+                "about now. memory_history shows it, and so does memory_search with "
+                "as_of inside that period.")
+    return "\n".join(lines)
+
+
 def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
     """The exact-fact write, which takes the library's default closure and no other.
 
@@ -471,12 +603,15 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
     where the tool's own name says which of the two is being asserted.
     """
     memory_type = args.get("memory_type")
+    since, until = _interval(args)
     receipt = ctx.memory.remember(
         args["subject"], args["predicate"], args["object"],
         confidence=args["confidence"],
         memory_type=MemoryType(memory_type) if memory_type is not None else None,
+        valid_from=since, valid_to=until,
     )
-    return "\n".join(_receipt_summary(ctx, receipt))
+    return "\n".join(filter(None, _receipt_summary(ctx, receipt)
+                            + [_interval_note(receipt.added), _pending(receipt.closed)]))
 
 
 def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -520,6 +655,12 @@ def _pending(claims: Sequence[Claim]) -> str:
     this line a model reads that as "the call did nothing" and retries with the tool that
     *does* silence it immediately, which is `memory_forget`, which records the wrong
     reason. Saying so here closes the loop back to the mistake this tool exists to stop.
+
+    Shared with `memory_remember`, which reaches the same outcome by the other door: a
+    value dated forward with `true_since` closes whatever it displaces *at that future
+    instant*, so the displaced value keeps answering until then. One wording for one
+    outcome — a second, near-identical note is how two surfaces come to describe the same
+    row differently.
     """
     now = utcnow()
     later = [c for c in claims if c.valid_to is not None and c.valid_to > now]
@@ -788,7 +929,12 @@ TOOLS: tuple[Tool, ...] = (
             "world moved on and the old one still answers about the period it held. If "
             "the old value was never right, storing over it is not enough: call "
             "memory_forget as well, which is the tool that says the record was wrong. "
-            "Example: subject 'user', predicate 'lives_in', object 'Lisbon'."
+            "Example: subject 'user', predicate 'lives_in', object 'Lisbon'. If the "
+            "fact did not start being true at this moment — you are recording something "
+            "from earlier in the session, from a log, or from what the user just told "
+            "you about last month — say so with true_since, because the default records "
+            "it as beginning now and a fact that had already changed by then is stored "
+            "as a claim that was never true."
         ),
         properties={
             "subject": _SUBJECT,
@@ -798,6 +944,8 @@ TOOLS: tuple[Tool, ...] = (
                 "description": "The value, as short as it can be: 'Lisbon', not 'they "
                                "live in Lisbon'.",
             },
+            "true_since": _TRUE_SINCE,
+            "true_until": _TRUE_UNTIL,
             "memory_type": {
                 "type": "string",
                 "enum": _MEMORY_TYPE_VALUES,
