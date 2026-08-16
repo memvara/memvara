@@ -1176,6 +1176,17 @@ library's "numpy and nothing else" claim survives. It refuses to start without
 `MEMVARA_DB` and prints the client config block, rather than silently remembering into a
 store that vanishes on exit.
 
+Both ends of valid time are on the surface. `memory_remember` takes `true_since` and
+`true_until` — when the fact became true in the world and, for a fact already over,
+when it stopped — so a backfill is one call and its interval contains only instants at
+which it really held. Without them `valid_from` defaults to the write instant, and a fact
+recorded 46 minutes after it changed is stored as a claim that was false at every instant
+of its own interval, which nothing detects afterwards. The argument is not called `at`:
+on a tool whose verb is *record*, "at" reads as the recording instant as readily as the
+world instant, and no tool here can set transaction time — a caller who could backdate
+when this system came to believe something could forge an audit trail nothing downstream
+could falsify.
+
 Both closures are on the surface, as two tools: `memory_forget` retires a record that was
 wrong, `memory_end` closes out a fact that was right and has stopped being true, at an
 optional `at` instant so it can close last Tuesday rather than now. They are separate

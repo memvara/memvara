@@ -1,7 +1,7 @@
 # Changelog
 
-Notable changes per release. Dates are the commit date; this project has not been
-published to PyPI yet, so nothing below has a release tag.
+Notable changes per release. Dates are the commit date, not the upload date: `0.1.0` is
+tagged `v0.1.0` and reached PyPI on 2026-08-14.
 
 The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [semantic versioning](https://semver.org/) once `1.0.0` ships. Before
@@ -99,6 +99,71 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
   `bool`. `Memvara.erase()` is unchanged and still returns `bool`.
 
 ### Added
+
+- **`true_since` and `true_until` on `memory_remember`: the other end of the interval.**
+  `memory_end` has always taken an `at` — the instant a fact stopped being true — and
+  nothing on this surface could say when one *started*. So `Claim.valid_from` took its
+  `default_factory=utcnow` on every tool write, and a store whose entire pitch is two
+  independent clocks let an agent set one end of the valid interval and not the other.
+
+  The failure it caused, with its real numbers. Recording project state, an agent wrote
+  `quota_gate status "not installed"` at 00:50:13Z to represent a belief it had held
+  earlier that morning. The gate had been installed at 00:04:07Z, 46 minutes before.
+  `valid_from` defaulted to the write instant, so the stored claim asserted *"not
+  installed, from 00:50:13Z onward"* — false at every instant of the interval it claimed.
+  Nothing warned, because `added 1` is also what a correct write says. The symptom
+  surfaced later and was misread: closing the claim at the install instant put `valid_to`
+  before `valid_from` and `close_out` clamped it, which was the store correctly refusing
+  to represent a fact that ended before it began, read as an obstacle rather than as the
+  diagnosis.
+
+  This is a tool-layer gap only. `Memvara.remember` has always accepted `valid_from` and
+  `valid_to`, and the reconciler has always superseded along valid time rather than
+  arrival order; nothing underneath changed.
+
+  **The name is the decision, and it is deliberately not `at`.** Symmetry with
+  `memory_end` argues for `at`, and the verb each name attaches to is why that is wrong.
+  On a tool whose verb is *end*, "at" can only mean the instant of the ending — the tool
+  name has already fixed which event is being timed. On a tool whose verb is *record*,
+  "at" attaches to the recording, so it reads as transaction time at least as readily as
+  valid time. The same spelling on the two tools would name two different clocks, and a
+  model that took the second reading would forge history with a correctly-spelled call
+  that nothing downstream could detect. `true_since` cannot take that reading: a record
+  is not "true since". The symmetry given up is one of spelling; the symmetry kept is one
+  of meaning.
+
+  **`recorded_at` is still not reachable from any tool, on purpose.** Valid time is a
+  claim about the world and the caller is entitled to it. Transaction time is a claim
+  about the *record* — when this system came to believe something — and a caller who can
+  backdate it can write an audit trail nothing downstream can falsify. `true_since`'s own
+  description says so, which is where a model meets the boundary rather than a changelog.
+
+  **`true_until` closes the interval in the same call, and that is a correctness gain
+  rather than a keystroke one.** A backfill of a finished fact written as a write plus a
+  `memory_end` leaves the store answering the present-tense question with a value already
+  known to be false for as long as the two calls are apart — and permanently, if the turn
+  ends before the second one. An interval that ends before or exactly when it begins is
+  **refused** rather than clamped, unlike `memory_end.at`: there the claim already exists
+  and the instant is second-hand, so refusing would leave no way to close it at all; here
+  both ends arrive in one sentence, and clamping would store a zero-length claim that is
+  true at no instant, returned by no query and identical at the call site to a successful
+  write — the original defect in a second costume.
+
+  **A past-dated write ends what it displaces where the new value began**, not now — the
+  reconciler's existing rule, now reachable: ending it at "now" would leave a window in
+  which both values were true, which for a single-valued slot is two answers to one
+  question. A write dated *behind* an existing later value is closed at that value's start
+  and becomes history rather than news, so an import cannot rewrite the present.
+
+  **A future-dated write is stored, in force from its instant, and says so.** It ends the
+  current value at that future instant — so the old value keeps answering until then and
+  the new one takes over — and the reply names both halves, because `added 1` beside a
+  `memory_recall` that returns the *old* value is the outcome most easily mistaken for a
+  call that did nothing, and the obvious retry is the same write with the argument
+  removed.
+
+  Omitting both arguments behaves exactly as before: one clock read, both axes, and a
+  test pins it.
 
 - **`memory_end` on the MCP server: the closure an agent could not ask for.** The core has
   had two closures since the axes were separated — `"ended"` means the world changed,
@@ -764,7 +829,8 @@ someone reading the store's semantics needs to know is deliberate.
   user reported `episodes: 0` with the sentence still there. Nothing surfaced it, because
   `get_episode` is unscoped so `why()` kept resolving. A caller-built episode that names
   no scope now adopts its claim's. **Existing stores may already hold orphaned turns**;
-  `docs/RELEASING.md` carries a detection query.
+  `docs/UPGRADING.md` carries a detection query, and what it means for an
+  erasure already answered.
 - **`forget()` returned stale claims** — every one reported `invalidated_at=None` and read
   as live while the same row re-read from the store read as retired.
 - **`remember(**meta)` accepted `salience_base`**, which the next `consolidate()` turned

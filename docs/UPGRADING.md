@@ -255,3 +255,51 @@ Both counts always appear, and each displaced claim carries its own closure — 
 second call says `ended`, the third says `Retired`, and they mean different things. This
 is tool output, not an API: nothing to migrate, but a transcript or an eval fixture that
 pins the old string needs updating.
+
+## Turns filed under tenant `"default"` by `remember(sources=[Episode(...)])`
+
+`Episode.scope` defaults to `Scope()`, whose tenant is the literal `"default"`. So the
+documented way to attach provenance — building an `Episode` yourself and passing it as a
+source — wrote the raw user text into that tenant while the claim it supported landed in
+the right one. `get_episode` is unscoped, so `why()` went on resolving and nothing
+surfaced it; what did surface it was an erasure reporting `episodes: 0` with the sentence
+still on disk. A caller-built episode that names no scope now adopts its claim's.
+
+**Only stores that use an explicit tenant can be affected.** If every write went through a
+`Memvara(...)` left at the default tenant, the episode and its claim both landed in
+`"default"` and there is nothing to find — the mismatch needs a second tenant to be a
+mismatch. Verified both ways against the shipped schema before writing this.
+
+### Detecting it
+
+Read-only, and it names the tenant the turn should have been under:
+
+```sql
+SELECT e.id     AS episode_id,
+       e.tenant AS episode_tenant,   -- where the turn landed, usually 'default'
+       c.tenant AS claim_tenant,     -- where it should have been
+       count(*) AS claims_affected
+FROM episodes e
+JOIN claim_sources s ON s.episode_id = e.id
+JOIN claims        c ON c.id         = s.claim_id
+WHERE e.tenant <> c.tenant
+GROUP BY e.id, e.tenant, c.tenant
+ORDER BY e.tenant, e.id;
+```
+
+No rows is the healthy answer. It looks for the mismatch rather than for `'default'`
+specifically, so it also catches a turn misfiled under any other tenant.
+
+### What it means for an erasure you have already run
+
+This is the part worth acting on. `erase()` and `purge()` are scoped, so a request served
+while the turn sat in another tenant deleted the claim and reported `episodes: 0` — a
+truthful count of what it found, about a sentence that is still on disk. If you have
+answered a deletion request for anyone whose turns this query returns, the text of those
+turns was not erased. Re-run the erasure for the affected tenant, or delete the rows the
+query names, and note the correction wherever the original erasure was recorded.
+
+Moving a turn is not just an `UPDATE`: `episodes_fts` and `episode_embeddings` are keyed
+by `episode_id` and carry no tenant of their own, so re-filing a row leaves its index
+entries reachable from the tenant they were written under. Deleting the affected episodes
+and re-attaching provenance is the safer repair.
