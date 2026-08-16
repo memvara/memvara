@@ -3,8 +3,17 @@
 Nothing has been published. This is the checklist for the day something is, plus the
 things that have to be true first — one of which is a hard blocker nobody had checked.
 
+Since `.github/workflows/release.yml` exists, most of what follows is automated: pushing
+a `v*` tag runs the whole gate on the tagged commit, builds in a clean runner, checks the
+artifact rather than the tree, and then stops and waits for a human. The manual procedure
+is kept below as the fallback, because a release process that cannot run when Actions is
+down is not a release process.
+
 **Publishing to PyPI is out of scope for any agent working in this repository.** It is
-outward-facing, effectively irreversible, and belongs to whoever owns the project. Every
+outward-facing, effectively irreversible, and belongs to whoever owns the project. The
+workflow does not change that; it moves the decision to one place — approving the `pypi`
+environment — instead of removing it. An agent may open the pull request that bumps the
+version and may push a branch. Approving a publish is a maintainer's, and every manual
 step below stops at TestPyPI.
 
 ---
@@ -63,7 +72,117 @@ Move everything under `## [Unreleased]` into `## [0.2.0] — YYYY-MM-DD`, and le
 supersession left two live values for a single-valued predicate" is the entry someone
 searches for; "bug fixes" is not.
 
-### 3. Green on every interpreter the package claims
+### 3. Tag the commit CI went green on
+
+```bash
+git tag -a v0.2.0 -m "memvara 0.2.0"
+git push origin v0.2.0
+```
+
+Tag the commit CI went green on, not the one you are standing on.
+
+That push is the whole trigger. `.github/workflows/release.yml` then runs, in order:
+
+| job | what it does, and which manual step it replaces |
+|---|---|
+| `version` | Refuses unless the tag, `pyproject.toml`'s `version` and `memvara/__init__.py`'s `__version__` are the same string. First and fastest, so a one-sided bump fails in seconds rather than after the matrix — or, the failure it really exists for, not at all, leaving a wheel on PyPI whose metadata disagrees with its tag. |
+| `ci` | Calls `.github/workflows/ci.yml` **on the tagged commit**: 3.10–3.13 on Linux plus macOS and Windows, coverage gated at 100%, mypy, and the no-extras import job. It calls rather than restates, so there is one matrix in this repository and it cannot drift. A tag push starts nothing else, so without this job the release would be gated on whatever CI last happened to run. |
+| `build` | `python -m build`, `twine check`, then `tests/test_packaging.py` *after* the build so its three dist-gated tests arm themselves — and then installs the wheel into a fresh venv outside the repository and checks that the dependency set is exactly memvara and numpy, that the library works, and that `reveal_type` reports `str` rather than `Any`. |
+| `publish-pypi` | Uploads the artifact `build` produced — those bytes, not a rebuild — over PyPI trusted publishing. Waits for a human first; see step 4. |
+
+The runner has no `dist/`, no second checkout and no earlier build, and that is the point
+rather than a convenience. The release attempted by hand before this workflow existed ran
+`twine upload dist/*` in a second checkout whose `dist/` still held `0.1.0` wheels, and
+uploaded those while releasing `0.2.0`; `twine` ships the directory, not the release. PyPI
+refused them only because the filenames already existed. **In a clean runner building from
+a tagged commit, that mistake has nowhere to come from** — there is no stale artifact to
+prefer, and no source but the tag.
+
+### 4. Approve the publish, or do not
+
+`publish-pypi` runs in the `pypi` GitHub Environment, which has a required reviewer, so the
+run stops there and waits. This is step 9 of the old checklist — *the real publish is a
+decision, not a step* — expressed as something the machinery enforces rather than something
+a document asks for.
+
+Approving is the irreversible act. Read the `build` job's log first: it lists the files it
+built, and the version in those filenames is the one about to become permanent. Everything
+under "Before a real publish" below still applies and none of it is checked by any job.
+
+A TestPyPI rehearsal is available and never automatic: **Actions → Release → Run workflow**,
+select the tag, set the target to `testpypi`. Opt-in because **a version number on TestPyPI
+is spent** the moment it is used and cannot be re-uploaded even after the release is
+deleted. A rehearsal wired into every tag push would burn the release's own number on the
+rehearsal index, and would then fail the *second* run of that tag — turning "re-run the
+release after the upload dropped" into a red build for a reason that has nothing to do with
+the release. Rehearse on an `rc` version and keep the real number clean.
+
+---
+
+## One-time setup, by a human, once
+
+None of the above can publish until a trusted publisher exists on PyPI. Nothing in this
+repository can create it and nothing should: it is the registration that says *this
+repository, this workflow, this environment may upload memvara*, and it is made from an
+account this repository has no access to.
+
+memvara has never been published, so the project does not exist on PyPI yet and the form to
+use is the **pending publisher** one — <https://pypi.org/manage/account/publishing/>
+(account settings → *Publishing*, not a project's settings, because there is no project).
+Under *GitHub*, enter exactly:
+
+| field | value |
+|---|---|
+| PyPI Project Name | `memvara` |
+| Owner | `memvara` |
+| Repository name | `memvara` |
+| Workflow name | `release.yml` |
+| Environment name | `pypi` |
+
+`release.yml` is the filename, not a path: the form expects a file in `.github/workflows/`
+of the repository named above. A pending publisher **does not reserve the name** — it
+converts into an ordinary publisher on the first successful upload, and is invalidated if
+someone else registers `memvara` first. Afterwards the same values live under the project's
+own *Publishing* tab.
+
+The environment name is optional to PyPI, and setting it is deliberate. Once registered,
+PyPI checks it: an OIDC token minted by a job that is not running in the `pypi` environment
+is rejected at upload. So that one field does two jobs — it is where the human approval
+lives, and it narrows what the publisher will trust from "any workflow run in this
+repository" to "a run that got past the environment's rules".
+
+Then, in GitHub, **Settings → Environments**:
+
+* **`pypi`** — add at least one *Required reviewer*. That is the approval gate; without it
+  the publish job runs unattended and step 4 above is a comment rather than a control.
+  Limiting the environment's deployment branches to tags matching `v*` is worth adding.
+* **`testpypi`** — for the rehearsal. A reviewer is optional here: a rehearsal is not
+  irreversible, only unrepeatable for a given version.
+
+A wrong value in any of the five fails at upload time with a message that does not say
+which one, so they are worth checking against this table rather than against memory.
+
+**No token appears anywhere in this.** That is the point of it: the workflow has no
+`password:` input, no secret, and nothing in the repository or in anyone's shell history
+that could publish memvara. The account-wide token the manual path needs can be revoked
+once the first upload has gone through the workflow.
+
+---
+
+## The manual fallback
+
+**The workflow above is the release process. This is for when it cannot run** — Actions is
+down, the OIDC exchange is broken, or the release is unusual enough that the workflow
+refuses it and you have concluded that it is wrong and you are right. It is also the source
+the workflow was written from: every check up there exists down here first.
+
+Two things it does not give you, and they are why it is second. It builds from your working
+tree rather than from the tagged commit, and it uploads whatever happens to be in `dist/`.
+Those are the two halves of the failure described in step 3. `release/publish_pypi.py`
+guards exactly them — it deletes and rebuilds `dist/` every run and refuses a dirty or
+unpushed tree — so prefer it to a raw `twine upload`.
+
+### Green on every interpreter the package claims
 
 ```bash
 python3 -m pytest -q
@@ -75,7 +194,7 @@ the release gate is a **green CI run on the release commit** — 3.10–3.13 on 
 3.13 on macOS and Windows. Do not cut a release off a local pass alone; the matrix exists
 because 3.10 through 3.12 had never executed a line of this library until it did.
 
-### 4. Build, and let the packaging tests arm themselves
+### Build, and let the packaging tests arm themselves
 
 ```bash
 rm -rf dist
@@ -93,7 +212,7 @@ python3 -m pip install twine
 python3 -m twine check dist/*         # README renders on PyPI, metadata is well-formed
 ```
 
-### 5. Install the artifact somewhere clean and use it
+### Install the artifact somewhere clean and use it
 
 The `offline` CI job does the import half on every push. Do the rest by hand, from a
 directory that is not the repository, because a source tree on `sys.path` will happily
@@ -124,7 +243,7 @@ cd /tmp && printf 'from memvara import Memvara\nreveal_type(Memvara(":memory:").
 the marker did not ship, and every annotation in the library is invisible to every user of
 that wheel. It is a two-line check for a failure that is otherwise completely silent.
 
-### 6. Smoke-test the MCP server and the image
+### Smoke-test the MCP server and the image
 
 Against the venv from step 5, so this exercises the artifact rather than the source tree:
 
@@ -141,7 +260,7 @@ docker run --rm -i -e MEMVARA_DB=:memory: memvara-mcp:0.2.0 < /dev/null   # expe
 Both should be quiet. The server writes protocol messages to stdout and nothing else —
 anything on stdout that is not JSON-RPC desynchronises a real client.
 
-### 7. Tag
+### Tag
 
 ```bash
 git tag -a v0.2.0 -m "memvara 0.2.0"
@@ -150,7 +269,12 @@ git push origin v0.2.0
 
 Tag the commit CI went green on, not the one you are standing on.
 
-### 8. TestPyPI dry run
+Note that this push still starts `release.yml`, even when you are down here because that
+workflow is the thing that is broken. It will either fail on its own or sit waiting for an
+approval; leave it waiting, and do not approve it after uploading by hand. Two paths that
+both think they are publishing `0.2.0` is how one of them discovers the number is spent.
+
+### TestPyPI dry run
 
 TestPyPI is a separate index with separate accounts and separate API tokens; register at
 <https://test.pypi.org/> and mint a token scoped to the project.
@@ -179,7 +303,7 @@ render, and a metadata field the index rejects on upload rather than on build.
 version even after a delete, so use `0.2.0` for the real thing only after the dry run has
 passed on it — or burn `0.2.0rc1` on TestPyPI and keep `0.2.0` clean.
 
-### 9. Stop here
+### Stop here
 
 The real publish is a decision, not a step. What has to be true first is below.
 
@@ -225,8 +349,11 @@ rehearsal, not the release.
 - **A CLA, before the first outside contribution.** Once an external patch lands without
   one, relicensing needs that contributor's agreement, forever. This is cheaper to do the
   week before the first release than the week after.
-- **Trusted publishing, not a long-lived token.** GitHub Actions' OIDC publisher means
-  there is no PyPI token in the repository or in anyone's shell history to leak.
+- **Trusted publishing, not a long-lived token.** Done on this side:
+  `.github/workflows/release.yml` publishes over GitHub Actions' OIDC publisher and holds
+  no credential at all. The other half is human and is not done — the pending publisher and
+  the two environments, above. Until they exist the publish job fails at the upload, which
+  is the right order: machinery should not be able to grant itself permission to publish.
 - **Nothing from the closed side, ever.** `docs/ROADMAP.md` puts governance (PII,
   encryption, the audit chain, RBAC) and the Postgres/pgvector store in a private
   repository, and "never committed" is the actual requirement — git history is public
@@ -244,4 +371,6 @@ rehearsal, not the release.
 - `python3 -m build` leaves `dist/` populated. Clear it before the next release, or the
   wheel tests in `tests/test_packaging.py` will be checking the previous one — they filter
   on `memvara-<current version>-*.whl`, so a stale wheel makes them silently skip rather
-  than silently pass, but the skip is still not the answer you wanted.
+  than silently pass, but the skip is still not the answer you wanted. This is a hazard of
+  building on a machine that has a history. The workflow's runner has none, which is why
+  those same three tests can be trusted there without anyone remembering to clean up.

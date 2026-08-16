@@ -9,6 +9,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # `release.yml` calls this workflow instead of restating the matrix, so the release gate
+  # and the everyday gate cannot drift apart — there is only one list of interpreters in
+  # this repository. Purely additive: a tag push matches none of the triggers above, so
+  # nothing about what runs on an ordinary push or pull request changes.
+  workflow_call:
 
 concurrency:
   # A second push to the same branch makes the first run's answer irrelevant.

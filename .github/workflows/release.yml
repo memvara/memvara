@@ -1,0 +1,331 @@
+# Publishing memvara: from a tag, in a clean runner, with a human on the last step.
+#
+# This exists because of a specific failure. A release attempted by hand ran
+# `twine upload dist/*` from a second checkout whose `dist/` still held `0.1.0` wheels
+# from an earlier build, so the command uploaded those instead of the `0.2.0` that was
+# being released. PyPI refused them only because the filenames already existed — which is
+# luck, not a safety net. Had the wheel been new, the wrong bytes would be on the index
+# permanently, because a version number on PyPI cannot be reused.
+#
+# The point of this workflow is not that it adds a check for that. It is that a runner
+# starts with no `dist/`, no second checkout and no earlier build, and the only source it
+# can build from is the commit the tag points at. **The entire class of "uploaded
+# something other than what I just built" stops being reachable**, rather than being
+# guarded against by somebody remembering to `rm -rf dist` first.
+#
+# What it deliberately does not automate: the version bump, the changelog, and the
+# decision. `docs/RELEASING.md` step 9 says "the real publish is a decision, not a step",
+# and the `pypi` environment below is how that survives automation — the upload job waits
+# for a human reviewer before it runs.
+#
+# Limits worth stating. This proves the artifact is built from the tagged commit and that
+# the tagged commit is green; it cannot prove the tag is on the commit anyone intended,
+# and it does not check PyPI for whether the version is already taken (the upload does
+# that, and it is the one check that cannot be wrong).
+
+name: Release
+
+on:
+  push:
+    # A tag, not every push to main. `docs/RELEASING.md` step 7 already ends a release
+    # with `git push origin v0.2.0`; this makes that push the trigger rather than a note
+    # to go and do something else afterwards. Publishing on every commit to main would be
+    # the opposite of a decision.
+    tags: ["v*"]
+  workflow_dispatch:
+    # For the re-run: CI was green, the build was fine, and the upload failed on a network
+    # blip or an approval that expired. Select the **tag** in the ref picker, not a branch
+    # — the first job refuses anything else, because a release that is not a tagged commit
+    # has nothing to check the wheel's version against.
+    inputs:
+      target:
+        description: "Index to publish to (testpypi is a rehearsal; see RELEASING.md)"
+        required: true
+        default: pypi
+        type: choice
+        options:
+          - pypi
+          - testpypi
+
+# Read-only by default. The two publish jobs raise `id-token: write` on themselves and
+# nowhere else, so the OIDC credential that can upload to PyPI exists only in the job that
+# uploads to PyPI.
+permissions:
+  contents: read
+
+# There is deliberately no `concurrency` group here. Two runs for the same tag is not a
+# thing that happens, cancelling a run that is midway through an upload is worse than
+# letting it finish, and a group here would risk colliding with the one `ci.yml` sets for
+# itself when called from this file — a caller and a called workflow sharing a concurrency
+# group deadlock, each waiting on the other.
+
+jobs:
+  version:
+    # First, and fast, because it is the check most likely to fail and the cheapest to
+    # run: no interpreter, no install, just three strings. A mismatch here would otherwise
+    # be discovered after eight minutes of matrix, or — the failure this really exists for
+    # — not at all, leaving a wheel on PyPI whose metadata says a different version than
+    # the tag it was cut from. Nothing downstream of that can be fixed by re-uploading.
+    name: the tag and the source agree
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare the tag against both places the version is written
+        id: read
+        # The tag is read from the environment rather than interpolated with `${{ }}`.
+        # A tag name is attacker-supplied text as far as this shell is concerned, and
+        # `${{ github.ref_name }}` inside a `run:` block is pasted in as source code.
+        run: |
+          set -euo pipefail
+
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::this run is on $GITHUB_REF_TYPE '$GITHUB_REF_NAME'. A release is a tagged commit or it is not a release — re-run this workflow with a tag selected in the ref picker."
+            exit 1
+          fi
+
+          from_tag="${GITHUB_REF_NAME#v}"
+          from_pyproject="$(sed -nE 's/^version = "(.+)"$/\1/p' pyproject.toml | head -1)"
+          from_dunder="$(sed -nE 's/^__version__ = "(.+)"$/\1/p' memvara/__init__.py | head -1)"
+
+          # An empty capture equals another empty capture, which is how a version check
+          # becomes no check at all. If either line moved or changed shape, say so instead
+          # of comparing two empty strings and calling it agreement.
+          if [ -z "$from_pyproject" ] || [ -z "$from_dunder" ]; then
+            echo "::error::could not read a version out of pyproject.toml ('$from_pyproject') or memvara/__init__.py ('$from_dunder'). The declaration moved or changed shape, and this step was one line away from passing vacuously."
+            exit 1
+          fi
+
+          echo "tag                   $GITHUB_REF_NAME  ->  $from_tag"
+          echo "pyproject.toml        $from_pyproject"
+          echo "memvara/__init__.py   $from_dunder"
+
+          if [ "$from_tag" != "$from_pyproject" ] || [ "$from_pyproject" != "$from_dunder" ]; then
+            echo "::error::version mismatch: tag says '$from_tag', pyproject.toml says '$from_pyproject', memvara.__version__ says '$from_dunder'. Publishing this would put a wheel on PyPI whose metadata disagrees with the tag it was cut from, permanently. Fix the bump (docs/RELEASING.md step 1), move the tag, and push it again."
+            exit 1
+          fi
+
+          echo "version=$from_pyproject" >> "$GITHUB_OUTPUT"
+
+      # The check above reads the *literal* in `memvara/__init__.py`, which is not quite
+      # the same claim as "the module reports this version". The runtime half is
+      # `tests/test_packaging.py::test_the_version_is_the_same_string_in_both_places_that_state_it`,
+      # which imports memvara and compares — and it runs in the matrix below, on this
+      # commit, before anything is built.
+
+  ci:
+    # Called, not copied. `ci.yml` owns the matrix; a second copy of
+    # `["3.10", "3.11", "3.12", "3.13"]` in this file is a copy that drifts, and the
+    # version it drifts to is the one nobody is testing releases against.
+    #
+    # This is also the only thing that runs CI on the tagged commit at all: `ci.yml`
+    # triggers on pushes to `main` and on pull requests, and a tag push matches neither.
+    # Without this job the release would be gated on whatever CI last happened to run,
+    # which is the "do not cut a release off a single local pass" failure wearing a green
+    # checkmark. It brings the whole gate — 3.10 through 3.13 on Linux plus macOS and
+    # Windows, coverage at 100%, mypy, and the no-extras import job.
+    name: CI
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    # `docs/RELEASING.md` steps 4-6, in order, in a runner that has never built this
+    # package before. The ordering is the substance: build first, then test the artifact
+    # rather than the tree, because a source tree on `sys.path` will happily stand in for
+    # a module the wheel forgot.
+    name: build the artifact and check the artifact
+    needs: [version, ci]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install the build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+
+      - name: Build wheel and sdist
+        # No `rm -rf dist` and no check that `dist/` is empty, because there is nothing to
+        # remove: this checkout is seconds old. That absence is the whole reason this file
+        # exists — see the header.
+        run: python -m build
+
+      - name: List what was built
+        run: ls -l dist/
+
+      - name: twine check
+        # Renders the README the way PyPI will. A `long_description` that fails to render
+        # is not rejected at upload — it is accepted and displayed as raw text forever, on
+        # the page that is the project's front door.
+        run: python -m twine check dist/*
+
+      - name: Install the dev extra, so the packaging tests can run
+        run: python -m pip install -e ".[dev]"
+
+      - name: The packaging tests, now that dist/ exists
+        # Three tests in this file skip when `dist/` is empty and arm themselves once it is
+        # not: `py.typed` is in the wheel, every module in the tree is in the wheel, and
+        # the wheel's metadata version matches `memvara.__version__`. Running them before
+        # the build step above would have been three silent skips reported as a pass.
+        run: python -m pytest tests/test_packaging.py -q
+
+      - name: Install the wheel into a clean venv that is not the repository
+        # From `$RUNNER_TEMP`, because the repository on `sys.path` hides exactly the bug
+        # this is looking for. `pip list` is asserted against a set rather than a count, so
+        # a transitive dependency arriving through numpy fails here rather than shipping.
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          wheel="$GITHUB_WORKSPACE/dist/memvara-$VERSION-py3-none-any.whl"
+          test -f "$wheel" || { echo "::error::no $wheel — the build produced something other than the version the tag claims"; exit 1; }
+
+          cd "$RUNNER_TEMP"
+          python -m venv rel
+          ./rel/bin/pip install --quiet "$wheel"
+
+          # `pip`, `setuptools` and `wheel` are whatever `venv` seeded and say nothing
+          # about this package; everything else in the list is a dependency a user of the
+          # wheel is made to install. That set is the "numpy and nothing else" claim.
+          got="$(./rel/bin/pip list --format=freeze | cut -d= -f1 | tr '[:upper:]' '[:lower:]' \
+                 | grep -vxE 'pip|setuptools|wheel' | sort | paste -sd' ' -)"
+          echo "installed: $got"
+          if [ "$got" != "memvara numpy" ]; then
+            echo "::error::installing the wheel pulled in '$got', and the package claims numpy and nothing else. Either a dependency leaked into pyproject.toml or the README's headline claim needs changing — not this line."
+            exit 1
+          fi
+
+      - name: Use the installed wheel
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          ./rel/bin/python - <<'PY'
+          from memvara import Memvara
+          mem = Memvara(':memory:', user='alice')
+          mem.remember('user', 'lives_in', 'Berlin')
+          print([r.text for r in mem.search('where do they live?')])
+          PY
+
+      - name: The annotations survived the trip into the wheel
+        # `py.typed` is included today only because hatchling's `packages = ["memvara"]`
+        # sweeps the directory, so the library's entire typing story hangs on that marker
+        # never matching an ignore rule. When it snaps, nothing breaks: the package
+        # installs, imports and runs, and every annotation in it silently becomes `Any` for
+        # every user. This is the two-line check for a failure that has no other symptom.
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          ./rel/bin/pip install --quiet mypy
+          printf 'from memvara import Memvara\nreveal_type(Memvara(":memory:").recall("x"))\n' > typing_probe.py
+          # Capture rather than fail: a missing marker makes mypy *error*, and the error
+          # text is the useful part.
+          out="$(./rel/bin/python -m mypy typing_probe.py 2>&1)" || true
+          echo "$out"
+          if ! printf '%s' "$out" | grep -qE 'Revealed type is "(builtins\.)?str"'; then
+            echo "::error::mypy did not see memvara's annotations through the wheel. 'Revealed type is \"Any\"' together with 'missing library stubs or py.typed marker' means memvara/py.typed did not ship, and every annotation in the library stops at the wheel boundary."
+            exit 1
+          fi
+
+      - name: Keep these exact bytes for the publish job
+        # The publish jobs download this rather than rebuilding. Two builds of one commit
+        # would almost certainly be identical, and "almost certainly" is not the standard
+        # for the thing that gets uploaded: what is published is what was checked above,
+        # byte for byte.
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish-pypi:
+    # The irreversible one.
+    #
+    # `environment: pypi` does two separate jobs here. It is where a required reviewer is
+    # configured, which is how "the real publish is a decision, not a step" survives being
+    # automated — this job sits and waits for a human. And it is a claim PyPI itself
+    # verifies: the registered trusted publisher names an environment, so an OIDC token
+    # minted by a job outside `pypi` is rejected at upload. See the PR that added this
+    # file, and docs/RELEASING.md, for the one-time registration.
+    #
+    # There is no token here, no `password:`, and no secret of any kind — that absence is
+    # the feature. `id-token: write` lets this job ask GitHub for a short-lived OIDC
+    # assertion, which PyPI exchanges for an upload credential that expires by itself.
+    # Nothing exists in this repository, in a secret store, or in anyone's shell history
+    # that could publish memvara.
+    name: publish to PyPI
+    needs: [version, build]
+    if: github.event_name == 'push' || inputs.target == 'pypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/memvara
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Say what is about to be uploaded, while it can still be stopped
+        # The last moment before the one-way action, and the exact question the incident in
+        # the header got wrong: are these files the version we think we are releasing?
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ls -l dist/
+          test -f "dist/memvara-$VERSION-py3-none-any.whl"
+          test -f "dist/memvara-$VERSION.tar.gz"
+          unexpected="$(find dist -type f ! -name "memvara-$VERSION-py3-none-any.whl" ! -name "memvara-$VERSION.tar.gz")"
+          if [ -n "$unexpected" ]; then
+            echo "::error::dist/ holds files that are not memvara $VERSION: $unexpected. twine uploads the directory, not the release."
+            exit 1
+          fi
+
+      - name: Publish
+        # No `password:` input. Under trusted publishing the action performs the OIDC
+        # exchange itself; a token here would mean this is not actually using OIDC.
+        # `@release/v1` is the moving branch PyPI's own documentation recommends, which is
+        # a real tradeoff honestly taken: it picks up fixes to the exchange without a PR
+        # here, and it is not a pinned SHA.
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-testpypi:
+    # A rehearsal, and only ever on request — never automatically on a tag.
+    #
+    # The reason is that a version number on TestPyPI is spent the moment it is used, and
+    # cannot be re-uploaded even after the release is deleted. A TestPyPI job wired into
+    # every tag push would burn the release's own number on the rehearsal index, and then
+    # fail the *second* run of that same tag — turning "re-run the release after the
+    # network dropped" into a red build for a reason that has nothing to do with the
+    # release. So: dispatch-only, and `skip-existing` so a repeat rehearsal of one version
+    # is a note rather than a failure. That flag is deliberately absent from the PyPI job
+    # above, where "this version already exists" is precisely the message you want to see.
+    name: publish to TestPyPI (rehearsal)
+    needs: [version, build]
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/memvara
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
