@@ -71,7 +71,10 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+          # `cloud` alongside `dev`: RemoteStore's tests use `httpx.MockTransport` as
+          # their offline seam (see tests/test_store_remote.py), so without the `cloud`
+          # extra installed the module fails to collect at all rather than skipping.
+          python -m pip install -e ".[dev,cloud]"
 
       - name: Test
         run: python -m pytest -q
@@ -89,7 +92,10 @@ jobs:
           cache: pip
       - run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+          # See the `test` job: RemoteStore's tests need `httpx` (the `cloud` extra) to
+          # collect at all, and every line in memvara/store/remote.py is covered only
+          # when they run.
+          python -m pip install -e ".[dev,cloud]"
       # `coverage report` exits non-zero below fail_under, so this step is the gate.
       - run: |
           python -m coverage run -m pytest -q
@@ -111,7 +117,11 @@ jobs:
           cache: pip
       - run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+          # `memvara/store/remote.py`, `memvara/server/login.py` and
+          # `memvara/server/init.py` import `httpx` under `TYPE_CHECKING`/lazily; mypy
+          # still needs it installed to resolve the import, or every annotated use of it
+          # is an `import-not-found` error regardless of whether the code is correct.
+          python -m pip install -e ".[dev,cloud]"
       - run: python -m mypy -p memvara
 
   offline:
