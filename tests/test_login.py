@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import urllib.request
 from typing import Any
 
@@ -267,7 +268,12 @@ def test_approved_on_the_first_poll_writes_credentials(monkeypatch, tmp_path):
         "api_key": "key-123", "project": "proj",
         "server_url": data["server_url"], "issued_at": data["issued_at"],
     }
-    assert oct(path.stat().st_mode)[-3:] == "600"
+    # Windows has no POSIX permission bits: `os.chmod` there can only toggle the
+    # read-only attribute, so group/other bits can never be cleared and `st_mode`
+    # always reads back as 0o666 regardless of what login.py asked for. The chmod
+    # call is still correct there (and harmless), it is just unobservable this way.
+    if sys.platform != "win32":
+        assert oct(path.stat().st_mode)[-3:] == "600"
 
 
 def test_authorization_pending_is_polled_again(monkeypatch, tmp_path):
