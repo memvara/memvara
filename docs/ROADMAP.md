@@ -393,6 +393,75 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
 
 ---
 
+## Related work published since `v0.1.0`
+
+Phase 4 existed because every comparative number here was self-authored. One external paper
+has since appeared that bears directly on this design, and it is recorded for the same
+reason: it is evidence nobody in this repository wrote.
+
+**"A Graph-Native Bitemporal Memory Store for Conversational AI Agents"** — Alp Niksarli and
+Gopesh Baheti, Davidson College, [arXiv:2607.26520](https://arxiv.org/abs/2607.26520)
+[cs.DB], 29 July 2026. A Neo4j property graph with HNSW vector indexes, memory identity
+nodes separated from versioned content nodes, two closed-open intervals on each version, and
+an evaluation on LongMemEval. It is an unreviewed five-page preprint scoring 60 of the 500
+questions, ten per category, so a single question moves any cell by ten points. None of what
+follows rests on its scores.
+
+**It is this project's argument, reached independently.** The paper's motivation is that
+context-stuffing does not scale and that third-party memory services — it names Mem0 and Zep
+— take custody of a record of everything the user said, so the store belongs next to the
+agent. Its answer is the same one: valid time for when a fact held in the world, transaction
+time for when the database believed it, closed-open intervals, nothing physically
+overwritten. Its related-work section states outright that a full two-axis temporal model has
+not previously been applied to a vector-indexed store for agent memory. That claim is theirs,
+not ours, and it is the first external statement of the gap this library was built into.
+
+**It is also a published instance of the conflation `INTERNALS.md` invariant 3 forbids, with
+the regression measured.** Per its §III.B, `update_memory` closes **transaction time only**
+and never sets `valid_to` on the superseded version, while `delete_memory` closes **both
+clocks at once**. Memvara does neither: a supersession sets `valid_to` and `invalidated_by`
+and leaves `invalidated_at` unset, because the old value stopped being true and we were not
+mistaken about it. The consequence in their schema is that every historical version of an
+updated fact stays valid-time-open forever, so the post-filter `valid_to IS NULL OR valid_to
+> $valid_at` admits all of them and the valid-time axis cannot discriminate on exactly the
+facts it was built for. Their §V-E reports the symptom without connecting it to the cause:
+time-travel retrieval scores **worse** than current-state search on temporal reasoning, 3/8
+against 5/8 on the same questions, which they attribute to over-fetch dilution and propose to
+fix by re-ranking on proximity to `valid_at`. Their retrieval also over-fetches `10 × k` from
+the full-history index and applies the temporal filter *afterwards*, which is the shape
+invariant 7 forbids — a filter and a limit in different layers — and is why `states=` is a
+`Store` parameter here rather than a comprehension in the facade.
+
+That reading is taken from five pages of prose rather than from their code, and it should be
+held that loosely. What supports it is their own result: a correctly closed valid interval
+could not have made the time-travel path lose to current-state search on the category that
+tests it.
+
+**Two things in it are better than what is here.** It builds `RELATED_TO` edges at write time
+from the top five neighbours above cosine 0.75, one extra ANN lookup per write, giving a
+related-memories operation that needs no extraction at all; memvara's `GraphTraverser` walks
+predicate edges, which is more precise and cannot exist until something has been extracted.
+And its future work proposes counter nodes maintained during ingestion for questions that
+count events across sessions — the class this repository's multi-session row at 65.5% R@12
+cannot reach by retrieval, and which the reranker above does not reach either, because
+counting is an aggregation over the evidence rather than an ordering of it.
+
+**Its numbers are not comparable to the tables above and should not be quoted beside them.**
+It clears the database per example and scores a hit as 50% token overlap with the ground-truth
+*answer*; the LongMemEval table above uses one shared 940-session store so distractors exist,
+and scores recall of annotator-marked evidence. Two of its weak rows are also structural
+rather than informative: single-session-assistant at 20% because it stores only user turns by
+policy, so the assistant's own text is never written down at all, and single-session-preference
+at 10% for the same metric artifact documented above, where the golds are multi-sentence
+summaries no single turn can contain. The first of those is worth separating from a choice
+that looks like it. `SalienceGate.DEFAULT_EVIDENCE_ROLES` is `{"user"}` here too, but it
+governs *extraction* and runs in tier 1 — every episode is already stored in tier 0
+regardless of role, which is why the assistant row in the table above is 100.0% R@12 rather
+than a structural zero. Declining to mine a turn for claims and declining to keep it are
+different decisions, and only one of them is recoverable later.
+
+---
+
 # The commercial layer
 
 ## Why the split exists, and why the core is permissive
