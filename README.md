@@ -1,5 +1,11 @@
 # Memvara
 
+The hosted service lives at:
+
+> ## 🔗 [memvara.dev](https://memvara.dev)
+>
+> ### 🤖 MCP client setup — [memvara.dev/docs/agents](https://memvara.dev/docs/agents)
+
 **Bitemporal memory for AI agents.** Structured facts, deterministic contradiction
 resolution, hybrid retrieval, and a write path that mostly doesn't call an LLM.
 
@@ -70,7 +76,7 @@ needs a qualifier. Plain `pip install memvara` gives you exactly what it always 
 a file on disk and talks to nothing else. `pip install memvara[cloud]` adds an optional
 `httpx` dependency and, with it, a second path: `memvara-mcp init` then defaults to
 `memvara-mcp login`, a device-code flow against the hosted console
-(app.memvara.dev) that mints an API key and writes it to `~/.memvara/credentials.json`.
+([app.memvara.dev](https://app.memvara.dev)) that mints an API key and writes it to `~/.memvara/credentials.json`.
 That default is a CLI convenience, not a change to what the library needs — local and
 self-hosted remain fully supported, explicitly, with `--mode local` on `init` or
 `MEMVARA_MODE=local` in the server's environment, and neither requires the `cloud` extra
