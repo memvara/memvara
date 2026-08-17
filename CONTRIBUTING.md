@@ -177,6 +177,19 @@ Ask these in order. The first `yes` decides it.
 If it is still unclear after those four, it is genuinely unclear, and the issue thread is
 the right place — not the PR.
 
+**One deliberate exception, made by the maintainer, so you do not file it as a policy
+violation:** `memvara/store/remote.py` and the `memvara-mcp login` device-code flow are a
+thin HTTP *client* for the hosted console, living in this repo behind the optional `cloud`
+extra with a lazy `httpx` import — no import in the core install, no runtime dependency
+added to it. By question 1 above that is a "yes": it only makes sense when there is more
+than one machine, which is normally the whole test. It stays here anyway because it is a
+caller of somebody else's REST API, not the REST API itself — the server, the multi-tenant
+control plane and the auth backend it talks to remain entirely in the commercial product —
+and because it changes nothing about what a claim is, how a contradiction resolves, or
+what `search()` finds, which is the one thing question 4 makes non-negotiable regardless
+of who benefits. A new client for some *other* hosted service is not covered by this
+exception and should still open an issue first.
+
 A declined feature is not a claim on your work. This is Apache-2.0: you can carry the
 patch in a fork, publish it as a separate package against the `Store` protocol, and we
 will link to it from the README if it is good. That option is deliberately left open,

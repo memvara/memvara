@@ -456,6 +456,17 @@ class Memvara:
             # this tenant inherits whatever the file holds — which is the behaviour it
             # had before scoping existed, not a new leak.
             return all_specs()
+        except NotImplementedError:
+            # A Store whose method exists (so the `getattr` check above passes) but
+            # whose backing surface has no way to answer — `RemoteStore.all_specs`, in
+            # particular: the cloud facade has no read route for learned predicate
+            # specs at all (see its docstring). Treated the same as "no specs to
+            # rehydrate" rather than left to propagate, because propagating would mean
+            # no `Memvara` can ever be constructed over that store — this is the one
+            # caller that has to tolerate "this store cannot do this" rather than
+            # surface it, since every other caller of `all_specs` reaches it through a
+            # tool or maintenance command that is allowed to fail loudly.
+            return ()
 
     @classmethod
     def _absorb_scope_aliases(cls, tuning: dict[str, Any],

@@ -7,6 +7,53 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `memvara-mcp init`'s default output changed, if you installed `memvara[cloud]`
+
+### What changed
+
+`memvara-mcp init` used to write one thing, always: a local server configuration pointed
+at a file on disk. With the optional `cloud` extra installed (`pip install
+memvara[cloud]`), it now defaults to the hosted path instead — it runs `memvara-mcp
+login`, a device-code flow against the console at `https://app.memvara.dev`, and the
+`.mcp.json` block it writes configures the server for `mode: cloud` rather than a local
+`MEMVARA_DB`. Without the `cloud` extra, nothing about `init` changed: same files, same
+local-only output, same as every prior release.
+
+### How the mistake shows up
+
+A CI job, a container build, or a teammate's machine that runs `pip install
+memvara[cloud] && memvara-mcp init` non-interactively now hits a device-code prompt where
+it used to finish silently — `login` waits on browser approval, which nothing headless can
+give it. The failure mode is a hang or a timeout, not a wrong answer, but it is easy to
+mistake for the package being broken rather than for the default having moved.
+
+### What to grep for
+
+```
+memvara[cloud]                 # anywhere in requirements/pyproject/CI config
+memvara-mcp init                # invocations with no --mode flag, in scripts or CI
+```
+
+Any hit combining an installed `cloud` extra with an unattended `init` call is a
+candidate.
+
+### What to replace it with
+
+Pin the mode explicitly rather than relying on which extras happen to be installed:
+
+```bash
+memvara-mcp init --mode local        # unchanged local-file behavior, on any install
+# or, in the server's own environment:
+MEMVARA_MODE=local
+```
+
+`--mode local` (or `MEMVARA_MODE=local` on the server itself) is fully supported
+regardless of which extras are installed and does not require a network call at any
+point. See [README.md § Open core, and exactly where the line is](../README.md#open-core-and-exactly-where-the-line-is)
+for what the `cloud` extra does and does not add.
+
+---
+
 ## `invalidated_at is None` no longer means "live"
 
 **This is the one to read.** It is the only change in this project's history that is

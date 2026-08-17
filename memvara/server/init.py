@@ -39,7 +39,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Sequence, TextIO
 
-__all__ = ["AGENTS", "INIT_USAGE", "MARKER", "client_entry", "init", "skill_text"]
+__all__ = ["AGENTS", "INIT_USAGE", "MARKER", "client_entry", "cloud_client_entry", "init",
+           "skill_text"]
 
 #: Clients `init` knows the file layout of. Each name is also a directory of packaged
 #: skill data, so adding one is two edits rather than one, which is deliberate: a client
@@ -74,12 +75,20 @@ memvara-mcp init — write the MCP server block, the agent skill and a CLAUDE.md
                 today, and naming it is required rather than defaulted: a second client
                 writes different files, and a default would silently pick one.
   --dir PATH    project directory to write into. Default: the current directory.
-  --db PATH     where the store lives. Default: MEMVARA_DB if this shell has one,
-                otherwise ~/.memvara/memory.db. Written absolute either way — that is
-                the requirement no client enforces and everyone meets on the second
-                attempt.
-  --user NAME   who the server remembers for. Default: MEMVARA_USER, else USER. Unset
-                means the whole tenant, which is right for a single-person machine.
+  --mode NAME   'local' or 'cloud'. Default: MEMVARA_MODE if this shell has one,
+                otherwise 'cloud' when httpx is importable (a "pip install
+                memvara[cloud]" happened) and 'local' otherwise. Local writes
+                MEMVARA_DB/MEMVARA_USER, exactly what this command always wrote before
+                --mode existed. Cloud writes MEMVARA_MODE and, only when it is not the
+                default, MEMVARA_SERVER_URL — and if this machine has no credentials
+                yet, prints a reminder to run `memvara-mcp login` rather than running it.
+  --db PATH     where the store lives, local mode only. Default: MEMVARA_DB if this
+                shell has one, otherwise ~/.memvara/memory.db. Written absolute either
+                way — that is the requirement no client enforces and everyone meets on
+                the second attempt.
+  --user NAME   who the server remembers for, local mode only. Default: MEMVARA_USER,
+                else USER. Unset means the whole tenant, which is right for a
+                single-person machine.
   --force       replace .claude/skills/memvara/SKILL.md when it differs from the
                 packaged one. Never touches .mcp.json or CLAUDE.md; those are yours.
 
@@ -93,7 +102,13 @@ The other environment variables keep their defaults and `memvara-mcp --help` lis
 This is the Python package; the npm package is a placeholder with no equivalent command.
 """
 
-_OPTIONS = ("--agent", "--db", "--dir", "--user")
+_OPTIONS = ("--agent", "--db", "--dir", "--user", "--mode")
+
+#: The server_url a client that never sets MEMVARA_SERVER_URL gets from config.py's own
+#: default. Written into .mcp.json only when the caller's value differs from it — writing
+#: a default into somebody's settings file freezes it there, the same reasoning
+#: `client_entry` already applies to MEMVARA_DB's default.
+_DEFAULT_SERVER_URL = "https://app.memvara.dev"
 
 
 class _Usage(Exception):
@@ -137,6 +152,38 @@ def client_entry(*, db: str, user: str | None, command: str) -> dict[str, Any]:
     return {"command": command, "args": ["-m", "memvara.server"], "env": environment}
 
 
+def cloud_client_entry(*, server_url: str | None, command: str) -> dict[str, Any]:
+    """The `mcpServers.memvara` object for cloud mode: no store path, no local user.
+
+    `MEMVARA_SERVER_URL` is written only when it differs from the default, for the same
+    reason `client_entry` omits a default `MEMVARA_USER`: a default spelled out here is
+    one that does not move when the real default does.
+    """
+    environment: dict[str, str] = {"MEMVARA_MODE": "cloud"}
+    if server_url and server_url != _DEFAULT_SERVER_URL:
+        environment["MEMVARA_SERVER_URL"] = server_url
+    return {"command": command, "args": ["-m", "memvara.server"], "env": environment}
+
+
+def _httpx_importable() -> bool:
+    """Whether `pip install memvara[cloud]` happened in this interpreter.
+
+    The only reliable way to ask: `httpx` is the cloud extra's one new dependency
+    (see pyproject.toml), so its presence is the signal that this install can actually
+    speak to app.memvara.dev, and its absence means a cloud default would hand back a
+    client block for a server this interpreter cannot reach.
+    """
+    try:
+        import httpx  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _credentials_path() -> Path:
+    return Path(os.path.expanduser("~")) / ".memvara" / "credentials.json"
+
+
 def _interpreter() -> str:
     """The interpreter to put in `command`, which is not the string a human would type.
 
@@ -177,7 +224,7 @@ def _absolute(raw: str) -> Path:
 
 
 def _parse(argv: Sequence[str]) -> tuple[dict[str, str], bool]:
-    """`--name value` and `--name=value`, and a hand-written parser for six of them.
+    """`--name value` and `--name=value`, and a hand-written parser for the options.
 
     The same reasoning as the server's argument handling: a parser library here would be
     a dependency-shaped answer to a question with six options in it, and `argparse` in
@@ -303,15 +350,48 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
         if not root.is_dir():
             raise _Usage(f"--dir {str(root)!r} is not a directory. Point it at the "
                          "project you want configured; init creates files in it, not it.")
-        raw_db = options.get("--db") or _default_db(env)
-        if raw_db == ":memory:":
-            raise _Usage(
-                "the store is ':memory:', which is the throwaway one that dies with the "
-                "process — a settings file pointing at it would remember nothing between "
-                "launches. Pass --db with a path to a file.")
+        mode = options.get("--mode")
+        if mode is not None and mode not in ("local", "cloud"):
+            raise _Usage(f"--mode {mode!r} must be 'local' or 'cloud'.")
+        if mode is None:
+            # No explicit flag: an explicit MEMVARA_MODE in this shell wins next, and only
+            # when neither is set does installing the cloud extra change the default —
+            # httpx importable means `pip install memvara[cloud]` happened, which is the
+            # strongest signal available that cloud mode will actually work here.
+            env_mode = (env.get("MEMVARA_MODE") or "").strip()
+            mode = env_mode if env_mode in ("local", "cloud") else (
+                "cloud" if _httpx_importable() else "local")
+        if mode == "local":
+            raw_db = options.get("--db") or _default_db(env)
+            if raw_db == ":memory:":
+                raise _Usage(
+                    "the store is ':memory:', which is the throwaway one that dies with "
+                    "the process — a settings file pointing at it would remember nothing "
+                    "between launches. Pass --db with a path to a file.")
     except _Usage as exc:
         print(f"memvara-mcp init: {exc}\n\n{INIT_USAGE}", file=err)
         return 2
+
+    if mode == "cloud":
+        server_url = _first(env, "MEMVARA_SERVER_URL") or _DEFAULT_SERVER_URL
+        entry = cloud_client_entry(server_url=server_url, command=_interpreter())
+
+        skill = _skill_file(root, agent, force)
+        settings = _mcp_json(root, entry)
+        guidance = _claude_md(root)
+
+        lines = [f"memvara-mcp init — {agent}, in {root} (cloud)", ""]
+        lines += _report([skill, settings, guidance])
+        if settings.paste:
+            block = json.dumps({"memvara": entry}, indent=2).splitlines()[1:-1]
+            lines += ["", 'Add this inside the "mcpServers" object of that file:', ""] + block
+        if not (env.get("MEMVARA_API_KEY") or "").strip() and not _credentials_path().exists():
+            lines += ["", "No credentials yet on this machine. Run `memvara-mcp login` to",
+                      "authorize it before the client can use the memory tools."]
+        lines += ["", "The client launches the server itself, so restart it before",
+                  "expecting the tools to appear."]
+        print("\n".join(lines), file=out)
+        return 0
 
     db = _absolute(raw_db)
     user = options.get("--user") or _first(env, "MEMVARA_USER", "USER", "USERNAME")

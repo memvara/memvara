@@ -45,6 +45,7 @@ from memvara.server.init import (
     MARKER,
     _default_db,
     client_entry,
+    cloud_client_entry,
     init,
     skill_text,
 )
@@ -63,7 +64,7 @@ def _run(root: pathlib.Path, *extra: str,
     whichever of those the developer happened to be sitting in.
     """
     out, err = io.StringIO(), io.StringIO()
-    argv = ["--agent", "claude", "--dir", str(root),
+    argv = ["--agent", "claude", "--dir", str(root), "--mode", "local",
             "--db", str(root / "store" / "memory.db"), *extra]
     status = init(argv, env={} if env is None else env, stdout=out, stderr=err)
     return status, out.getvalue(), err.getvalue()
@@ -112,8 +113,8 @@ def test_the_store_path_is_absolute_however_it_arrived(tmp_path, monkeypatch) ->
     """
     monkeypatch.chdir(tmp_path)
     out, err = io.StringIO(), io.StringIO()
-    assert init(["--agent", "claude", "--dir", str(tmp_path), "--db", "memory.db"],
-                env={}, stdout=out, stderr=err) == 0
+    assert init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "local",
+                "--db", "memory.db"], env={}, stdout=out, stderr=err) == 0
 
     written = _entry(tmp_path)["env"]["MEMVARA_DB"]  # type: ignore[index]
     assert isinstance(written, str)
@@ -316,7 +317,8 @@ def test_with_nothing_injected_it_uses_the_process_streams(capsys) -> None:
     (["--agent="], "--agent needs a value"),
     (["--agent", "claude", "--user", "   "], "--user needs a value"),
     (["--agent", "claude", "--port", "8080"], "unexpected argument '--port'"),
-    (["--agent", "claude", "--db", ":memory:"], "remember nothing between launches"),
+    (["--agent", "claude", "--mode", "local", "--db", ":memory:"],
+     "remember nothing between launches"),
 ])
 def test_a_wrong_command_line_exits_two_and_names_the_part_that_was_wrong(
         argv: Sequence[str], expected: str) -> None:
@@ -353,7 +355,7 @@ def test_a_throwaway_store_in_the_environment_is_refused_the_same_way(tmp_path) 
     """
     err = io.StringIO()
 
-    status = init(["--agent", "claude", "--dir", str(tmp_path)],
+    status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "local"],
                   env={"MEMVARA_DB": ":memory:"}, stdout=io.StringIO(), stderr=err)
 
     assert status == 2
@@ -363,7 +365,7 @@ def test_a_throwaway_store_in_the_environment_is_refused_the_same_way(tmp_path) 
 def test_option_values_may_be_joined_with_an_equals_sign(tmp_path) -> None:
     """Both spellings, because both are what people type."""
     out = io.StringIO()
-    status = init(["--agent=claude", f"--dir={tmp_path}",
+    status = init(["--agent=claude", f"--dir={tmp_path}", "--mode=local",
                    f"--db={tmp_path / 'memory.db'}", "--user=alice"],
                   env={}, stdout=out, stderr=io.StringIO())
 
@@ -634,3 +636,141 @@ def test_the_skill_directory_is_the_name_the_front_matter_declares() -> None:
 
     assert declared is not None
     assert declared.group(1) == _skill_path(pathlib.Path("/anywhere")).parent.name
+
+
+# -- cloud mode --------------------------------------------------------------------------
+
+
+def test_explicit_local_mode_matches_todays_behaviour_byte_for_byte(tmp_path) -> None:
+    """`--mode local` is the escape hatch back to the only behaviour this command had
+    before cloud mode existed, and it has to still write MEMVARA_DB/MEMVARA_USER."""
+    status, out, _ = _run(tmp_path, env={"USER": "alice"})
+
+    assert status == 0
+    assert _entry(tmp_path)["env"] == {
+        "MEMVARA_DB": str(tmp_path / "store" / "memory.db"),
+        "MEMVARA_USER": "alice",
+    }
+    assert "(cloud)" not in out
+
+
+def test_cloud_mode_writes_mode_and_server_url_instead_of_db(tmp_path) -> None:
+    """Cloud mode has no local store, so the entry it writes has no MEMVARA_DB at all."""
+    out = io.StringIO()
+    status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "cloud"],
+                 env={}, stdout=out, stderr=io.StringIO())
+
+    assert status == 0
+    entry = _entry(tmp_path)
+    assert entry["env"] == {"MEMVARA_MODE": "cloud"}
+    assert "(cloud)" in out.getvalue()
+
+
+def test_cloud_mode_writes_the_server_url_only_when_not_the_default(tmp_path) -> None:
+    out = io.StringIO()
+    status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "cloud"],
+                 env={"MEMVARA_SERVER_URL": "https://staging.memvara.dev"},
+                 stdout=out, stderr=io.StringIO())
+
+    assert status == 0
+    assert _entry(tmp_path)["env"] == {
+        "MEMVARA_MODE": "cloud",
+        "MEMVARA_SERVER_URL": "https://staging.memvara.dev",
+    }
+
+
+def test_cloud_mode_with_no_credentials_points_at_login(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("memvara.server.init._credentials_path",
+                        lambda: tmp_path / "nonexistent" / "credentials.json")
+    out = io.StringIO()
+    status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "cloud"],
+                 env={}, stdout=out, stderr=io.StringIO())
+
+    assert status == 0
+    assert "memvara-mcp login" in out.getvalue()
+
+
+def test_cloud_mode_with_an_api_key_already_set_skips_the_login_reminder(tmp_path) -> None:
+    out = io.StringIO()
+    status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "cloud"],
+                 env={"MEMVARA_API_KEY": "mv_something"}, stdout=out, stderr=io.StringIO())
+
+    assert status == 0
+    assert "memvara-mcp login" not in out.getvalue()
+
+
+def test_cloud_mode_with_an_existing_mcp_json_prints_the_block_to_paste(tmp_path) -> None:
+    """The cloud-mode mirror of `test_an_existing_mcp_json_is_never_rewritten`: an
+    `.mcp.json` already present means `_mcp_json` returns `paste=True`, and cloud mode's
+    own branch has to print the entry the same way local mode's does."""
+    original = '{ "mcpServers": { "other": { "command": "elsewhere" } } }\n'
+    (tmp_path / ".mcp.json").write_text(original, encoding="utf-8")
+
+    out = io.StringIO()
+    status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "cloud"],
+                 env={"MEMVARA_API_KEY": "mv_something"}, stdout=out, stderr=io.StringIO())
+
+    assert status == 0
+    assert (tmp_path / ".mcp.json").read_text(encoding="utf-8") == original
+    body = out.getvalue()
+    assert 'Add this inside the "mcpServers" object' in body
+    assert '"MEMVARA_MODE": "cloud"' in body
+
+
+def test_an_invalid_mode_is_a_usage_error(tmp_path) -> None:
+    err = io.StringIO()
+    status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "staging"],
+                 env={}, stdout=io.StringIO(), stderr=err)
+
+    assert status == 2
+    assert "'local' or 'cloud'" in err.getvalue()
+
+
+def test_httpx_importable_reports_true_when_the_cloud_extra_is_installed() -> None:
+    from memvara.server.init import _httpx_importable
+
+    assert _httpx_importable() is True
+
+
+def test_httpx_importable_reports_false_when_it_is_not(monkeypatch) -> None:
+    import builtins
+
+    from memvara.server.init import _httpx_importable
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **kw):
+        if name == "httpx":
+            raise ImportError("no module named httpx")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert _httpx_importable() is False
+
+
+def test_no_mode_and_no_httpx_defaults_to_local(tmp_path, monkeypatch) -> None:
+    """The other half of the default-mode decision: absent the `cloud` extra, an
+    unset --mode and an unset MEMVARA_MODE fall back to 'local', not 'cloud'."""
+    monkeypatch.setattr("memvara.server.init._httpx_importable", lambda: False)
+    out = io.StringIO()
+    status = init(["--agent", "claude", "--dir", str(tmp_path)],
+                 env={"MEMVARA_DB": str(tmp_path / "store" / "memory.db")},
+                 stdout=out, stderr=io.StringIO())
+    assert status == 0
+    assert "MEMVARA_DB" in _entry(tmp_path)["env"]
+
+
+def test_the_mode_environment_variable_is_honoured_without_the_flag(tmp_path) -> None:
+    """MEMVARA_MODE in the shell picks the mode when --mode is not given, the same
+    precedence the flag/environment pairs elsewhere in this command already use."""
+    out = io.StringIO()
+    status = init(["--agent", "claude", "--dir", str(tmp_path)],
+                 env={"MEMVARA_MODE": "cloud"}, stdout=out, stderr=io.StringIO())
+
+    assert status == 0
+    assert _entry(tmp_path)["env"] == {"MEMVARA_MODE": "cloud"}
+
+
+def test_cloud_client_entry_omits_server_url_at_the_default() -> None:
+    entry = cloud_client_entry(server_url="https://app.memvara.dev", command="p")
+    assert entry["env"] == {"MEMVARA_MODE": "cloud"}
