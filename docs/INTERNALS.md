@@ -34,8 +34,14 @@ importable from the foundation modules:
    `"ended"` everywhere except `forget`/`delete`, which are belief operations by name.
 4. **Every claim carries provenance.** `sources` must be populated with the episode ids
    the claim came from, and `derivation` must reflect how it was produced.
-5. **Everything must run with no API key and no network.** `NullLLM` + `HashingEmbedder`
-   is the default configuration and the one the tests use.
+5. **The library must run with no API key and no network.** `NullLLM` + `HashingEmbedder`
+   is the default configuration and the one the tests use, and this invariant is about
+   `import memvara` and the modules under it — every file this document is a contract
+   for. It is not a claim about `memvara-mcp init`'s default output: with the optional
+   `cloud` extra installed, that CLI now defaults to authenticating against a hosted
+   console (`memvara-mcp login`), a decision made one layer up, in `memvara/server/`,
+   and reversible per-invocation with `--mode local`. Nothing below `memvara/server/`
+   knows that mode exists.
 6. **A multi-hop answer is evaluated at one clock pair.** Every edge on a returned path
    must be checked against the same `(valid_at, known_at)`, pinned once before the walk.
    A path stitched from edges believed at different times is a connection that never

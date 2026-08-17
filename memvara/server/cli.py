@@ -59,6 +59,12 @@ Rather than writing that block by hand:
                      CLAUDE.md snippet into a project, with MEMVARA_DB already
                      absolute. `memvara-mcp init --help` for its options.
 
+  memvara-mcp login --project NAME
+                     Signs in to a memvara-cloud deployment over the device-code
+                     flow and writes an API key to ~/.memvara/credentials.json,
+                     for MEMVARA_MODE=cloud. Needs the `cloud` extra. `memvara-mcp
+                     login --help` for its options.
+
 Client configuration:
 
 {EXAMPLE_CONFIG}
@@ -79,6 +85,14 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
         # because `init` has a command line of its own and this one has none.
         if args[0] == "init":
             return init(args[1:], env=env, stdout=out, stderr=err)
+        if args[0] == "login":
+            # Imported here, not at module top: `login.py` belongs to the `cloud` extra
+            # and requires `httpx`, and this file has to stay importable with no extras
+            # installed (CONTRIBUTING.md's "no extras" CI job) for everyone who never
+            # calls `login`.
+            from .login import login
+
+            return login(args[1:], env=env, stdout=out, stderr=err)
         if args == ["--version"]:
             print(__version__, file=out)
             return 0

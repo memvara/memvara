@@ -85,7 +85,7 @@ EXTRAS = {name: value for name, value in _toml_table("project.optional-dependenc
 # because the person reading that traceback has no other way to learn that the fix is one
 # `pip install` away. `ModuleNotFoundError: No module named 'x'` is not that error.
 ADAPTER_EXTRAS = {"anthropic", "openai", "local-embed", "rerank",
-                  "langchain", "llama-index", "crewai", "langgraph"}
+                  "langchain", "llama-index", "crewai", "langgraph", "cloud"}
 # A **reserved** extra buys nothing yet and says so. `http` names the REST layer's
 # dependencies before the REST layer exists. That is defensible — it fixes the dependency
 # set publicly before anything depends on it — and it is one letter away from the
@@ -119,6 +119,12 @@ def _construct_cross_encoder_reranker() -> None:
     from memvara.rerank.cross import CrossEncoderReranker
 
     CrossEncoderReranker()
+
+
+def _construct_remote_store() -> None:
+    from memvara.store.remote import RemoteStore
+
+    RemoteStore(base_url="https://app.memvara.dev", api_key="k")
 
 
 # The adapters are lazy attributes on their own modules, so naming the class is the
@@ -166,6 +172,7 @@ ADAPTERS = {
     # `store/` in it at all. Exactly the distribution-name-is-not-import-name trap this
     # mapping exists for.
     "langgraph": ("langgraph", _resolve_langgraph_store),
+    "cloud": ("httpx", _construct_remote_store),
 }
 
 #: The subset of `ADAPTERS` whose SDK name never appears in an `import` statement,
@@ -196,16 +203,35 @@ def _absolute_imports(nodes: Iterable[ast.AST]) -> set[str]:
     return names
 
 
+def _is_type_checking_guard(node: ast.stmt) -> bool:
+    """`if TYPE_CHECKING:` (bare or `typing.TYPE_CHECKING`) — the one `if` whose body a
+    real interpreter never runs, so a static "what executes on import" walk has to treat
+    it differently from every other conditional import.
+    """
+    if not isinstance(node, ast.If):
+        return False
+    test = node.test
+    return ((isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
+            or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"))
+
+
 def _import_time_imports(body: list[ast.stmt]) -> set[str]:
     """What executes on `import memvara.<module>`.
 
     Descends into `if`, `try` and `with` — a conditional import at module scope still runs
     at import time — and stops at every `def` and `class`, which is precisely the line the
-    optional backends are hiding behind.
+    optional backends are hiding behind. The one `if` this does not descend into is
+    `if TYPE_CHECKING:`: that branch is `False` at runtime by construction (that is the
+    entire point of `TYPE_CHECKING`), so an SDK imported there only for annotations —
+    `RemoteStore` importing `httpx` under it, exactly like `mypy` needs — never actually
+    executes on import and must not be flagged as though it did.
     """
     names = _absolute_imports(body)
     for node in body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if _is_type_checking_guard(node):
+            names |= _import_time_imports(node.orelse)
             continue
         for field in ("body", "orelse", "finalbody"):
             names |= _import_time_imports(getattr(node, field, None) or [])

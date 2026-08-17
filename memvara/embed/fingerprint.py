@@ -138,10 +138,21 @@ def stored_dim(store: Any) -> int | None:
     iter_claims = getattr(store, "iter_claims", None)
     if get_embedding is None or iter_claims is None:
         return None
-    for scanned, claim in enumerate(iter_claims(include_invalidated=True)):
-        vec = get_embedding(claim.id)
-        if vec is not None:
-            return int(np.asarray(vec).reshape(-1).shape[0])
-        if scanned + 1 >= _PROBE_LIMIT:
-            break
+    try:
+        for scanned, claim in enumerate(iter_claims(include_invalidated=True)):
+            vec = get_embedding(claim.id)
+            if vec is not None:
+                return int(np.asarray(vec).reshape(-1).shape[0])
+            if scanned + 1 >= _PROBE_LIMIT:
+                break
+    except NotImplementedError:
+        # A `Store` whose `iter_claims`/`get_embedding` exist as methods (so the
+        # `getattr` checks above pass) but whose backing surface has no way to answer —
+        # `RemoteStore`, whose vectors and claim listing are both server-internal, in
+        # particular. The probe exists to protect a store this process can actually
+        # read from a silent width mismatch; a store that flatly cannot be probed is
+        # not that case, so this falls back to "unknown" exactly like a store with no
+        # vectors yet, rather than making every `Memvara(store=RemoteStore(...))`
+        # unconstructible.
+        return None
     return None

@@ -13,8 +13,10 @@ failed launch and the message below immediately.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ..core import Memvara
@@ -25,6 +27,17 @@ __all__ = ["ConfigError", "ServerConfig", "build_memvara"]
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off", ""}
+
+#: Modes selectable from the environment. "local" is unchanged, decades-old behaviour:
+#: a file on disk named by MEMVARA_DB. "cloud" is the device-code auth contract: no
+#: MEMVARA_DB, an API key from either the environment or the credentials file written
+#: by `memvara-mcp login`, and a RemoteStore talking to a memvara-cloud deployment.
+_MODES = ("local", "cloud")
+
+#: Where `memvara-mcp login` writes what it obtained, and where `from_env` reads it back
+#: from when MEMVARA_API_KEY is not set directly. Kept as a module constant because the
+#: login command (built separately) has to write exactly this path for this file to find it.
+CREDENTIALS_PATH = Path.home() / ".memvara" / "credentials.json"
 
 #: Backends selectable from the environment. Anything needing constructor arguments —
 #: a custom model, an injected client — is a reason to import `MemvaraMCPServer` and wire
@@ -78,13 +91,19 @@ class ConfigError(Exception):
 class ServerConfig:
     """Everything the process needs to know, resolved once at startup."""
 
-    path: str
+    path: str = ""
     tenant: str = "default"
     user: str | None = None
     agent: str | None = None
     session: str | None = None
     read_only: bool = False
     llm: str = "none"
+    #: "local" (default) opens MEMVARA_DB on disk, exactly as before this field existed.
+    #: "cloud" opens no local file at all; it resolves an API key (MEMVARA_API_KEY, or
+    #: the credentials file `memvara-mcp login` writes) and talks to `server_url` instead.
+    mode: str = "local"
+    server_url: str = "https://app.memvara.dev"
+    api_key: str | None = None
     #: Which vector space this server's store is opened in. Named rather than discovered,
     #: for the same reason `llm` is: a store outlives the environment it was created in,
     #: and a setting that reads "whatever happens to be installed" makes the store's
@@ -95,14 +114,39 @@ class ServerConfig:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ServerConfig":
         env = os.environ if env is None else env
-        path = (env.get("MEMVARA_DB") or "").strip()
-        if not path:
+
+        mode = (env.get("MEMVARA_MODE") or "local").strip().lower()
+        if mode not in _MODES:
             raise ConfigError(
-                "MEMVARA_DB is not set, so there is nowhere to remember anything. Point "
-                "it at a file the client can write; it is created on first use:\n\n"
-                f"{EXAMPLE_CONFIG}\n\n"
-                "Use MEMVARA_DB=:memory: only for a smoke test — that store is discarded "
-                "when this process exits.")
+                f"MEMVARA_MODE={mode!r} is not a mode. Use {_one_of(_MODES)}. 'local' is "
+                "the default: a MEMVARA_DB file on disk. 'cloud' talks to a memvara-cloud "
+                "deployment instead and needs no MEMVARA_DB.")
+
+        path = (env.get("MEMVARA_DB") or "").strip()
+        api_key: str | None = None
+        server_url = (env.get("MEMVARA_SERVER_URL") or "https://app.memvara.dev").strip() \
+            or "https://app.memvara.dev"
+
+        if mode == "local":
+            if not path:
+                raise ConfigError(
+                    "MEMVARA_DB is not set, so there is nowhere to remember anything. "
+                    "Point it at a file the client can write; it is created on first "
+                    "use:\n\n"
+                    f"{EXAMPLE_CONFIG}\n\n"
+                    "Use MEMVARA_DB=:memory: only for a smoke test — that store is "
+                    "discarded when this process exits.")
+        else:
+            api_key = _optional(env.get("MEMVARA_API_KEY"))
+            if api_key is None:
+                api_key, credentials_url = _read_credentials()
+                server_url = (env.get("MEMVARA_SERVER_URL") or "").strip() \
+                    or credentials_url or server_url
+            if api_key is None:
+                raise ConfigError(
+                    "MEMVARA_MODE=cloud needs an API key, and none was found. Set "
+                    "MEMVARA_API_KEY, or run \"memvara-mcp login\" to write one to "
+                    f"{CREDENTIALS_PATH}.")
 
         backend = (env.get("MEMVARA_LLM") or "none").strip().lower()
         if backend not in _BACKENDS:
@@ -115,7 +159,8 @@ class ServerConfig:
         return cls(
             # `~` is what a human types in a JSON settings file, and nothing else in the
             # launch path will expand it.
-            path=path if path == ":memory:" else os.path.expanduser(path),
+            path=(path if path == ":memory:" else os.path.expanduser(path))
+                if path else "",
             tenant=(env.get("MEMVARA_TENANT") or "default").strip() or "default",
             user=_optional(env.get("MEMVARA_USER")),
             agent=_optional(env.get("MEMVARA_AGENT")),
@@ -123,6 +168,9 @@ class ServerConfig:
             read_only=_flag(env.get("MEMVARA_READ_ONLY"), "MEMVARA_READ_ONLY"),
             llm=backend,
             embedder=_embedder_spec(env.get("MEMVARA_EMBEDDER")),
+            mode=mode,
+            server_url=server_url,
+            api_key=api_key,
         )
 
     @property
@@ -178,6 +226,25 @@ def _embedder_spec(raw: str | None) -> str:
             "'this store holds N-dimensional vectors' in the error that sent you here, "
             "or \"dim\" in memory.db.embedder.json.")
     return f"{kind}:{argument}" if sep else kind
+
+
+def _read_credentials() -> tuple[str | None, str | None]:
+    """Read the api_key and server_url `memvara-mcp login` wrote, or (None, None).
+
+    Any way this file could fail to be a usable credential — missing, unreadable, not
+    JSON, no api_key — is treated the same as "not logged in yet" rather than raised
+    directly, so the caller's ConfigError naming "memvara-mcp login" is the one message
+    the user sees.
+    """
+    try:
+        data = json.loads(CREDENTIALS_PATH.read_text())
+    except (OSError, ValueError):
+        return None, None
+    api_key = data.get("api_key") if isinstance(data, dict) else None
+    server_url = data.get("server_url") if isinstance(data, dict) else None
+    if not isinstance(api_key, str) or not api_key:
+        return None, None
+    return api_key, server_url if isinstance(server_url, str) and server_url else None
 
 
 def _flag(raw: str | None, name: str) -> bool:
@@ -236,7 +303,31 @@ def build_memvara(config: ServerConfig) -> Memvara:
     The scope goes to the constructor as well as to `Memvara.scope()` later, because the
     tenant decides which learned predicate vocabulary is rehydrated at open — a server
     that scoped only its calls would classify every predicate again on every launch.
+
+    In "cloud" mode there is no local file at all: the store is a `RemoteStore` talking
+    to `config.server_url` with `config.api_key`, and `Memvara.__init__` accepts `store=`
+    as an alternative to `path=` for exactly this case.
     """
+    if config.mode == "cloud":
+        from ..store.remote import RemoteStore
+
+        if config.api_key is None:
+            # Reachable only by constructing a ServerConfig directly in Python, bypassing
+            # from_env's own check (which never returns mode="cloud" without an api_key) —
+            # the equivalent of the "no MEMVARA_DB" path below, given the same error type
+            # for the same reason: the environment (or here, the Python caller) named a
+            # configuration that cannot open a store.
+            raise ConfigError(
+                "build_memvara() was given a ServerConfig(mode='cloud') with no "
+                "api_key. ServerConfig.from_env() never produces this combination; "
+                "a caller constructing ServerConfig directly must set api_key too.")
+
+        return Memvara(
+            store=RemoteStore(base_url=config.server_url, api_key=config.api_key),
+            llm=NullLLM() if config.llm == "none" else _anthropic(),
+            embedder=_embedder(config.embedder),
+            **config.scope_kwargs,
+        )
     return Memvara(
         config.path,
         # Passed explicitly even when it is the default: `Memvara()` warns about a missing
