@@ -55,9 +55,11 @@ what stops a model reaching another user's memory.
 Rather than writing that block by hand:
 
   memvara-mcp init --agent claude
-                     Writes the client's server block, the memvara skill and a
-                     CLAUDE.md snippet into a project, with MEMVARA_DB already
-                     absolute. `memvara-mcp init --help` for its options.
+                     Writes the client's server block, the memvara skill tree
+                     and a project note, with MEMVARA_DB already absolute.
+                     `--agent cursor` and `--agent grok` write the same skill
+                     into those clients' skill directories. `--skill-only`
+                     skips .mcp.json. `memvara-mcp init --help` for its options.
 
   memvara-mcp login --project NAME
                      Signs in to a memvara-cloud deployment over the device-code

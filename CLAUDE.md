@@ -47,7 +47,7 @@ author — it is whoever reads it next, without the context that would let them 
 inventory out by looking rather than by trusting this list. It runs to at least
 `README.md`, `CHANGELOG.md` (every user-visible change), `docs/UPGRADING.md` when
 behaviour changes under someone, `docs/INTERNALS.md`, and the packaged skill at
-`memvara/skills/claude/SKILL.md`, which states outright that it does not repeat what a
+`memvara/skills/memvara/SKILL.md`, which states outright that it does not repeat what a
 tool description says — so text moving between the two has to move in both.
 `CONTRIBUTING.md` states the same duty from the other end, and names the documents that
 make specific, checkable claims.

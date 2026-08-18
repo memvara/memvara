@@ -9,6 +9,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **A real agent skill**, at `memvara/skills/memvara/`. One `SKILL.md` of procedures
+  (read before asserting, the dispute sequence, the bound scope, what is worth
+  storing, fast-path-only writes) plus `references/` for worked turns, deletion /
+  audit, and a short paste for clients that have no skill directory.
+  `memvara-mcp init --agent` now accepts `claude`, `cursor` and `grok` — those
+  names pick the destination, not different prose — and `--skill-only` writes the
+  tree without touching `.mcp.json`.
+
 ### Fixed
 
 - **`supersede()` reported closing nothing, from the one call whose whole purpose is

@@ -1227,7 +1227,10 @@ library's "numpy and nothing else" claim survives. It refuses to start without
 store that vanishes on exit.
 
 ```bash
-memvara-mcp init --agent claude          # writes the config, the skill and a CLAUDE.md note
+memvara-mcp init --agent claude          # config, skill tree, CLAUDE.md note
+memvara-mcp init --agent cursor          # same skill, under .cursor/skills/
+memvara-mcp init --agent grok            # same skill, under .grok/skills/
+memvara-mcp init --agent claude --skill-only   # skill only; leaves .mcp.json alone
 ```
 
 `init` writes the client's server block with `MEMVARA_DB` already absolute, which is the
@@ -1236,14 +1239,18 @@ setting most people get wrong on the first attempt. It never rewrites an existin
 enclosing braces, indented to paste inside `mcpServers`, because a self-valid block is
 the one people paste whole and break the file. `command` is the running interpreter
 rather than `python3`, since the client launches with no login profile and `PATH` there
-is not your shell's.
+is not your shell's. `--skill-only` skips that file entirely, for a client that is
+already talking to the hosted URL.
 
 It also writes a **skill** — the judgment a tool description cannot carry, because it
 spans tools: the sequence to follow when a user disputes a memory (and why the `why()`
 excerpt has to come *before* the write that acts on it), which scope your writes are
 landing in, what is worth storing at all, and what changes on a server with no extraction
-model. A test asserts it shares no six-word run with any tool or parameter description,
-so the two cannot quietly become two sources for one fact.
+model. The file lives at `memvara/skills/memvara/SKILL.md` and ships with
+`references/` for worked turns and for deletion / audit questions. A test asserts the
+package shares no six-word run with any tool or parameter description, so the two
+cannot quietly become two sources for one fact. `--agent` chooses the directory the
+client will actually read; the prose is the same.
 
 `memory_since` is the read a resumed session wants: what arrived and what left while the
 agent was away, rather than the whole store again. It returns rows rather than a prompt
