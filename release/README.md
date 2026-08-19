@@ -68,15 +68,17 @@ separate token" before any of it happened, and that made no difference whatsoeve
 guard passed, so nobody read the warning. **A rule the code does not enforce is not in
 effect**, however clearly it is written down.
 
-### Sequencing that matters for the first release
+### Sequencing that mattered for the first release
 
 1. **Claim the name before making the core repo public.** Pushing a public repo announces
-   the name before it is secured.
-2. This does **not** wait on the PyPI organisation request. An organisation reserves no
+   the name before it is secured. Both uploads happened on 2026-08-14, with the GitHub
+   repo following; do not reverse that order for a new name.
+2. This did **not** wait on the PyPI organisation request. An organisation reserves no
    project name — only the first upload does. Publish from a personal account and transfer
    the project into the organisation later.
-3. `pyproject.toml`'s `Homepage` points at `github.com/memvara/memvara`, which is private
-   until step 1 is done. The PyPI page will link to a 404 for as long as that gap lasts.
+3. `pyproject.toml`'s `Homepage` pointed at `github.com/memvara/memvara` while that
+   repository was still private, so the PyPI page linked at a 404 for a few hours. The
+   repo is public now and the link resolves.
 
 ## npm
 

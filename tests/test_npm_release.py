@@ -199,7 +199,9 @@ def test_no_public_doc_calls_npm_unclaimed_while_linking_to_it():
     free next to a link at the live package is how a reader concludes they can
     take it — or that we do not know what we published."""
     unclaimed = re.compile(
-        r"(unclaimed|unpublished|still takeable|is 404 right now|answered HTTP 404)",
+        r"(unclaimed|unpublished|still takeable|is 404 right now|"
+        r"answered HTTP 404|The name is available, and that was not free|"
+        r"will link to a 404)",
         re.I,
     )
     npm_link = re.compile(r"npmjs\.com/package/memvara|registry\.npmjs\.org/memvara")

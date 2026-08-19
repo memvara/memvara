@@ -363,7 +363,7 @@ The real publish is a decision, not a step. What has to be true first is below.
 
 ## Before a real publish
 
-### The name is available, and that was not free
+### The name was available, and that was not free
 
 The project was called `engram` until Phase 8 prep checked. `pip download --no-deps
 engram` resolves today to an unrelated MIT library ("Shared research utilities for
