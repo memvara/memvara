@@ -85,15 +85,15 @@ python3 release/publish_npm.py --package PATH --dry-run
 python3 release/publish_npm.py --package PATH
 ```
 
-**npm is a name-reservation question here, not a release process.** There is no JavaScript
-client. The two other `package.json` files in this project are applications marked
-`"private": true` — the console and the marketing site — and neither belongs in a
-registry; the script refuses them by name rather than letting `npm` produce a vaguer error.
+**The first publish happened.** `memvara@0.0.1` is on the registry as a name
+reservation; there is still no JavaScript client. The release *process* is now the
+same tagged-commit workflow as PyPI (`.github/workflows/release.yml`): `check-npm`,
+`build-npm`, `publish-npm`. This script is the fallback for when Actions cannot
+run, and it still refuses the two `"private": true` applications — the console and
+the marketing site — rather than letting `npm` produce a vaguer error.
 
-`memvara` on npm is unclaimed, and an npm organisation reserves only `@memvara/*`, exactly
-as a PyPI organisation reserves no project name. Claiming the bare name requires publishing
-something real, so [`npm/memvara/`](../npm/memvara) is a placeholder that names the
-project, links to it, and does nothing:
+An npm organisation still only reserves `@memvara/*`. The placeholder is what
+claimed the bare name. [`npm/memvara/`](../npm/memvara) is that package:
 
 ```bash
 python3 release/publish_npm.py --package npm/memvara --dry-run

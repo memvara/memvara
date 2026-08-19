@@ -9,7 +9,25 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **npm on the same release workflow as PyPI.** A `v*` tag now runs `check-npm`
+  (does this `package.json` version already exist?), `build-npm` (pack once, hash
+  the tarball), and `publish-npm` (download those bytes, verify the hash, wait for
+  a human, upload the tarball). npm versions stay independent of the Python tag:
+  if the placeholder is still `0.0.1` and the registry already has it, the publish
+  job is skipped and the release is still green. There is no JavaScript client;
+  `npm/memvara` remains a four-field notice object.
+
 ### Fixed
+
+- **The docs still described a world in which nothing had been published.**
+  `docs/RELEASING.md`, `docs/DEPLOY.md`, `SECURITY.md`, `docs/ROADMAP.md` and
+  `release/README.md` said the PyPI and npm names were free, or that
+  `pip install memvara` was not the install. Both names were claimed on
+  2026-08-14. A reader acting on those sentences would have treated a live
+  package as takeable, or cloned a tree to get a library that has been on
+  the index for days.
 
 - **`supersede()` reported closing nothing, from the one call whose whole purpose is
   closing a claim out.** `receipt.closed` came back empty — and with it `receipt.ended`

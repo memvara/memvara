@@ -57,9 +57,10 @@ on:
           - pypi
           - testpypi
 
-# Read-only by default. The two publish jobs raise `id-token: write` on themselves and
-# nowhere else, so the OIDC credential that can upload to PyPI exists only in the job that
-# uploads to PyPI.
+# Read-only by default. The publish jobs raise `id-token: write` on themselves and
+# nowhere else, so the OIDC credential that can upload exists only in the job that
+# uploads. PyPI and npm each get their own environment; a token minted outside that
+# environment is rejected at the registry.
 permissions:
   contents: read
 
@@ -263,6 +264,172 @@ jobs:
           name: dist
           path: dist/
           if-no-files-found: error
+
+  check-npm:
+    # Separate from packing on purpose. The first run of this workflow is expected to
+    # SKIP: npm/memvara is already 0.0.1 on the registry, and that version is spent.
+    # Putting the lookup in its own job makes that skip a log line you can read, not an
+    # absent publish job you have to infer.
+    #
+    # npm versions are independent of the Python tag. This job does not compare
+    # package.json to the tag, and it must not: a v0.2.1 Python release is not an
+    # invitation to republish the placeholder.
+    name: is this npm version already on the registry
+    needs: version
+    runs-on: ubuntu-latest
+    outputs:
+      npm_version: ${{ steps.read.outputs.npm_version }}
+      npm_exists: ${{ steps.read.outputs.npm_exists }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compare package.json against the registry
+        id: read
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open("npm/memvara/package.json"))["version"])')"
+          if [ -z "$version" ]; then
+            echo "::error::could not read a version out of npm/memvara/package.json"
+            exit 1
+          fi
+
+          code="$(curl -sS -o /tmp/npm-meta.json -w '%{http_code}' https://registry.npmjs.org/memvara)"
+          if [ "$code" = "404" ]; then
+            exists=false
+          elif [ "$code" = "200" ]; then
+            exists="$(python3 -c 'import json,sys; print(str(sys.argv[1] in json.load(open("/tmp/npm-meta.json")).get("versions", {})).lower())' "$version")"
+          else
+            echo "::error::registry.npmjs.org/memvara answered HTTP $code"
+            exit 1
+          fi
+
+          echo "npm/memvara version: $version"
+          if [ "$exists" = "true" ]; then
+            echo "registry: exists"
+            echo "action: SKIP — version already published"
+          else
+            echo "registry: missing"
+            echo "action: PUBLISH — waiting on the npm environment reviewer"
+          fi
+
+          echo "npm_version=$version" >> "$GITHUB_OUTPUT"
+          echo "npm_exists=$exists" >> "$GITHUB_OUTPUT"
+
+  build-npm:
+    # Packs once. The publish job is not allowed to pack: if it could, the SHA-256
+    # check would be theatre and we would be back to uploading whatever the runner
+    # happened to build a second time.
+    name: pack the npm tarball and hash it
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: npm CLI new enough for trusted publishing
+        run: npm install -g 'npm@^11.5.1'
+
+      - name: Pack, hash, and refuse a surprise file list
+        working-directory: npm/memvara
+        run: |
+          set -euo pipefail
+          npm publish --dry-run --access public
+          npm pack
+          shopt -s nullglob
+          tarballs=(memvara-*.tgz)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one memvara-*.tgz, got: ${tarballs[*]:-none}"
+            exit 1
+          fi
+          tarball="${tarballs[0]}"
+
+          listed="$(tar -tzf "$tarball" | grep -v '/$' | sed 's|^package/||' | sort)"
+          # package.json is always in the tarball even when it is not in `files`.
+          expected="$(printf '%s\n' LICENSE README.md index.d.ts index.js package.json | sort)"
+          if [ "$listed" != "$expected" ]; then
+            echo "::error::tarball contents are not the package.json files list"
+            echo "listed:"
+            echo "$listed"
+            echo "expected:"
+            echo "$expected"
+            exit 1
+          fi
+
+          sha256sum "$tarball" | awk '{print $1}' > sha256.txt
+          echo "tarball $tarball"
+          echo "sha256  $(cat sha256.txt)"
+          echo "sha256=$(cat sha256.txt)" >> "$GITHUB_STEP_SUMMARY"
+          echo "tarball=$tarball" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-dist
+          path: |
+            npm/memvara/memvara-*.tgz
+            npm/memvara/sha256.txt
+          if-no-files-found: error
+
+  publish-npm:
+    # The irreversible one for npm, and only when check-npm said the version is free.
+    # This job cannot build. It downloads the packed tarball, checks the hash, and
+    # uploads those bytes. A mismatch is a stop, not a rebuild.
+    name: publish to npm
+    needs: [version, check-npm, build-npm]
+    if: needs.check-npm.outputs.npm_exists == 'false'
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/memvara
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: npm CLI new enough for trusted publishing
+        run: npm install -g 'npm@^11.5.1'
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm-dist
+          path: npm-dist/
+
+      - name: Verify these are the bytes that were packed
+        run: |
+          set -euo pipefail
+          cd npm-dist
+          shopt -s nullglob
+          tarballs=(memvara-*.tgz)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one tarball in npm-dist, got: ${tarballs[*]:-none}"
+            exit 1
+          fi
+          tarball="${tarballs[0]}"
+          test -f sha256.txt
+          got="$(sha256sum "$tarball" | awk '{print $1}')"
+          want="$(tr -d ' \n\r' < sha256.txt)"
+          echo "tarball $tarball"
+          echo "want    $want"
+          echo "got     $got"
+          if [ "$got" != "$want" ]; then
+            echo "::error::SHA-256 mismatch: packed $want, downloaded $got. Refusing to publish bytes we did not check."
+            exit 1
+          fi
+
+      - name: Publish the tarball
+        run: |
+          set -euo pipefail
+          tarball="$(ls npm-dist/memvara-*.tgz)"
+          npm publish "$tarball" --access public
 
   publish-pypi:
     # The irreversible one.

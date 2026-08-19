@@ -1,7 +1,8 @@
 # Releasing memvara
 
-Nothing has been published. This is the checklist for the day something is, plus the
-things that have to be true first — one of which is a hard blocker nobody had checked.
+PyPI has `memvara` 0.2.0 (first upload 2026-08-14). npm has `memvara` 0.0.1, a
+name reservation with no JavaScript client (same day). This is the checklist for the
+next upload of either, plus the things that have to stay true.
 
 Since `.github/workflows/release.yml` exists, most of what follows is automated: pushing
 a `v*` tag runs the whole gate on the tagged commit, builds in a clean runner, checks the
@@ -9,12 +10,17 @@ artifact rather than the tree, and then stops and waits for a human. The manual 
 is kept below as the fallback, because a release process that cannot run when Actions is
 down is not a release process.
 
-**Publishing to PyPI is out of scope for any agent working in this repository.** It is
-outward-facing, effectively irreversible, and belongs to whoever owns the project. The
-workflow does not change that; it moves the decision to one place — approving the `pypi`
-environment — instead of removing it. An agent may open the pull request that bumps the
-version and may push a branch. Approving a publish is a maintainer's, and every manual
-step below stops at TestPyPI.
+**Publishing to PyPI or npm is out of scope for any agent working in this repository.**
+It is outward-facing, effectively irreversible, and belongs to whoever owns the project.
+The workflow does not change that; it moves the decision to one place — approving the
+`pypi` or `npm` environment — instead of removing it. An agent may open the pull request
+that bumps a version and may push a branch. Approving a publish is a maintainer's. Every
+manual step below stops at TestPyPI / `npm publish --dry-run`.
+
+npm versions are independent of the Python tag. `v0.2.1` does not imply npm `0.2.1`.
+If `npm/memvara/package.json` still says `0.0.1` — and the registry already has that
+number — `publish-npm` is skipped and the release is still green. That is the expected
+first run of the npm job.
 
 ---
 
@@ -88,7 +94,10 @@ That push is the whole trigger. `.github/workflows/release.yml` then runs, in or
 | `version` | Refuses unless the tag, `pyproject.toml`'s `version` and `memvara/__init__.py`'s `__version__` are the same string. First and fastest, so a one-sided bump fails in seconds rather than after the matrix — or, the failure it really exists for, not at all, leaving a wheel on PyPI whose metadata disagrees with its tag. |
 | `ci` | Calls `.github/workflows/ci.yml` **on the tagged commit**: 3.10–3.13 on Linux plus macOS and Windows, coverage gated at 100%, mypy, and the no-extras import job. It calls rather than restates, so there is one matrix in this repository and it cannot drift. A tag push starts nothing else, so without this job the release would be gated on whatever CI last happened to run. |
 | `build` | `python -m build`, `twine check`, then the whole suite again *after* the build, which is the only run in which the four dist-gated tests execute at all — three in `tests/test_packaging.py` and one in `tests/test_init.py`. Then it installs the wheel into a fresh venv outside the repository and checks that the dependency set is exactly memvara and numpy, that the library works, and that `reveal_type` reports `str` rather than `Any`. |
+| `check-npm` | Reads `npm/memvara/package.json` and asks the registry whether that version already exists. Writes `npm_version` and `npm_exists`. Logs `SKIP` or `PUBLISH` in those words, so the first run — which is a skip — is readable rather than an absent job. Does not compare the npm version to the Python tag. |
+| `build-npm` | `npm pack` once, hashes the tarball, refuses a file list that is not `package.json`'s `files`, uploads `npm-dist`. The publish job is not allowed to pack. |
 | `publish-pypi` | Uploads the artifact `build` produced — those bytes, not a rebuild — over PyPI trusted publishing. Waits for a human first; see step 4. |
+| `publish-npm` | Runs only when `npm_exists == false`. Downloads `npm-dist`, checks the SHA-256, and `npm publish`es **the tarball**. No `npm pack`. Waits on the `npm` environment. |
 
 The runner has no `dist/`, no second checkout and no earlier build, and that is the point
 rather than a convenience. The release attempted by hand before this workflow existed ran
@@ -106,8 +115,10 @@ decision, not a step* — expressed as something the machinery enforces rather t
 a document asks for.
 
 Approving is the irreversible act. Read the `build` job's log first: it lists the files it
-built, and the version in those filenames is the one about to become permanent. Everything
-under "Before a real publish" below still applies and none of it is checked by any job.
+built, and the version in those filenames is the one about to become permanent. For npm,
+read `check-npm` — if it said `SKIP`, there is nothing to approve and `publish-npm` will
+not have run. Everything under "Before a real publish" below still applies and none of it
+is checked by any job.
 
 A TestPyPI rehearsal is available and never automatic: **Actions → Release → Run workflow**,
 select the tag, set the target to `testpypi`. Opt-in because **a version number on TestPyPI
@@ -121,15 +132,13 @@ the release. Rehearse on an `rc` version and keep the real number clean.
 
 ## One-time setup, by a human, once
 
-None of the above can publish until a trusted publisher exists on PyPI. Nothing in this
-repository can create it and nothing should: it is the registration that says *this
+None of the above can publish until a trusted publisher exists on the index. Nothing in
+this repository can create one and nothing should: it is the registration that says *this
 repository, this workflow, this environment may upload memvara*, and it is made from an
 account this repository has no access to.
 
-memvara has never been published, so the project does not exist on PyPI yet and the form to
-use is the **pending publisher** one — <https://pypi.org/manage/account/publishing/>
-(account settings → *Publishing*, not a project's settings, because there is no project).
-Under *GitHub*, enter exactly:
+PyPI already has the project, so the form lives under the project's own *Publishing* tab
+rather than the pending-publisher one. Under *GitHub*, the values are:
 
 | field | value |
 |---|---|
@@ -157,6 +166,36 @@ and a separate publisher registry, so repeat the same form at
 Skipping this does not break a release — it breaks the rehearsal, at the upload, which is
 the last place anyone thinks to look for a missing registration.
 
+### npm trusted publisher
+
+The package already exists on npm (`memvara@0.0.1`), so there is no chicken-and-egg:
+the form is on the package's Settings → Trusted Publisher, not a pending registration.
+
+**Preflight, before filling the form.** If any of these have changed, stop — the
+placeholder is no longer the thing this workflow is wired to publish.
+
+```
+npm view memvara name          # memvara
+npm view memvara version       # 0.0.1
+npm view memvara description   # still a name reservation
+```
+
+Then, on npmjs.com → package `memvara` → Trusted Publisher → GitHub Actions:
+
+| field | value |
+|---|---|
+| Organization or user | `memvara` |
+| Repository | `memvara` |
+| Workflow filename | `release.yml` |
+| Environment name | `npm` |
+| Allowed actions | `npm publish` |
+
+`release.yml` is the filename, including the extension. npm does not verify the
+configuration when you save it; a typo shows up at publish as `ENEEDAUTH`.
+
+npm CLI ≥ 11.5.1 and Node ≥ 22.14 are required for the OIDC exchange. The job installs
+that CLI; do not pin an older one to "what the runner happened to have".
+
 Then, in GitHub, **Settings → Environments**:
 
 * **`pypi`** — add at least one *Required reviewer*. That is the approval gate; without it
@@ -164,14 +203,17 @@ Then, in GitHub, **Settings → Environments**:
   Limiting the environment's deployment branches to tags matching `v*` is worth adding.
 * **`testpypi`** — for the rehearsal. A reviewer is optional here: a rehearsal is not
   irreversible, only unrepeatable for a given version.
+* **`npm`** — same bar as `pypi`: at least one required reviewer, tags matching `v*`.
+  Without the reviewer, `publish-npm` runs unattended the first time `package.json` is
+  bumped. There is no Test-npm: a version number on the real registry is spent.
 
-A wrong value in any of the five fails at upload time with a message that does not say
+A wrong value in any of the fields fails at upload time with a message that does not say
 which one, so they are worth checking against this table rather than against memory.
 
 **No token appears anywhere in this.** That is the point of it: the workflow has no
-`password:` input, no secret, and nothing in the repository or in anyone's shell history
-that could publish memvara. The account-wide token the manual path needs can be revoked
-once the first upload has gone through the workflow.
+`password:`, no `NPM_TOKEN`, no `NODE_AUTH_TOKEN`, and nothing in the repository or in
+anyone's shell history that could publish memvara. The account-wide token the manual path
+needs can be revoked once the first upload has gone through the workflow.
 
 ---
 
@@ -336,19 +378,15 @@ neuroscience term for a memory trace, so as a name for a memory product it is
 around.
 
 `memvara` is coined, means nothing in any language, and is therefore a **fanciful mark**,
-the strongest trademark class. Verified free (HTTP 404) on **PyPI, GitHub and npm**.
+the strongest trademark class. Both bare names were claimed on 2026-08-14: PyPI by
+uploading 0.1.0, npm by publishing the placeholder at `npm/memvara` as 0.0.1.
 
-**The org is not the name.** `github.com/memvara` exists and PyPI/npm organizations are
-registered, but on PyPI an organization does not reserve a project name — the flat project
-namespace is claimed by the first upload or a PEP 541 request — and an npm org reserves
-`@memvara/*`, not the bare `memvara`. Verified: `pypi.org/simple/memvara/` and
-`registry.npmjs.org/memvara` are both 404 right now.
-
-So the sequence matters. Publishing the GitHub repo is a public mention of a name that is
-still takeable on two registries, and we already lost `engram` by assuming a name was
-ours. **Claim both registry names before, or in the same sitting as, the first public
-push** — on PyPI that means uploading at least once, so the TestPyPI rehearsal in step 4 is
-the rehearsal, not the release.
+**The org is not the name.** That was the reason the placeholder had to exist at all.
+`github.com/memvara` and the PyPI/npm organizations were already registered, but a PyPI
+organization does not reserve a project name — the first upload does — and an npm org
+reserves `@memvara/*`, not the bare `memvara`. We already lost `engram` by assuming a
+name was ours. The uploads closed that gap. An organization still does not protect a
+name you have not published.
 
 ### The rest
 
@@ -361,9 +399,12 @@ the rehearsal, not the release.
   week before the first release than the week after.
 - **Trusted publishing, not a long-lived token.** Done on this side:
   `.github/workflows/release.yml` publishes over GitHub Actions' OIDC publisher and holds
-  no credential at all. The other half is human and is not done — the pending publisher and
-  the two environments, above. Until they exist the publish job fails at the upload, which
-  is the right order: machinery should not be able to grant itself permission to publish.
+  no credential at all. PyPI's publisher and the `pypi` / `testpypi` environments exist.
+  The npm half is the same shape and is **not** done — the trusted publisher on the
+  package, and the `npm` GitHub Environment, above. Until they exist `publish-npm` fails
+  at the upload the first time the version is actually new, which is the right order:
+  machinery should not be able to grant itself permission to publish. The skip on 0.0.1
+  does not need them.
 - **Nothing from the closed side, ever.** `docs/ROADMAP.md` puts governance (PII,
   encryption, the audit chain, RBAC) and the Postgres/pgvector store in a private
   repository, and "never committed" is the actual requirement — git history is public

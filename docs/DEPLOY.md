@@ -14,13 +14,14 @@ combination a memory layer can have.
 ## 1. As a library
 
 ```bash
-pip install -e .                   # numpy, and nothing else
+pip install memvara                # numpy, and nothing else
 ```
 
-Not `pip install memvara`, yet — nothing has been published. The name is *available* on
-PyPI and verified so; see [`RELEASING.md`](RELEASING.md#the-name-is-available-and-that-was-not-free).
-Until the first upload, install from this tree or from a wheel you built
-(`python3 -m build --wheel`).
+That is the supported install. `pip install -e .` from a clone is the development
+install, and `python3 -m build --wheel` is how you get an artifact of the tree you
+are standing on. See [`RELEASING.md`](RELEASING.md) for how a version gets onto
+PyPI. There is an npm package of the same name; it is a name reservation and
+installs no client.
 
 <!-- This paragraph previously said the name "already belongs to an unrelated
 differentiable-rendering library". That was true of `engram`, the project's former name,

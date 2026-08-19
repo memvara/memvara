@@ -4,26 +4,17 @@
     python3 release/publish_npm.py --package PATH --dry-run
     python3 release/publish_npm.py --package PATH
 
-## Read this before using it: there is nothing to publish yet
+## Read this before using it
 
-At the time of writing **no publishable JavaScript package exists in this project.** Both
-`package.json` files are applications marked `"private": true` — `memvara-dashboard` (the
-console) and `memvara-web` (the marketing site) — and neither should ever reach a registry.
-`npm publish` refuses a private package, which is the correct behaviour and the reason
-they are marked that way.
+The first publish already happened: `memvara@0.0.1` is a name reservation on the
+registry. The tagged-commit path is `.github/workflows/release.yml`. This script is
+the fallback for when that workflow cannot run, and it still refuses the two
+`"private": true` applications — the console and the marketing site — rather than
+letting `npm` produce a vaguer error.
 
-So this script exists for two situations, and it is worth knowing which one you are in:
-
-**1. Reserving the name.** `registry.npmjs.org/memvara` is 404 and an npm *organization*
-reserves only the `@memvara/*` scope, not the bare name — exactly as a PyPI organization
-reserves no project name. Claiming `memvara` needs a real publish of a real package.
-A minimal placeholder that names the project, links to it and does nothing is a legitimate
-reservation for a project that genuinely exists; npm's policy is against squatting names
-you have no claim to, which is not this. It is still a decision, because the first publish
-is public and permanent, so this script will not invent one for you.
-
-**2. Publishing the client when there is one.** The obvious future package is a JS client
-for the REST API. When it exists, point `--package` at it and nothing here changes.
+A published version cannot be republished. Bump `npm/memvara/package.json` before
+pointing this at it. When a JS client exists, point `--package` at it and nothing
+here changes.
 
 ## The rule that shapes this, and how it differs from PyPI
 
