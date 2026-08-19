@@ -5,6 +5,8 @@ The hosted service lives at:
 > ## 🔗 [memvara.dev](https://memvara.dev)
 >
 > ### 🤖 MCP client setup — [memvara.dev/docs/agents](https://memvara.dev/docs/agents)
+>
+> Plugin (skill + hosted MCP): `claude plugin marketplace add memvara/memvara` then `claude plugin install memvara@memvara`. Same repo for Grok / Cursor / Copilot.
 
 **Bitemporal memory for AI agents.** Structured facts, deterministic contradiction
 resolution, hybrid retrieval, and a write path that mostly doesn't call an LLM.
@@ -1242,15 +1244,25 @@ rather than `python3`, since the client launches with no login profile and `PATH
 is not your shell's. `--skill-only` skips that file entirely, for a client that is
 already talking to the hosted URL.
 
-It also writes a **skill** — the judgment a tool description cannot carry, because it
-spans tools: the sequence to follow when a user disputes a memory (and why the `why()`
-excerpt has to come *before* the write that acts on it), which scope your writes are
-landing in, what is worth storing at all, and what changes on a server with no extraction
-model. The file lives at `memvara/skills/memvara/SKILL.md` and ships with
-`references/` for worked turns and for deletion / audit questions. A test asserts the
-package shares no six-word run with any tool or parameter description, so the two
-cannot quietly become two sources for one fact. `--agent` chooses the directory the
-client will actually read; the prose is the same.
+It also writes a **skill** — which surface to use, then the judgment a tool
+description cannot carry (dispute sequence, bound scope, what is worth storing,
+fast-path-only writes). The file lives at `memvara/skills/memvara/SKILL.md` with
+`references/` beside it. A test asserts the package shares no six-word run with
+any tool or parameter description. `--agent` chooses the directory the client
+will actually read; the prose is the same.
+
+For Claude Code, Grok, Cursor and Copilot the same skill ships in a **plugin**
+that also wires the hosted MCP URL (`plugin/`, marketplace indexes at the
+repository root). That is the path that does not ask you to run `init`:
+
+```bash
+claude plugin marketplace add memvara/memvara
+claude plugin install memvara@memvara
+```
+
+A loop you wrote is not that path. Python uses this library; other languages
+speak MCP as a client or call REST. The plugin README says so next to the
+install commands.
 
 `memory_since` is the read a resumed session wants: what arrived and what left while the
 agent was away, rather than the whole store again. It returns rows rather than a prompt

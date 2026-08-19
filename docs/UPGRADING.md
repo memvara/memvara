@@ -45,6 +45,13 @@ files. Without it, `init` keeps a file you edited and only writes the
 references that are absent. `--skill-only` if the client is already connected
 and you do not want a new `.mcp.json`.
 
+Coding agents that can install plugins can skip `init` for the hosted path:
+
+```
+claude plugin marketplace add memvara/memvara
+claude plugin install memvara@memvara
+```
+
 ---
 
 ## `memvara-mcp init`'s default output changed, if you installed `memvara[cloud]`

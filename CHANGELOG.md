@@ -11,13 +11,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
-- **A real agent skill**, at `memvara/skills/memvara/`. One `SKILL.md` of procedures
-  (read before asserting, the dispute sequence, the bound scope, what is worth
-  storing, fast-path-only writes) plus `references/` for worked turns, deletion /
-  audit, and a short paste for clients that have no skill directory.
-  `memvara-mcp init --agent` now accepts `claude`, `cursor` and `grok` — those
-  names pick the destination, not different prose — and `--skill-only` writes the
-  tree without touching `.mcp.json`.
+- **A real agent skill**, at `memvara/skills/memvara/`. `SKILL.md` is a
+  dispatcher (which surface, then which job) plus `references/` for
+  integrate / hosted MCP / write-and-correct / time / scopes / governance /
+  mem0, worked turns, and a short paste for clients that have no skill
+  directory. `memvara-mcp init --agent` accepts `claude`, `cursor` and
+  `grok` — those names pick the destination, not different prose — and
+  `--skill-only` writes the tree without touching `.mcp.json`.
+- **A plugin** at `plugin/`, listed from marketplace indexes in this
+  repository, that installs the same skill and the hosted MCP URL
+  (`https://app.memvara.dev/mcp`). No `npx`, no local stdio in the plugin.
+  Coding agents (Claude Code, Grok, Cursor, Copilot) install it; a loop
+  you wrote still uses the library, REST, or MCP as a client.
 
 ### Fixed
 

@@ -1,0 +1,17 @@
+{
+  "name": "memvara",
+  "description": "Hosted memory for AI agents.",
+  "owner": {
+    "name": "Memvara",
+    "url": "https://memvara.dev"
+  },
+  "plugins": [
+    {
+      "name": "memvara",
+      "description": "Hosted MCP plus the skill for using it.",
+      "source": "./plugin",
+      "homepage": "https://memvara.dev/docs/agents",
+      "license": "Apache-2.0"
+    }
+  ]
+}
