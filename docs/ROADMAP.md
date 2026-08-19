@@ -214,10 +214,10 @@ because it is a demonstration of the seam rather than a product.
   is why the first uploads had to happen — but they did: PyPI `memvara` 0.1.0 on
   2026-08-14, npm `memvara` 0.0.1 the same day (a placeholder, not a client). An npm
   org still only reserves `@memvara/*`.
-- **npm trusted publisher** — the remaining human step. `.github/workflows/release.yml`
-  already packs, hashes and will upload; it waits on an `npm` GitHub Environment and an
-  OIDC publisher that has to be registered on the package. Until those exist a *new*
-  npm version fails at upload. `0.0.1` is already on the index and the job skips it.
+- **npm trusted publisher** — one-time registration on the package, then a tag
+  push uploads the way PyPI does. `.github/workflows/release.yml` packs, hashes
+  and publishes with no reviewer wait. Until the publisher exists a *new* npm
+  version fails at upload. `0.0.1` is already on the index and the job skips it.
 - **Community files** — `CONTRIBUTING.md`, `SECURITY.md` and issue templates are in place,
   and the README states the open-core boundary rather than leaving a reader to infer it
   from a pricing page.

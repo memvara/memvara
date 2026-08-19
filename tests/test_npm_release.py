@@ -152,6 +152,7 @@ def test_check_npm_writes_the_two_outputs_the_skip_depends_on():
     assert "npm_exists" in job
     assert "action: SKIP" in job
     assert "action: PUBLISH" in job
+    assert "reviewer" not in job.lower()
 
 
 def test_publish_npm_skips_when_the_version_already_exists():
@@ -166,6 +167,7 @@ def test_publish_npm_skips_when_the_version_already_exists():
     rest = header[start:start + 800]
     assert "npm_exists" in rest
     assert "'false'" in rest or '"false"' in rest
+    assert "github.event_name == 'push'" in rest
     assert "needs: [version, check-npm, build-npm]" in rest or (
         "check-npm" in rest and "build-npm" in rest
     )

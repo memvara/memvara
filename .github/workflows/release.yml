@@ -309,7 +309,7 @@ jobs:
             echo "action: SKIP — version already published"
           else
             echo "registry: missing"
-            echo "action: PUBLISH — waiting on the npm environment reviewer"
+            echo "action: PUBLISH"
           fi
 
           echo "npm_version=$version" >> "$GITHUB_OUTPUT"
@@ -375,12 +375,13 @@ jobs:
           if-no-files-found: error
 
   publish-npm:
-    # The irreversible one for npm, and only when check-npm said the version is free.
-    # This job cannot build. It downloads the packed tarball, checks the hash, and
-    # uploads those bytes. A mismatch is a stop, not a rebuild.
+    # Same shape as publish-pypi: the tag push is the publish. `environment: npm` is
+    # what the trusted publisher on npmjs.com names, so an OIDC token from any other
+    # job is rejected. It is not a reviewer gate. This job cannot pack; it uploads
+    # the hashed tarball or it does not run.
     name: publish to npm
     needs: [version, check-npm, build-npm]
-    if: needs.check-npm.outputs.npm_exists == 'false'
+    if: github.event_name == 'push' && needs.check-npm.outputs.npm_exists == 'false'
     runs-on: ubuntu-latest
     environment:
       name: npm

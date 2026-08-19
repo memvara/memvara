@@ -13,8 +13,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 - **npm on the same release workflow as PyPI.** A `v*` tag now runs `check-npm`
   (does this `package.json` version already exist?), `build-npm` (pack once, hash
-  the tarball), and `publish-npm` (download those bytes, verify the hash, wait for
-  a human, upload the tarball). npm versions stay independent of the Python tag:
+  the tarball), and `publish-npm` (download those bytes, verify the hash, upload
+  the tarball). No reviewer wait — the tag is the publish, as with PyPI. npm
+  versions stay independent of the Python tag:
   if the placeholder is still `0.0.1` and the registry already has it, the publish
   job is skipped and the release is still green. There is no JavaScript client;
   `npm/memvara` remains a four-field notice object.

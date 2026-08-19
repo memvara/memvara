@@ -97,7 +97,7 @@ That push is the whole trigger. `.github/workflows/release.yml` then runs, in or
 | `check-npm` | Reads `npm/memvara/package.json` and asks the registry whether that version already exists. Writes `npm_version` and `npm_exists`. Logs `SKIP` or `PUBLISH` in those words, so the first run — which is a skip — is readable rather than an absent job. Does not compare the npm version to the Python tag. |
 | `build-npm` | `npm pack` once, hashes the tarball, refuses a file list that is not `package.json`'s `files`, uploads `npm-dist`. The publish job is not allowed to pack. |
 | `publish-pypi` | Uploads the artifact `build` produced — those bytes, not a rebuild — over PyPI trusted publishing. Waits for a human first; see step 4. |
-| `publish-npm` | Runs only when `npm_exists == false`. Downloads `npm-dist`, checks the SHA-256, and `npm publish`es **the tarball**. No `npm pack`. Waits on the `npm` environment. |
+| `publish-npm` | Runs on a tag push when `npm_exists == false`. Downloads `npm-dist`, checks the SHA-256, and `npm publish`es **the tarball**. No `npm pack`, no reviewer wait. A TestPyPI dispatch does not publish npm. |
 
 The runner has no `dist/`, no second checkout and no earlier build, and that is the point
 rather than a convenience. The release attempted by hand before this workflow existed ran
@@ -114,11 +114,11 @@ run stops there and waits. This is step 9 of the old checklist — *the real pub
 decision, not a step* — expressed as something the machinery enforces rather than something
 a document asks for.
 
-Approving is the irreversible act. Read the `build` job's log first: it lists the files it
-built, and the version in those filenames is the one about to become permanent. For npm,
-read `check-npm` — if it said `SKIP`, there is nothing to approve and `publish-npm` will
-not have run. Everything under "Before a real publish" below still applies and none of it
-is checked by any job.
+Approving is the irreversible act for PyPI. Read the `build` job's log first: it lists
+the files it built, and the version in those filenames is the one about to become
+permanent. npm does not wait here: a tag push that `check-npm` marked `PUBLISH` uploads
+after the hash check. If `check-npm` said `SKIP`, `publish-npm` does not run. Everything
+under "Before a real publish" below still applies and none of it is checked by any job.
 
 A TestPyPI rehearsal is available and never automatic: **Actions → Release → Run workflow**,
 select the tag, set the target to `testpypi`. Opt-in because **a version number on TestPyPI
@@ -203,9 +203,9 @@ Then, in GitHub, **Settings → Environments**:
   Limiting the environment's deployment branches to tags matching `v*` is worth adding.
 * **`testpypi`** — for the rehearsal. A reviewer is optional here: a rehearsal is not
   irreversible, only unrepeatable for a given version.
-* **`npm`** — same bar as `pypi`: at least one required reviewer, tags matching `v*`.
-  Without the reviewer, `publish-npm` runs unattended the first time `package.json` is
-  bumped. There is no Test-npm: a version number on the real registry is spent.
+* **`npm`** — exists so the trusted publisher can name it. **No required reviewer.**
+  A tag push that finds a new `package.json` version uploads. There is no Test-npm:
+  a version number on the real registry is spent.
 
 A wrong value in any of the fields fails at upload time with a message that does not say
 which one, so they are worth checking against this table rather than against memory.
