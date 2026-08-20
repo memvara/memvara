@@ -1261,6 +1261,11 @@ also wires the hosted MCP URL. That is the path that does not ask you to run
 /plugin install memvara
 ```
 
+Codex: [`memvara/codex-memvara`](https://github.com/memvara/codex-memvara).
+Cursor: [`memvara/cursor-memvara`](https://github.com/memvara/cursor-memvara).
+Grok: [`memvara/grok-memvara`](https://github.com/memvara/grok-memvara).
+VS Code: [`memvara/vscode-memvara`](https://github.com/memvara/vscode-memvara).
+
 A loop you wrote is not that path. Python uses this library; other languages
 speak MCP as a client or call REST. `plugin/` in this repository is the source
 layout the dedicated repos vendor.

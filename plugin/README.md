@@ -20,6 +20,12 @@ Claude Code uses the dedicated marketplace
 This `plugin/` directory is the source layout those repos copy. Do not
 `marketplace add memvara/memvara` — this repository is the library.
 
+- Claude Code: https://github.com/memvara/claude-memvara
+- Codex: https://github.com/memvara/codex-memvara
+- Cursor: https://github.com/memvara/cursor-memvara
+- Grok: https://github.com/memvara/grok-memvara
+- VS Code: https://github.com/memvara/vscode-memvara
+
 The plugin points at `https://app.memvara.dev/mcp`. The first connection
 opens a browser so you can click Allow. That grant lasts 90 days.
 
