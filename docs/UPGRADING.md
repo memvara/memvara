@@ -48,8 +48,8 @@ and you do not want a new `.mcp.json`.
 Coding agents that can install plugins can skip `init` for the hosted path:
 
 ```
-claude plugin marketplace add memvara/memvara
-claude plugin install memvara@memvara
+/plugin marketplace add memvara/claude-memvara
+/plugin install memvara
 ```
 
 ---

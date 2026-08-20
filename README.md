@@ -6,7 +6,7 @@ The hosted service lives at:
 >
 > ### 🤖 MCP client setup — [memvara.dev/docs/agents](https://memvara.dev/docs/agents)
 >
-> Plugin (skill + hosted MCP): `claude plugin marketplace add memvara/memvara` then `claude plugin install memvara@memvara`. Same repo for Grok / Cursor / Copilot.
+> Plugin (Claude Code): `/plugin marketplace add memvara/claude-memvara` then `/plugin install memvara`. Other agents: [memvara.dev/docs/agents](https://memvara.dev/docs/agents).
 
 **Bitemporal memory for AI agents.** Structured facts, deterministic contradiction
 resolution, hybrid retrieval, and a write path that mostly doesn't call an LLM.
@@ -1251,18 +1251,19 @@ fast-path-only writes). The file lives at `memvara/skills/memvara/SKILL.md` with
 any tool or parameter description. `--agent` chooses the directory the client
 will actually read; the prose is the same.
 
-For Claude Code, Grok, Cursor and Copilot the same skill ships in a **plugin**
-that also wires the hosted MCP URL (`plugin/`, marketplace indexes at the
-repository root). That is the path that does not ask you to run `init`:
+For Claude Code the same skill ships in a dedicated marketplace,
+[`memvara/claude-memvara`](https://github.com/memvara/claude-memvara), that
+also wires the hosted MCP URL. That is the path that does not ask you to run
+`init`:
 
-```bash
-claude plugin marketplace add memvara/memvara
-claude plugin install memvara@memvara
+```
+/plugin marketplace add memvara/claude-memvara
+/plugin install memvara
 ```
 
 A loop you wrote is not that path. Python uses this library; other languages
-speak MCP as a client or call REST. The plugin README says so next to the
-install commands.
+speak MCP as a client or call REST. `plugin/` in this repository is the source
+layout the dedicated repos vendor.
 
 `memory_since` is the read a resumed session wants: what arrived and what left while the
 agent was away, rather than the whole store again. It returns rows rather than a prompt

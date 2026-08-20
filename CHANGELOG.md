@@ -18,11 +18,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   directory. `memvara-mcp init --agent` accepts `claude`, `cursor` and
   `grok` — those names pick the destination, not different prose — and
   `--skill-only` writes the tree without touching `.mcp.json`.
-- **A plugin** at `plugin/`, listed from marketplace indexes in this
-  repository, that installs the same skill and the hosted MCP URL
-  (`https://app.memvara.dev/mcp`). No `npx`, no local stdio in the plugin.
-  Coding agents (Claude Code, Grok, Cursor, Copilot) install it; a loop
-  you wrote still uses the library, REST, or MCP as a client.
+- **A plugin** at `plugin/` is the source layout. Claude Code installs from
+  the dedicated public marketplace
+  [`memvara/claude-memvara`](https://github.com/memvara/claude-memvara)
+  (`/plugin marketplace add memvara/claude-memvara`). No `npx`, no local
+  stdio. A loop you wrote still uses the library, REST, or MCP as a client.
 
 ### Fixed
 

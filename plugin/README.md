@@ -9,20 +9,16 @@ are writing the agent loop yourself, skip to [Your own agent](#your-own-agent).
 
 ## Install
 
-The GitHub repo is the marketplace.
+Claude Code uses the dedicated marketplace
+[memvara/claude-memvara](https://github.com/memvara/claude-memvara):
 
 ```
-claude plugin marketplace add memvara/memvara
-claude plugin install memvara@memvara
+/plugin marketplace add memvara/claude-memvara
+/plugin install memvara
 ```
 
-```
-grok plugin marketplace add memvara/memvara
-grok plugin install memvara --trust
-```
-
-Cursor and Copilot: add `memvara/memvara` as a marketplace, then install
-`memvara`.
+This `plugin/` directory is the source layout those repos copy. Do not
+`marketplace add memvara/memvara` — this repository is the library.
 
 The plugin points at `https://app.memvara.dev/mcp`. The first connection
 opens a browser so you can click Allow. That grant lasts 90 days.

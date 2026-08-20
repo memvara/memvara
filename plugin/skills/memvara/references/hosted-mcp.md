@@ -11,26 +11,15 @@ and click Allow again. A forgotten connector does not stay authorized forever.
 
 ## Plugin (skill + this URL together)
 
-Clients that have a plugin format. The repo `memvara/memvara` *is* the
-marketplace.
-
-Claude Code:
+Claude Code uses a dedicated marketplace, not this library repo:
 
 ```
-claude plugin marketplace add memvara/memvara
-claude plugin install memvara@memvara
+/plugin marketplace add memvara/claude-memvara
+/plugin install memvara
 ```
 
-Grok:
-
-```
-grok plugin marketplace add memvara/memvara
-grok plugin install memvara --trust
-```
-
-Cursor and Copilot/VS Code: add the same marketplace, then install `memvara`.
-The plugin ships this URL and the skill. It does not ship a local Python
-command.
+Other coding agents get their own `{agent}-memvara` repo when that installer
+exists. This package's `plugin/` directory is the source those repos copy.
 
 After install the client opens a browser. That is the product. There is no
 API key in the plugin files.

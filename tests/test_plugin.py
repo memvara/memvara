@@ -106,3 +106,18 @@ def test_hosted_url_is_the_one_on_the_public_site() -> None:
     assert HOSTED in (SKILL / "references" / "hosted-mcp.md").read_text(encoding="utf-8")
     assert HOSTED in (SKILL / "SKILL.md").read_text(encoding="utf-8")
     assert HOSTED in (PLUGIN / "README.md").read_text(encoding="utf-8")
+
+
+def test_sync_script_writes_skill_and_lock(tmp_path) -> None:
+    import subprocess
+    import sys
+
+    script = REPO / "scripts" / "sync_plugin_repos.py"
+    dest = tmp_path / "claude-memvara"
+    dest.mkdir()
+    subprocess.check_call([sys.executable, str(script), str(dest)])
+    copied = dest / "plugin" / "skills" / "memvara" / "SKILL.md"
+    assert copied.read_bytes() == (SKILL / "SKILL.md").read_bytes()
+    lock = (dest / "skill.lock").read_text(encoding="utf-8")
+    assert "repo=memvara/memvara" in lock
+    assert "sha=" in lock
