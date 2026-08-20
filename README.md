@@ -1266,6 +1266,7 @@ Cursor: [`memvara/cursor-memvara`](https://github.com/memvara/cursor-memvara).
 Grok: [`memvara/grok-memvara`](https://github.com/memvara/grok-memvara).
 VS Code: [`memvara/vscode-memvara`](https://github.com/memvara/vscode-memvara).
 OpenCode: [`memvara/opencode-memvara`](https://github.com/memvara/opencode-memvara) (remote MCP in `opencode.json`, not a JS plugin).
+OpenClaw: [`memvara/openclaw-memvara`](https://github.com/memvara/openclaw-memvara) (`mcp add` Streamable HTTP; native plugin ships the skill).
 
 A loop you wrote is not that path. Python uses this library; other languages
 speak MCP as a client or call REST. `plugin/` in this repository is the source

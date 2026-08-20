@@ -26,6 +26,7 @@ This `plugin/` directory is the source layout those repos copy. Do not
 - Grok: https://github.com/memvara/grok-memvara
 - VS Code: https://github.com/memvara/vscode-memvara
 - OpenCode: https://github.com/memvara/opencode-memvara
+- OpenClaw: https://github.com/memvara/openclaw-memvara
 
 The plugin points at `https://app.memvara.dev/mcp`. The first connection
 opens a browser so you can click Allow. That grant lasts 90 days.
