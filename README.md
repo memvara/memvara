@@ -623,6 +623,32 @@ The model's job moves off the write path and onto *schema acquisition*: the firs
 unfamiliar predicate appears, one call asks whether it's single-valued; the answer is
 cached forever. The thousandth occurrence costs nothing.
 
+Or say it yourself, and skip the acquisition entirely. `MEMVARA_PREDICATES` names one or
+more declared vocabularies — a shipped pack, a TOML file of your own, or a comma-separated
+mix — and `engineering` ships with the package:
+
+```bash
+MEMVARA_PREDICATES=engineering memvara-mcp          # or: engineering,./ours.toml
+```
+
+```toml
+[[predicate]]
+name = "git_state"
+cardinality = "one"     # supersedes; "many" accumulates
+volatility = "fast"     # static | slow | fast -> 36500 | 730 | 7 day half-life
+```
+
+This matters most where the builtins do not reach. They are a personal-assistant
+vocabulary, so a store of engineering facts matches none of them, and every predicate it
+writes takes the unregistered default twice over: MANY, so nothing supersedes, and *slow*,
+so a fact that changed this morning still ranks as fresh two years from now. The first
+half announces itself on the write receipt. The second is silent — a mis-ranked fact
+raises no event at all — which is the argument for declaring rather than waiting.
+
+A declaration outranks a guess, so a pack corrects a store that already classified a
+predicate wrongly rather than only shaping a fresh one. It is forward-only: what
+supersedes changes on the next write, and nothing already stored is retired.
+
 Aliases collapse too, so `lives_in` / `resides_in` / `based_in` / `moved_to` are one slot.
 Without that, the contradiction between them is invisible — which is exactly how free-text
 stores end up holding two cities for one person.

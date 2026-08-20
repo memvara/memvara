@@ -43,8 +43,11 @@ mode and the cap is the backstop for the times resolution guesses wrong.
 
 from __future__ import annotations
 
+import tomllib
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from pathlib import Path
+from typing import Any
 
 from .types import MemoryType
 
@@ -457,6 +460,16 @@ class PredicateRegistry:
     def known(self, predicate: str) -> bool:
         return self.normalize(predicate) in self._specs
 
+    def spec_is_declared(self, predicate: str) -> bool:
+        """True when this predicate holds a declaration rather than a guess.
+
+        Builtins and loaded packs are declarations; anything the write path classified is
+        a guess. `Memvara` uses this to stop rehydration overwriting the former with the
+        latter.
+        """
+        found = self._specs.get(self.normalize(predicate))
+        return found is not None and not found.learned
+
     def learn(
         self,
         predicate: str,
@@ -524,3 +537,131 @@ class PredicateRegistry:
 
     def __len__(self) -> int:
         return len(self._specs)
+
+
+# -- declared vocabularies -----------------------------------------------------
+#
+# The registry has always accepted `specs=`, so a Python caller could declare a vocabulary
+# from the first release. An MCP client cannot: it launches a process and sets environment
+# variables, and there was no variable for this. So every server-backed store — which is
+# every plugin install — was pinned to the 23 builtins with no way to say otherwise, and
+# every predicate outside them fell to the unregistered default. That is what these load.
+
+#: Shipped vocabularies, by the name `MEMVARA_PREDICATES` accepts.
+PACKS_DIR = Path(__file__).resolve().parent / "packs"
+
+
+class PredicatePackError(ValueError):
+    """A declared vocabulary could not be read. Raised with the fix in the message."""
+
+
+def available_packs() -> list[str]:
+    """Names of the vocabularies that ship with the package."""
+    try:
+        return sorted(p.stem for p in PACKS_DIR.glob("*.toml"))
+    except OSError:
+        return []
+
+
+def _coerce_enum(enum: type, value: object, field: str, name: str) -> Any:
+    if value is None:
+        raise KeyError(field)
+    try:
+        return enum(str(value).strip().lower())
+    except ValueError:
+        allowed = ", ".join(repr(m.value) for m in enum)
+        raise PredicatePackError(
+            f"predicate {name!r} has {field}={value!r}, which is not one of {allowed}."
+        ) from None
+
+
+def load_specs(source: str) -> tuple[PredicateSpec, ...]:
+    """Read one declared vocabulary: a shipped pack name, or a path to a TOML file.
+
+    Every failure is raised rather than skipped. A vocabulary that half-loads is worse
+    than one that does not load at all: the predicates that made it through supersede and
+    the ones that did not accumulate, and nothing in the store says which is which.
+    """
+    raw = source.strip()
+    if not raw:
+        raise PredicatePackError("MEMVARA_PREDICATES contains an empty entry.")
+
+    path = PACKS_DIR / f"{raw}.toml" if raw.isidentifier() else Path(raw).expanduser()
+    if not path.is_file():
+        if raw.isidentifier():
+            known = ", ".join(repr(n) for n in available_packs()) or "none are installed"
+            raise PredicatePackError(
+                f"{raw!r} is not a predicate pack that ships with memvara. "
+                f"Available: {known}. To load your own file, give a path instead.")
+        raise PredicatePackError(f"No predicate file at {path}.")
+
+    try:
+        with path.open("rb") as handle:
+            body = tomllib.load(handle)
+    except tomllib.TOMLDecodeError as exc:
+        raise PredicatePackError(f"{path} is not valid TOML: {exc}") from None
+    except OSError as exc:
+        raise PredicatePackError(f"{path} could not be read: {exc}") from None
+
+    entries = body.get("predicate")
+    if not isinstance(entries, list) or not entries:
+        raise PredicatePackError(
+            f"{path} declares no predicates. Each one is a [[predicate]] table with at "
+            "least `name`, `cardinality` and `volatility`.")
+
+    specs: list[PredicateSpec] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise PredicatePackError(f"{path} has a [[predicate]] entry that is not a table.")
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            raise PredicatePackError(f"{path} has a [[predicate]] entry with no `name`.")
+        if name in seen:
+            # Last-wins would be a silent, order-dependent choice between two
+            # declarations of the same fact, which is the ambiguity declaring exists
+            # to remove.
+            raise PredicatePackError(f"{path} declares {name!r} more than once.")
+        seen.add(name)
+
+        try:
+            cardinality = _coerce_enum(Cardinality, entry.get("cardinality"),
+                                       "cardinality", name)
+            volatility = _coerce_enum(Volatility, entry.get("volatility"),
+                                      "volatility", name)
+        except KeyError as exc:
+            raise PredicatePackError(
+                f"predicate {name!r} in {path} has no {exc.args[0]}. Declaring it is the "
+                "point of the file — an omitted field would silently take the "
+                "unregistered default this pack exists to replace.") from None
+
+        memory_type = (_coerce_enum(MemoryType, entry["memory_type"], "memory_type", name)
+                       if "memory_type" in entry else MemoryType.SEMANTIC)
+        specs.append(PredicateSpec(
+            name=name,
+            cardinality=cardinality,
+            volatility=volatility,
+            memory_type=memory_type,
+            aliases=tuple(str(a) for a in entry.get("aliases", ())),
+            supersedes=tuple(str(s) for s in entry.get("supersedes", ())),
+            # Declared, not learned. The distinction is load-bearing: `Memvara` refuses to
+            # let a persisted *learned* spec overwrite a declared one, which is what makes
+            # a pack able to correct a store that already guessed wrong.
+            learned=False,
+        ))
+    return tuple(specs)
+
+
+def load_all_specs(sources: str) -> tuple[PredicateSpec, ...]:
+    """Load a comma-separated list of packs and paths, later entries winning.
+
+    Order is the whole interface for combining them: `engineering,./ours.toml` means "the
+    shipped vocabulary, then our corrections to it".
+    """
+    specs: dict[str, PredicateSpec] = {}
+    for entry in sources.split(","):
+        if entry.strip():
+            for spec in load_specs(entry):
+                specs[spec.name] = spec
+    return tuple(specs.values())
+

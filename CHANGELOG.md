@@ -11,6 +11,21 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **Declared predicate vocabularies**, via `MEMVARA_PREDICATES`. It takes shipped
+  pack names, paths to TOML files, or a comma-separated mix with later
+  entries winning, and an `engineering` pack ships with the package.
+  `PredicateRegistry` has always accepted `specs=`, but an MCP client can
+  only set environment variables, so every server-backed store was pinned to
+  the built-in vocabulary — and a predicate outside it accumulated instead of
+  superseding, and decayed at the slow default rather than its own. A
+  malformed pack is a startup error naming its own fix, not a surprise at the
+  first write.
+- **A declared spec now outranks a persisted learned one.** Rehydration skips
+  a learned spec whose name a declaration already holds, so a vocabulary can
+  correct a store that guessed rather than only describe a fresh one.
+  Forward-only: it changes what supersedes on the next write and retires
+  nothing already stored.
+
 - **A real agent skill**, at `memvara/skills/memvara/`. `SKILL.md` is a
   dispatcher (which surface, then which job) plus `references/` for
   integrate / hosted MCP / write-and-correct / time / scopes / governance /
