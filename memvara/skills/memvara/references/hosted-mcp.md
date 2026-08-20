@@ -18,8 +18,17 @@ Claude Code uses a dedicated marketplace, not this library repo:
 /plugin install memvara
 ```
 
-Other coding agents get their own `{agent}-memvara` repo when that installer
-exists. This package's `plugin/` directory is the source those repos copy.
+Other coding agents:
+
+- Codex / ChatGPT desktop marketplace: `memvara/codex-memvara`
+- Cursor: `memvara/cursor-memvara`
+- Grok: `memvara/grok-memvara`
+- VS Code: `memvara/vscode-memvara`
+- OpenCode: `memvara/opencode-memvara` (remote MCP in `opencode.json`)
+- OpenClaw: `memvara/openclaw-memvara` (`mcp add` Streamable HTTP)
+
+This package's `plugin/` directory is the source those repos copy. ChatGPT in
+the browser still pastes the URL until OpenAI's public directory lists us.
 
 After install the client opens a browser. That is the product. There is no
 API key in the plugin files.

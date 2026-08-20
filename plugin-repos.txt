@@ -1,0 +1,9 @@
+# Dedicated public install surfaces. One name per line.
+# skill-notify.yml pings these when memvara/skills/ changes.
+claude-memvara
+codex-memvara
+cursor-memvara
+grok-memvara
+vscode-memvara
+opencode-memvara
+openclaw-memvara

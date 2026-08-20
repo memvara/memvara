@@ -101,6 +101,23 @@ def test_the_dispatcher_points_at_a_reference_that_exists(name: str) -> None:
     assert (SKILL / "references" / name).is_file()
 
 
+def test_plugin_repos_list_is_the_public_set() -> None:
+    names = [
+        line.strip()
+        for line in (REPO / "plugin-repos.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert names == [
+        "claude-memvara",
+        "codex-memvara",
+        "cursor-memvara",
+        "grok-memvara",
+        "vscode-memvara",
+        "opencode-memvara",
+        "openclaw-memvara",
+    ]
+
+
 def test_hosted_url_is_the_one_on_the_public_site() -> None:
     """One string, several files. A typo here is a plugin that authorizes nothing."""
     assert HOSTED in (SKILL / "references" / "hosted-mcp.md").read_text(encoding="utf-8")

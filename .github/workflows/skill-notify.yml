@@ -1,0 +1,42 @@
+# Ping dedicated plugin repos so their skill-sync.yml can open a PR.
+# Needs org secret PLUGIN_SYNC_TOKEN (repo scope). If unset, skip — those
+# repos also cron daily against this default branch.
+name: Skill notify
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "memvara/skills/**"
+      - "plugin-repos.txt"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Dispatch skill-changed
+        env:
+          TOKEN: ${{ secrets.PLUGIN_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN}" ]; then
+            echo "PLUGIN_SYNC_TOKEN unset; plugin repos will pick this up on their daily cron."
+            exit 0
+          fi
+          while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+              ''|\#*) continue ;;
+            esac
+            echo "dispatch $line"
+            curl -sS -f -X POST \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/memvara/${line}/dispatches" \
+              -d '{"event_type":"skill-changed"}'
+          done < plugin-repos.txt
