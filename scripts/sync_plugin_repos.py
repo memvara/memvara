@@ -31,7 +31,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"missing skill at {SKILL_SRC}", file=sys.stderr)
         return 2
 
-    target = dest / "plugin" / "skills" / "memvara"
+    # Claude/Cursor/Codex/Grok/VS Code vendor under plugin/. OpenCode and
+    # OpenClaw keep the tree at skills/memvara.
+    if (dest / "skills" / "memvara").is_dir() and not (
+        dest / "plugin" / ".mcp.json"
+    ).is_file() and not (dest / "plugin" / "mcp.json").is_file():
+        target = dest / "skills" / "memvara"
+    else:
+        target = dest / "plugin" / "skills" / "memvara"
     if target.exists():
         shutil.rmtree(target)
     target.parent.mkdir(parents=True, exist_ok=True)
