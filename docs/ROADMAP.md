@@ -167,8 +167,17 @@ list.
 - **Query-intent gating** — `retrieve/intent.py`, deterministic and model-free, four
   classes matching the categories LOCOMO reports separately. It is what makes the graph
   leg affordable to switch on: `lookup` and `temporal` queries skip the walk before the
-  traverser is called. Every multiplier that is not the graph gate is 1.0 and stays 1.0
-  until a per-category sweep moves it.
+  traverser is called. Every multiplier that is not a gate is 1.0 and stays 1.0 until a
+  per-category sweep moves it.
+
+  **Its relational vocabulary is a hand-written list and it is too narrow, measured.** On
+  `bench/multihop.py` the gate routes two of the three question families past the walk —
+  "who founded the company that X works at" contains no word in it — so the shipped
+  configuration scores exactly what plain `search` scores and the leg's whole gain is
+  gated away. `works at` and `founded` are relations by any reading and both are
+  predicates in the store's own registry, so **deriving the markers from the registry is
+  the fix**. Not done, deliberately: widening the list by hand against a benchmark this
+  repository wrote is how a classifier gets fitted to its own corpus.
 - **Token accounting** — `WriteReceipt.tokens_in`/`tokens_out`, `LLM.Usage` with a
   caller-allocated accumulator, and the `write.tokens_in` / `write.tokens_out` /
   `write.extract_ms` series. `llm_calls` was the only cost signal and cannot be billed on:

@@ -229,10 +229,21 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   because `SalienceGate` drops any turn whose role is not `user` and the deterministic
   extractor's vocabulary is first-person declaratives. The LOCOMO reports with and without
   the leg are byte-identical. What moves is `bench/multihop.py`, over a store of asserted
-  claims: **2.9% → 21.6% at k=12 and 7.6% → 50.4% at k=25** on the shipped read path, with
-  no seed entity supplied by the caller. That benchmark is synthetic and self-authored,
-  which is an illustration of a mechanism and not evidence for a default — the precedent
-  is the MMR rejection recorded in `hybrid.py`.
+  claims: **2.9% → 21.6% at k=12 and 7.6% → 50.4% at k=25**, with no seed entity supplied
+  by the caller. That benchmark is synthetic and self-authored, which is an illustration
+  of a mechanism and not evidence for a default — the precedent is the MMR rejection
+  recorded in `hybrid.py`.
+
+  **Those numbers are with `intent_weighting=False`, and the shipped configuration scores
+  nothing at all.** Two of the three question families there contain no word in
+  `RELATIONAL_MARKERS` — "who founded the company that X works at" — so the gate reads
+  them as `lookup` and switches the leg off on exactly the questions it was built for.
+  That is a gap in the vocabulary rather than in the gate: `works at` and `founded` are
+  relations by any reading, and both are predicates in the store's own registry. Deriving
+  the markers from the registry is the fix and it is **not done** — widening the list by
+  hand against a benchmark this repository wrote is how a classifier gets fitted to its
+  own corpus. A deployment turning the graph leg on should turn `intent_weighting` off
+  with it; `bench/multihop.py` prints both columns so the cost is a number.
 
   It is opt-in rather than rejected because the gain is real where there is a graph to
   walk. Where there is not, it costs: with the widened write path leaving 81 claims across

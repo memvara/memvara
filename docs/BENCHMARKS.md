@@ -151,7 +151,8 @@ PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-gr
 |---|---:|---|
 | LOCOMO, 1,531 questions | **0** | nothing — the two reports are byte-identical |
 | LongMemEval oracle, 500, `--share-store` | **81** | R@12 **70.4 → 70.0**; single-session-user **92.2 → 90.6**, multi-session **65.5 → 64.6** |
-| `bench/multihop.py` (synthetic) | 4,498 | **2.9% → 21.6%** at k=12, **7.6% → 50.4%** at k=25 |
+| `bench/multihop.py` (synthetic), gate off | 4,498 | **2.9% → 21.6%** at k=12, **7.6% → 50.4%** at k=25 |
+| `bench/multihop.py`, **as shipped** | 4,498 | **nothing** — the intent gate routes 2 of the 3 question families past the walk |
 
 The LongMemEval row is a **loss**, and it is the decisive one: 1.6 points off
 single-session-user is above any guardrail worth setting. It is what a third leg costs
@@ -176,14 +177,29 @@ could previously get by hand (take the seed entity off the top hit and call
 `neighborhood()` yourself):
 
 ```
-  set           k   search   +graph  search x2  traverse  +min_hops    +both   linked
-  two-hop       5     1.0%     2.3%       7.7%      5.3%      41.0%   100.0%    41.0%
-  two-hop      12     4.0%    31.7%      64.3%     69.7%     100.0%   100.0%    99.7%
-  two-hop      25     9.3%    73.3%      96.3%    100.0%     100.0%   100.0%    99.7%
-  three-hop    25     4.0%     4.7%       4.7%     34.7%      48.7%   100.0%    46.7%
-  all          12     2.9%    21.6%      43.1%     46.4%      78.7%    83.1%    77.8%
-  all          25     7.6%    50.4%      65.8%     78.2%      82.9%   100.0%    82.0%
+  set           k   search   +graph  +graph!  search x2  traverse  +min_hops    +both   linked
+  two-hop      12     4.0%     4.0%    31.7%      64.3%     69.7%     100.0%   100.0%    99.7%
+  two-hop      25     9.3%     9.3%    73.3%      96.3%    100.0%     100.0%   100.0%    99.7%
+  three-hop    25     4.0%     4.0%     4.7%       4.7%     34.7%      48.7%   100.0%    46.7%
+  all          12     2.9%     2.9%    21.6%      43.1%     46.4%      78.7%    83.1%    77.8%
+  all          25     7.6%     7.6%    50.4%      65.8%     78.2%      82.9%   100.0%    82.0%
 ```
+
+**`+graph` is the shipped configuration and `+graph!` is the same with
+`intent_weighting=False`. The gap between them is the second finding, and it is not a
+small one.** Two of the three question families here contain no word in
+`intent.RELATIONAL_MARKERS` — "which city is the company X works at based in", "who
+founded the company that X works at" — so the gate reads them as `lookup` and routes them
+past the walk. The leg is switched off on exactly the questions it was built for, and the
+column collapses onto `search`.
+
+That is a gap in the vocabulary rather than in the gate: `works at` and `founded` are
+relations by any reading, and both are *predicates in this store's own registry*. The fix
+is to derive the relational markers from the registry's predicate names rather than from a
+hand-written list, which is written down here rather than done, because widening the list
+by hand against a benchmark this repository wrote is how a classifier gets fitted to its
+own corpus. Until then, a deployment turning the graph leg on should turn
+`intent_weighting` off with it and pay the walk on every query.
 
 The three-hop rows barely move because `graph_depth` ships at 2; that row measures the
 bound, not the traversal. And this benchmark is synthetic and self-authored — read it as
@@ -199,10 +215,10 @@ not, and no honest way to make a default out of that pair.
 mem = Memvara("memory.db", read_w_graph=1.0)
 ```
 
-Turning it on is affordable because of `memvara/retrieve/intent.py`: a deterministic,
-model-free classifier routes `lookup` and `temporal` queries past the walk entirely, so
-the cost lands only on the query shapes it was measured on. Every other multiplier in that
-table is 1.0 and stays 1.0 until a per-category sweep moves it.
+`memvara/retrieve/intent.py` is what makes turning it on affordable — a deterministic,
+model-free classifier routes `lookup` and `temporal` queries past the walk entirely — and
+the table above is also what it currently costs. Every multiplier in it other than the two
+gates is 1.0 and stays 1.0 until a per-category sweep moves it.
 
 ### The temporal leg, and the abstention that is the actual finding
 

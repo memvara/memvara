@@ -100,6 +100,18 @@ _YEAR = re.compile(r"^(?:19|20|21)\d\d$")
 #: that only ever appear in a question about a relation. It is short and it stays short:
 #: every word added here is a query routed into a walk, and the cost of being wrong is
 #: paid on every query that contains it.
+#:
+#: **It is measurably too narrow, and widening it by hand is the wrong fix.** On
+#: `bench/multihop.py` this list routes two of the three question families past the walk —
+#: "which city is the company X works at based in" and "who founded the company that X
+#: works at" contain no word in it — so the shipped configuration scores what plain
+#: `search` scores and the leg's whole gain is gated away (`docs/BENCHMARKS.md`). Both
+#: `works at` and `founded` are relations by any reading, and both are *predicates in the
+#: store's own registry*, which is the shape of the answer: derive the markers from
+#: `PredicateRegistry` rather than from a list here. That is not done, because adding
+#: those two words because a benchmark this repository wrote needs them is how a
+#: classifier gets fitted to its own corpus, and the next person would have no way to
+#: tell which entries were reasoned and which were retrofitted.
 RELATIONAL_MARKERS: frozenset[str] = frozenset("""
     whose between via through connect connects connected connection connections
     relate relates related relation relations relationship relationships

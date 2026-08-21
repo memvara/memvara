@@ -171,23 +171,31 @@ def genuinely_multi_hop(mem: Memvara, questions, limit: int) -> list:
     return kept
 
 
-def graph_reader(mem: Memvara, *, w_graph: float = 1.0,
-                 depth: int = 2) -> HybridRetriever:
+def graph_reader(mem: Memvara, *, w_graph: float = 1.0, depth: int = 2,
+                 gated: bool = True) -> HybridRetriever:
     """The shipped retriever over the same store, with the graph leg switched on.
 
     A second reader rather than a second store: the corpus costs seconds to build at
     100k claims and the two configurations have to see byte-identical data or the column
     is measuring the loader. `Memvara` builds the traverser, and this borrows it, so the
     walk here is bounded exactly as `mem.neighborhood()`'s is.
+
+    `gated` is `intent_weighting`, and it is a column of its own below rather than a
+    footnote: the shipped default routes a query the classifier reads as a `lookup` past
+    the walk entirely, and two of the three question families here are exactly that —
+    "who founded the company that X works at" contains no word in the relational
+    vocabulary. The gap between the two columns is what the gate costs on this workload.
     """
     return HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=w_graph,
-                           graph_depth=depth, traverser=mem.traverser)
+                           graph_depth=depth, traverser=mem.traverser,
+                           intent_weighting=gated)
 
 
-def evaluate(mem: Memvara, questions, *, k: int, graph: HybridRetriever) -> dict[str, float]:
+def evaluate(mem: Memvara, questions, *, k: int, graph: HybridRetriever,
+             ungated: HybridRetriever) -> dict[str, float]:
     hits = dict.fromkeys(
-        ("search", "search+graph", "search x2", "traverse", "traverse+min_hops",
-         "traverse+both", "linked"), 0)
+        ("search", "search+graph", "search+graph!", "search x2", "traverse",
+         "traverse+min_hops", "traverse+both", "linked"), 0)
     for question, seed, gold, hops, preds in questions:
         results = mem.search(question, k=k, as_of=T0)
         if any(gold in f"{r.claim.subject} {r.claim.object}" for r in results):
@@ -201,6 +209,12 @@ def evaluate(mem: Memvara, questions, *, k: int, graph: HybridRetriever) -> dict
         fused = graph.search(question, mem.default_scope, k=k, as_of=T0)
         if any(gold in f"{r.claim.subject} {r.claim.object}" for r in fused):
             hits["search+graph"] += 1
+
+        # The same again with the intent gate off, so the gate's cost is a number rather
+        # than an argument. Nothing else differs between the two readers.
+        raw = ungated.search(question, mem.default_scope, k=k, as_of=T0)
+        if any(gold in f"{r.claim.subject} {r.claim.object}" for r in raw):
+            hits["search+graph!"] += 1
 
         # The agent loop: re-query on what the first search brought back. Given the same
         # `k` budget per step, so the two-step system sees at most 2k claims against
@@ -245,19 +259,25 @@ def accuracy() -> None:
           f"{len(mem.neighborhood(corpus.staff[0], depth=2, k=999, as_of=T0))}")
 
     graph = graph_reader(mem)
-    header = (f"\n  {'set':<10} {'k':>4} {'search':>8} {'+graph':>8} {'search x2':>10} "
-              f"{'traverse':>9} {'+min_hops':>10} {'+both':>8} {'linked':>8}")
+    ungated = graph_reader(mem, gated=False)
+    header = (f"\n  {'set':<10} {'k':>4} {'search':>8} {'+graph':>8} {'+graph!':>8} "
+              f"{'search x2':>10} {'traverse':>9} {'+min_hops':>10} {'+both':>8} "
+              f"{'linked':>8}")
     print(header)
     for label, subset in (("two-hop", two), ("three-hop", three), ("all", questions)):
         for k in (5, 12, 25):
-            got = evaluate(mem, subset, k=k, graph=graph)
+            got = evaluate(mem, subset, k=k, graph=graph, ungated=ungated)
             print(f"  {label:<10} {k:>4} {got['search']:>7.1f}% "
-                  f"{got['search+graph']:>7.1f}% "
+                  f"{got['search+graph']:>7.1f}% {got['search+graph!']:>7.1f}% "
                   f"{got['search x2']:>9.1f}% {got['traverse']:>8.1f}%"
                   f" {got['traverse+min_hops']:>9.1f}% {got['traverse+both']:>7.1f}%"
                   f" {got['linked']:>7.1f}%")
-    print("  `+graph` walks two hops, which is the shipped `graph_depth`; the three-hop "
-          "row\n   is therefore a measurement of that bound, not of traversal.")
+    print("  `+graph` is the shipped configuration and `+graph!` the same with "
+          "intent_weighting off.\n   The gap between them is what the query-shape gate "
+          "costs here: two of the three\n   question families contain no word in the "
+          "relational vocabulary, so the gate\n   routes them past the walk. Both walk "
+          "two hops, the shipped `graph_depth`, which\n   is why the three-hop rows "
+          "measure that bound rather than traversal.")
 
     question, seed, gold, hops, preds = two[0]
     print(f"\n  example: {question}\n    gold: {gold}")
