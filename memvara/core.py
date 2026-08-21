@@ -1424,8 +1424,19 @@ class Memvara:
     #: and no note reads them as everything known and answers from the absence of the
     #: ninth, so a bounded list has to say that it is bounded — the same reasoning that
     #: gives episodes their own header rather than one undifferentiated list.
-    RECALL_DROPPED = ("({n} further note{s} matched and did not fit — this list is "
-                      "bounded, not everything known.)")
+    #: "matched" was the wrong word and made the number read as a total. It is counted
+    #: over the notes `search()` returned, which `k` had already capped, so it says how
+    #: many retrieved notes the budget cut and nothing about how many more the store
+    #: holds. A model reading "3 further notes matched" concludes there are exactly three,
+    #: which is a bound it was never given — so the line now names the second cap as well.
+    #:
+    #: Kept *shorter* than the sentence it replaces, deliberately. This line is counted
+    #: against `budget=` like any other, and it is the floor of a squeezed block, so every
+    #: character spent here is one a real note cannot have. The first rewrite of it was
+    #: twenty-nine characters longer and cost a note at the budget one test uses, which is
+    #: how that constraint was found.
+    RECALL_DROPPED = ("({n} further note{s} did not fit, and the search was capped too "
+                      "— not everything known.)")
 
     @classmethod
     def _dropped_line(cls, n: int) -> str:

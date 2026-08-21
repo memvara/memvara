@@ -105,6 +105,46 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A blank part of a triple was stored as nothing, in silence.** `memory_remember` with
+  an empty or whitespace `subject`, `predicate` or `object` wrote nothing and reported
+  `added 0, ended 0, retired 0, already-known 0, no-fact 0` with `isError` false — which
+  is also exactly what a legitimate already-known write looks like. A model had no way to
+  tell "you sent nothing" from "there was nothing to do", so it either believed the fact
+  was on record or repeated the call. Now refused, naming the field, like every other
+  rejection on this surface.
+
+- **`memory_end` on an already-retired claim contradicted itself in one line.** It
+  rendered the state as `retired` and then asserted, in the next sentence, that
+  `memory_history` shows the claim as *ended, not retired*. Stored state was never wrong —
+  the store keeps `retired`, the stronger statement and the one made first — so this was a
+  message defect. But an agent that believed it would report a false reason for a change,
+  which is the one mistake the two-tool split exists to make unmakeable, because nothing
+  downstream can detect it. It now says the claim is already retired, stays that way, and
+  that nothing changed.
+
+- **`memory_since` with a future instant answered "what you knew then still stands".**
+  True of the future and useless: unqualified it reads as *you are up to date*, so a model
+  stops asking, having learned nothing about the period it meant to ask about. It now says
+  the instant has not arrived, and names the usual cause — a local time sent as UTC lands
+  ahead of now for anyone west of Greenwich.
+
+- **`recall(budget=)`'s cut notice implied a total it never counted.** It said "n further
+  notes **matched**", counted over the pool `search()` had already truncated to `k`. So it
+  reported how many *retrieved* notes the budget dropped and nothing about how many more
+  the store holds, while reading as the complete remainder. Reworded to name the second
+  cap. Deliberately three characters *shorter* than the sentence it replaces: the notice
+  is counted against the budget and is the floor of a squeezed block, so a longer one
+  silently lowers how many real notes fit — the first rewrite was 29 characters longer and
+  cost a note, which is now pinned by its own test.
+
+- **Two tool descriptions claimed more than the code does.** `memory_search` published
+  `relevance` as a bare number without saying it is match strength adjusted by recency,
+  writer-set confidence and reinforcement — so a smaller number reads as a worse match
+  when it may not be. And `memory_remember.memory_type` said omitting it lets "the
+  predicate's own classification decide, which is usually right"; a predicate this store
+  has never seen has no classification and becomes `semantic`, and nothing infers a type
+  from the words. Both now say what actually happens.
+
 - **A failing tool replayed its exception message into the model's context unflattened
   and uncapped.** Stored claims have been treated as untrusted at the rendering boundary
   since the beginning; the failure path was the one line that was not, and it is the same

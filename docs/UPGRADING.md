@@ -7,6 +7,58 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A blank part of a triple is now an error, not a quiet no-op
+
+### What changed
+
+`memory_remember` refuses an empty or whitespace-only `subject`, `predicate` or `object`.
+It used to accept the call, store nothing, and return every counter at zero with
+`isError` false.
+
+Three nearby messages changed text in the same release, all of them cases where the old
+wording was true-but-useless or self-contradictory:
+
+- `memory_end` on an **already-retired** claim now says so, instead of reporting it as
+  ended;
+- `memory_since` with a **future** instant says the instant has not arrived, instead of
+  "what you knew then still stands";
+- `recall(budget=)`'s cut notice no longer says "n further notes *matched*".
+
+### How the mistake shows up
+
+The refusal is the only one that changes a call's outcome, and it surfaces as a tool
+result with `isError: true` where there used to be a zero-count success. Anything that
+treated that success as "written" was already wrong — nothing was stored either way —
+but a caller that never checked will now see an error where it previously saw none.
+
+The other three are text. A log rule or assertion matching on `still stands`, `ended, not
+retired`, or `further notes matched` stops matching.
+
+### What to grep for
+
+```
+memory_remember
+further notes matched
+still stands
+```
+
+...in fixtures, assertions, and anything that builds a triple from interpolated values —
+an empty variable is where a blank part comes from.
+
+### What to replace it with
+
+Check the value before writing it. If a field can legitimately be empty, the fact is not
+ready to store: a triple missing one of its three parts is not a partial fact, it is not
+a fact.
+
+The library's `remember()` is unchanged — it does not raise on a blank part, and it does
+not store one either, returning a receipt with `added 0`. That is the same silent no-op,
+and it is left alone deliberately: a caller holding a `WriteReceipt` can read the zero and
+decide, whereas a model reading rendered text cannot tell that zero from any other. The
+guard belongs where the ambiguity is.
+
+---
+
 ## Failure messages are flattened and cut
 
 ### What changed
