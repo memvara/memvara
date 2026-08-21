@@ -240,8 +240,17 @@ def _import_time_imports(body: list[ast.stmt]) -> set[str]:
     return names
 
 
+#: Standard library on the versions that have it, absent on the ones that do not, so
+#: `sys.stdlib_module_names` disagrees with itself across the support matrix. `tomllib`
+#: landed in 3.11 and this package supports 3.10, where it would otherwise be reported as
+#: an undeclared third-party SDK — a false positive that says the opposite of the truth,
+#: since the reason it is imported lazily is precisely so 3.10 never reaches it.
+_STDLIB_SINCE_311 = {"tomllib"}
+
+
 def _third_party(names: set[str]) -> set[str]:
-    return {n for n in names if n != "memvara" and n not in sys.stdlib_module_names}
+    known = set(sys.stdlib_module_names) | _STDLIB_SINCE_311
+    return {n for n in names if n != "memvara" and n not in known}
 
 
 # -- the built wheel ----------------------------------------------------------------

@@ -11,8 +11,16 @@ in two years. These pin the door open.
 from __future__ import annotations
 
 import re
+import sys
 
 import pytest
+
+#: Declared vocabularies are read with `tomllib`, which arrives in 3.11. On 3.10 the
+#: reader refuses by design rather than pulling in a backport nobody declared, so the
+#: behaviour these pin does not exist there. `TestUnsupportedInterpreter` covers what 3.10
+#: does instead.
+needs_toml = pytest.mark.skipif(sys.version_info < (3, 11),
+                                reason="tomllib arrives in 3.11; load_specs refuses below it")
 
 from memvara.schema import (BUILTIN_PREDICATES, Cardinality, PredicatePackError,
                             PredicateRegistry, PredicateSpec, Volatility,
@@ -25,6 +33,7 @@ def _env(tmp_path, **extra):
             "MEMVARA_EMBEDDER": "hashing:64", "MEMVARA_LLM": "none", **extra}
 
 
+@needs_toml
 class TestLoading:
     def test_the_engineering_pack_ships(self):
         assert "engineering" in available_packs()
@@ -67,6 +76,7 @@ class TestLoading:
             load_specs("enginering")
 
 
+@needs_toml
 class TestServerWiring:
     def test_a_typo_is_a_startup_error_not_a_first_write_surprise(self, tmp_path):
         # By the first write the process has already accepted facts into the very slots
@@ -112,6 +122,7 @@ class TestServerWiring:
         assert "embedder default" in recalled and "code blocks" in recalled
 
 
+@needs_toml
 class TestDeclarationOutranksAGuess:
     def test_a_pack_corrects_a_store_that_already_guessed(self, tmp_path):
         """The migration path, and the reason the guard in `Memvara.__init__` exists.
@@ -160,6 +171,7 @@ class TestDeclarationOutranksAGuess:
         assert not registry.spec_is_declared("never_heard_of_it")
 
 
+@needs_toml
 class TestUnreadableSources:
     """The error paths, which are the ones a 95% gate would let through.
 
@@ -226,3 +238,23 @@ class TestUnreadableSources:
         assert schema.available_packs() == []
         with pytest.raises(PredicatePackError, match="none are installed"):
             load_specs("enginering")
+
+
+@pytest.mark.skipif(sys.version_info >= (3, 11), reason="3.10 only")
+class TestUnsupportedInterpreter:
+    def test_it_refuses_and_names_the_reason(self):
+        """The refusal is the feature on 3.10, not a crash.
+
+        A `tomli` fallback would make this work at the price of a runtime dependency the
+        package does not declare, and "numpy and nothing else" is pinned by a test. So
+        one optional feature is unavailable on one interpreter, and says so.
+        """
+        with pytest.raises(PredicatePackError, match="Python 3.11"):
+            load_specs("engineering")
+
+    def test_everything_else_still_imports(self):
+        # The point of the lazy reader: a module-level import would have taken the whole
+        # suite down on this interpreter, not just this feature.
+        import memvara.schema  # noqa: F401
+
+        assert PredicateRegistry()
