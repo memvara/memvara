@@ -350,6 +350,7 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
         min_score=args["min_score"],
         memory_types=_memory_types(args.get("memory_types")),
         budget=args.get("budget"),
+        include_episodes=bool(args.get("include_episodes", False)),
     ) or _no_match(args["query"])
 
 
@@ -789,6 +790,21 @@ TOOLS: tuple[Tool, ...] = (
             "is to answer the user rather than to inspect the memory itself."
         ),
         properties={
+            "include_episodes": {
+                "type": "boolean",
+                "description": (
+                    "Also return raw excerpts from earlier conversation, not just the "
+                    "facts extracted from them. Default false, because a fact is a "
+                    "settled reading of what was said and an excerpt is not — mixing "
+                    "them by default would let something the user once said outrank "
+                    "what is known to be true. Turn it on when the store holds text "
+                    "nothing has structured yet: a server running without an extractor "
+                    "keeps every turn and derives no claims from most of them, and an "
+                    "import from another memory product arrives the same way. In those "
+                    "stores this is the difference between recall answering and recall "
+                    "looking empty."
+                ),
+            },
             "query": {
                 "type": "string",
                 "description": (

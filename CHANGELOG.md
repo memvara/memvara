@@ -11,6 +11,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`import_supermemory`**, in `memvara.compat`, moving a Supermemory
+  account into a store over stdlib HTTP with no SDK. Supermemory keeps
+  documents rather than a mutation log, so unlike `import_mem0` nothing
+  can reconstruct supersession it was never told: documents arrive as
+  episodes on their original `createdAt`, and the receipt reports
+  episodes and claims separately so a store with no extractor cannot
+  mistake "nothing was structured" for "nothing arrived".
+- **`include_episodes` on `memory_recall`.** Recall answers from claims,
+  so a store holding imported or unextracted text looked empty through
+  the tool surface however much it held — there was no way to ask for
+  the excerpts at all. Default stays false: a fact is a settled reading
+  of what was said and an excerpt is not.
+
 - **Declared predicate vocabularies**, via `MEMVARA_PREDICATES`. It takes shipped
   pack names, paths to TOML files, or a comma-separated mix with later
   entries winning, and an `engineering` pack ships with the package.

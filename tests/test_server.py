@@ -2009,7 +2009,7 @@ def test_read_only_explains_itself_rather_than_erroring(read_only):
 def test_unknown_argument_suggests_the_real_one(server):
     body, is_error = call(server, "memory_recall", {"query": "x", "kk": 3})
     assert is_error and "did you mean 'k'" in body
-    assert "Accepted: budget, k, memory_types" in body
+    assert "Accepted: budget, include_episodes, k, memory_types" in body
 
 
 def test_missing_required_argument(server):

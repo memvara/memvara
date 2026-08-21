@@ -6,6 +6,7 @@ importable from the foundation modules:
 
 - `memvara/types.py` — `Claim`, `Episode`, `Scope`, `Result`, `Explanation`, `WriteReceipt`,
   `MemoryType`, `Derivation`, `utcnow()`, `content_hash()`
+- `memvara/compat/supermemory_import.py` — `import_supermemory`, `SupermemoryReceipt`
 - `memvara/schema.py` — `PredicateRegistry`, `PredicateSpec`, `Cardinality`, `Volatility`
 - `memvara/store/` — `Store` and `SQLStore` protocols, `SQLiteStore`, `STATES`,
   `ClaimState`, `resolve_states()`, `state_predicate()`, `stored_state_predicate()`,

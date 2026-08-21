@@ -50,6 +50,35 @@ Check once at the start. On that server, write anything you actually want
 kept as `memory_remember` subject / predicate / object. Do not hand a
 paragraph to `memory_add` and hope.
 
+## "1 already live, 2 now"
+
+A receipt saying this means the slot accumulated where it might have been
+meant to replace. Nothing is wrong with the row that was written; the
+predicate has no spec, so it is multi-valued by default and the new value
+landed beside the old one.
+
+Read it, do not reflex-fix it. Two live values are a **contradiction** for
+something like `quota_gate/status` and completely **correct** for something
+like `project/rejected` — a project rejects many things. The rows are
+identical and the difference is intent, which is not a property of the row,
+so the note offers both readings rather than picking.
+
+- Genuinely one value: the old one is stale, so `memory_end` it. Use
+  `memory_search` first to get the id.
+- Genuinely several: nothing to do. It is already right.
+
+If it keeps happening on the same predicate, the fix is not per-write. The
+server can declare its vocabulary with `MEMVARA_PREDICATES` — a shipped pack
+name, a TOML file, or a comma-separated mix — and a declared predicate
+supersedes or accumulates because someone said so, instead of defaulting.
+`engineering` ships with the package. Tell them; you cannot set it yourself,
+it is server configuration read at startup.
+
+Declaring also sets **volatility**, which has no note of its own. An
+undeclared predicate decays at the slow default — a two-year half-life — so
+a fact that changed this morning still ranks as fresh long after it stopped
+being true, and nothing ever reports it.
+
 ## Valid time on a write
 
 `memory_remember` takes `true_since` and `true_until` — when it was true in
