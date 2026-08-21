@@ -543,6 +543,30 @@ of `_live_clause` and is held to the same wording clause for clause. Three copie
 predicate is three chances to disagree; `tests/test_bitemporal.py` checks the Python one
 against the SQL one row for row.
 
+### Erasure removes the bytes, not just the rows
+
+Two settings, covering two different halves, and neither is SQLite's default.
+
+`PRAGMA secure_delete=ON` (in `SCHEMA`, so it applies to every writer connection) covers
+ordinary tables: without it a deleted row's bytes sit in a free page, readable in the file.
+
+FTS5's own `secure-delete` option (set once in `_migrate_to_v7`, persistent in the table's
+config) covers the text indexes, and this is the half that is easy to miss.
+`DELETE FROM claims_fts` does **not** remove the document's terms — FTS5 writes a delete
+marker and keeps the terms as *live rows* in the `claims_fts_data` shadow table. They are
+not residue in freed space, so `VACUUM` never reclaimed them, and an erased claim's words
+stayed in the file indefinitely while `erase_claim` reported per-table counts as evidence.
+
+The option is not retroactive, which is why the migration also runs one `optimize`: only a
+merge discards what the existing markers hide.
+
+Anything testing this must **read the file**, not query the store. Every query already
+answered correctly — that is precisely why it went unnoticed. See
+`tests/test_erasure_residue.py`.
+
+The remaining residue is the write-ahead log, which a checkpoint or a clean `close()`
+clears. `SECURITY.md` states that as the boundary.
+
 ### `stats()`
 
 ```python

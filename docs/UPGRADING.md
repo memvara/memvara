@@ -7,6 +7,56 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Erasure now actually removes the text, and the schema is version 7
+
+### What changed
+
+`erase()`, `purge()` and `reset()` left the erased words readable in the database file.
+The store now sets `PRAGMA secure_delete=ON` and FTS5's `secure-delete`, so the bytes are
+overwritten rather than freed, and opening an existing store scrubs what is already on
+disk once.
+
+**If you have run an erasure on any earlier version, the text may still be in that file.**
+Opening it with this release cleans the text index. It does not rewrite pages that were
+freed before the upgrade — for those, one `VACUUM` after the first open finishes the job:
+
+```python
+from memvara import Memvara
+mem = Memvara("memory.db")      # migrates and scrubs the text index
+mem.store._db.execute("VACUUM") # reclaims pages freed by pre-upgrade deletes
+mem.close()
+```
+
+Check a file yourself — the point is to look at the file, not to ask the store, which
+answered correctly all along:
+
+```bash
+grep -c 'something-you-erased' memory.db || echo "not present"
+```
+
+### What to do about it
+
+Nothing, for most callers. Three things are worth knowing.
+
+**Writes cost about 6% more and `erase_claim` about 9% more.** Measured on a 5,000-claim
+run. That is the price of the bytes being overwritten.
+
+**The one-time `optimize` runs on first open.** 0.01 s over a 20,000-claim index, and
+bounded by segment count rather than row count, so a normally-written store has little to
+merge.
+
+**Schema 6 → 7, and it is a one-way door.** A file opened by this build is refused by an
+older one, which is deliberate: the FTS5 option is durable state in the file, and an older
+build would write to a text index whose format it does not understand. The option needs
+SQLite 3.35 — already the store's minimum, so nothing that could open the file before is
+locked out now.
+
+**Still not scrubbed: the `-wal`.** An erased claim's bytes can remain in the write-ahead
+log until it checkpoints. A clean `close()` or a checkpoint clears it; `SECURITY.md` now
+records this as the remaining residue rather than the claim it used to make.
+
+---
+
 ## A blank part of a triple is now an error, not a quiet no-op
 
 ### What changed
