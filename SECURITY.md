@@ -112,8 +112,14 @@ defences, all in `memvara/core.py`, all worth attacking:
 
 - **`_safe_line`** collapses each claim to a single line and strips leading list and
   heading markers, so stored text cannot open its own bullet list or repeat the header and
-  forge a block indistinguishable from the real one. Episodes are additionally truncated,
-  so a pasted stack trace cannot become the whole prompt.
+  forge a block indistinguishable from the real one. It also maps `[` and `]` to their
+  fullwidth forms, because flattening only settles what a claim can do *between* lines: a
+  surface that writes its own metadata as `[id=… relevance=…]` can be impersonated by a
+  claim that spells one of those out and appends it to the row it is already on, with no
+  newline needed. Every renderer here — `recall()`, and each line the MCP server emits —
+  goes through this one function, so that is the one place the character set lives.
+  Episodes are additionally truncated, so a pasted stack trace cannot become the whole
+  prompt.
 - **`RECALL_HEADER` and `RECALL_EPISODE_HEADER`** frame the block as retrieved data rather
   than instructions, and the episode header says "said", not "true".
 - **The signature is explicit rather than `**kwargs`**, so `states`, `include_invalidated`

@@ -7,6 +7,51 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Square brackets in stored text now render as `［` and `］`
+
+### What changed
+
+`Memvara._safe_line` — and so `recall()` and every line the MCP server emits — maps `[`
+and `]` to U+FF3B and U+FF3D anywhere in a claim, not just at the head. A stored value
+containing `[id=cl_… relevance=0.99] …` used to render as something that read like a
+second, higher-scoring result row; the brackets are what made it parse, so the brackets
+are what stopped being passed through. `SECURITY.md` has the reasoning.
+
+Storage is unchanged. `Claim.text` on disk still holds exactly what was written, and
+`search()` and `history()` still return the claim objects verbatim — this is a rendering
+change, and only the rendering methods are affected.
+
+### How the mistake shows up
+
+Anything that parses the *rendered* text rather than the claim objects. A scraper reading
+`recall()` output for `[...]` spans finds none where a note contained brackets; a golden
+file or snapshot test over `recall()` or a `memory_*` tool result goes red on any fixture
+with a bracket in it; a diff of two stores rendered before and after upgrading shows
+changes in rows nobody edited.
+
+An exact-match assertion is where this bites. Substring checks for the claim's words are
+unaffected — the text is all still there, and still in the same order.
+
+### What to grep for
+
+```
+recall(
+_safe_line
+safe_line
+```
+
+...in your own tree, then in whatever consumes their return value. Fixtures are the ones
+worth checking by eye: `grep -l '\[' tests/**/*.txt` over any snapshot of rendered output.
+
+### What to replace it with
+
+If you need the original characters, read the claim rather than the render — `search()`
+and `history()` hand back `Claim` objects whose `.text` is untouched. Rendered output is
+for a model to read, and has never been a parsing target; this change is the reason that
+distinction now matters in practice.
+
+---
+
 ## The packaged skill moved, and `init` writes a directory
 
 ### What changed
