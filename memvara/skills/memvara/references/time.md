@@ -13,10 +13,22 @@ On the **library and REST**:
 - `as_of=T` — both clocks at T. Sugar for `valid_at=known_at=T`. Passing it
   alongside either axis raises rather than picking one.
 
-On **MCP**: `memory_search` takes `as_of` only. The two axes separately are
-not on the tools. If they need one clock and not the other, say you cannot
-do that from here and point them at the library or REST. Do not guess which
-clock they meant and silently send `as_of`.
+On **MCP**: `memory_search` takes `as_of` and `valid_at`, not `known_at`.
+Passing both of the two it has is refused.
+
+Reach for `valid_at`. Asking about someone's earlier city, job or year is
+asking about the world, and `as_of` answers something else: it rewinds
+belief as well, so every later correction disappears — including one that
+was made about exactly the period being asked about. `as_of` earns its
+place only when they want what you *used to think*.
+
+A fact backfilled so that both its ends are already past is reachable
+through `valid_at` alone. Its write receipt says so at the time, and the
+tool description says why.
+
+For `known_at` alone — what did we believe on 1 August, about now — say you
+cannot do that from here and point them at the library or REST. Do not
+approximate it with the two you have.
 
 `memory_history` is "what the value used to be", not "why it was written".
 `memory_why` is the latter.

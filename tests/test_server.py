@@ -2116,20 +2116,20 @@ def test_a_future_dated_write_is_stored_and_says_it_is_not_in_force_yet(server):
 
 
 def test_a_closed_backfilled_write_is_sent_somewhere_that_can_actually_answer(server):
-    """The note on this write named a `memory_search` call that succeeds at no instant.
+    """The note on this write names a search, and the search has to work.
 
     Reaching a claim whose interval is already over needs an instant *inside* that
     interval. Reaching one recorded a moment ago needs an instant at or after the write.
-    `as_of` moves both clocks together, so one instant has to satisfy both and none does —
-    the claim is stored, correct, and unreachable from this surface by search.
+    `as_of` moves both clocks together, so one instant has to satisfy both and none does.
+    `valid_at` moves only the world clock, leaves belief at now, and reaches it.
 
-    That made the note a worse failure than silence. `_interval_note` exists because a
-    correct write whose effect is invisible gets "fixed" by a second write with the
-    argument dropped; sending the model to a query that returns nothing is the same dead
-    end, now with the server's authority behind it.
+    `_interval_note` exists because a correct write whose effect is invisible gets
+    "fixed" by a second write with the argument dropped, so the note has to hand back a
+    call that actually returns the claim — naming one that cannot is the same dead end
+    with the server's authority behind it, which is what it did before `valid_at` existed.
 
-    Asserted against the store, not the sentence: the promise the note makes is exercised,
-    and so is the one it no longer makes.
+    Asserted against the store, not the sentence: both halves of what the note claims are
+    exercised, the reachable one and the unreachable one.
     """
     now = utcnow()
     began, over = now - timedelta(days=400), now - timedelta(days=200)
@@ -2140,19 +2140,83 @@ def test_a_closed_backfilled_write_is_sent_somewhere_that_can_actually_answer(se
         "true_since": stamp(began), "true_until": stamp(over)})
     assert "had already stopped being true" in body
 
-    # What it now promises.
+    # What it promises, exercised.
     assert "memory_history shows it" in body
     assert "Berlin" in text(server, "memory_history", {"predicate": "lives_in"})
+    assert "memory_search finds it with valid_at" in body
+    found = text(server, "memory_search",
+                 {"query": "Berlin", "valid_at": stamp(began + timedelta(days=100))})
+    assert "Berlin" in found, "the note names this call, so it has to return the claim"
+    assert "as true on" in found, "and the header names the clock that moved"
 
-    # What it used to promise, at every instant a caller could reasonably try.
-    assert "memory_search will not find it at any as_of" in body
+    # And the half that stays unreachable, at every instant a caller could try.
+    assert "as_of will not, at any instant" in body
     for label, when in (("inside the interval", began + timedelta(days=100)),
                         ("at the start", began),
                         ("at the close", over),
                         ("after it, before now", over + timedelta(days=100)),
                         ("now", now)):
-        found = text(server, "memory_search", {"query": "Berlin", "as_of": stamp(when)})
-        assert "No stored memory matched" in found, f"as_of {label} reached it after all"
+        missed = text(server, "memory_search", {"query": "Berlin", "as_of": stamp(when)})
+        assert "No stored memory matched" in missed, f"as_of {label} reached it after all"
+
+
+def test_valid_at_sees_a_correction_that_as_of_rewinds_past(server):
+    """The row the two axes were split for, now askable from this surface.
+
+    A value recorded today about last year is what `valid_at` exists to reach: the world
+    clock moves, the belief clock stays at now, so today's understanding of a past date
+    includes everything learned since. `as_of` rewinds both and lands before the
+    correction was ever written, which is a real question but a different one.
+
+    Both are asserted here rather than only the new axis, because the value of `valid_at`
+    is precisely that it disagrees with `as_of` on this shape of history.
+    """
+    now = utcnow()
+    last_year = now - timedelta(days=365)
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+
+    # Learned today, about a period that ended before today.
+    text(server, "memory_remember", {
+        "predicate": "lives_in", "object": "Porto",
+        "true_since": stamp(last_year - timedelta(days=30)),
+        "true_until": stamp(last_year + timedelta(days=30))})
+
+    today_about_then = text(server, "memory_search",
+                            {"query": "Porto", "valid_at": stamp(last_year)})
+    assert "Porto" in today_about_then
+
+    believed_then = text(server, "memory_search", {"query": "Porto", "as_of": stamp(last_year)})
+    assert "No stored memory matched" in believed_then, "nothing was believed then"
+
+
+def test_the_two_clocks_cannot_be_asked_for_at_once(server):
+    """`as_of` *is* both axes, so passing it beside one of them asks two questions.
+
+    `time_axes` already refuses this, but as a bare `ValueError` from inside the library,
+    which would reach the model through the server's catch-all instead of as an argument
+    error in the same voice as every other one. The refusal says which to send for which
+    question, because a rejection a model cannot act on costs the same retry as none.
+    """
+    body, is_error = call(server, "memory_search", {
+        "query": "anything", "as_of": "2024-03-01", "valid_at": "2024-03-01"})
+    assert is_error
+    assert "memory_search takes as_of or valid_at, not both" in body
+    assert "valid_at=known_at=" in body, "it says why they cannot combine"
+    assert "believed on that date" in body, "and which one answers which question"
+
+
+def test_known_at_is_still_not_reachable_from_the_tools(server):
+    """One axis was exposed, not both, and the schema is closed so this is a real refusal.
+
+    `known_at` alone is the audit read — what did we believe on some past date, about the
+    world as it is now. It stays a library and REST question deliberately: it is the axis
+    that can be used to misread an audit trail, and `references/time.md` tells an agent to
+    say so rather than approximate it with the two axes that are here.
+    """
+    body, is_error = call(server, "memory_search", {"query": "x", "known_at": "2024-03-01"})
+    assert is_error
+    assert "unknown argument" in body
+    assert "valid_at" in body, "the accepted list names the axis that does exist"
 
 
 @pytest.mark.parametrize("arguments, expected", [
