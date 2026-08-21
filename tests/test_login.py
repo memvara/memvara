@@ -259,6 +259,29 @@ def test_authorize_error_body_that_is_not_json_falls_back_to_text(monkeypatch):
     assert "upstream error" in err.getvalue()
 
 
+def test_an_upstream_error_page_does_not_land_whole_in_the_log(monkeypatch):
+    """A gateway answering with HTML is the ordinary shape of this failure.
+
+    Unlike the tool surface this reaches a terminal rather than a model, so the risk is
+    volume: a login run in CI writes stderr into a build log, and on a public repository
+    that log is public. The cut keeps the part that says what went wrong, which is what
+    the operator ran the command for — a short body, like the test above, is untouched.
+    """
+    _no_browser(monkeypatch)
+    _no_loopback(monkeypatch)
+    _install_fake_httpx(monkeypatch, {
+        "device/authorize": [FakeResponse(502, "<html><body>" + "x" * 5000)],
+    })
+    err = io.StringIO()
+    status = login(["--project", "proj"], env={}, stdout=io.StringIO(), stderr=err)
+
+    assert status == 1
+    body = err.getvalue()
+    assert len(body) < 500, f"a 5,000-character error page reached the log: {len(body)}"
+    assert "502" in body and "<html>" in body, "the diagnosis survives the cut"
+    assert "…" in body, "and it says it was cut"
+
+
 # -- browser handling ---------------------------------------------------------------
 
 def test_browser_opened_successfully_prints_the_short_message(monkeypatch):

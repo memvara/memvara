@@ -105,6 +105,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A failing tool replayed its exception message into the model's context unflattened
+  and uncapped.** Stored claims have been treated as untrusted at the rendering boundary
+  since the beginning; the failure path was the one line that was not, and it is the same
+  kind of text arriving through a different door. An exception message is not this
+  process's to trust — a store error can quote a value somebody wrote, and against a
+  hosted backend it can carry an upstream body verbatim — so it could open its own line,
+  spell something that reads as a result row, or run to the length of an HTML error page
+  inside a context window.
+
+  It now goes through `safe_detail`: `safe_line` for the structure, and a 300-character
+  cap for the volume. The exception *class* is kept whole — it is a Python identifier and
+  it is the half that says what went wrong. `SECURITY.md` now names the failure path as in
+  scope on the same terms as the result path.
+
+- **`memvara-mcp login` echoed an upstream error body whole.** A different audience and so
+  a different risk: this reaches a terminal rather than a model, and the problem is
+  volume. A gateway answering with an HTML error page put five kilobytes into stderr —
+  which for a login run in CI is a build log, and on a public repository that log is
+  public. Bounded to 200 characters, the same cap `compat/supermemory_import.py` already
+  applies to the same kind of text. A short body, the normal case, is unchanged.
+
 - **A predicate folded onto its canonical name silently, changing how many values the
   slot holds.** `uses_tool` is an alias of `prefers_tool`; a predicate the store has never
   seen is `MANY` and accumulates, and `prefers_tool` is `ONE`, where the next write ends

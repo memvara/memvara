@@ -145,6 +145,14 @@ A way to break out of that block, forge a header, or reach a retired claim throu
 as data is a model behaviour, not a memvara vulnerability — but a case where the framing
 itself can be removed or spoofed is ours.
 
+**Stored claims are not the only untrusted text that reaches a model here.** A tool that
+fails returns the exception's message as a tool result, and that message is not this
+process's to trust: a store error can quote a value somebody wrote, and against a hosted
+backend it can carry an upstream body verbatim. It goes through the same neutralisation a
+claim does, plus a length cap — `safe_detail` in `memvara/server/tools.py`. Text that
+reaches a model through a *failure* path without that treatment is the same finding as
+text that reaches it through a result, and is in scope on the same terms.
+
 ### The redaction seam
 
 `memvara/redact.py` is the last place text can be changed before it becomes durable, and

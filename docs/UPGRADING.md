@@ -7,6 +7,49 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Failure messages are flattened and cut
+
+### What changed
+
+Two error paths that used to pass text through whole:
+
+- a tool that raises returns `<name> failed: <ExceptionClass>: <message>`, and the
+  *message* is now flattened to one line and cut at 300 characters;
+- `memvara-mcp login` cuts an upstream error body at 200 characters.
+
+The exception class name is untouched, and so is any message already inside the cap —
+which is nearly all of them. A cut is marked with `…`.
+
+### How the mistake shows up
+
+While debugging. A long exception — a multi-line traceback repr, a driver error quoting a
+whole statement, an HTML error page from a gateway — is no longer complete in a tool
+result or in the login output, and the missing half is the half that used to matter to
+someone reading it. Newlines inside a message become spaces, so a message that was laid
+out to be read no longer is.
+
+Nothing is swallowed: the failure still surfaces, in the same place, with the same class
+name and status code.
+
+### What to grep for
+
+```
+failed: 
+isError
+```
+
+...in anything that parses tool results, and in log-scraping rules that match on error
+text. A rule anchored on a phrase deep inside a long message may stop matching.
+
+### What to replace it with
+
+For the real detail, read the process's own logs or run the failing call from the library,
+where exceptions are untouched — this cap is on what is handed to a *model*, and on what a
+CLI writes to a build log, not on Python's exception itself. A `try`/`except` around a
+library call still sees the whole thing.
+
+---
+
 ## Storing non-Latin text now emits a warning
 
 ### What changed

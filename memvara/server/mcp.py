@@ -27,7 +27,7 @@ from .protocol import (
     serve_stdio,
     success,
 )
-from .tools import TOOLS, Tool, ToolContext, ToolError
+from .tools import TOOLS, Tool, ToolContext, ToolError, safe_detail
 
 #: What we implement. A client that asks for one of these gets its own version echoed
 #: back; anything else is answered with ours, and the client decides whether to proceed.
@@ -207,7 +207,13 @@ class MemvaraMCPServer:
             # so it comes back as a tool result: the model sees it and can try something
             # else, and one bad call does not end a session the user is in the middle of.
             # `Exception` excludes KeyboardInterrupt and SystemExit, which do mean stop.
-            return _text(f"{name} failed: {type(exc).__name__}: {exc}", is_error=True)
+            #
+            # Through `safe_detail`, because that decision makes this line a rendering
+            # boundary like every line in `tools.py` — and it was the one that was not.
+            # The class name is a Python identifier and safe as it is; the message is not
+            # ours: against a hosted store it can carry an upstream body verbatim.
+            return _text(f"{name} failed: {type(exc).__name__}: {safe_detail(exc)}",
+                         is_error=True)
 
 
 def _text(body: str, *, is_error: bool = False) -> dict[str, Any]:
