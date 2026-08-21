@@ -54,6 +54,31 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **Stored text could forge a result row without opening a line.** `_safe_line` flattens
+  a claim so it cannot start its own block, and every surface writes its metadata before
+  the untrusted span so nothing can *follow* a claim and impersonate this system. Neither
+  rule covers the rest of the line the claim is already on: a value containing
+  `[id=cl_… relevance=0.99] …` rendered as what read like an additional, higher-scoring
+  result. It reached `memory_search`, `memory_recall`, `memory_history`, `memory_since`
+  and `memory_why` — including the two surfaces the dispute flow tells an agent to consult
+  when a user challenges a memory, which is what made it worth a fix rather than a note.
+  Write and read need not be the same session, so the payload is planted once and read
+  later by an agent that never saw it arrive.
+
+  `_safe_line` now maps `[` and `]` to their fullwidth forms wherever they occur, rather
+  than only stripping markers from the head. A substitution and not a deletion: a note
+  about `arr[0]` still reads as `arr［0］`, where dropping the brackets would quietly
+  rewrite the fact into a different one. **Rendered output changes for any stored value
+  containing a square bracket** — see `docs/UPGRADING.md`. Nothing on disk is touched, and
+  because the fix is at render time it also covers rows already in the store, which a
+  write-time fix could not: `remember(..., text=…)` lets a caller supply the rendered line
+  directly and the reconciler deliberately preserves it.
+
+  `memvara.server.tools.safe_line` now calls `Memvara._safe_line` instead of holding a
+  second copy of it. The two had already drifted — the library's set had stopped stripping
+  `>` and backticks — so the same stored value was neutralised one way through
+  `memory_recall` and another through `memory_search`.
+
 - **`memvara-mcp login` never completed against the hosted console.** Two independent
   refusals stacked: `POST /api/auth/device/authorize` answers 403 `csrf_failed` unless
   `X-Memvara-CSRF` is present (presence is the whole check with no session cookie, which

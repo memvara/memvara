@@ -342,10 +342,15 @@ class Memvara:
   can influence a parameter. `states=["retired"]` is the sharper form: a prompt built from
   nothing but the records we stopped believing. Time travel and audit reads stay on
   `search()`;
-- flatten every rendered line through `_safe_line`, which collapses whitespace and strips
-  leading list and heading markers, so stored text cannot open its own bullet list or
-  repeat a header and forge a block indistinguishable from the real one. Episodes are
-  additionally truncated to `RECALL_EPISODE_CHARS`;
+- flatten every rendered line through `_safe_line`, which collapses whitespace, strips
+  leading list and heading markers, and maps `[`/`]` to their fullwidth forms
+  (`_FORGEABLE`), so stored text cannot open its own bullet list, repeat a header, or
+  finish a line with something that parses as the next result row. The first two defend
+  the gaps *between* lines; the third defends the rest of the line a claim is already on,
+  which ordering metadata-first cannot reach. `memvara/server/tools.py:safe_line` calls
+  this method rather than reimplementing it — it was a copy once, the two sets drifted,
+  and the same stored value was then neutralised differently depending on which surface
+  replayed it. Episodes are additionally truncated to `RECALL_EPISODE_CHARS`;
 - keep the three blocks in order — claims, then history, then episodes — each under its own
   header, and emit a header only when its block is non-empty;
 - under `budget=`, **drop whole notes and never part of one**, filling downward from the
