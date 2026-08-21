@@ -155,6 +155,15 @@ WRITE_RETRACTION = "write.retraction"
 #: fully populated and unsearchable by meaning, with one line in a log from last month.
 WRITE_EMBEDDING_REJECTED = "write.embedding_rejected"
 
+#: An embedding the store accepted and that carries no information: every component zero,
+#: so cosine against it is zero against everything and retrieval abstains rather than
+#: ranking it. The store is happy, the write succeeds, and the claim is reachable by
+#: predicate and by lexical match but never by meaning. Counted separately from
+#: `WRITE_EMBEDDING_REJECTED` because nothing raised — this is the failure that leaves no
+#: exception anywhere, and the only two signals it can produce are this series and one
+#: warning per process.
+WRITE_EMBEDDING_UNUSABLE = "write.embedding_unusable"
+
 #: End-to-end `add()` duration.
 WRITE_LATENCY_MS = "write.latency_ms"
 

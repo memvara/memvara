@@ -11,6 +11,28 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **A write that embeds to nothing now says so**, via `UnembeddableTextWarning` and the
+  `write.embedding_unusable` counter, tagged by script. `HashingEmbedder` — the default
+  with no extras — tokenises `[a-z0-9']+` and builds its character n-grams over the
+  rejoined word list, so a claim with no Latin in it reduces to an all-zero vector. Every
+  layer then behaves correctly: the store accepts the row, retrieval abstains on a zero
+  norm rather than inventing a rank, and the claim still answers by predicate. Nothing
+  raised, and the result was a fact vector search could never return, with no signal
+  anywhere. Detection is one norm the embedder had already computed and discarded.
+
+  The claim is still stored — refusing the write would lose data over a retrieval
+  limitation. The warning fires once per pipeline and the counter counts every claim,
+  the same split `write.embedding_rejected` already uses: one line answers *is this
+  happening*, and only the counter answers *how much of this store is affected*.
+
+  **This is a floor, not a fix, and it does not catch mixed text.** A norm is a
+  whole-string measure, and `remember("user", "lives_in", "里斯本")` renders as
+  `user lives in 里斯本`, which embeds perfectly well from the Latin scaffolding alone —
+  so the object is invisible to vector search while the claim looks healthy. The fix is
+  an embedder that tokenises the script. `README.md`'s limitations section now says this
+  outright; it previously named the schema, gate and extractor as English-centric and
+  omitted the embedder, which is the larger of the two.
+
 - **`import_supermemory`**, in `memvara.compat`, moving a Supermemory
   account into a store over stdlib HTTP with no SDK. Supermemory keeps
   documents rather than a mutation log, so unlike `import_mem0` nothing

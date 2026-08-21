@@ -68,6 +68,7 @@ from ..telemetry import (
     PREDICATE_CAPPED,
     PREDICATE_LEARNED,
     WRITE_EMBEDDING_REJECTED,
+    WRITE_EMBEDDING_UNUSABLE,
     WRITE_EXTRACT_MS,
     WRITE_LATENCY_MS,
     WRITE_LLM_CALLS,
@@ -92,6 +93,17 @@ _EXAMPLE_CHARS = 400
 #: rather than applied on the spot because the identification is a read and the bump is
 #: a write, and only the write belongs in the transaction.
 _Reinforcement = tuple[Claim, list[str], datetime]
+
+
+class UnembeddableTextWarning(UserWarning):
+    """A claim was stored with an all-zero vector and can never be found by meaning.
+
+    Its own category for the reason `DegradedExtractionWarning` has one: a deployment
+    that knowingly stores text its embedder cannot read should be able to silence this by
+    policy without silencing everything else the library says. It is a `UserWarning`
+    rather than a `RuntimeWarning` because the fix is a configuration choice — which
+    embedder to run — and not a fault in the running code.
+    """
 
 
 class WritePipeline:
@@ -131,6 +143,10 @@ class WritePipeline:
         # A rejected embedding is warned about once per pipeline, not once per claim —
         # a misconfigured embedder would otherwise emit one warning per write forever.
         self._warned_embedding = False
+        # Same rule, different failure: see `UnembeddableTextWarning`. Separate flags so
+        # a store hitting both does not have one silence the other, which would leave the
+        # quieter of the two indistinguishable from not happening.
+        self._warned_unembeddable = False
 
     # -- public ---------------------------------------------------------------
 
@@ -734,11 +750,55 @@ class WritePipeline:
             rec.counter(WRITE_RETRACTION,
                         outcome="retired" if res.invalidated else "noop")
 
+    def _unembeddable(self, claim: Claim) -> None:
+        """Report a claim whose vector carries nothing, which nothing else would.
+
+        A rejected embedding raises and is handled below. This one succeeds: an all-zero
+        row is stored like any other, retrieval correctly abstains on it rather than
+        inventing a rank, and the claim answers by predicate and by lexical match. Every
+        layer behaves well and the result is a fact that vector search can never return,
+        with no exception anywhere to say so. Detection is one norm the embedder has
+        already computed and thrown away.
+
+        The usual cause is a script the configured embedder cannot tokenise — the shipped
+        `HashingEmbedder` matches `[a-z0-9']+`, so Han, Kana, Hangul, Arabic and Hebrew
+        all reduce to no tokens and the character n-grams are built over the *rejoined
+        word list*, which is empty too. The script goes in the message because "this text
+        embedded to nothing" is not actionable and "your Han text embedded to nothing" is.
+
+        **What this does not catch**, and it is the larger half: a *mixed* text embeds to
+        a perfectly good vector built from the Latin part alone. `remember("user",
+        "lives_in", "里斯本")` renders as `user lives in 里斯本`, whose norm is 1.0 — so
+        every `lives_in` claim looks the same in vector space no matter which city it
+        names. A norm is a whole-string measure and cannot see a component contributing
+        nothing. This guard is the floor, not the fix; the fix is an embedder that
+        tokenises the script.
+        """
+        if self.telemetry is not None:
+            # Per-claim, because the warning fires once per process and a count is the
+            # only thing that answers "how much of this store is unsearchable".
+            self.telemetry.counter(WRITE_EMBEDDING_UNUSABLE, script=script_of(claim.text))
+        if self._warned_unembeddable:
+            return
+        self._warned_unembeddable = True
+        warnings.warn(
+            f"{self.embedder!r} produced an all-zero embedding for {script_of(claim.text)} "
+            "text, so those claims are stored but can never be returned by meaning — only "
+            "by predicate or by exact lexical match. The shipped HashingEmbedder only "
+            "tokenises [a-z0-9'], so any non-Latin script embeds to nothing. Configure an "
+            "embedder that covers the scripts you store. Mixed-script text does not reach "
+            "this warning and is affected too: the vector is built from the Latin part "
+            "alone.",
+            UnembeddableTextWarning, stacklevel=2,
+        )
+
     def _write_embeddings(self, claims: Sequence[Claim]) -> None:
         if not claims:
             return
         vecs = self.embedder.encode([c.text for c in claims])
         for claim, vec in zip(claims, vecs):
+            if not vec.any():
+                self._unembeddable(claim)
             try:
                 self.store.set_embedding(claim.id, vec)
             except ValueError as e:

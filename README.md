@@ -258,9 +258,19 @@ Memvara is built around the observation that **most of this doesn't need a model
 - **Predicate schema, the salience gate and the fast extractor are English-centric.** The
   schema grows by learning, but the seed set is small on purpose, and the gate's and
   extractor's rules are English sentence forms. On other scripts they fall through to the
-  model — which is correct behavior and a real cost. This is the one limitation the
-  telemetry measures directly: `gate.drop` and `fast.miss` are tagged by script, so the
-  gap is visible rather than assumed.
+  model — which is correct behavior and a real cost. This is the limitation the telemetry
+  measures directly: `gate.drop` and `fast.miss` are tagged by script, so the gap is
+  visible rather than assumed.
+- **The default embedder is worse than English-centric — it is Latin-only.**
+  `HashingEmbedder`, what you get with no extras installed, tokenises `[a-z0-9']+` and
+  builds its character n-grams over the rejoined word list, so text in Han, Kana, Hangul,
+  Arabic or Hebrew produces an **all-zero vector**. Retrieval handles that honestly — it
+  abstains on a zero norm rather than inventing a rank — so such a claim is stored, is
+  reachable by predicate, and is never returned by meaning. A write like that now warns
+  (`UnembeddableTextWarning`) and counts (`write.embedding_unusable`, tagged by script).
+  Mixed text is affected without being caught: `user lives in 里斯本` embeds fine, from
+  the Latin half alone. Installing `memvara[local-embed]` gets a real model and non-zero
+  vectors; genuine cross-language retrieval needs a multilingual model and is not claimed.
 - **Entity resolution folds surface forms, it does not know the world.** `Acme Corp` and
   `acme, inc.` collapse; `Big Blue` and `IBM` do not, unless you enable the opt-in model
   path or declare the alias. `Stark` versus `Stark Industries` is genuinely ambiguous and
@@ -318,7 +328,7 @@ Memvara is built around the observation that **most of this doesn't need a model
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 3,159 tests, offline, no API key
+python3 -m pytest -q                              # 3,163 tests, offline, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison
 PYTHONPATH=. python3 bench/perf.py                # throughput and scaling

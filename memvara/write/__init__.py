@@ -7,7 +7,7 @@ without losing facts.
 
 from .fast import FastExtractor
 from .gate import SalienceGate
-from .pipeline import WritePipeline
+from .pipeline import UnembeddableTextWarning, WritePipeline
 from .reconcile import Reconciler, ReconcileResult
 
 __all__ = [
@@ -16,4 +16,5 @@ __all__ = [
     "Reconciler",
     "ReconcileResult",
     "WritePipeline",
+    "UnembeddableTextWarning",
 ]
