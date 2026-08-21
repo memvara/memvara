@@ -54,6 +54,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`memvara-mcp login` never completed against the hosted console.** Two independent
+  refusals stacked: `POST /api/auth/device/authorize` answers 403 `csrf_failed` unless
+  `X-Memvara-CSRF` is present (presence is the whole check with no session cookie, which
+  a CLI never has), and a successful mint is 201, which the client treated as "the
+  server refused to start." Either one alone was enough for login to exit 1 before a
+  browser opened. The client now sends the header and accepts 200 or 201.
+
 - **`supersede()` reported closing nothing, from the one call whose whole purpose is
   closing a claim out.** `receipt.closed` came back empty — and with it `receipt.ended`
   and `receipt.retired` — while the predecessor was closed correctly on disk. Only the

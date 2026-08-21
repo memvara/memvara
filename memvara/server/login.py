@@ -60,6 +60,13 @@ _CREDENTIALS_PATH = Path.home() / ".memvara" / "credentials.json"
 #: or a network stall would otherwise spin forever.
 _MAX_WAIT_SECONDS = 900
 
+#: The hosted console refuses unauthenticated POSTs that lack this header. Presence is
+#: the whole check when there is no session cookie, because a cross-site HTML form
+#: cannot set one; this process has no session and never will, so any value works.
+#: Without it, `POST /api/auth/device/authorize` answers 403 `csrf_failed` and login
+#: never starts.
+_CSRF_HEADERS = {"X-Memvara-CSRF": "cli"}
+
 LOGIN_USAGE = f"""\
 memvara-mcp login — sign in to a memvara-cloud deployment and store an API key.
 
@@ -153,7 +160,10 @@ def _authorize(client: Any, server_url: str, project: str,
     if redirect_uri is not None:
         body["redirect_uri"] = redirect_uri
     response = client.post(f"{server_url}/api/auth/device/authorize", json=body)
-    if response.status_code != 200:
+    # 201 is what the hosted console actually returns (`DeviceAuthorized` is a
+    # created grant). Tests historically faked 200; both are success, anything
+    # else is the server refusing to start.
+    if response.status_code not in (200, 201):
         raise _LoginFailed(_server_error(response, "start a device login"))
     data = response.json()
     return _Authorization(
@@ -239,7 +249,7 @@ def login(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
         redirect_uri = f"http://127.0.0.1:{port}/callback"
 
     try:
-        with httpx.Client(timeout=10.0) as client:
+        with httpx.Client(timeout=10.0, headers=_CSRF_HEADERS) as client:
             try:
                 authorization = _authorize(client, server_url, project, redirect_uri)
             except httpx.HTTPError as exc:

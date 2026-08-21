@@ -1,4 +1,6 @@
-"""One guard, and no fixtures.
+"""Two guards, and no fixtures.
+
+The first is the embedder.
 
 `memvara.embed.default_embedder()` returns a sentence-transformers model as soon as that
 package is importable and falls back to `HashingEmbedder` when it is not. So a `Memvara()`
@@ -89,3 +91,50 @@ def _guarded_default_embedder(dim: int = 512) -> Any:
 
 
 memvara.core.default_embedder = _guarded_default_embedder
+
+
+# The second guard is a file the suite must never touch.
+#
+# `memvara-mcp login` writes ~/.memvara/credentials.json mode 0600, and
+# tests/test_login.py used to write it too: it isolated the network, the
+# browser and the loopback listener, but the filesystem was opt-in, and
+# three tests remembered. The others that reached `_write_credentials`
+# wrote a fixture key (`key-123`) over a real one. That has now happened
+# three times, and each time the hooks that read the file treated the
+# resulting 401 as an empty store.
+#
+# Isolation in one file remains opt-in the moment someone adds another, so
+# the real file is snapshotted at session start and compared at session
+# end. A test that needs to write credentials redirects
+# `login._CREDENTIALS_PATH` (and `config.CREDENTIALS_PATH`) to tmp_path.
+
+_HOME_CREDENTIALS = pathlib.Path.home() / ".memvara" / "credentials.json"
+_CREDENTIALS_SNAPSHOT: Any = None
+_CREDENTIALS_EXISTED = False
+_CREDENTIALS_SEEN = False
+
+
+def pytest_sessionstart(session: Any) -> None:
+    global _CREDENTIALS_SNAPSHOT, _CREDENTIALS_EXISTED, _CREDENTIALS_SEEN
+    _CREDENTIALS_SEEN = True
+    _CREDENTIALS_EXISTED = _HOME_CREDENTIALS.is_file()
+    _CREDENTIALS_SNAPSHOT = (
+        _HOME_CREDENTIALS.read_bytes() if _CREDENTIALS_EXISTED else None
+    )
+
+
+def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
+    if not _CREDENTIALS_SEEN:
+        return
+    existed = _HOME_CREDENTIALS.is_file()
+    after = _HOME_CREDENTIALS.read_bytes() if existed else None
+    if existed == _CREDENTIALS_EXISTED and after == _CREDENTIALS_SNAPSHOT:
+        return
+    raise AssertionError(
+        f"{_HOME_CREDENTIALS} was created, deleted or rewritten during this "
+        "suite. Redirect memvara.server.login._CREDENTIALS_PATH (and "
+        "memvara.server.config.CREDENTIALS_PATH) to tmp_path before any call "
+        "that can write it. tests/test_login.py used to clobber a real 0600 "
+        "key with the fixture key-123 whenever a test forgot; that has now "
+        "happened three times."
+    )
