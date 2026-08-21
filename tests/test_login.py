@@ -49,6 +49,7 @@ class FakeClient:
     def __init__(self, responses: dict[str, list[FakeResponse]]) -> None:
         self._responses = responses
         self.calls: list[tuple[str, dict]] = []
+        self.init_kwargs: dict = {}
 
     def post(self, url: str, json: dict) -> FakeResponse:  # noqa: A002 - matches httpx's kw
         self.calls.append((url, json))
@@ -74,7 +75,12 @@ def _install_fake_httpx(monkeypatch, responses: dict[str, list[FakeResponse]]) -
     import httpx
 
     client = FakeClient(responses)
-    monkeypatch.setattr(httpx, "Client", lambda *a, **kw: client)
+
+    def factory(*a, **kw):
+        client.init_kwargs = kw
+        return client
+
+    monkeypatch.setattr(httpx, "Client", factory)
     return client
 
 
@@ -149,6 +155,22 @@ def test_equals_form_is_accepted(monkeypatch):
     assert client.calls[0][1]["project"] == "proj"
 
 
+def test_the_httpx_client_sends_the_csrf_header_the_hosted_console_requires(monkeypatch):
+    """Unauthenticated POSTs without `X-Memvara-CSRF` are 403 `csrf_failed` on
+    the hosted console. Presence is the whole check when there is no session,
+    which this process never has — login used to omit the header and never
+    started."""
+    _no_browser(monkeypatch)
+    _no_loopback(monkeypatch)
+    client = _install_fake_httpx(monkeypatch, {
+        "device/authorize": [FakeResponse(200, AUTH_BODY)],
+        "device/token": [FakeResponse(200, approved())],
+    })
+    assert login(["--project", "proj"], env={}, stdout=io.StringIO()) == 0
+    headers = client.init_kwargs.get("headers") or {}
+    assert headers.get("X-Memvara-CSRF")
+
+
 # -- server URL resolution --------------------------------------------------------------
 
 def test_server_url_falls_back_to_the_environment_then_the_default(monkeypatch):
@@ -210,6 +232,19 @@ def test_authorize_non_200_is_a_login_failure(monkeypatch):
     assert status == 1
     assert "the server refused to start a device login" in err.getvalue()
     assert "unknown_project" in err.getvalue()
+
+
+def test_authorize_201_is_success(monkeypatch):
+    """The hosted console answers 201 Created for a minted grant. The client
+    used to treat anything other than 200 as refusal, so a successful
+    authorize never reached the poll."""
+    _no_browser(monkeypatch)
+    _no_loopback(monkeypatch)
+    _install_fake_httpx(monkeypatch, {
+        "device/authorize": [FakeResponse(201, AUTH_BODY)],
+        "device/token": [FakeResponse(200, approved())],
+    })
+    assert login(["--project", "proj"], env={}, stdout=io.StringIO()) == 0
 
 
 def test_authorize_error_body_that_is_not_json_falls_back_to_text(monkeypatch):
