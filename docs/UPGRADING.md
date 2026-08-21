@@ -7,6 +7,49 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `subject` and `predicate` are now length-bounded on the MCP tools
+
+### What changed
+
+`subject` is capped at 128 characters and `predicate` at 64. Both were previously
+unbounded — a 2,000-character subject was accepted — because the tool validator had no
+`maxLength` support and no schema declared one. Over the limit is now a normal tool error
+naming the limit, the length sent, and where the text should have gone.
+
+`object` is **not** capped. It carries the fact itself, and a long one is a legitimate
+value rather than a misuse.
+
+### How the mistake shows up
+
+A call that used to succeed now returns `isError: true`. In practice this only bites
+something writing a sentence into `subject` or `predicate` — using the slot name as if it
+were the value — which is the shape the cap exists to stop. Real predicates are far
+inside the bound: the longest built-in is 21 characters.
+
+Nothing already stored is affected. The cap is on new arguments, not on existing claims,
+and no read path filters on length.
+
+### What to grep for
+
+```
+memory_remember
+memory_forget
+memory_end
+memory_history
+```
+
+...in anything that builds a `subject` or `predicate` by interpolation rather than from a
+fixed vocabulary. Those are the calls that can exceed a bound without anyone intending it.
+
+### What to replace it with
+
+Put the detail in `object`, which is where a value belongs, and keep the predicate a
+short snake_case relation. If you genuinely need a longer slot name, the library's
+`remember()` is unchanged and applies no cap — this bound is on the MCP surface, where
+the argument is filled in by a model.
+
+---
+
 ## `memory_history` rows gained a `true from` field
 
 ### What changed
