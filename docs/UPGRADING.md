@@ -7,6 +7,64 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Storing non-Latin text now emits a warning
+
+### What changed
+
+A claim whose text embeds to an all-zero vector raises `UnembeddableTextWarning` (once
+per pipeline) and increments `write.embedding_unusable` (per claim, tagged by script).
+With the default `HashingEmbedder` that is any claim containing no `[a-z0-9']`
+characters — Han, Kana, Hangul, Arabic, Hebrew.
+
+Nothing about the write changed. The claim is stored, the vector is stored, and
+retrieval behaves exactly as before. This is a diagnostic for something that was already
+happening silently.
+
+### How the mistake shows up
+
+Only two ways, and both are about warnings rather than about memory:
+
+1. **A test suite or service running under `-W error`** — or
+   `filterwarnings = ["error"]` in `pytest.ini` — turns this into an exception on a write
+   that used to pass. That is the intended signal if you did not know your vectors were
+   empty, and a false alarm if you did.
+2. **Log volume**, if you knowingly store text your embedder cannot read. It is
+   warn-once per pipeline instance, so a process building one `Memvara` sees one line;
+   a server constructing one per request sees one per request.
+
+### What to grep for
+
+```
+UnembeddableTextWarning
+write.embedding_unusable
+```
+
+...after upgrading, in whatever collects your warnings or metrics. If the counter is
+non-zero, that is the share of your store vector search cannot reach.
+
+### What to replace it with
+
+If the warning is telling you something true, install a real embedder:
+
+```bash
+pip install 'memvara[local-embed]'
+```
+
+That produces non-zero vectors for those scripts. Genuine *cross-language* retrieval —
+querying in English for a fact stored in Chinese — needs a multilingual model and is not
+claimed by either option.
+
+If you have accepted the limitation and want the warning gone, it has its own category
+precisely so you can silence it alone:
+
+```python
+warnings.filterwarnings("ignore", category=UnembeddableTextWarning)
+```
+
+The counter keeps counting either way, which is the point of it being separate.
+
+---
+
 ## `subject` and `predicate` are now length-bounded on the MCP tools
 
 ### What changed

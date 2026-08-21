@@ -82,7 +82,13 @@ from .types import (
     utcnow,
 )
 from .telemetry import MemoryRecorder, NullRecorder, Recorder
-from .write import FastExtractor, Reconciler, SalienceGate, WritePipeline
+from .write import (
+    FastExtractor,
+    Reconciler,
+    SalienceGate,
+    UnembeddableTextWarning,
+    WritePipeline,
+)
 from .write.reconcile import backfill_entities
 
 __version__ = "0.2.0"
@@ -115,6 +121,7 @@ __all__ = [
     "DegradedExtractionWarning", "EmbedderChangedWarning", "EmbedderMismatchError",
     # subsystems
     "WritePipeline", "SalienceGate", "FastExtractor", "Reconciler",
+    "UnembeddableTextWarning",
     "HybridRetriever", "Retrieved", "EpisodeResult",
     # multi-hop traversal. `Path` is a chain of claims, not a filesystem path.
     "GraphTraverser", "Path", "Edge", "HOP_DAMPING",
