@@ -1,12 +1,26 @@
 """Blinded five-arm answer-quality run over the support-history demo.
 
+    PYTHONPATH=. python3 demo/harness.py --reader stub          # offline, one command
     PYTHONPATH=. python3 demo/harness.py --dump   runs/demo.jsonl
     # ...answer them into runs/answers.jsonl as {"id": ..., "answer": ...}
     PYTHONPATH=. python3 demo/harness.py --dump runs/demo.jsonl --answers runs/answers.jsonl
 
-Phase one writes one file containing every question under every arm in `demo/baselines`,
-merged and shuffled together. Phase two reads the answers back, re-derives which item
-belonged to which arm, and scores.
+Two readers, and the difference between them is the difference between a smoke test and a
+measurement.
+
+`--reader stub` runs both phases in one process against `evalkit.StubReader` and
+`ContainmentJudge`, so it needs no key, no dump file and no answerer, and it produces the
+same report twice. That is what makes it the *guarded* path: it is the form a test can
+run, and a repeated run is a diff rather than a new experiment. What it cannot do is
+measure answer quality — the stub picks the retrieved line with the most words in common
+with the question, so its `correct` column is a property of the corpus and the arms and
+nothing else. `evalkit.stub_caveat` prints that on every run of it, and the number must
+never be quoted beside the ones in `docs/BENCHMARKS.md`.
+
+`--reader file` is the two-phase round trip and the only configuration that produces a
+number about answers. Phase one writes one file containing every question under every arm
+in `demo/baselines`, merged and shuffled together. Phase two reads the answers back,
+re-derives which item belonged to which arm, and scores.
 
 ## The two numbers, and why the second one is the headline
 
@@ -382,6 +396,15 @@ def results_table(cells: Mapping[Any, Tally], label: str) -> str:
                            rows)
 
 
+#: Appended to `evalkit.stub_caveat`'s stub banner, which ends "Re-run with --reader
+#: anthropic" — the right instruction for the `bench/` runners it was written for and the
+#: wrong one here, where the reader that measures answers is a person or an agent behind
+#: `--reader file`. A banner naming a flag this program does not have is worse than no
+#: banner: it reads as a way out and there isn't one.
+STUB_READER_HERE = """\
+  In THIS harness the flag is `--reader file`, and the answerer is a person or an
+  agent rather than an API. There is no `--reader anthropic` here."""
+
 #: Everything the containment judge gets wrong here, printed on every run that uses it.
 #: Longer than `evalkit.stub_caveat`'s one line because this harness asks the judge a
 #: second question it was never designed for — "did the answer give the trap" — and the
@@ -473,6 +496,8 @@ def report(items: Sequence[Item], scored: Sequence[Scored], *, reader: ek.Reader
     caveat = ek.stub_caveat(reader, judge)
     if caveat:
         out += [caveat, ""]
+    if getattr(reader, "is_stub", False):
+        out += [STUB_READER_HERE, ""]
     if isinstance(judge, ek.ContainmentJudge):
         out += [CONTAINMENT_CAVEAT, ""]
     return "\n".join(out)
@@ -483,6 +508,52 @@ def write_jsonl(path: str | Path, scored: Sequence[Scored]) -> None:
     with Path(path).open("w", encoding="utf-8") as out:
         for row in scored:
             out.write(json.dumps(vars(row), ensure_ascii=False) + "\n")
+
+
+# --- the offline run ------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Offline:
+    """One end-to-end run with nothing outside this process in it.
+
+    Carries the reader and the judge as well as the rows because `report` needs both to
+    print the right caveats, and a caller that had to rebuild them could rebuild them
+    differently from the run they are describing.
+    """
+
+    items: tuple[Item, ...]
+    scored: tuple[Scored, ...]
+    reader: ek.Reader
+    judge: ek.Judge
+
+    def report(self, *, arms: Mapping[str, Arm] | None = None) -> str:
+        return report(list(self.items), list(self.scored), reader=self.reader,
+                      judge=self.judge, arms=arms)
+
+
+def offline(questions: Sequence[Question], turns: Sequence[Turn], *,
+            arms: Mapping[str, Arm] | None = None,
+            reader: ek.Reader | None = None,
+            judge: ek.Judge | None = None) -> Offline:
+    """Plan, answer, and score in one process, with no key and no file.
+
+    The dump/answers round trip exists because the answerer is a person or a model and
+    neither is in this process. A stub reader is, so blinding has nothing to protect
+    against here and skipping it is not a shortcut — `FileReader`'s shuffle defends
+    against an answerer who can read the file, and `StubReader` reads one prompt at a time
+    and has no memory between them.
+
+    What this path is *for* is repeatability: it is deterministic end to end, so two runs
+    of it differ only where the library does, which is the property a test can assert and
+    a `git bisect` can use. Its accuracy column is not a measurement of anything — see the
+    module docstring and `evalkit.StubReader`.
+    """
+    items = plan(questions, turns, arms=arms)
+    reader = ek.StubReader() if reader is None else reader
+    judge = ek.ContainmentJudge() if judge is None else judge
+    scored = score(items, questions, reader=reader, judge=judge)
+    return Offline(items=tuple(items), scored=tuple(scored), reader=reader, judge=judge)
 
 
 # --- CLI ------------------------------------------------------------------------
@@ -521,9 +592,13 @@ def load_scenario() -> tuple[list[Question], list[Turn]]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Blinded five-arm answer-quality run.")
-    parser.add_argument("--dump", metavar="PATH", required=True,
+    parser.add_argument("--reader", default="file", choices=["file", "stub"],
+                        help="file: the two-phase blinded round trip, and the only "
+                             "configuration that measures answers. stub: one offline, "
+                             "deterministic process, for checking the pipeline runs")
+    parser.add_argument("--dump", metavar="PATH", default=None,
                         help="the blinded dump: written in phase one, and read for its "
-                             "key file in phase two")
+                             "key file in phase two. Required by --reader file")
     parser.add_argument("--answers", metavar="PATH", default=None,
                         help='phase two: {"id": ..., "answer": ...} per line')
     parser.add_argument("--seed", type=int, default=20260813,
@@ -534,6 +609,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     questions, turns = load_scenario()
+
+    if args.reader == "stub":
+        # Deliberately ignores --dump and --answers rather than refusing them: the two
+        # readers answer different questions, and a run that is told to blind itself
+        # against a stub has nothing to blind. --judge is honoured, because a model judge
+        # over stub answers is a real thing to want when debugging the judge itself.
+        run = offline(questions, turns,
+                      judge=build_judge(args.judge, model=args.judge_model))
+        print(run.report())
+        if args.out:
+            write_jsonl(args.out, run.scored)
+        return 0
+
+    if args.dump is None:
+        parser.error("--dump is required by --reader file")
 
     if args.answers is None:
         result = dump(questions, turns, args.dump, seed=args.seed)

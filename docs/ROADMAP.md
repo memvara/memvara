@@ -382,6 +382,14 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
    because the reader never gave a superseded value. Still missing: a hosted reader, a
    second corpus size to turn the token argument from a slope into a measurement, and any
    comparison against mem0 on answers rather than on architecture.
+
+   What did land is the *guarded* half: `python3 demo/harness.py --reader stub` runs all
+   five arms end to end in one offline, deterministic process, and
+   `test_the_offline_run_is_identical_twice` pins it. That makes the apparatus runnable in
+   CI and a change to it bisectable. It does **not** move this item, and the distinction is
+   the point: a stub reader picks the retrieved line with the most words in common with the
+   question, so its accuracy column measures the corpus and the arms and nothing about
+   answers.
 2. **No external user has run this in production.** 2,734 tests prove the code does what we
    said it does. They prove nothing about what happens on someone else's data.
 3. **The English-centrism is measured, not fixed.** The salience gate and the fast extractor

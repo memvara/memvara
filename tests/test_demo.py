@@ -1296,6 +1296,108 @@ def test_load_scenario_reads_the_real_corpus_and_it_satisfies_the_arms_contract(
     assert len({q.id for q in questions}) == len(questions)
 
 
+# --- the harness: the offline run -------------------------------------------------
+
+
+def test_the_offline_run_answers_and_scores_every_item_with_no_key_and_no_file():
+    """One process, no dump, no answerer, no network. The guarded path.
+
+    The two-phase round trip exists because the answerer is outside this process, and
+    that is exactly what makes it unrunnable in CI: it stops halfway and waits for a
+    person. This path is the one a test, a `git bisect` or an evaluator with no key can
+    actually run, and it has to cover every arm to be worth running at all.
+    """
+    run = hz.offline(QUESTIONS, CONVERSATION)
+    assert {i.arm for i in run.items} == set(bl.ARMS)
+    assert len(run.scored) == len(bl.ARMS) * len(QUESTIONS)
+    assert all(row.answer for row in run.scored), (
+        "an unanswered row here is a stub that abstained on everything, which would "
+        "score every arm at zero and look like a finding"
+    )
+    assert isinstance(run.reader, ek.StubReader) and isinstance(run.judge,
+                                                               ek.ContainmentJudge)
+
+
+def test_the_offline_run_is_identical_twice():
+    """Two runs, one diff. The whole reason this path is worth wiring up.
+
+    A number that moves between two runs of the same code cannot be bisected, and
+    retrieval was in exactly that state until ties stopped breaking on `claim.id` — a
+    fresh `uuid4` per ingest, which made repeated LOCOMO runs disagree by 0.07 points with
+    nothing changed. Asserting on the rendered report rather than on the tallies is
+    deliberate: the report is what a reader compares, so anything that reaches it — an
+    ordering, a caveat, a size column — is inside the guarantee.
+    """
+    first, second = hz.offline(QUESTIONS, CONVERSATION), hz.offline(QUESTIONS,
+                                                                   CONVERSATION)
+    assert first.report() == second.report()
+    assert [vars(r) for r in first.scored] == [vars(r) for r in second.scored]
+
+
+def test_two_ingest_orders_produce_the_same_context():
+    """Same turns, opposite insertion order, byte-identical prompt.
+
+    This is the property `HybridRetriever._rank` breaks ties on `value_key` for, stated
+    where an evaluator would notice it breaking. Claim ids are `uuid4` minted at ingest,
+    so an id tiebreak gives an ordering that is stable within one store and a coin flip
+    across two ingests of identical data — which is precisely the comparison a benchmark
+    and a bisect both make.
+
+    Reversing the *ingest* order rather than the argument to an arm is what makes this
+    test bite: `visible_turns` sorts, so an arm handed a shuffled list has already
+    normalised it and the assertion would hold no matter what the ranking did.
+    """
+    seen = bl.visible_turns(QUESTIONS[0], CONVERSATION)
+    forward, _ = bl.build_memory(seen)
+    backward, _ = bl.build_memory(list(reversed(seen)))
+    assert forward.stats()["claims"] > 1, (
+        "an empty or single-row store ranks identically however it was filled, so the "
+        "assertion below would pass without testing anything"
+    )
+    for q in QUESTIONS:
+        rendered = forward.recall(q.text, k=bl.DEFAULT_K, include_episodes=True)
+        assert rendered == backward.recall(q.text, k=bl.DEFAULT_K, include_episodes=True)
+
+
+def test_the_offline_cli_is_one_command_and_says_what_it_is_not(monkeypatch, capsys):
+    """`--reader stub`, end to end, and both banners it has to carry.
+
+    The stub's accuracy column is a property of the corpus and a bag-of-words matcher, so
+    the run has to disown it in the same breath it prints it. `evalkit.stub_caveat` says
+    that much and ends by naming a flag that exists in `bench/` and not here, which is why
+    the harness appends its own line.
+    """
+    _install_stub_scenario(monkeypatch)
+    assert hz.main(["--reader", "stub"]) == 0
+    printed = capsys.readouterr().out
+    assert "five-arm answer quality, blinded" in printed
+    assert "THE READER IS A STUB" in printed
+    assert "`--reader file`" in printed
+
+
+def test_the_offline_cli_writes_the_per_question_rows_too(tmp_path, monkeypatch, capsys):
+    """`--out` is how a run is audited rather than trusted, on both readers."""
+    _install_stub_scenario(monkeypatch)
+    out = tmp_path / "rows.jsonl"
+    assert hz.main(["--reader", "stub", "--out", str(out)]) == 0
+    capsys.readouterr()
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    assert len(rows) == len(bl.ARMS) * len(QUESTIONS)
+
+
+def test_the_file_reader_still_refuses_to_run_without_a_dump(monkeypatch, capsys):
+    """`--dump` stopped being unconditionally required when the stub reader landed.
+
+    Losing the requirement entirely would make `demo/harness.py` with no arguments write
+    nothing and exit 0, which reads as a completed run.
+    """
+    _install_stub_scenario(monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        hz.main([])
+    assert exc.value.code == 2
+    assert "--dump is required" in capsys.readouterr().err
+
+
 # --- the answer key, checked against the library and no reader --------------------
 #
 # Everything above this line is mechanics on a fixture. These are the claim being made:

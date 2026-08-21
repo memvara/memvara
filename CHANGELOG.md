@@ -51,6 +51,28 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`demo/harness.py --reader stub`**, one offline command that runs all five arms end to
+  end and reports them. The answer-quality apparatus existed and could not be run without
+  a person in the loop: the blinded dump/answers round trip stops halfway by design,
+  because the answerer is outside the process. That made it unprotected — nothing in CI
+  touched it, and a change to the arms or to `recall()`'s rendering would have been found
+  by whoever next ran it by hand, which on the record is once.
+
+  The new path plans, answers with `evalkit.StubReader`, judges with `ContainmentJudge`
+  and prints the same report, in about three seconds and with no key. It is deterministic
+  end to end, which is the property that makes it worth wiring up rather than a
+  convenience: `test_the_offline_run_is_identical_twice` compares two rendered reports, and
+  `test_two_ingest_orders_produce_the_same_context` ingests the same turns in opposite
+  order and compares the rendered prompt — the property `HybridRetriever` breaks score ties
+  on `value_key` for, asserted where an evaluator would notice it breaking.
+
+  **Its accuracy column is not a measurement of answers**, and the run says so twice: the
+  stub picks the retrieved line with the most words in common with the question. The
+  harness appends a line to `evalkit.stub_caveat`'s banner because that banner ends by
+  naming `--reader anthropic`, which is right for the `bench/` runners it was written for
+  and does not exist here — the reader that measures answers is `--reader file`, a person
+  or an agent. `--dump` is now required by `--reader file` rather than unconditionally.
+
 - **`valid_at` on `memory_search`**, so the MCP surface can move the world clock without
   the belief clock. It previously took `as_of` only, which is exact sugar for
   `valid_at=known_at=T` — one instant on both axes — and that made two questions

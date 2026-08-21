@@ -22,6 +22,23 @@ costs nothing and cannot fail; `demo.baselines` and `demo.harness` are imported 
 because they pull in numpy and the bench helpers.
 
 ```bash
+PYTHONPATH=. python3 demo/harness.py --reader stub          # offline, one command
+```
+
+That is the whole run in one process: every arm, every question, judged by
+`ContainmentJudge`, with no key, no file and no answerer. It is deterministic — two runs
+produce the same report, and `test_the_offline_run_is_identical_twice` asserts it — which
+is what makes the apparatus something CI can protect and a bisect can use.
+
+**Its accuracy column is not a measurement of answers.** The reader is
+`evalkit.StubReader`, which picks the line of the retrieved context with the most words in
+common with the question; it cannot reason, cannot read a date and cannot combine two
+turns. What its `correct` and `trapped` columns describe is the corpus and the arms. The
+run prints that above its own table, twice.
+
+Measuring answers needs a reader, and a reader is not in this process:
+
+```bash
 PYTHONPATH=. python3 demo/harness.py --dump runs/demo.jsonl
 # ...answer them into runs/answers.jsonl as {"id": ..., "answer": ...}
 PYTHONPATH=. python3 demo/harness.py --dump runs/demo.jsonl --answers runs/answers.jsonl

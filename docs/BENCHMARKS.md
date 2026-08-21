@@ -251,10 +251,25 @@ single-clock store gives as `trap`, and which clock closed as `closure`, so the 
 failures can be counted apart. The golds were written by hand from the transcript, never
 recorded from a memvara run.
 
+### The offline run, which is one command and repeats exactly
+
+```bash
+PYTHONPATH=. python3 demo/harness.py --reader stub
+```
+
+Every arm, every question, in one process, with no key. It is deterministic, so two runs
+of it differ only where the library does — which is what makes the apparatus something a
+test can hold and a bisect can walk. `test_the_offline_run_is_identical_twice` pins it.
+
+**Read nothing about answer quality out of it.** The reader is `evalkit.StubReader`: it
+returns the line of the retrieved context with the most words in common with the question.
+Its `correct` column is a property of the corpus and the arms, and the run prints two
+banners saying so. The rows below, and the table further down, are the numbers.
+
 ### Context size, which is deterministic and reproducible
 
-`PYTHONPATH=. python3 demo/harness.py --dump runs/demo.jsonl` builds the contexts. This
-table is a property of the corpus and the arms and comes out the same on every run:
+Either command builds the contexts. This table is a property of the corpus and the arms
+and comes out the same on every run:
 
 ```
   arm                 mean chars  max chars  mean ~tokens  items used / turns seen
