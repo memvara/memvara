@@ -135,7 +135,7 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   cloud mode: `erase()` there now raises rather than returning `True` for an erasure it
   could not verify.
 
-- **SQLite schema 7: an `erasures` audit table.** One row per `erase_claim`, and two
+- **SQLite schema 8: an `erasures` audit table.** One row per `erase_claim`, and two
   things about it are the whole design.
 
   It is written **before** the delete and in the same transaction, so a failed audit write

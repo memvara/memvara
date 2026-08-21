@@ -233,7 +233,7 @@ def test_a_failed_audit_write_leaves_the_claim_in_place(mem):
 def test_the_erasures_table_is_schema_seven():
     """A store upgraded from an older file gets an empty table, and an empty table means
     "nothing erased since the upgrade" — never "nothing was ever erased here"."""
-    assert SCHEMA_VERSION == 7
+    assert SCHEMA_VERSION == 8
     store = SQLiteStore(":memory:")
     try:
         assert store.erasure_record("anything") is None

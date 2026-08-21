@@ -7,7 +7,7 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
-## `erase()` can now raise, and the schema is version 7
+## `erase()` can now raise, and the schema is version 8
 
 ### What changed
 
@@ -21,7 +21,7 @@ cannot count rows, so every `erase()` against it now raises instead of returning
 That is the intended behaviour — it was returning `True` for an erasure it could not
 verify — but it is a behaviour change on a working configuration.
 
-The SQLite schema goes 6 → 7, adding an `erasures` audit table. The migration is the
+The SQLite schema goes 7 → 8, adding an `erasures` audit table. The migration is the
 `CREATE TABLE` and nothing else: there is no data to backfill, and an upgraded file starts
 with an empty table, which means "nothing erased since the upgrade" and never "nothing was
 ever erased here". **A file opened by this build cannot be opened by an older one** —
