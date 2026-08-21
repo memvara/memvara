@@ -327,17 +327,37 @@ def _no_match(query: str) -> str:
 
 
 def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
-    as_of = args.get("as_of")
+    as_of, valid_at = args.get("as_of"), args.get("valid_at")
+    # `time_axes` refuses this combination too, with a good message — but as a bare
+    # `ValueError` from inside the library, which reaches the model through `mcp.py`'s
+    # catch-all rather than as an argument error phrased like every other one here.
+    # Refusing at the boundary keeps the wording in the same voice as the numeric bounds.
+    if as_of is not None and valid_at is not None:
+        raise ToolError(
+            "memory_search takes as_of or valid_at, not both. as_of is exactly "
+            "valid_at=known_at=<instant>, so passing both asks two different questions "
+            "at once. Send valid_at alone for what is true of that date as far as we "
+            "know today, which is what a question about the past usually means; send "
+            "as_of alone for what this system believed on that date.")
     results = ctx.memory.search(
         args["query"],
         k=args["k"],
         min_score=args["min_score"],
         memory_types=_memory_types(args.get("memory_types")),
         as_of=_timestamp(as_of, "memory_search.as_of") if as_of is not None else None,
+        valid_at=(_timestamp(valid_at, "memory_search.valid_at")
+                  if valid_at is not None else None),
     )
     if not results:
         return _no_match(args["query"])
-    when = f" as believed on {safe_line(as_of)}" if as_of is not None else ""
+    if as_of is not None:
+        when = f" as believed on {safe_line(as_of)}"
+    elif valid_at is not None:
+        # Named differently on purpose: this is the world clock, and reporting it as
+        # "believed on" would describe the one axis that did *not* move.
+        when = f" as true on {safe_line(valid_at)}, as far as we know today"
+    else:
+        when = ""
     lines = [f"{len(results)} match(es){when}. {STORED_HEADER}"]
     # Metadata first, stored text last: the untrusted span then ends the line and cannot
     # be followed by anything it could impersonate. That settles what comes *after* a
@@ -607,17 +627,17 @@ def _interval_note(claims: Sequence[Claim]) -> str:
                 "true from then, not from now, so memory_recall will not return it "
                 "before that instant and that is this write working rather than "
                 "failing. memory_history shows it immediately, and memory_search with "
-                "as_of set past that instant finds it.")
+                "valid_at set past that instant finds it.")
         elif c.valid_to is not None and c.valid_to <= now:
             lines.append(
                 f"note: stored as a fact that had already stopped being true at "
                 f"{_stamp(c.valid_to)}, so memory_recall will not return it — a "
                 "backfilled interval that is over answers about the period it held, not "
-                "about now. memory_history shows it, by subject and predicate. "
-                "memory_search will not find it at any as_of: as_of moves both clocks to "
-                "one instant, and reaching this claim needs one that is inside a period "
-                "that is already over and also at or after this write, which no instant "
-                "is. Ask memory_history for it rather than searching.")
+                "about now. memory_history shows it, by subject and predicate, and "
+                "memory_search finds it with valid_at set inside that period. as_of will "
+                "not, at any instant: as_of moves both clocks together, and reaching this "
+                "claim needs one that is inside a period already over and also at or "
+                "after this write, which no instant is.")
     return "\n".join(lines)
 
 
@@ -920,10 +940,12 @@ TOOLS: tuple[Tool, ...] = (
             "types. Call this when the memory itself is the subject: the user asks what "
             "you know about them, wants to correct or remove something, asks why you "
             "believe something, or you need an id to pass to memory_why or "
-            "memory_forget. Also the tool for time travel — pass as_of to see what was "
-            "believed at a past instant, which is how you answer 'what did I tell you "
-            "back in March'. To simply answer a question from memory, use memory_recall "
-            "instead: it returns text meant to be read, not inspected."
+            "memory_forget. Also the tool for time travel, on either of two clocks: "
+            "valid_at asks what was true in the world then, judged by everything known "
+            "now ('where did they live in 2019'), and as_of asks what this system "
+            "believed then ('what did I tell you back in March'). Most questions about "
+            "the past are the first one. To simply answer a question from memory, use "
+            "memory_recall instead: it returns text meant to be read, not inspected."
         ),
         properties={
             "query": {"type": "string", "description": "Natural-language search query."},
@@ -938,7 +960,25 @@ TOOLS: tuple[Tool, ...] = (
                 "description": (
                     "ISO-8601 instant, e.g. '2024-03-01T00:00:00Z' or '2024-03-01'. "
                     "Returns what was believed then, including values that have since "
-                    "been superseded. Omit for current belief."
+                    "been superseded. Omit for current belief. This moves both clocks "
+                    "at once, so anything learned after that instant is invisible — "
+                    "including a correction about the very period you are asking about. "
+                    "Use valid_at instead when you want today's best understanding of "
+                    "how things were. Passing both is refused."
+                ),
+            },
+            "valid_at": {
+                "type": "string",
+                "description": (
+                    "ISO-8601 instant, e.g. '2024-03-01T00:00:00Z' or '2024-03-01'. "
+                    "What was true in the world at that instant, judged by everything "
+                    "known now — so a fact recorded last week about last year is "
+                    "included, and a value that has since been corrected is not. This "
+                    "is the one to reach for when the user asks about the past: 'where "
+                    "did they live in 2019' is a question about the world, not about "
+                    "what this system used to think. It is also the only way to find a "
+                    "fact written with true_since and true_until already in the past, "
+                    "which no as_of can reach. Passing both is refused."
                 ),
             },
         },

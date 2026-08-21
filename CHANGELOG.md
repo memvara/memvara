@@ -11,6 +11,35 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`valid_at` on `memory_search`**, so the MCP surface can move the world clock without
+  the belief clock. It previously took `as_of` only, which is exact sugar for
+  `valid_at=known_at=T` — one instant on both axes — and that made two questions
+  unaskable from a tool. The first is the row the axes were split for: a correction
+  learned in August about June is invisible to `as_of=June`, because that call rewinds
+  belief past the correction. The second is worse, because it has no workaround: a fact
+  written now whose valid interval is **already over** needs `recorded_at <= known_at`
+  and `valid_from <= valid_at < valid_to`, and no single instant satisfies both — so a
+  backfilled closed interval was stored correctly, shown by `memory_history`, and
+  reachable by no `memory_search` call at all.
+
+  Additive plumbing rather than new retrieval behaviour: `Memvara.search`,
+  `ScopedMemvara.search`, `HybridRetriever` and `state_predicate` have always threaded
+  the two axes independently, with per-clause axis tags. Only the tool surface collapsed
+  them.
+
+  `known_at` is deliberately **not** exposed. It is the belief clock, the axis a caller
+  can use to misread an audit trail, and audit reads stay a library and REST job — which
+  is what the packaged skill already tells an agent to say. Passing `as_of` and
+  `valid_at` together is refused at the tool boundary rather than by a bare `ValueError`
+  from inside the library, so the message arrives in the same voice as the other argument
+  errors and names which one answers which question.
+
+  The write note for a closed backfilled interval moves with it. It was corrected in the
+  previous release to promise only `memory_history`, because the `as_of` it used to name
+  could not work; it now names `valid_at`, which can. `memvara/skills/memvara/` changes
+  too — it stated the `as_of`-only limitation outright — and so does the vendored copy
+  under `plugin/`, which is asserted byte-identical.
+
 - **A write that embeds to nothing now says so**, via `UnembeddableTextWarning` and the
   `write.embedding_unusable` counter, tagged by script. `HashingEmbedder` — the default
   with no extras — tokenises `[a-z0-9']+` and builds its character n-grams over the
