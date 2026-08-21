@@ -54,6 +54,31 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A write note sent the model to a search that can never succeed.** Storing a fact whose
+  valid interval was already over emitted `memory_history shows it, and so does
+  memory_search with as_of inside that period`. The second half is false at every instant:
+  reaching a closed interval needs a moment *inside* it, reaching a claim recorded just now
+  needs a moment at or after the write, and `as_of` moves both clocks together, so no
+  single value satisfies both. The claim is stored and correct and simply not reachable by
+  search from this surface.
+
+  That made the note worse than saying nothing. `_interval_note` exists because a correct
+  write whose effect is invisible gets "fixed" by a second write with the argument dropped
+  — and this pointed at a query that comes back empty, with the server's authority behind
+  it. It fires on the single-call closed-interval write, which `memory_remember` actively
+  recommends over write-then-`memory_end`, so the recommended path was the one being
+  misinformed. The note now names `memory_history`, says search will not find it, and says
+  why. Exposing the two time axes separately on `memory_search`, which would make the
+  original promise keepable, is #16.
+
+- **`memory_history` printed only one of the two clocks.** Rows carried `recorded_at` and
+  the closing instant, never `valid_from`, under a header that said "oldest first" —
+  ordering by recording time, as every backend's protocol declares. A value backfilled
+  today about two years ago was therefore listed last while being the earliest thing the
+  slot had ever held, with nothing in the output saying so. Rows now carry `true from`, and
+  the header names which clock the order is in. The `ORDER BY` is unchanged: printing the
+  clock the order is *not* in is what makes the order safe to read.
+
 - **Stored text could forge a result row without opening a line.** `_safe_line` flattens
   a claim so it cannot start its own block, and every surface writes its metadata before
   the untrusted span so nothing can *follow* a claim and impersonate this system. Neither

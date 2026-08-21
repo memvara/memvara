@@ -1091,6 +1091,39 @@ def test_history_shows_every_value_a_slot_has_held(server):
     assert "Lisbon" in lines[2] and "live" in lines[2]
 
 
+def test_history_says_when_each_value_held_and_not_only_when_it_was_written(server):
+    """Two clocks, one of which never reached the output at all.
+
+    Rows come back ordered by `recorded_at` — a protocol promise every backend declares —
+    and the header says "oldest first". A value backfilled today about two years ago is
+    therefore listed *last* while being the earliest thing the slot has ever held. With
+    only `recorded_at` on the row there was nothing in the rendered text that said so, so
+    a model asked "where did they live first" reads the order, answers Berlin, and is
+    wrong with the evidence apparently in front of it.
+
+    The ordering is not the defect and is deliberately left alone. Printing the clock the
+    order is *not* in is what makes the order safe to read.
+    """
+    now = utcnow()
+    began = now - timedelta(days=900)
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Berlin"})
+    text(server, "memory_remember", {
+        "predicate": "lives_in", "object": "Lisbon",
+        "true_since": stamp(began), "true_until": stamp(now - timedelta(days=500))})
+
+    body = text(server, "memory_history", {"predicate": "lives_in"})
+    rows = [line for line in body.splitlines() if line.startswith(("1. [", "2. ["))]
+    assert len(rows) == 2
+
+    berlin, lisbon = rows[0], rows[1]
+    assert "Berlin" in berlin and "Lisbon" in lisbon, "recorded last is still listed last"
+    assert f"true from {began:%Y-%m-%d}" in lisbon, "the row carries the other clock"
+    assert f"true from {now:%Y-%m-%d}" in berlin
+    assert "different order" in body, "the header warns that the two can disagree"
+
+
 def test_history_renders_a_fact_that_ended_without_being_superseded(server):
     """`ended` and `retired` are different states and the timeline must not conflate them."""
     server._ctx.memory.remember("user", "on_leave", "yes",
@@ -2008,6 +2041,46 @@ def test_a_future_dated_write_is_stored_and_says_it_is_not_in_force_yet(server):
     assert "Berlin" in text(server, "memory_search", {
         "query": "where do they live",
         "as_of": (starts + timedelta(days=1)).isoformat().replace("+00:00", "Z")})
+
+
+def test_a_closed_backfilled_write_is_sent_somewhere_that_can_actually_answer(server):
+    """The note on this write named a `memory_search` call that succeeds at no instant.
+
+    Reaching a claim whose interval is already over needs an instant *inside* that
+    interval. Reaching one recorded a moment ago needs an instant at or after the write.
+    `as_of` moves both clocks together, so one instant has to satisfy both and none does —
+    the claim is stored, correct, and unreachable from this surface by search.
+
+    That made the note a worse failure than silence. `_interval_note` exists because a
+    correct write whose effect is invisible gets "fixed" by a second write with the
+    argument dropped; sending the model to a query that returns nothing is the same dead
+    end, now with the server's authority behind it.
+
+    Asserted against the store, not the sentence: the promise the note makes is exercised,
+    and so is the one it no longer makes.
+    """
+    now = utcnow()
+    began, over = now - timedelta(days=400), now - timedelta(days=200)
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+
+    body = text(server, "memory_remember", {
+        "predicate": "lives_in", "object": "Berlin",
+        "true_since": stamp(began), "true_until": stamp(over)})
+    assert "had already stopped being true" in body
+
+    # What it now promises.
+    assert "memory_history shows it" in body
+    assert "Berlin" in text(server, "memory_history", {"predicate": "lives_in"})
+
+    # What it used to promise, at every instant a caller could reasonably try.
+    assert "memory_search will not find it at any as_of" in body
+    for label, when in (("inside the interval", began + timedelta(days=100)),
+                        ("at the start", began),
+                        ("at the close", over),
+                        ("after it, before now", over + timedelta(days=100)),
+                        ("now", now)):
+        found = text(server, "memory_search", {"query": "Berlin", "as_of": stamp(when)})
+        assert "No stored memory matched" in found, f"as_of {label} reached it after all"
 
 
 @pytest.mark.parametrize("arguments, expected", [

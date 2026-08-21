@@ -7,6 +7,58 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `memory_history` rows gained a `true from` field
+
+### What changed
+
+Each row used to read:
+
+```
+1. [id=cl_… recorded 2026-08-21 07:33Z ended 2026-08-21 09:00Z] user lives in Berlin
+```
+
+and now reads:
+
+```
+1. [id=cl_… recorded 2026-08-21 07:33Z true from 2024-01-01 00:00Z ended …] user lives in Berlin
+```
+
+The header changed with it, to name which clock "oldest first" refers to. Row order is
+**unchanged** — still `recorded_at` ascending, which is the declared protocol behaviour
+for every backend.
+
+### How the mistake shows up
+
+Only for something parsing the rendered text. A regex anchored on `recorded <stamp>]`
+— that is, expecting the state word or the closing bracket immediately after the recorded
+instant — no longer matches, because `true from <stamp>` now sits between them. A fixed
+field-count split on the bracketed span comes out two tokens longer.
+
+Nothing about the ordering or the set of rows moved, so a test asserting *which* values
+come back, or in what order, is unaffected.
+
+### What to grep for
+
+```
+memory_history
+recorded 
+```
+
+...in anything that consumes tool output rather than the library.
+
+### What to replace it with
+
+Read the claim rather than the render: `history()` on the library returns `Claim` objects
+with `recorded_at`, `valid_from`, `valid_to` and `invalidated_at` as fields, which is
+where anything programmatic should have been reading them from. The rendered row is for a
+model to read.
+
+If you were reconstructing chronology from row order, that was never reliable and is the
+reason for this change — a backfilled value is listed last while being the earliest. Sort
+on `valid_from` if you want the world's order.
+
+---
+
 ## Square brackets in stored text now render as `［` and `］`
 
 ### What changed
