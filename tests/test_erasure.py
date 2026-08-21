@@ -19,6 +19,7 @@ Three properties, and each test here defends one:
    back out of.
 """
 
+import sqlite3
 from datetime import datetime, timezone
 
 import pytest
@@ -111,7 +112,7 @@ def test_a_store_that_cannot_be_asked_yields_unproven_rather_than_proven():
         proof = mem.prove_erased(claim_id)
         assert proof.proven is False
         assert proof.residue == {}, "no counts is not the same as counts of zero"
-        assert "cannot re-query" in proof.reason
+        assert "does not implement residue()" in proof.reason
 
 
 def test_erase_refuses_to_report_success_it_cannot_support():
@@ -259,3 +260,154 @@ def test_the_proof_carries_the_record_so_a_caller_need_not_go_looking(mem):
     assert proof.record is not None and proof.record["claim_id"] == claim_id
     assert "gone" in repr(proof)
     assert "UNPROVEN" in repr(ErasureProof(claim_id="x", proven=False, reason="why"))
+
+
+# --- failing closed, in every shape a store can fail in -----------------------
+
+
+@pytest.mark.parametrize("residue, why", [
+    (lambda self, cid: {}, "counted nothing"),
+    (lambda self, cid: None, "counted nothing"),
+    (lambda self, cid: "all gone", "counted nothing"),
+    (lambda self, cid: {"claims": -1}, "not a row count"),
+    (lambda self, cid: {"claims": "0"}, "not a row count"),
+])
+def test_a_residue_that_did_not_really_count_is_not_a_proof(residue, why):
+    """The empty dict is the case this method exists to refuse, and the one the first
+    version of it got wrong.
+
+    `ErasureProof` says residue is "empty when nothing could be counted, which is a
+    different thing from every count being zero" — and the code then treated them the
+    same, because `all(n == 0 for n in {})` is vacuously true. A store that counts
+    nothing, counts the wrong type, or hands back something that is not a mapping must
+    not receive a certificate for a claim that is still sitting there.
+    """
+    store = type("Odd", (SQLiteStore,), {"residue": residue})(":memory:")
+    with Memvara(store=store, llm=NullLLM(), embedder=HashingEmbedder(dim=64),
+                 user="alice") as mem:
+        claim_id = stored(mem)
+        proof = mem.prove_erased(claim_id)
+        assert proof.proven is False, "the claim is still stored"
+        assert why in proof.reason
+
+
+def test_a_residue_that_raises_anything_at_all_fails_closed():
+    """Not just `NotImplementedError`. A locked database raises `OperationalError` and a
+    third-party store can raise whatever it likes; narrowing the catch to the one type we
+    thought of is how a check that did not run gets reported as a check that passed."""
+    class Locked(SQLiteStore):
+        def residue(self, claim_id):
+            raise sqlite3.OperationalError("database is locked")
+
+    with Memvara(store=Locked(":memory:"), llm=NullLLM(),
+                 embedder=HashingEmbedder(dim=64), user="alice") as mem:
+        claim_id = stored(mem)
+        assert mem.prove_erased(claim_id).proven is False
+        with pytest.raises(ErasureIncomplete):
+            mem.erase(claim_id)
+
+
+def test_an_unreadable_audit_trail_does_not_make_the_rows_less_gone():
+    """`record` is a lookup, not evidence. Failing to read it must not flip a proof
+    either way — and it used to raise straight out of a method whose whole job is to
+    answer."""
+    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64), user="alice") as mem:
+        claim_id = stored(mem)
+        mem.erase(claim_id)
+        mem.store._db.execute("DROP TABLE erasures")
+        proof = mem.prove_erased(claim_id)
+        assert proof.proven is True and proof.record is None
+
+
+def test_the_shipped_stores_residue_names_every_table_a_claim_can_survive_in():
+    """The one thing the generic contract cannot check.
+
+    `Store.residue` lets an implementation name its own tables, so a store that counts
+    only `claims` and forgets the text index gets a passing certificate — nothing here
+    can tell an honest key set from a short one. That boundary is documented on the
+    protocol; what is pinned here is the *shipped* store's set, so it cannot silently
+    shrink.
+    """
+    store = SQLiteStore(":memory:")
+    try:
+        assert set(store.residue("cl_anything")) == {
+            "claims", "claims_fts", "embeddings", "claim_sources"}
+    finally:
+        store.close()
+
+
+# --- the audit row cannot outlive a failed delete -----------------------------
+
+
+def test_a_delete_that_fails_after_the_audit_row_leaves_no_audit_row(tmp_path):
+    """The converse of audit-before-delete, and the half that was missing.
+
+    Damage the text index the way a truncated restore does, so the delete raises *after*
+    the record is written. Before the fix the row sat pending in the open transaction and
+    the next commit from anywhere — an ordinary `remember()`, or the standard FTS5 repair
+    — made it durable: a trail asserting an erasure that never happened, about a claim
+    still readable.
+    """
+    path = tmp_path / "m.db"
+    mem = Memvara(str(path), llm=NullLLM(), embedder=HashingEmbedder(dim=64), user="d")
+    try:
+        claim_id = stored(mem)
+        mem.store._db.execute("DELETE FROM claims_fts_data WHERE id > 1")
+        with pytest.raises(sqlite3.Error):
+            mem.erase(claim_id)
+        # The repair a real operator runs next, which is what used to commit the lie.
+        mem.store._db.execute("INSERT INTO claims_fts(claims_fts) VALUES('rebuild')")
+        mem.store._db.commit()
+
+        assert mem.get(claim_id) is not None, "nothing was erased"
+        assert mem.store.erasure_record(claim_id) is None, (
+            "an audit row survived a delete that never happened"
+        )
+    finally:
+        mem.close()
+
+
+def test_an_erasure_inside_an_abandoned_batch_still_rolls_back(tmp_path):
+    """Why the compensation is a DELETE and not a SAVEPOINT.
+
+    `RELEASE` commits a savepoint's work into the enclosing transaction, so wrapping the
+    erase in one broke `batch()` — an erasure inside an abandoned batch stopped rolling
+    back. Undoing the single row this method added leaves every transaction boundary
+    where the caller put it.
+    """
+    path = tmp_path / "m.db"
+    mem = Memvara(str(path), llm=NullLLM(), embedder=HashingEmbedder(dim=64), user="d")
+    try:
+        claim_id = stored(mem)
+        with pytest.raises(RuntimeError):
+            with mem.store.batch():
+                mem.store.erase_claim(claim_id)
+                raise RuntimeError("abandoned")
+        assert mem.get(claim_id) is not None
+        assert mem.store.erasure_record(claim_id) is None
+    finally:
+        mem.close()
+
+
+def test_two_erasures_of_one_id_are_two_records(tmp_path):
+    """A claim can be erased, restored from a backup, and erased again. Keyed on the id
+    alone the second silently overwrote the first, so an append-only trail lost exactly
+    the entry somebody would go looking for."""
+    path = tmp_path / "m.db"
+    mem = Memvara(str(path), llm=NullLLM(), embedder=HashingEmbedder(dim=64), user="d")
+    try:
+        claim = mem.remember("Dara Wray", "lives_in", "Lisbon").added[0]
+        mem.erase(claim.id)
+        first = mem.store.erasure_record(claim.id)
+        mem.store.put_claim(claim)                    # restored from a backup
+        mem.erase(claim.id)
+
+        rows = mem.store._db.execute(
+            "SELECT count(*) FROM erasures WHERE claim_id=?", (claim.id,)).fetchone()[0]
+        assert rows == 2, "the first erasure was overwritten"
+        assert mem.store.erasure_record(claim.id)["erased_at"] >= first["erased_at"], (
+            "the lookup must return the most recent of the two"
+        )
+    finally:
+        mem.close()
+

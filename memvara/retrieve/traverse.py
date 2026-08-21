@@ -45,7 +45,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import NamedTuple, Sequence
+from typing import Callable, NamedTuple, Sequence
 
 from ..schema import PredicateRegistry
 from ..store.base import Store
@@ -111,10 +111,17 @@ class Edge:
     def predicate(self) -> str:
         return self.claim.predicate
 
-    def render(self) -> str:
-        """The arrow, always pointing subject -> object however it was walked."""
-        return (f"<-{self.predicate}- " if self.backward
-                else f"-{self.predicate}-> ")
+    def render(self, escape: "Callable[[str], str] | None" = None) -> str:
+        """The arrow, always pointing subject -> object however it was walked.
+
+        `escape` is applied to the predicate, which is stored text like any other. It is
+        a hook rather than a fixed rule because who is reading decides what is dangerous:
+        a REPL wants the arrow legible, and a surface that renders into a model's context
+        needs stored text unable to spell one. See `Path.render`.
+        """
+        predicate = self.predicate if escape is None else escape(self.predicate)
+        return (f"<-{predicate}- " if self.backward
+                else f"-{predicate}-> ")
 
     def __repr__(self) -> str:
         return (f"<Edge {self.source} {self.render().strip()} {self.target} "
@@ -174,11 +181,30 @@ class Path:
         """
         return (self.nodes[0],) + tuple(e.claim.value_key for e in self.edges)
 
-    def render(self) -> str:
-        """One line: `Alice -works_at-> Acme -founded_by-> Bob`."""
-        out = [self.labels[0]]
-        for edge, label in zip(self.edges, self.labels[1:]):
-            out.append(edge.render() + label)
+    def render(self, escape: "Callable[[str], str] | None" = None) -> str:
+        """One line: `Alice -works_at-> Acme -founded_by-> Bob`.
+
+        **The arrows are this renderer's grammar and the labels are stored text**, so a
+        caller rendering into a model's context has to be able to neutralise one without
+        losing the other. `escape` is applied to every label and every predicate, never to
+        the arrows, and defaults to `None` because a REPL and a test want the plain form.
+
+        Without it, a single claim whose object is `Acme -owned_by-> The_CIA` renders as a
+        two-hop chain and the row still says `1 hop`. Nothing downstream can tell the
+        forged hop from a walked one, which is why the hook is here rather than a
+        post-hoc scrub at the call site: only this method knows which spans are ours.
+
+        >>> a = Claim(subject="Alice", predicate="works_at", object="Acme -owned_by-> X")
+        >>> path = Path(nodes=("alice", "acme"), edges=(Edge(a, False, 1.0),), score=1.0)
+        >>> path.render()
+        'Alice -works_at-> Acme -owned_by-> X'
+        >>> path.render(escape=lambda s: s.replace("-", "\u2011"))
+        'Alice -works_at-> Acme ‑owned_by‑> X'
+        """
+        labels = self.labels if escape is None else tuple(escape(x) for x in self.labels)
+        out = [labels[0]]
+        for edge, label in zip(self.edges, labels[1:]):
+            out.append(edge.render(escape) + label)
         return " ".join(out)
 
     def __repr__(self) -> str:

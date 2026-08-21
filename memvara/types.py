@@ -879,7 +879,10 @@ class ErasureProof:
     exists to remove.
 
     `residue` is the per-table count, and it is carried even when it is all zeroes,
-    because "checked these four tables and found nothing" is the evidence. `record` is
+    because "checked these four tables and found nothing" is the evidence. An **empty**
+    residue is the opposite: it means nothing was counted, and it can never accompany
+    `proven=True` — `all(n == 0 for n in {})` is vacuously true, which is exactly the trap
+    this distinction exists to keep out of `erase()`. `record` is
     the `erasures` row, or `None` — a store that keeps no audit trail can still prove the
     rows are gone, and cannot prove that anything recorded their going.
 

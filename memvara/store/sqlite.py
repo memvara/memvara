@@ -296,12 +296,17 @@ CREATE TABLE IF NOT EXISTS entities (
 -- defends against is a delete that no record was ever written for, which is the failure
 -- an unaudited `erase()` had.
 CREATE TABLE IF NOT EXISTS erasures (
-    claim_id   TEXT PRIMARY KEY,
+    claim_id   TEXT NOT NULL,
     tenant     TEXT NOT NULL,
     scope      TEXT NOT NULL,
     erased_at  REAL NOT NULL,
     sources    INTEGER NOT NULL DEFAULT 0,
-    counts     TEXT NOT NULL DEFAULT '{}'
+    counts     TEXT NOT NULL DEFAULT '{}',
+    -- Keyed on the pair, not on the claim. An id can be erased, restored from a backup,
+    -- and erased again, and those are two events: keying on `claim_id` alone made the
+    -- second silently overwrite the first, so an append-only trail lost exactly the entry
+    -- somebody would go looking for. `erasure_record` returns the most recent.
+    PRIMARY KEY (claim_id, erased_at)
 );
 CREATE INDEX IF NOT EXISTS erasures_tenant ON erasures(tenant, erased_at);
 
@@ -2223,47 +2228,78 @@ class SQLiteStore:
                 return {"claims": 0, "episodes": 0, "embeddings": 0, "entities": 0}
             tenant: str = row["tenant"]
             cited = json.loads(row["sources"]) if sources else []
-            # Audit first, delete second, one transaction. The ordering is the guarantee:
-            # if this INSERT raises — disk full, table missing, a constraint — the
-            # exception propagates out of the `with` and `_maybe_commit` is never
-            # reached, so the claim is still there. The other order would let a delete
-            # succeed and its record fail, which is exactly the state that cannot be
-            # detected afterwards. Counts are patched in below, once they are known.
-            self._db.execute(
-                "INSERT OR REPLACE INTO erasures "
-                "(claim_id, tenant, scope, erased_at, sources, counts) "
-                "VALUES (?,?,?,?,?,?)",
-                (claim_id, tenant,
-                 Scope(tenant, row["usr"], row["agent"], row["session"]).key(),
-                 utcnow().timestamp(),
-                 len(json.loads(row["sources"])), "{}"))
-            # Before the claim row goes, and not as housekeeping afterwards: these rows
-            # are what `_orphan` reads three lines below to decide whether the turns this
-            # claim cited still have a citer. Left behind, the claim being erased votes
-            # to keep its own source turn alive — and `sources=True` quietly stops
-            # erasing anything.
-            self._db.execute("DELETE FROM claim_sources WHERE claim_id=?", (claim_id,))
-            # Nothing to test on the existence flag: the row was there one statement ago,
-            # on this connection, under this lock.
-            _, vectors = self._erase_row("claims", "claims_fts", _CLAIM_VECS, claim_id)
-            # Orphan-checked after the claim is gone, so it cannot count itself a citer.
-            episodes = 0
-            for episode_id in cited:
-                if self._orphan(episode_id):
-                    gone, vecs = self._erase_row(
-                        "episodes", "episodes_fts", _EPISODE_VECS, episode_id)
-                    episodes += gone
-                    vectors += vecs
-            # Same reason as `purge`: the entity row holds the subject's and object's
-            # first-seen spelling verbatim, so leaving it behind erases the claim and
-            # keeps the text. Reference-counted, because one entity is usually shared.
-            entities = self._gc_entities(tenant)
-            # `embeddings` is the vector total across both tables, as in `purge`: it
-            # counts what was erased, not which table it sat in.
-            counts = {"claims": 1, "episodes": episodes, "embeddings": vectors,
-                      "entities": entities}
-            self._db.execute("UPDATE erasures SET counts=? WHERE claim_id=?",
-                             (json.dumps(counts, sort_keys=True), claim_id))
+            # **The audit row and the delete stand or fall together.** Writing the
+            # record first is what makes "gone without a record" unreachable; this
+            # handler is what makes the converse unreachable too. Without it an exception
+            # after the INSERT — a corrupt index, a disk error, a constraint — left the
+            # row pending in the open transaction, and the *next commit from anywhere*
+            # made it durable: a trail asserting an erasure that never happened, about a
+            # claim still readable, with nothing but an empty `counts` to hint at it.
+            #
+            # A compensating DELETE rather than a SAVEPOINT, and that is not a stylistic
+            # choice. `RELEASE` commits the savepoint's work into the enclosing
+            # transaction, so wrapping this in one breaks `batch()`: an erasure inside an
+            # abandoned batch stopped rolling back, and `test_erase_rolls_back_with_its_
+            # batch` caught it. Undoing the single row this method added leaves every
+            # transaction boundary exactly where the caller put it.
+            #
+            # `BaseException` because a KeyboardInterrupt mid-erase must not commit a lie
+            # either.
+            try:
+                # Audit first, delete second, one transaction. The ordering is the guarantee:
+                # if this INSERT raises — disk full, table missing, a constraint — the
+                # exception propagates out of the `with` and `_maybe_commit` is never
+                # reached, so the claim is still there. The other order would let a delete
+                # succeed and its record fail, which is exactly the state that cannot be
+                # detected afterwards. Counts are patched in below, once they are known.
+                stamp = utcnow().timestamp()
+                self._db.execute(
+                    "INSERT OR REPLACE INTO erasures "
+                    "(claim_id, tenant, scope, erased_at, sources, counts) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (claim_id, tenant,
+                     Scope(tenant, row["usr"], row["agent"], row["session"]).key(),
+                     stamp, len(json.loads(row["sources"])), "{}"))
+                # Before the claim row goes, and not as housekeeping afterwards: these rows
+                # are what `_orphan` reads three lines below to decide whether the turns this
+                # claim cited still have a citer. Left behind, the claim being erased votes
+                # to keep its own source turn alive — and `sources=True` quietly stops
+                # erasing anything.
+                self._db.execute("DELETE FROM claim_sources WHERE claim_id=?", (claim_id,))
+                # Nothing to test on the existence flag: the row was there one statement ago,
+                # on this connection, under this lock.
+                _, vectors = self._erase_row("claims", "claims_fts", _CLAIM_VECS, claim_id)
+                # Orphan-checked after the claim is gone, so it cannot count itself a citer.
+                episodes = 0
+                for episode_id in cited:
+                    if self._orphan(episode_id):
+                        gone, vecs = self._erase_row(
+                            "episodes", "episodes_fts", _EPISODE_VECS, episode_id)
+                        episodes += gone
+                        vectors += vecs
+                # Same reason as `purge`: the entity row holds the subject's and object's
+                # first-seen spelling verbatim, so leaving it behind erases the claim and
+                # keeps the text. Reference-counted, because one entity is usually shared.
+                entities = self._gc_entities(tenant)
+                # `embeddings` is the vector total across both tables, as in `purge`: it
+                # counts what was erased, not which table it sat in.
+                counts = {"claims": 1, "episodes": episodes, "embeddings": vectors,
+                          "entities": entities}
+                self._db.execute(
+                    "UPDATE erasures SET counts=? WHERE claim_id=? AND erased_at=?",
+                    (json.dumps(counts, sort_keys=True), claim_id, stamp))
+            except BaseException:
+                try:
+                    self._db.execute(
+                        "DELETE FROM erasures WHERE claim_id=? AND erased_at=?",
+                        (claim_id, stamp))
+                except sqlite3.Error:
+                    # The cleanup failed too, which usually means the same damage that
+                    # broke the delete. Swallowed so the original exception is what the
+                    # caller sees: it names the actual fault, and a secondary error from
+                    # the compensation would bury it.
+                    pass
+                raise
             self._maybe_commit()
         return counts
 
@@ -2313,7 +2349,8 @@ class SQLiteStore:
         with self._lock:
             row = self._db.execute(
                 "SELECT claim_id, tenant, scope, erased_at, sources, counts "
-                "FROM erasures WHERE claim_id=?", (claim_id,)).fetchone()
+                "FROM erasures WHERE claim_id=? ORDER BY erased_at DESC LIMIT 1",
+                (claim_id,)).fetchone()
         if row is None:
             return None
         return {"claim_id": row["claim_id"], "tenant": row["tenant"],

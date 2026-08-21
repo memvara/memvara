@@ -899,20 +899,53 @@ def _walk_axes(args: dict[str, Any], tool: str) -> tuple[Any, Any]:
             _timestamp(valid_at, f"{tool}.valid_at") if valid_at is not None else None)
 
 
+#: What a stored span may not contain once this server has an arrow grammar of its own.
+#:
+#: `safe_line` folds `[` and `]` because every surface here marks its metadata with them.
+#: Traversal added a second piece of grammar — `-predicate->` and `<-predicate-` — and a
+#: label carrying one forges a hop. One claim whose object is `Acme -owned_by-> The_CIA`
+#: rendered as a two-hop chain while the row still said `1 hop`, and `memory_history`
+#: confirmed the second hop had never been recorded.
+#:
+#: Folded to the fullwidth forms for the same reasons the brackets are: length-preserving,
+#: still legible (`a ＜ b` reads fine), and impossible to mistake for the delimiter a
+#: reader is looking for.
+#:
+#: **Not added to `Memvara._FORGEABLE`**, which is deliberate. That set is the characters
+#: *every* surface has to answer for, and `<` is structural only where arrows are — here.
+#: Folding it globally would rewrite `a > b` in a claim that `memory_search` renders, for
+#: no gain on a surface with no arrows in it.
+_ARROWHEADS = str.maketrans({"<": "＜", ">": "＞"})
+
+
+def _safe_span(text: str) -> str:
+    """One label or predicate from a walked path, safe to sit beside our own arrows."""
+    return safe_line(text).translate(_ARROWHEADS)
+
+
 def _render_paths(paths: Sequence[Any], header: str) -> str:
-    """One path per line, through `Path.render()`, with the score and hop count.
+    """One path per line, through `Path.render()`, with the score, hops and claim ids.
 
     `Path.render()` rather than a second renderer here: it is what `neighborhood()` and
-    `paths_between()` already print, so a chain reads the same in a tool result as it
-    does in a REPL, and there is one place for the arrow convention to live.
+    `paths_between()` already print, so a chain reads the same in a tool result as it does
+    in a REPL, and there is one place for the arrow convention to live. It takes an escape
+    hook precisely so that place can stay single while this surface hardens the parts of a
+    line that came out of the store.
 
-    Every label on a path is a stored string, so every line goes through `safe_line` —
-    the whole rendered path at once rather than label by label, because the arrows
-    between them are ours and the injection risk is a label that impersonates a row.
+    **Neutralised span by span, not line by line.** The first version of this flattened the
+    whole rendered path at once, which folds brackets inside labels and leaves the arrows
+    between them — including arrows that arrived *inside* a label. See `_ARROWHEADS`.
+
+    **The ids are what make the chain checkable.** Both tool descriptions promise a
+    derivation the caller can verify, and a row with no ids cannot be taken to
+    `memory_why` — which is exactly the affordance a forged hop needs to be caught by.
+    They are the claims in walk order, so the nth id is the nth arrow.
     """
     lines = [header]
-    lines += [f"{i}. [{p.hops} hop(s) strength={p.score:.3f}] {safe_line(p.render())}"
-              for i, p in enumerate(paths, 1)]
+    for i, path in enumerate(paths, 1):
+        ids = ",".join(claim.id for claim in path.claims)
+        lines.append(f"{i}. [{path.hops} hop(s) strength={path.score:.3f} ids={ids}] "
+                     f"{path.render(escape=_safe_span)}")
     return "\n".join(lines)
 
 

@@ -680,6 +680,14 @@ class Store(Protocol):
         counted here: it is supposed to survive, and including it would make every proof
         fail.
 
+        **The key set is trusted, and that is the limit of the guarantee.** Only the
+        implementation knows which of its tables hold a claim's content, so a store that
+        counts `claims` and forgets its text index gets a passing proof and nothing
+        generic can tell the short key set from an honest one. `prove_erased` refuses an
+        empty or malformed result, which catches a `residue` that did not really run; it
+        cannot catch one that ran over too few tables. An implementor adding a table that
+        can hold claim content has to add it here in the same commit.
+
         Optional. A store without it cannot be asked to prove an erasure, and
         `prove_erased` returns `proven=False` naming that rather than assuming success —
         see `types.ErasureProof`.

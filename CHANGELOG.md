@@ -94,7 +94,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   Read-only, so both survive `MEMVARA_READ_ONLY`, which is the deployment that most wants
   them: a store nobody can write to is exactly the one worth asking about connections.
   Rendered through `Path.render()`, the same arrows `neighborhood()` prints in a REPL, so
-  there is one place for that convention to live.
+  there is one place for that convention to live. `render()` takes an `escape` hook and
+  the tool layer passes one, because a rendered walk is the first surface here that puts
+  *stored text* either side of a delimiter **it** supplies: a claim whose object is
+  `Acme -owned_by-> The CIA` otherwise prints a second hop that nobody walked, and the
+  line it forges is well-formed. The hook escapes each label and predicate separately, so
+  the arrows the walk really took are still arrows and the ones a row was carrying are
+  not. Every row also names the claim ids it is made of, which is what lets a reader check
+  a hop against `memory_why` rather than take the rendering's word for it.
 
   **Neither takes a scope argument, and a test asserts they never will.**
   `memvara/server/config.py` is explicit that reading scope from tool arguments hands the
@@ -128,10 +135,24 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   provenance edges. `prove_erased` returns an `ErasureProof` built from it, `erase()` calls
   it after the delete, and raises `ErasureIncomplete` if anything survived.
 
-  It **fails closed**. A store with no `residue`, or one whose `residue` is present and
-  raises — `RemoteStore`, the shape a `getattr` guard cannot see — yields `proven=False`
-  with a reason naming it, never `proven=True`. Unproven and proven-gone are different
-  answers and only one of them is an erasure certificate. This is a behaviour change on
+  It **fails closed**, and against the shape of the answer rather than against a list of
+  known failures. A store with no `residue`; one whose `residue` raises anything at all —
+  `RemoteStore`, the shape a `getattr` guard cannot see; one that returns something that
+  is not a mapping; and one that returns an *empty* mapping all yield `proven=False` with
+  a reason naming what happened. The empty case is the one worth stating outright:
+  `all(n == 0 for n in {})` is `True`, so a store that counted nothing would otherwise
+  have produced the strongest possible certificate from the weakest possible evidence.
+  Unproven and proven-gone are different answers and only one of them is an erasure
+  certificate.
+
+  **What it cannot check, said plainly here because the docstring says it too.** A store
+  that returns well-formed zero counts for the *wrong* tables gets a passing proof. The
+  protocol lets each store name the tables its own schema keeps content in — that is what
+  makes `residue()` implementable by a backend this repository has never seen — and
+  nothing generic can tell a short key set from an honest one. So the trust boundary is
+  the store, and it is pinned where it can be: a test asserts the shipped SQLite store
+  counts all four of its tables, and `Store.residue`'s docstring tells an implementer that
+  a forgotten table is a passing proof rather than a missing one. This is a behaviour change on
   cloud mode: `erase()` there now raises rather than returning `True` for an erasure it
   could not verify.
 
@@ -143,6 +164,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   delete succeed and its record fail, which is precisely the state nothing downstream can
   detect. `tests/test_erasure.py` asserts it by dropping the table and watching the claim
   survive.
+
+  That ordering opens the mirror-image hole, and it is closed by hand: if the *delete*
+  then fails, the audit row is a record of an erasure that never happened, which is a
+  worse lie than no record at all — it reads as proof to exactly the audit that would
+  otherwise catch the survival. `erase_claim` compensates by deleting its own row before
+  re-raising. Deliberately **not** a `SAVEPOINT`: `RELEASE` commits the savepoint's work
+  into the enclosing transaction, so an erasure inside an abandoned `batch()` stopped
+  rolling back with it. The suite caught that; the comment in the code says so, because
+  the savepoint is the version that looks tidier.
+
+  Keyed on `(claim_id, erased_at)` rather than on the claim, so the trail is append-only.
+  An id can be erased, restored from a backup and erased again — two events, and a table
+  keyed on the id alone would let the second overwrite the record of the first.
 
   It holds **nothing the erased fact could be read back out of** — `claim_id`, `tenant`,
   `scope`, `erased_at`, how many source turns were cited, and the per-table counts. No

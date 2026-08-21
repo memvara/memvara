@@ -1392,39 +1392,58 @@ class Memvara:
         >>> proof.proven, proof.surviving
         (True, {})
         """
-        residue = getattr(self.store, "residue", None)
-        unsupported = ErasureProof(
-            claim_id=claim_id, proven=False,
-            reason=(f"{type(self.store).__name__} cannot re-query for residue; an "
-                    "erasure this store cannot check is unproven, which is not the same "
-                    "as unsuccessful"),
-        )
-        if residue is None:
-            return unsupported
+        def unproven(reason: str, residue: dict[str, int] | None = None) -> ErasureProof:
+            return ErasureProof(claim_id=claim_id, proven=False,
+                                residue=residue or {}, reason=reason)
+
+        query = getattr(self.store, "residue", None)
+        if query is None:
+            return unproven(f"{type(self.store).__name__} does not implement residue(); "
+                            "an erasure this store cannot check is unproven, which is "
+                            "not the same as unsuccessful")
         try:
-            counts: dict[str, int] = residue(claim_id)
-        except NotImplementedError:
-            # Present on the object and raising, which is `RemoteStore` — the shape a
-            # `getattr` guard cannot see. Caught rather than guarded, and failing closed:
-            # the one answer this must never give is `proven=True` for a check that did
-            # not run.
-            return unsupported
+            counts = query(claim_id)
+        except Exception as exc:
+            # Deliberately every exception, not just `NotImplementedError`. This method's
+            # whole job is to answer "is it really gone", and a store that raised while
+            # being asked has not answered — `RemoteStore` raises `NotImplementedError`,
+            # a locked database raises `OperationalError`, and a third-party store can
+            # raise anything at all. Narrowing this to the one type we happened to think
+            # of is how a check that did not run gets reported as a check that passed.
+            return unproven(f"{type(self.store).__name__}.residue() raised "
+                            f"{type(exc).__name__}: {exc}")
+
+        # **The empty dict is the case this method exists to refuse.** `ErasureProof`
+        # says so in as many words — residue is "empty when nothing could be counted,
+        # which is a different thing from every count being zero" — and the first version
+        # of this code then treated them identically, because `all(n == 0 for n in {})`
+        # is vacuously true. A store that counts nothing, or counts the wrong tables, or
+        # returns something that is not a mapping at all, must not receive a certificate.
+        if not isinstance(counts, Mapping) or not counts:
+            return unproven(f"{type(self.store).__name__}.residue() counted nothing "
+                            f"({counts!r}); a proof needs tables it actually looked in")
+        if not all(isinstance(n, int) and n >= 0 for n in counts.values()):
+            return unproven(f"{type(self.store).__name__}.residue() returned a count "
+                            f"that is not a row count ({counts!r})", dict(counts))
+
         lookup = getattr(self.store, "erasure_record", None)
         record: dict[str, Any] | None = None
         if lookup is not None:
             try:
                 record = lookup(claim_id)
-            except NotImplementedError:
-                # A missing audit trail does not make the rows less gone. `record=None`
-                # already means "no record here", which covers this.
+            except Exception:
+                # A missing or unreachable audit trail does not make the rows less gone,
+                # and `record=None` already means "no record here". Unlike `residue`,
+                # failing to read this cannot turn an unproven erasure into a proven one.
                 record = None
+
         alive = {table: n for table, n in counts.items() if n}
         if alive:
             return ErasureProof(
-                claim_id=claim_id, proven=False, residue=counts, record=record,
+                claim_id=claim_id, proven=False, residue=dict(counts), record=record,
                 reason="rows survived the delete in " + ", ".join(sorted(alive)),
             )
-        return ErasureProof(claim_id=claim_id, proven=True, residue=counts,
+        return ErasureProof(claim_id=claim_id, proven=True, residue=dict(counts),
                             record=record)
 
     def count(self, *, tenant=None, user=None, agent=None, session=None,
