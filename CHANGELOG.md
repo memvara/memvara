@@ -201,6 +201,40 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `scoring.relevance()` gains `graph`/`w_graph`; `GraphTraverser` gains `spread()`, a
   keys-only entry that does not re-fold what the write path already folded.
 
+  **The leg is gated on `states`, because it can only ever produce live rows.**
+  `Store.adjacent` walks the live edges at the pinned instant and takes no `states`
+  argument — a graph of retracted edges is not a graph, since a retraction says the
+  connection was never there. So a search asking only for `ended` or `retired` must not
+  run it, and it was running: on a store where one retired claim had a live neighbour,
+  `search(states=["retired"])` returned that neighbour ranked *above* the retired row,
+  because the seeds come from the lookup legs and the retired row was a good seed. An
+  audit query answered with current facts, silently. Gated rather than post-filtered: a
+  post-filter would test `claim.state`, which is the state **now**, and at a historical
+  `known_at` the lookup legs correctly return rows that were live then — filtering those
+  would fix this leg by breaking time travel in the other two. A search naming `live`
+  among several states still gets the leg.
+
+  **One stored claim is one path, whichever end was seeded.** `Path.signature` starts at
+  `nodes[0]`, so a walk reaching Acme from Alice and one reaching Alice from Acme signed
+  differently while being one row read from two ends. `seed_keys` emits *both* ends of
+  each top-ranked claim, so for the head of the list the pair was guaranteed rather than
+  possible, and the second reading spent one of the caller's `k` on a claim already in
+  the answer — one slot in six at `k=6`, measured on seeds shaped the way `seed_keys`
+  emits them. `Path.undirected` is the mirror-insensitive identity and collection keeps
+  one per value of it, lexicographically, so which direction survives is a property of
+  the content rather than of seed order.
+
+  The dedup is at collection and deliberately **not** in the frontier: the two readings
+  extend to different places — `alice→acme` grows towards Acme's neighbours and
+  `acme→alice` towards Alice's — so deduping earlier would make the walk cheaper by
+  making it reach less.
+
+  Two smaller ones. `graph_seeds=0` now means no seeds rather than one: the cap is
+  checked after a key is inserted, because the loop has to insert before it can know it
+  is full, so zero read as "stop once you have at least none". And a third-party
+  `Store.get_claims` that returns an id nobody asked for costs the graph leg a seed
+  instead of taking the whole search down with a `KeyError`.
+
   **`w_graph` ships at 0.0, and the measured table is in `docs/BENCHMARKS.md`.** Neither
   public retrieval benchmark can see the leg: it walks claims, and both runs are episode
   retrieval — LOCOMO extracts 0 claims from 5,882 turns and LongMemEval 78 from 10,866,

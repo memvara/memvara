@@ -59,7 +59,17 @@ def seed_keys(ranked: Sequence[tuple[Claim, float]], limit: int) -> tuple[str, .
     ('bob', 'acme', 'alice')
     >>> seed_keys([(c("Alice", ""), 0.02)], 5)
     ('alice',)
+
+    A limit of zero is no seeds, not one. The cap is checked after a key is inserted —
+    the loop has to insert before it can know whether it is full — so zero read as "stop
+    once you have at least none" and returned the first key anyway. `graph_seeds=0` is
+    the spelling for "seed nothing", and it was quietly the same as `graph_seeds=1`.
+
+    >>> seed_keys([(c("Alice", "Acme"), 0.02)], 0)
+    ()
     """
+    if limit <= 0:
+        return ()
     # `value_key` and not `id`: the id tier of the fused order is a `uuid4`, so two
     # stores holding identical data would seed identical queries from different entities
     # and the graph leg alone would make retrieval unreproducible across ingests.

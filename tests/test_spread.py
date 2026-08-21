@@ -171,12 +171,19 @@ def test_an_edge_between_two_seeds_is_the_answer_rather_than_a_cycle(store):
     written = edge(store, "Alice", "reports_to", "Dana")
     walker = GraphTraverser(store, PredicateRegistry())
     paths = walker.spread(("alice", "dana"), SCOPE)
-    assert sorted(p.render() for p in paths) == ["Alice -reports_to-> Dana",
-                                                 "Dana <-reports_to- Alice"]
-    # Two seeds on one edge produce it once from each end, which is the honest answer to
-    # "what is around each of these entities" and is not double-counting downstream:
-    # `rank_paths` keys on the claim, so the leg ranks one row.
+    assert [p.render() for p in paths] == ["Alice -reports_to-> Dana"]
     assert [cid for cid, _ in rank_paths(paths)] == [written.id]
+    # Both ends still walk it; only one reading is *collected*. This assertion used to
+    # expect the pair, on the reasoning that returning it twice is not double-counting
+    # downstream — `rank_paths` keys on the claim, so the leg still ranks one row. That
+    # was true and remains true, and it was the wrong place to look: collection happens
+    # before `[:k]`, so the second reading spent one of the caller's slots on a claim
+    # already in the answer. Measured on seeds shaped the way `seed_keys` emits them —
+    # both ends of each top-ranked claim — that is one slot in six at `k=6`.
+    #
+    # Which reading survives is content-determined (`Path.undirected` takes the
+    # lexicographically smaller), never seed order, so two stores holding the same data
+    # return the same direction.
 
     # And the single-entity entry point still refuses the same edge, walked from both of
     # one entity's names.
@@ -323,3 +330,93 @@ def test_a_candidate_set_of_retractions_alone_seeds_nothing(store):
                           recorded_at=T0, valid_from=T0, text="lisbon"))
     assert reader.search("lisbon", SCOPE, k=5) is not None
     assert walked == []
+
+
+# --- what the graph leg must not answer, and what it must not spend twice -----
+
+
+def test_a_retired_only_search_gets_no_live_rows_from_the_walk(mem):
+    """The graph leg took no `states` argument, so an audit query got live facts back.
+
+    `Store.adjacent` walks the live edges at the pinned instant and has no way to be
+    asked for anything else — a graph of retracted edges is not a graph, since a
+    retraction says the connection was never there. So *everything* this leg can produce
+    belongs to the live population, and it was contributing to searches that had asked
+    for the retired one.
+
+    Not a near-miss: the seeds come from the lookup legs, the retired row is a perfectly
+    good seed, and its live neighbour came back ranked **above** it. The caller asked
+    what we had stopped believing and was told, first, something we still believe.
+    """
+    mem.remember("Alice", "works_at", "Globex", recorded_at=T0)
+    mem.forget("Alice", "works_at")
+
+    retired = mem.search("Alice Globex", k=10, states=["retired"])
+    assert retired, "the retired row itself should still be found by the lookup legs"
+    assert all(r.claim.state == "retired" for r in retired), (
+        f"live rows leaked into a retired-only search: "
+        f"{[(r.claim.subject, r.claim.predicate, r.claim.state) for r in retired]}"
+    )
+    assert all(r.explain.graph_rank is None for r in retired), (
+        "the leg should be gated off, not filtered afterwards"
+    )
+
+
+def test_the_walk_still_runs_when_live_is_one_of_several_wanted_states(mem):
+    """Gated on what the leg *can* return, not on whether the caller wanted only that.
+
+    A live row is an admissible answer to `states=["live", "retired"]`, so widening the
+    population must not switch the leg off — otherwise the fix for the leak above would
+    have cost every audit-plus-current query its third leg.
+    """
+    both = mem.search("who does Alice report to", k=10, states=["live", "retired"])
+    assert any(r.explain.graph_rank is not None for r in both)
+
+
+def test_one_stored_claim_is_one_path_however_many_ends_seeded_it(mem):
+    """`spread` seeds both ends of each top-ranked claim, so the mirror is guaranteed.
+
+    `signature` starts at `nodes[0]`, so `alice -works_at-> acme` and
+    `acme <-works_at- alice` signed differently while being one row read from two ends.
+    Both survived to the answer and both spent one of the caller's `k`.
+    """
+    paths = mem.traverser.spread(("alice", "dana"), mem.default_scope, depth=2, k=20)
+    sets = [frozenset(c.id for c in p.claims) for p in paths]
+    assert len(sets) == len(set(sets)), (
+        "the same claims came back twice:\n  " + "\n  ".join(p.render() for p in paths)
+    )
+
+
+def test_dropping_the_mirror_does_not_cost_the_walk_its_reach(mem):
+    """The reason the dedup is at collection and not in the frontier.
+
+    Both readings of an edge extend to different places — `alice→dana` grows towards
+    Dana's neighbours and `dana→alice` towards Alice's — so a walk that kept one
+    direction would be cheaper by reaching less. Acme is two hops from Alice *through*
+    Dana, and Bruno is three; if the mirror were dropped before `frontier` this is the
+    assertion that would fail.
+    """
+    paths = mem.traverser.spread(("alice", "dana"), mem.default_scope, depth=3, k=50)
+    reached = {node for p in paths for node in p.nodes}
+    assert {"acme", "tallinn", "bruno"} <= reached, f"walk reached only {sorted(reached)}"
+
+
+def test_a_store_that_hydrates_more_than_it_was_asked_for_costs_a_seed_not_a_search(mem):
+    """`get_claims` is on the protocol, so a third-party store fills it in.
+
+    One that returns an id nobody asked for used to take retrieval down with a
+    `KeyError` from the seed list, which is a store being loose with a return value
+    turning into the caller's search failing.
+    """
+    real = mem.store.get_claims
+
+    def generous(ids):
+        out = dict(real(ids))
+        out["cl_never_requested"] = claim("Ghost", "Nowhere")
+        return out
+
+    mem.store.get_claims = generous
+    try:
+        assert mem.search("who does Alice report to", k=5)
+    finally:
+        mem.store.get_claims = real

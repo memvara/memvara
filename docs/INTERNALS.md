@@ -446,8 +446,18 @@ The leg must:
   `Store.adjacent`, and frontier width is what a hop costs;
 - **pass `valid_at`/`known_at` through unchanged**, so the walk pins the pair `search()`
   was asked about (invariant 6) rather than reading the clock again;
+- **run only when `live` is among the wanted `states`.** `Store.adjacent` walks the live
+  edges at the pinned instant and cannot be asked for anything else, so every row this
+  leg can produce belongs to the live population. Gated, not post-filtered: a post-filter
+  would have to test `claim.state`, which is the state *now*, and at a historical
+  `known_at` the lookup legs correctly return rows that were live then;
 - **take the best path's score per claim**, never the sum — a path score is a relevance,
   and summing would rank a hub on nine weak chains above a claim on one strong one;
+- **collect one path per *undirected* identity** (`Path.undirected`), before `k` is
+  spent rather than after. `seed_keys` emits both ends of each top-ranked claim, so the
+  same row read from two ends is the normal case for the head of the list. The dedup is
+  at collection only — the frontier keeps both readings, because they extend to
+  different places;
 - **abstain, not vote zero, when it did not run.** `_Legs.graph_active` is the same
   distinction the other two legs carry, and it is what keeps a two-leg query from being
   scored as though a third leg had rejected everything;

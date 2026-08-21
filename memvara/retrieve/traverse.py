@@ -181,6 +181,31 @@ class Path:
         """
         return (self.nodes[0],) + tuple(e.claim.value_key for e in self.edges)
 
+    @property
+    def undirected(self) -> tuple[str, ...]:
+        """The same identity with the direction taken out: this path or its mirror.
+
+        `signature` starts at `nodes[0]`, so a walk that reaches Acme from Alice and one
+        that reaches Alice from Acme sign differently while being the same single stored
+        claim read from opposite ends. `neighborhood` never sees the pair, because its
+        seeds are one entity's aliases and arrival at a seed is blocked; `spread` seeds
+        *distinct* entities, and `seed_keys` emits both ends of every top-ranked claim, so
+        for the head of the fused list the pair is guaranteed rather than possible.
+
+        Read as the lexicographically smaller of the two readings, so which one survives
+        is a property of the content and not of the order the seeds happened to arrive in.
+
+        >>> a = Claim(subject="Alice", predicate="works_at", object="Acme")
+        >>> fwd = Path(nodes=("alice", "acme"), edges=(Edge(a, False, 1.0),), score=1.0)
+        >>> rev = Path(nodes=("acme", "alice"), edges=(Edge(a, True, 1.0),), score=1.0)
+        >>> fwd.signature == rev.signature
+        False
+        >>> fwd.undirected == rev.undirected
+        True
+        """
+        keys = tuple(e.claim.value_key for e in self.edges)
+        return min((self.nodes[0],) + keys, (self.nodes[-1],) + keys[::-1])
+
     def render(self, escape: "Callable[[str], str] | None" = None) -> str:
         """One line: `Alice -works_at-> Acme -founded_by-> Bob`.
 
@@ -596,7 +621,25 @@ class GraphTraverser:
                 # Short paths are still *expanded* when `min_hops` excludes them — they
                 # are the only way to reach the deeper ones — they are simply not
                 # collected as answers.
-                for path in ranked[:k] if hops >= min_hops else ():
+                #
+                # One per *undirected* identity, and the dedup happens before `[:k]`
+                # rather than after: a mirrored pair is one stored claim, and letting
+                # both through spends two of the caller's `k` on it. With `spread`'s
+                # seeds — both ends of each top-ranked claim — that is not an edge case,
+                # it is what the head of the list looks like every time.
+                #
+                # Only for collection. `ranked` itself keeps both directions, because
+                # `frontier` is taken from it and the two readings extend to genuinely
+                # different places: `alice→acme` grows towards Acme's neighbours and
+                # `acme→alice` towards Alice's. Deduping before the frontier would make
+                # this cheaper by making the walk reach less.
+                distinct: list[Path] = []
+                seen: set[tuple[str, ...]] = set()
+                for path in ranked:
+                    if path.undirected not in seen:
+                        seen.add(path.undirected)
+                        distinct.append(path)
+                for path in distinct[:k] if hops >= min_hops else ():
                     found.setdefault(path.signature, path)
             else:
                 # Arrival is terminal. A path that has reached the target and keeps

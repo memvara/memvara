@@ -656,7 +656,7 @@ class HybridRetriever:
                         if (c := self.store.get_claim(cid)) is not None})
 
         graph_hits, walked = self._graph_search(
-            claims, fused, scope, limit, valid_at, known_at, weights.graph)
+            claims, fused, scope, limit, valid_at, known_at, states, weights.graph)
         if graph_hits:
             # Re-fused rather than merged, because RRF reads positions and the positions
             # in the two-leg fusion are not the positions in the three-leg one. Doing it
@@ -709,6 +709,7 @@ class HybridRetriever:
         limit: int,
         valid_at: datetime | None,
         known_at: datetime | None,
+        states: Sequence[str],
         w_graph: float,
     ) -> tuple[list[tuple[str, float]], dict[str, Claim]]:
         """The third leg: a bounded walk out of the entities the first two just named.
@@ -726,17 +727,42 @@ class HybridRetriever:
           rather than guarded, warned once, and remembered for the life of this retriever.
         * no seeds — every candidate's ends folded to nothing, which is possible only for
           a candidate set made entirely of retractions.
+        * `states` does not include `live` — see below. Nothing is warned; the leg has
+          nothing admissible to contribute rather than something it failed to fetch.
 
         `known_at`/`valid_at` are passed through unchanged, so the walk is evaluated at
         the same pair `search()` was asked about and pins it once before its first hop
         (`GraphTraverser._pin`). An axis left unset is filled by the walk's own clock read
         — the same treatment the store gives the two lookup legs, and the reason a
         three-hop chain here cannot be assembled out of two different afternoons.
+
+        **`states` gates the leg rather than filtering its output.** `Store.adjacent` walks
+        the live edges at the pinned instant and takes no `states` argument — a graph of
+        retracted edges is not a graph, since the whole point of a retraction is that the
+        connection was never there. So every row this leg can produce belongs to the live
+        population, and a search asking only for `ended` or `retired` must not receive
+        them. It was receiving them: `search(states=["retired"])` on a store where one
+        retracted claim had a live neighbour returned that neighbour, ranked *above* the
+        retired row the caller actually asked for, because the seeds come from the lookup
+        legs and the retired row was a perfectly good seed. An audit query answered with
+        live facts is the failure mode that matters here, and it is silent.
+
+        Gating rather than post-filtering, because a post-filter would have to test
+        `claim.state`, which is the claim's state **now** — and at a historical `known_at`
+        the lookup legs correctly return rows that were live then and are retired today.
+        Filtering those out would fix this leg by breaking time travel in the other two.
         """
         if w_graph <= 0.0 or self.traverser is None or self._graph_unsupported:
             return [], {}
-        seeds = seed_keys([(claim, fused[cid]) for cid, claim in claims.items()],
-                          self.graph_seeds)
+        if "live" not in states:
+            return [], {}
+        # Driven from `fused`, which is the authority on scores, rather than from what
+        # the hydration returned. `get_claims` is on the Store protocol and a third-party
+        # one that returns an id nobody asked for would otherwise take retrieval down
+        # with a `KeyError` — a store being loose with its return value should cost the
+        # graph leg a seed, not cost the caller their search.
+        seeds = seed_keys([(claims[cid], score) for cid, score in fused.items()
+                           if cid in claims], self.graph_seeds)
         if not seeds:
             return [], {}
         try:
