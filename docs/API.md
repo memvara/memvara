@@ -1,0 +1,196 @@
+# API
+
+The whole surface, in the order you meet it. `docs/DESIGN.md` explains why it is
+shaped this way; this file is the reference.
+
+## API
+
+Every method takes `tenant=`/`user=`/`agent=`/`session=` to override the default scope,
+omitted below for readability.
+
+```python
+mem = Memvara(path=":memory:", *, store=, embedder=, llm=, registry=, telemetry=,
+             redactor=, tenant=, user=, agent=, session=, reembed=False, **tuning)
+
+# write
+mem.add(messages, *, role="user", ts=None)        -> WriteReceipt
+mem.remember(subject, predicate, obj, *, valid_from=, valid_to=, recorded_at=, sources=,
+             text=, confidence=, memory_type=, polarity=, extractor=, **meta)
+                                                  -> WriteReceipt
+mem.supersede(old_claim_id, new_claim, *, at=, sources=)   -> WriteReceipt
+
+# retire — reversible, keeps history
+mem.forget(subject, predicate, *, at=None)        -> list[Claim]    # a whole slot
+mem.delete(claim_id, *, at=None)                  -> bool           # one claim
+
+# erase — irreversible, removes the text itself
+mem.erase(claim_id, *, sources=False)             -> bool           # one claim
+mem.purge()                                       -> dict[str, int] # a whole scope
+mem.reset()                                       -> dict[str, int] # scope + schema
+#   `store.erase_claim` returns purge's four counts instead; `mem.erase` stays a bool
+#   so that `if mem.erase(id):` keeps working — a dict of zeroes is truthy
+
+# read
+# every read below takes the same three time keywords, written `T=` here for width:
+#   valid_at=  the world clock   known_at=  the belief clock   as_of=  both at once
+# the first three also take `states=`, any non-empty subset of ("live", "ended",
+# "retired"), defaulting to ["live"]; `include_invalidated=` is its two-valued alias.
+mem.search(query, *, k=10, min_score=0.0, T=None, memory_types=None,
+           states=None, include_invalidated=None, include_episodes=False)
+                                                  -> list[Retrieved]
+mem.recall(query, *, k=8, min_score=0.0, header=None, include_episodes=False,
+           episode_header=None, include_history=False, history_header=None,
+           budget=None, counter=<internal>, with_ids=False)
+                                                  -> str | RecallResult
+#   no `T=`, no `states=`, no `include_invalidated=` — deliberately; see recall() below
+#   budget= caps the block by size rather than by count: `k` bounds how many notes,
+#     this bounds how much text. Notes drop whole and the block says how many did not
+#     fit. `counter=` is any `(str) -> int`; pass `tiktoken`'s or Anthropic's to
+#     measure exactly. The default is deliberately not exported — it is a length
+#     heuristic that under-counts CJK, so a budget it meets can still overflow the
+#     real one, and code that reaches for it by name is usually code that wanted a
+#     real tokenizer.
+#   with_ids=True returns RecallResult(text, claim_ids, dropped) instead of `str`.
+#     `text` is byte-identical to what you would have got; `claim_ids` is in render
+#     order, 1:1 with the notes, so note n is claim_ids[n - 1]. Live facts only —
+#     an episode has no claim id, and a past value is not the source of a
+#     present-tense answer.
+mem.get(claim_id)                                 -> Claim | None
+mem.get_all(*, T=None, states=None, include_invalidated=None)  -> list[Claim]
+mem.count(*, T=None, states=None, include_invalidated=None)    -> int
+mem.history(subject, predicate, *, T=None)        -> list[Claim]    # timeline of one slot
+mem.why(claim_id, *, T=None)                      -> Provenance | None
+mem.produced(episode_id, *, T=None)               -> list[Claim]    # why(), backwards
+mem.since(when)                                   -> Delta          # what changed since
+#   Delta(since, added, gone): believed now and not then, believed then and not now.
+#   A supersession lands in **both** halves, which is the point — an agent coming back
+#   to a delta that showed only the arrival would hold the replaced value as well.
+#   Both clocks pin to `when`: the belief clock alone leaves `valid_at` at now, so a
+#   claim whose world-interval has since closed never enters the "then" set at all.
+
+# traverse — the claims are a graph; walk it
+mem.neighborhood(entity, *, depth=2, k=10, min_hops=1, predicates=None,
+                 T=None, min_score=0.0)                    -> list[Path]
+mem.paths_between(source, target, *, depth=3, k=3, predicates=None,
+                  T=None, min_score=0.0)                   -> list[Path]
+
+# maintenance
+mem.consolidate()                                 -> dict[str, int]
+mem.reembed(embedder=None)                        -> int            # after a model change
+mem.stats()                                       -> dict[str, int]
+#   episodes, claims, live_claims, ended_claims, invalidated, embeddings
+#   these do not sum — see "Counting claims" above; `claims` is the only total
+mem.scope(user="bob")                             -> ScopedMemvara   # same API, scope bound
+mem.close()                                       -> None           # or use as a context manager
+```
+
+`add()` takes a string, a list of strings, pre-built `Episode`s, or OpenAI/mem0-style
+`{"role": ..., "content": ...}` transcripts, so an existing agent loop can pass its
+messages straight through.
+
+`recall()` is the one you put in a prompt. It returns a framed block that labels itself as
+retrieved data rather than instructions, and flattens each claim to a single line — a
+memory whose text contains newlines and a fake section header cannot forge prompt
+structure around itself. Its signature is explicit rather than `**kwargs` for the same
+reason: the time and state keywords are not reachable from here, and `include_history=True`
+is the one bounded exception — see
+[What a prompt block may carry from the past](#what-a-prompt-block-may-carry-from-the-past).
+
+### Two meanings of "delete", kept apart
+
+`forget`/`delete` **retire**: the claim stops answering present-tense queries, and
+`history()` and `as_of` still see it. That is the right default for correcting a belief,
+and the wrong answer to "delete my data" — the text stays readable, which does not satisfy
+a GDPR Article 17 request.
+
+`erase`/`purge` **erase**, irreversibly, including everything derived from the text:
+the claim, the FTS entry (which stores the tokens directly), the embedding (which leaks
+content under inversion) and — with `sources=True`, or always for `purge` — the source
+turns. `erase(sources=True)` only removes turns that no surviving claim still cites,
+because one turn can source several claims.
+
+### Scoping
+
+`tenant > user > agent > session`, with inheritance. A query at session scope also sees
+that user's durable memory, but never a sibling session's scratch space or another user's
+anything. mem0's flat `user_id`/`agent_id`/`run_id` triple can't express that.
+
+```python
+bob = mem.scope(user="bob")     # the whole API, with the scope bound
+bob.add("I live in Oslo")
+```
+
+Scope filters fail **closed**: a scope that resolves to nothing matches nothing, rather
+than degrading into an unfiltered query across every user.
+
+### Swapping backends
+
+Everything is a protocol:
+
+```python
+Memvara(embedder=MyEmbedder(),      # anything with .dim and .encode(texts) -> (n, dim)
+       llm=AnthropicLLM(),         # or your own .extract() / .classify_predicate()
+       store=MyPgVectorStore())    # see memvara/store/base.py
+```
+
+Defaults are `HashingEmbedder` + `NullLLM` + `SQLiteStore` — so `Memvara()` constructs and
+works with zero configuration. To use a real model:
+
+```python
+from memvara import AnthropicLLM, Memvara          # pip install 'memvara[anthropic]'
+mem = Memvara("memory.db", llm=AnthropicLLM(model="claude-opus-5"))
+
+from memvara import OpenAILLM                     # pip install 'memvara[openai]'
+mem = Memvara("memory.db", llm=OpenAILLM(model="gpt-4.1"))
+```
+
+Both are lazy attributes: naming one does not import its SDK, so the default offline
+install stays a two-package install (`memvara` and `numpy`, verified in CI). Each backend
+is transport and response-shape only — every rule about what counts as a valid claim is
+shared in `memvara/llm/_shape.py`, so the same turn produces the same claim regardless of
+which model wrote it.
+
+### Concurrency
+
+The library is synchronous, and reads no longer queue behind writes. Read statements use a
+per-thread connection, and the slow half of a write — the near-duplicate encode and the
+model call — runs with no transaction open, so the store's write lock is held for the
+database work and nothing else.
+
+One reader thread against a 20,000-claim consolidation sweep:
+
+| | before | after |
+|---|---:|---:|
+| reads completed during the sweep | 1,470 | **13,728** |
+| p95 | 3.44 ms | **0.31 ms** |
+| p99 | 30.4 ms | **2.01 ms** |
+
+Idle read latency is unchanged (12.7 µs → 13.0 µs), so this was not taken from the write
+path. The sweep itself goes 2.2 s → 2.8 s *with a reader beside it*, because the reader is
+now doing about 9× the work instead of waiting.
+
+For an asyncio application, `AsyncMemvara` wraps each method over `asyncio.to_thread`:
+
+```python
+from memvara import AsyncMemvara, Memvara
+
+mem = AsyncMemvara(Memvara("memory.db", user="alice"))
+await mem.add("I live in Berlin")
+[r.text for r in await mem.search("where do they live?")]
+
+bob = mem.scope(user="bob")          # -> AsyncScopedMemvara, the same API, scope bound
+await bob.add("I live in Oslo")
+```
+
+It wraps an `Memvara` rather than constructing one, so the sync object stays available for
+setup and for the calls that have no async form.
+
+`scope()` is the one method that is not a coroutine — it binds four strings and touches
+no store — and it is the shape a server wants: one handle per request, with the four
+scope keywords written once instead of on every call.
+
+It is a thread-pool wrapper, not an async rewrite, and says so: SQLite has no async
+driver worth the name, and the work here is CPU and disk rather than network.
+
+---
+

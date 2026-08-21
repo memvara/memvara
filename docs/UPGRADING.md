@@ -96,7 +96,7 @@ MEMVARA_MODE=local
 
 `--mode local` (or `MEMVARA_MODE=local` on the server itself) is fully supported
 regardless of which extras are installed and does not require a network call at any
-point. See [README.md § Open core, and exactly where the line is](../README.md#open-core-and-exactly-where-the-line-is)
+point. See [docs/OPEN-CORE.md](OPEN-CORE.md)
 for what the `cloud` extra does and does not add.
 
 ---
