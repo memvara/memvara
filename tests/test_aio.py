@@ -282,6 +282,21 @@ def test_maintenance_is_awaitable(amem):
     run(main())
 
 
+def test_proving_an_erasure_is_awaitable_on_both_views(amem):
+    """It re-queries the disk, so it is exactly the kind of call that must not run on
+    the loop thread — and it is on the scoped view too, taking no scope, because a
+    scoped view has no narrower version of a row count."""
+    async def main():
+        receipt = await amem.remember("user", "lives_in", "Berlin")
+        claim_id = receipt.added[0].id
+        assert not (await amem.prove_erased(claim_id)).proven
+        assert await amem.erase(claim_id)
+        assert (await amem.prove_erased(claim_id)).proven
+        assert (await amem.scope(user="alice").prove_erased(claim_id)).proven
+
+    run(main())
+
+
 def test_close_is_awaitable_because_it_commits():
     memvara = Memvara(embedder=HashingEmbedder(dim=32), llm=NullLLM(), user="alice")
 

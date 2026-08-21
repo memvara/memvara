@@ -149,8 +149,11 @@ list.
   `search()` can: the caller no longer has to know the seed entity. **It ships at
   `w_graph=0.0`** — the measured table is in `docs/BENCHMARKS.md`, and the short version
   is that neither public retrieval benchmark can see it, because both run the offline
-  write path over conversational data it extracts almost nothing from. Every guardrail
-  held exactly; the only measured gain is on a synthetic multi-hop workload.
+  write path over conversational data it extracts almost nothing from. The only measured
+  gain is on a synthetic multi-hop workload, and on LongMemEval — where the widened write
+  path leaves 81 claims across 940 sessions — the leg costs 1.6 points of
+  single-session-user R@12. A third leg with almost nothing to walk puts a real zero on
+  every candidate it did not reach.
 - **Query-intent gating** — `retrieve/intent.py`, deterministic and model-free, four
   classes matching the categories LOCOMO reports separately. It is what makes the graph
   leg affordable to switch on: `lookup` and `temporal` queries skip the walk before the

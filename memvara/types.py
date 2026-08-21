@@ -850,6 +850,62 @@ class Explanation:
         return f"<Explanation {self.summary()}>"
 
 
+@dataclass(frozen=True, slots=True)
+class ErasureProof:
+    """Whether one claim is actually gone, checked against the disk rather than inferred.
+
+    `Memvara.erase()` used to report success from a return code: the store said it had
+    deleted a row, and that was the whole of the evidence. That proves the code took the
+    branch it thought it took, which is the same statement the return value already made.
+    A proof has to be able to *disagree* with the delete, so this is built from a physical
+    re-query — `Store.residue`, four `SELECT COUNT(*)`s over the tables a claim's content
+    can survive in.
+
+    **`proven` is false whenever it could not be established**, never merely when
+    something survived. A store with no `residue` method yields `proven=False` with a
+    reason naming it, and `erase()` refuses rather than reporting a success it cannot
+    support. Unproven and proven-gone are different answers and only one of them is an
+    erasure certificate; rendering the first as the second is the failure this type
+    exists to remove.
+
+    `residue` is the per-table count, and it is carried even when it is all zeroes,
+    because "checked these four tables and found nothing" is the evidence. `record` is
+    the `erasures` row, or `None` — a store that keeps no audit trail can still prove the
+    rows are gone, and cannot prove that anything recorded their going.
+
+    >>> ErasureProof(claim_id="c1", proven=True, residue={"claims": 0}).surviving
+    {}
+    >>> gone_wrong = ErasureProof(claim_id="c1", proven=False,
+    ...                           residue={"claims": 0, "claims_fts": 1},
+    ...                           reason="rows survived the delete")
+    >>> gone_wrong.surviving
+    {'claims_fts': 1}
+    """
+
+    claim_id: str
+    #: True only when a physical re-query ran *and* every table came back empty.
+    proven: bool
+    #: Per-table surviving row counts, from `Store.residue`. Empty when nothing could be
+    #: counted, which is a different thing from every count being zero.
+    residue: dict[str, int] = field(default_factory=dict)
+    #: Why `proven` is false, in one sentence. Empty when it is true.
+    reason: str = ""
+    #: The audit row this erasure wrote, if the store keeps one. See
+    #: `SQLiteStore.erasure_record`; `None` also means "this store has no such table",
+    #: so it is never on its own evidence that nothing happened.
+    record: dict[str, Any] | None = None
+
+    @property
+    def surviving(self) -> dict[str, int]:
+        """The tables that still hold something. Empty is the answer you want."""
+        return {table: n for table, n in self.residue.items() if n}
+
+    def __repr__(self) -> str:
+        if self.proven:
+            return f"<ErasureProof {self.claim_id} gone {sorted(self.residue)}>"
+        return f"<ErasureProof {self.claim_id} UNPROVEN {self.reason!r}>"
+
+
 @dataclass(slots=True)
 class Result:
     """A retrieved claim with its score and the reason it was retrieved.

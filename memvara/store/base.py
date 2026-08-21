@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from contextlib import AbstractContextManager
-from typing import (TYPE_CHECKING, Collection, Iterable, Literal, Protocol, Sequence,
+from typing import (TYPE_CHECKING, Any, Collection, Iterable, Literal, Protocol, Sequence,
                     runtime_checkable)
 
 import numpy as np
@@ -631,6 +631,45 @@ class Store(Protocol):
         resolves. `cited=True` erases anyway and is what a retention obligation over
         transcripts needs; the dangling provenance is then a deliberate, recorded
         consequence rather than an accident.
+        """
+        ...
+
+    def residue(self, claim_id: str) -> dict[str, int]:
+        """How many rows still mention `claim_id`, per table. A **live query**, always.
+
+        The evidence behind `Memvara.prove_erased`, and it is worth being exact about
+        what makes it evidence: `erase_claim` already reports what it believes it
+        deleted, and a proof assembled from that number proves only that the code took
+        the branch it thought it took. This one goes back to the storage and counts what
+        is there *now*, so it is able to disagree with the delete. A re-hash of what was
+        returned, or a cached count, would not be.
+
+        Keys are the implementation's own tables — `SQLiteStore` returns `claims`,
+        `claims_fts`, `embeddings` and `claim_sources` — because "which tables can this
+        claim's content survive in" is a property of the backend and not of the protocol.
+        Every value zero is the answer that proves an erasure; any non-zero means it did
+        not complete, whatever `erase_claim` said.
+
+        An erasure audit table, if the implementation keeps one, is deliberately **not**
+        counted here: it is supposed to survive, and including it would make every proof
+        fail.
+
+        Optional. A store without it cannot be asked to prove an erasure, and
+        `prove_erased` returns `proven=False` naming that rather than assuming success —
+        see `types.ErasureProof`.
+        """
+        ...
+
+    def erasure_record(self, claim_id: str) -> dict[str, Any] | None:
+        """What this store recorded about erasing `claim_id`, or `None`.
+
+        Optional, and `None` is genuinely ambiguous: it means "no record here", which
+        covers a store that keeps no audit trail, a store whose trail predates the claim,
+        and a claim that was never erased. It is a lookup, never a proof of absence.
+
+        `SQLiteStore` returns `claim_id`, `tenant`, `scope`, `erased_at`, `sources` and
+        the per-table `counts`, and deliberately **no text, subject, predicate or
+        object** — an audit trail the erased fact can be read out of is a copy of it.
         """
         ...
 

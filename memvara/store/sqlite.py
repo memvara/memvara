@@ -73,6 +73,7 @@ from ..types import (
     MemoryType,
     Scope,
     resolved_entity,
+    utcnow,
 )
 from .base import BELIEVED, resolve_states, state_predicate, stored_state_predicate
 
@@ -120,7 +121,15 @@ if TYPE_CHECKING:  # pragma: no cover
 #    reported success. FTS5's own `secure-delete` option is the fix, it is persistent once
 #    set, and it is not retroactive — hence a one-time `optimize` here to clear what is
 #    already on disk. See `_migrate_to_v7`.
-SCHEMA_VERSION = 7
+# 8: erasure became evidenced (`erasures`). One row per `erase_claim`, written *before*
+#    the delete and inside the same transaction, so a delete that happens without a
+#    record of it is not reachable: if the audit write fails, nothing is deleted. The
+#    table holds no text, subject, predicate or object — an audit trail that reconstructs
+#    the erased fact is a copy of it, not an audit trail — so there is nothing to
+#    backfill and nothing an earlier version could have written. The stamp is what tells
+#    the next migration whether the table it sees was built here or invented on the spot
+#    by its own `IF NOT EXISTS`.
+SCHEMA_VERSION = 8
 
 # Kept separate because the v1 -> v2 migration has to recreate this table: SQLite
 # cannot add a column to an existing primary key, and (tenant, name) is now the key.
@@ -268,6 +277,32 @@ CREATE TABLE IF NOT EXISTS entities (
     aliases   TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (tenant, id)
 );
+
+-- What was erased, when, and by whom it was cited. Written *before* the delete and in
+-- the same transaction, which is the whole of what this table guarantees: a claim cannot
+-- be gone without a row here, because a failed audit write aborts the delete.
+--
+-- **It holds nothing that could reconstruct the fact.** No text, no subject, no
+-- predicate, no object — an audit trail you can read the erased memory out of is a copy
+-- of it wearing a different name, and would make `erase()` a rename rather than a
+-- deletion. What is left is enough to answer "was this erased, when, and how much went
+-- with it": the id, where it lived, the instant, how many source turns it cited, and the
+-- per-table counts the delete reported.
+--
+-- **Ordering and durability, not tamper-evidence.** Nothing here is chained or signed,
+-- so an operator with write access to this file can remove a row. A hash-chained log is
+-- a different feature and is not in this package; see docs/OPEN-CORE.md. What this
+-- defends against is a delete that no record was ever written for, which is the failure
+-- an unaudited `erase()` had.
+CREATE TABLE IF NOT EXISTS erasures (
+    claim_id   TEXT PRIMARY KEY,
+    tenant     TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    erased_at  REAL NOT NULL,
+    sources    INTEGER NOT NULL DEFAULT 0,
+    counts     TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS erasures_tenant ON erasures(tenant, erased_at);
 
 -- Learned predicate schema. This has to be durable: cardinality is what makes a
 -- contradiction detectable, so a registry that evaporates on restart means a fresh
@@ -1108,6 +1143,12 @@ class SQLiteStore:
             self._migrate_to_v5()
             self._migrate_to_v6()
             self._migrate_to_v7()
+            # No `_migrate_to_v8`: version 8 added a table nothing had ever written to
+            # and that holds no derived data, so its `CREATE TABLE IF NOT EXISTS` above
+            # genuinely is the whole migration — the same shape as version 4. What it
+            # cannot do is invent history: a store upgraded to 7 has an empty `erasures`
+            # table, and an empty one means "nothing has been erased *since this file was
+            # upgraded*", never "nothing has ever been erased here".
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _migrate_to_v2(self) -> None:
@@ -2163,16 +2204,38 @@ class SQLiteStore:
         keeps the terms as live rows that no `VACUUM` reclaims. Without both, this method
         returned a count of what it had deleted while the words were still greppable in
         the file. `tests/test_erasure_residue.py` checks the file rather than the store.
+
+        What *is* recorded is that it happened: one row in `erasures`, written before the
+        delete and in the same transaction, holding no text, subject, predicate or object.
+        See the table's own comment for why it holds none of those, and for what the
+        ordering does and does not guarantee.
         """
         with self._lock:
             row = self._db.execute(
-                "SELECT tenant, sources FROM claims WHERE id=?", (claim_id,)).fetchone()
+                "SELECT tenant, usr, agent, session, sources FROM claims WHERE id=?",
+                (claim_id,)).fetchone()
             if row is None:
                 # Zeroes rather than an absent key, so a caller adding up an erasure
-                # campaign never has to special-case the id that was not there.
+                # campaign never has to special-case the id that was not there. No audit
+                # row either: nothing was erased, and a record saying otherwise would be
+                # the one kind of entry this table must never contain.
                 return {"claims": 0, "episodes": 0, "embeddings": 0, "entities": 0}
             tenant: str = row["tenant"]
             cited = json.loads(row["sources"]) if sources else []
+            # Audit first, delete second, one transaction. The ordering is the guarantee:
+            # if this INSERT raises — disk full, table missing, a constraint — the
+            # exception propagates out of the `with` and `_maybe_commit` is never
+            # reached, so the claim is still there. The other order would let a delete
+            # succeed and its record fail, which is exactly the state that cannot be
+            # detected afterwards. Counts are patched in below, once they are known.
+            self._db.execute(
+                "INSERT OR REPLACE INTO erasures "
+                "(claim_id, tenant, scope, erased_at, sources, counts) "
+                "VALUES (?,?,?,?,?,?)",
+                (claim_id, tenant,
+                 Scope(tenant, row["usr"], row["agent"], row["session"]).key(),
+                 utcnow().timestamp(),
+                 len(json.loads(row["sources"])), "{}"))
             # Before the claim row goes, and not as housekeeping afterwards: these rows
             # are what `_orphan` reads three lines below to decide whether the turns this
             # claim cited still have a citer. Left behind, the claim being erased votes
@@ -2194,11 +2257,69 @@ class SQLiteStore:
             # first-seen spelling verbatim, so leaving it behind erases the claim and
             # keeps the text. Reference-counted, because one entity is usually shared.
             entities = self._gc_entities(tenant)
+            # `embeddings` is the vector total across both tables, as in `purge`: it
+            # counts what was erased, not which table it sat in.
+            counts = {"claims": 1, "episodes": episodes, "embeddings": vectors,
+                      "entities": entities}
+            self._db.execute("UPDATE erasures SET counts=? WHERE claim_id=?",
+                             (json.dumps(counts, sort_keys=True), claim_id))
             self._maybe_commit()
-        # `embeddings` is the vector total across both tables, as in `purge`: it counts
-        # what was erased, not which table it sat in.
-        return {"claims": 1, "episodes": episodes, "embeddings": vectors,
-                "entities": entities}
+        return counts
+
+    def residue(self, claim_id: str) -> dict[str, int]:
+        """How many rows mentioning `claim_id` are still on disk, per table.
+
+        A **physical re-query**, and that is the entire point of it. `erase_claim`
+        already returns what it believes it deleted, and a proof built from that number
+        proves only that the code took the branch it thought it took — the same statement
+        the return value already made, restated. This goes back to the file and counts
+        what is there now, so it can disagree with the delete, which is the one thing that
+        makes it evidence.
+
+        Four tables, because those are the four a claim's content can survive in: the row
+        itself, the text index over it, its vector, and its provenance edges. A non-zero
+        anywhere means the erasure did not complete, whatever it reported.
+
+        `erasures` is deliberately not among them. It is the record that the erasure
+        happened and it is *supposed* to survive; counting it would make every proof fail.
+
+        >>> store = SQLiteStore(":memory:")
+        >>> store.residue("nothing-was-ever-stored-here")
+        {'claims': 0, 'claims_fts': 0, 'embeddings': 0, 'claim_sources': 0}
+        >>> store.close()
+        """
+        with self._lock:
+            def count(sql: str) -> int:
+                return int(self._db.execute(sql, (claim_id,)).fetchone()[0])
+            return {
+                "claims": count("SELECT COUNT(*) FROM claims WHERE id=?"),
+                "claims_fts": count(
+                    "SELECT COUNT(*) FROM claims_fts WHERE claim_id=?"),
+                "embeddings": count(
+                    "SELECT COUNT(*) FROM embeddings WHERE claim_id=?"),
+                "claim_sources": count(
+                    "SELECT COUNT(*) FROM claim_sources WHERE claim_id=?"),
+            }
+
+    def erasure_record(self, claim_id: str) -> dict[str, Any] | None:
+        """The `erasures` row for `claim_id`, or `None` if nothing here erased it.
+
+        Read-only, and the only way out of the audit table. `None` is not proof that the
+        claim was never erased — a store upgraded to schema 7 starts with an empty table
+        however much was deleted before — which is why it is a lookup rather than a
+        `bool`.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT claim_id, tenant, scope, erased_at, sources, counts "
+                "FROM erasures WHERE claim_id=?", (claim_id,)).fetchone()
+        if row is None:
+            return None
+        return {"claim_id": row["claim_id"], "tenant": row["tenant"],
+                "scope": row["scope"],
+                "erased_at": datetime.fromtimestamp(row["erased_at"], tz=timezone.utc),
+                "sources": int(row["sources"]),
+                "counts": json.loads(row["counts"])}
 
     def purge(self, scope: Scope) -> dict[str, int]:
         """Irreversibly erase everything at `scope` and beneath it.

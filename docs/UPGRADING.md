@@ -7,6 +7,54 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `erase()` can now raise, and the schema is version 7
+
+### What changed
+
+`Memvara.erase()` used to report success from the store's return code. It now re-queries
+the disk afterwards (`prove_erased`) and raises `ErasureIncomplete` if anything survived,
+or if the store cannot be asked. The two ordinary outcomes are unchanged: `True` means
+proved gone, `False` still means there was nothing to erase.
+
+**The exception is reachable from a store you already have.** `RemoteStore` (cloud mode)
+cannot count rows, so every `erase()` against it now raises instead of returning `True`.
+That is the intended behaviour — it was returning `True` for an erasure it could not
+verify — but it is a behaviour change on a working configuration.
+
+The SQLite schema goes 6 → 7, adding an `erasures` audit table. The migration is the
+`CREATE TABLE` and nothing else: there is no data to backfill, and an upgraded file starts
+with an empty table, which means "nothing erased since the upgrade" and never "nothing was
+ever erased here". **A file opened by this build cannot be opened by an older one** —
+`_migrate` refuses a store stamped newer than the build reading it, which is deliberate
+and is the usual one-way door.
+
+### What to do about it
+
+If you call `erase()` in a loop over a legal erasure request, catch the exception and
+treat the erasure as incomplete:
+
+```python
+from memvara import ErasureIncomplete
+
+try:
+    mem.erase(claim_id)
+except ErasureIncomplete as exc:
+    log.error("half-erased: %s still holds rows", exc.proof.surviving)
+```
+
+To check an erasure that happened months ago, or in another process:
+
+```python
+mem.prove_erased(claim_id).proven
+```
+
+**It is not scope-checked**, and that is stated rather than fixed: the claim is gone, so
+there is nothing to scope-check against. It reveals whether any row with a given id
+survives, for an id the caller must already hold. Treat erasure verification as an
+operator action.
+
+---
+
 ## Three predicates entered the shipped vocabulary, at `ONE`
 
 ### What changed

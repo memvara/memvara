@@ -61,6 +61,7 @@ from .types import (
     Delta,
     Derivation,
     Episode,
+    ErasureProof,
     MemoryType,
     Provenance,
     RecallResult,
@@ -105,6 +106,29 @@ class EmbedderMismatchError(ValueError):
     dimension errors, which is what it replaces at the one place it can still be acted
     on: construction.
     """
+
+
+class ErasureIncomplete(RuntimeError):
+    """`erase()` deleted something and could not prove it is gone.
+
+    Raised rather than returned, and that is the whole design: every caller of
+    `erase()` already branches on a `bool`, so a "could not prove it" folded into `False`
+    would read as "there was nothing to erase" and a caller acting on a legal erasure
+    request would move on. An exception is the only answer that cannot be mistaken for
+    either of the two ordinary outcomes.
+
+    It carries the `ErasureProof`, so the handler has the per-table counts rather than a
+    string to parse. `proof.surviving` names the tables that still hold something; an
+    empty `surviving` with `proven=False` means the check could not run at all.
+    """
+
+    def __init__(self, proof: "ErasureProof") -> None:
+        self.proof = proof
+        super().__init__(
+            f"erase({proof.claim_id}) deleted rows and cannot prove the claim is gone: "
+            f"{proof.reason}. Nothing here is undoable, so this is a store that has "
+            "half-erased a memory: treat the erasure as incomplete and re-run it."
+        )
 
 
 class EmbedderChangedWarning(UserWarning):
@@ -1312,6 +1336,14 @@ class Memvara:
         unconditionally — a non-empty dict of zeroes is true. `counts["claims"]` is the
         flag, so nothing is lost that this method ever reported; a caller wanting the
         evidence calls `store.erase_claim` or `purge()`.
+
+        **`True` is now proved rather than reported.** The store's return code says the
+        code took the branch it thought it took, which is not the same statement as "the
+        row is gone" and cannot disagree with it. After the delete this re-queries the
+        disk (`prove_erased`) and raises `ErasureIncomplete` if anything survived, or if
+        the store cannot answer. Returning `True` while the text is still readable is the
+        exact failure this method was added to remove, and reporting it from a return code
+        left the door open at the last step.
         """
         if self.get(claim_id, tenant=tenant, user=user, agent=agent,
                     session=session) is None:
@@ -1326,7 +1358,75 @@ class Memvara:
                 f"{type(self.store).__name__} does not implement erase_claim(); "
                 "erasure cannot be faked with retirement"
             )
-        return bool(erase(claim_id, sources=sources)["claims"])
+        erased = bool(erase(claim_id, sources=sources)["claims"])
+        if not erased:
+            # Raced with another erasure between `get` and here. Nothing was deleted, so
+            # there is nothing to prove and nothing to refuse.
+            return False
+        proof = self.prove_erased(claim_id)
+        if not proof.proven:
+            raise ErasureIncomplete(proof)
+        return True
+
+    def prove_erased(self, claim_id: str) -> ErasureProof:
+        """Check the disk, not the return code: is this claim actually gone?
+
+        A physical re-query over the tables a claim's content can survive in — the row,
+        the text index, the vector, the provenance edges — plus the audit row the erasure
+        wrote, if the store keeps one. See `Store.residue` and `types.ErasureProof`.
+
+        Callable on its own, and worth calling on its own: it takes an id and no other
+        state, so it answers "is this really gone" months later, for a claim erased by
+        another process, without erasing anything itself.
+
+        **It fails closed.** A store with no `residue` yields `proven=False` naming the
+        method, because a proof that cannot run is not a proof that passed. `erase()`
+        turns that into an exception rather than a `True`.
+
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> claim = mem.remember("Alice", "lives_in", "Lisbon").added[0]
+        >>> mem.prove_erased(claim.id).proven      # still there
+        False
+        >>> mem.erase(claim.id)
+        True
+        >>> proof = mem.prove_erased(claim.id)
+        >>> proof.proven, proof.surviving
+        (True, {})
+        """
+        residue = getattr(self.store, "residue", None)
+        unsupported = ErasureProof(
+            claim_id=claim_id, proven=False,
+            reason=(f"{type(self.store).__name__} cannot re-query for residue; an "
+                    "erasure this store cannot check is unproven, which is not the same "
+                    "as unsuccessful"),
+        )
+        if residue is None:
+            return unsupported
+        try:
+            counts: dict[str, int] = residue(claim_id)
+        except NotImplementedError:
+            # Present on the object and raising, which is `RemoteStore` — the shape a
+            # `getattr` guard cannot see. Caught rather than guarded, and failing closed:
+            # the one answer this must never give is `proven=True` for a check that did
+            # not run.
+            return unsupported
+        lookup = getattr(self.store, "erasure_record", None)
+        record: dict[str, Any] | None = None
+        if lookup is not None:
+            try:
+                record = lookup(claim_id)
+            except NotImplementedError:
+                # A missing audit trail does not make the rows less gone. `record=None`
+                # already means "no record here", which covers this.
+                record = None
+        alive = {table: n for table, n in counts.items() if n}
+        if alive:
+            return ErasureProof(
+                claim_id=claim_id, proven=False, residue=counts, record=record,
+                reason="rows survived the delete in " + ", ".join(sorted(alive)),
+            )
+        return ErasureProof(claim_id=claim_id, proven=True, residue=counts,
+                            record=record)
 
     def count(self, *, tenant=None, user=None, agent=None, session=None,
               as_of: datetime | None = None, valid_at: datetime | None = None,
@@ -2360,6 +2460,11 @@ class ScopedMemvara:
 
     def erase(self, claim_id: str, *, sources: bool = False) -> bool:
         return self._mem.erase(claim_id, sources=sources, **self._kw)
+
+    def prove_erased(self, claim_id: str) -> ErasureProof:
+        """See `Memvara.prove_erased`. Takes no scope, and passes none: the check is a
+        row count over an id, and a scoped view has no narrower version of it."""
+        return self._mem.prove_erased(claim_id)
 
     def supersede(self, old_claim_id: str, new_claim: Claim, *,
                   at: datetime | None = None,

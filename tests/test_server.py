@@ -127,6 +127,64 @@ def text(server, name, arguments=None):
 
 # -- what is deliberately absent ---------------------------------------------
 
+#: Every spelling of "when we came to believe this" that a tool argument could plausibly
+#: carry. The list is names rather than semantics because a schema is names: a model fills
+#: in what a parameter is called, and a parameter called any of these is one it will try
+#: to backdate.
+_TRANSACTION_CLOCK_NAMES = frozenset({
+    "recorded_at", "recorded", "known_at", "known", "transaction_time", "tx_time",
+    "believed_at", "belief_time", "asserted_at", "ingested_at", "created_at",
+    "observed_at", "as_of_known",
+})
+
+
+def test_no_tool_schema_exposes_a_transaction_clock_argument():
+    """Design invariant 8, and the falsifiable half of it.
+
+    The record clock is what makes the audit trail an audit trail: `valid_from` says when
+    a fact became true and a caller is *supposed* to set it, while `recorded_at` says when
+    we came to believe it and a caller who can set that can write a history that never
+    happened. `Memvara.remember(recorded_at=...)` is a real public parameter — replays and
+    imports need it — so the guarantee is not "the library refuses", it is "the tool
+    surface does not offer it", and a guarantee shaped like that reopens the moment
+    somebody adds a parameter that seems harmless.
+
+    Walks every property of every tool rather than the write tools alone. A read tool that
+    took `known_at` would let a model rewind belief past a correction and quote what the
+    store used to say, which is the same forgery arriving through the other door.
+
+    `memory_search.as_of` and `memory_search.valid_at` are not exceptions to this. Both
+    move the *world* clock; `as_of` moves both together and is a read, so it can only ever
+    narrow what comes back.
+    """
+    for tool in TOOLS:
+        leaked = set(tool.properties) & _TRANSACTION_CLOCK_NAMES
+        assert not leaked, f"{tool.name} exposes the record clock as {sorted(leaked)}"
+
+
+def test_a_write_through_the_tool_surface_is_recorded_now_however_it_is_dated():
+    """The behavioural half: the schema could be clean and the handler still forge.
+
+    `memory_remember` takes `true_since`, which is world time and is meant to be settable
+    — a fact can have become true last year. What must not move is when we came to believe
+    it, and this asserts the two actually come apart: a claim dated to 2019 is recorded
+    today, so `known_at=<yesterday>` cannot see it and no audit read can be made to say
+    the desk knew in 2019.
+    """
+    memory = make_memory(user="alice")
+    server = MemvaraMCPServer(memory, user="alice")
+    try:
+        before = utcnow()
+        text(server, "memory_remember", {"subject": "Dara", "predicate": "born_in",
+                                         "object": "Lewes",
+                                         "true_since": "2019-03-04T00:00:00Z"})
+        claim = memory.get_all()[0]
+        assert claim.valid_from.year == 2019, "world time is settable, and should be"
+        assert claim.recorded_at >= before, "belief time is not"
+    finally:
+        server.close()
+
+
 def test_no_tool_can_erase_anything():
     """`purge`, `reset` and `consolidate` are not one tool call away from a model.
 

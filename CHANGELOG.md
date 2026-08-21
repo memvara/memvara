@@ -51,6 +51,43 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`Memvara.prove_erased()`, and `erase()` refusing to report a success it cannot
+  support.** `erase()` returned `True` when `Store.erase_claim` said it had deleted a row.
+  That proves the code took the branch it thought it took — which is the statement the
+  return value already made and cannot disagree with — and "told the caller the memory was
+  deleted while the text is still on disk" is the exact failure the method was added to
+  remove. It was left open at the last step.
+
+  `Store.residue(claim_id)` is a **physical re-query**: four `SELECT COUNT(*)`s over the
+  tables a claim's content can survive in — the row, the text index, the vector, the
+  provenance edges. `prove_erased` returns an `ErasureProof` built from it, `erase()` calls
+  it after the delete, and raises `ErasureIncomplete` if anything survived.
+
+  It **fails closed**. A store with no `residue`, or one whose `residue` is present and
+  raises — `RemoteStore`, the shape a `getattr` guard cannot see — yields `proven=False`
+  with a reason naming it, never `proven=True`. Unproven and proven-gone are different
+  answers and only one of them is an erasure certificate. This is a behaviour change on
+  cloud mode: `erase()` there now raises rather than returning `True` for an erasure it
+  could not verify.
+
+- **SQLite schema 7: an `erasures` audit table.** One row per `erase_claim`, and two
+  things about it are the whole design.
+
+  It is written **before** the delete and in the same transaction, so a failed audit write
+  aborts the delete: a claim cannot be gone without a record of it. The other order lets a
+  delete succeed and its record fail, which is precisely the state nothing downstream can
+  detect. `tests/test_erasure.py` asserts it by dropping the table and watching the claim
+  survive.
+
+  It holds **nothing the erased fact could be read back out of** — `claim_id`, `tenant`,
+  `scope`, `erased_at`, how many source turns were cited, and the per-table counts. No
+  text, subject, predicate or object. An audit trail you can read the erased memory out of
+  is a copy of it wearing a different name, and would make `erase()` a rename.
+
+  **Ordering and durability, not tamper-evidence.** Nothing here is chained or signed; an
+  operator with write access can remove a row. The hash-chained log is a different feature
+  and is commercial. What this defends against is a delete no record was ever written for.
+
 - **The offline write path extracts from ordinary prose**, where before it extracted
   nothing from it. `README.md` has carried the measurement since `demo/` landed: sixty-four
   turns of a real-shaped support history through the shipped defaults produced **64
@@ -132,8 +169,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   which is an illustration of a mechanism and not evidence for a default — the precedent
   is the MMR rejection recorded in `hybrid.py`.
 
-  It is opt-in rather than rejected because nothing regressed: every R@k in both public
-  runs held exactly, knowledge-update at 91.0 and single-session-user at 92.2 included.
+  It is opt-in rather than rejected because the gain is real where there is a graph to
+  walk. Where there is not, it costs: with the widened write path leaving 81 claims across
+  LongMemEval's 940 sessions, single-session-user R@12 goes 92.2 → 90.6 and multi-session
+  65.5 → 64.6. knowledge-update, the row the thesis rests on, held exactly at 91.0. The
+  measured table and the reproduce commands are in `docs/BENCHMARKS.md`.
 
   A `Store` without a working `adjacent()` degrades to the two legs it had and raises
   `DegradedRetrievalWarning` once per retriever. That is caught rather than guarded,
@@ -275,6 +315,31 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   [`memvara/claude-memvara`](https://github.com/memvara/claude-memvara)
   (`/plugin marketplace add memvara/claude-memvara`). No `npx`, no local
   stdio. A loop you wrote still uses the library, REST, or MCP as a client.
+
+### Changed
+
+- **The seven design invariants in `docs/INTERNALS.md` are restated as Claim / Scope /
+  Sketch / Measured**, and an eighth is added. The format earns its place on the last two
+  lines: *Sketch* names the code that makes the claim true, and *Measured* is either a
+  number this repository produced or an explicit statement that none exists and only a
+  test stands behind it. Several already carried measurements in prose and those moved to
+  the Measured line; **where nothing was measured the line says so and names the enforcing
+  test.** No numbers were invented.
+
+  The eighth is the one that needed writing down, because it was being read as holding
+  further than it does:
+
+  > **Claim.** No MCP client can backdate the transaction clock.
+  > **Scope.** The MCP tool surface only. `Memvara.remember(recorded_at=...)` is a public
+  > Python parameter that writes the record clock directly, and `Reconciler.apply` clamps
+  > forward-dating only — backdating is permitted deliberately, for replays and imports. A
+  > deployment needing this end to end must not expose the Python API to untrusted callers.
+
+  The falsifiable part is a test that walks every property of every tool schema and fails
+  if a record-clock argument appears, plus one that writes a fact dated to 2019 through
+  `memory_remember` and asserts it is *recorded* today. That is what stops the gap
+  reopening silently — a new tool taking `recorded_at` because it seemed harmless would
+  otherwise ship green.
 
 ### Fixed
 

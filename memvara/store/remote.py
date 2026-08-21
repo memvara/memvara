@@ -303,6 +303,19 @@ class RemoteStore:
             why="No graph-traversal endpoint exists on the data plane today; "
                 "subject_key/object_key are not exposed or queryable over /v1."))
 
+    def residue(self, claim_id: str) -> dict[str, int]:
+        raise NotImplementedError(_NO_ENDPOINT.format(
+            method="residue",
+            why="Proving an erasure means counting rows on the storage that holds them, "
+                "and this facade holds none. A count relayed over HTTP would be the "
+                "server's word for it, which is the thing a proof is supposed to be "
+                "able to disagree with."))
+
+    def erasure_record(self, claim_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError(_NO_ENDPOINT.format(
+            method="erasure_record",
+            why="No erasure-audit endpoint exists on the data plane today."))
+
     def invalidate(self, claim_id: str, at: datetime, by: str | None) -> None:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="invalidate",
