@@ -598,8 +598,11 @@ def _interval_note(claims: Sequence[Claim]) -> str:
                 f"note: stored as a fact that had already stopped being true at "
                 f"{_stamp(c.valid_to)}, so memory_recall will not return it — a "
                 "backfilled interval that is over answers about the period it held, not "
-                "about now. memory_history shows it, and so does memory_search with "
-                "as_of inside that period.")
+                "about now. memory_history shows it, by subject and predicate. "
+                "memory_search will not find it at any as_of: as_of moves both clocks to "
+                "one instant, and reaching this claim needs one that is inside a period "
+                "that is already over and also at or after this write, which no instant "
+                "is. Ask memory_history for it rather than searching.")
     return "\n".join(lines)
 
 
@@ -737,9 +740,12 @@ def _history(ctx: ToolContext, args: dict[str, Any]) -> str:
         return (f"Nothing has ever been recorded for {args['subject']}/"
                 f"{args['predicate']}.")
     lines = [f"{len(claims)} recorded value(s) of {args['subject']}/{args['predicate']}, "
-             f"oldest first. {STORED_HEADER}"]
+             f"oldest first by when each was recorded. 'true from' is the other clock — "
+             f"when the value held in the world — and it can run in a different order. "
+             f"{STORED_HEADER}"]
     lines += [
-        f"{i}. [id={c.id} recorded {_stamp(c.recorded_at)} {_state(c)}] {safe_line(c.text)}"
+        f"{i}. [id={c.id} recorded {_stamp(c.recorded_at)} "
+        f"true from {_stamp(c.valid_from)} {_state(c)}] {safe_line(c.text)}"
         for i, c in enumerate(claims, 1)
     ]
     return "\n".join(lines)
@@ -1081,9 +1087,13 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="memory_history",
         description=(
-            "Show every value one fact has ever held, oldest first, with when each was "
-            "recorded and when it stopped being current — 'ended' where a newer value "
-            "took over, 'retired' where the record was withdrawn as wrong. Call it when "
+            "Show every value one fact has ever held, oldest first by when each was "
+            "recorded, with the instant it began holding in the world and how it stopped "
+            "being current — 'ended' where a newer value took over, 'retired' where the "
+            "record was withdrawn as wrong. Those are two different clocks and the rows "
+            "are ordered by the first, so a value backfilled today about last year is "
+            "listed last while being the earliest thing here; read 'true from' rather "
+            "than the row number when the question is what came first. Call it when "
             "the user asks what they told you before, when something changed, or "
             "whether you still have an old value — and before contradicting them about "
             "their own history. Needs the fact as subject and predicate (e.g. 'user' "
