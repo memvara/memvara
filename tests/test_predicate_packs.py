@@ -156,3 +156,68 @@ class TestDeclarationOutranksAGuess:
         assert registry.spec_is_declared("lives_in")
         assert registry.spec_is_declared("git_state")
         assert not registry.spec_is_declared("never_heard_of_it")
+
+
+class TestUnreadableSources:
+    """The error paths, which are the ones a 95% gate would let through.
+
+    Each names a way a vocabulary can fail to load on someone else's machine, where the
+    difference between a raised error and a silent skip is whether their predicates
+    supersede or accumulate.
+    """
+
+    def test_an_empty_entry_is_rejected(self):
+        # `load_all_specs` skips blanks so `engineering,` is not an error, but the
+        # single-source entry point is public and must not treat "" as "the builtins".
+        with pytest.raises(PredicatePackError, match="empty entry"):
+            load_specs("")
+
+    def test_a_missing_path_says_which_path(self, tmp_path):
+        missing = tmp_path / "nowhere.toml"
+        with pytest.raises(PredicatePackError, match=str(missing)):
+            load_specs(str(missing))
+
+    def test_an_unreadable_file_is_reported_not_skipped(self, tmp_path, monkeypatch):
+        """A permission bit, a vanished mount, a file replaced mid-read.
+
+        Provoked by monkeypatching rather than by `chmod 000`, which does nothing when
+        the suite happens to run as root and would make this pass without exercising
+        anything.
+        """
+        path = tmp_path / "p.toml"
+        path.write_text('[[predicate]]\nname="x"\ncardinality="one"\nvolatility="fast"\n',
+                        encoding="utf-8")
+
+        def refuse(self, *args, **kwargs):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(type(path), "open", refuse)
+        with pytest.raises(PredicatePackError, match="could not be read"):
+            load_specs(str(path))
+
+    def test_a_predicate_entry_that_is_not_a_table(self, tmp_path):
+        path = tmp_path / "p.toml"
+        path.write_text('predicate = ["just a string"]\n', encoding="utf-8")
+        with pytest.raises(PredicatePackError, match="not a table"):
+            load_specs(str(path))
+
+    def test_a_predicate_entry_with_no_name(self, tmp_path):
+        path = tmp_path / "p.toml"
+        path.write_text('[[predicate]]\ncardinality="one"\nvolatility="fast"\n',
+                        encoding="utf-8")
+        with pytest.raises(PredicatePackError, match="no `name`"):
+            load_specs(str(path))
+
+    def test_an_unreadable_packs_directory_lists_nothing(self, monkeypatch):
+        """`available_packs` is called while building an error message for a mistyped
+        pack name. If it raised there, a typo would surface as an OSError from inside
+        the error handler instead of as the advice it was assembling."""
+        import memvara.schema as schema
+
+        def explode(self, pattern):
+            raise OSError("packs directory is unreadable")
+
+        monkeypatch.setattr(type(schema.PACKS_DIR), "glob", explode)
+        assert schema.available_packs() == []
+        with pytest.raises(PredicatePackError, match="none are installed"):
+            load_specs("enginering")
