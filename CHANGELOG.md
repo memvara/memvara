@@ -51,6 +51,36 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`memory_neighborhood` and `memory_paths`**, so the MCP surface can ask the graph a
+  question. `GraphTraverser` has been complete since schema 6 and no tool reached it, so
+  an agent asking "who does their manager report to" had `memory_search`, which matches
+  text — and the fact that answers that question shares no words with it.
+
+  Read-only, so both survive `MEMVARA_READ_ONLY`, which is the deployment that most wants
+  them: a store nobody can write to is exactly the one worth asking about connections.
+  Rendered through `Path.render()`, the same arrows `neighborhood()` prints in a REPL, so
+  there is one place for that convention to live.
+
+  **Neither takes a scope argument, and a test asserts they never will.**
+  `memvara/server/config.py` is explicit that reading scope from tool arguments hands the
+  model other people's memory; these two walk *between* rows, so a scope argument here
+  would not merely widen a read, it would let a chain leave the caller's own memory
+  mid-hop.
+
+  Two things the descriptions say because a model cannot check them for itself. An empty
+  `memory_paths` result is an answer about **this search** — the walk is bounded by a beam
+  as well as by depth, so a real route can be missed because its prefix was pruned — and
+  the handler's own wording says "nothing stored connects them", never "they are
+  unrelated". And `min_hops` is a correctness knob rather than a tuning one: a path's
+  strength never rises with length, so every one-hop connection outranks every two-hop
+  one and a crowded first hop spends the whole of `k`. Measured on questions whose answer
+  is exactly two hops away, at `k=5`: **5.3% at the default against 41.0% with
+  `min_hops=2`**.
+
+  `memvara/skills/memvara/SKILL.md` gets the complementary half, since it states outright
+  that it does not repeat what a tool description says: when a connection question beats a
+  recall question, and to ask one *after* a thin recall rather than instead of one.
+
 - **`Memvara.prove_erased()`, and `erase()` refusing to report a success it cannot
   support.** `erase()` returned `True` when `Store.erase_claim` said it had deleted a row.
   That proves the code took the branch it thought it took — which is the statement the

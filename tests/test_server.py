@@ -194,9 +194,9 @@ def test_no_tool_can_erase_anything():
     """
     names = {t.name for t in TOOLS}
     assert names == {
-        "memory_recall", "memory_search", "memory_since", "memory_add",
-        "memory_remember", "memory_forget", "memory_end", "memory_history",
-        "memory_why", "memory_stats",
+        "memory_recall", "memory_search", "memory_neighborhood", "memory_paths",
+        "memory_since", "memory_add", "memory_remember", "memory_forget",
+        "memory_end", "memory_history", "memory_why", "memory_stats",
     }
     forbidden = ("purge", "reset", "consolidate", "reembed", "erase", "delete")
     for tool in TOOLS:
@@ -238,6 +238,10 @@ _FORWARDING_CASES = {
     "memory_recall": [{"query": "anything", "memory_types": ["semantic"]}],
     "memory_search": [{"query": "anything", "memory_types": ["semantic"],
                        "as_of": "2024-03-01"}],
+    "memory_neighborhood": [{"entity": "Acme", "depth": 2, "k": 5, "min_hops": 1,
+                             "as_of": "2024-03-01"}],
+    "memory_paths": [{"source": "Alice", "target": "Acme", "depth": 3, "k": 3,
+                      "valid_at": "2024-03-01"}],
     "memory_since": [{"since": "2024-03-01"}],
     "memory_add": [{"text": "I live in Lisbon"}],
     "memory_remember": [{"predicate": "lives_in", "object": "Lisbon",
@@ -2439,6 +2443,103 @@ def test_remembering_is_not_flagged_destructive_by_the_new_arguments(server):
     assert BY_NAME["memory_remember"].writes is True
 
 
+# -- traversal ---------------------------------------------------------------
+
+
+@pytest.fixture()
+def graph_server():
+    memory = make_memory(user="alice")
+    for subject, predicate, obj in (("Alice", "reports_to", "Dana"),
+                                    ("Dana", "works_at", "Acme"),
+                                    ("Acme", "headquartered_in", "Tallinn"),
+                                    ("Bruno", "lives_in", "Lisbon")):
+        memory.remember(subject, predicate, obj)
+    srv = MemvaraMCPServer(memory, user="alice")
+    yield srv
+    srv.close()
+
+
+def test_neighborhood_walks_out_of_one_entity_and_renders_the_chain(graph_server):
+    """The answer is two facts with a join between them, and neither lookup tool can
+    make that join: `Acme headquartered_in Tallinn` shares no words with "Alice"."""
+    out = text(graph_server, "memory_neighborhood", {"entity": "Alice"})
+    assert "Alice -reports_to-> Dana" in out
+    assert "Dana -works_at-> Acme" in out
+    assert "hop(s) strength=" in out
+    assert "Stored memory about the user" in out, (
+        "walked rows are stored text and have to be framed as such"
+    )
+
+
+def test_neighborhood_folds_the_spelling_the_user_used(graph_server):
+    assert "Tallinn" in text(graph_server, "memory_neighborhood",
+                             {"entity": "acme, inc.", "depth": 1})
+
+
+def test_min_hops_is_how_a_two_hop_answer_survives_a_crowded_first_hop(graph_server):
+    """The knob the description calls a correctness knob rather than a tuning one.
+
+    Score never rises along a path, so every one-hop connection outranks every two-hop
+    one; at a small `k` the whole budget goes to the immediate neighbours. Here `k=1`
+    makes that exact: the default returns the one-hop chain and `min_hops=2` returns the
+    two-hop one, which is the answer.
+    """
+    near = text(graph_server, "memory_neighborhood", {"entity": "Alice", "k": 1})
+    assert "Acme" not in near
+    far = text(graph_server, "memory_neighborhood",
+               {"entity": "Alice", "k": 1, "min_hops": 2})
+    assert "Acme" in far
+
+
+def test_paths_answers_with_the_route_rather_than_with_a_yes(graph_server):
+    out = text(graph_server, "memory_paths", {"source": "Alice", "target": "Tallinn"})
+    assert "Alice -reports_to-> Dana -works_at-> Acme -headquartered_in-> Tallinn" in out
+
+
+def test_an_empty_paths_result_is_about_the_search_and_says_so(graph_server):
+    """The one thing a model cannot check for itself.
+
+    The walk is bounded by a beam as well as by `depth`, so a real route can be missed
+    because its prefix was pruned. A result that reads as "they are unrelated" is a
+    claim about the world made from a claim about this search.
+    """
+    out = text(graph_server, "memory_paths", {"source": "Alice", "target": "Lisbon"})
+    assert "No route found" in out
+    assert "about this search rather than about the store" in out
+    assert "Do not tell the user the two are unrelated" in out
+
+
+def test_an_entity_nothing_mentions_points_at_the_other_tool(graph_server):
+    out = text(graph_server, "memory_neighborhood", {"entity": "Reykjavik"})
+    assert "Nothing stored connects" in out and "memory_search" in out
+
+
+def test_neither_traversal_tool_takes_a_scope_argument():
+    """`memvara/server/config.py` is explicit that reading scope from tool arguments
+    would hand the model other people's memory. These two are the newest place that
+    could go wrong, and they walk *between* rows, so a scope argument here would not
+    merely widen a read — it would let a chain leave the caller's own memory mid-hop."""
+    scope_names = {"tenant", "user", "agent", "session", "scope", "owner"}
+    for name in ("memory_neighborhood", "memory_paths"):
+        tool = next(t for t in TOOLS if t.name == name)
+        assert not (set(tool.properties) & scope_names)
+
+
+def test_both_traversal_tools_refuse_two_clocks_at_once(graph_server):
+    for name, args in (("memory_neighborhood", {"entity": "Alice"}),
+                       ("memory_paths", {"source": "Alice", "target": "Acme"})):
+        body, is_error = call(graph_server, name,
+                              {**args, "as_of": "2024-03-01", "valid_at": "2024-03-01"})
+        assert is_error and "not both" in body
+
+
+def test_a_walk_reads_the_world_clock_the_same_way_search_does(graph_server):
+    """`valid_at` is how things were connected then, judged by what is known now."""
+    out = text(graph_server, "memory_neighborhood",
+               {"entity": "Alice", "valid_at": "2000-01-01"})
+    assert "Nothing stored connects" in out
+
+
 # -- read-only deployments ---------------------------------------------------
 
 @pytest.fixture()
@@ -2452,8 +2553,12 @@ def read_only():
 def test_read_only_hides_the_write_tools(read_only):
     """Hidden, not listed-and-refused: a visible tool is a turn the model will spend."""
     names = [t["name"] for t in request(read_only, "tools/list")["result"]["tools"]]
-    assert names == ["memory_recall", "memory_search", "memory_since", "memory_history",
-                     "memory_why", "memory_stats"]
+    assert names == ["memory_recall", "memory_search", "memory_neighborhood",
+                     "memory_paths", "memory_since", "memory_history", "memory_why",
+                     "memory_stats"], (
+        "traversal is read-only and must survive here: a deployment that cannot be "
+        "written to is exactly the one that wants to be asked about connections"
+    )
     assert "Lisbon" in text(read_only, "memory_recall", {"query": "Lisbon"})
 
 
