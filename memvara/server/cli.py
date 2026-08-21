@@ -52,7 +52,8 @@ client, not run interactively. Configured entirely by environment:
                      Unset means the built-in vocabulary alone, and a predicate
                      outside it accumulates values instead of superseding them and
                      decays at the slow default. 'engineering' ships with the
-                     package; see docs/INTERNALS.md for the file format.
+                     package; see docs/INTERNALS.md for the file format. Needs
+                     Python 3.11+, where tomllib arrives.
   MEMVARA_READ_ONLY   '1' to hide every tool that writes.
 
 The scope above is bound at startup and cannot be changed by a tool call, which is

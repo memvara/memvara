@@ -10,6 +10,8 @@ in two years. These pin the door open.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from memvara.schema import (BUILTIN_PREDICATES, Cardinality, PredicatePackError,
@@ -173,8 +175,11 @@ class TestUnreadableSources:
             load_specs("")
 
     def test_a_missing_path_says_which_path(self, tmp_path):
+        # re.escape because a Windows tmp_path is full of backslashes, and `match=` is a
+        # regex: without it this fails as "incomplete escape \\U" rather than as a
+        # missing file.
         missing = tmp_path / "nowhere.toml"
-        with pytest.raises(PredicatePackError, match=str(missing)):
+        with pytest.raises(PredicatePackError, match=re.escape(str(missing))):
             load_specs(str(missing))
 
     def test_an_unreadable_file_is_reported_not_skipped(self, tmp_path, monkeypatch):

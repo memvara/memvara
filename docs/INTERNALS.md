@@ -39,6 +39,9 @@ importable from the foundation modules:
    aliases = ["git_status"]
    ```
 
+   Needs Python 3.11 or later, which is where `tomllib` arrives; the reader is
+   imported lazily so 3.10 keeps working for everything else.
+
    Malformed entries raise rather than being skipped: a vocabulary that half-loads leaves
    some predicates superseding and others accumulating with nothing recording which.
 3. **Nothing is ever hard-deleted by the engine, and end-of-life moves exactly one

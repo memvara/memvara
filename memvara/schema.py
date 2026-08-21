@@ -43,7 +43,6 @@ mode and the cap is the backstop for the times resolution guesses wrong.
 
 from __future__ import annotations
 
-import tomllib
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -563,7 +562,30 @@ def available_packs() -> list[str]:
         return []
 
 
-def _coerce_enum(enum: type, value: object, field: str, name: str) -> Any:
+def _toml_reader() -> Any:
+    """`tomllib`, or a refusal that names the fix.
+
+    Imported here rather than at module scope because `tomllib` arrived in 3.11 and this
+    package supports 3.10: a top-level import fails at *collection*, taking every caller
+    of this module down over a feature almost none of them use. Lazy, an older
+    interpreter costs only the person who actually declares a vocabulary.
+
+    No `tomli` fallback, deliberately. The backport would make this work on 3.10 at the
+    price of a runtime dependency the package does not declare, and "numpy and nothing
+    else" is a claim a test pins rather than a slogan. Refusing one optional feature on
+    one interpreter is the smaller loss.
+    """
+    try:
+        import tomllib
+
+        return tomllib
+    except ModuleNotFoundError:  # pragma: no cover - 3.10 only
+        raise PredicatePackError(
+            "Declared predicate vocabularies need Python 3.11 or later, which is where "
+            "`tomllib` arrives. Everything else in memvara works on 3.10.") from None
+
+
+def _coerce_enum(enum: "type[Enum]", value: object, field: str, name: str) -> Any:
     if value is None:
         raise KeyError(field)
     try:
@@ -595,6 +617,7 @@ def load_specs(source: str) -> tuple[PredicateSpec, ...]:
                 f"Available: {known}. To load your own file, give a path instead.")
         raise PredicatePackError(f"No predicate file at {path}.")
 
+    tomllib = _toml_reader()
     try:
         with path.open("rb") as handle:
             body = tomllib.load(handle)
