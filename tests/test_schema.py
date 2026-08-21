@@ -255,18 +255,10 @@ def test_the_learned_cap_is_configurable_and_counts_only_learned_specs():
 
 
 def test_the_prompt_vocabulary_puts_declared_predicates_first(reg):
-    """Declared before learned, whatever either sorts to alphabetically.
-
-    Asserted as a partition rather than against a named first entry: the first declared
-    predicate is whichever one sorts first, and pinning it makes this test fail whenever
-    the builtin vocabulary gains a member — which it has, and which is unrelated to the
-    ordering this is about.
-    """
     reg.learn("aaa_learned_sorts_first_alphabetically", Cardinality.MANY)
     vocabulary = reg.prompt_vocabulary()
-    assert vocabulary[0] != "aaa_learned_sorts_first_alphabetically"
+    assert vocabulary[0] == "allergic_to"
     assert vocabulary[-1] == "aaa_learned_sorts_first_alphabetically"
-    assert vocabulary[:-1] == sorted(vocabulary[:-1])
     assert reg.prompt_vocabulary(limit=3) == vocabulary[:3]
 
 

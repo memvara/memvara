@@ -150,21 +150,16 @@ PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-gr
 | instrument | claims in the store | what the leg changed |
 |---|---:|---|
 | LOCOMO, 1,531 questions | **0** | nothing — the two reports are byte-identical |
-| LongMemEval oracle, 500, `--share-store` | **81** | R@12 **70.4 → 70.0**; single-session-user **92.2 → 90.6**, multi-session **65.5 → 64.6** |
-| `bench/multihop.py` (synthetic), gate off | 4,498 | **2.9% → 21.6%** at k=12, **7.6% → 50.4%** at k=25 |
+| LongMemEval oracle, 500, `--share-store` | **78** | no R@k moved; MRR −0.5 on `single-session-preference`, −0.1 on `multi-session` |
+| `bench/multihop.py` (synthetic) | 4,498 | **2.9% → 21.6%** at k=12, **7.6% → 50.4%** at k=25 |
 | `bench/multihop.py`, **as shipped** | 4,498 | **nothing** — the intent gate routes 2 of the 3 question families past the walk |
 
-The LongMemEval row is a **loss**, and it is the decisive one: 1.6 points off
-single-session-user is above any guardrail worth setting. It is what a third leg costs
-when it has almost nothing to walk — where it fires at all it puts a real zero on every
-candidate it did not reach, and 81 claims across a 940-session store is not a graph.
-
-The leg walks *claims*, and both public runs are essentially episode retrieval:
-`SalienceGate` drops any turn whose role is not `user`, LOCOMO writes each turn under the
-speaker's name, and the deterministic extractor reads a small set of sentence forms.
-LOCOMO extracts **0 claims from 5,882 turns** and LongMemEval **81 from 10,866**. With no
-claims at all the candidate set is empty and the leg is never reached, so the LOCOMO
-figure is not a null result — it is the leg being inert by construction.
+The leg walks *claims*, and both public runs are episode retrieval: `SalienceGate` drops
+any turn whose role is not `user`, LOCOMO writes each turn under the speaker's name, and
+the deterministic extractor's vocabulary is first-person declaratives. LOCOMO extracts
+**0 claims from 5,882 turns** and LongMemEval **78 from 10,866**. With no claims the
+candidate set is empty and the leg is never reached, so the LOCOMO figure is not a null
+result — it is the leg being inert by construction.
 
 `bench/multihop.py` already said the other half of this, before the leg existed: LOCOMO's
 `multi-hop` category is single-fact lookups whose evidence happens to span one or two
@@ -205,11 +200,10 @@ The three-hop rows barely move because `graph_depth` ships at 2; that row measur
 bound, not the traversal. And this benchmark is synthetic and self-authored — read it as
 an illustration of a mechanism, which is not evidence for a default.
 
-**So it is opt-in, and it stays opt-in until ingestion changes.** knowledge-update, the
-row the thesis rests on, held exactly at 91.0; single-session-user did not. The precedent
-for shipping a measured stage at zero is the MMR rejection recorded in `hybrid.py`, and
-this is the same call: a large gain on a workload we wrote, a small loss on one we did
-not, and no honest way to make a default out of that pair.
+**So it is opt-in, and the guardrails are why it is opt-in rather than rejected.** Every
+R@k in both public runs held exactly, including the two the thesis rests on:
+knowledge-update 91.0 → 91.0 and single-session-user 92.2 → 92.2. The precedent for
+shipping a measured stage at zero is the MMR rejection recorded in `hybrid.py`.
 
 ```python
 mem = Memvara("memory.db", read_w_graph=1.0)
@@ -401,14 +395,13 @@ Either command builds the contexts. This table is a property of the corpus and t
 and comes out the same on every run:
 
 ```
-
   arm                 mean chars  max chars  mean ~tokens  items used / turns seen
   ------------------  ----------  ---------  ------------  -----------------------
   none                         0          0             0               0.0 / 60.8
   full_transcript           9803      10263          2451              60.8 / 60.8
   naive_rag                 2329       2846           582              12.0 / 60.8
-  memvara                   2043       2331           511              12.0 / 60.8
-  memvara_structured        1671       2032           418              12.0 / 60.8
+  memvara                   2074       2489           519              12.0 / 60.8
+  memvara_structured        1721       2151           430              12.0 / 60.8
 ```
 
 `~tokens` is characters ÷ 4, an estimate and not a tokenizer.
@@ -427,12 +420,6 @@ the history it corrects) and false negatives (it marks a correct paraphrase wron
 | `naive_rag` | 582 tok | 80% | 0 |
 | `memvara` | 519 tok | 95% | 0 |
 | `memvara_structured` | 430 tok | 95% | 0 |
-
-**These context sizes are the ones that run was answered against, and they are no longer
-what the arms produce.** The offline write path was widened afterwards, so the `memvara`
-arm now builds 511 tokens and `memvara_structured` 418 — the table above is the current
-apparatus, this one is a record of a past run. The accuracy column belongs to the contexts
-in *this* table and cannot be re-attached to the new ones without answering them again.
 
 **This is not a benchmark and must not be quoted as one.** Twenty questions, on a corpus
 we wrote, answered by an agent that is the same party that wrote the library. It is **not
@@ -470,18 +457,13 @@ With that said, four things in it are worth reading:
 ### The finding that matters more than the score
 
 The `memvara` arm — the shipped defaults, a transcript dropped in with no `llm=` —
-produced **zero claims from those 64 turns**, so its prompt block had no
-`Known about the user` header in it at all, only the episode tail. No claim means no
-`(subject, predicate)` slot, so there was no supersession and no bitemporal reasoning of
-any kind: it was lexical episode retrieval with a different ranker, and its 95% was not a
-measurement of the thing this comparison exists to test.
-
-**It now produces six**, and two of them supersede on the world clock — the delivery
-address when the customer moves, the contact preference when it reverses. That is the
-machine working offline, on prose, with no key. It is also still four facts short of what
-the corpus contains: the plan, the serial, the mobile correction and the billing address
-are in sentence forms no rule reads, so `memvara_structured` remains the arm that
-exercises the whole of it. The mechanism, the receipt counts and the way out are in
+produced **zero claims from those 64 turns**. Its prompt block has no
+`Known about the user` header in it at all, only the episode tail. The rule extractor's
+vocabulary is first-person declaratives and a support history is not written that way, so
+in that configuration there is no supersession and no bitemporal reasoning: it is lexical
+episode retrieval with a different ranker, and its 95% is not a measurement of the thing
+this comparison exists to test. `memvara_structured`'s is. The mechanism, the receipt
+counts and the way out are in
 [What the fast path does not catch](#what-the-fast-path-does-not-catch-measured).
 
 That is why there are two memvara arms and why neither may be deleted: the first is what

@@ -247,30 +247,22 @@ def test_recall_can_carry_the_past_of_a_fact_without_carrying_a_retired_one(tmp_
 
 
 def test_recall_history_asks_once_per_slot_however_many_values_are_live(tmp_path):
-    """A multi-valued predicate returning several live values must cost one history
-    lookup, not one per value — and must not print the slot's past that many times over.
-
-    `likes` rather than `contact_preference`, which this used to use: contact preference
-    is `ONE` in the shipped vocabulary now, so the second write supersedes the first and
-    the slot never holds two live values at all. It needs a genuinely `MANY` slot, or the
-    branch it is about is unreachable and the test passes without exercising anything.
-    """
+    """A multi-valued predicate returning four live values must cost one history lookup,
+    not four — and must not print the slot's past four times over."""
     path = str(tmp_path / "m.db")
     mem = Memvara(path, embedder=HashingEmbedder(dim=512), llm=NullLLM(), user="dara")
     try:
-        ramen = mem.remember("dara", "likes", "ramen").added[0]
-        mem.remember("dara", "likes", "udon")
-        mem.supersede(ramen.id, Claim(subject="dara", predicate="likes",
-                                      object="soba", scope=mem.default_scope))
-        live = {c.object for c in mem.get_all() if c.predicate == "likes"}
-        assert live == {"udon", "soba"}, live
+        phone = mem.remember("account", "contact_preference", "phone").added[0]
+        mem.remember("account", "contact_preference", "text")
+        mem.supersede(phone.id, Claim(subject="account", predicate="contact_preference",
+                                      object="email", scope=mem.default_scope))
 
         calls = []
         real = mem.history
         mem.history = lambda *a, **kw: (calls.append(a), real(*a, **kw))[1]  # type: ignore[method-assign]
-        out = mem.recall("likes", k=8, include_history=True)
+        out = mem.recall("contact preference", k=8, include_history=True)
         assert len(calls) == 1, calls
-        assert out.count("ramen") == 1, out
+        assert out.count("phone") == 1, out
     finally:
         mem.close()
 

@@ -278,16 +278,12 @@ Memvara is built around the observation that **most of this doesn't need a model
   is left that way.
 - **`AsyncMemvara` is a thread-pool wrapper, not an async rewrite.** It keeps an asyncio
   event loop unblocked, which is what it is for; it does not make the store itself async.
-- **With no `llm=`, `add()` keeps only what its rules recognise — and on real prose that
-  is a small fraction of it.** The default `NullLLM` runs tiers 0, 1 and 1b and then
-  stops, so high-precision sentence forms ("I live in X", "I work at X", "email me from
-  now on", an address, a phone number) are extracted for nothing and an employer mentioned
-  in passing is dropped. Measured on `demo/`'s 64-turn support history: **64 episodes, 6
-  claims** — enough that the delivery address and the contact preference each supersede on
-  the right clock, and a long way short of the dozen facts the transcript actually holds.
-  It was **0** until the rules were widened, which is the number to remember: a store with
-  no claims does no supersession and no bitemporal reasoning at all. It is loud rather
-  than silent —
+- **With no `llm=`, `add()` keeps only what its rules recognise — and on some corpora that
+  is nothing.** The default `NullLLM` runs tiers 0, 1 and 1b and then stops, so
+  high-precision sentence forms ("I live in X", "I work at X") are extracted for nothing
+  and an employer mentioned in passing is dropped. Measured on `demo/`'s 64-turn support
+  history: **64 episodes, 0 claims** — the rules matched not one turn, so that store does
+  no supersession and no bitemporal reasoning at all. It is loud rather than silent —
   `Memvara()` warns once with a `DegradedExtractionWarning`, and
   `WriteReceipt.unextracted` counts the dropped turns on every write — but it is the
   qualifier on the offline claim: the *library* runs with no API key, extraction from

@@ -153,62 +153,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   operator with write access can remove a row. The hash-chained log is a different feature
   and is commercial. What this defends against is a delete no record was ever written for.
 
-- **The offline write path extracts from ordinary prose**, where before it extracted
-  nothing from it. `README.md` has carried the measurement since `demo/` landed: sixty-four
-  turns of a real-shaped support history through the shipped defaults produced **64
-  episodes and 0 claims**, because the rule extractor's vocabulary was first-person
-  declaratives and a support desk does not talk that way. An empty claim tier is not a
-  weaker feature set, it is none of it — no `(subject, predicate)` slot means no
-  supersession, no valid-time closing and no bitemporal read with anything to read.
-
-  It is now **6 claims**, and the count is not the point. Both slots that corpus was built
-  around come out superseding *on the world clock*: the delivery address ends when the
-  customer moves, the contact preference ends when it reverses, and each displaced value
-  still answers `valid_at=<back then>`. That is the whole machine, offline, on prose, with
-  no key — which is what that arm was supposed to demonstrate and could not.
-
-  Three rule families landed, and two of them are not first-person declaratives:
-
-  - **Contact directives.** "Ring me", "email from now on", "stop ringing me". Second
-    person and imperative, so the clause pre-filter stopped being "has a first-person
-    subject"; and the value is not in the text, so the rule fixes it — "ring me" means the
-    phone and does not contain the word, and capturing an object there would file
-    "ringing" and "calling" as two values of one slot.
-  - **Postal addresses and bare phone numbers**, matched on the whole **sentence** before
-    the clause splitter runs. Their values contain the punctuation it cuts on: split on
-    its commas, "41 Coldharbour Road, Lewes, BN7 2GT" is three fragments and a postcode. A
-    number is read as a phone only if the whole utterance is 9–15 digits and separators,
-    which is what keeps `HX2-4419-B`, `2026` and `£79` out.
-  - **A wider clause split.** `and` starts a new clause when any pronoun subject follows
-    it, not only `i` or `my`. "I live in Hove and it is cold" is one fact and one aside;
-    read as a coordinated object the whole clause was rejected and the fact lost.
-
-  One guard moved in the precision direction at the same time: hedges (`if`, `might`,
-  `said`) now scope over the whole sentence rather than the clause they sit in, because
-  "if it breaks, call me" has a second clause that reads as a standing preference on its
-  own. A sentence that hedges one thing and asserts another now yields neither, which is
-  this module's stated trade — a missed triple is one model call away, a wrong one is
-  repeated for months.
-
-  **Precision is pinned by hand, not inferred from a count.** `tests/test_demo.py`'s
-  `EXTRACTED` table lists all six claims and the turn each comes from, authored from the
-  transcript rather than recorded from a run, so a rule that starts emitting a seventh
-  fails until somebody has read the seventh against the transcript.
-
-  What has not changed: `llm_calls` is still 0, `DegradedExtractionWarning` still fires
-  (the missing tier is a separate fact from the rules' reach), and `unextracted` still
-  counts every turn that reached extraction and found no model — 29 of them, down from 34.
-  Six claims is four short of the facts that transcript actually holds; the plan, the
-  serial, the mobile correction and the billing address are all in forms no rule reads.
-
-- **`address`, `phone` and `contact_preference` in `BUILTIN_PREDICATES`**, all
-  `Cardinality.ONE`. Required rather than decorative, and for the reason `demo/` already
-  documents from the other side: an undeclared predicate defaults to `MANY`, so without
-  these a second address would sit beside the first, both live, with nothing saying which
-  one to post to — and nothing would warn, because accumulating is exactly what `MANY` is
-  for. See `docs/UPGRADING.md` for what this does to a store that already holds claims
-  under those names (forward-only; nothing already stored is rewritten).
-
 - **A graph leg in `search()`**, off by default. `GraphTraverser` has been able to answer
   "who does Alice's manager report to" since it landed, and `bench/multihop.py` measured
   what that is worth — 34.7% against 4.7% for a search-then-search loop at three hops.
@@ -245,11 +189,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   own corpus. A deployment turning the graph leg on should turn `intent_weighting` off
   with it; `bench/multihop.py` prints both columns so the cost is a number.
 
-  It is opt-in rather than rejected because the gain is real where there is a graph to
-  walk. Where there is not, it costs: with the widened write path leaving 81 claims across
-  LongMemEval's 940 sessions, single-session-user R@12 goes 92.2 → 90.6 and multi-session
-  65.5 → 64.6. knowledge-update, the row the thesis rests on, held exactly at 91.0. The
-  measured table and the reproduce commands are in `docs/BENCHMARKS.md`.
+  It is opt-in rather than rejected because nothing regressed where it cannot help: with
+  78 claims across LongMemEval's 940 sessions no R@k moved at all, knowledge-update
+  included. The measured table and the reproduce commands are in `docs/BENCHMARKS.md`.
 
   A `Store` without a working `adjacent()` degrades to the two legs it had and raises
   `DegradedRetrievalWarning` once per retriever. That is caught rather than guarded,

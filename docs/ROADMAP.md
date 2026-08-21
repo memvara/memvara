@@ -149,11 +149,9 @@ list.
   `search()` can: the caller no longer has to know the seed entity. **It ships at
   `w_graph=0.0`** — the measured table is in `docs/BENCHMARKS.md`, and the short version
   is that neither public retrieval benchmark can see it, because both run the offline
-  write path over conversational data it extracts almost nothing from. The only measured
-  gain is on a synthetic multi-hop workload, and on LongMemEval — where the widened write
-  path leaves 81 claims across 940 sessions — the leg costs 1.6 points of
-  single-session-user R@12. A third leg with almost nothing to walk puts a real zero on
-  every candidate it did not reach.
+  write path over conversational data it extracts almost nothing from — 0 claims from
+  LOCOMO and 78 from LongMemEval. The only measured gain is on a synthetic multi-hop
+  workload, and there the shipped configuration gates it away entirely.
 - **The temporal leg of retrieval** — `Store.episodes_near()`, `retrieve/temporal.py`, and
   a fourth leg over raw turns ranked on proximity to the instant the search was asked
   about. Time was a filter and a multiplier on the read path and never a candidate

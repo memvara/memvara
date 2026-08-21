@@ -136,26 +136,6 @@ BUILTIN_PREDICATES: tuple[PredicateSpec, ...] = (
     _p("allergic_to", Cardinality.MANY, Volatility.STATIC, "allergy", "is_allergic_to"),
     _p("dietary_restriction", Cardinality.MANY, Volatility.SLOW, "diet", "eats"),
 
-    # --- contact details: single-valued, and the reason they are here ---
-    # Not on the original vocabulary, and added with the deterministic extractor that
-    # produces them (`write/fast.py`). Cardinality is the whole point: an unknown
-    # predicate defaults to `MANY`, so without these specs a second address would sit
-    # beside the first, both live, with nothing saying which one to post to — and nothing
-    # would warn, because accumulating is exactly what `MANY` is supposed to do.
-    _p("address", Cardinality.ONE, Volatility.SLOW,
-       "postal_address", "delivery_address", "mailing_address", "ships_to",
-       "street_address"),
-    _p("phone", Cardinality.ONE, Volatility.SLOW,
-       "phone_number", "mobile", "telephone", "contact_number", "cell"),
-    #: Which channel to reach this user on. `ONE` because "how should I contact you" has
-    #: one standing answer: a reversal is a supersession, not a second preference sitting
-    #: alongside the first. A deployment that genuinely accepts several channels at once
-    #: declares its own spec at `MANY` and closes the slot explicitly, which is what
-    #: `demo/baselines.py` does and why it has to.
-    _p("contact_preference", Cardinality.ONE, Volatility.SLOW,
-       "contact_via", "contact_method", "preferred_contact", "reach_me_by",
-       mtype=MemoryType.PROCEDURAL),
-
     # --- procedural: how this user wants the agent to behave ---
     _p("prefers", Cardinality.MANY, Volatility.SLOW, "wants", "would_rather",
        mtype=MemoryType.PROCEDURAL),

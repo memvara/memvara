@@ -67,10 +67,9 @@ GDPR Article 17 obligation is not a feature to upsell.
 
 The one thing to know before you count on "offline": with no `llm=`, `add()` runs the
 deterministic fast path only and drops the turns its rules do not recognise — on a real
-support transcript that is most of them. Sixty-four turns yield **six claims**, which is
-enough for two slots to supersede on the world clock and four of the six facts that move
-in that transcript to be invisible. It used to be zero. `remember()`, retrieval,
-contradiction resolution and everything else are unaffected and need no model ever, and writing structured facts through `remember()` is
+support transcript that turned out to be **all 64 of them**, leaving a store with episodes
+and no claims. `remember()`, retrieval, contradiction resolution and everything else are
+unaffected and need no model ever, and writing structured facts through `remember()` is
 how an offline integration gets the whole bitemporal machine. See
 [What the fast path does not catch](#what-the-fast-path-does-not-catch-measured).
 
