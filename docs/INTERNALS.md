@@ -6,6 +6,7 @@ importable from the foundation modules:
 
 - `memvara/types.py` — `Claim`, `Episode`, `Scope`, `Result`, `Explanation`, `WriteReceipt`,
   `MemoryType`, `Derivation`, `utcnow()`, `content_hash()`
+- `memvara/compat/supermemory_import.py` — `import_supermemory`, `SupermemoryReceipt`
 - `memvara/schema.py` — `PredicateRegistry`, `PredicateSpec`, `Cardinality`, `Volatility`
 - `memvara/store/` — `Store` and `SQLStore` protocols, `SQLiteStore`, `STATES`,
   `ClaimState`, `resolve_states()`, `state_predicate()`, `stored_state_predicate()`,
@@ -20,7 +21,29 @@ importable from the foundation modules:
    ranking, decay, and time travel are all pure functions of stored state. Only
    `extract()` and `resolve_predicate()` may touch a model.
 2. **Unknown predicates default to `Cardinality.MANY`.** Wrongly retiring a true fact is
-   worse than keeping two competing ones.
+   worse than keeping two competing ones. The default is deliberate and stays; what
+   `MEMVARA_PREDICATES` adds is a way to *revise* it, since before it a server-backed
+   store had none. A declared spec outranks a persisted learned one — rehydration skips
+   any learned spec whose name a declaration already holds, so a pack corrects a store
+   that guessed rather than only describing a fresh one. Forward-only: it changes what
+   supersedes on the next write and retires nothing already stored.
+
+   A vocabulary is TOML, one `[[predicate]]` table each, `name`, `cardinality` and
+   `volatility` required, `memory_type`, `aliases` and `supersedes` optional:
+
+   ```toml
+   [[predicate]]
+   name = "git_state"
+   cardinality = "one"     # "one" supersedes, "many" accumulates
+   volatility = "fast"     # static | slow | fast -> 36500 | 730 | 7 day half-life
+   aliases = ["git_status"]
+   ```
+
+   Needs Python 3.11 or later, which is where `tomllib` arrives; the reader is
+   imported lazily so 3.10 keeps working for everything else.
+
+   Malformed entries raise rather than being skipped: a vocabulary that half-loads leaves
+   some predicates superseding and others accumulating with nothing recording which.
 3. **Nothing is ever hard-deleted by the engine, and end-of-life moves exactly one
    clock.** Closing valid time (`valid_to`) says *the world changed*; closing transaction
    time (`invalidated_at`) says *the record was wrong*. They are different events and no

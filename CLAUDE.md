@@ -1,8 +1,9 @@
 # Working in this repository
 
 `CONTRIBUTING.md` has the setup, the gates and the scope rules, and it is the file to read
-before writing code. This one covers the three things that are about *working here* rather
-than about the code, all of which have cost real time.
+before writing code. This one covers the things that are about *working here* rather
+than about the code, all of which have cost real time, and closes with the general
+coding guidelines this project has adopted.
 
 ## Files you need to keep but must not commit go in `local/`
 
@@ -47,7 +48,7 @@ author — it is whoever reads it next, without the context that would let them 
 inventory out by looking rather than by trusting this list. It runs to at least
 `README.md`, `CHANGELOG.md` (every user-visible change), `docs/UPGRADING.md` when
 behaviour changes under someone, `docs/INTERNALS.md`, and the packaged skill at
-`memvara/skills/claude/SKILL.md`, which states outright that it does not repeat what a
+`memvara/skills/memvara/SKILL.md`, which states outright that it does not repeat what a
 tool description says — so text moving between the two has to move in both.
 `CONTRIBUTING.md` states the same duty from the other end, and names the documents that
 make specific, checkable claims.
@@ -92,3 +93,88 @@ way to know you exist.
 5. **Never overwrite a document you did not write.** Append, or pick a distinct filename.
 6. **Use a private `COVERAGE_FILE`.** Two concurrent runs clobber a shared `.coverage`,
    and the report that comes out of that is wrong in the direction that looks fine.
+
+---
+
+# Karpathy guidelines
+
+Behavioural guidelines for reducing common LLM coding mistakes, from
+[multica-ai/andrej-karpathy-skills](https://github.com/multica-ai/andrej-karpathy-skills)
+(declared MIT in the skill's frontmatter), derived from
+[Andrej Karpathy's observations](https://x.com/karpathy/status/2015883857489522876).
+They are merged here rather than vendored as a second skill: they govern how work is done
+*in* this repository, and shipping them inside the plugin would hand every memvara user a
+third-party skill they did not install.
+
+**Tradeoff:** these bias toward caution over speed. For trivial tasks, use judgment.
+
+## 1. Think before coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them — don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity first
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it — don't delete it.
+- Remove imports, variables and functions that *your* changes orphaned; leave
+  pre-existing dead code alone unless asked.
+
+The test: every changed line should trace directly to the request.
+
+## 4. Goal-driven execution
+
+**Define success criteria. Loop until verified.**
+
+- "Add validation" → "write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "write a test that reproduces it, then make it pass"
+- "Refactor X" → "ensure tests pass before and after"
+
+For multi-step work, state the plan as steps with their checks, then run it.
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due
+to overcomplication, and clarifying questions arriving before implementation rather than
+after mistakes.
+
+## Where they bite hardest in this repository
+
+Not decoration — each of these has already cost time here.
+
+- **§1 and §2 against what is already decided.** `docs/INTERNALS.md` states the invariants
+  and why; `docs/ROADMAP.md` keeps a *Deliberately deferred* list precisely so that
+  considered-and-declined stops reading as not-yet-done; and the tests explain reasoning at
+  paragraph length. A proposal written without reading those three is usually a rebuild of
+  something already here — a plugin-side predicate-router design was cut by three quarters on
+  exactly this discovery. "Think before coding" means reading them, not merely pausing.
+- **§3 against the packaged skill.** `memvara/skills/memvara/` is vendored into seven
+  downstream plugin repos that pin it by sha and diff against it in CI. An unrequested
+  formatting improvement there is a change in all of them.
+- **§4 against silent failures.** This library's own telemetry module exists because a
+  red-team review classified six of eleven long-horizon failure modes as *silent*. "Verify"
+  therefore means comparing an output — a count, a series, a diff — never that a command
+  exited 0.
+
+§3 has one local amendment here, and it makes the rule stricter rather than looser:
+**documentation ships in the same commit as the code**, per the section above. Updating
+`README.md`, `CHANGELOG.md`, `docs/UPGRADING.md`, `docs/INTERNALS.md` or a tool description
+alongside a behaviour change *is* the surgical change, not scope creep.

@@ -9,6 +9,49 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`import_supermemory`**, in `memvara.compat`, moving a Supermemory
+  account into a store over stdlib HTTP with no SDK. Supermemory keeps
+  documents rather than a mutation log, so unlike `import_mem0` nothing
+  can reconstruct supersession it was never told: documents arrive as
+  episodes on their original `createdAt`, and the receipt reports
+  episodes and claims separately so a store with no extractor cannot
+  mistake "nothing was structured" for "nothing arrived".
+- **`include_episodes` on `memory_recall`.** Recall answers from claims,
+  so a store holding imported or unextracted text looked empty through
+  the tool surface however much it held — there was no way to ask for
+  the excerpts at all. Default stays false: a fact is a settled reading
+  of what was said and an excerpt is not.
+
+- **Declared predicate vocabularies**, via `MEMVARA_PREDICATES`. It takes shipped
+  pack names, paths to TOML files, or a comma-separated mix with later
+  entries winning, and an `engineering` pack ships with the package.
+  `PredicateRegistry` has always accepted `specs=`, but an MCP client can
+  only set environment variables, so every server-backed store was pinned to
+  the built-in vocabulary — and a predicate outside it accumulated instead of
+  superseding, and decayed at the slow default rather than its own. A
+  malformed pack is a startup error naming its own fix, not a surprise at the
+  first write.
+- **A declared spec now outranks a persisted learned one.** Rehydration skips
+  a learned spec whose name a declaration already holds, so a vocabulary can
+  correct a store that guessed rather than only describe a fresh one.
+  Forward-only: it changes what supersedes on the next write and retires
+  nothing already stored.
+
+- **A real agent skill**, at `memvara/skills/memvara/`. `SKILL.md` is a
+  dispatcher (which surface, then which job) plus `references/` for
+  integrate / hosted MCP / write-and-correct / time / scopes / governance /
+  mem0, worked turns, and a short paste for clients that have no skill
+  directory. `memvara-mcp init --agent` accepts `claude`, `cursor` and
+  `grok` — those names pick the destination, not different prose — and
+  `--skill-only` writes the tree without touching `.mcp.json`.
+- **A plugin** at `plugin/` is the source layout. Claude Code installs from
+  the dedicated public marketplace
+  [`memvara/claude-memvara`](https://github.com/memvara/claude-memvara)
+  (`/plugin marketplace add memvara/claude-memvara`). No `npx`, no local
+  stdio. A loop you wrote still uses the library, REST, or MCP as a client.
+
 ### Fixed
 
 - **`memvara-mcp login` never completed against the hosted console.** Two independent

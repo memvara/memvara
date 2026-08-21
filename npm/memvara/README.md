@@ -34,10 +34,13 @@ project is ever abandoned, the right thing is to hand it over rather than sit on
 
 ## If you were looking for a JS client
 
-Say so on the [issue tracker](https://github.com/memvara/memvara/issues). Whether to build
-one is an open question, and the number of people who ask is most of the answer. The REST
-API it would wrap is documented in the commercial layer; the Python library needs no
-server and runs offline.
+There isn't one. For a JavaScript agent, speak [MCP](https://memvara.dev/docs/agents)
+against `https://app.memvara.dev/mcp`, or call the commercial REST API. The
+[skill](https://github.com/memvara/memvara/blob/main/memvara/skills/memvara/SKILL.md)
+is markdown you can paste into a system prompt.
+
+Say so on the [issue tracker](https://github.com/memvara/memvara/issues) if a real
+client would change that. The number of people who ask is most of the answer.
 
 ## License
 

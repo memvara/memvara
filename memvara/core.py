@@ -417,7 +417,16 @@ class Memvara:
         # treats learned predicates as multi-valued until it does — silently disabling
         # contradiction detection for those writes.
         for spec in self._persisted_specs(tenant):
-            self.registry.register(spec)
+            # A *declared* spec outranks a persisted *learned* one, and this is the line
+            # that makes a declared vocabulary able to correct a store rather than merely
+            # describe a fresh one. Rehydration runs after construction, so without the
+            # guard the guess a previous process wrote — often the MANY default fossilised
+            # by an offline extractor — would overwrite the caller's declaration and the
+            # correction would silently do nothing on exactly the stores that needed it.
+            # Forward-only: it changes what supersedes on the *next* write and retires
+            # nothing already stored.
+            if not (spec.learned and self.registry.spec_is_declared(spec.name)):
+                self.registry.register(spec)
         self.default_scope = Scope(tenant, scope_kw["user"], scope_kw["agent"],
                                    scope_kw["session"])
 

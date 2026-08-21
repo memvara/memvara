@@ -72,7 +72,10 @@ packages = ["memvara"]
 # rules' reach entirely. It is worth the two lines because of how the failure presents:
 # not an ImportError in CI, but `memvara init` raising FileNotFoundError on a user's
 # machine, at the one moment they are deciding whether this package works.
-artifacts = ["memvara/skills/**/*.md"]
+# The predicate packs are data for the same reason and fail the same way: not an
+# ImportError in CI, but MEMVARA_PREDICATES=engineering telling a user on a fresh
+# install that the pack shipping in this very file does not exist.
+artifacts = ["memvara/skills/**/*.md", "memvara/packs/*.toml"]
 
 # The sdist takes everything at the top level by default — `bench`, `demo`, `docs`,
 # `tests` are all in it deliberately, because a source distribution that cannot

@@ -52,7 +52,8 @@ from memvara.server.init import (
 from memvara.server.tools import BY_NAME, TOOLS
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-SKILL_SOURCE = REPO / "memvara" / "skills" / "claude" / "SKILL.md"
+SKILL_SOURCE = REPO / "memvara" / "skills" / "memvara" / "SKILL.md"
+SKILL_PACKAGE = REPO / "memvara" / "skills" / "memvara"
 
 
 def _run(root: pathlib.Path, *extra: str,
@@ -94,6 +95,10 @@ def test_one_run_writes_the_three_files_a_client_looks_for(tmp_path) -> None:
 
     assert status == 0 and err == ""
     assert _skill_path(tmp_path).read_text(encoding="utf-8") == skill_text()
+    refs = tmp_path / ".claude" / "skills" / "memvara" / "references"
+    assert (refs / "examples.md").is_file()
+    assert (refs / "governance.md").is_file()
+    assert (refs / "project-instructions.md").is_file()
     assert MARKER in (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
     entry = _entry(tmp_path)
     assert entry["args"] == ["-m", "memvara.server"]
@@ -312,7 +317,7 @@ def test_with_nothing_injected_it_uses_the_process_streams(capsys) -> None:
 
 @pytest.mark.parametrize("argv, expected", [
     ([], "needs --agent"),
-    (["--agent", "cursor"], "not a client init can write files for"),
+    (["--agent", "windsurf"], "not a client init can write files for"),
     (["--agent"], "--agent needs a value"),
     (["--agent="], "--agent needs a value"),
     (["--agent", "claude", "--user", "   "], "--user needs a value"),
@@ -475,10 +480,10 @@ def test_the_skill_is_read_out_of_the_installed_package(tmp_path) -> None:
     assert skill_text().startswith("---\n"), "front matter is what makes it a skill"
 
 
-def test_the_only_agent_offered_is_the_only_one_with_a_skill_to_write() -> None:
-    """`--agent` is an inventory of file layouts, and each needs its own packaged prose."""
+def test_every_agent_init_knows_gets_the_same_packaged_skill() -> None:
+    """`--agent` is an inventory of file layouts, not of different prose."""
     for agent in AGENTS:
-        assert skill_text(agent).strip(), f"--agent {agent} has no skill behind it"
+        assert skill_text(agent) == skill_text(), f"--agent {agent} drifted from the package"
 
 
 def test_the_skill_is_not_hidden_from_the_build_by_an_ignore_rule() -> None:
@@ -518,7 +523,10 @@ def test_the_skill_reaches_the_wheel() -> None:
     for wheel in (REPO / "dist").glob(f"memvara-{memvara.__version__}-*.whl"):
         with zipfile.ZipFile(wheel) as archive:
             names |= set(archive.namelist())
-    assert "memvara/skills/claude/SKILL.md" in names
+    assert "memvara/skills/memvara/SKILL.md" in names
+    assert "memvara/skills/memvara/references/examples.md" in names
+    assert "memvara/skills/memvara/references/governance.md" in names
+    assert "memvara/skills/memvara/references/project-instructions.md" in names
 
 
 # -- the skill as prose ------------------------------------------------------------------
@@ -554,7 +562,10 @@ def test_the_skill_does_not_restate_a_tool_description() -> None:
     skill's job is to say that the *source turn* decides which one applies, which is a
     fact about the sequence and nothing a parameter description could carry.
     """
-    skill = _ngrams(skill_text())
+    packaged = skill_text()
+    for extra in sorted((SKILL_PACKAGE / "references").glob("*.md")):
+        packaged += "\n" + extra.read_text(encoding="utf-8")
+    skill = _ngrams(packaged)
     offenders = {source: sorted(" ".join(g) for g in skill & _ngrams(prose))
                  for source, prose in _tool_prose() if skill & _ngrams(prose)}
     assert not offenders, (
@@ -636,6 +647,58 @@ def test_the_skill_directory_is_the_name_the_front_matter_declares() -> None:
 
     assert declared is not None
     assert declared.group(1) == _skill_path(pathlib.Path("/anywhere")).parent.name
+
+
+def test_cursor_and_grok_write_their_own_skill_directory(tmp_path) -> None:
+    """Same skill, different folder. The Claude path is not implied."""
+    layouts = (
+        ("cursor", pathlib.Path(".cursor") / "skills" / "memvara"),
+        ("grok", pathlib.Path(".grok") / "skills" / "memvara"),
+    )
+    for agent, rel in layouts:
+        dest = tmp_path / agent
+        dest.mkdir()
+        status, _, err = _run(dest, "--agent", agent, env={"USER": "alice"})
+        assert status == 0 and err == ""
+        assert (dest / rel / "SKILL.md").read_text(encoding="utf-8") == skill_text()
+        assert (dest / rel / "references" / "examples.md").is_file()
+        assert MARKER in (dest / "AGENTS.md").read_text(encoding="utf-8")
+        assert not (dest / "CLAUDE.md").exists()
+        assert not (dest / ".claude").exists()
+
+
+def test_skill_only_writes_the_tree_and_leaves_mcp_json_alone(tmp_path) -> None:
+    """Hosted-first users already have a URL in the client; they must not get a
+    local stdio block they did not ask for."""
+    status, out, err = _run(tmp_path, "--skill-only")
+    assert status == 0 and err == ""
+    assert _skill_path(tmp_path).is_file()
+    assert (tmp_path / ".claude" / "skills" / "memvara" / "references"
+            / "governance.md").is_file()
+    assert not (tmp_path / ".mcp.json").exists()
+    assert not (tmp_path / "store").exists()
+    assert "skill only" in out
+    assert "No .mcp.json" in out
+
+
+def test_skill_only_does_not_touch_an_existing_mcp_json(tmp_path) -> None:
+    original = '{ "mcpServers": { "other": { "command": "elsewhere" } } }\n'
+    (tmp_path / ".mcp.json").write_text(original, encoding="utf-8")
+
+    assert _run(tmp_path, "--skill-only")[0] == 0
+
+    assert (tmp_path / ".mcp.json").read_text(encoding="utf-8") == original
+
+
+def test_a_second_note_file_that_already_exists_is_updated_too(tmp_path) -> None:
+    """A repo that already has AGENTS.md should get the pointer there as well."""
+    (tmp_path / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
+
+    _run(tmp_path)
+
+    assert MARKER in (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    assert MARKER in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert (tmp_path / "AGENTS.md").read_text(encoding="utf-8").startswith("# Agents\n")
 
 
 # -- cloud mode --------------------------------------------------------------------------

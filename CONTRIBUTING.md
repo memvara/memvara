@@ -145,7 +145,7 @@ one is a product decision, not a packaging detail.
 ### Likely to be declined
 
 - **A feature that belongs in the commercial layer.** The
-  [open-core boundary](README.md#open-core-and-exactly-where-the-line-is) is real and this
+  [open-core boundary](docs/OPEN-CORE.md) is real and this
   is the honest part: a Postgres/pgvector store, a REST API, a multi-tenant control plane,
   usage metering or quotas, and the governance layer (retention policy, tamper-evident
   audit chain, RBAC) are a separate paid product, and a PR that adds one here is likely to

@@ -22,6 +22,8 @@ from typing import Any, Mapping, Sequence
 from ..core import Memvara
 from ..embed import CachedEmbedder, HashingEmbedder
 from ..llm import NullLLM
+from ..schema import (BUILTIN_PREDICATES, PredicatePackError,
+                      PredicateRegistry, load_all_specs)
 
 __all__ = ["ConfigError", "ServerConfig", "build_memvara"]
 
@@ -110,6 +112,11 @@ class ServerConfig:
     #: identity a property of the machine's package set. `pip install memvara[rerank]`
     #: is the case that proves it — see `build_memvara`.
     embedder: str = _DEFAULT_EMBEDDER
+    #: Declared predicate vocabularies: shipped pack names, paths to TOML files, or a
+    #: comma-separated mix of both, later entries winning. Empty means the 23 builtins
+    #: alone — which is what every server-backed store had before this field existed,
+    #: and why a predicate outside them accumulated instead of superseding.
+    predicates: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ServerConfig":
@@ -156,6 +163,17 @@ class ServerConfig:
                 "works offline, but stores only the sentence forms the deterministic "
                 "extractor recognises.")
 
+        predicates = (env.get("MEMVARA_PREDICATES") or "").strip()
+        if predicates:
+            # Read now and discard the result: a typo in a pack name or an unreadable file
+            # must be a startup error beside the rest of the configuration, not a
+            # surprise at the first write — by which point the process has already
+            # accepted facts into the very slots the pack was meant to shape.
+            try:
+                load_all_specs(predicates)
+            except PredicatePackError as exc:
+                raise ConfigError(f"MEMVARA_PREDICATES: {exc}") from None
+
         return cls(
             # `~` is what a human types in a JSON settings file, and nothing else in the
             # launch path will expand it.
@@ -171,6 +189,7 @@ class ServerConfig:
             mode=mode,
             server_url=server_url,
             api_key=api_key,
+            predicates=predicates,
         )
 
     @property
@@ -297,6 +316,18 @@ def _embedder(spec: str) -> Any:
         HashingEmbedder(dim=int(argument) if argument else _DEFAULT_DIM))
 
 
+def _registry(config: ServerConfig) -> PredicateRegistry | None:
+    """The vocabulary this server declares, or None to take the builtins alone.
+
+    `None` rather than an empty registry on purpose: `Memvara()` builds its own default
+    when given nothing, and handing it one built here would duplicate that decision in a
+    second place.
+    """
+    if not config.predicates:
+        return None
+    return PredicateRegistry(
+        specs=BUILTIN_PREDICATES + load_all_specs(config.predicates))
+
 def build_memvara(config: ServerConfig) -> Memvara:
     """Open the store this server speaks for.
 
@@ -326,6 +357,7 @@ def build_memvara(config: ServerConfig) -> Memvara:
             store=RemoteStore(base_url=config.server_url, api_key=config.api_key),
             llm=NullLLM() if config.llm == "none" else _anthropic(),
             embedder=_embedder(config.embedder),
+            registry=_registry(config),
             **config.scope_kwargs,
         )
     return Memvara(
@@ -346,5 +378,9 @@ def build_memvara(config: ServerConfig) -> Memvara:
         # here. `MEMVARA_EMBEDDER` is that door, and naming a default rather than
         # discovering one is what keeps the store's vector space out of `pip`'s hands.
         embedder=_embedder(config.embedder),
+        # The door this server did not have. `Memvara` has always taken a registry, but
+        # an MCP client can only set environment variables, so a server-backed store was
+        # pinned to the builtins and everything outside them accumulated silently.
+        registry=_registry(config),
         **config.scope_kwargs,
     )

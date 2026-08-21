@@ -7,6 +7,53 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## The packaged skill moved, and `init` writes a directory
+
+### What changed
+
+The skill `memvara-mcp init` writes used to live at
+`memvara/skills/claude/SKILL.md` and land as a single file under
+`.claude/skills/memvara/SKILL.md`. It now lives at `memvara/skills/memvara/` —
+`SKILL.md` plus a `references/` directory — and `--agent` chooses where that
+tree is written (`claude`, `cursor`, `grok`). `--skill-only` writes the tree
+and the project note, and leaves `.mcp.json` alone.
+
+### How the mistake shows up
+
+An older `.claude/skills/memvara/SKILL.md` still loads. What it will not have
+is `references/examples.md` or `references/governance.md`, so an agent that
+follows the new body and tries to open those files finds nothing. A script
+that greps the old package path, or that treated `--agent cursor` as a usage
+error, is looking at a layout that is gone.
+
+### What to grep for
+
+```
+memvara/skills/claude
+.claude/skills/memvara/SKILL.md
+memvara-mcp init --agent
+```
+
+### What to replace it with
+
+```
+memvara-mcp init --agent claude --force
+```
+
+`--force` replaces a drifted `SKILL.md` and fills in the missing reference
+files. Without it, `init` keeps a file you edited and only writes the
+references that are absent. `--skill-only` if the client is already connected
+and you do not want a new `.mcp.json`.
+
+Coding agents that can install plugins can skip `init` for the hosted path:
+
+```
+/plugin marketplace add memvara/claude-memvara
+/plugin install memvara
+```
+
+---
+
 ## `memvara-mcp init`'s default output changed, if you installed `memvara[cloud]`
 
 ### What changed
@@ -49,7 +96,7 @@ MEMVARA_MODE=local
 
 `--mode local` (or `MEMVARA_MODE=local` on the server itself) is fully supported
 regardless of which extras are installed and does not require a network call at any
-point. See [README.md § Open core, and exactly where the line is](../README.md#open-core-and-exactly-where-the-line-is)
+point. See [docs/OPEN-CORE.md](OPEN-CORE.md)
 for what the `cloud` extra does and does not add.
 
 ---
