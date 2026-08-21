@@ -1305,8 +1305,39 @@ def test_a_budget_says_how_many_notes_it_dropped(five_cities):
 def test_the_dropped_line_counts_one_note_in_the_singular(five_cities):
     """"1 further notes" reads as a rendering bug, and a model that distrusts the framing
     has no reason to trust the facts under it."""
-    assert Memvara._dropped_line(1).startswith("(1 further note matched")
-    assert Memvara._dropped_line(2).startswith("(2 further notes matched")
+    assert Memvara._dropped_line(1).startswith("(1 further note did not fit")
+    assert Memvara._dropped_line(2).startswith("(2 further notes did not fit")
+
+
+def test_the_dropped_count_does_not_claim_to_be_a_total(five_cities):
+    """It counts what retrieval returned, and retrieval was already capped by `k`.
+
+    The number is `len(claims) + len(episodes)` minus what was rendered, over a pool
+    `search()` had truncated to `k` before the budget ever saw it. So it says how many
+    *retrieved* notes were cut and nothing about how many more the store holds. The old
+    wording — "n further notes matched" — reads as a total, and a model told three more
+    matched will believe there are exactly three.
+
+    Asserted on the absence of the word rather than only on the replacement, because the
+    replacement can be reworded again and the claim that must not come back is "matched".
+    """
+    line = Memvara._dropped_line(3)
+    assert "matched" not in line
+    assert "the search was capped too" in line
+    assert "not everything known" in line, "the original point still has to survive"
+
+
+def test_the_dropped_line_is_not_longer_than_the_sentence_it_replaced(five_cities):
+    """Every character here is one a real note cannot have.
+
+    The notice is counted against `budget=` like any other line and is the floor of a
+    squeezed block, so lengthening it silently lowers how many notes fit. The first
+    rewrite of this line was twenty-nine characters longer and cost a note at the budget
+    `test_a_budget_drops_a_facts_past_along_with_the_fact` uses — it failed there rather
+    than here, on a count of rendered notes, which is a long way from the string that
+    caused it. This pins the constraint where it can be read.
+    """
+    assert len(Memvara._dropped_line(5)) <= 87, "the wording this replaced was 87 chars"
 
 
 def test_the_line_reporting_the_cut_is_itself_inside_the_budget(five_cities):

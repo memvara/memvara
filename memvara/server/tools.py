@@ -474,6 +474,15 @@ def _since(ctx: ToolContext, args: dict[str, Any]) -> str:
         # Said plainly, because "nothing changed" is an answer and the alternative — an
         # empty-looking result — reads as "the store is empty" or "the call failed",
         # both of which are the wrong thing to tell the user you were away from.
+        if delta.since > utcnow():
+            # A future instant makes the sentence below true and useless: of course
+            # nothing has changed since a moment that has not arrived. Left unsaid, the
+            # reply reads as a clean "you are up to date" and a model stops asking —
+            # having in fact learned nothing about the period it meant to ask about.
+            return (f"{stamp} is in the future, so nothing can have changed since it and "
+                    "this answers nothing about what you missed. Send the instant your "
+                    "last turn ended, in UTC — a local time read as UTC lands ahead of "
+                    "now for anyone west of Greenwich, which is the usual cause.")
         return (f"Nothing has changed since {stamp}. Nothing was recorded in this scope "
                 "and nothing stopped being believed, so what you knew then still "
                 "stands.")
@@ -719,6 +728,18 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
     wrong, which is a different claim about the past and belongs to `memory_forget`,
     where the tool's own name says which of the two is being asserted.
     """
+    # Blank is not a value, and it used to be accepted in silence: the write stored
+    # nothing and the receipt reported `added 0` with every other counter zero too, which
+    # is also what a legitimate already-known write looks like. A model reading that has
+    # no way to tell "you sent nothing" from "there was nothing to do", so it either
+    # believes the fact is on record or repeats the call. Every other rejection here says
+    # what to send instead; this one said nothing at all.
+    for field in ("subject", "predicate", "object"):
+        if not args[field].strip():
+            raise ToolError(
+                f"memory_remember.{field} is blank. A fact needs all three parts — who "
+                "it is about, the relation, and the value — and a write missing one is "
+                "stored as nothing rather than as a partial fact.")
     memory_type = args.get("memory_type")
     since, until = _interval(args)
     receipt = ctx.memory.remember(
@@ -818,6 +839,24 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
         # forward to the claim's own start. Reporting the requested instant instead would
         # be this layer inventing a fact about the row it just wrote.
         closed = cast(Claim, ctx.memory.get(claim_id))
+        if closed.state == "retired":
+            # Ending a claim that was already retired changes nothing, correctly — the
+            # store keeps `retired`, because that is the stronger statement and the one
+            # that was made first. The success boilerplate below does not survive that:
+            # it renders `_state` as "retired" and then asserts in the next sentence that
+            # history shows it as ended and not retired, contradicting itself inside one
+            # line. Stored state was never wrong, so this is a message defect — but an
+            # agent that believed it would report the wrong reason for the change, which
+            # is precisely the mistake two separate tools exist to make unmakeable.
+            # Through `_state` rather than the timestamp directly: it is the one place
+            # the state word is spelled, so this cannot drift from what every other
+            # surface calls the same claim — and `invalidated_at` is only non-None
+            # because the state is "retired", which no checker can narrow from here.
+            return (
+                f"Claim {claim_id} is already {_state(closed)} and stays that way. Ending "
+                "says the world moved on from something true; retiring already said the "
+                "record was wrong, which is the stronger claim and the one "
+                "memory_history keeps showing. Nothing changed here.")
         return "\n".join(filter(None, [
             f"Ended claim {claim_id} — {_state(closed)}. It answers nothing after that "
             "instant and still answers about the period before it. memory_history shows "
@@ -974,7 +1013,12 @@ TOOLS: tuple[Tool, ...] = (
             "now ('where did they live in 2019'), and as_of asks what this system "
             "believed then ('what did I tell you back in March'). Most questions about "
             "the past are the first one. To simply answer a question from memory, use "
-            "memory_recall instead: it returns text meant to be read, not inspected."
+            "memory_recall instead: it returns text meant to be read, not inspected. "
+            "The relevance on each row is not similarity: it is how well the text "
+            "matched, adjusted by how recent the claim is, how confident its writer was, "
+            "and how often it has been reinforced. Two rows can differ on those alone, "
+            "so a smaller number is not proof of a worse match — and confidence is set "
+            "by whoever wrote the claim, which makes it the one input a caller controls."
         ),
         properties={
             "query": {"type": "string", "description": "Natural-language search query."},
@@ -1111,8 +1155,13 @@ TOOLS: tuple[Tool, ...] = (
                 "description": (
                     "'semantic' for a durable fact, 'episodic' for something that "
                     "happened at a time, 'procedural' for how the user wants work done. "
-                    "Omit to let the predicate's own classification decide, which is "
-                    "usually right."
+                    "Omitting it uses the predicate's declared type, and predicates this "
+                    "store has never seen have none — they become 'semantic', which is "
+                    "the safe default rather than a reading of what you wrote. Nothing "
+                    "here infers a type from the words. So if you are recording "
+                    "something that happened, send 'episodic' yourself: a predicate like "
+                    "attended or met_with will otherwise be filed as a standing fact and "
+                    "will decay at the slow rate a standing fact deserves."
                 ),
             },
             "confidence": {
@@ -1120,7 +1169,11 @@ TOOLS: tuple[Tool, ...] = (
                 "description": (
                     "How sure you are. Lower it when you inferred the fact rather than "
                     "being told it; confidence feeds ranking, so an honest 0.6 keeps a "
-                    "guess from outranking something the user actually said."
+                    "guess from outranking something the user actually said. It is a "
+                    "real lever and not a label: the gap between 1.0 and 0.5 moves a "
+                    "claim's published relevance by a few percent, which is enough to "
+                    "reorder rows that matched about equally well. Inflating it on "
+                    "everything removes the signal rather than raising it."
                 ),
             },
         },

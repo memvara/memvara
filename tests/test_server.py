@@ -1486,6 +1486,68 @@ def test_a_slot_name_has_a_length_bound_like_every_other_argument(
     assert not is_error, f"{limit} characters is inside the bound: {ok}"
 
 
+@pytest.mark.parametrize("field", ["subject", "predicate", "object"])
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_a_blank_part_of_a_triple_is_refused_rather_than_stored_as_nothing(
+        server, field, blank):
+    """The silent no-op, which looked identical to a write that had nothing to do.
+
+    A blank part stored nothing and reported `added 0, ended 0, retired 0,
+    already-known 0, no-fact 0` — every counter zero, no note, `isError` false. That is
+    also what a legitimate already-known write looks like, so a model had no way to tell
+    "you sent nothing" from "there was nothing to do", and either believed the fact was
+    on record or repeated the call. Every other rejection on this surface says what to
+    send instead; this one said nothing at all.
+    """
+    args = {"subject": "user", "predicate": "likes", "object": "coffee", field: blank}
+    body, is_error = call(server, "memory_remember", args)
+
+    assert is_error, f"a blank {field} was accepted in silence"
+    assert f"memory_remember.{field} is blank" in body
+    assert not server._ctx.memory.get_all(), "and nothing reached the store"
+
+
+def test_ending_an_already_retired_claim_does_not_report_it_as_ended(server):
+    """The message contradicted itself inside one line, on the distinction that matters.
+
+    `memory_end` on a retired claim renders `_state` as "retired" and then asserts in the
+    next sentence that history shows it as ended and *not* retired. Stored state was
+    never wrong — the store keeps `retired`, which is the stronger statement and the one
+    made first — so this is a message defect. But an agent that believed it would report
+    the wrong reason for a change, and a false reason is the one mistake the two-tool
+    design exists to make unmakeable, because nothing downstream can detect it.
+    """
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Berlin"})
+    claim_id = text(server, "memory_search", {"query": "Berlin"}).split("[id=")[1].split()[0]
+    text(server, "memory_forget", {"claim_id": claim_id})
+
+    body = text(server, "memory_end", {"claim_id": claim_id})
+    assert "is already retired" in body, "and it names the state on disk, with its instant"
+    assert "stays that way" in body
+    assert "Nothing changed here" in body
+    assert "ended, not retired" not in body, "the sentence that contradicted the stamp"
+
+    # And the state it reports is the state on disk.
+    assert server._ctx.memory.get(claim_id).state == "retired"
+
+
+def test_memory_since_says_so_when_the_instant_has_not_arrived(server):
+    """"Nothing has changed" is true of the future and tells the caller nothing.
+
+    Unqualified it reads as "you are up to date", so a model stops asking — having
+    learned nothing about the period it meant to ask about. The likeliest cause is named
+    because it is nearly always the same one: a local time sent as UTC lands ahead of now
+    for anyone west of Greenwich.
+    """
+    ahead = (utcnow() + timedelta(days=2)).isoformat().replace("+00:00", "Z")
+    body = text(server, "memory_since", {"since": ahead})
+
+    assert "is in the future" in body
+    assert "answers nothing about what you missed" in body
+    assert "UTC" in body
+    assert "still stands" not in body, "the reassurance that made it read as up to date"
+
+
 def test_a_configured_extractor_gets_different_advice():
     """"No model" and "the model found nothing" are different problems."""
     srv = MemvaraMCPServer(make_memory(user="alice", llm=ScriptedLLM()), user="alice")
