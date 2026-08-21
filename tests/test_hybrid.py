@@ -747,6 +747,30 @@ def test_the_analyzer_tokenizes_exactly_as_the_store_does() -> None:
         assert tokenize(query) == expected, query
 
 
+def test_an_unspaced_script_becomes_one_token_and_a_substring_of_it_finds_nothing() -> None:
+    """The limitation `tokenize`'s docstring describes, asserted rather than only stated.
+
+    CJK survives tokenization — it is alphanumeric, so nothing discards it — and that is
+    the sentence the docstring used to stop at. What it does not do is *segment*: with no
+    spaces to split on, a contiguous run comes out as one token holding the entire phrase,
+    so a search for a word inside it matches no term in the index.
+
+    Pinned here because the old wording read as though the case were handled, and a claim
+    about behaviour that no test exercises is one that can quietly stop being true — or,
+    as here, can never have been true in the way a reader took it.
+    """
+    phrase = "我住在里斯本"
+    assert tokenize(phrase) == [phrase], "the whole run, indexed under itself"
+
+    # The substring a user would actually search for is a term the index does not hold.
+    assert tokenize("里斯本") == ["里斯本"]
+    assert "里斯本" not in tokenize(phrase)
+
+    # Latin is unaffected, which is why this is easy to miss. Stopwords are a later
+    # stage, so "in" is still a token here and "I" is gone only for being one character.
+    assert tokenize("I live in Lisbon") == ["live", "in", "lisbon"]
+
+
 def test_only_closed_class_words_are_stopwords() -> None:
     """The list is defensible only because membership of these classes is fixed by the
     grammar. Anything that could be the content of a memory has to stay out - "never"

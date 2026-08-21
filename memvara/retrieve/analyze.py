@@ -62,8 +62,23 @@ MIN_TERM_CHARS = 2
 def tokenize(raw: str) -> list[str]:
     """Split on runs of alphanumerics, lowercased - the store's tokenization, mirrored.
 
-    Unicode-aware via `str.isalnum`, so CJK text survives as tokens rather than being
-    silently discarded the way an ASCII word regex would discard it.
+    Unicode-aware via `str.isalnum`, so CJK text survives rather than being discarded the
+    way an ASCII word regex would discard it. **Surviving is not the same as being
+    segmented, and the difference is the whole of this limitation.** Chinese, Japanese and
+    Korean are written without spaces, so a contiguous run of them is alphanumeric from
+    end to end and comes out as one enormous token — the entire phrase, indexed under
+    itself. A search for a word inside that phrase matches nothing at all, because the
+    index holds no such term.
+
+    Both stores behave this way, for the same reason and independently: SQLite's
+    `unicode61` and Postgres's `to_tsvector` neither of them segment. It is a lexical-leg
+    limitation rather than a bug in this function, which is faithfully mirroring what the
+    store does; fixing it means segmenting on both sides at once. See the CJK segmentation
+    issue for the options and why it is not simply switched on.
+
+    The doctest below is Latin because that is the case this function gets right; the
+    behaviour above has no honest one-line example, which is part of why the comment used
+    to read as though nothing were wrong.
 
     >>> tokenize("What is my mother's maiden name?")
     ['what', 'is', 'my', 'mother', 'maiden', 'name']
