@@ -54,6 +54,33 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A predicate folded onto its canonical name silently, changing how many values the
+  slot holds.** `uses_tool` is an alias of `prefers_tool`; a predicate the store has never
+  seen is `MANY` and accumulates, and `prefers_tool` is `ONE`, where the next write ends
+  the last. So writing two values under `uses_tool` keeps one, and writing them under a
+  name the store does not know keeps both — a different outcome for the data, decided by a
+  rename the caller was never told about. `memory_remember`'s own schema offers
+  `uses_tool` as an example spelling, so this was reached by following the tool
+  description rather than by getting it wrong.
+
+  `memory_remember`, `memory_forget` and `memory_end` now say when the predicate they
+  acted on is not the one they were given, and on a write they say what the fold decided
+  about cardinality. The fold itself is unchanged and remains the right behaviour: without
+  it two spellings of one fact become two slots that cannot contradict each other.
+
+  **Addressing was never affected**, and the note says so rather than implying otherwise —
+  every predicate-addressed tool resolves through the same registry, so the original
+  spelling still finds the fact.
+
+- **`subject` and `predicate` had no length bound.** A 2,000-character subject and a
+  1,000-character predicate were both accepted, echoed back by the write, and re-rendered
+  by every later `memory_search` and `memory_recall` that matched them. The validator
+  implemented `minimum`/`maximum` for numbers and `enum` for strings but never checked
+  string length, and no tool schema declared one. It now supports `maxLength`, and the two
+  arguments that name a *slot* declare it: 128 characters for `subject`, 64 for
+  `predicate`. `object` is deliberately left uncapped — it carries the fact itself, and a
+  caller who needs a long one is not misusing the tool.
+
 - **A write note sent the model to a search that can never succeed.** Storing a fact whose
   valid interval was already over emitted `memory_history shows it, and so does
   memory_search with as_of inside that period`. The second half is false at every instant:

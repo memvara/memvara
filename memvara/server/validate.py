@@ -8,9 +8,9 @@ a JSON-RPC error — the model sees results, whereas protocol errors are address
 client, which typically renders them as a failed call and moves on.
 
 The validated subset of JSON Schema is exactly what the tools in this package declare:
-`type` (string/integer/number/array), `enum`, `minimum`, `maximum`, `default`,
-`required`, and `additionalProperties: false`. Anything wider would be untested code in
-a validator, which is the one place that is not acceptable.
+`type` (string/integer/number/array), `enum`, `minimum`, `maximum`, `maxLength`,
+`default`, `required`, and `additionalProperties: false`. Anything wider would be untested
+code in a validator, which is the one place that is not acceptable.
 
 >>> validate({"k": {"type": "integer", "default": 8}}, (), {}, tool="demo")
 {'k': 8}
@@ -103,6 +103,19 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any]) -> Any:
     if allowed is not None and value not in allowed:
         raise ToolError(
             f"{label} must be one of {', '.join(repr(a) for a in allowed)}, got {value!r}")
+
+    # The string counterpart of `maximum`, and it exists for the same reason a numeric
+    # bound does: an argument nothing checks is one every later turn pays for. A subject
+    # or predicate is a slot *name* — it is echoed by the write, rendered again by every
+    # search and recall that hits it, and `recall` drops notes whole rather than trimming
+    # them, so one oversized name evicts several real notes from a budgeted block. Unlike
+    # a long object, there is no legitimate reading in which it is the value someone meant
+    # to store.
+    longest = spec.get("maxLength")
+    if longest is not None and len(value) > longest:
+        raise ToolError(
+            f"{label} must be at most {longest} characters, got {len(value)}. This is a "
+            "name for a fact, not the fact itself — put the detail in 'object'.")
     return value
 
 

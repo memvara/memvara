@@ -58,6 +58,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence, cast
 
 from ..core import Memvara, ScopedMemvara
+from ..schema import Cardinality
 from ..types import Accumulation, Claim, MemoryType, WriteReceipt, utcnow
 from .validate import ToolError, validate
 
@@ -215,9 +216,22 @@ _MIN_SCORE = {
     ),
 }
 
-_SUBJECT = {
+#: Caps for the two arguments that name a *slot* rather than carry a value. Generous
+#: against every real spelling — the longest built-in predicate is 21 characters and a
+#: person's name is far inside 128 — and they exist because neither had any bound at all:
+#: a 2,000-character subject was accepted, echoed back, and then re-rendered by every
+#: search and recall that matched it. `object` is deliberately left uncapped; it is the
+#: fact itself, and a caller who needs a long one is not misusing the tool.
+_SUBJECT_CHARS = 128
+_PREDICATE_CHARS = 64
+
+#: Annotated because `maxLength` is the first non-string value in either dict, and
+#: without it the inferred value type widens to `object` — which breaks the two places
+#: that build a longer description by concatenating onto `_PREDICATE["description"]`.
+_SUBJECT: dict[str, Any] = {
     "type": "string",
     "default": "user",
+    "maxLength": _SUBJECT_CHARS,
     "description": (
         "Who or what the fact is about. Almost always 'user' — the person you are "
         "talking to. Use another subject only for a named third party the user has told "
@@ -225,8 +239,9 @@ _SUBJECT = {
     ),
 }
 
-_PREDICATE = {
+_PREDICATE: dict[str, Any] = {
     "type": "string",
+    "maxLength": _PREDICATE_CHARS,
     "description": (
         "The relation, in snake_case: lives_in, works_at, prefers, allergic_to, "
         "uses_tool, birthday. Reuse a predicate you have already seen in this store — "
@@ -606,6 +621,46 @@ def _interval_note(claims: Sequence[Claim]) -> str:
     return "\n".join(lines)
 
 
+def _fold_note(ctx: ToolContext, raw: str, *, writing: bool) -> str:
+    """Say so when the predicate acted on is not the predicate that was asked for.
+
+    The registry folds surface spellings onto canonical ones — `uses_tool` onto
+    `prefers_tool`, `birthday` onto `born_on` — and the fold is the feature: without it
+    two spellings of one fact become two slots that cannot contradict each other, which
+    is how free-text memory stores end up holding two answers to one question.
+
+    Doing it *silently* is the defect, and the reason is not the one it first looks like.
+    Addressing is safe: `memory_history`, `memory_forget` and `memory_end` all resolve
+    their predicate through this same registry, so either spelling reaches the fact. What
+    the caller cannot see is that the *slot* it landed in is not the one the name implies.
+
+    On a write that matters, because the fold decides how many values the slot holds. A
+    predicate this store has never seen is MANY and accumulates; a canonical one may be
+    ONE, where the next write ends this value instead of joining it. `uses_tool` unresolved
+    would accumulate; folded onto `prefers_tool` it supersedes. The write receipt reports
+    `ended 1` and is telling the truth, but nothing connects that to a rename the caller
+    never asked for — and the tool schema offers `uses_tool` as an example spelling, so
+    this is reached by following the description rather than by getting it wrong.
+
+    Reported for the same reason `_accumulated_note` reports the mirror case, and in the
+    same voice: not a warning, because the fold is correct, but a change of slot semantics
+    nothing in the result would otherwise reveal.
+    """
+    registry = ctx.memory.memvara.registry
+    resolution = registry.resolve(raw)
+    if resolution.method not in ("alias", "morphological", "derivational"):
+        return ""
+    name = resolution.name
+    note = (f"note: '{raw}' is another spelling of '{name}' in this store, and the fact is "
+            f"held under '{name}' — the name memory_search and memory_history will show "
+            f"back. Either spelling finds it; every tool here folds the same way.")
+    if writing and registry.spec(name).cardinality is Cardinality.ONE:
+        note += (f" The fold also sets how many values the slot keeps: '{name}' keeps one "
+                 "at a time, where a predicate this store has not seen before keeps many, "
+                 "so the next value replaces this one instead of joining it.")
+    return note
+
+
 def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
     """The exact-fact write, which takes the library's default closure and no other.
 
@@ -624,7 +679,8 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
         valid_from=since, valid_to=until,
     )
     return "\n".join(filter(None, _receipt_summary(ctx, receipt)
-                            + [_interval_note(receipt.added), _pending(receipt.closed)]))
+                            + [_fold_note(ctx, args["predicate"], writing=True),
+                               _interval_note(receipt.added), _pending(receipt.closed)]))
 
 
 def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -656,7 +712,8 @@ def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
                 "Check the predicate spelling with memory_search.")
     lines = [f"Retired {len(retired)} value(s) of {args['subject']}/{predicate}. They no "
              "longer answer questions; memory_history still shows them."]
-    return "\n".join(lines + _claim_lines("-", retired))
+    return "\n".join(filter(None, lines + _claim_lines("-", retired)
+                            + [_fold_note(ctx, predicate, writing=False)]))  # type: ignore[arg-type]
 
 
 def _pending(claims: Sequence[Claim]) -> str:
@@ -731,7 +788,9 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
              "period before it; memory_history keeps them, marked ended rather than "
              "retired."]
     lines += [f"- [{c.id} {_state(c)}] {safe_line(c.text)}" for c in ended]
-    return "\n".join(filter(None, lines + [_pending(ended)]))
+    return "\n".join(filter(None, lines + [_fold_note(ctx, predicate,  # type: ignore[arg-type]
+                                                     writing=False),
+                                           _pending(ended)]))
 
 
 def _history(ctx: ToolContext, args: dict[str, Any]) -> str:
