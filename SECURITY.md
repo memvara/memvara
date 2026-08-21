@@ -200,10 +200,19 @@ on the list above.
   page-level boundary, and a plaintext vector beside encrypted text is a confirmation
   oracle you can hill-climb. Encrypting one and not the other would be theatre. Full-disk
   encryption is the honest answer today.
-- **On-disk residue after erasure.** Erasure deletes rows and index entries and zeroes the
-  vector slots; it does not scrub the SQLite pages they occupied, and the `-wal` may still
-  hold them. `VACUUM` and `PRAGMA secure_delete` are the deployment's levers, and
-  `docs/DEPLOY.md` says so.
+- **`-wal` residue after erasure.** Erasure removes the rows, the index entries and the
+  vectors, and overwrites the pages they occupied — `PRAGMA secure_delete=ON` and FTS5's
+  own `secure-delete` are both set by the store, so the text is gone from the main
+  database file without a `VACUUM`. What is *not* scrubbed is the write-ahead log: an
+  erased claim's bytes can remain in `-wal` until it checkpoints. A checkpoint or a clean
+  close clears it.
+
+  **This bullet used to say the opposite of what the code did.** It claimed the index
+  entries were deleted and named `VACUUM` as the lever for what was left. Neither was
+  true of the text index: `DELETE FROM claims_fts` writes a delete marker and keeps the
+  document's terms as *live rows* in a shadow table, where no `VACUUM` reaches them. Fixed
+  in schema 7; `tests/test_erasure_residue.py` greps the file rather than asking the
+  store, because asking the store always answered correctly.
 - **An attacker who already has the database file, the `.vecs` sidecar, or the process's
   memory.** The store is a file with the filesystem's permissions and nothing more. It
   makes no attempt to defend against someone who can read it.

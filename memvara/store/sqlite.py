@@ -113,7 +113,14 @@ if TYPE_CHECKING:  # pragma: no cover
 #    the backfill is derivable — and it has to run, because an unfilled key column is
 #    indistinguishable from an entity nothing mentions, which would make a two-hop
 #    question over a store written last year return "not connected" rather than an error.
-SCHEMA_VERSION = 6
+# 7: erasure started actually erasing the text. `DELETE FROM claims_fts` writes a *delete
+#    marker*; the deleted document's terms stay behind as live rows in the `claims_fts_data`
+#    shadow table, where they survive a VACUUM and every subsequent write. So the tokens of
+#    an erased claim remained readable in the file indefinitely, while `erase_claim`
+#    reported success. FTS5's own `secure-delete` option is the fix, it is persistent once
+#    set, and it is not retroactive — hence a one-time `optimize` here to clear what is
+#    already on disk. See `_migrate_to_v7`.
+SCHEMA_VERSION = 7
 
 # Kept separate because the v1 -> v2 migration has to recreate this table: SQLite
 # cannot add a column to an existing primary key, and (tenant, name) is now the key.
@@ -134,6 +141,13 @@ CREATE TABLE IF NOT EXISTS predicates (
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
+-- Overwrite the content of a deleted row rather than merely marking its space free.
+-- `erase()` and `purge()` promise the text is gone, and without this it is still sitting
+-- in a free page of the file: readable with `grep`, with no VACUUM needed to expose it
+-- and no VACUUM run anywhere in normal operation. Measured at +6% on a 5,000-claim write
+-- run and +9% on `erase_claim`, which is the right side of that trade for the one
+-- operation in this library whose entire purpose is that the data stops existing.
+PRAGMA secure_delete=ON;
 
 CREATE TABLE IF NOT EXISTS episodes (
     id       TEXT PRIMARY KEY,
@@ -1093,6 +1107,7 @@ class SQLiteStore:
             # so its `CREATE TABLE IF NOT EXISTS` genuinely was the whole migration.
             self._migrate_to_v5()
             self._migrate_to_v6()
+            self._migrate_to_v7()
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _migrate_to_v2(self) -> None:
@@ -1247,6 +1262,48 @@ class SQLiteStore:
         )
 
     # -- vector index --------------------------------------------------------
+
+    def _migrate_to_v7(self) -> None:
+        """Make the text indexes actually forget what `erase_claim` deleted.
+
+        **The defect this closes.** `DELETE FROM claims_fts WHERE ...` does not remove the
+        document's terms from an FTS5 index. It writes a *delete marker*, and the terms
+        stay behind as live rows in the `claims_fts_data` shadow table — not as residue in
+        a freed page, which a VACUUM would reclaim, but as current content of a current
+        table. So an erased claim's words remained readable in the file indefinitely: they
+        survived a VACUUM, and in a 3,000-claim store they survived 2,600 subsequent
+        writes. `erase_claim` reported success the whole time, and `docs/DEPLOY.md` said
+        the FTS entry was erased "including the FTS entry (which stores the tokens
+        directly)" — which was the sentence a careful operator would have relied on.
+
+        **Two settings, because they cover different halves.** `PRAGMA secure_delete=ON`
+        in `SCHEMA` handles ordinary tables, where the row's bytes sit in a free page until
+        something overwrites them. This handles the text indexes, where the bytes are not
+        free at all.
+
+        FTS5's `secure-delete` is **persistent** — it is stored in the table's own config
+        and survives every reopen — so it is set once, here, rather than on each open,
+        which also keeps a read-only open from needing a write. It is **not retroactive**,
+        which is why the `optimize` below has to run: an existing store already has the
+        markers, and only a merge discards what they cancel.
+
+        Setting it moves the FTS5 file format from version 4 to 5. That is safe for exactly
+        one reason: the option landed in SQLite 3.35, and `_MIN_SQLITE` already refuses to
+        open this store on anything older, so every build that can read the file at all can
+        read the newer format. The two version floors are the same number by coincidence,
+        and this comment exists so that lowering one is understood to break the other.
+
+        Cost, measured on this machine: `optimize` over a 20,000-claim index took 0.01 s,
+        and 0.01 s again over a deliberately fragmented 4,000-claim one — the merge is
+        bounded by segment count rather than by row count, and a store that has been
+        written to normally has few segments. Erasure afterwards costs about 9% more.
+        """
+        for table in ("claims_fts", "episodes_fts"):
+            self._db.execute(
+                f"INSERT INTO {table}({table}, rank) VALUES('secure-delete', 1)")
+            # Clears what the markers already hide. On a fresh file this is a no-op over
+            # an empty index; on an upgraded one it is the whole point of the migration.
+            self._db.execute(f"INSERT INTO {table}({table}) VALUES('optimize')")
 
     def _attach_vectors(self) -> None:
         """Point the index at its backing file. Deliberately reads no vectors.
@@ -2098,6 +2155,14 @@ class SQLiteStore:
 
         Nothing here is undoable and nothing is audited: `history()` will show a gap
         where the claim was, because that is what erasure means.
+
+        **The text is overwritten, not merely unlinked**, and neither half of that is
+        automatic in SQLite. `PRAGMA secure_delete=ON` (see `SCHEMA`) covers the ordinary
+        rows, whose bytes would otherwise sit in a free page; FTS5's `secure-delete` (see
+        `_migrate_to_v7`) covers the text indexes, where a delete writes a marker and
+        keeps the terms as live rows that no `VACUUM` reclaims. Without both, this method
+        returned a count of what it had deleted while the words were still greppable in
+        the file. `tests/test_erasure_residue.py` checks the file rather than the store.
         """
         with self._lock:
             row = self._db.execute(

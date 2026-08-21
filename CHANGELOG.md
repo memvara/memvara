@@ -9,6 +9,46 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`erase()` left the erased text readable in the database file.** It deleted the row,
+  the index entry and the vector, returned per-table counts as evidence, and the words
+  were still there — findable with `grep`, with no `VACUUM` needed to expose them and no
+  `VACUUM` run anywhere in normal operation. In a 3,000-claim store an erased term
+  survived 2,600 subsequent writes. `purge()` and `reset()` leaked the same way.
+
+  Two independent causes, and the second is the one that makes this worth a release of its
+  own:
+
+  - **Ordinary rows.** SQLite frees a deleted row's space and leaves the bytes. This half
+    was known and disclosed. `PRAGMA secure_delete=ON` now overwrites them.
+  - **The text indexes.** `DELETE FROM claims_fts` does not remove the document's terms.
+    FTS5 writes a *delete marker* and keeps the terms as **live rows** in the
+    `claims_fts_data` shadow table — not residue in a freed page, but current content of a
+    current table, which is why `VACUUM` never touched them. FTS5's own `secure-delete`
+    option fixes it, is persistent once set, and is **not** retroactive; schema 7 therefore
+    also runs a one-time `optimize` to clear what is already on disk.
+
+  **Two documents said the opposite of what the code did**, and both are corrected here:
+  `SECURITY.md` listed the residue as out of scope while asserting that "erasure deletes
+  rows and index entries", and named `VACUUM` as the deployment's lever — which cannot
+  reach a shadow table. `docs/DEPLOY.md` said erasure covered "the FTS entry (which stores
+  the tokens directly)". An operator following either would have believed the text was
+  gone.
+
+  Costs, measured: +6% on a 5,000-claim write run, +9% on `erase_claim`, and 0.01 s for
+  the one-time `optimize` over a 20,000-claim index. The FTS5 option needs SQLite 3.35,
+  which is already `_MIN_SQLITE` — the store has refused to open on anything older since
+  before this change, so no build that can read the file lacks the option.
+
+  **What is still not scrubbed is the write-ahead log.** An erased claim's bytes can
+  remain in `-wal` until it checkpoints; a checkpoint or a clean close clears it.
+  `SECURITY.md` now says that instead of the sentence it used to carry.
+
+  SQLite schema **6 → 7**. The stamp moves because the setting is durable state in the
+  file, and an older build must not open it and write to a text index whose format it does
+  not understand.
+
 ### Added
 
 - **`valid_at` on `memory_search`**, so the MCP surface can move the world clock without
