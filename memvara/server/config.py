@@ -328,6 +328,29 @@ def _registry(config: ServerConfig) -> PredicateRegistry | None:
     return PredicateRegistry(
         specs=BUILTIN_PREDICATES + load_all_specs(config.predicates))
 
+#: The `Store` methods the engine calls on an ordinary turn. Not the whole protocol —
+#: this is the subset whose absence makes a *server* useless rather than a feature narrow.
+#: `put_claim` and `add_episode` are every write; the three searches are every read;
+#: `competing_claims` is contradiction resolution, which is the product.
+_ENGINE_NEEDS = frozenset({
+    "put_claim", "add_episode", "candidate_ids", "lexical_search", "vector_search",
+    "competing_claims",
+})
+
+_CLOUD_NOT_WIRED = (
+    "MEMVARA_MODE=cloud cannot start a server yet. RemoteStore is faithful to what the "
+    "REST facade actually exposes — reading one memory by id, erasing one, erasing a "
+    "scope, tenant stats — and the facade has no endpoint for the low-level surface the "
+    "engine calls on every turn: {missing}.\n\n"
+    "Building it anyway would start a server that lists twelve tools and fails on the "
+    "first one a model reaches for, which is worse than not starting: the failure would "
+    "arrive mid-conversation, as a tool error, to a model with no way to act on it.\n\n"
+    "Use MEMVARA_MODE=local (or --mode local) with MEMVARA_DB pointing at a file. To use "
+    "a hosted deployment, point an MCP client at its own URL rather than proxying it "
+    "through this server; see docs/OPEN-CORE.md."
+)
+
+
 def build_memvara(config: ServerConfig) -> Memvara:
     """Open the store this server speaks for.
 
@@ -335,9 +358,13 @@ def build_memvara(config: ServerConfig) -> Memvara:
     tenant decides which learned predicate vocabulary is rehydrated at open — a server
     that scoped only its calls would classify every predicate again on every launch.
 
-    In "cloud" mode there is no local file at all: the store is a `RemoteStore` talking
-    to `config.server_url` with `config.api_key`, and `Memvara.__init__` accepts `store=`
-    as an alternative to `path=` for exactly this case.
+    In "cloud" mode there is no local file at all: the store would be a `RemoteStore`
+    talking to `config.server_url` with `config.api_key`, and `Memvara.__init__` accepts
+    `store=` as an alternative to `path=` for exactly this case. **It is refused instead,
+    at construction**, and `_CLOUD_NOT_WIRED` says why: the REST facade has no endpoint
+    for the low-level surface the engine calls on every turn, so a server built this way
+    starts, lists twelve tools, and fails on the first one a model reaches for. See
+    `docs/OPEN-CORE.md` for the decision and which side of the line each seam is on.
     """
     if config.mode == "cloud":
         from ..store.remote import RemoteStore
@@ -353,7 +380,10 @@ def build_memvara(config: ServerConfig) -> Memvara:
                 "api_key. ServerConfig.from_env() never produces this combination; "
                 "a caller constructing ServerConfig directly must set api_key too.")
 
-        return Memvara(
+        missing = sorted(_ENGINE_NEEDS - RemoteStore.WIRED)
+        if missing:
+            raise ConfigError(_CLOUD_NOT_WIRED.format(missing=", ".join(missing)))
+        return Memvara(   # pragma: no cover - unreachable until the endpoints exist
             store=RemoteStore(base_url=config.server_url, api_key=config.api_key),
             llm=NullLLM() if config.llm == "none" else _anthropic(),
             embedder=_embedder(config.embedder),

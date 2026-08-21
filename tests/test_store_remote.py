@@ -13,10 +13,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Callable
 
+import inspect
+
 import httpx
 import numpy as np
 import pytest
 
+from memvara import HashingEmbedder, Memvara, NullLLM
+from memvara.store.base import Store
 from memvara.store.remote import RemoteStore
 from memvara.types import Claim, Derivation, Episode, MemoryType, Scope
 
@@ -342,3 +346,54 @@ def test_unmapped_methods_raise_with_an_explanatory_message(call):
     message = str(caught.value)
     assert "no REST equivalent" in message
     store.close()
+
+
+
+def test_the_wired_list_names_exactly_the_methods_that_do_not_raise():
+    """`RemoteStore.WIRED` is a literal, and a literal drifts.
+
+    It is read by `memvara.server.config.build_memvara`, which refuses to start a cloud
+    server unless the engine's needs are in it — so a name that lands on this list without
+    an endpoint behind it does not merely mislead a reader, it un-refuses a configuration
+    that cannot work. And a name that falls *off* it keeps a working capability hidden.
+
+    Derived from the source rather than restated: a method whose body raises
+    `NotImplementedError` is unwired, and everything else on the protocol is wired. That
+    is the same rule a reader applies, applied by a machine.
+    """
+    protocol = {name for name in dir(Store) if not name.startswith("_")}
+    wired = set()
+    for name in protocol:
+        function = getattr(RemoteStore, name, None)
+        if function is None:
+            continue          # absent entirely, which is not "wired" either
+        if "raise NotImplementedError" not in inspect.getsource(function):
+            wired.add(name)
+    assert RemoteStore.WIRED == wired, (
+        f"WIRED says {sorted(RemoteStore.WIRED)} and the source says {sorted(wired)}"
+    )
+
+
+def test_a_memvara_can_still_be_constructed_over_a_remote_store():
+    """The library tolerates it; only the *server* refuses to start one.
+
+    Two constructor-time probes reach for methods `RemoteStore` does not have —
+    `all_specs`, to rehydrate learned predicate schema, and the embedding-width probe in
+    `memvara/embed/fingerprint.py`. Both are present on the object and raise, which no
+    `getattr` guard sees, and both catch it and fall back to "nothing to rehydrate" and
+    "unknown width". Without that, `Memvara(store=RemoteStore(...))` would be
+    unconstructible and the object would have no honest way to exist at all.
+
+    It is worth being able to construct: a caller wiring their own erasure or stats job
+    against the cloud facade needs the four methods that *are* wired, and
+    `memvara.server.config.build_memvara` refuses only the thing that cannot work —
+    running the engine's read and write paths over it.
+    """
+    store = RemoteStore(base_url="https://example.invalid", api_key="k")
+    memory = Memvara(store=store, llm=NullLLM(), embedder=HashingEmbedder(dim=32),
+                     tenant="acme", user="alice")
+    try:
+        assert memory.store is store
+        assert memory.default_scope.tenant == "acme"
+    finally:
+        memory.close()

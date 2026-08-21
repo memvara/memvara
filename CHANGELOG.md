@@ -348,6 +348,29 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Changed
 
+- **`MEMVARA_MODE=cloud` refuses at construction instead of failing on the first tool
+  call.** It built a `Memvara` over a `RemoteStore` and started a server; that server
+  listed twelve tools and raised `NotImplementedError` on the first one a model reached
+  for. `RemoteStore` wires seven `Store` methods and the engine calls a different set on
+  every turn — `put_claim`, `add_episode`, `candidate_ids`, `lexical_search`,
+  `vector_search`, `competing_claims` — none of which the REST facade has an endpoint
+  for.
+
+  A failure that arrives mid-conversation as a tool error is in the one place it cannot be
+  acted on: the model cannot fix a deployment and whoever configured it is not in the
+  room. `build_memvara` now raises a `ConfigError` naming exactly which methods are
+  missing and what to run instead.
+
+  The check is `_ENGINE_NEEDS - RemoteStore.WIRED`, a set difference rather than a
+  literal refusal, so it **un-refuses itself** the day those endpoints exist and `WIRED`
+  grows — and a test fails on that day and says what to delete. `RemoteStore.WIRED` is
+  kept honest by another test that derives the same list from the source rather than
+  restating it.
+
+  `docs/OPEN-CORE.md` carries the decision behind it: **diverge, and gate**, with a table
+  of which side of the open-core line each seam is on and why converging the two shapes
+  would move contradiction resolution and scope enforcement to the client.
+
 - **The seven design invariants in `docs/INTERNALS.md` are restated as Claim / Scope /
   Sketch / Measured**, and an eighth is added. The format earns its place on the last two
   lines: *Sketch* names the code that makes the claim true, and *Measured* is either a

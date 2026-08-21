@@ -79,6 +79,21 @@ class RemoteStore:
     than the key's own, are asserted against it rather than silently ignored.
     """
 
+    #: The methods on this class that actually reach the API. Everything else on the
+    #: `Store` protocol raises, and the split is written down rather than left to be
+    #: discovered at the first write, because callers branch on it: see
+    #: `memvara.server.config.build_memvara`, which refuses to build a server whose engine
+    #: would run against a store this thin.
+    #:
+    #: A literal, and kept honest by a test rather than by care —
+    #: `tests/test_store_remote.py::test_the_wired_list_names_exactly_the_methods_that_do_
+    #: not_raise` calls every protocol method and compares. A name that drifts off this
+    #: list is the failure mode that matters: it would make the guard below think a
+    #: capability exists.
+    WIRED: frozenset[str] = frozenset({
+        "batch", "close", "erase_claim", "get_claim", "get_claims", "purge", "stats",
+    })
+
     def __init__(self, base_url: str, api_key: str, *, timeout: float = 30.0) -> None:
         try:
             import httpx
