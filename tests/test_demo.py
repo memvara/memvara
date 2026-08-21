@@ -537,8 +537,15 @@ def test_the_structured_arm_declares_a_cardinality_for_every_slot_it_writes():
 
 
 def _without(name: str) -> PredicateRegistry:
-    return PredicateRegistry(BUILTIN_PREDICATES + tuple(
-        s for s in FIXTURE_PREDICATES if s.name != name))
+    """The fixture's registry with one slot's declaration removed — from the builtins too.
+
+    It used to strip only `FIXTURE_PREDICATES`, which was enough while every fixture slot
+    was one the shipped vocabulary had never heard of. `contact_preference` is now a
+    builtin at `ONE`, because the deterministic extractor writes it, so stripping the
+    fixture's copy left it declared and the omission this models did not happen.
+    """
+    return PredicateRegistry(tuple(
+        s for s in BUILTIN_PREDICATES + FIXTURE_PREDICATES if s.name != name))
 
 
 def test_a_predicate_left_at_the_default_cardinality_stops_superseding_silently():
@@ -548,6 +555,8 @@ def test_a_predicate_left_at_the_default_cardinality_stops_superseding_silently(
     live and the slot answers a single-valued question with two values. Nothing raises and
     nothing is lost — the store simply stops resolving the contradiction, which is the
     whole feature. The assertion runs both ways so it cannot pass against the bug.
+
+    "Undeclared" now means removed from the builtins as well — see `_without`.
     """
     q = QUESTIONS[0]
     assert bl.slot_values(fixture_store(q), "account", "contact_preference") == ["phone"]
@@ -1633,11 +1642,22 @@ def test_the_correction_audit_names_exactly_the_two_records_that_were_wrong():
     q = real_questions()["q_which_were_corrections"]
     mem = real_store(q)
 
-    retired = {(c.subject, c.predicate) for c in mem.get_all(states=["retired"])}
-    ended = {(c.subject, c.predicate) for c in mem.get_all(states=["ended"])}
+    # `polarity > 0` because a retraction claim is a marker rather than a record: the
+    # fast extractor writes one for "stop ringing me", and it is `retired` from the moment
+    # it is written, which is how the store has always stored a negative assertion. Read
+    # without the filter, "which records were wrong" gains a row that says the opposite —
+    # a fact that stopped being true, recorded as one that never was.
+    def slots(state):
+        return {(c.subject, c.predicate)
+                for c in mem.get_all(states=[state]) if c.polarity > 0}
+
+    retired, ended = slots("retired"), slots("ended")
     assert retired == {("account", "mobile"), ("main_unit", "serial")}
     assert ended == {("account", "plan"), ("account", "delivery_address"),
-                     ("account", "billing_address"), ("account", "contact_preference")}
+                     ("account", "billing_address"), ("account", "contact_preference"),
+                     # The extractor's own reading of the same history, filed under the
+                     # subject it can name without a schema. It agrees with the desk.
+                     ("user", "contact_preference"), ("user", "address")}
     assert not retired & ended, "a slot in both populations is a closure written twice"
 
     # And the gold says the same thing in words, which is what makes this the answer to
@@ -1684,7 +1704,7 @@ def test_a_replayed_correction_records_when_belief_changed_not_when_it_was_repla
     February" is exactly the level of accuracy a wall-clock stamp already has.
     """
     mem = real_store(real_questions()["q_mobile_correction"])
-    retired = {c.object: c for c in mem.get_all(states=["retired"])}
+    retired = {c.object: c for c in mem.get_all(states=["retired"]) if c.polarity > 0}
     corrections = {f.obj: f for f in bl.SUPPORT_FACTS if f.mode == "correct"}
 
     assert set(retired) == {"07700 900 118", "HX2-4419-B"}
@@ -1715,32 +1735,93 @@ def test_the_structured_arm_holds_nothing_that_could_answer_the_two_unanswerable
     assert {s.name for s in bl.SUPPORT_PREDICATES} & {"price", "card"} == set()
 
 
-def test_the_plain_memvara_arm_extracts_no_claims_at_all_from_the_real_corpus():
-    """The finding that makes the fifth arm necessary, pinned so it cannot be forgotten.
+#: Every claim the deterministic extractor is expected to find in the real corpus, and
+#: the turn each one comes from. Hand-authored from the transcript, never recorded from a
+#: run — an expectation derived from the system under test measures nothing.
+#:
+#: This is the **precision** half of the measurement, and it is why the list is exact
+#: rather than a floor. Recall says the extractor found six things; only a hand-written
+#: list says all six are true. A rule that starts emitting a seventh fails here, which is
+#: the correct outcome: a new claim has to be read against the transcript by a person
+#: before it counts as recall rather than as noise.
+EXTRACTED: tuple[tuple[str, str, int, str], ...] = (
+    ("address", "41 Coldharbour Road, Lewes, BN7 2GT", 1,
+     "Everything comes to 41 Coldharbour Road"),
+    ("contact_preference", "phone", 1, "And please do ring."),
+    ("phone", "07700 900 118", 1, "07700 900 118."),
+    ("contact_preference", "phone", -1, "Can you stop ringing me."),
+    ("contact_preference", "email", 1, "Email from now on please."),
+    ("address", "Bramble Cottage, Ditchling Road, Westmeston, BN6 8XA", 1,
+     "everything comes to Bramble Cottage"),
+)
 
-    Sixty-four turns of ordinary support prose, and the shipped defaults produce **zero**
-    claims: the rule extractor's vocabulary is first-person declaratives and a support
-    history is not written that way, and with no `llm=` there is no tier behind it. An
-    empty claim tier means no supersession, no valid-time closing and no bitemporal
-    reasoning of any kind — the `memvara` arm is lexical episode retrieval with a
-    different ranker, and its score cannot be read as a measurement of this library's
-    central claim.
 
-    It is a real deployment configuration and it stays in the comparison for that reason.
-    It is simply not the one the product is about.
+def test_what_the_plain_memvara_arm_extracts_from_the_real_corpus():
+    """Sixty-four turns of ordinary support prose, through the shipped defaults.
+
+    This test used to assert **zero**, and that was the finding the fifth arm exists for:
+    the rule extractor's vocabulary was first-person declaratives, a support history is
+    not written that way, and with no `llm=` there is no tier behind it. An empty claim
+    tier is not a weaker feature set, it is none of it — no supersession, no valid-time
+    closing, no bitemporal reasoning of any kind.
+
+    It is now six, and what matters is not the count. It is that both slots the corpus was
+    built around come out **superseding on the right clock**: the delivery address ends
+    when they move, the contact preference ends when it reverses, and the values that were
+    displaced still answer `valid_at=<back then>`. That is the machine working offline, on
+    prose, with no key — which is what the arm was supposed to demonstrate and could not.
+
+    Two things it still is not. It is a long way short of what the corpus contains: the
+    plan, the serial, the mobile correction and the billing address are all in the
+    transcript and none of them is in a sentence form a rule can read. And `degraded` is
+    still `True` and `unextracted` still counts the turns that reached extraction and
+    found no model, because both of those are about the missing tier rather than about the
+    rules. `memvara_structured` remains the arm a deployment ships.
     """
     questions, turns = hz.load_scenario()
     q = questions[0]
     plain, degraded = bl.build_memory(bl.visible_turns(q, turns),
                                       max_episodes=bl.DEFAULT_K)
-    assert degraded is True
+    assert degraded is True, "the missing model is a separate fact from the rules' reach"
     assert len(turns) == 64
-    assert plain.get_all(states=["live", "ended", "retired"]) == []
 
+    got = plain.get_all(states=["live", "ended", "retired"])
+    assert sorted((c.predicate, c.object, c.polarity) for c in got) == sorted(
+        (p, o, pol) for p, o, pol, _turn in EXTRACTED)
+
+    # Grounded: every expectation quotes a turn that is actually in the transcript. A
+    # claim justified by a sentence nobody said is the failure this catches.
+    history = " ".join(t.text for t in turns)
+    for _p, _o, _pol, quote in EXTRACTED:
+        assert quote in history, f"{quote!r} is not in the transcript"
+
+    # The two slots that supersede, on the clock that says the world changed rather than
+    # that the record was wrong. This is the whole of what the arm gained.
+    by_slot = {}
+    for claim in got:
+        if claim.polarity > 0:
+            by_slot.setdefault(claim.predicate, []).append(claim)
+    for slot in ("address", "contact_preference"):
+        states = sorted(c.state for c in by_slot[slot])
+        assert states == ["ended", "live"], f"{slot} did not supersede: {states}"
+
+    # And the displaced value still answers about the period it held, which is the
+    # difference between a store with two clocks and one with a latest-value column.
+    before = datetime(2026, 3, 1, tzinfo=UTC)
+    was = [c.object for c in plain.get_all(valid_at=before) if c.predicate == "address"]
+    assert was == ["41 Coldharbour Road, Lewes, BN7 2GT"]
+
+    # The structured arm, counted over the desk's own subjects. It ingests the same turns,
+    # so the extractor's reading of them now sits in that store too — under `user` rather
+    # than `account`, because a rule with no schema cannot know what the desk calls this
+    # customer. Two vocabularies describing one history is what a deployment that does
+    # both actually gets, and they agree here; the count below is the desk's half.
     rich = real_store(q)
-    assert len(rich.get_all()) == 9
-    assert len(rich.get_all(states=["ended"])) == 6
-    assert len(rich.get_all(states=["retired"])) == 2
+    desk = [c for c in rich.get_all(states=["live", "ended", "retired"])
+            if c.subject != "user"]
+    assert len([c for c in desk if c.state == "live"]) == 9
+    assert len([c for c in desk if c.state == "ended"]) == 6
+    assert len([c for c in desk if c.state == "retired"]) == 2
 
 
 def test_every_structured_fact_is_grounded_in_a_turn_of_the_real_transcript():

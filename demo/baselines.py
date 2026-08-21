@@ -32,15 +32,17 @@ Each arm builds the **context**, never the answer. What to do with it is
 `memvara` and `memvara_structured` are the same library, one variable apart, and the gap
 between them is a finding rather than a redundancy.
 
-On this corpus `memvara` produces **zero claims from sixty-four turns**. The rule
-extractor's vocabulary is first-person declaratives ("I live in X", "my name is X") and a
-support history is not written that way; with no `llm=` there is no extraction tier behind
-the rules, so the claim tier stays empty. An empty claim tier means no supersession, no
-valid-time closing and no bitemporal reasoning of any kind — that arm is lexical episode
-retrieval with a different ranker, and it cannot test the claim the comparison exists to
-test. That is the documented behaviour of the shipped defaults (`README.md` says so, and
-`bench/locomo.py` says the same about LOCOMO), so it is worth measuring: it is what
-somebody evaluating the library over a weekend will actually see.
+On this corpus `memvara` produces **six claims from sixty-four turns**, and it used to
+produce none. The rule extractor's vocabulary is mostly first-person declaratives ("I live
+in X", "my name is X") and a support history is not written that way; what it now also
+reads is a contact directive, a postal address and a bare phone number, which is enough
+for two slots to supersede on the world clock. Four of the six facts the corpus was built
+around — the plan, the serial, the mobile correction, the billing address — are still in
+sentence forms no rule can read, so with no `llm=` this arm sees a fraction of the
+history and cannot test the whole of what the comparison exists to test. That is the
+documented behaviour of the shipped defaults (`README.md` says so, and `bench/locomo.py`
+says the same about LOCOMO), so it is worth measuring: it is what somebody evaluating the
+library over a weekend will actually see.
 
 `memvara_structured` is the other real configuration, and the one the product is *for*. A
 support integration does not ask a model to read prose back out of its own database; it
@@ -398,13 +400,14 @@ def memvara(question: Question, turns: Sequence[Turn], *, k: int = DEFAULT_K,
     `asked_at` cutoff here is applied at ingest instead.
 
     **Read `Context.degraded` before quoting this arm's score.** On a corpus written as
-    ordinary support prose the rule extractor matches almost nothing — its vocabulary is
-    first-person declaratives ("I live in X", "my name is X") and a support history is
-    mostly not that. With no `llm=` the claim tier can therefore be *empty*, and an empty
-    claim tier means no supersession, no valid-time closing and no bitemporal reasoning of
-    any kind: the arm degrades to lexical retrieval over raw turns, which is `naive_rag`
-    with a different ranker. That is a real deployment configuration and it is worth
-    measuring, but it is not a measurement of the thing this comparison exists to test.
+    ordinary support prose the rule extractor matches a small fraction of it — its
+    vocabulary is mostly first-person declaratives ("I live in X", "my name is X") plus a
+    contact directive, an address and a bare phone number, and a support history is mostly
+    none of those. With no `llm=` the claim tier can therefore be nearly *empty*: on this
+    corpus it holds six claims covering two of the six facts that move, so four of them
+    get no supersession and no valid-time closing at all. That is a real deployment
+    configuration and it is worth measuring, but it is a partial view of the thing this
+    comparison exists to test.
     """
     seen = visible_turns(question, turns)
     mem, degraded = build_memory(seen, llm=llm, dim=dim, max_episodes=k)

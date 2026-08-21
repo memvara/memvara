@@ -254,9 +254,11 @@ the store a second question.
 #### What the fast path does not catch, measured
 
 With no `llm=` there is no tier 2, so tier 1b is the last stop and everything it does not
-recognise is dropped. Its vocabulary is first-person declaratives — "I live in X", "my
-name is X", "I work at X" — and a great deal of real text is not written that way. The
-size of that gap is a property of your corpus, not of the library, so here it is on one:
+recognise is dropped. Its vocabulary is mostly first-person declaratives — "I live in X",
+"my name is X", "I work at X" — plus contact directives ("email me from now on") and two
+whole-sentence forms, an address and a bare phone number. A great deal of real text is
+none of those. The size of that gap is a property of your corpus, not of the library, so
+here it is on one:
 
 ```python
 from demo import conversation                    # 64 turns of a real-shaped support history
@@ -266,20 +268,30 @@ for turn in conversation():
     mem.add(turn.text, role=turn.role, ts=turn.at)
 
 mem.stats()
-# {'episodes': 64, 'claims': 0, 'live_claims': 0, 'ended_claims': 0,
-#  'invalidated': 0, 'embeddings': 64}
+# {'episodes': 64, 'claims': 6, 'live_claims': 3, 'ended_claims': 2,
+#  'invalidated': 1, 'embeddings': 70}
 ```
 
-**Sixty-four turns, sixty-four episodes, zero claims.** Summed over those writes:
-`unextracted=34` turns reached the extraction tier and found no model there, and
-`skipped=30` were dropped by the salience gate. A support desk does not talk in
-first-person declaratives, so the rules matched nothing at all.
+**Sixty-four turns, sixty-four episodes, six claims.** Summed over those writes:
+`unextracted=29` turns reached the extraction tier and found no model there, and
+`skipped=30` were dropped by the salience gate.
 
-An empty claim tier is not a degraded version of the feature set — it is *none* of it.
-No claim means no `(subject, predicate)` slot, so nothing supersedes, no valid time
-closes, and no bitemporal read has anything to read. In that configuration the library is
-lexical and vector retrieval over raw turns, which is a real and useful thing and is not
-what the rest of this file is about.
+**This used to be zero**, and that is the number worth holding onto. The vocabulary was
+first-person declaratives alone; a support desk does not talk that way, so the rules
+matched not one turn in sixty-four. An empty claim tier is not a degraded version of the
+feature set — it is *none* of it: no claim means no `(subject, predicate)` slot, so
+nothing supersedes, no valid time closes, and no bitemporal read has anything to read.
+
+Six is still a long way short of what that transcript contains — the plan, the serial, the
+mobile correction and the billing address are all in it and none is in a form a rule can
+read. What changed is not the count. Both slots the corpus was built around now come out
+**superseding on the right clock**: the delivery address ends when the customer moves, the
+contact preference ends when it reverses, and the displaced values still answer
+`valid_at=<back then>`. That is the machine working offline, on prose, with no key.
+
+Precision is pinned rather than assumed: `tests/test_demo.py::EXTRACTED` is a
+hand-authored list of all six claims and the turn each comes from, so a rule that starts
+emitting a seventh fails until somebody has read it against the transcript.
 
 Two ways out, and the second is what a deployment actually does:
 

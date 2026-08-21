@@ -7,6 +7,84 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Three predicates entered the shipped vocabulary, at `ONE`
+
+### What changed
+
+`BUILTIN_PREDICATES` gained `address`, `phone` and `contact_preference`, each
+`Cardinality.ONE`, with the usual aliases (`delivery_address`, `mobile`, `contact_via`,
+…). They arrived with the deterministic extractor rules that write them.
+
+**If your store already holds claims under any of those names, they were `MANY`.** An
+undeclared predicate defaults to multi-valued, so a second address sat beside the first
+with both live. From this release a new write in one of those slots **supersedes** the
+standing value instead of joining it.
+
+The change is forward-only. Nothing already stored is retired, ended or rewritten — the
+rehydration path is explicit that a *declared* spec outranks a persisted *learned* one and
+that it changes what supersedes on the next write only. So a store that accumulated four
+addresses still has four live addresses until something writes a fifth, at which point the
+fifth displaces exactly one of them.
+
+### What to do about it
+
+Find your own instances:
+
+```python
+from collections import Counter
+Counter(c.predicate for c in mem.get_all()) # look for address / phone / contact_preference
+```
+
+If multi-valued was what you wanted — a deployment that genuinely accepts two contact
+channels at once — declare your own spec and it wins:
+
+```python
+from memvara import Memvara, PredicateRegistry, PredicateSpec
+from memvara.schema import BUILTIN_PREDICATES, Cardinality, Volatility
+
+registry = PredicateRegistry(BUILTIN_PREDICATES + (
+    PredicateSpec("contact_preference", Cardinality.MANY, Volatility.SLOW),
+))
+mem = Memvara("memory.db", registry=registry)
+```
+
+That is what `demo/baselines.py` does, and its comment is worth reading: a `MANY` slot
+supersedes nothing on its own, so a reversal has to close the slot explicitly.
+
+---
+
+## `add()` extracts from a few forms it did not, and the demo corpus is no longer empty
+
+### What changed
+
+`FastExtractor` gained contact directives ("email me from now on", "stop ringing me"),
+postal addresses and bare phone numbers, and three guards moved to make room for them:
+
+- the clause pre-filter is no longer "has a first-person subject", because an imperative
+  has no subject;
+- hedges (`if`, `might`, `said`) scope over the whole **sentence** rather than the clause
+  they sit in. "If it breaks, call me" used to extract a standing contact preference from
+  its second clause. The cost is that a sentence which hedges one thing and asserts
+  another now yields neither, which is this module's stated trade;
+- `and` splits a clause when a pronoun subject follows it, not only `i` or `my`. "I live
+  in Hove and it is cold" is one fact and one aside; read as a coordinated object the
+  whole clause was rejected.
+
+On `demo/`'s 64-turn support history that takes the shipped offline path from **0 claims
+to 6**, `unextracted` from 34 to 29.
+
+### What to do about it
+
+Nothing, unless you assert on extraction counts. Two places will notice:
+
+- a test pinning `WriteReceipt.added` or `stats()["claims"]` for a corpus containing any
+  of those forms;
+- a store where `contact_preference`, `address` or `phone` are now written by the
+  extractor as well as by your own `remember()` calls, under `subject="user"` rather than
+  under whatever subject you use. They coexist; nothing is overwritten.
+
+---
+
 ## `Explanation` gained two fields and a third retrieval leg exists
 
 ### What changed

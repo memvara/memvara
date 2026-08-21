@@ -454,11 +454,11 @@ def report(items: Sequence[Item], scored: Sequence[Scored], *, reader: ek.Reader
         # asked to read them back out of prose, which is the entire point of it.
         out += ["", "  It reads differently for `memvara_structured`, and the difference is",
                 "  the finding: its claims come from declared, structured writes, so the",
-                "  missing model costs it only the episode tail. On this corpus the",
-                "  `memvara` arm's claim tier is EMPTY — the rule extractor's vocabulary is",
-                "  first-person declaratives and a support history is not written that way —",
-                "  so that arm is lexical episode retrieval with a different ranker, and its",
-                "  row is not a measurement of bitemporal reasoning. The structured arm's is."]
+                "  missing model costs it only the episode tail. The `memvara` arm's claim",
+                "  tier is a fraction of the history — the rule extractor reads first-person",
+                "  declaratives, a contact directive, an address and a phone number, and a",
+                "  support history is mostly none of those — so most of what moves in this",
+                "  corpus reaches that arm as raw turns rather than as facts that supersede."]
 
     naive = [i for i in items if i.arm == "naive_rag"]
     saturated = [i for i in naive

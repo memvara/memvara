@@ -114,6 +114,29 @@ both common and unambiguous — "my name is X", "I live in X", "I work at X", "I
 nothing rather than a wrong triple; the LLM tier is the fallback. Set
 `derivation=Derivation.FAST_PATH`, `extractor="fast/v1"`, and `sources=[ep.id]`.
 
+Two rule families are not first-person declaratives, and both exist because a vocabulary
+that was only that extracted **nothing at all** from sixty-four turns of ordinary support
+prose:
+
+- **Contact directives** — "ring me", "email from now on", "stop ringing me". Second
+  person and imperative, so they carry no subject for the clause pre-filter to key on,
+  and their value is not in the text: the rule fixes it, because "ring me" means the
+  phone and does not contain the word. The one family here that writes
+  `MemoryType.PROCEDURAL`.
+- **Whole-sentence rules** — a postal address and a bare phone number, matched *before*
+  the clause splitter runs. Their values contain the punctuation it cuts on: split on its
+  commas, "41 Coldharbour Road, Lewes, BN7 2GT" is three fragments and a postcode.
+
+Two guards moved with them. The clause pre-filter is no longer "has a first-person
+subject" — an imperative has no subject — and hedges (`if`, `might`, `said`) now scope
+over the whole **sentence** rather than the clause they sit in, because "if it breaks,
+call me" has a second clause that reads as a standing preference on its own.
+
+`address`, `phone` and `contact_preference` are in `BUILTIN_PREDICATES` at `ONE` for this
+reason. An undeclared predicate defaults to `MANY`, so without them a second address would
+sit beside the first with nothing saying which one to post to — and nothing would warn,
+because accumulating is what `MANY` is for.
+
 ### `write/reconcile.py`
 
 ```python

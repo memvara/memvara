@@ -293,7 +293,8 @@ context for every question.
 
 ### Why the product has two arms, and why neither may be deleted
 
-**On this corpus the `memvara` arm produces zero claims from sixty-four turns.**
+**On this corpus the `memvara` arm produced zero claims from sixty-four turns.** It now
+produces six, and both halves of that sentence are the point.
 
 ```python
 from demo import conversation
@@ -304,22 +305,26 @@ for turn in conversation():
     mem.add(turn.text, role=turn.role, ts=turn.at)
 
 mem.stats()
-# {'episodes': 64, 'claims': 0, 'live_claims': 0, 'ended_claims': 0,
-#  'invalidated': 0, 'embeddings': 64}
+# {'episodes': 64, 'claims': 6, 'live_claims': 3, 'ended_claims': 2,
+#  'invalidated': 1, 'embeddings': 70}
 ```
 
-Summed over those 64 writes: `unextracted=34`, `skipped=30`, `llm_calls=0`. The rule
-extractor's vocabulary is first-person declaratives — "I live in X", "my name is X" — and
-a support history is not written that way; with no `llm=` there is no extraction tier
-behind the rules, so the claim tier stays empty. Its rendered context has no
-`Known about the user` header in it at all, only the episode tail.
+Summed over those 64 writes: `unextracted=29`, `skipped=30`, `llm_calls=0`.
 
-An empty claim tier is not a weaker version of the feature set, it is none of it: no
-`(subject, predicate)` slot means no supersession, no valid-time closing, and no
-bitemporal reasoning of any kind. That arm is lexical episode retrieval with a different
-ranker, and **its row cannot test the claim this comparison exists to test.** It is still
-worth measuring, because it is what somebody evaluating the library over a weekend will
-actually see, and because it is the documented behaviour of the shipped defaults.
+The six, and the turn each comes from, are pinned by hand in
+`tests/test_demo.py::EXTRACTED` — an expectation recorded from a run would measure
+nothing, so that list is the precision half and a seventh claim fails it until somebody
+has read the seventh against the transcript. Two of the slots supersede: the delivery
+address ends when the customer moves, and the contact preference ends when it reverses,
+each on the world clock, with the displaced value still answering `valid_at=<back then>`.
+
+It is still a long way short of what the transcript holds. The plan, the serial, the
+mobile correction and the billing address are all in it and none of them is in a sentence
+form a rule can read, so four of the six facts the corpus was built around are invisible
+to this arm. **Its row still cannot test the whole of what this comparison exists to
+test** — but it is no longer lexical episode retrieval with a different ranker, which is
+what it was while the claim tier was empty. It is worth measuring because it is what
+somebody evaluating the library over a weekend actually sees.
 
 `memvara_structured` is the other real configuration and the one the product is for. A
 support integration does not ask a model to read prose back out of its own database; it
@@ -402,13 +407,14 @@ Context size is deterministic and comes out the same every time. This is real ou
 `demo/harness.py`:
 
 ```
+
   arm                 mean chars  max chars  mean ~tokens  items used / turns seen
   ------------------  ----------  ---------  ------------  -----------------------
   none                         0          0             0               0.0 / 60.8
   full_transcript           9803      10263          2451              60.8 / 60.8
   naive_rag                 2329       2846           582              12.0 / 60.8
-  memvara                   2074       2489           519              12.0 / 60.8
-  memvara_structured        1721       2151           430              12.0 / 60.8
+  memvara                   2043       2331           511              12.0 / 60.8
+  memvara_structured        1671       2032           418              12.0 / 60.8
 ```
 
 `~tokens` is `chars // 4`, an estimate and not a tokenizer — `CHARS_PER_TOKEN` says so.
@@ -428,6 +434,12 @@ its own trap by construction) and false negatives (a correct paraphrase is marke
 | `naive_rag` | 582 tok | 80% | 0 |
 | `memvara` | 519 tok | 95% | 0 |
 | `memvara_structured` | 430 tok | 95% | 0 |
+
+**These context sizes are the ones that run was answered against, and they are no longer
+what the arms produce.** The offline write path was widened afterwards, so the `memvara`
+arm now builds 511 tokens and `memvara_structured` 418 — the table above is the current
+apparatus, this one is a record of a past run. The accuracy column belongs to the contexts
+in *this* table and cannot be re-attached to the new ones without answering them again.
 
 **Read `evalkit.FileReader`'s docstring and the banner `demo/harness.py` prints above its
 own table before quoting any of this.** They say, and they are right, that a run whose
