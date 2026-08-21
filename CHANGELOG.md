@@ -51,6 +51,41 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **A temporal leg over raw turns**, off by default. Bitemporality is what this library is
+  for and time appeared on the read path twice, both times too late to matter: as a
+  *filter*, which narrows what the store returns and so cannot add a candidate no other
+  leg found, and as a *multiplier*, which reorders the fused list and so cannot add to it.
+  Neither answers "what was going on around then" — a question whose only content words
+  are `when`, `around` and `then`, every one of which the analyzer drops as a stopword.
+
+  `Store.episodes_near` is one new optional method returning the turns closest to an
+  anchor, nearest first; `memvara/retrieve/temporal.py` turns their timestamps into an
+  absolute [0, 1] closeness. `HybridRetriever` gains `w_temporal`, `Explanation` gains
+  `temporal_rank` and `temporal_score`, and `intent.MULTIPLIERS` gains a `temporal`
+  column — where it is exclusive with the graph gate, because a question about a chain and
+  a question about an instant are different questions.
+
+  **The anchor is given, never parsed**: `valid_at`, else `known_at`, else now. A date
+  parser on the read path is a second extractor with its own locale bugs, answering a
+  question the caller who wrote `valid_at=` has already answered. An explicit instant also
+  outranks the marker vocabulary — a call that named one has stated a temporal intent, and
+  the words are frequently the wrong place to look.
+
+  **Episodes, not claims.** A claim carries a predicate-keyed half-life, which knows what
+  raw proximity cannot: a `born_in` from 2019 is as current as it will ever be and a
+  `working_on` from 2019 is not.
+
+  **`w_temporal` ships at 0.0, and the measured finding is the abstention rather than the
+  leg.** Without one it cost **2.4 points of LongMemEval temporal-reasoning R@12 and 4.6
+  of MRR**: with no instant given the anchor is *now*, those transcripts are years old, so
+  every turn scored a proximity around 0.005 — and RRF reads *positions*, so a leg with no
+  opinion still contributed rank 0, rank 1, rank 2. A ranking assembled from nothing is not
+  a weak ranking, it is a fabricated one, and fusion cannot tell. `MIN_PROXIMITY` gives
+  the leg the guard the other two have always had — the vector leg abstains on a zero-norm
+  query, the lexical leg on a query with no content terms — and the loss goes to zero.
+  With it, temporal-reasoning is unchanged and multi-session loses 0.5, so the default
+  stays off. `docs/BENCHMARKS.md` has the table.
+
 - **`memory_neighborhood` and `memory_paths`**, so the MCP surface can ask the graph a
   question. `GraphTraverser` has been complete since schema 6 and no tool reached it, so
   an agent asking "who does their manager report to" had `memory_search`, which matches

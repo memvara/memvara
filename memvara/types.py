@@ -806,6 +806,14 @@ class Explanation:
     #: *through* something else, which is the one thing the other two legs cannot report.
     graph_rank: int | None = None
     graph_score: float | None = None
+    #: Position and closeness in the temporal leg — the episode search that ranks on
+    #: *when* and reads no text (see `memvara/retrieve/temporal.py`). Only ever set on an
+    #: `EpisodeResult`: a claim's time signal is the predicate-keyed decay in `recency`,
+    #: which knows what raw proximity cannot, that a `born_in` from 2019 is as current as
+    #: it will ever be. `None` means the leg did not rank this turn, which includes the
+    #: ordinary case of it not having run.
+    temporal_rank: int | None = None
+    temporal_score: float | None = None
     fusion_score: float = 0.0
     recency: float = 1.0
     confidence: float = 1.0
@@ -833,6 +841,8 @@ class Explanation:
             bits.append(f"bm25#{self.lexical_rank}({self.lexical_score:.2f})")
         if self.graph_rank is not None:
             bits.append(f"graph#{self.graph_rank}({self.graph_score:.3f})")
+        if self.temporal_rank is not None:
+            bits.append(f"time#{self.temporal_rank}({self.temporal_score:.3f})")
         bits.append(f"recency={self.recency:.2f}")
         bits.append(f"conf={self.confidence:.2f}")
         bits.append(f"sal={self.salience:.2f}")

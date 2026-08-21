@@ -204,6 +204,45 @@ model-free classifier routes `lookup` and `temporal` queries past the walk entir
 the cost lands only on the query shapes it was measured on. Every other multiplier in that
 table is 1.0 and stays 1.0 until a per-category sweep moves it.
 
+### The temporal leg, and the abstention that is the actual finding
+
+`w_temporal > 0` adds a fourth leg over **raw turns**: the ones nearest in time to the
+instant the search was asked about, ranked on *when* and reading no text at all. It is the
+answer to "what was going on around then", whose only content words — `when`, `around`,
+`then` — the analyzer drops and the embedder maps onto nothing. **It also ships at 0.0.**
+
+```bash
+PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-temporal 1.0
+```
+
+| LongMemEval oracle, R@12 | baseline | + temporal, no floor | + temporal, with floor |
+|---|---:|---:|---:|
+| temporal-reasoning | **66.6** | 64.2 | **66.6** |
+| knowledge-update | 91.0 | 91.0 | 91.0 |
+| multi-session | 65.5 | 65.2 | 65.0 |
+| **all** | **70.4** | 69.7 | 70.3 |
+| all MRR | 62.0 | 57.4 | 62.0 |
+
+**The middle column is the finding, and it is about fusion rather than about time.** With
+no instant given the anchor is *now*, and these transcripts are dated years earlier, so
+every turn scored a proximity around 0.005 — and RRF reads *positions*, so a leg with no
+opinion still contributed rank 0, rank 1, rank 2. A ranking assembled from nothing is not
+a weak ranking, it is a fabricated one, and fusion cannot tell the difference. That cost
+**2.4 points of temporal-reasoning R@12 and 4.6 of MRR**.
+
+The other two legs have had the matching guard all along: the vector leg abstains on a
+zero-norm query, the lexical leg on a query with no content terms. `MIN_PROXIMITY` gives
+this one the same rule — nothing within a half-life of the anchor and it does not vote —
+and the loss goes to zero.
+
+What it does not do is clear the bar. Temporal-reasoning is unchanged and multi-session
+loses 0.5, so the default stays off. The reason is the same shape as the graph leg's: the
+leg is strongest when a caller passes `valid_at`, and no benchmark here passes one — both
+call `search(question, k)` with the question as prose. It is second strongest on a **live**
+store, where `add()` stamps turns with the wall clock and the recent ones genuinely are
+near the anchor; LongMemEval replays an archive, so the abstention fires nearly everywhere,
+which is right and also leaves nothing to measure.
+
 **The blocking dependency here is ingestion, not retrieval.** Both public instruments are
 blind to the graph leg for the same reason the `memvara` demo arm produces zero claims —
 see [What the fast path does not

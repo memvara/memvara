@@ -428,7 +428,7 @@ class HybridRetriever:
                  w_recency: float = 0.25, w_confidence: float = 0.15,
                  w_salience: float = 0.10, candidate_multiplier: int = 5,
                  w_graph: float = 0.0, graph_seeds: int = 5, graph_depth: int = 2,
-                 traverser: GraphTraverser | None = None,
+                 w_temporal: float = 0.0, traverser: GraphTraverser | None = None,
                  intent_weighting: bool = True) -> None
 
     def search(self, query: str, scope: Scope, *, k: int = 10,
@@ -478,6 +478,29 @@ The leg must:
 - **degrade rather than raise.** `RemoteStore.adjacent` exists and raises, so a `getattr`
   guard cannot see it: the `NotImplementedError` is caught, `DegradedRetrievalWarning`
   fires once per retriever, and the leg stays off for that retriever's life.
+
+#### The fourth leg
+
+At `w_temporal > 0` a fourth leg runs over **raw turns**: `Store.episodes_near` returns
+the `limit` turns closest to the anchor, nearest first, and `retrieve/temporal.py` turns
+their timestamps into an absolute [0, 1] closeness. The anchor is `valid_at`, else
+`known_at`, else now — **given, never parsed**, because a date parser on the read path is
+a second extractor answering a question the caller who wrote `valid_at=` already answered.
+
+Episodes and not claims: a claim carries a predicate-keyed half-life, which knows what raw
+proximity cannot — whether a fact from 2019 is stale. A `born_in` from 2019 is as current
+as it will ever be.
+
+Two properties are load-bearing.
+
+- **The sort and the cap are one SQL statement.** Design invariant 7. Listing a scope's
+  turns and dropping the ones after `valid_at` in Python filters a page the store already
+  truncated, so a time-travel query comes back short with nothing saying it was partial.
+- **The leg abstains when nothing is within a half-life of the anchor.** Measured: without
+  it, a query with no instant anchors on *now*, an archival corpus scores every turn at
+  ~0.005 proximity, and fusion — which reads positions — still takes rank 0, rank 1, rank
+  2 from it. That cost 2.4 points of LongMemEval temporal-reasoning R@12. The vector and
+  lexical legs have had the same guard from the start.
 
 #### `retrieve/intent.py`
 

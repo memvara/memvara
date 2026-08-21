@@ -133,21 +133,26 @@ Nothing, unless you assert on extraction counts. Two places will notice:
 
 ---
 
-## `Explanation` gained two fields and a third retrieval leg exists
+## `Explanation` gained four fields and two more retrieval legs exist
 
 ### What changed
 
-`Explanation` now carries `graph_rank`, `graph_score` and `intent`, and
-`HybridRetriever.__init__` takes `w_graph`, `graph_seeds`, `graph_depth`, `traverser` and
-`intent_weighting`. All are additive and every default reproduces the previous behaviour
-exactly: `w_graph=0.0` means no walk runs, no leg is fused, and `graph_rank` stays `None`
-on every result.
+`Explanation` now carries `graph_rank`, `graph_score`, `temporal_rank`, `temporal_score`
+and `intent`, and `HybridRetriever.__init__` takes `w_graph`, `graph_seeds`,
+`graph_depth`, `w_temporal`, `traverser` and `intent_weighting`. All are additive and
+every default reproduces the previous behaviour exactly: `w_graph=0.0` and
+`w_temporal=0.0` mean no walk and no time query run, nothing extra is fused, and both
+pairs of fields stay `None` on every result.
+
+`Store` gains one optional method, `episodes_near`. A store without it does not run the
+temporal leg, exactly as one without `vector_search_episodes` does not run the vector half
+of the episode search.
 
 Two things will announce themselves anyway.
 
 **`Explanation.summary()` and `repr(Result)` gained fields.** A test asserting on the
-whole string will see `graph#2(0.750)` and `intent=lookup` appear once the leg is on;
-neither is emitted while it is off, and `intent=` is absent whenever
+whole string will see `graph#2(0.750)`, `time#1(0.500)` and `intent=lookup` appear once
+the legs are on; none is emitted while they are off, and `intent=` is absent whenever
 `intent_weighting=False`.
 
 **`Memvara` now hands its `GraphTraverser` to its retriever.** It is the same object

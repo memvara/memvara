@@ -90,6 +90,7 @@ from .scoring import (
     vector_relevance,
 )
 from .spread import rank_paths, seed_keys
+from .temporal import TEMPORAL, anchor_for, rank as rank_by_time
 from .traverse import GraphTraverser
 
 # Retriever names. Shared between the fusion weights and the `Explanation` fields so
@@ -162,6 +163,10 @@ class EpisodeResult:
             legs.append(f"vector#{self.explain.vector_rank}")
         if self.explain.lexical_rank is not None:
             legs.append(f"bm25#{self.explain.lexical_rank}")
+        if self.explain.temporal_rank is not None:
+            # Without this a turn found only by proximity reprs as `no-retriever`, which
+            # is the one reading that is wrong: a leg found it, and which one is the point.
+            legs.append(f"time#{self.explain.temporal_rank}")
         return (f"<EpisodeResult {self.score:.4f} {_short(self.text)!r} "
                 f"{'+'.join(legs) or 'no-retriever'} {self.episode.id}>")
 
@@ -200,6 +205,7 @@ class _Weights(NamedTuple):
     vector: float
     lexical: float
     graph: float
+    temporal: float
     #: `None` when `intent_weighting` is off, which is a different statement from any of
     #: the four intents: it says nothing classified this query, so nothing scaled it.
     intent: Intent | None
@@ -243,6 +249,7 @@ class HybridRetriever:
         filter_retry_multiplier: int = 10,
         w_episode: float = 0.5,
         max_episodes: int = 3,
+        w_temporal: float = 0.0,
         w_graph: float = 0.0,
         graph_seeds: int = 5,
         graph_depth: int = 2,
@@ -278,6 +285,16 @@ class HybridRetriever:
         # a single well-worded conversation crowd out everything the store knows.
         self.w_episode = w_episode
         self.max_episodes = max_episodes
+        #: Weight of the **episode** temporal leg, and the switch that runs it at all.
+        #: At 0.0 no time-ranked candidates are produced and `Explanation.temporal_rank`
+        #: stays `None`.
+        #:
+        #: **It ships at 0.0**, for the reason in `docs/BENCHMARKS.md`. It is an episode
+        #: leg only: a claim already carries a predicate-keyed half-life, which is a
+        #: better time signal than raw proximity because only the predicate knows whether
+        #: a fact from 2019 is stale. `include_episodes=False` therefore makes this leg
+        #: inert whatever its weight, which is the shipped default of `search()`.
+        self.w_temporal = w_temporal
         #: Weight of the graph leg in fusion and in the relevance average, and the switch
         #: that turns the leg on at all: at 0.0 no walk runs, nothing is fused from it,
         #: and `Explanation.graph_rank` stays `None` on every result.
@@ -467,7 +484,7 @@ class HybridRetriever:
         limit = max(depth * self.candidate_multiplier, depth)
         wanted = set(memory_types) if memory_types is not None else None
 
-        weights = self._weights(query)
+        weights = self._weights(query, timed=valid_at is not None or known_at is not None)
 
         results, saturated = self._gather(
             query, scope, limit, valid_at, known_at, wanted_states, wanted, now,
@@ -489,7 +506,7 @@ class HybridRetriever:
             ranked = self._interleave(
                 ranked,
                 self._episodes(query, scopes, limit, valid_at, known_at, min_score,
-                               weights),
+                               weights, now),
                 depth)
         if self.reranker is not None:
             # Last, deliberately. Everything above it — fusion, the recency half-lives,
@@ -504,19 +521,29 @@ class HybridRetriever:
 
     # -- internals -----------------------------------------------------------
 
-    def _weights(self, query: str) -> _Weights:
+    def _weights(self, query: str, *, timed: bool) -> _Weights:
         """The configured weights, gated and scaled by what kind of question this is.
 
         One classification per search, not one per leg and not one per candidate: it is
         a property of the query, and running it twice would let two halves of one search
         disagree about what was being asked.
+
+        `timed` outranks the marker vocabulary, and it is not a heuristic: it says the
+        caller passed `valid_at` or `known_at`, which is a temporal intent stated
+        outright. `classify` reads words, and the words are frequently the wrong place to
+        look — "what was going on around then" carries `then`, which is a discourse
+        connective at least as often as a time reference, while the instant the caller
+        already resolved is sitting in the argument list. Deferring to the marker list
+        there would gate the time leg off on the one call that named an instant.
         """
         if not self.intent_weighting:
-            return _Weights(self.w_vector, self.w_lexical, self.w_graph, None)
-        intent = classify(query)
-        vector, lexical, graph = intent_weights(
-            intent, vector=self.w_vector, lexical=self.w_lexical, graph=self.w_graph)
-        return _Weights(vector, lexical, graph, intent)
+            return _Weights(self.w_vector, self.w_lexical, self.w_graph,
+                            self.w_temporal, None)
+        intent = Intent.TEMPORAL if timed else classify(query)
+        vector, lexical, graph, temporal = intent_weights(
+            intent, vector=self.w_vector, lexical=self.w_lexical, graph=self.w_graph,
+            temporal=self.w_temporal)
+        return _Weights(vector, lexical, graph, temporal, intent)
 
     def _observe(self, rec: Recorder, query: str, results: Sequence[Retrieved],
                  elapsed_ms: float) -> None:
@@ -736,31 +763,40 @@ class HybridRetriever:
         known_at: datetime | None,
         min_score: float,
         weights: _Weights,
+        now: datetime,
     ) -> list[EpisodeResult]:
-        """The same two legs over raw turns, discounted and capped.
+        """The legs over raw turns, discounted and capped.
 
         Structurally a copy of `_gather` minus everything episodes do not have. There
         is no liveness filter because nothing retires a turn, no `memory_types` because
         a turn has no type, and no quality rescoring because recency decay, confidence
         and salience are all properties of an extracted claim. What is left is the part
-        that actually finds things: BM25 over the words that were used, and cosine over
-        what they meant.
+        that actually finds things: BM25 over the words that were used, cosine over what
+        they meant, and — at `w_temporal > 0` — proximity to the instant being asked
+        about, which is the only leg here that reads no text at all. See
+        `retrieve/temporal.py` for why that one lives on this side and not on the claim
+        side.
         """
         vector_hits = self._episode_vector_search(
             query, scopes, limit, valid_at, known_at)
         lexical_hits, terms = self._episode_lexical_search(
             query, scopes, limit, valid_at, known_at)
+        anchor = anchor_for(valid_at, known_at, now)
+        time_hits = self._episode_time_search(
+            scopes, limit, valid_at, known_at, weights.temporal, anchor)
 
         fused = reciprocal_rank_fusion(
-            {VECTOR: vector_hits, LEXICAL: lexical_hits},
+            {VECTOR: vector_hits, LEXICAL: lexical_hits, TEMPORAL: time_hits},
             k=self.rrf_k,
-            weights={VECTOR: weights.vector, LEXICAL: weights.lexical},
+            weights={VECTOR: weights.vector, LEXICAL: weights.lexical,
+                     TEMPORAL: weights.temporal},
         )
         if not fused:
             return []
 
         vector_pos = _positions(vector_hits)
         lexical_pos = _positions(lexical_hits)
+        time_pos = _positions(time_hits)
         episodes = self._hydrate_episodes(list(fused))
 
         out: list[EpisodeResult] = []
@@ -770,13 +806,19 @@ class HybridRetriever:
                 continue  # raced with a purge; a missing row is not a ranking error
             v = vector_pos.get(episode_id)
             lx = lexical_pos.get(episode_id)
+            tm = time_pos.get(episode_id)
             evidence = relevance(
                 vector=(vector_relevance(0.0 if v is None else v[1])
                         if vector_hits else None),
                 lexical=(lexical_relevance(0.0 if lx is None else lx[1], terms)
                          if lexical_hits else None),
+                # A proximity is already an absolute [0, 1] closeness, like a cosine, so
+                # it goes in unmapped. It rides the `graph` slot of the average because
+                # the two never run together: one is claims, one is episodes.
+                graph=(0.0 if tm is None else tm[1]) if time_hits else None,
                 w_vector=weights.vector,
                 w_lexical=weights.lexical,
+                w_graph=weights.temporal,
             )
             score = evidence * self.w_episode
             if score < min_score:
@@ -789,6 +831,8 @@ class HybridRetriever:
                     vector_score=None if v is None else v[1],
                     lexical_rank=None if lx is None else lx[0],
                     lexical_score=None if lx is None else lx[1],
+                    temporal_rank=None if tm is None else tm[0],
+                    temporal_score=None if tm is None else tm[1],
                     fusion_score=fusion,
                     # No quality multiplier to divide back out, so the raw score is the
                     # fusion term itself - which keeps `raw_score` meaning the same
@@ -808,6 +852,27 @@ class HybridRetriever:
         if bulk is not None:
             return bulk(ids)
         return {eid: e for eid in ids if (e := self.store.get_episode(eid)) is not None}
+
+    def _episode_time_search(
+        self, scopes: Sequence[Scope], limit: int, valid_at: datetime | None,
+        known_at: datetime | None, w_temporal: float, anchor: datetime,
+    ) -> list[tuple[str, float]]:
+        """Turns nearest the asked instant, or nothing. Degrades like the other legs.
+
+        `episodes_near` is optional on the `Store` protocol, so a third-party store
+        simply does not run this leg — the same treatment `vector_search_episodes`
+        already gets, and right for the same reason: a narrower answer beats refusing to
+        search. Unlike the graph leg there is no raising implementation to catch, because
+        `RemoteStore` cannot serve any episode search at all and is refused a whole
+        server before it gets here.
+        """
+        if w_temporal <= 0.0:
+            return []
+        near = getattr(self.store, "episodes_near", None)
+        if near is None:
+            return []
+        return rank_by_time(
+            near(anchor, scopes, limit, valid_at=valid_at, known_at=known_at), anchor)
 
     def _episode_vector_search(
         self, query: str, scopes: Sequence[Scope], limit: int,

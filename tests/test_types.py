@@ -477,6 +477,9 @@ def test_explanation_summary_shows_the_raw_score_once_a_retriever_sets_one():
         "an absent graph leg is a finding — it says the walk did not reach this claim "
         "— and rendering it as graph#None would read as though it had"
     )
+    assert "time#1(0.500)" in Explanation(temporal_rank=1, temporal_score=0.5,
+                                          final_score=0.5).summary()
+    assert "time#" not in Explanation(final_score=0.5).summary()
     assert "intent=relational" in Explanation(intent="relational",
                                               final_score=0.5).summary()
     assert "intent=" not in Explanation(final_score=0.5).summary()

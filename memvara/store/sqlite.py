@@ -72,6 +72,7 @@ from ..types import (
     Episode,
     MemoryType,
     Scope,
+    as_utc,
     resolved_entity,
     utcnow,
 )
@@ -2825,6 +2826,43 @@ class SQLiteStore:
             cur.row_factory = None
             cur.execute(f"SELECT id FROM episodes WHERE {sc} AND {hp}", sp + hpp)
             return [r[0] for r in cur.fetchall()]
+
+    def episodes_near(self, anchor: datetime, scopes: Sequence[Scope], limit: int, *,
+                      valid_at: datetime | None = None,
+                      known_at: datetime | None = None) -> list[tuple[str, float]]:
+        """The `limit` turns closest in time to `anchor`, nearest first, with their `ts`.
+
+        The third episode search, beside lexical and vector, and the only one that ranks
+        on *when* rather than on what was said. It exists because time was a filter and a
+        multiplier here and never a candidate producer: "what was going on around then"
+        is answered by a turn that need share no vocabulary with the question at all, and
+        neither of the other two legs can return one.
+
+        **The ordering and the cap are in the same statement, deliberately** — design
+        invariant 7. A caller that took `scope_episodes(newest_first=True, limit=n)` and
+        dropped the turns after `valid_at` in Python would be filtering a page the store
+        had already truncated, so a time-travel query would come back short by however
+        many recent turns happened to fill the page, with nothing saying it was partial.
+
+        `ABS(ts - anchor)` cannot use `ep_scope`'s trailing `ts` for the ordering, so this
+        sorts what the scope and happened-by clauses matched. That is the same shape
+        `scope_episodes` degrades to for several scopes, and it is bounded by the scope
+        rather than by the tenant.
+
+        Ties break on `id` after the distance, so two turns equidistant from the anchor
+        come back in the same order on every file.
+        """
+        sc, sp = self._scope_clause(scopes)
+        hp, hpp = self._happened_clause(valid_at, known_at)
+        at = as_utc(anchor).timestamp()
+        with self._read() as conn:
+            cur = conn.cursor()
+            cur.row_factory = None
+            cur.execute(
+                f"SELECT id, ts FROM episodes WHERE {sc} AND {hp} "
+                "ORDER BY ABS(ts - ?), id LIMIT ?",
+                sp + hpp + [at, limit])
+            return [(row[0], float(row[1])) for row in cur.fetchall()]
 
     def lexical_search(self, query: str, scopes: Sequence[Scope], limit: int, *,
                        valid_at: datetime | None = None,

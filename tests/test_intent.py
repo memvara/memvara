@@ -75,14 +75,26 @@ def test_an_unreadable_query_is_open_rather_than_an_error():
         assert classify(query) is Intent.OPEN
 
 
-def test_a_lookup_pays_nothing_for_the_graph_leg_and_a_relational_query_pays_full():
-    """The gate is a zero weight, which `_graph_search` checks *before* the walk.
+def leg_weights(intent):
+    return weights(intent, vector=1.0, lexical=1.0, graph=0.8, temporal=0.4)
 
-    A multiplier applied after the walk would buy the same ranking and none of the
-    latency saving, which is the whole reason the table has a zero in it.
+
+def test_a_lookup_pays_for_neither_extra_leg_and_the_others_pay_for_one_each():
+    """The gates are zero weights, checked *before* the walk and before the time query.
+
+    A multiplier applied afterwards would buy the same ranking and none of the latency
+    saving, which is the whole reason the table has zeroes in it. And the two are never
+    on together: a question about a chain and a question about an instant are different
+    questions, and running the graph leg on the second would zero every claim it did not
+    reach on a question that was never about a join.
     """
-    assert weights(Intent.LOOKUP, vector=1.0, lexical=1.0, graph=0.8)[2] == 0.0
-    assert weights(Intent.RELATIONAL, vector=1.0, lexical=1.0, graph=0.8)[2] == 0.8
+    assert leg_weights(Intent.LOOKUP)[2:] == (0.0, 0.0)
+    assert leg_weights(Intent.RELATIONAL)[2:] == (0.8, 0.0)
+    assert leg_weights(Intent.TEMPORAL)[2:] == (0.0, 0.4)
+    assert leg_weights(Intent.OPEN)[2:] == (0.8, 0.4), (
+        "open is the one shape that could be either, so it runs both and lets fusion "
+        "decide"
+    )
 
 
 def test_configured_weights_are_scaled_rather_than_replaced():
@@ -92,7 +104,8 @@ def test_configured_weights_are_scaled_rather_than_replaced():
     the failure mode of every routing layer that ends up switched off in production.
     """
     for intent in Intent:
-        vector, lexical, _graph = weights(intent, vector=0.3, lexical=2.5, graph=0.0)
+        vector, lexical, _graph, _temporal = weights(
+            intent, vector=0.3, lexical=2.5, graph=0.0, temporal=0.0)
         assert (vector, lexical) == (0.3, 2.5)
 
 

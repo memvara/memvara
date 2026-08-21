@@ -2305,6 +2305,11 @@ def add_common_arguments(parser: Any) -> None:
                         help="weight of the graph leg (0 = off, the shipped default). "
                              "The leg walks extracted claims, so it can only move a "
                              "number on a dataset the write path actually extracts from")
+    # The temporal leg, off by default because it ships off. Episodes only: a claim's
+    # time signal is the predicate-keyed decay retrieval already applies.
+    parser.add_argument("--w-temporal", type=float, default=0.0, metavar="W",
+                        help="weight of the temporal leg over raw turns (0 = off, the "
+                             "shipped default). Inert without episodes")
     parser.add_argument("--k", type=int, default=12, help="retrieval budget, results")
     parser.add_argument("--max-chars", type=int, default=4000,
                         help="retrieval budget, characters of context")

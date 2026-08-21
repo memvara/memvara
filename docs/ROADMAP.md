@@ -154,6 +154,16 @@ list.
   path leaves 81 claims across 940 sessions — the leg costs 1.6 points of
   single-session-user R@12. A third leg with almost nothing to walk puts a real zero on
   every candidate it did not reach.
+- **The temporal leg of retrieval** — `Store.episodes_near()`, `retrieve/temporal.py`, and
+  a fourth leg over raw turns ranked on proximity to the instant the search was asked
+  about. Time was a filter and a multiplier on the read path and never a candidate
+  producer, so "what was going on around then" — whose only content words the analyzer
+  drops — had no leg that could answer it. **It ships at `w_temporal=0.0`.** The measured
+  finding is the abstention rather than the leg: without one it cost 2.4 points of
+  LongMemEval temporal-reasoning R@12, because a query with no instant anchors on *now*,
+  an archival corpus scores every turn at ~0.005, and fusion reads positions. With the
+  guard the other two legs already had, the loss goes to zero — and so does the gain, on an
+  instrument that never passes `valid_at`.
 - **Query-intent gating** — `retrieve/intent.py`, deterministic and model-free, four
   classes matching the categories LOCOMO reports separately. It is what makes the graph
   leg affordable to switch on: `lookup` and `temporal` queries skip the walk before the

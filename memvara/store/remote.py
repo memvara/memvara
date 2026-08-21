@@ -318,6 +318,14 @@ class RemoteStore:
             why="No graph-traversal endpoint exists on the data plane today; "
                 "subject_key/object_key are not exposed or queryable over /v1."))
 
+    def episodes_near(self, anchor: datetime, scopes: Sequence[Scope], limit: int, *,
+                      valid_at: datetime | None = None,
+                      known_at: datetime | None = None) -> list[tuple[str, float]]:
+        raise NotImplementedError(_NO_ENDPOINT.format(
+            method="episodes_near",
+            why="No episode listing or search exists on the data plane today; turns are "
+                "server-internal and are not queryable over /v1."))
+
     def residue(self, claim_id: str) -> dict[str, int]:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="residue",

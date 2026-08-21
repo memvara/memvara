@@ -327,7 +327,7 @@ def fixture() -> list[Instance]:
 
 def build_memory(user: str, budget: ek.RetrievalBudget, llm: Any = None,
                  read_k: int | None = None, embedder: Any = None,
-                 w_graph: float = 0.0) -> Memvara:
+                 w_graph: float = 0.0, w_temporal: float = 0.0) -> Memvara:
     """One store, scoped to a user.
 
     `read_max_episodes=k` for the same reason as in `bench/locomo.py`: raw turns are
@@ -348,7 +348,7 @@ def build_memory(user: str, budget: ek.RetrievalBudget, llm: Any = None,
     """
     return Memvara(user=user, llm=llm if llm is not None else NullLLM(),
                   embedder=embedder, read_max_episodes=read_k or budget.k,
-                  read_w_graph=w_graph)
+                  read_w_graph=w_graph, read_w_temporal=w_temporal)
 
 
 def answer_one(
@@ -510,6 +510,7 @@ def run_retrieval(
     share_store: bool = False,
     embedder: Any = None,
     w_graph: float = 0.0,
+    w_temporal: float = 0.0,
 ) -> tuple[list[ek.RetrievalScore], ek.IngestStats, ek.RetrievalStats, Counter]:
     """`run()`'s ingest and retrieval, scored with no reader and no judge."""
     budget = budget or ek.RetrievalBudget()
@@ -520,7 +521,8 @@ def run_retrieval(
 
     if share_store:
         shared = build_memory("shared", budget, llm, read_k=plan.depth(budget),
-                              embedder=embedder, w_graph=w_graph)
+                              embedder=embedder, w_graph=w_graph,
+                              w_temporal=w_temporal)
         labels: dict[str, str] = {}
         seen: set[str] = set()
         try:
@@ -543,7 +545,7 @@ def run_retrieval(
 
     for item in items:
         mem = build_memory(item.qid, budget, llm, read_k=plan.depth(budget),
-                           w_graph=w_graph,
+                           w_graph=w_graph, w_temporal=w_temporal,
                            embedder=embedder)
         per_item: dict[str, str] = {}
         try:
@@ -694,7 +696,7 @@ def main(argv: Sequence[str] | None = None,
         plan = ek.build_plan(args)
         scores, ingest_stats, read_stats, excluded = run_retrieval(
             items, budget=budget, plan=plan, share_store=args.share_store,
-            embedder=embedder, w_graph=args.w_graph)
+            embedder=embedder, w_graph=args.w_graph, w_temporal=args.w_temporal)
         out(ek.retrieval_report(
             scores, ingest_stats, read_stats,
             title=f"LongMemEval ({args.dataset})", plan=plan, budget=budget,

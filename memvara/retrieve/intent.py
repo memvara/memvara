@@ -208,20 +208,26 @@ def classify(query: str) -> Intent:
 #: it afterwards; `docs/BENCHMARKS.md` carries the sweep each non-neutral number came
 #: from, and a category that did not improve keeps its 1.0 and says so there.
 #:
-#: The `graph` column is the one that is not neutral, and the zero in it is a gate rather
-#: than a weight: `LOOKUP` skips the walk entirely. See `HybridRetriever._graph_search`
-#: — a zero weight is checked before the traverser is called, so the query pays nothing
-#: rather than paying for a walk whose result is then multiplied away.
+#: The `graph` and `temporal` columns are the ones that are not neutral, and their zeroes
+#: are gates rather than weights: they are checked before the walk or the time query runs,
+#: so a query pays nothing rather than paying for work whose result is multiplied away.
+#: See `HybridRetriever._graph_search` and `._episode_time_search`.
+#:
+#: The two are never on together, and the table is where that is decided. `relational` is
+#: a question about a join and `temporal` a question about an instant; `lookup` is neither
+#: and skips both; `open` is the one shape that could be either, so it runs both and lets
+#: fusion pick. Turning both on for a `temporal` query would have the graph leg zeroing
+#: every claim it did not reach on a question that was never about a chain.
 MULTIPLIERS: dict[Intent, dict[str, float]] = {
-    Intent.LOOKUP: {"vector": 1.0, "lexical": 1.0, "graph": 0.0},
-    Intent.TEMPORAL: {"vector": 1.0, "lexical": 1.0, "graph": 0.0},
-    Intent.RELATIONAL: {"vector": 1.0, "lexical": 1.0, "graph": 1.0},
-    Intent.OPEN: {"vector": 1.0, "lexical": 1.0, "graph": 1.0},
+    Intent.LOOKUP: {"vector": 1.0, "lexical": 1.0, "graph": 0.0, "temporal": 0.0},
+    Intent.TEMPORAL: {"vector": 1.0, "lexical": 1.0, "graph": 0.0, "temporal": 1.0},
+    Intent.RELATIONAL: {"vector": 1.0, "lexical": 1.0, "graph": 1.0, "temporal": 0.0},
+    Intent.OPEN: {"vector": 1.0, "lexical": 1.0, "graph": 1.0, "temporal": 1.0},
 }
 
 
-def weights(intent: Intent, *, vector: float, lexical: float,
-            graph: float) -> tuple[float, float, float]:
+def weights(intent: Intent, *, vector: float, lexical: float, graph: float,
+            temporal: float) -> tuple[float, float, float, float]:
     """The configured weights, scaled for this intent.
 
     Multipliers rather than replacements, so a deployment that has tuned `w_vector` keeps
@@ -229,10 +235,13 @@ def weights(intent: Intent, *, vector: float, lexical: float,
     absolute weights would silently discard every configured value, which is the failure
     mode of every "smart routing" layer that has to be turned off in production.
 
-    >>> weights(Intent.LOOKUP, vector=1.0, lexical=1.0, graph=0.6)
-    (1.0, 1.0, 0.0)
-    >>> weights(Intent.RELATIONAL, vector=1.0, lexical=1.0, graph=0.6)
-    (1.0, 1.0, 0.6)
+    >>> weights(Intent.LOOKUP, vector=1.0, lexical=1.0, graph=0.6, temporal=0.4)
+    (1.0, 1.0, 0.0, 0.0)
+    >>> weights(Intent.RELATIONAL, vector=1.0, lexical=1.0, graph=0.6, temporal=0.4)
+    (1.0, 1.0, 0.6, 0.0)
+    >>> weights(Intent.TEMPORAL, vector=1.0, lexical=1.0, graph=0.6, temporal=0.4)
+    (1.0, 1.0, 0.0, 0.4)
     """
     m = MULTIPLIERS[intent]
-    return vector * m["vector"], lexical * m["lexical"], graph * m["graph"]
+    return (vector * m["vector"], lexical * m["lexical"], graph * m["graph"],
+            temporal * m["temporal"])

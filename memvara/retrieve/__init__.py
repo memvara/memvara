@@ -23,6 +23,7 @@ from .scoring import (
     vector_relevance,
 )
 from .spread import rank_paths, seed_keys
+from .temporal import PROXIMITY_HALF_LIFE_DAYS, anchor_for, proximity
 from .traverse import HOP_DAMPING, Edge, GraphTraverser, Path
 
 __all__ = [
@@ -45,6 +46,10 @@ __all__ = [
     # the graph leg: which entities to walk from, and what a walk is worth
     "seed_keys",
     "rank_paths",
+    # the temporal leg: how close a turn is to the instant being asked about
+    "proximity",
+    "anchor_for",
+    "PROXIMITY_HALF_LIFE_DAYS",
     # query shape, and the weights it selects
     "Intent",
     "classify",

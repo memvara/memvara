@@ -316,6 +316,7 @@ CLAIM = Claim(subject="user", predicate="lives_in", object="Lisbon", scope=SCOPE
     lambda s: s.claims_citing("acme", "ep_1"),
     lambda s: s.slot_history("acme", "fk"),
     lambda s: s.adjacent("acme", ["k1"]),
+    lambda s: s.episodes_near(T0, [SCOPE], 5),
     lambda s: s.residue("clm_1"),
     lambda s: s.erasure_record("clm_1"),
     lambda s: s.invalidate("clm_1", T0, None),

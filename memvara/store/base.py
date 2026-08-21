@@ -606,6 +606,32 @@ class Store(Protocol):
                                known_at: datetime | None = None
                                ) -> list[tuple[str, float]]: ...
 
+    def episodes_near(self, anchor: datetime, scopes: Sequence[Scope], limit: int, *,
+                      valid_at: datetime | None = None,
+                      known_at: datetime | None = None) -> list[tuple[str, float]]:
+        """The `limit` turns closest in time to `anchor`, nearest first, with their `ts`.
+
+        The third episode search, and the only one that ranks on *when* rather than on
+        what was said. "What was going on around then" is answered by a turn that need
+        share no vocabulary with the question — the words in it are `when`, `around` and
+        `then`, all of which the analyzer drops — so neither of the other two legs can
+        return one. See `memvara/retrieve/temporal.py`.
+
+        **The ordering and the cap must be in one statement.** A caller that listed a
+        scope's turns and dropped the ones after `valid_at` in Python would be filtering
+        a page the store had already truncated, and a time-travel query would come back
+        short with nothing saying it was partial — design invariant 7, and the same shape
+        that made `adjacent` return 8 of 20 readable claims.
+
+        Distance is symmetric: a turn a week before the anchor and a turn a week after it
+        are equally about that time. Returning `ts` rather than a score keeps the fitted
+        constant on the retrieval side, where it can be changed without a store release.
+
+        Optional. A store without it simply does not run the leg, exactly as one without
+        `vector_search_episodes` does not run the vector half.
+        """
+        ...
+
     def purge(self, scope: Scope) -> dict[str, int]:
         """Irreversibly erase a scope: claims, episodes, every vector, both text indexes.
 
