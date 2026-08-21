@@ -173,11 +173,27 @@ def _authorize(client: Any, server_url: str, project: str,
         expires_in=int(data["expires_in"]), interval=int(data["interval"]))
 
 
+#: Longest upstream body this command will echo. The same cap the Supermemory importer
+#: uses on the same kind of text, for the same reason.
+_BODY = 200
+
+
 def _server_error(response: Any, doing: str) -> str:
+    """The message a failed step prints, with the upstream body bounded.
+
+    Unlike the tool surface, this ends up on a terminal rather than in a model's context,
+    so the risk is volume rather than forged structure: a gateway that answers with an
+    HTML error page, or a JSON envelope carrying an infrastructure dump, otherwise lands
+    whole in whatever is reading stderr — which for a login run in CI is a build log, and
+    on a public repository that log is public. Two hundred characters keeps the part that
+    says what went wrong, which is what the operator ran this for.
+    """
     try:
-        detail = response.json()
+        detail = str(response.json())
     except ValueError:
-        detail = response.text
+        detail = str(response.text)
+    if len(detail) > _BODY:
+        detail = detail[:_BODY - 1] + "…"
     return f"the server refused to {doing} ({response.status_code}): {detail}"
 
 
