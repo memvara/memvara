@@ -51,6 +51,61 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **A graph leg in `search()`**, off by default. `GraphTraverser` has been able to answer
+  "who does Alice's manager report to" since it landed, and `bench/multihop.py` measured
+  what that is worth — 34.7% against 4.7% for a search-then-search loop at three hops.
+  Nothing on the read path called it. `search()` fused two legs, both lookups, and a
+  question whose evidence is two rows with a join between them was answered by whichever
+  row happened to embed closest.
+
+  The leg is Zep's φ_bfs: seeds are the folded `subject_key`/`object_key` of the
+  best-scoring claims from the first fusion, so no entity extractor runs over the query
+  text. `HybridRetriever` gains `w_graph`, `graph_seeds`, `graph_depth`, `traverser` and
+  `intent_weighting`; `Explanation` gains `graph_rank`, `graph_score` and `intent`;
+  `scoring.relevance()` gains `graph`/`w_graph`; `GraphTraverser` gains `spread()`, a
+  keys-only entry that does not re-fold what the write path already folded.
+
+  **`w_graph` ships at 0.0, and the measured table is in `docs/BENCHMARKS.md`.** Neither
+  public retrieval benchmark can see the leg: it walks claims, and both runs are episode
+  retrieval — LOCOMO extracts 0 claims from 5,882 turns and LongMemEval 78 from 10,866,
+  because `SalienceGate` drops any turn whose role is not `user` and the deterministic
+  extractor's vocabulary is first-person declaratives. The LOCOMO reports with and without
+  the leg are byte-identical. What moves is `bench/multihop.py`, over a store of asserted
+  claims: **2.9% → 21.6% at k=12 and 7.6% → 50.4% at k=25** on the shipped read path, with
+  no seed entity supplied by the caller. That benchmark is synthetic and self-authored,
+  which is an illustration of a mechanism and not evidence for a default — the precedent
+  is the MMR rejection recorded in `hybrid.py`.
+
+  It is opt-in rather than rejected because nothing regressed: every R@k in both public
+  runs held exactly, knowledge-update at 91.0 and single-session-user at 92.2 included.
+
+  A `Store` without a working `adjacent()` degrades to the two legs it had and raises
+  `DegradedRetrievalWarning` once per retriever. That is caught rather than guarded,
+  because `RemoteStore.adjacent` is present on the object and raises when called, which a
+  `getattr` check cannot see.
+
+- **Deterministic query-intent gating**, `memvara/retrieve/intent.py`. Four classes —
+  `lookup`, `temporal`, `relational`, `open` — matching the categories LOCOMO reports
+  separately, decided by a marker vocabulary over the query's raw tokens with no model
+  anywhere. It is what makes the graph leg affordable to turn on: `lookup` and `temporal`
+  queries skip the walk *before* the traverser is called, so they pay nothing rather than
+  paying for a walk that is then weighted away.
+
+  It reads the raw tokens rather than `analyze()`'s reduced terms, and that is the one
+  subtlety: `when`, `whose` and `between` are all stopwords, and they are exactly the
+  words that say what kind of question is being asked. The two functions share a tokenizer
+  and want opposite halves of it.
+
+  Multipliers scale the *configured* weights rather than replacing them, so a deployment
+  that tuned `w_vector` keeps its tuning. Every entry is 1.0 except the graph gate, and
+  every entry stays 1.0 until a per-category sweep moves it. `intent_weighting=False`
+  turns the stage off wholesale and leaves `Explanation.intent` unset, which is how a
+  ranking difference is attributed to it rather than argued about.
+
+- **`--w-graph` on both benchmark runners**, so the table above reproduces, and a
+  `search+graph` column in `bench/multihop.py` measuring the shipped read path rather than
+  a caller who already knows the seed entity.
+
 - **`demo/harness.py --reader stub`**, one offline command that runs all five arms end to
   end and reports them. The answer-quality apparatus existed and could not be run without
   a person in the loop: the blinded dump/answers round trip stops halfway by design,

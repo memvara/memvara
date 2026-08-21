@@ -433,15 +433,22 @@ class Memvara:
         self.writer = WritePipeline(
             self.store, self.embedder, self.registry, self.llm, **write_kw
         )
-        self.reader = HybridRetriever(
-            self.store, self.embedder, self.registry, **read_kw
-        )
         #: Multi-hop traversal. No embedder: a walk follows stored entity identity, not
         #: similarity — which is the point, since a chain of "close enough" hops
         #: compounds into an assertion nobody made. No telemetry either, for now: the
         #: series worth publishing here (frontier truncation, paths pruned by the beam)
         #: are not in `telemetry.series_names()` yet.
+        #:
+        #: Built before the reader because the reader takes it: the graph leg of
+        #: `search()` walks this same object, at the same scope and the same clock pair,
+        #: so `neighborhood()` and a graph-weighted search cannot disagree about what the
+        #: graph is. `read_traverser=` still wins, for a caller wiring a differently-bounded
+        #: walk into retrieval than the one `neighborhood()` exposes.
         self.traverser = GraphTraverser(self.store, self.registry, **graph_kw)
+        read_kw.setdefault("traverser", self.traverser)
+        self.reader = HybridRetriever(
+            self.store, self.embedder, self.registry, **read_kw
+        )
         self.consolidator = Consolidator(self.store, self.embedder, self.registry,
                                          telemetry=telemetry)
         # See `_index_episodes`: warned once per instance, not once per rejected turn.

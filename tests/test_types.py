@@ -471,6 +471,15 @@ def test_explanation_repr_is_its_summary():
 def test_explanation_summary_shows_the_raw_score_once_a_retriever_sets_one():
     """`raw_score` is the pre-normalization value. It is only meaningful next to the
     normalized one, and only present once something computes it."""
+    assert "graph#2(0.750)" in Explanation(graph_rank=2, graph_score=0.75,
+                                           final_score=0.5).summary()
+    assert "graph#" not in Explanation(final_score=0.5).summary(), (
+        "an absent graph leg is a finding — it says the walk did not reach this claim "
+        "— and rendering it as graph#None would read as though it had"
+    )
+    assert "intent=relational" in Explanation(intent="relational",
+                                              final_score=0.5).summary()
+    assert "intent=" not in Explanation(final_score=0.5).summary()
     assert "raw=" not in Explanation(final_score=0.5).summary()
     assert "raw=0.0310" in Explanation(raw_score=0.031, final_score=0.5).summary()
 

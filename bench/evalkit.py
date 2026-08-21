@@ -2297,6 +2297,14 @@ def add_common_arguments(parser: Any) -> None:
     parser.add_argument("--embedder", default="hashing", choices=["hashing", "local"],
                         help="vector leg: hashing (offline, the published "
                              "configuration) or local (sentence-transformers)")
+    # The graph leg, off by default because it ships off. Shared rather than per-runner
+    # for the reason `--embedder` is: a number from one benchmark and a number from the
+    # other get quoted in one paragraph, and a leg present in one run and absent from the
+    # other is exactly the kind of difference that does not survive the quoting.
+    parser.add_argument("--w-graph", type=float, default=0.0, metavar="W",
+                        help="weight of the graph leg (0 = off, the shipped default). "
+                             "The leg walks extracted claims, so it can only move a "
+                             "number on a dataset the write path actually extracts from")
     parser.add_argument("--k", type=int, default=12, help="retrieval budget, results")
     parser.add_argument("--max-chars", type=int, default=4000,
                         help="retrieval budget, characters of context")

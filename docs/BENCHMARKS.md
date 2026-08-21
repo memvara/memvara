@@ -136,6 +136,74 @@ until this run**: `HybridRetriever` broke score ties on `claim.id`, a fresh `uui
 ingest, so two ingests of one corpus ranked differently and the numbers drifted 0.07
 points. Ties now break on a content hash and three full runs are byte-identical.
 
+### The graph leg, and why no row above moves
+
+`w_graph > 0` adds a third retrieval leg: a bounded walk out of the entities the vector
+and lexical legs just named (`memvara/retrieve/spread.py`). **It ships at `w_graph=0.0`,
+and the reason is that neither benchmark above can see it.**
+
+```bash
+PYTHONPATH=. python3 bench/locomo.py      --score retrieval --w-graph 1.0
+PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-graph 1.0
+```
+
+| instrument | claims in the store | what the leg changed |
+|---|---:|---|
+| LOCOMO, 1,531 questions | **0** | nothing — the two reports are byte-identical |
+| LongMemEval oracle, 500, `--share-store` | **78** | no R@k moved; MRR −0.5 on `single-session-preference`, −0.1 on `multi-session` |
+| `bench/multihop.py` (synthetic) | 4,498 | **2.9% → 21.6%** at k=12, **7.6% → 50.4%** at k=25 |
+
+The leg walks *claims*, and both public runs are episode retrieval: `SalienceGate` drops
+any turn whose role is not `user`, LOCOMO writes each turn under the speaker's name, and
+the deterministic extractor's vocabulary is first-person declaratives. LOCOMO extracts
+**0 claims from 5,882 turns** and LongMemEval **78 from 10,866**. With no claims the
+candidate set is empty and the leg is never reached, so the LOCOMO figure is not a null
+result — it is the leg being inert by construction.
+
+`bench/multihop.py` already said the other half of this, before the leg existed: LOCOMO's
+`multi-hop` category is single-fact lookups whose evidence happens to span one or two
+turns, not transitive relations over entities, "so a graph walk is not what that 36% row
+is short of."
+
+What the one instrument that *can* see it measures — `search` is the shipped read path,
+`+graph` the same call with one constructor argument changed, `linked` the best a caller
+could previously get by hand (take the seed entity off the top hit and call
+`neighborhood()` yourself):
+
+```
+  set           k   search   +graph  search x2  traverse  +min_hops    +both   linked
+  two-hop       5     1.0%     2.3%       7.7%      5.3%      41.0%   100.0%    41.0%
+  two-hop      12     4.0%    31.7%      64.3%     69.7%     100.0%   100.0%    99.7%
+  two-hop      25     9.3%    73.3%      96.3%    100.0%     100.0%   100.0%    99.7%
+  three-hop    25     4.0%     4.7%       4.7%     34.7%      48.7%   100.0%    46.7%
+  all          12     2.9%    21.6%      43.1%     46.4%      78.7%    83.1%    77.8%
+  all          25     7.6%    50.4%      65.8%     78.2%      82.9%   100.0%    82.0%
+```
+
+The three-hop rows barely move because `graph_depth` ships at 2; that row measures the
+bound, not the traversal. And this benchmark is synthetic and self-authored — read it as
+an illustration of a mechanism, which is not evidence for a default.
+
+**So it is opt-in, and the guardrails are why it is opt-in rather than rejected.** Every
+R@k in both public runs held exactly, including the two the thesis rests on:
+knowledge-update 91.0 → 91.0 and single-session-user 92.2 → 92.2. The precedent for
+shipping a measured stage at zero is the MMR rejection recorded in `hybrid.py`.
+
+```python
+mem = Memvara("memory.db", read_w_graph=1.0)
+```
+
+Turning it on is affordable because of `memvara/retrieve/intent.py`: a deterministic,
+model-free classifier routes `lookup` and `temporal` queries past the walk entirely, so
+the cost lands only on the query shapes it was measured on. Every other multiplier in that
+table is 1.0 and stays 1.0 until a per-category sweep moves it.
+
+**The blocking dependency here is ingestion, not retrieval.** Both public instruments are
+blind to the graph leg for the same reason the `memvara` demo arm produces zero claims —
+see [What the fast path does not
+catch](#what-the-fast-path-does-not-catch-measured). Until the offline write path extracts
+from ordinary prose, no public retrieval number can move on this.
+
 ---
 
 ## A design comparison (synthetic, self-authored)

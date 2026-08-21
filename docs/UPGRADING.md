@@ -7,6 +7,45 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `Explanation` gained two fields and a third retrieval leg exists
+
+### What changed
+
+`Explanation` now carries `graph_rank`, `graph_score` and `intent`, and
+`HybridRetriever.__init__` takes `w_graph`, `graph_seeds`, `graph_depth`, `traverser` and
+`intent_weighting`. All are additive and every default reproduces the previous behaviour
+exactly: `w_graph=0.0` means no walk runs, no leg is fused, and `graph_rank` stays `None`
+on every result.
+
+Two things will announce themselves anyway.
+
+**`Explanation.summary()` and `repr(Result)` gained fields.** A test asserting on the
+whole string will see `graph#2(0.750)` and `intent=lookup` appear once the leg is on;
+neither is emitted while it is off, and `intent=` is absent whenever
+`intent_weighting=False`.
+
+**`Memvara` now hands its `GraphTraverser` to its retriever.** It is the same object
+`neighborhood()` walks, so the two cannot disagree about what the graph is. Pass
+`read_traverser=` to wire a differently-bounded walk into retrieval than the one the
+public method exposes.
+
+### What to do about it
+
+Nothing, unless you want the leg. To turn it on:
+
+```python
+mem = Memvara("memory.db", read_w_graph=1.0)
+```
+
+Read `docs/BENCHMARKS.md` first. Neither public retrieval benchmark can measure it — both
+run the offline write path over conversational data it extracts almost nothing from — so
+the default is 0.0 and the only measured gain is on a synthetic multi-hop workload.
+
+**If your `Store` is a third-party one**, the leg needs `adjacent()`. A store without it
+degrades to the two legs it had, with a `DegradedRetrievalWarning` raised once per
+retriever rather than silently. `RemoteStore` (cloud mode) is in that category: the method
+is present and raises.
+
 ## Erasure now actually removes the text, and the schema is version 7
 
 ### What changed

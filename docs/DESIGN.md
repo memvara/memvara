@@ -453,6 +453,14 @@ LOCOMO's `multi-hop` category is *not* transitive multi-hop — its questions ar
 single-fact lookups whose evidence spans a couple of turns — so the number in the table
 above cannot be improved by this, and is not claimed to be.
 
+Since then the walk has become a third leg of `search()` itself, seeded from the head of
+the fused vector+lexical list so the caller no longer has to know the seed entity. On the
+same synthetic set that closes most of the gap the `linked` column measured: 2.9% → 21.6%
+at k=12 and 7.6% → 50.4% at k=25. It ships **off** (`w_graph=0.0`), because neither public
+retrieval benchmark can measure it — both run the offline write path over conversational
+data it extracts almost nothing from, so there is no graph in either store to walk. See
+`docs/BENCHMARKS.md`.
+
 ### Nothing is silently lost
 
 Superseding sets an end timestamp; it never deletes, and it never records the old value

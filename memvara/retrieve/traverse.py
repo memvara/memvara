@@ -356,6 +356,52 @@ class GraphTraverser:
                           known_at=known_at, min_score=min_score,
                           source_keys=source_keys, target_keys=target_keys)
 
+    def spread(
+        self,
+        seed_keys: Sequence[str],
+        scope: Scope,
+        *,
+        depth: int = 2,
+        k: int = 10,
+        min_hops: int = 1,
+        predicates: Sequence[str] | None = None,
+        as_of: datetime | None = None,
+        valid_at: datetime | None = None,
+        known_at: datetime | None = None,
+        min_score: float = 0.0,
+    ) -> list[Path]:
+        """`neighborhood`, from several already-folded keys at once and no surface form.
+
+        The entry point retrieval uses. `neighborhood` exists for a question spelled by a
+        person — "what is around Acme" — so it takes a surface form, folds it, and widens
+        the fold with whatever aliases the owner has learned. A retrieval seed is not
+        spelled by anybody: it is `Claim.subject_key`, read off a row that the write path
+        already folded and already resolved through the same registry. Handing that back
+        to `_identities` would fold an entity key a second time, which is at best a no-op
+        and at worst re-derives a different key from the canonical one.
+
+        So this takes keys and trusts them, and the trust is bounded: falsy keys are
+        dropped, which is the one check `_identities` was doing that still applies here —
+        `object=""` is how a retraction clears a slot, and admitting the empty key as a
+        node would fuse every retraction in the tenant into one hub.
+
+        Several seeds in one walk rather than one walk per seed, for the reason
+        `_identities` gives: the beam, the diversification and the per-level cap are
+        properties of *one answer*, and running the walk n times and concatenating would
+        multiply every bound by n.
+
+        Scope, the clock pin and the negation rule are exactly `neighborhood`'s. Nothing a
+        walk started this way can reach is anything the caller could not have read
+        directly; see `_visible`.
+        """
+        pin = self._pin(*time_axes(as_of, valid_at, known_at))
+        seeds = tuple(dict.fromkeys(key for key in seed_keys if key))
+        if not seeds:
+            return []
+        return self._search(seeds, frozenset(), scope, depth=depth, k=k,
+                            min_hops=min_hops, predicates=predicates, pin=pin,
+                            min_score=min_score, blocked=frozenset())
+
     # -- internals ------------------------------------------------------------
 
     @staticmethod
@@ -432,7 +478,7 @@ class GraphTraverser:
         """
         pin = self._pin(*time_axes(as_of, valid_at, known_at))
         seeds = _identities(source, source_keys)
-        if not seeds or depth <= 0 or k <= 0:
+        if not seeds:
             return []
         goals: frozenset[str] = frozenset()
         if target is not None:
@@ -443,6 +489,46 @@ class GraphTraverser:
                 # every cycle through the seed. Overlap rather than equality because two
                 # names of one merged entity are one endpoint, however they were spelled.
                 return []
+        return self._search(seeds, goals, scope, depth=depth, k=k, min_hops=min_hops,
+                            predicates=predicates, pin=pin, min_score=min_score,
+                            # Every seed here is a name for the *same* entity, so a hop
+                            # onto any of them is a self-loop wearing another spelling.
+                            blocked=frozenset(seeds))
+
+    def _search(
+        self,
+        seeds: Sequence[str],
+        goals: frozenset[str],
+        scope: Scope,
+        *,
+        depth: int,
+        k: int,
+        min_hops: int,
+        predicates: Sequence[str] | None,
+        pin: _Pin,
+        min_score: float,
+        blocked: frozenset[str],
+    ) -> list[Path]:
+        """The walk itself, from resolved keys and a resolved clock pair.
+
+        Split out from `_walk` for `spread`, which arrives holding canonical keys already
+        and must not re-fold them — see there. Everything about the walk lives here, so
+        the two entry points cannot drift into two different traversals: `_walk` decides
+        what the seeds and goals *are*, this decides what happens to them.
+
+        `blocked` is the one thing the two entry points genuinely disagree about, and it
+        is not a knob. `_walk`'s seeds are several spellings of **one** entity, so
+        arriving at any of them is a self-loop and every one-hop path would otherwise come
+        back twice — once direct and once via the entity's other name. `spread`'s seeds
+        are several **different** entities, so blocking them would delete the answer:
+        every edge between two seeds is exactly the join the leg exists to make, and with
+        five seeds off the head of a fused list most edges have both ends in the set. That
+        was not a hypothetical — it returned zero paths on the first store it was pointed
+        at, and zero paths from a leg that is allowed to abstain looks like a corpus with
+        no structure in it.
+        """
+        if depth <= 0 or k <= 0:
+            return []
         preds = self._predicates(predicates)
         if preds == []:
             return []       # "these predicates and no others", of which there are none
@@ -450,21 +536,20 @@ class GraphTraverser:
         # One partial path per identity, all at depth zero, all scoring 1.0. They are the
         # same node as far as the walk is concerned; only the store still keys them apart.
         frontier = [Path(nodes=(s,), edges=(), score=1.0) for s in seeds]
-        started = frozenset(seeds)
         found: dict[tuple[str, ...], Path] = {}
         for hops in range(1, depth + 1):
             edges = self._edges(scope, [p.nodes[-1] for p in frontier], preds, pin)
             grown: dict[tuple[str, ...], Path] = {}
             for path in frontier:
                 for edge in edges.get(path.nodes[-1], ()):
-                    if edge.target_key in path.nodes or edge.target_key in started:
-                        # Cycle: a path may not revisit an entity. `started` is what
-                        # makes that true of a *merged* entity — an edge from `big blue`
-                        # to `ibm` is a self-loop wearing two names, and `_edges` already
-                        # drops the single-key kind. Without it every one-hop path came
-                        # back twice, once direct and once via the entity's other name.
-                        # A no-op when the probe resolved to one key, since `nodes[0]`
-                        # is then the whole of `started`.
+                    if edge.target_key in path.nodes or edge.target_key in blocked:
+                        # Cycle: a path may not revisit an entity. `blocked` extends that
+                        # to a *merged* entity — an edge from `big blue` to `ibm` is a
+                        # self-loop wearing two names, and `_edges` already drops the
+                        # single-key kind. Without it every one-hop path came back twice,
+                        # once direct and once via the entity's other name. It is empty
+                        # for `spread`, whose seeds are different entities rather than
+                        # one entity's aliases; see `_search`.
                         continue
                     nxt = self._extend(path, edge)
                     if nxt.score < min_score:
@@ -475,7 +560,7 @@ class GraphTraverser:
             if not grown:
                 break
             ranked = self._diversify(sorted(grown.values(), key=_order))
-            if target is None:
+            if not goals:
                 # `[:k]` and not the whole level: a level can be `beam` x fan-out wide,
                 # and without a cap here a hub keeps every candidate it ever generated
                 # alive to the final sort — the one collection in this walk that nothing

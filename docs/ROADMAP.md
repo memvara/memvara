@@ -143,6 +143,19 @@ list.
   all, and it is the feature that made the "the store has been a graph all along" claim
   true rather than rhetorical. Every edge on a path is evaluated at one pinned `as_of`,
   which is the property a search-then-search loop cannot have.
+- **The graph leg of retrieval** — `GraphTraverser.spread()`, `retrieve/spread.py`, and a
+  third leg in `HybridRetriever` seeded from the head of the fused vector+lexical list
+  (Zep's φ_bfs). It closes the gap between what `neighborhood()` can answer and what
+  `search()` can: the caller no longer has to know the seed entity. **It ships at
+  `w_graph=0.0`** — the measured table is in `docs/BENCHMARKS.md`, and the short version
+  is that neither public retrieval benchmark can see it, because both run the offline
+  write path over conversational data it extracts almost nothing from. Every guardrail
+  held exactly; the only measured gain is on a synthetic multi-hop workload.
+- **Query-intent gating** — `retrieve/intent.py`, deterministic and model-free, four
+  classes matching the categories LOCOMO reports separately. It is what makes the graph
+  leg affordable to switch on: `lookup` and `temporal` queries skip the walk before the
+  traverser is called. Every multiplier that is not the graph gate is 1.0 and stays 1.0
+  until a per-category sweep moves it.
 - **Token accounting** — `WriteReceipt.tokens_in`/`tokens_out`, `LLM.Usage` with a
   caller-allocated accumulator, and the `write.tokens_in` / `write.tokens_out` /
   `write.extract_ms` series. `llm_calls` was the only cost signal and cannot be billed on:

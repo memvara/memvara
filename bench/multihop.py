@@ -15,6 +15,11 @@ entities, so a graph walk is not what that 36% row in the README is short of.
 Four ways of answering the same question, over one store:
 
     search              mem.search(question, k)              — the shipped retriever
+    search+graph        the same call at w_graph=1.0          — the shipped retriever with
+                        the graph leg on, which is the only column here that measures an
+                        end-to-end system: the walk is seeded from the head of its own
+                        fused list, so nothing hands it the seed entity. Compare it with
+                        `linked`, which is the same idea done by the caller.
     search x2           search, then search again on the top hit's object — the agent
                         loop traversal is meant to replace, and the baseline that
                         matters. A single-shot search cannot answer these questions by
@@ -32,9 +37,9 @@ A question counts as answered when the gold entity is where one of the returned 
 is in what you were handed", and for traversal the path itself is the witness — the
 caller can read every hop and take any of them to `why()`.
 
-`seed` is the entity the question is about. Traversal is given it and search is not, so
-these numbers are **not a like-for-like comparison** and the traversal columns are an
-upper bound on an end-to-end system. `linked` reports the honest version: the seed is
+`seed` is the entity the question is about. Traversal is given it and `search` is not, so
+those numbers are **not a like-for-like comparison** and the traversal columns are an
+upper bound on an end-to-end system. `search+graph` is the like-for-like one. `linked` reports the honest version: the seed is
 taken from the top hit of the same search the baseline ran, so the gap between it and
 `traverse` is entity linking rather than traversal.
 
@@ -74,6 +79,7 @@ sys.path.insert(0, "bench")
 from evalkit import mean, percentile                        # noqa: E402
 
 from memvara import HashingEmbedder, Memvara, NullLLM       # noqa: E402
+from memvara.retrieve import HybridRetriever                # noqa: E402
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
@@ -165,14 +171,36 @@ def genuinely_multi_hop(mem: Memvara, questions, limit: int) -> list:
     return kept
 
 
-def evaluate(mem: Memvara, questions, *, k: int) -> dict[str, float]:
+def graph_reader(mem: Memvara, *, w_graph: float = 1.0,
+                 depth: int = 2) -> HybridRetriever:
+    """The shipped retriever over the same store, with the graph leg switched on.
+
+    A second reader rather than a second store: the corpus costs seconds to build at
+    100k claims and the two configurations have to see byte-identical data or the column
+    is measuring the loader. `Memvara` builds the traverser, and this borrows it, so the
+    walk here is bounded exactly as `mem.neighborhood()`'s is.
+    """
+    return HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=w_graph,
+                           graph_depth=depth, traverser=mem.traverser)
+
+
+def evaluate(mem: Memvara, questions, *, k: int, graph: HybridRetriever) -> dict[str, float]:
     hits = dict.fromkeys(
-        ("search", "search x2", "traverse", "traverse+min_hops", "traverse+both",
-         "linked"), 0)
+        ("search", "search+graph", "search x2", "traverse", "traverse+min_hops",
+         "traverse+both", "linked"), 0)
     for question, seed, gold, hops, preds in questions:
         results = mem.search(question, k=k, as_of=T0)
         if any(gold in f"{r.claim.subject} {r.claim.object}" for r in results):
             hits["search"] += 1
+
+        # The same call, one constructor argument different. This is the column that says
+        # what the *shipped read path* can do, as opposed to what a caller who already
+        # knows the seed entity can do with `neighborhood()` — the seed here comes from
+        # the head of the fused list, which is the `linked` row's handicap paid inside
+        # the retriever instead of by the caller.
+        fused = graph.search(question, mem.default_scope, k=k, as_of=T0)
+        if any(gold in f"{r.claim.subject} {r.claim.object}" for r in fused):
+            hits["search+graph"] += 1
 
         # The agent loop: re-query on what the first search brought back. Given the same
         # `k` budget per step, so the two-step system sees at most 2k claims against
@@ -216,16 +244,20 @@ def accuracy() -> None:
           f"the two-hop frontier "
           f"{len(mem.neighborhood(corpus.staff[0], depth=2, k=999, as_of=T0))}")
 
-    header = (f"\n  {'set':<10} {'k':>4} {'search':>8} {'search x2':>10} "
+    graph = graph_reader(mem)
+    header = (f"\n  {'set':<10} {'k':>4} {'search':>8} {'+graph':>8} {'search x2':>10} "
               f"{'traverse':>9} {'+min_hops':>10} {'+both':>8} {'linked':>8}")
     print(header)
     for label, subset in (("two-hop", two), ("three-hop", three), ("all", questions)):
         for k in (5, 12, 25):
-            got = evaluate(mem, subset, k=k)
+            got = evaluate(mem, subset, k=k, graph=graph)
             print(f"  {label:<10} {k:>4} {got['search']:>7.1f}% "
+                  f"{got['search+graph']:>7.1f}% "
                   f"{got['search x2']:>9.1f}% {got['traverse']:>8.1f}%"
                   f" {got['traverse+min_hops']:>9.1f}% {got['traverse+both']:>7.1f}%"
                   f" {got['linked']:>7.1f}%")
+    print("  `+graph` walks two hops, which is the shipped `graph_depth`; the three-hop "
+          "row\n   is therefore a measurement of that bound, not of traversal.")
 
     question, seed, gold, hops, preds = two[0]
     print(f"\n  example: {question}\n    gold: {gold}")

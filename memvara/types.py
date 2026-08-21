@@ -798,6 +798,14 @@ class Explanation:
     vector_score: float | None = None
     lexical_rank: int | None = None
     lexical_score: float | None = None
+    #: Position and path score in the graph leg — the multi-hop walk seeded from the head
+    #: of the other two (see `memvara/retrieve/spread.py`). `None` means this claim was
+    #: not on any path the walk returned, which includes the ordinary case of the walk
+    #: not having run: it is gated by query intent, it needs a `Store` with `adjacent`,
+    #: and it is off entirely at `w_graph=0`. A number here says the claim was reached
+    #: *through* something else, which is the one thing the other two legs cannot report.
+    graph_rank: int | None = None
+    graph_score: float | None = None
     fusion_score: float = 0.0
     recency: float = 1.0
     confidence: float = 1.0
@@ -810,6 +818,12 @@ class Explanation:
     #: two relate (see `memvara/retrieve/scoring.py`).
     raw_score: float = 0.0
     final_score: float = 0.0        # == Result.score, i.e. normalized into [0, 1]
+    #: The query shape retrieval routed this search as, or `None` when intent weighting
+    #: was off. It is on the explanation rather than only in a log because it is the
+    #: answer to the question a surprising result set actually raises: not "why is this
+    #: row here" but "why was the leg that would have found the other one switched off".
+    #: See `memvara/retrieve/intent.py`.
+    intent: str | None = None
 
     def summary(self) -> str:
         bits = []
@@ -817,6 +831,8 @@ class Explanation:
             bits.append(f"vector#{self.vector_rank}({self.vector_score:.3f})")
         if self.lexical_rank is not None:
             bits.append(f"bm25#{self.lexical_rank}({self.lexical_score:.2f})")
+        if self.graph_rank is not None:
+            bits.append(f"graph#{self.graph_rank}({self.graph_score:.3f})")
         bits.append(f"recency={self.recency:.2f}")
         bits.append(f"conf={self.confidence:.2f}")
         bits.append(f"sal={self.salience:.2f}")
@@ -826,6 +842,8 @@ class Explanation:
             # Shown only once a retriever populates it, so the line stays readable for
             # anything that scores without a normalization step.
             bits.append(f"raw={self.raw_score:.4f}")
+        if self.intent is not None:
+            bits.append(f"intent={self.intent}")
         return " ".join(bits) + f" -> {self.final_score:.4f}"
 
     def __repr__(self) -> str:
@@ -865,6 +883,11 @@ class Result:
             legs.append(f"vector#{self.explain.vector_rank}")
         if self.explain.lexical_rank is not None:
             legs.append(f"bm25#{self.explain.lexical_rank}")
+        if self.explain.graph_rank is not None:
+            # Without this line a claim reached only by traversal reprs as
+            # `no-retriever`, which is the one reading that is actually wrong: a
+            # retriever found it, and which one is the whole point of the leg.
+            legs.append(f"graph#{self.explain.graph_rank}")
         return (f"<Result {self.score:.4f} {_short(self.text)!r} "
                 f"{'+'.join(legs) or 'no-retriever'} {self.claim.id}>")
 

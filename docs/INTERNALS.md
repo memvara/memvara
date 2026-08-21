@@ -249,7 +249,10 @@ class HybridRetriever:
     def __init__(self, store, embedder, registry, *,
                  w_vector: float = 1.0, w_lexical: float = 1.0, rrf_k: int = 60,
                  w_recency: float = 0.25, w_confidence: float = 0.15,
-                 w_salience: float = 0.10, candidate_multiplier: int = 5) -> None
+                 w_salience: float = 0.10, candidate_multiplier: int = 5,
+                 w_graph: float = 0.0, graph_seeds: int = 5, graph_depth: int = 2,
+                 traverser: GraphTraverser | None = None,
+                 intent_weighting: bool = True) -> None
 
     def search(self, query: str, scope: Scope, *, k: int = 10,
                as_of: datetime | None = None, valid_at: datetime | None = None,
@@ -273,6 +276,55 @@ Search must:
   we last heard something, and that is a question about the belief clock;
 - populate `Explanation` on every `Result` — per-retriever rank and raw score, the fusion
   score, each scoring factor, and the final score. A result with no explanation is a bug.
+
+#### The third leg
+
+At `w_graph > 0` a graph leg runs **after** the first fusion and the whole list is fused
+again, three-way. It cannot run before: its seeds are the folded entity keys of the
+best-scoring claims (`retrieve/spread.seed_keys`), which is Zep's φ_bfs and is the
+decision that keeps the leg cheap — no entity extractor over free-text queries, and no
+second vocabulary to disagree with the store's.
+
+The leg must:
+- **seed on content, not on ids.** The fused order breaks ties on the item id and a claim
+  id is a `uuid4` minted at ingest, so seeding straight off it would make which entities
+  get walked a property of which ingest ran. `seed_keys` re-sorts on `value_key`;
+- **bound seeds by key count**, not by claim count: the key list is what reaches
+  `Store.adjacent`, and frontier width is what a hop costs;
+- **pass `valid_at`/`known_at` through unchanged**, so the walk pins the pair `search()`
+  was asked about (invariant 6) rather than reading the clock again;
+- **take the best path's score per claim**, never the sum — a path score is a relevance,
+  and summing would rank a hub on nine weak chains above a claim on one strong one;
+- **abstain, not vote zero, when it did not run.** `_Legs.graph_active` is the same
+  distinction the other two legs carry, and it is what keeps a two-leg query from being
+  scored as though a third leg had rejected everything;
+- **degrade rather than raise.** `RemoteStore.adjacent` exists and raises, so a `getattr`
+  guard cannot see it: the `NotImplementedError` is caught, `DegradedRetrievalWarning`
+  fires once per retriever, and the leg stays off for that retriever's life.
+
+#### `retrieve/intent.py`
+
+```python
+def classify(query: str) -> Intent          # lookup | temporal | relational | open
+def weights(intent, *, vector, lexical, graph) -> tuple[float, float, float]
+```
+
+Deterministic, model-free, and read off the *raw* tokens rather than `analyze()`'s terms —
+`when`, `whose`, `between` are all stopwords, and they are exactly the words that say what
+kind of question this is. The classes are checked in priority order, not as a taxonomy:
+time first, because a wrong instant is wrong in a way extra recall does not repair.
+
+`MULTIPLIERS` scales the *configured* weights rather than replacing them, so a deployment
+that tuned `w_vector` keeps its tuning. Every entry is 1.0 except the graph column, where
+`lookup` and `temporal` are 0.0 — and that zero is a **gate**, checked before the traverser
+is called, so those queries pay nothing rather than paying for a walk that is then
+multiplied away. `intent_weighting=False` runs every query at the configured weights and
+leaves `Explanation.intent` unset, which is how a ranking difference is attributed to this
+stage rather than argued about.
+
+Any multiplier that is not 1.0 must come from a per-category sweep recorded in
+`docs/BENCHMARKS.md`. A number picked because it sounds right is a ranking change with no
+evidence behind it.
 
 ### `retrieve/traverse.py`
 

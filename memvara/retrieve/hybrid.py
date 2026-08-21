@@ -25,6 +25,13 @@ out of that, and both are routine rather than exotic.
    `WriteReceipt.skipped`, the number the write path is proudest of, meant "we kept
    this and will never find it again". `include_episodes=True` adds a second, weaker
    pair of legs over the raw turns; see `EpisodeResult` for why weaker.
+5. **Everything that is two rows and a join.** "Where is my manager's employer based" is
+   two claims with nothing joining them, and neither lookup leg can find the second: the
+   claim holding the answer shares no vocabulary with the question. The graph leg walks
+   out of the entities the first two legs just named, which is Zep's φ_bfs — see
+   `retrieve/spread.py` for why the seeds come from the answer rather than the query, and
+   `retrieve/intent.py` for what keeps every other query from paying for it. It ships at
+   `w_graph=0.0`; the measurement behind that default is in `docs/BENCHMARKS.md`.
 
 Everything here is deterministic. No LLM sits on the read path, and identical inputs
 produce an identical ordering, ties included - unstable ranking makes retrieval
@@ -35,10 +42,11 @@ ordering that only holds within one store is not reproducibility, it is luck.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import perf_counter
-from typing import Any, ClassVar, Collection, Literal, Sequence, overload
+from typing import Any, ClassVar, Collection, Literal, NamedTuple, Sequence, overload
 
 import numpy as np
 
@@ -70,6 +78,8 @@ from ..types import (
 )
 from .analyze import analyze
 from .fusion import reciprocal_rank_fusion
+from .intent import Intent, classify
+from .intent import weights as intent_weights
 from .scoring import (
     final_score,
     lexical_relevance,
@@ -79,11 +89,14 @@ from .scoring import (
     relevance,
     vector_relevance,
 )
+from .spread import rank_paths, seed_keys
+from .traverse import GraphTraverser
 
 # Retriever names. Shared between the fusion weights and the `Explanation` fields so
 # the two cannot drift apart under a rename.
 VECTOR = "vector"
 LEXICAL = "lexical"
+GRAPH = "graph"
 
 
 # There is deliberately no default relevance floor here. One was measured and shipped
@@ -96,6 +109,21 @@ LEXICAL = "lexical"
 
 def _as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+class DegradedRetrievalWarning(UserWarning):
+    """A configured retrieval leg could not run against this store.
+
+    Raised once per `HybridRetriever`, not once per query: a store that cannot traverse
+    cannot traverse for the whole process, and a warning per search would bury the
+    finding under itself.
+
+    Degrading is right — two legs are a worse answer than three and a far better one than
+    an exception out of `search()` — but degrading *silently* is how a deployment runs for
+    a month believing it has multi-hop retrieval. `RemoteStore.adjacent` is the case this
+    exists for: it is present on the object, which is what a `getattr` guard checks, and
+    raises `NotImplementedError` when called.
+    """
 
 
 @dataclass(slots=True)
@@ -158,6 +186,25 @@ def _short(text: str, limit: int = 48) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
+class _Weights(NamedTuple):
+    """The leg weights one search actually ran with, and what decided them.
+
+    Resolved once, at the top of `search`, and carried down — rather than read off
+    `self` at each of the five places a weight is needed. The two spellings look
+    identical until intent weighting is on, at which point reading `self.w_graph` inside
+    `_explain` while fusion used the gated value produces a relevance average that
+    divides by a leg the fusion never ran. That is a silent scoring error and nothing
+    downstream can see it.
+    """
+
+    vector: float
+    lexical: float
+    graph: float
+    #: `None` when `intent_weighting` is off, which is a different statement from any of
+    #: the four intents: it says nothing classified this query, so nothing scaled it.
+    intent: Intent | None
+
+
 @dataclass(frozen=True, slots=True)
 class _Legs:
     """One search's retriever output, in the shape scoring needs it.
@@ -169,8 +216,10 @@ class _Legs:
 
     vector: dict[str, tuple[int, float]]
     lexical: dict[str, tuple[int, float]]
+    graph: dict[str, tuple[int, float]]
     vector_active: bool
     lexical_active: bool
+    graph_active: bool
     lexical_terms: int
 
 
@@ -194,6 +243,11 @@ class HybridRetriever:
         filter_retry_multiplier: int = 10,
         w_episode: float = 0.5,
         max_episodes: int = 3,
+        w_graph: float = 0.0,
+        graph_seeds: int = 5,
+        graph_depth: int = 2,
+        traverser: "GraphTraverser | None" = None,
+        intent_weighting: bool = True,
         reranker: "Reranker | None" = None,
         rerank_top_n: int = 20,
         telemetry: Recorder | None = None,
@@ -224,6 +278,47 @@ class HybridRetriever:
         # a single well-worded conversation crowd out everything the store knows.
         self.w_episode = w_episode
         self.max_episodes = max_episodes
+        #: Weight of the graph leg in fusion and in the relevance average, and the switch
+        #: that turns the leg on at all: at 0.0 no walk runs, nothing is fused from it,
+        #: and `Explanation.graph_rank` stays `None` on every result.
+        #:
+        #: **It ships at 0.0.** See the measured table in `docs/BENCHMARKS.md`: the leg
+        #: is a large win on the questions it was built for and a small loss on the ones
+        #: it was not, and a default that trades the second for the first is a default
+        #: nobody chose. `intent.py` is what makes it affordable — it turns the leg on for
+        #: the query classes that gained and leaves it off for the rest — so the shipped
+        #: switch is `intent_weighting`, and this is the raw knob under it.
+        self.w_graph = w_graph
+        #: How many entity keys the walk starts from, taken off the head of the fused
+        #: vector+lexical list. Keys rather than claims: the key list is what reaches
+        #: `Store.adjacent` and the frontier width is what a hop costs. See
+        #: `spread.seed_keys`.
+        self.graph_seeds = graph_seeds
+        #: How many hops out the walk goes. Two, because that is where the measured gap
+        #: between traversal and search-then-search opens (`bench/multihop.py`) and
+        #: because `GraphTraverser` scores a path multiplicatively — a third hop is
+        #: damped to at most 0.56 before edge quality is counted at all, so it rarely
+        #: survives fusion against a direct hit and always costs a frontier expansion.
+        self.graph_depth = graph_depth
+        #: The traversal engine, or `None` — in which case the leg cannot run whatever
+        #: `w_graph` says. `Memvara` builds one and hands it over; a `HybridRetriever`
+        #: constructed directly against a third-party `Store` gets the two-leg search it
+        #: had before, rather than an import-time dependency on a `Store` method that is
+        #: optional in the protocol.
+        self.traverser = traverser
+        #: Whether the configured leg weights are scaled per query shape. On by default,
+        #: and at the shipped weights it changes nothing at all: every multiplier in
+        #: `intent.MULTIPLIERS` is 1.0 except the graph column, and `w_graph` ships at
+        #: 0.0, so zero times a gate is zero either way. It becomes load-bearing the
+        #: moment a deployment turns the graph leg on, which is the configuration it was
+        #: measured for. `False` runs every query at the configured weights and leaves
+        #: `Explanation.intent` unset, which is how a ranking difference is attributed to
+        #: this stage rather than argued about.
+        self.intent_weighting = intent_weighting
+        # Set the first time a walk raises `NotImplementedError`, so a store that cannot
+        # traverse is asked once rather than once per query. See
+        # `DegradedRetrievalWarning`.
+        self._graph_unsupported = False
         #: A reranking pass over the head of the fused list, or `None` — the default,
         #: and an absence rather than a no-op: with nothing configured the stage does not
         #: run, imports nothing and costs nothing, which is what keeps the shipped
@@ -321,6 +416,13 @@ class HybridRetriever:
         built on it. `memory_types` is a claim-only filter and, when given, suppresses
         the episode leg entirely rather than pretending a turn has a memory type.
 
+        The graph leg does not appear in this signature and is a constructor argument
+        (`w_graph`) rather than a per-call one, deliberately. It changes which claims are
+        *candidates*, not which are returned, so a caller flipping it per query would get
+        two different rankings for one store with nothing in the result to say which they
+        had asked for — `Explanation.graph_rank` and `Explanation.intent` are how a result
+        says what ran.
+
         The declared return type follows that flag rather than covering both cases:
         `list[Result]` unless episodes were asked for. The annotation on the
         implementation is `list[Any]` only because an overloaded implementation cannot
@@ -365,9 +467,11 @@ class HybridRetriever:
         limit = max(depth * self.candidate_multiplier, depth)
         wanted = set(memory_types) if memory_types is not None else None
 
+        weights = self._weights(query)
+
         results, saturated = self._gather(
-            query, scopes, limit, valid_at, known_at, wanted_states, wanted, now,
-            min_score)
+            query, scope, limit, valid_at, known_at, wanted_states, wanted, now,
+            min_score, weights)
 
         # Filter starvation. `memory_types` is applied after fusion truncated the pool,
         # so a rejected candidate has already consumed a slot and a narrow filter can
@@ -377,14 +481,15 @@ class HybridRetriever:
         # bounded and happens only when the shortfall could actually be an artefact.
         if wanted is not None and saturated and len(results) < depth:
             results, _ = self._gather(
-                query, scopes, limit * self.filter_retry_multiplier, valid_at, known_at,
-                wanted_states, wanted, now, min_score)
+                query, scope, limit * self.filter_retry_multiplier, valid_at, known_at,
+                wanted_states, wanted, now, min_score, weights)
 
         ranked: list[Retrieved] = list(self._rank(results, depth))
         if include_episodes and wanted is None:
             ranked = self._interleave(
                 ranked,
-                self._episodes(query, scopes, limit, valid_at, known_at, min_score),
+                self._episodes(query, scopes, limit, valid_at, known_at, min_score,
+                               weights),
                 depth)
         if self.reranker is not None:
             # Last, deliberately. Everything above it — fusion, the recency half-lives,
@@ -398,6 +503,20 @@ class HybridRetriever:
         return ranked
 
     # -- internals -----------------------------------------------------------
+
+    def _weights(self, query: str) -> _Weights:
+        """The configured weights, gated and scaled by what kind of question this is.
+
+        One classification per search, not one per leg and not one per candidate: it is
+        a property of the query, and running it twice would let two halves of one search
+        disagree about what was being asked.
+        """
+        if not self.intent_weighting:
+            return _Weights(self.w_vector, self.w_lexical, self.w_graph, None)
+        intent = classify(query)
+        vector, lexical, graph = intent_weights(
+            intent, vector=self.w_vector, lexical=self.w_lexical, graph=self.w_graph)
+        return _Weights(vector, lexical, graph, intent)
 
     def _observe(self, rec: Recorder, query: str, results: Sequence[Retrieved],
                  elapsed_ms: float) -> None:
@@ -458,7 +577,7 @@ class HybridRetriever:
     def _gather(
         self,
         query: str,
-        scopes: Sequence[Scope],
+        scope: Scope,
         limit: int,
         valid_at: datetime | None,
         known_at: datetime | None,
@@ -466,14 +585,22 @@ class HybridRetriever:
         wanted: set[MemoryType] | None,
         now: datetime,
         min_score: float,
+        weights: _Weights,
     ) -> tuple[list[Result], bool]:
-        """Run both legs at `limit` and return the surviving results, unsorted.
+        """Run the legs at `limit` and return the surviving results, unsorted.
 
-        The second element reports whether either leg came back full, i.e. whether
-        there is any reason to believe candidates were cut off. It is the only honest
-        trigger for a retry: a short result set from a leg that returned fewer than
-        `limit` hits has nothing more to give, and re-asking would be pure cost.
+        The second element reports whether either *lookup* leg came back full, i.e.
+        whether there is any reason to believe candidates were cut off. It is the only
+        honest trigger for a retry: a short result set from a leg that returned fewer than
+        `limit` hits has nothing more to give, and re-asking would be pure cost. The graph
+        leg is deliberately not consulted for it — it is bounded by its own beam and depth
+        rather than by `limit`, so a full return from it says nothing about whether a wider
+        lookup would find more.
+
+        Two legs run against the query; the third runs against the *answer to it*. See
+        `_graph_search`.
         """
+        scopes = scope.ancestors()
         vector_hits = self._vector_search(
             query, scopes, limit, valid_at, known_at, states)
         lexical_hits, lexical_terms = self._lexical_search(
@@ -482,22 +609,14 @@ class HybridRetriever:
         fused = reciprocal_rank_fusion(
             {VECTOR: vector_hits, LEXICAL: lexical_hits},
             k=self.rrf_k,
-            weights={VECTOR: self.w_vector, LEXICAL: self.w_lexical},
+            weights={VECTOR: weights.vector, LEXICAL: weights.lexical},
         )
         saturated = len(vector_hits) >= limit or len(lexical_hits) >= limit
         if not fused:
+            # Nothing to seed a walk from either. A graph leg that ran on an empty
+            # candidate set would have to pick its entities out of the query text, which
+            # is the second extractor this design exists to avoid.
             return [], saturated
-
-        legs = _Legs(
-            vector=_positions(vector_hits),
-            lexical=_positions(lexical_hits),
-            # A leg that returned nothing is indistinguishable from one that never ran,
-            # and both must be dropped from the relevance average rather than counted
-            # as a zero vote - otherwise every result of a lexical-only query is halved.
-            vector_active=bool(vector_hits),
-            lexical_active=bool(lexical_hits),
-            lexical_terms=lexical_terms,
-        )
 
         # Hydrate every fused candidate in one round trip. Fetching them individually
         # makes a search cost O(candidates) queries — the classic N+1 — so retrieval
@@ -509,6 +628,36 @@ class HybridRetriever:
                   else {cid: c for cid in fused
                         if (c := self.store.get_claim(cid)) is not None})
 
+        graph_hits, walked = self._graph_search(
+            claims, fused, scope, limit, valid_at, known_at, weights.graph)
+        if graph_hits:
+            # Re-fused rather than merged, because RRF reads positions and the positions
+            # in the two-leg fusion are not the positions in the three-leg one. Doing it
+            # twice is the cost of seeding the third leg from the first two.
+            fused = reciprocal_rank_fusion(
+                {VECTOR: vector_hits, LEXICAL: lexical_hits, GRAPH: graph_hits},
+                k=self.rrf_k,
+                weights={VECTOR: weights.vector, LEXICAL: weights.lexical,
+                         GRAPH: weights.graph},
+            )
+            # No second round trip for what the walk found: a `Path` carries the claims
+            # it is made of. The lookup legs' rows win a collision, which is a formality —
+            # both came from the same store within one call — but keeps one object per id.
+            claims = {**walked, **claims}
+
+        legs = _Legs(
+            vector=_positions(vector_hits),
+            lexical=_positions(lexical_hits),
+            graph=_positions(graph_hits),
+            # A leg that returned nothing is indistinguishable from one that never ran,
+            # and both must be dropped from the relevance average rather than counted
+            # as a zero vote - otherwise every result of a lexical-only query is halved.
+            vector_active=bool(vector_hits),
+            lexical_active=bool(lexical_hits),
+            graph_active=bool(graph_hits),
+            lexical_terms=lexical_terms,
+        )
+
         results: list[Result] = []
         for claim_id, fusion in fused.items():
             claim = claims.get(claim_id)
@@ -519,11 +668,64 @@ class HybridRetriever:
             if not self._believed_by(claim, known_at):
                 continue
 
-            result = self._explain(claim, fusion, legs, now)
+            result = self._explain(claim, fusion, legs, now, weights)
             if result.score < min_score:
                 continue
             results.append(result)
         return results, saturated
+
+    def _graph_search(
+        self,
+        claims: dict[str, Claim],
+        fused: dict[str, float],
+        scope: Scope,
+        limit: int,
+        valid_at: datetime | None,
+        known_at: datetime | None,
+        w_graph: float,
+    ) -> tuple[list[tuple[str, float]], dict[str, Claim]]:
+        """The third leg: a bounded walk out of the entities the first two just named.
+
+        Returns the ranked `(claim_id, path score)` list and the claims behind it, which
+        the paths already carry — so a leg that reaches thirty rows the lookups missed
+        costs zero extra store round trips beyond the hops themselves.
+
+        Every early return here is a *degradation*, and each is a different fact:
+
+        * `w_graph <= 0` or no traverser — the leg is switched off, which is the shipped
+          default. Nothing is warned, because nothing is wrong.
+        * `NotImplementedError` — the store has `adjacent` and it does not work. That is
+          `RemoteStore`, and it is the case a `getattr` guard cannot see, so it is caught
+          rather than guarded, warned once, and remembered for the life of this retriever.
+        * no seeds — every candidate's ends folded to nothing, which is possible only for
+          a candidate set made entirely of retractions.
+
+        `known_at`/`valid_at` are passed through unchanged, so the walk is evaluated at
+        the same pair `search()` was asked about and pins it once before its first hop
+        (`GraphTraverser._pin`). An axis left unset is filled by the walk's own clock read
+        — the same treatment the store gives the two lookup legs, and the reason a
+        three-hop chain here cannot be assembled out of two different afternoons.
+        """
+        if w_graph <= 0.0 or self.traverser is None or self._graph_unsupported:
+            return [], {}
+        seeds = seed_keys([(claim, fused[cid]) for cid, claim in claims.items()],
+                          self.graph_seeds)
+        if not seeds:
+            return [], {}
+        try:
+            paths = self.traverser.spread(
+                seeds, scope, depth=self.graph_depth, k=limit,
+                valid_at=valid_at, known_at=known_at)
+        except NotImplementedError as exc:
+            self._graph_unsupported = True
+            warnings.warn(
+                f"graph retrieval is configured (w_graph={w_graph}) and this store "
+                f"cannot traverse, so search is running two legs instead of three: {exc}",
+                DegradedRetrievalWarning,
+                stacklevel=2,
+            )
+            return [], {}
+        return rank_paths(paths), {c.id: c for p in paths for c in p.claims}
 
     def _episodes(
         self,
@@ -533,6 +735,7 @@ class HybridRetriever:
         valid_at: datetime | None,
         known_at: datetime | None,
         min_score: float,
+        weights: _Weights,
     ) -> list[EpisodeResult]:
         """The same two legs over raw turns, discounted and capped.
 
@@ -551,7 +754,7 @@ class HybridRetriever:
         fused = reciprocal_rank_fusion(
             {VECTOR: vector_hits, LEXICAL: lexical_hits},
             k=self.rrf_k,
-            weights={VECTOR: self.w_vector, LEXICAL: self.w_lexical},
+            weights={VECTOR: weights.vector, LEXICAL: weights.lexical},
         )
         if not fused:
             return []
@@ -572,8 +775,8 @@ class HybridRetriever:
                         if vector_hits else None),
                 lexical=(lexical_relevance(0.0 if lx is None else lx[1], terms)
                          if lexical_hits else None),
-                w_vector=self.w_vector,
-                w_lexical=self.w_lexical,
+                w_vector=weights.vector,
+                w_lexical=weights.lexical,
             )
             score = evidence * self.w_episode
             if score < min_score:
@@ -790,9 +993,11 @@ class HybridRetriever:
             return True
         return _as_utc(claim.recorded_at) <= _as_utc(known_at)
 
-    def _explain(self, claim: Claim, fusion: float, legs: _Legs, now: datetime) -> Result:
+    def _explain(self, claim: Claim, fusion: float, legs: _Legs, now: datetime,
+                 weights: _Weights) -> Result:
         v = legs.vector.get(claim.id)
         lx = legs.lexical.get(claim.id)
+        g = legs.graph.get(claim.id)
         recency = recency_factor(claim, self.registry, now)
         quality = {
             "recency": recency,
@@ -809,8 +1014,13 @@ class HybridRetriever:
                     if legs.vector_active else None),
             lexical=(lexical_relevance(0.0 if lx is None else lx[1], legs.lexical_terms)
                      if legs.lexical_active else None),
-            w_vector=self.w_vector,
-            w_lexical=self.w_lexical,
+            # A path score is already an absolute [0, 1] relevance — `_extend` composes
+            # factors that are each at most 1.0 — so unlike BM25 it needs no map onto the
+            # unit interval and unlike cosine it needs no clamp.
+            graph=(0.0 if g is None else g[1]) if legs.graph_active else None,
+            w_vector=weights.vector,
+            w_lexical=weights.lexical,
+            w_graph=weights.graph,
         )
         score = normalized_score(evidence, **quality)
         explain = Explanation(
@@ -821,6 +1031,8 @@ class HybridRetriever:
             vector_score=None if v is None else v[1],
             lexical_rank=None if lx is None else lx[0],
             lexical_score=None if lx is None else lx[1],
+            graph_rank=None if g is None else g[0],
+            graph_score=None if g is None else g[1],
             fusion_score=fusion,
             recency=recency,
             confidence=claim.confidence,
@@ -830,6 +1042,7 @@ class HybridRetriever:
             rerank_score=None,
             raw_score=final_score(fusion, **quality),
             final_score=score,
+            intent=None if weights.intent is None else weights.intent.value,
         )
         return Result(claim=claim, score=score, explain=explain)
 

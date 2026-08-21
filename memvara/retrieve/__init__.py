@@ -3,7 +3,16 @@
 from .analyze import STOPWORDS, LexicalQuery, analyze, tokenize
 from .calibrate import FloorReport, calibrate_min_score
 from .fusion import reciprocal_rank_fusion
-from .hybrid import CLAIM, EPISODE, EpisodeResult, HybridRetriever, Retrieved, kind_of
+from .hybrid import (
+    CLAIM,
+    EPISODE,
+    DegradedRetrievalWarning,
+    EpisodeResult,
+    HybridRetriever,
+    Retrieved,
+    kind_of,
+)
+from .intent import Intent, classify
 from .scoring import (
     final_score,
     lexical_relevance,
@@ -13,6 +22,7 @@ from .scoring import (
     relevance,
     vector_relevance,
 )
+from .spread import rank_paths, seed_keys
 from .traverse import HOP_DAMPING, Edge, GraphTraverser, Path
 
 __all__ = [
@@ -31,6 +41,13 @@ __all__ = [
     "calibrate_min_score",
     "FloorReport",
     "HybridRetriever",
+    "DegradedRetrievalWarning",
+    # the graph leg: which entities to walk from, and what a walk is worth
+    "seed_keys",
+    "rank_paths",
+    # query shape, and the weights it selects
+    "Intent",
+    "classify",
     # retrieved episodes, and how to tell one from a claim
     "EpisodeResult",
     "Retrieved",

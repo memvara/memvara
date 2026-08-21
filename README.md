@@ -70,7 +70,7 @@ and no vector database.
 | 🔌 **Offline by default** | numpy and nothing else. No API key, no Docker, no vector database, no network on the write path. |
 | 🧾 **Nothing is silently lost** | Every write returns a receipt saying what it did — including what it could *not* extract. |
 | 🔍 **Hybrid retrieval that explains itself** | Vector and BM25, time-aware, and every score is inspectable rather than a ranking you have to trust. |
-| 🧬 **Claims are a graph** | Walk relationships, at a point in time. |
+| 🧬 **Claims are a graph** | Walk relationships, at a point in time — and optionally fuse that walk into search as a third retrieval leg. |
 
 ## Where to start
 
