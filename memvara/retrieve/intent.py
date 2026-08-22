@@ -32,7 +32,7 @@ from __future__ import annotations
 import re
 from enum import Enum
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Iterable, Mapping
 
 from .analyze import tokenize
 
@@ -214,10 +214,48 @@ def predicate_refs(query: str, registry: "PredicateRegistry") -> set[str]:
     two — otherwise a question that spelled the same relation twice would look like a
     chain.
     """
+    return _named_in(query, _phrases(registry), registry.normalize)
+
+
+def observed_refs(query: str, predicates: "Iterable[str]",
+                  normalize: "Callable[[str], str] | None" = None) -> set[str]:
+    """The same count, over a vocabulary that was observed rather than declared.
+
+    `predicate_refs` reads `PredicateRegistry.all_specs()`, which lists what somebody
+    *declared*. A predicate written straight through `remember()` is never declared —
+    `registry.spec()` synthesizes an answer for it and the registry does not remember —
+    so on a store whose vocabulary arrived that way the declared list is the 23 builtins
+    and the count is always one or zero.
+
+    Teaching the registry instead was tried and reverted. Recording an observed predicate
+    means recording a cardinality, and the only cardinality available is the default; a
+    store would then hold `MANY` chosen by nobody, and `memory_remember`'s note — "this
+    store has no cardinality recorded for that predicate" — would stop firing because the
+    sentence had been made false rather than because the question had been answered. That
+    note is the only warning that two live values might be a contradiction. Buying a
+    read-path signal by silencing it is the trade this function exists to avoid.
+
+    So the vocabulary comes from the rows instead. Predicates in hand are observed facts
+    about the store and commit it to nothing.
+    """
+    fold = normalize or (lambda name: name)
+    spoken = {name.replace("_", " "): name for name in predicates}
+    return _named_in(query, spoken, fold)
+
+
+def _named_in(query: str, spoken: "Mapping[str, str] | Iterable[str]",
+              fold: "Callable[[str], str]") -> set[str]:
+    """Which of these predicates the question says out loud, folded and deduplicated.
+
+    Phrases, never tokens. `lives_in` splits into `lives` and `in`, and `in` appears in
+    most English questions, so a token index would read almost every query as naming
+    several predicates — the opposite failure to the one being fixed, and visible only as
+    latency.
+    """
     padded = " " + _WORDS.sub(" ", query.lower()).strip() + " "
-    return {registry.normalize(phrase.replace(" ", "_"))
-            for phrase in _phrases(registry)
-            if f" {phrase} " in padded}
+    pairs = (spoken.items() if isinstance(spoken, Mapping)
+             else ((phrase, phrase.replace(" ", "_")) for phrase in spoken))
+    return {fold(name) for phrase, name in pairs if f" {phrase} " in padded}
 
 
 def classify(query: str, registry: "PredicateRegistry | None" = None) -> Intent:

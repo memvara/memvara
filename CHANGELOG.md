@@ -284,6 +284,40 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   operator with write access can remove a row. The hash-chained log is a different feature
   and is commercial. What this defends against is a delete no record was ever written for.
 
+- **The graph leg's gate can see predicates nobody declared.** `classify` decides a
+  question is a chain by counting the predicates it names, drawn from
+  `PredicateRegistry.all_specs()` — which lists what somebody *declared*. A predicate
+  written through `remember()` is never declared: the registry synthesizes a spec on
+  demand and does not remember. So on a store whose vocabulary arrived that way the count
+  was always one or zero and every chain question read as a lookup.
+
+  `HybridRetriever` now takes a second look after the lookup legs have run. Their
+  candidates are the store's vocabulary — observed rather than declared, and already
+  narrowed to this query — and a question naming two of *those* predicates gets the walk.
+  It only ever widens: it fires where intent weighting closed the leg on a store that
+  configured it open, and never narrows what the classifier allowed.
+  `intent.observed_refs()` is the same phrase matching over an explicit vocabulary.
+
+  Measured on 2WikiMultihopQA, 12,576 questions, k=12: chained questions **29.1% →
+  35.4%** answer and 19.8% → 26.1% chain recall, `compositional` 24.0% → 32.1%, and
+  `flat` unchanged at 75.3% — so the discrimination holds and the leg still does not run
+  where it cannot help. The gate captured 0.9 points of a 42.5-point gain and now
+  captures 7.2.
+
+  **Teaching the registry instead was tried and reverted.** Recording an observed
+  predicate means recording a cardinality, the only one available is the default, and the
+  store would then hold `MANY` chosen by nobody — silencing `memory_remember`'s note that
+  it has *no* cardinality recorded, which is the only warning that two live values may be
+  a contradiction. Three tests caught it. A read-path signal is not worth a write-path
+  warning.
+
+  **`inference` questions gain nothing, and that is the ceiling rather than a defect.**
+  They ask "who is the maternal grandfather of X" over evidence `(X, mother, Y)` and
+  `(Y, father, Z)` — a *derived* relation the question never names. Matching words against
+  stored predicate names cannot bridge `grandfather` to `mother` + `father`; that needs
+  synonymy or entailment, which is a model rather than a lookup. 83% of the available gain
+  is still behind `intent_weighting=False`.
+
 - **The graph leg now actually runs in the shipped configuration.** It was installed,
   weighted and switched off by two separate things, and the published explanation named
   neither of them.

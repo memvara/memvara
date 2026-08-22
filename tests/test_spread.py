@@ -458,3 +458,56 @@ def test_a_plain_temporal_question_still_does_not_walk(mem):
     results = mem.search("what happened last March", k=10, as_of=T0)
     assert results, "the query should still return something"
     assert all(r.explain.graph_rank is None for r in results)
+
+
+def test_the_rows_supply_the_vocabulary_the_registry_never_declared(mem):
+    """The gate could only count predicates somebody had *declared*, and almost none are.
+
+    `classify` decides a question is a chain by counting the predicates it names, drawn
+    from `PredicateRegistry.all_specs()`. A predicate written through `remember()` is
+    never declared — the registry synthesizes an answer for it and does not remember — so
+    a store whose vocabulary arrived that way has 23 builtins in that list and every chain
+    question reads as a lookup. Measured on 2WikiMultihopQA, whose 34 relations are all of
+    that kind: the gate captured 0.9 points of a 42-point gain.
+
+    Teaching the registry was tried first and reverted. Recording an observed predicate
+    means recording a cardinality, the only one available is the default, and
+    `memory_remember`'s note — "this store has no cardinality recorded for that predicate"
+    — would then stop firing because the sentence had been made false rather than because
+    anyone had answered the question. That note is the only warning that two live values
+    might be a contradiction; three tests in `test_server.py` caught the trade.
+
+    So the vocabulary comes from the candidates the lookup legs already returned. They are
+    observed facts about the store and commit it to nothing.
+    """
+    mem.remember("Polish-Russian War", "directed_by", "Xawery", recorded_at=T0)
+    mem.remember("Xawery", "mother_is", "Malgorzata", recorded_at=T0)
+
+    question = "Who is the mother_is of the directed_by of Polish-Russian War?"
+    from memvara.retrieve.intent import Intent, classify
+    assert classify(question, mem.registry) is not Intent.RELATIONAL, (
+        "the declared registry cannot see either predicate — that is the premise"
+    )
+    results = mem.search(question, k=10)
+    assert any(r.explain.graph_rank is not None for r in results), (
+        "the rows named both predicates and the walk still did not run"
+    )
+
+
+def test_the_second_chance_stays_off_when_the_rows_name_one_predicate(mem):
+    """The discrimination, and the reason this is not "always run the walk".
+
+    A comparison question reaches two claims that share a predicate — "who was born
+    first" finds two `born_on` rows — so it names *one* predicate, not two, and the walk
+    stays off. That is the case the intent gate was right about, and measured on
+    2WikiMultihopQA turning the walk on there costs 15.4 points because it spends `k` on
+    a hub's neighbours.
+    """
+    mem.remember("Ada", "born_on", "1970-01-01", recorded_at=T0)
+    mem.remember("Bruno", "born_on", "1980-01-01", recorded_at=T0)
+
+    results = mem.search("Who was born_on first, Ada or Bruno?", k=10)
+    assert results
+    assert all(r.explain.graph_rank is None for r in results), (
+        "one predicate named twice is not a chain"
+    )

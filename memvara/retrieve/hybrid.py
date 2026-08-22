@@ -79,6 +79,7 @@ from ..types import (
 from .analyze import analyze
 from .fusion import reciprocal_rank_fusion
 from .intent import Intent, classify
+from .intent import observed_refs
 from .intent import weights as intent_weights
 from .scoring import (
     final_score,
@@ -671,6 +672,27 @@ class HybridRetriever:
         # The fallback for a store predating `get_claims` used to live here and only
         # here, so those two raised on the very stores this one supported.
         claims = bulk_claims(self.store, list(fused))
+
+        # A second chance for the graph leg, decided by the rows rather than by a word
+        # list. `classify` counts the predicates a question names, but it can only count
+        # the ones the registry *declared* — and a predicate written through `remember()`
+        # is never declared, so on a store whose vocabulary arrived that way the count is
+        # always one or zero and every chain question reads as a lookup. Measured on
+        # 2WikiMultihopQA, whose 34 relations are all of that kind: the gate captured 0.9
+        # points of a 42-point gain.
+        #
+        # The candidates just hydrated are the store's vocabulary, observed instead of
+        # declared, and narrowed to what this query already surfaced. If the question
+        # names two of *those* predicates, it is a chain and the walk should run. A
+        # comparison question names one — "who was born first" reaches two claims sharing
+        # `date_of_birth` — so this stays off where the gate was right to be off.
+        #
+        # Only ever widens: it runs when intent weighting closed the leg on a store that
+        # configured it open, and never narrows what the classifier allowed.
+        if weights.graph <= 0.0 < self.w_graph and len(
+                observed_refs(query, {c.predicate for c in claims.values()},
+                              self.registry.normalize)) > 1:
+            weights = weights._replace(graph=self.w_graph)
 
         graph_hits, walked = self._graph_search(
             claims, fused, scope, limit, valid_at, known_at, states, weights.graph)
