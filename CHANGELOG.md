@@ -51,6 +51,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`now` on `Consolidator.run()`**, which evaluates the whole pass at one instant the way
+  `decay()` already could. `Sweep` reads the wall clock once per pass, and the decay target
+  depends on that instant as well as on stored state, so two back-to-back passes land
+  microseconds apart. `decay_pass` compares salience already rounded to six decimals, which
+  hides that gap until a claim sits within one pass-duration of a rounding boundary; the
+  second pass then crosses the boundary and rewrites the row. Measured on a FAST predicate,
+  that is 0.045% of claims per millisecond of gap, and the gap is the first pass's own
+  duration. It made `test_run_twice_leaves_identical_state` fail once on a CI runner and
+  never in 55 local runs.
+
+  The comparison in `decay_pass` is unchanged. Exact equality on the rounded value is what
+  makes a skipped or doubled pass a no-op, so widening it would hide drift rather than
+  prevent it.
+
 - **A temporal leg over raw turns**, off by default. Bitemporality is what this library is
   for and time appeared on the read path twice, both times too late to matter: as a
   *filter*, which narrows what the store returns and so cannot add a candidate no other

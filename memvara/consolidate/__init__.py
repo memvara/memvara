@@ -71,12 +71,22 @@ class Consolidator:
         return _promote(self.store, tenant, min_observations, window=self.window,
                         telemetry=self.telemetry)
 
-    def run(self, tenant: str | None = None) -> dict[str, int]:
+    def run(self, tenant: str | None = None,
+            now: datetime | None = None) -> dict[str, int]:
         """All three stages, in the order their outputs feed each other.
 
         Merge runs before promote so a claim only crosses `min_observations` after its
         duplicates' counts have been folded in - otherwise the same evidence split across
         two rows would never promote either of them.
+
+        `now` defaults to the wall clock, read once for the whole pass. Pass it to
+        evaluate two passes at the same instant. The decay target is a function of stored
+        state *and* the instant it is measured at, so a claim whose recomputed salience
+        sits within a pass-duration of a rounding boundary changes on the second call
+        over a store nothing has touched. That is the schedule working as intended - a
+        nightly pass is meant to move as time passes - but it is not what a caller
+        comparing two passes is asking for. `decay()` has taken `now` for the same reason
+        since it existed.
 
         One snapshot serves all three, and one windowed flush writes the result. The
         alternative - a scan and a transaction per stage - cost three full reads of the
@@ -87,7 +97,8 @@ class Consolidator:
         than as backpressure.
         """
         t0 = perf_counter() if self.telemetry is not None else 0.0
-        sweep = Sweep(self.store, tenant, window=self.window, telemetry=self.telemetry)
+        sweep = Sweep(self.store, tenant, now=now, window=self.window,
+                      telemetry=self.telemetry)
         counts = {
             "decayed": decay_pass(sweep, self.registry),
             "merged": merge_pass(sweep, self.embedder, self.registry),
