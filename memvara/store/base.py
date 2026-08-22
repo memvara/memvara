@@ -293,6 +293,62 @@ def live_predicate(at: str = "?", *, include_invalidated: bool = False,
     )[0]
 
 
+def bulk_claims(store: "Store", claim_ids: Sequence[str]) -> dict[str, Claim]:
+    """`get_claims` where the store has it, one `get_claim` per id where it does not.
+
+    `get_claims` was added after the first third-party backends existed, and
+    `tests/test_edges.py` holds the promise that those keep working. That promise was
+    kept in exactly one of the three places that hydrate a list of ids: `search()` fell
+    back, and `Memvara.get_all` and `produced` called straight through, so a store
+    without it searched fine and raised `TypeError: 'NoneType' object is not callable`
+    the moment anybody listed their memories.
+
+    A guarantee honoured at one of three call sites is not a guarantee, and the way to
+    stop that recurring is for there to be one call site. Every hydrate goes through
+    here.
+
+    The fallback is genuinely worse — one query per candidate instead of one, the N+1
+    this method exists to avoid — which is the argument for implementing `get_claims`,
+    not for letting an old store crash.
+    """
+    bulk = getattr(store, "get_claims", None)
+    if bulk is not None:
+        return bulk(list(claim_ids))
+    return {cid: claim for cid in claim_ids
+            if (claim := store.get_claim(cid)) is not None}
+
+
+#: Members a backend may leave out, and what it costs to leave each one out.
+#:
+#: `Store` is `@runtime_checkable`, and `isinstance` on a Protocol is **all or nothing**:
+#: it asks whether every one of the ~43 members is present, so it cannot answer "can this
+#: store walk a graph". A backend that implements everything a memory needs and skips the
+#: four below is a perfectly good store and `isinstance(x, Store)` is `False` for it.
+#:
+#: So the capability check in this codebase is `getattr(store, name, None)`, per member,
+#: at the call site that needs it — and each of those call sites degrades in a way it
+#: names out loud rather than raising. This mapping is the list they are drawn from; it is
+#: documentation and a test asserts it stays true, not something the runtime consults.
+#:
+#: `get_claims` is the awkward one and it is on the list. The protocol declares it with no
+#: hedge and both shipped stores implement it, but it was added after the first
+#: third-party backends existed and `tests/test_edges.py` pins that those keep working —
+#: so it is optional by compatibility rather than by design. Reach it through
+#: `bulk_claims()` and the distinction stops mattering at the call site.
+OMITTABLE: dict[str, str] = {
+    "adjacent": "no graph leg in search(), and neighborhood()/paths_between() raise "
+                "NotImplementedError. HybridRetriever warns once per retriever.",
+    "episodes_near": "no temporal leg. Time still filters and still decays; it just "
+                     "stops producing candidates of its own.",
+    "residue": "erase() cannot be proved, so prove_erased() returns proven=False with a "
+               "reason and erase() raises rather than reporting an unverified success.",
+    "erasure_record": "no audit trail to read back. Erasure itself is unaffected.",
+    "get_claims": "hydration falls back to one get_claim per id — the N+1 that bulk "
+                  "fetch exists to avoid. Correct, and it makes retrieval scale with "
+                  "how many candidates were considered. Go through bulk_claims().",
+}
+
+
 @runtime_checkable
 class Store(Protocol):
     # --- episodes ---------------------------------------------------------

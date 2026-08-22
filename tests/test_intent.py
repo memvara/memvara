@@ -118,3 +118,30 @@ def test_the_vocabularies_do_not_claim_words_another_stage_already_decided():
     assert not (LOOKUP_MARKERS & TEMPORAL_MARKERS)
     assert not (LOOKUP_MARKERS & RELATIONAL_MARKERS)
     assert not (TEMPORAL_MARKERS & RELATIONAL_MARKERS)
+
+
+@pytest.mark.parametrize("query", [
+    "what was I working on last summer",
+    "what did we ship in Q3",
+    "what happened in the fourth quarter",
+    "where was I living in the winter",
+    "what did I do in spring",
+])
+def test_seasons_and_quarters_are_time_words(query: str) -> None:
+    """Months were in the marker set and the coarser units were not.
+
+    So "what did I do in March" routed as temporal and "what did I do in spring" routed
+    as a lookup — answered with the leg that ranks on *when* switched off, on a question
+    that is about nothing else. `spring` is also a coil and `fall` is also a verb, which
+    is the objection; it is outweighed because this set only weights legs, and the
+    temporal leg abstains anyway when nothing in scope is near the anchor. That is
+    exactly the shape a misread `fall` produces.
+    """
+    assert classify(query) is Intent.TEMPORAL
+
+
+def test_adding_the_coarse_units_did_not_pull_in_ordinary_questions() -> None:
+    """The check on the other side: a relation question and a lookup stay where they
+    were, so the widened vocabulary bought recall without spending precision."""
+    assert classify("who does Alice report to") is Intent.RELATIONAL
+    assert classify("what is my name") is Intent.LOOKUP

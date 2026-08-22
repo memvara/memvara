@@ -2886,8 +2886,12 @@ class SQLiteStore:
         `scope_episodes` degrades to for several scopes, and it is bounded by the scope
         rather than by the tenant.
 
-        Ties break on `id` after the distance, so two turns equidistant from the anchor
-        come back in the same order on every file.
+        Ties break on the content hash and then on `id`, so two turns equidistant from
+        the anchor come back in the same order on every file. It was `id` alone, which is
+        stable within one file and nothing more: an episode id is minted at ingest, so two
+        stores holding the same turns ordered a tie differently — and this docstring said
+        the opposite. `hash` is what `find_episode_by_hash` dedupes on, so identical turns
+        sort identically wherever they were written; `id` stays last to make it total.
         """
         sc, sp = self._scope_clause(scopes)
         hp, hpp = self._happened_clause(valid_at, known_at)
@@ -2897,7 +2901,7 @@ class SQLiteStore:
             cur.row_factory = None
             cur.execute(
                 f"SELECT id, ts FROM episodes WHERE {sc} AND {hp} "
-                "ORDER BY ABS(ts - ?), id LIMIT ?",
+                "ORDER BY ABS(ts - ?), hash, id LIMIT ?",
                 sp + hpp + [at, limit])
             return [(row[0], float(row[1])) for row in cur.fetchall()]
 
@@ -2919,7 +2923,15 @@ class SQLiteStore:
             "SELECT f.claim_id AS cid, bm25(claims_fts) AS s "
             "FROM claims_fts f JOIN claims c ON c.id = f.claim_id "
             f"WHERE claims_fts MATCH ? AND {sc} AND {lv} "
-            "ORDER BY s ASC LIMIT ?"
+            # `value_key` before `id`, and neither is decoration: BM25 ties are common —
+            # eight claims differing only in subject score identically for a query on
+            # the object — and with no tiebreak the winners were whatever rowid order
+            # the ingest happened to produce. Two stores holding the *same* data, filled
+            # in opposite orders, returned disjoint top-3s. The cap is inside the
+            # statement, so this decides which rows come back at all, not merely how
+            # they are arranged. `value_key` is derived from content; `id` is a uuid4
+            # and is last, present only to make the order total.
+            "ORDER BY s ASC, c.value_key ASC, c.id ASC LIMIT ?"
         )
         with self._read() as conn:
             rows = conn.execute(sql, [m] + sp + lp + [limit]).fetchall()
@@ -2945,7 +2957,9 @@ class SQLiteStore:
             "SELECT f.episode_id AS eid, bm25(episodes_fts) AS s "
             "FROM episodes_fts f JOIN episodes e ON e.id = f.episode_id "
             f"WHERE episodes_fts MATCH ? AND {sc} AND {hp} "
-            "ORDER BY s ASC LIMIT ?"
+            # Same tie, same fix. A turn has no `value_key`; `hash` is the content hash
+            # `find_episode_by_hash` dedupes on, so it plays the same role.
+            "ORDER BY s ASC, e.hash ASC, e.id ASC LIMIT ?"
         )
         with self._read() as conn:
             rows = conn.execute(sql, [m] + sp + hpp + [limit]).fetchall()

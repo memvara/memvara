@@ -3107,3 +3107,70 @@ def test_tool_context_carries_only_a_bound_view(server):
     assert ctx.memory.scope.user == "alice"
     with pytest.raises(TypeError):
         ctx.memory.search("x", user="bob")
+
+
+# --- what the tool surface says about arguments and about clocks --------------
+
+
+def test_the_length_message_only_offers_object_to_a_tool_that_has_one(graph_server):
+    """Five of the six tools carrying a `maxLength` have no `object` argument.
+
+    "put the detail in 'object'" is right for memory_remember and nonsense for the rest,
+    and a model that follows it gets a second rejection for an unknown argument. The
+    other five take names that have to *match* something already stored, which is a
+    different instruction rather than a softer one.
+    """
+    remember, err = call(graph_server, "memory_remember",
+                         {"subject": "x" * 300, "predicate": "p", "object": "o"})
+    assert err and "put the detail in 'object'" in remember
+
+    for tool, args in (("memory_neighborhood", {"entity": "x" * 300}),
+                       ("memory_history", {"subject": "x" * 300, "predicate": "p"})):
+        out, err = call(graph_server, tool, args)
+        assert err
+        assert "'object'" not in out, f"{tool} was told to use an argument it lacks"
+        assert "has to match how the thing was stored" in out
+
+
+def test_an_unpaired_surrogate_is_named_as_an_argument_not_as_a_traceback(graph_server):
+    """JSON accepts "\\ud800" and Python hands back a `str` that cannot be encoded.
+
+    It therefore arrives looking like any other string and fails at whatever line first
+    tries to write it — for memory_remember that was the store, and what reached the
+    model was "failed: UnicodeEncodeError: 'utf-8' codec can't encode character". That
+    names a Python exception rather than an argument, so a model cannot tell which
+    argument to fix. Checked for every string argument, because it is a property of the
+    value and any tool can be handed one.
+    """
+    out, err = call(graph_server, "memory_remember",
+                    {"subject": "Al\ud800ice", "predicate": "p", "object": "o"})
+    assert err
+    assert "memory_remember.subject" in out
+    assert "unpaired surrogate" in out
+    assert "UnicodeEncodeError" not in out, "the exception type is not an instruction"
+
+    # An astral-plane character is four bytes and perfectly encodable; it must pass.
+    assert "failed" not in text(graph_server, "memory_search", {"query": "emoji \U0001F600"})
+
+
+def test_a_walk_answered_at_a_past_instant_says_so(graph_server):
+    """`memory_search` has echoed the clock since time travel existed; the two walk
+    tools took the same axes and said nothing, so a walk of the graph as it stood in
+    2019 came back looking exactly like a walk of it as it stands now. The rows are
+    right and the frame is missing, which is the shape a model passes straight on.
+
+    The two axes are worded differently on purpose: `as_of` moves both clocks, so the
+    answer is what was *believed* then; `valid_at` moves only the world clock, so it is
+    what was *true* then, judged by what is known today.
+    """
+    now = text(graph_server, "memory_neighborhood", {"entity": "Alice"})
+    assert "as believed on" not in now and "as true on" not in now
+
+    believed = text(graph_server, "memory_neighborhood",
+                    {"entity": "Alice", "as_of": "2019-06-01"})
+    assert "as believed on 2019-06-01" in believed
+
+    true_then = text(graph_server, "memory_paths",
+                     {"source": "Alice", "target": "Tallinn", "valid_at": "2019-06-01"})
+    assert "as true on 2019-06-01" in true_then
+    assert "as far as we know today" in true_then

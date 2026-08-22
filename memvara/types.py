@@ -798,6 +798,33 @@ class Explanation:
     vector_score: float | None = None
     lexical_rank: int | None = None
     lexical_score: float | None = None
+    fusion_score: float = 0.0
+    recency: float = 1.0
+    confidence: float = 1.0
+    salience: float = 1.0
+    rerank_score: float | None = None
+    #: The pre-normalization product of fusion and the quality multipliers. It is kept
+    #: because it is what the retriever actually computes and what a ranking change
+    #: should be diffed on; it is *not* comparable across queries, which is precisely
+    #: why `Result.score` is the normalized value instead. The retriever owns how the
+    #: two relate (see `memvara/retrieve/scoring.py`).
+    raw_score: float = 0.0
+    final_score: float = 0.0        # == Result.score, i.e. normalized into [0, 1]
+
+    # --- fields added after 0.2.0, appended rather than slotted in beside their kin ---
+    #
+    # `graph_*` and `temporal_*` belong next to `vector_*` and `lexical_*` and are not
+    # there, because this is a dataclass and its field order is an API. Inserted in the
+    # readable place they shifted `fusion_score` and everything after it four positions
+    # right, so `Explanation(0, 0.9, 1, 0.8, 0.5)` — a perfectly ordinary call written
+    # against 0.2.x — put the fusion score into `graph_rank` and left `fusion_score` at
+    # its default. No exception: an `int | None` field silently holding 0.5, and a
+    # ranking explanation quietly reporting the wrong number about itself.
+    #
+    # Pickle is a separate question and appending does not answer it: `slots=True` makes
+    # `__getstate__` a *name*-keyed dict, so an older pickle restores its own fields
+    # correctly and simply leaves these five unset — reading one then raises
+    # `AttributeError` rather than returning the default. That is true wherever they sit.
     #: Position and path score in the graph leg — the multi-hop walk seeded from the head
     #: of the other two (see `memvara/retrieve/spread.py`). `None` means this claim was
     #: not on any path the walk returned, which includes the ordinary case of the walk
@@ -814,18 +841,6 @@ class Explanation:
     #: ordinary case of it not having run.
     temporal_rank: int | None = None
     temporal_score: float | None = None
-    fusion_score: float = 0.0
-    recency: float = 1.0
-    confidence: float = 1.0
-    salience: float = 1.0
-    rerank_score: float | None = None
-    #: The pre-normalization product of fusion and the quality multipliers. It is kept
-    #: because it is what the retriever actually computes and what a ranking change
-    #: should be diffed on; it is *not* comparable across queries, which is precisely
-    #: why `Result.score` is the normalized value instead. The retriever owns how the
-    #: two relate (see `memvara/retrieve/scoring.py`).
-    raw_score: float = 0.0
-    final_score: float = 0.0        # == Result.score, i.e. normalized into [0, 1]
     #: The query shape retrieval routed this search as, or `None` when intent weighting
     #: was off. It is on the explanation rather than only in a log because it is the
     #: answer to the question a surprising result set actually raises: not "why is this

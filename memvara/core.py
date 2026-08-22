@@ -45,7 +45,7 @@ from .llm import LLM, NullLLM
 from .redact import Redactor, redact_episode
 from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retrieved
 from .schema import PredicateRegistry
-from .store import SQLiteStore, Store, resolve_states
+from .store import SQLiteStore, Store, bulk_claims, resolve_states
 from .telemetry import Recorder
 from dataclasses import replace
 
@@ -1876,7 +1876,7 @@ class Memvara:
         ids = self.store.candidate_ids(
             scope.ancestors(), valid_at=valid_at, known_at=known_at,
             states=resolve_states(states, include_invalidated))
-        claims = list(self.store.get_claims(ids).values())
+        claims = list(bulk_claims(self.store, ids).values())
         # Content first, id only to make the order total; the stable sort below then
         # breaks timestamp ties on that instead of on whatever order SQLite returned.
         #
@@ -1962,7 +1962,7 @@ class Memvara:
         for the reason given there: `value_key` is derived from content, so two stores
         holding the same data answer identically.
         """
-        claims = list(self.store.get_claims(list(ids)).values())
+        claims = list(bulk_claims(self.store, list(ids)).values())
         claims.sort(key=lambda c: (c.value_key, c.id))
         claims.sort(key=lambda c: c.recorded_at, reverse=True)
         return tuple(claims)

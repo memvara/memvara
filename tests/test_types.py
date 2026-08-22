@@ -499,3 +499,32 @@ def test_provenance_repr_summarises_the_trail_without_dumping_it():
 def test_provenance_repr_survives_an_unattributed_claim():
     p = Provenance(claim=mk(), episodes=[], derivation=Derivation.USER, extractor="")
     assert "via ? (user)" in repr(p)
+
+
+def test_explanation_fields_added_after_020_are_appended_not_slotted_in() -> None:
+    """A dataclass's field order is an API, and this one broke it silently.
+
+    `graph_*` and `temporal_*` read best beside `vector_*` and `lexical_*`, and putting
+    them there shifted `fusion_score` and everything after it four positions right. A
+    call written against 0.2.x — `Explanation(0, 0.9, 1, 0.8, 0.5)` — then put the fusion
+    score into `graph_rank` and left `fusion_score` at its default. No exception: an
+    `int | None` field holding 0.5, and a ranking explanation quietly reporting the wrong
+    number about itself.
+
+    Asserted as a prefix rather than as the whole list, so appending a tenth field later
+    is allowed and inserting one is not.
+    """
+    from dataclasses import fields
+
+    from memvara.types import Explanation
+
+    order = [f.name for f in fields(Explanation)]
+    assert order[:11] == ["vector_rank", "vector_score", "lexical_rank", "lexical_score",
+                          "fusion_score", "recency", "confidence", "salience",
+                          "rerank_score", "raw_score", "final_score"], (
+        "a field was inserted into the 0.2.0 prefix; append it instead"
+    )
+
+    old_call = Explanation(0, 0.9, 1, 0.8, 0.5)
+    assert old_call.fusion_score == 0.5
+    assert old_call.graph_rank is None

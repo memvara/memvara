@@ -253,15 +253,23 @@ the tables a claim's content can survive in (`claims`, `claims_fts`, `embeddings
 and `erase()` raises `ErasureIncomplete` rather than returning `True`. Unproven and
 proven-gone are different answers and only one of them is an erasure certificate.
 
-Schema 7 adds `erasures`, one row per `erase_claim`, and two properties matter:
+Schema 8 adds `erasures`, one row per `erase_claim`, and three properties matter (schema
+7 is the FTS scrub that makes erasure remove the text from the file, not only from the
+queries):
 
 - **Written before the delete, in the same transaction.** If the audit write raises, the
   exception leaves `erase_claim` before any delete runs and the claim is still there. The
   other order lets a delete succeed and its record fail, which is exactly the state
   nothing downstream can detect.
+- **Compensated if the delete then fails.** The ordering above opens the mirror hole: a
+  record of an erasure that never happened, which reads as proof to precisely the audit
+  that would otherwise notice the claim survived. `erase_claim` removes its own row
+  before re-raising. Not a `SAVEPOINT` — `RELEASE` commits into the enclosing
+  transaction, so an erasure inside an abandoned `batch()` stopped rolling back with it.
 - **It holds no text, subject, predicate or object.** `(claim_id, tenant, scope,
   erased_at, sources, counts)` and nothing else — an audit trail the erased fact can be
-  read out of is a copy of it wearing a different name.
+  read out of is a copy of it wearing a different name. Keyed on `(claim_id, erased_at)`,
+  so erase, restore from backup and erase again is two records rather than one.
 
 **Ordering and durability, not tamper-evidence.** Nothing here is chained or signed, so an
 operator with write access can remove a row. A hash-chained log is a different feature and
@@ -441,7 +449,12 @@ second vocabulary to disagree with the store's.
 The leg must:
 - **seed on content, not on ids.** The fused order breaks ties on the item id and a claim
   id is a `uuid4` minted at ingest, so seeding straight off it would make which entities
-  get walked a property of which ingest ran. `seed_keys` re-sorts on `value_key`;
+  get walked a property of which ingest ran. `seed_keys` re-sorts on `value_key`. The
+  same rule binds the store underneath: **every `ORDER BY` that sits above a `LIMIT`
+  ends in a content key before `id`** — `s, value_key, id` for claims, `s, hash, id` for
+  turns, `ABS(ts - anchor), hash, id` for `episodes_near`. Without it the tie is settled
+  by rowid, and because the cap is in the same statement that decides which rows come
+  back at all, not merely how they are arranged;
 - **bound seeds by key count**, not by claim count: the key list is what reaches
   `Store.adjacent`, and frontier width is what a hop costs;
 - **pass `valid_at`/`known_at` through unchanged**, so the walk pins the pair `search()`

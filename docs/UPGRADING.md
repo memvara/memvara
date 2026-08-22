@@ -74,8 +74,12 @@ of the episode search.
 Two things will announce themselves anyway.
 
 **`Explanation.summary()` and `repr(Result)` gained fields.** A test asserting on the
-whole string will see `graph#2(0.750)`, `time#1(0.500)` and `intent=lookup` appear once
-the legs are on; none is emitted while they are off, and `intent=` is absent whenever
+whole string will see `graph#2(0.750)` and `time#1(0.500)` appear once those legs are on;
+neither is emitted while they are off, and both ship off.
+
+**`intent=` is different: it is emitted by default.** `intent_weighting` ships **on**, so
+a stock build already prints `intent=lookup` on an ordinary search — it is the one new
+field a test can meet without turning anything on. It is absent only when
 `intent_weighting=False`.
 
 **`Memvara` now hands its `GraphTraverser` to its retriever.** It is the same object

@@ -379,14 +379,7 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
     )
     if not results:
         return _no_match(args["query"])
-    if as_of is not None:
-        when = f" as believed on {safe_line(as_of)}"
-    elif valid_at is not None:
-        # Named differently on purpose: this is the world clock, and reporting it as
-        # "believed on" would describe the one axis that did *not* move.
-        when = f" as true on {safe_line(valid_at)}, as far as we know today"
-    else:
-        when = ""
+    when = _when(as_of, valid_at)
     lines = [f"{len(results)} match(es){when}. {STORED_HEADER}"]
     # Metadata first, stored text last: the untrusted span then ends the line and cannot
     # be followed by anything it could impersonate. That settles what comes *after* a
@@ -949,11 +942,39 @@ def _render_paths(paths: Sequence[Any], header: str) -> str:
     return "\n".join(lines)
 
 
+def _when(as_of: str | None, valid_at: str | None) -> str:
+    """The clock this answer was evaluated at, as a phrase to hang on a header.
+
+    `memory_search` has said this since time travel existed; the two walk tools took the
+    same axes and said nothing, so a walk of the graph as it stood in 2019 came back
+    looking exactly like a walk of it as it stands now. The rows are right and the frame
+    is missing, which is the shape of wrong that a model passes straight on to the user.
+
+    The two axes are named differently on purpose, and it is the distinction the whole
+    library is built on: `as_of` moves both clocks, so the answer is what we *believed*
+    then; `valid_at` moves only the world clock, so the answer is what was *true* then,
+    judged by everything known today.
+
+    >>> _when(None, None)
+    ''
+    >>> _when("2019-06-01", None)
+    ' as believed on 2019-06-01'
+    >>> _when(None, "2019-06-01")
+    ' as true on 2019-06-01, as far as we know today'
+    """
+    if as_of is not None:
+        return f" as believed on {safe_line(as_of)}"
+    if valid_at is not None:
+        return f" as true on {safe_line(valid_at)}, as far as we know today"
+    return ""
+
+
 def _neighborhood(ctx: ToolContext, args: dict[str, Any]) -> str:
     as_of, valid_at = _walk_axes(args, "memory_neighborhood")
     paths = ctx.memory.neighborhood(
         args["entity"], depth=args["depth"], k=args["k"],
         min_hops=args["min_hops"], as_of=as_of, valid_at=valid_at)
+    when = _when(as_of, valid_at)
     if not paths:
         entity = safe_line(args["entity"])
         if args["min_hops"] > 1:
@@ -963,14 +984,15 @@ def _neighborhood(ctx: ToolContext, args: dict[str, Any]) -> str:
             # — and the model has no way to see the filter that produced it. It reads as
             # a fact about the store and it is a fact about the arguments.
             return (
-                f"No connection to {entity!r} at {args['min_hops']} or more hops, "
-                f"searching {args['depth']}. Closer connections are excluded by "
+                f"No connection to {entity!r}{when} at {args['min_hops']} or more "
+                f"hops, searching {args['depth']}. Closer connections are excluded by "
                 f"min_hops={args['min_hops']} and may well be stored: re-ask with "
                 "min_hops=1 to see them. Do not report that nothing is connected "
                 "without doing that first."
             )
         return (
-            f"Nothing stored connects to {entity!r} within {args['depth']} hop(s). "
+            f"Nothing stored connects to {entity!r}{when} within {args['depth']} "
+            "hop(s). "
             "Either nothing here mentions it, or what does mentions it only as free "
             "text rather than as a fact with two ends. memory_search is the tool for "
             "the second case. As with memory_paths, the walk is bounded by a beam as "
@@ -979,8 +1001,8 @@ def _neighborhood(ctx: ToolContext, args: dict[str, Any]) -> str:
         )
     return _render_paths(
         paths,
-        f"{len(paths)} connection(s) from {safe_line(args['entity'])}, strongest first. "
-        f"{STORED_HEADER}")
+        f"{len(paths)} connection(s) from {safe_line(args['entity'])}{when}, strongest "
+        f"first. {STORED_HEADER}")
 
 
 def _paths(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -988,6 +1010,7 @@ def _paths(ctx: ToolContext, args: dict[str, Any]) -> str:
     paths = ctx.memory.paths_between(
         args["source"], args["target"], depth=args["depth"], k=args["k"],
         as_of=as_of, valid_at=valid_at)
+    when = _when(as_of, valid_at)
     if not paths:
         # The wording is the whole point of this branch, and it is the thing a model
         # cannot check for itself: the walk is bounded by a beam as well as by `depth`,
@@ -995,7 +1018,8 @@ def _paths(ctx: ToolContext, args: dict[str, Any]) -> str:
         # claim about the store; this is a claim about this search.
         return (
             f"No route found from {safe_line(args['source'])!r} to "
-            f"{safe_line(args['target'])!r} within {args['depth']} hop(s). Read that as "
+            f"{safe_line(args['target'])!r}{when} within {args['depth']} hop(s). Read "
+            "that as "
             "an answer about this search rather than about the store: the walk is "
             "bounded, so a longer or less direct route can exist and not be found. Do "
             "not tell the user the two are unrelated — say nothing stored connects them."
@@ -1003,7 +1027,7 @@ def _paths(ctx: ToolContext, args: dict[str, Any]) -> str:
     return _render_paths(
         paths,
         f"{len(paths)} route(s) from {safe_line(args['source'])} to "
-        f"{safe_line(args['target'])}, strongest first. {STORED_HEADER}")
+        f"{safe_line(args['target'])}{when}, strongest first. {STORED_HEADER}")
 
 
 def _history(ctx: ToolContext, args: dict[str, Any]) -> str:

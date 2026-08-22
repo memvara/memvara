@@ -2471,3 +2471,100 @@ def test_the_sqlite_store_still_satisfies_the_runtime_store_protocol(store):
     there."""
     assert isinstance(store, Store)
     assert not hasattr(Store, "_live_clause")
+
+
+# --- ties, and the invariant that two stores holding the same data agree ------
+
+
+def _sardine_store(order):
+    """Eight claims that differ only in subject, so a query on the object ties them all."""
+    from memvara import Memvara, NullLLM
+    from memvara.embed import HashingEmbedder
+
+    mem = Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64), user="u")
+    for i in order:
+        mem.remember(f"Person{i}", "likes", "sardines")
+    return mem
+
+
+def test_bm25_ties_are_broken_on_content_so_ingest_order_cannot_decide_the_page():
+    """`ORDER BY s ASC` with no tiebreak made the answer a property of insertion order.
+
+    BM25 ties are not exotic: eight claims differing only in subject score identically
+    for a query on the object. With nothing after `s`, SQLite returned them in rowid
+    order — and because the `LIMIT` is inside the same statement (design invariant 7),
+    that decided *which rows came back at all*, not merely how they were arranged.
+
+    Two stores holding the same eight facts, filled in opposite orders, returned
+    disjoint top-3s. Every other tie-break in this codebase is keyed on `value_key` for
+    exactly this reason; this one was missed.
+    """
+    ascending = _sardine_store(range(8))
+    descending = _sardine_store(reversed(range(8)))
+    try:
+        def top3(mem):
+            return tuple(mem.store.get_claim(cid).subject for cid, _ in
+                         mem.store.lexical_search("sardines", [mem.default_scope], 3))
+
+        assert top3(ascending) == top3(descending), (
+            "same data, different ingest order, different answer"
+        )
+    finally:
+        ascending.close()
+        descending.close()
+
+
+def test_equidistant_turns_come_back_in_the_same_order_on_every_file():
+    """`episodes_near` broke ties on `id`, and its docstring claimed that was enough.
+
+    An episode id is minted at ingest, not derived from the turn, so `id` is stable
+    within one file and means nothing across two. The docstring said the opposite in as
+    many words, which is the kind of wrong that stops anybody checking.
+    """
+    import datetime as dt
+
+    from memvara import Memvara, NullLLM
+    from memvara.embed import HashingEmbedder
+
+    at = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+
+    def near(order):
+        mem = Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64), user="u")
+        try:
+            for word in order:
+                mem.add(word, role="user", ts=at)       # identical ts => a real tie
+            return tuple(mem.store.get_episode(eid).content for eid, _ in
+                         mem.store.episodes_near(at, [mem.default_scope], 3))
+        finally:
+            mem.close()
+
+    assert near(["alpha", "bravo", "charlie"]) == near(["charlie", "bravo", "alpha"])
+
+
+def test_omittable_names_every_member_a_backend_may_actually_leave_out():
+    """`Store` is `@runtime_checkable`, and `isinstance` on a Protocol is all-or-nothing.
+
+    So it cannot answer "can this store walk a graph" — it asks whether all ~43 members
+    are present, and a backend that implements everything a memory needs and skips the
+    four optional ones is `False`. The capability check in this codebase is therefore
+    `getattr` per member, and `OMITTABLE` is the list those call sites are drawn from.
+    Asserted here because it is documentation: nothing at runtime reads it, so nothing
+    else would notice it going stale.
+    """
+    from memvara.store.base import OMITTABLE, Store
+
+    assert set(OMITTABLE) <= set(Store.__protocol_attrs__), (
+        "OMITTABLE names something that is not on the protocol at all"
+    )
+    assert "get_claims" in OMITTABLE, (
+        "get_claims was added after the first third-party backends existed and "
+        "tests/test_edges.py pins that those keep working — optional by compatibility "
+        "rather than by design, which is still optional"
+    )
+    # Both shipped stores implement everything, optional members included — which is why
+    # the isinstance trap is invisible in this repository and waiting for the first
+    # third-party backend.
+    from memvara.store import SQLiteStore
+    from memvara.store.remote import RemoteStore
+    for cls in (SQLiteStore, RemoteStore):
+        assert not [m for m in Store.__protocol_attrs__ if not hasattr(cls, m)]

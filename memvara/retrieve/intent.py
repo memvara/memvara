@@ -81,8 +81,19 @@ TEMPORAL_MARKERS: frozenset[str] = frozenset("""
     jan feb mar apr jun jul aug sep sept oct nov dec
     monday tuesday wednesday thursday friday saturday sunday
     morning afternoon evening night weekend
+    spring summer autumn fall winter season seasons
+    quarter quarters q1 q2 q3 q4 h1 h2
     used
 """.split())
+
+#: On the two ambiguous ones. `spring` is also a coil and `fall` is also a verb, which is
+#: the objection to putting either in a list of time words. It is outweighed here: this
+#: set only *weights* legs, so the cost of a false positive is a temporal leg voting on a
+#: question that was not about time — and it abstains when nothing in scope is near the
+#: anchor, which is exactly the case a misread `fall` produces. The cost of the false
+#: negative is a plainly temporal question ("what was I working on last summer") routed
+#: as a lookup and answered with the leg that ranks on *when* switched off. Months are
+#: already here on the same reasoning, and `may` is at least as ambiguous as either.
 
 #: A four-digit token in the range a stored date could plausibly fall in. Narrow on
 #: purpose: `1999` and `2026` are years, and `4419` is a serial number off a power brick.

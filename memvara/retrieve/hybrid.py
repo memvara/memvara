@@ -53,7 +53,7 @@ import numpy as np
 from ..embed.base import Embedder
 from ..rerank import Reranker, rerank
 from ..schema import PredicateRegistry
-from ..store.base import Store, resolve_states
+from ..store.base import Store, bulk_claims, resolve_states
 from ..telemetry import (
     RETRIEVAL_LATENCY_MS,
     RETRIEVAL_OBSERVATION_RANK_CORR,
@@ -648,12 +648,11 @@ class HybridRetriever:
         # Hydrate every fused candidate in one round trip. Fetching them individually
         # makes a search cost O(candidates) queries — the classic N+1 — so retrieval
         # would scale with how many results it considered rather than with the query.
-        # `get_claims` is optional on the Store protocol; fall back for third-party ones.
-        bulk = getattr(self.store, "get_claims", None)
-        claims = (bulk(list(fused))
-                  if bulk is not None
-                  else {cid: c for cid in fused
-                        if (c := self.store.get_claim(cid)) is not None})
+        #
+        # Through `bulk_claims`, which is also what `Memvara.get_all` and `produced` use.
+        # The fallback for a store predating `get_claims` used to live here and only
+        # here, so those two raised on the very stores this one supported.
+        claims = bulk_claims(self.store, list(fused))
 
         graph_hits, walked = self._graph_search(
             claims, fused, scope, limit, valid_at, known_at, states, weights.graph)

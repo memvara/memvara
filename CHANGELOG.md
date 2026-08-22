@@ -133,6 +133,63 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   that it does not repeat what a tool description says: when a connection question beats a
   recall question, and to ask one *after* a thin recall rather than instead of one.
 
+- **Ties are broken on content, so two stores holding the same data answer the same.**
+  `lexical_search` ordered by BM25 alone. Ties are not exotic there — eight claims
+  differing only in subject score identically for a query on the object — and with
+  nothing after the score SQLite returned rowid order. The `LIMIT` is inside the same
+  statement, so that decided *which rows came back at all*: two stores holding the same
+  eight facts, filled in opposite orders, returned disjoint top-3s. Now
+  `s, value_key, id`, and `s, hash, id` for the episode half. `episodes_near` had the
+  same hole one level down — it broke ties on `id`, which is minted at ingest, while its
+  docstring said equidistant turns "come back in the same order on every file". Now the
+  content hash first, and the docstring says what the code does.
+
+- **`Explanation`'s new fields are appended rather than slotted in beside their kin.**
+  `graph_*` and `temporal_*` read best next to `vector_*` and `lexical_*`; putting them
+  there shifted `fusion_score` and everything after it four positions right, so
+  `Explanation(0, 0.9, 1, 0.8, 0.5)` written against 0.2.x put the fusion score into
+  `graph_rank` and left `fusion_score` at its default — no exception, an `int | None`
+  field holding 0.5, and a ranking explanation quietly reporting the wrong number about
+  itself. Pickle is unaffected either way: `slots=True` keys state by name, so an older
+  pickle restores its own fields and leaves the new ones unset.
+
+- **`Store.OMITTABLE` names the five members a backend may leave out**, and what each
+  costs. `Store` is `@runtime_checkable` and `isinstance` on a Protocol is all-or-nothing,
+  so it cannot answer "can this store walk a graph" — which is why the capability check
+  here is `getattr` per member, and why that list needed writing down.
+
+  **`store.base.bulk_claims()` is the new one place claims are hydrated by id.**
+  `get_claims` was added after the first third-party backends existed, and the suite
+  pins that those keep working — but only `search()` actually fell back. `Memvara.get_all`
+  and `produced` called straight through, so a store predating `get_claims` searched
+  perfectly well and raised `TypeError: 'NoneType' object is not callable` the moment
+  anybody listed their memories. A compatibility guarantee honoured at one of three call
+  sites is not a guarantee, so now there is one call site.
+
+- **Time-shifted walks say which clock they were answered at.** `memory_search` has
+  echoed it since time travel existed; `memory_neighborhood` and `memory_paths` took the
+  same axes and said nothing, so a walk of the graph as it stood in 2019 came back
+  looking exactly like a walk of it as it stands now. All three share `_when()` now, and
+  the two axes stay worded apart: `as_of` is what was *believed* then, `valid_at` what
+  was *true* then judged by what is known today.
+
+- **An unpaired surrogate is rejected by name.** JSON accepts `"\ud800"` and Python hands
+  back a `str` that cannot be encoded, so it arrived looking like any other string and
+  failed at whatever line first tried to write it — reaching the model as "failed:
+  UnicodeEncodeError: 'utf-8' codec can't encode character". Now every string argument is
+  checked, and the error names the argument and the position.
+
+- **The length error stops recommending an argument the tool does not have.** Five of the
+  six tools carrying a `maxLength` have no `object`; "put the detail in 'object'" earned
+  their callers a second rejection for an unknown argument.
+
+- **Seasons and quarters are time words.** `march` was in the classifier's marker set and
+  `spring` was not, so "what did I do in March" routed as temporal and "what did I do in
+  spring" routed as a lookup — answered with the leg that ranks on *when* switched off.
+  Added `spring summer autumn fall winter season(s) quarter(s) q1-q4 h1 h2`. `between`
+  was checked and is fine: `TEMPORAL` is tested before `RELATIONAL`, so "between 2019 and
+  2021" and "between March and June" already routed on time.
+
 - **`memvara-mcp init` no longer writes a config the server refuses to start.** With
   `httpx` importable — which is a great many environments that never installed the cloud
   extra — `init` defaulted to cloud mode, wrote `MEMVARA_MODE: cloud`, printed "restart
