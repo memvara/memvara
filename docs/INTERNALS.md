@@ -870,7 +870,8 @@ class Consolidator:
     def decay(self, tenant: str | None = None, now: datetime | None = None) -> int
     def merge_duplicates(self, tenant: str | None = None, threshold: float = 0.97) -> int
     def promote(self, tenant: str | None = None, min_observations: int = 3) -> int
-    def run(self, tenant: str | None = None) -> dict[str, int]
+    def run(self, tenant: str | None = None,
+            now: datetime | None = None) -> dict[str, int]
 ```
 
 - `decay` multiplies `salience` by the predicate's recency factor, floored at `0.05` so
@@ -882,7 +883,10 @@ class Consolidator:
 - `promote` turns a repeatedly-observed `EPISODIC` claim into a `SEMANTIC` one: seeing
   something happen once is an event, seeing it `min_observations` times is a pattern.
   The promoted claim gets `derivation=Derivation.CONSOLIDATION`.
-- `run` executes all three and returns the per-stage counts.
+- `run` executes all three and returns the per-stage counts. `now` defaults to the wall
+  clock, read once for the whole pass. Pass it to evaluate two passes at the same instant:
+  the decay target depends on that instant, so a claim sitting within a pass-duration of a
+  rounding boundary otherwise changes on the second call.
 
 All counts are "number of claims affected". These run off the write path.
 

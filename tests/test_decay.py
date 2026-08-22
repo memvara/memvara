@@ -156,6 +156,24 @@ def test_decay_twice_at_same_instant_is_a_no_op(consolidator):
 
 
 def test_run_twice_leaves_identical_state(consolidator):
+    """Both passes run at `NOW`, and pinning them there is the point of the test.
+
+    Idempotence here means that the same inputs produce the same write, and `now` is one
+    of those inputs. `Sweep` reads the wall clock, so two unpinned `run()` calls evaluate
+    decay microseconds apart, and the recomputed salience differs in the twelfth decimal.
+    `decay_pass` compares values already rounded to `SALIENCE_PRECISION`, which hides
+    that difference - until a claim sits within one pass-duration of a rounding boundary.
+    Then the second pass crosses the boundary and reports `decayed: 1` for a store
+    nothing had touched.
+
+    Measured on this file's FAST claim: 0.045% per claim per millisecond of gap. The gap
+    is the first pass's own duration, which is 2.3 ms over these six claims and more on a
+    loaded runner. That works out at roughly one red run in a thousand - it failed once
+    on CI and not once in 55 consecutive local runs.
+
+    Do not widen the comparison in `decay_pass` to fix this. Exact equality on the
+    rounded value is what makes a skipped or doubled pass a no-op.
+    """
     store = consolidator.store
     add(store, "works_at", "acme", age_days=730)
     add(store, "working_on", "the migration", age_days=14)
@@ -165,14 +183,14 @@ def test_run_twice_leaves_identical_state(consolidator):
     add(store, "likes", "coffee", age_days=10)
     add(store, "likes", "Coffee", age_days=10, observation_count=2)
 
-    first = consolidator.run()
+    first = consolidator.run(now=NOW)
     snapshot = {
         c.id: (round(c.salience, 6), c.observation_count, c.memory_type, c.invalidated_by)
         for c in store.iter_claims("acme", include_invalidated=True)
     }
     stats = store.stats()
 
-    second = consolidator.run()
+    second = consolidator.run(now=NOW)
 
     assert second == {"decayed": 0, "merged": 0, "promoted": 0}
     assert first["merged"] == 1 and first["promoted"] == 1
@@ -427,11 +445,14 @@ def test_a_settled_store_opens_no_transaction_at_all(consolidator):
     """Nothing changed means nothing is written, so there is nothing to lock."""
     store = consolidator.store
     add(store, "works_at", "acme", age_days=365)
-    consolidator.run()
+    consolidator.run(now=NOW)
 
     counted = GappedStore(store, lambda: None)
     con = Consolidator(counted, consolidator.embedder, consolidator.registry)
-    assert con.run("acme") == {"decayed": 0, "merged": 0, "promoted": 0}
+    # Both passes run at one instant. Otherwise the store stays settled only until the
+    # claim's salience crosses a rounding boundary between the two - see
+    # `test_run_twice_leaves_identical_state`.
+    assert con.run("acme", now=NOW) == {"decayed": 0, "merged": 0, "promoted": 0}
     assert counted.transactions == 0
 
 
@@ -509,11 +530,11 @@ def test_a_settled_pass_reports_zeroes_instead_of_going_quiet(consolidator):
     rec = MemoryRecorder()
     store = consolidator.store
     add(store, "works_at", "acme", age_days=365)
-    consolidator.run()
+    consolidator.run(now=NOW)
 
     con = Consolidator(store, consolidator.embedder, consolidator.registry,
                        telemetry=rec)
-    assert con.run("acme") == {"decayed": 0, "merged": 0, "promoted": 0}
+    assert con.run("acme", now=NOW) == {"decayed": 0, "merged": 0, "promoted": 0}
     assert con.store is store
     assert rec.total(CONSOLIDATE_DECAYED) == 0
     assert rec.total(CONSOLIDATE_MERGED) == 0
