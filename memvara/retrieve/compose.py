@@ -18,9 +18,11 @@ store uses and returns the derived terms over them; the read path does a set mem
 test against the result. Same shape as `resolve_predicate` on the write side — pay once
 per vocabulary, keep the answer, never pay again.
 
-Measured with the terms supplied, `inference` at k=12 goes **52.6% → 86.4%** answer and
-**49.0% → 83.8%** chain. That is the whole of the feature's value and it is why the
-acquisition is worth a model call.
+Measured on all 1,549 of that family at k=12, with terms acquired from a live model
+against the store's own seven predicates: **49.0% → 80.3%** answer and **45.1% → 78.6%**
+chain. The floor matters more than the headline — four words any model produces
+(`grandfather`, `grandmother`, `uncle`, `aunt`) are worth 73.9% / 71.8% alone — because it
+means the feature needs a plausible list rather than a good one.
 
 **Not persisted yet.** The terms live for the life of a `Memvara`, so a long-running
 server pays once at startup and a short script pays once per run. Persisting them needs a
@@ -31,9 +33,31 @@ backend that has not grown it. `docs/ROADMAP.md` carries it.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Collection, Mapping, Protocol, Sequence, runtime_checkable
 
 from .analyze import tokenize
+
+
+class DerivedTermsUnavailable(UserWarning):
+    """The backend was asked for derived relation terms and could not answer.
+
+    Returning nothing is right — an enrichment that raised into `Memvara.__init__` would
+    make an optional feature a startup dependency — but returning nothing *silently* is
+    how a deployment runs for a month believing it has this and does not.
+    `DegradedRetrievalWarning` says the same thing one layer down and for the same reason.
+
+    The case this exists for is not a backend that lacks the method. That one is silent,
+    because nothing is wrong: it never claimed to do this. It is the backend that has the
+    method and cannot deliver — a rate limit, a timeout, a model answering with prose —
+    which is indistinguishable from "this vocabulary composes into nothing" unless
+    somebody says so.
+
+    Measured, and the reason this class exists: an acquisition against a rate-limited free
+    endpoint returned an empty set, and the only way to tell that from a model with no
+    opinion was to make the call again by hand and read the HTTP status.
+    """
+
 
 #: Longest a derived term may be, in tokens. "Paternal grandfather" is two and
 #: "great-great-grandmother" is one; a model that answers with a sentence is answering a
@@ -81,14 +105,18 @@ def acquire(llm: Any, predicates: Collection[str]) -> frozenset[str]:
     """
     compose = getattr(llm, "compose_relations", None)
     if compose is None:
+        # Silent: a backend that never claimed to do this is not failing at it.
         return frozenset()
     try:
         answer = compose(sorted(predicates))
-    except Exception:
-        # Including the network. See the docstring: an enrichment that raises into
-        # `Memvara.__init__` would make an optional feature a startup dependency.
+    except Exception as exc:
+        # Including the network — a rate limit reaches here as readily as a bug.
+        _unavailable(f"{type(llm).__name__}.compose_relations raised "
+                     f"{type(exc).__name__}: {exc}")
         return frozenset()
     if not isinstance(answer, Mapping):
+        _unavailable(f"{type(llm).__name__}.compose_relations returned "
+                     f"{type(answer).__name__}, not a term-to-arity mapping")
         return frozenset()
 
     known = {p.lower() for p in predicates}
@@ -104,7 +132,21 @@ def acquire(llm: Any, predicates: Collection[str]) -> frozenset[str]:
         if len(tokenize(folded)) > MAX_TERM_TOKENS:
             continue
         out.add(folded)
+    if answer and not out:
+        # It answered, and nothing it said survived. That is a different fact from a
+        # vocabulary with no compositions in it, and the two look identical from here
+        # unless one of them says so.
+        _unavailable(f"{type(llm).__name__}.compose_relations returned {len(answer)} "
+                     f"term(s) and none survived filtering; the first is "
+                     f"{next(iter(answer))!r}")
     return frozenset(out)
+
+
+def _unavailable(reason: str) -> None:
+    warnings.warn(
+        f"derived relation terms are unavailable, so multi-hop questions that name a "
+        f"relation rather than a predicate will not reach the graph leg: {reason}",
+        DerivedTermsUnavailable, stacklevel=3)
 
 
 def names_derived(query: str, terms: Collection[str]) -> bool:

@@ -294,3 +294,78 @@ def test_a_backend_that_cannot_compose_costs_nothing() -> None:
 
     for backend in (Silent(), Broken(), Nonsense()):
         assert acquire(backend, ["father"]) == frozenset()
+
+
+def test_a_backend_that_cannot_deliver_says_so_rather_than_going_quiet() -> None:
+    """Returning nothing is right; returning nothing silently is how a deployment runs
+    for a month believing it has this feature.
+
+    The case this exists for is not a backend without the method — that one is silent,
+    because nothing is wrong and it never claimed to do this. It is the backend that has
+    the method and cannot deliver, which is indistinguishable from "this vocabulary
+    composes into nothing" unless somebody says so.
+
+    Written after a live acquisition against a rate-limited free endpoint returned an
+    empty set, and the only way to tell that from a model with no opinion was to make the
+    call again by hand and read the HTTP status.
+    """
+    import warnings as w
+
+    from memvara.retrieve.compose import DerivedTermsUnavailable, acquire
+
+    class RateLimited:
+        def compose_relations(self, predicates):
+            raise RuntimeError("429 rate-limited upstream")
+
+    class Prose:
+        def compose_relations(self, predicates):
+            return "a grandfather is the father of a parent"
+
+    class Rejected:
+        """Answers, and nothing survives — a different fact from answering nothing."""
+
+        def compose_relations(self, predicates):
+            return {"father": 5}
+
+    for backend, expect in ((RateLimited(), "429"), (Prose(), "not a term-to-arity"),
+                            (Rejected(), "none survived filtering")):
+        with w.catch_warnings(record=True) as caught:
+            w.simplefilter("always")
+            assert acquire(backend, ["father", "mother"]) == frozenset()
+        assert len(caught) == 1, f"{type(backend).__name__} went quiet"
+        assert issubclass(caught[0].category, DerivedTermsUnavailable)
+        assert expect in str(caught[0].message)
+
+
+def test_a_backend_without_the_method_is_not_warned_about() -> None:
+    """It never claimed to do this. A warning here would fire on every store that has no
+    model, which is the shipped default, and would teach a reader to filter the category."""
+    import warnings as w
+
+    from memvara.retrieve.compose import acquire
+
+    class NoModel:
+        pass
+
+    with w.catch_warnings(record=True) as caught:
+        w.simplefilter("always")
+        assert acquire(NoModel(), ["father"]) == frozenset()
+    assert caught == []
+
+
+def test_a_vocabulary_that_genuinely_composes_into_nothing_is_not_a_failure() -> None:
+    """An empty answer to an empty question. `{name, email}` has no compositions and a
+    model saying so is right, so this must not warn — otherwise the signal that means
+    "something went wrong" fires on the case where nothing did."""
+    import warnings as w
+
+    from memvara.retrieve.compose import acquire
+
+    class Honest:
+        def compose_relations(self, predicates):
+            return {}
+
+    with w.catch_warnings(record=True) as caught:
+        w.simplefilter("always")
+        assert acquire(Honest(), ["name", "email"]) == frozenset()
+    assert caught == []
