@@ -58,6 +58,7 @@ import bench.evalkit as ek                                          # noqa: E402
 from memvara import Memvara, NullLLM                                # noqa: E402
 from memvara.embed import HashingEmbedder                           # noqa: E402
 from memvara.retrieve.hybrid import HybridRetriever                 # noqa: E402
+from memvara.schema import PredicateRegistry                        # noqa: E402
 
 #: The transitive types. A walk can only help where the evidence has a join in it.
 CHAINED = ("compositional", "inference")
@@ -79,12 +80,27 @@ class Sample:
         self.question: str = raw["question"]
         self.answer: str = raw["answer"]
         self.kind: str = raw["type"]
-        # Wikidata relations arrive spaced ("date of birth"); the store keys predicates
-        # by name, so they are underscored here and nowhere else. Doing it at load time
-        # keeps `PredicateRegistry` seeing one spelling per relation.
+        # Wikidata relations arrive spaced ("date of birth"); the store keys predicates by
+        # name, so they are underscored here. **Not folded yet** — see `fold_to_store`.
         self.triples: list[tuple[str, str, str]] = [
             (s, p.strip().replace(" ", "_"), o) for s, p, o in raw["evidences"]
         ]
+
+    def fold_to_store(self, registry: "PredicateRegistry") -> None:
+        """Rewrite the gold predicates the way the store will have written them.
+
+        `place_of_birth` is an alias of `born_in` and `date_of_birth` of `born_on`, so a
+        claim written from this evidence is *stored* under the canonical name. Comparing
+        the raw gold triple against a returned row therefore never matched for either of
+        them — and they are 6,624 of this corpus's evidence triples.
+
+        The effect was one-sided and quiet: `answer` matched on the object alone and kept
+        scoring, while `chain` required the predicate too and silently failed. So chain
+        recall read far below the truth and the gap between the two columns looked like a
+        finding about retrieval — "the walk brings back answers without their evidence" —
+        when it was an artifact of this file comparing two spellings of one predicate.
+        """
+        self.triples = [(s, registry.normalize(p), o) for s, p, o in self.triples]
 
     @property
     def chained(self) -> bool:
@@ -123,6 +139,10 @@ def ingest(samples: Sequence[Sample]) -> Memvara:
                     rate = written / (time.perf_counter() - started)
                     print(f"    {written:,} claims  ({rate:,.0f}/s)", flush=True)
     took = time.perf_counter() - started
+    # Fold the gold predicates the way the store just wrote them, or `chain` compares
+    # `place_of_birth` against the `born_in` it was stored as and never matches.
+    for sample in samples:
+        sample.fold_to_store(mem.registry)
     print(f"  ingested {written:,} distinct claims from {len(samples):,} questions "
           f"in {took:,.1f}s")
     return mem
