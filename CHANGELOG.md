@@ -297,7 +297,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   block on an API call breaks both — so this is shaped like `resolve_predicate`, paid once
   per vocabulary rather than once per query.
 
-  Measured on `inference` at k=12: **53.2% → 83.2%** answer and **50.2% → 81.2%** chain.
+  Measured on all 1,549 `inference` questions at k=12, with terms acquired from a live
+  model against the store's own vocabulary: **49.0% → 80.3%** answer and
+  **45.1% → 78.6%** chain. A minimal four-word list any model would produce is worth
+  73.9% / 71.8% on its own, so the feature needs a plausible list rather than a good one.
   `compositional`, `comparison` and `bridge_comparison` are unchanged. A disjunction is
   still a comparison when it names a derived relation, so `is_comparison` runs first.
 
@@ -311,6 +314,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   itself a predicate, a phrase longer than three tokens, a non-integer arity — and a
   backend that raises costs nothing, because an enrichment that raised into
   `Memvara.__init__` would make an optional feature a startup dependency.
+
+  **`_shape.shape_composition` reads a bare term-to-arity map as well as the wrapped
+  one.** `COMPOSE_SCHEMA` declares `{"derived": {...}}` and a backend whose structured
+  output enforces the schema sends that; one that is only *asked* for it answers with the
+  bare map. The parser required the wrapper and returned `{}` silently, so a live model's
+  21 correct terms all disappeared and the acquisition looked like a model with no
+  opinion. The unit tests could not have caught it — the fake client returns the shape the
+  test author expected, and the test author had written the schema.
 
 - **Predicates are matched on content tokens, and comparison frames are excluded from
   the chain rule.** `date of birth` folds to `born_on`, whose spoken form is "born on",

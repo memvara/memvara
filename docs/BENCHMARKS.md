@@ -392,12 +392,27 @@ retrieval; a search that could block on an API call breaks both, which is why th
 acquisition is shaped like `resolve_predicate` — pay once per vocabulary, keep it, never
 pay again.
 
-Measured on `inference`, k=12, terms supplied:
+Measured on **all 1,549** `inference` questions at k=12, terms acquired from a live model
+(`nvidia/nemotron-3-ultra-550b-a55b` via OpenRouter) against the store's own seven
+predicates:
 
 ```
-  without derived terms   53.2% answer / 50.2% chain
-  with derived terms      83.2%        / 81.2%
+  no terms                    49.0% answer / 45.1% chain
+  terms from the live model   80.3%        / 78.6%
 ```
+
+**The floor matters more than that number.** A minimal list of four words any model would
+produce — `grandfather, grandmother, uncle, aunt` — is worth 73.9% / 71.8% on its own. The
+feature does not need a good list, only a plausible one. A hand-written full kinship list
+reaches 81.4% / 79.7%, so the live model landed within a point of it.
+
+The model was given the store's actual vocabulary, not a kinship prompt, and returned
+`academic grandfather` for `doctoral_advisor` — the generalisation past kinship that no
+hand-written list would have contained.
+
+**False positives are negligible**: the terms appear in 0.10% of `comparison`, 0.62% of
+`bridge_comparison` and 0.13% of `compositional` questions, and the `bridge_comparison`
+ones are disjunctions that `is_comparison` catches first.
 
 `compositional`, `comparison` and `bridge_comparison` are unchanged, so it reaches the
 family it was built for and nothing else. A disjunction is still a comparison even when it

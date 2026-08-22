@@ -608,3 +608,27 @@ def test_compose_relations_survives_a_response_that_is_not_the_shape_asked_for()
     for body in ({"derived": "not a map"}, {}, {"derived": {"x": "two"}}):
         llm = AnthropicLLM(client=FakeClient(body))
         assert llm.compose_relations(["father"]) == {}
+
+
+def test_compose_relations_reads_a_bare_map_as_well_as_the_wrapped_one() -> None:
+    """A live model returned 21 correct terms and this parser dropped every one.
+
+    `COMPOSE_SCHEMA` declares `{"derived": {...}}`, and a backend whose structured output
+    enforces the schema sends that. One that is only *asked* for it — any OpenAI-compatible
+    endpoint, which is most of them — answers with the bare term-to-arity map instead. The
+    parser required the wrapper and returned `{}` without complaint, so the acquisition
+    looked like a model with no opinion rather than a reader of the wrong shape.
+
+    The unit tests could not have caught it: the fake client returns whatever shape the
+    test author expected, and the test author had written the schema. It took a call to a
+    real endpoint — `nvidia/nemotron-3-ultra-550b-a55b` via OpenRouter — to see it.
+    """
+    from memvara.llm.anthropic import AnthropicLLM
+
+    wrapped = FakeClient({"derived": {"grandfather": 2, "uncle": 2}})
+    bare = FakeClient({"grandfather": 2, "uncle": 2})
+
+    assert AnthropicLLM(client=wrapped).compose_relations(["father"]) == {
+        "grandfather": 2, "uncle": 2}
+    assert AnthropicLLM(client=bare).compose_relations(["father"]) == {
+        "grandfather": 2, "uncle": 2}
