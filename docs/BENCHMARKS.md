@@ -154,7 +154,7 @@ PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-gr
 | `bench/multihop.py` (synthetic), gate off | 4,498 | **2.9% → 20.0%** at k=12, **7.6% → 50.0%** at k=25 |
 | `bench/multihop.py`, **as shipped** | 4,498 | **2.9% → 6.4%** at k=12, **7.6% → 21.8%** at k=25 |
 | `bench/twowiki.py`, gate off, **public** | 26,403 | **28.2% → 70.7%** at k=12 on chained questions; **−15.4** on flat ones |
-| `bench/twowiki.py`, **as shipped** | 26,403 | **28.2% → 41.4%** on chained, no cost on flat — the gate captures 13.2 of 42.5 |
+| `bench/twowiki.py`, **as shipped** | 26,403 | **28.2% → 41.4%** answer and **25.5% → 38.8%** chain on chained questions, no cost on flat |
 
 The leg walks *claims*, and both public runs are episode retrieval: `SalienceGate` drops
 any turn whose role is not `user`, LOCOMO writes each turn under the speaker's name, and
@@ -275,13 +275,13 @@ returned rows / whole evidence chain returned*:
 ```
   k=12
   set                     n         search         +graph        +graph!
-  all                12,576   50.7% / 27.2%   57.1% / 29.4%   66.4% / 35.7%
-  chained             6,785   28.2% / 19.3%   41.4% / 26.3%   70.7% / 46.2%
-  flat                5,791   76.9% / 36.4%   75.4% / 33.0%   61.5% / 23.5%
-  compositional       5,236   22.9% / 12.5%   40.0% / 21.6%   68.4% / 37.2%
+  all                12,576   50.7% / 37.2%   57.1% / 43.5%   66.4% / 56.3%
+  chained             6,785   28.2% / 25.5%   41.4% / 38.8%   70.7% / 68.8%
+  flat                5,791   76.9% / 50.8%   75.4% / 49.0%   61.5% / 41.8%
+  compositional       5,236   22.9% / 20.6%   40.0% / 37.8%   68.4% / 66.5%
   inference           1,549   46.4% / 42.2%   46.4% / 42.2%   78.5% / 76.4%
-  comparison          3,040   74.4% / 69.4%   73.3% / 61.8%   58.3% / 38.7%
-  bridge_comparison   2,751   79.8% /  0.0%   77.7% /  1.2%   65.0% /  6.7%
+  comparison          3,040   74.4% / 96.8%   73.3% / 88.8%   58.3% / 58.3%
+  bridge_comparison   2,751   79.8% /  0.0%   77.7% /  5.1%   65.0% / 23.6%
 ```
 
 **`chained` is the result.** `compositional` and `inference` questions chain one fact into
@@ -347,12 +347,31 @@ One false positive found on the way: `born_in` and `born_on` share the content t
 Matches are now deduplicated by what the question said rather than by how many predicates
 answer to it.
 
-**Answers improved and derivations did not.** `chained` answer recall went 35.4% → 41.4%
-and chain recall 26.1% → 26.3%. The walk reaches the far end of the chain far more often
-and does not bring the middle back with it: at k=12 against 26,403 competing claims the
-answer wins a slot and the supporting triples do not. For a library whose pitch is a
-derivation the caller can check, the gap between those two columns is the more interesting
-number, and it is not closing.
+**Answers and derivations move together.** On `chained`, the leg is worth +13.2 points of
+answer recall and **+13.3 of chain recall** — 28.2% → 41.4% and 25.5% → 38.8%. Ungated the
+two columns nearly meet, 70.7% against 68.8%: almost every answer the walk finds arrives
+with every triple that supports it. That is the property the library is for, and it is the
+one worth quoting.
+
+<div data-type="panel-warning">
+
+**This paragraph previously said the opposite, and the error was in this harness.**
+`place_of_birth` is an alias of `born_in` and `date_of_birth` of `born_on`, so a claim
+written from 2Wiki evidence is *stored* under the canonical name. `chain` compared the raw
+gold predicate against the returned row and never matched for either — 6,624 of this
+corpus's triples. The failure was one-sided: `answer` matched on the object alone and kept
+scoring, `chain` needed the predicate too and silently failed.
+
+So chain recall read ~13 points low everywhere, and the gap between the two columns looked
+like a finding about retrieval — "the walk brings back answers without their evidence" —
+when it was this file comparing two spellings of one predicate. `Sample.fold_to_store()`
+now folds the gold predicates the way the store wrote them.
+
+The tell was there and was misread: chain recall sat still through three changes while
+answer recall climbed. That pattern was evidence about the measurement, not about the
+product.
+
+</div>
 
 **What it still does not reach: 69% of the gain, and one whole question type.**
 `inference` gains **nothing** — 46.4% through every change in this series — and the reason

@@ -308,11 +308,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   unchanged, so the walk still does not run where it cannot help. The gate captured 0.9
   points of a 42.5-point gain three releases ago and now captures 13.2.
 
-  **Answers improved and derivations did not.** Chain recall moved 26.1% → 26.3% against
-  answer recall's six points: the walk reaches the far end of a chain and does not bring
-  the middle back, because at k=12 against 26,403 claims the answer wins a slot and its
-  supporting triples do not. For a library that sells checkable derivations, that gap is
-  the more interesting number and it is not closing.
+  **Answers and derivations move together.** The leg is worth +13.2 points of answer
+  recall on chained questions and **+13.3 of chain recall** — 28.2% → 41.4% and
+  25.5% → 38.8%. Ungated the two columns nearly meet, 70.7% against 68.8%: almost every
+  answer the walk finds arrives with every triple that supports it.
+
+  **An earlier version of this entry said the opposite, and the error was in the
+  benchmark.** `place_of_birth` is an alias of `born_in`, so a claim written from 2Wiki
+  evidence is stored under the canonical name; `bench/twowiki.py` compared the raw gold
+  predicate against the returned row and never matched, for 6,624 of that corpus's
+  triples. `answer` matched on the object alone and kept scoring while `chain` needed the
+  predicate and silently failed, so chain recall read about 13 points low everywhere. The
+  numbers in the merged commits for #32, #33 and #34 are understated for that reason;
+  `docs/BENCHMARKS.md` carries the corrected table and the explanation.
 
   `inference` is unchanged at 46.4% through this whole series, as it has been through all
   of them: "who is the maternal grandfather of X" over `(X, mother, Y)` and
