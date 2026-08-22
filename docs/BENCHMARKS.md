@@ -154,6 +154,7 @@ PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-gr
 | `bench/multihop.py` (synthetic), gate off | 4,498 | **2.9% → 20.0%** at k=12, **7.6% → 50.0%** at k=25 |
 | `bench/multihop.py`, **as shipped** | 4,498 | **2.9% → 6.4%** at k=12, **7.6% → 21.8%** at k=25 |
 | `bench/twowiki.py`, gate off, **public** | 26,403 | **28.2% → 70.7%** at k=12 on chained questions; **−15.4** on flat ones |
+| `bench/twowiki.py`, **as shipped** | 26,403 | **28.2% → 35.4%** on chained, no cost on flat — the gate now captures 7.2 of 42.5 |
 
 The leg walks *claims*, and both public runs are episode retrieval: `SalienceGate` drops
 any turn whose role is not `user`, LOCOMO writes each turn under the speaker's name, and
@@ -274,13 +275,13 @@ returned rows / whole evidence chain returned*:
 ```
   k=12
   set                     n         search         +graph        +graph!
-  all                12,576   50.7% / 27.2%   50.4% / 25.9%   66.5% / 35.7%
-  chained             6,785   28.2% / 19.3%   29.1% / 19.8%   70.7% / 46.2%
-  flat                5,791   76.9% / 36.4%   75.4% / 32.9%   61.5% / 23.5%
-  compositional       5,236   22.9% / 12.5%   24.0% / 13.2%   68.4% / 37.2%
+  all                12,576   50.7% / 27.2%   53.8% / 29.3%   66.4% / 35.7%
+  chained             6,785   28.2% / 19.3%   35.4% / 26.1%   70.7% / 46.2%
+  flat                5,791   76.9% / 36.4%   75.3% / 33.1%   61.5% / 23.5%
+  compositional       5,236   22.9% / 12.5%   32.1% / 21.4%   68.3% / 37.2%
   inference           1,549   46.4% / 42.2%   46.4% / 42.2%   78.5% / 76.4%
-  comparison          3,040   74.4% / 69.4%   73.3% / 61.8%   58.3% / 38.7%
-  bridge_comparison   2,751   79.8% /  0.0%   77.7% /  1.1%   65.0% /  6.7%
+  comparison          3,040   74.4% / 69.4%   73.2% / 61.8%   58.3% / 38.7%
+  bridge_comparison   2,751   79.8% /  0.0%   77.6% /  1.3%   65.0% /  6.7%
 ```
 
 **`chained` is the result.** `compositional` and `inference` questions chain one fact into
@@ -296,12 +297,41 @@ ends and no join, the leg has nothing to walk, and turning it on **costs 15.4 po
 the `chained` row would be worth much less: it would suggest the leg helps by adding rows
 rather than by following edges.
 
-**So the intent gate is right in principle and badly calibrated in practice.** It exists to
-route flat questions past the walk, and on `flat` it does: 75.4% against search's 76.9%.
-On `chained` it blocks almost the entire gain — 29.1% where 70.7% was available. The
-current gate is close to the worst of both: it captures 0.9 points of a 42-point gain and
-still gives up 3.5 points of chain recall on `flat`, because `comparison` questions say
-"both" and that word is in `RELATIONAL_MARKERS`.
+**The intent gate is right in principle, and it now captures some of what it was
+blocking.** It exists to route flat questions past the walk, and on `flat` it does:
+75.3% against search's 76.9%. On `chained` it used to block almost the entire gain —
+29.1% where 70.7% was available, 0.9 points of 42.5.
+
+The reason was vocabulary, and not the kind a word list fixes. `classify` counts the
+predicates a question names, drawn from `PredicateRegistry.all_specs()`, which lists what
+somebody **declared**. A predicate written through `remember()` is never declared — the
+registry synthesizes a spec on demand and does not remember — so on a store whose
+vocabulary arrived that way the count is one or zero and every chain question reads as a
+lookup. All 34 of this corpus's relations are of that kind.
+
+The fix reads the vocabulary off the rows instead. The lookup legs run first, so by the
+time the graph weight matters the candidates are in hand, and their predicates are the
+store's vocabulary — observed rather than declared, and already narrowed to this query.
+A question naming two of them is a chain. `chained` goes **29.1% → 35.4%** and chain
+recall 19.8% → 26.1%; `flat` is unchanged at 75.3%, so the discrimination holds.
+
+**Teaching the registry instead was tried first and reverted**, and the reason is worth
+recording. Recording an observed predicate means recording a cardinality; the only one
+available is the default; the store would then hold `MANY` chosen by nobody, and
+`memory_remember`'s note — *"this store has no cardinality recorded for that predicate"* —
+would stop firing because the sentence had been made false rather than because anyone had
+answered the question. That note is the only warning that two live values might be a
+contradiction rather than a legitimate multi-valued slot. Three tests in
+`tests/test_server.py` caught the trade.
+
+**What it still does not reach: 83% of the gain, and one whole question type.**
+`inference` gains **nothing** — 46.4% before and after — and the reason is not a bug. Those
+questions ask "who is the maternal grandfather of X"; the evidence is `(X, mother, Y)` and
+`(Y, father, Z)`, and the question names neither `mother` nor `father`. It names a
+*derived* relation. Matching a question's words against stored predicate names cannot
+bridge `grandfather` to `mother` + `father`, and no longer word list closes that — it
+needs synonymy or entailment, which is a model rather than a lookup. All of the gain here
+is in `compositional`, where the question does say the predicates out loud: 24.0% → 32.1%.
 
 `bridge_comparison` chain recall is 0.0% for `search` and 6.7% ungated. Those chains are
 four hops and `graph_depth` ships at 2, so that row measures the depth bound rather than
