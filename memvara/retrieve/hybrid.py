@@ -79,7 +79,7 @@ from ..types import (
 from .analyze import analyze
 from .fusion import reciprocal_rank_fusion
 from .intent import Intent, classify
-from .intent import observed_refs
+from .intent import is_comparison, observed_refs
 from .intent import weights as intent_weights
 from .scoring import (
     final_score,
@@ -689,9 +689,9 @@ class HybridRetriever:
         #
         # Only ever widens: it runs when intent weighting closed the leg on a store that
         # configured it open, and never narrows what the classifier allowed.
-        if weights.graph <= 0.0 < self.w_graph and len(
+        if (weights.graph <= 0.0 < self.w_graph and not is_comparison(query) and len(
                 observed_refs(query, {c.predicate for c in claims.values()},
-                              self.registry.normalize)) > 1:
+                              self.registry.normalize)) > 1):
             weights = weights._replace(graph=self.w_graph)
 
         graph_hits, walked = self._graph_search(

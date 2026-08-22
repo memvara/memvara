@@ -284,6 +284,41 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   operator with write access can remove a row. The hash-chained log is a different feature
   and is commercial. What this defends against is a delete no record was ever written for.
 
+- **Predicates are matched on content tokens, and comparison frames are excluded from
+  the chain rule.** `date of birth` folds to `born_on`, whose spoken form is "born on",
+  and questions say "when was X born" — the predicate was in the question and the
+  preposition was not. `intent._content()` drops `STOPWORDS` from a predicate name and
+  requires **all** remaining tokens, so `born_on` is named by "born" while
+  `country_of_citizenship` still needs both `country` and `citizenship`. A bare token
+  index would read almost every query as a chain; that is the failure this avoids.
+
+  `intent.is_comparison()` suppresses the rule on a disjunction. "Which film has the
+  director died later, A or B" names `director` and `died_on` — two predicates, a chain by
+  that measure — and is two independent lookups whose answers are compared. Without the
+  guard, content matching fired on a third of that family, where the walk costs 15.4
+  points. Suppression is on the disjunction rather than on comparative words, because
+  "earlier", "first" and "younger" are what one corpus happens to say.
+
+  Matches are deduplicated by what the question said: `born_in` and `born_on` share the
+  content token `born`, so "when was Alice born" named two predicates and read as a chain
+  from one word.
+
+  Measured on 2WikiMultihopQA, 12,576 questions, k=12: chained **35.4% → 41.4%**,
+  compositional **32.1% → 40.0%**, and `flat`, `comparison` and `bridge_comparison` all
+  unchanged, so the walk still does not run where it cannot help. The gate captured 0.9
+  points of a 42.5-point gain three releases ago and now captures 13.2.
+
+  **Answers improved and derivations did not.** Chain recall moved 26.1% → 26.3% against
+  answer recall's six points: the walk reaches the far end of a chain and does not bring
+  the middle back, because at k=12 against 26,403 claims the answer wins a slot and its
+  supporting triples do not. For a library that sells checkable derivations, that gap is
+  the more interesting number and it is not closing.
+
+  `inference` is unchanged at 46.4% through this whole series, as it has been through all
+  of them: "who is the maternal grandfather of X" over `(X, mother, Y)` and
+  `(Y, father, Z)` names a derived relation the question never says, and no lexical rule
+  reaches it.
+
 - **The graph leg's gate can see predicates nobody declared.** `classify` decides a
   question is a chain by counting the predicates it names, drawn from
   `PredicateRegistry.all_specs()` — which lists what somebody *declared*. A predicate

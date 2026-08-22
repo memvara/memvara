@@ -154,7 +154,7 @@ PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-gr
 | `bench/multihop.py` (synthetic), gate off | 4,498 | **2.9% → 20.0%** at k=12, **7.6% → 50.0%** at k=25 |
 | `bench/multihop.py`, **as shipped** | 4,498 | **2.9% → 6.4%** at k=12, **7.6% → 21.8%** at k=25 |
 | `bench/twowiki.py`, gate off, **public** | 26,403 | **28.2% → 70.7%** at k=12 on chained questions; **−15.4** on flat ones |
-| `bench/twowiki.py`, **as shipped** | 26,403 | **28.2% → 35.4%** on chained, no cost on flat — the gate now captures 7.2 of 42.5 |
+| `bench/twowiki.py`, **as shipped** | 26,403 | **28.2% → 41.4%** on chained, no cost on flat — the gate captures 13.2 of 42.5 |
 
 The leg walks *claims*, and both public runs are episode retrieval: `SalienceGate` drops
 any turn whose role is not `user`, LOCOMO writes each turn under the speaker's name, and
@@ -275,13 +275,13 @@ returned rows / whole evidence chain returned*:
 ```
   k=12
   set                     n         search         +graph        +graph!
-  all                12,576   50.7% / 27.2%   53.8% / 29.3%   66.4% / 35.7%
-  chained             6,785   28.2% / 19.3%   35.4% / 26.1%   70.7% / 46.2%
-  flat                5,791   76.9% / 36.4%   75.3% / 33.1%   61.5% / 23.5%
-  compositional       5,236   22.9% / 12.5%   32.1% / 21.4%   68.3% / 37.2%
+  all                12,576   50.7% / 27.2%   57.1% / 29.4%   66.4% / 35.7%
+  chained             6,785   28.2% / 19.3%   41.4% / 26.3%   70.7% / 46.2%
+  flat                5,791   76.9% / 36.4%   75.4% / 33.0%   61.5% / 23.5%
+  compositional       5,236   22.9% / 12.5%   40.0% / 21.6%   68.4% / 37.2%
   inference           1,549   46.4% / 42.2%   46.4% / 42.2%   78.5% / 76.4%
-  comparison          3,040   74.4% / 69.4%   73.2% / 61.8%   58.3% / 38.7%
-  bridge_comparison   2,751   79.8% /  0.0%   77.6% /  1.3%   65.0% /  6.7%
+  comparison          3,040   74.4% / 69.4%   73.3% / 61.8%   58.3% / 38.7%
+  bridge_comparison   2,751   79.8% /  0.0%   77.7% /  1.2%   65.0% /  6.7%
 ```
 
 **`chained` is the result.** `compositional` and `inference` questions chain one fact into
@@ -324,8 +324,39 @@ answered the question. That note is the only warning that two live values might 
 contradiction rather than a legitimate multi-valued slot. Three tests in
 `tests/test_server.py` caught the trade.
 
-**What it still does not reach: 83% of the gain, and one whole question type.**
-`inference` gains **nothing** — 46.4% before and after — and the reason is not a bug. Those
+**Predicates are matched on content tokens, and comparison frames are excluded.** Two
+refinements measured after the above, worth their own paragraph because the first is not
+what "entailment" suggested.
+
+`date of birth` folds to `born_on`, whose spoken form is "born on" — and questions say
+"when was X born". The predicate was in the question and the *preposition* was not, which
+failed 79% of compositional questions. Matching the content tokens of a predicate name
+(`STOPWORDS` dropped, and **all** remaining tokens required, so `country_of_citizenship`
+still needs both) took the trigger rate from 21% to 38.8%.
+
+That alone would have been a net loss. It also fired on a third of `bridge_comparison`,
+where the walk costs 15.4 points: "which film has the director died later, A or B" names
+`director` and `died_on` — two predicates, a chain by that measure — while being two
+independent lookups whose answers are compared. `intent.is_comparison()` suppresses on the
+**disjunction** rather than on a list of comparative words, because "earlier", "first" and
+"younger" are what this corpus happens to say and a rule built from them would be fitted
+to it. That took `bridge_comparison` back to 0.0% with no cost to `compositional`.
+
+One false positive found on the way: `born_in` and `born_on` share the content token
+`born`, so "when was Alice born" named two predicates and read as a chain — from one word.
+Matches are now deduplicated by what the question said rather than by how many predicates
+answer to it.
+
+**Answers improved and derivations did not.** `chained` answer recall went 35.4% → 41.4%
+and chain recall 26.1% → 26.3%. The walk reaches the far end of the chain far more often
+and does not bring the middle back with it: at k=12 against 26,403 competing claims the
+answer wins a slot and the supporting triples do not. For a library whose pitch is a
+derivation the caller can check, the gap between those two columns is the more interesting
+number, and it is not closing.
+
+**What it still does not reach: 69% of the gain, and one whole question type.**
+`inference` gains **nothing** — 46.4% through every change in this series — and the reason
+is not a bug. Those
 questions ask "who is the maternal grandfather of X"; the evidence is `(X, mother, Y)` and
 `(Y, father, Z)`, and the question names neither `mother` nor `father`. It names a
 *derived* relation. Matching a question's words against stored predicate names cannot

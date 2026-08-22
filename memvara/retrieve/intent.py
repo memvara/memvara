@@ -34,7 +34,7 @@ from enum import Enum
 
 from typing import TYPE_CHECKING, Callable, Iterable, Mapping
 
-from .analyze import tokenize
+from .analyze import STOPWORDS, tokenize
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, annotation only
     from ..schema import PredicateRegistry
@@ -243,19 +243,72 @@ def observed_refs(query: str, predicates: "Iterable[str]",
     return _named_in(query, spoken, fold)
 
 
+def _content(predicate: str) -> frozenset[str]:
+    """The tokens of a predicate name that carry its meaning, without the joinery.
+
+    `born_on` means "born"; the `on` is the preposition that attaches it to a date, and no
+    question says it. Matching the whole phrase therefore missed "when was X born", which
+    is how most people ask — 79% of the compositional questions in `bench/twowiki.py`, all
+    of them naming a predicate the store held.
+
+    Every token has to be present, which is what keeps this from collapsing into a token
+    index: `country_of_citizenship` needs both `country` and `citizenship`, so a question
+    mentioning a country does not thereby name the predicate.
+    """
+    return frozenset(t for t in tokenize(predicate.replace("_", " "))
+                     if t not in STOPWORDS)
+
+
 def _named_in(query: str, spoken: "Mapping[str, str] | Iterable[str]",
               fold: "Callable[[str], str]") -> set[str]:
-    """Which of these predicates the question says out loud, folded and deduplicated.
+    """Which of these predicates the question says, folded and deduplicated.
 
-    Phrases, never tokens. `lives_in` splits into `lives` and `in`, and `in` appears in
-    most English questions, so a token index would read almost every query as naming
-    several predicates — the opposite failure to the one being fixed, and visible only as
-    latency.
+    Content tokens rather than the whole phrase, and *all* of them rather than any. The
+    first is what lets "when was X born" name `born_on`; the second is what stops
+    `lives_in` being named by every question containing `in`. A bare token index would
+    read almost every query as naming several predicates — the opposite failure to the one
+    this fixes, and visible only as latency.
     """
-    padded = " " + _WORDS.sub(" ", query.lower()).strip() + " "
+    tokens = set(tokenize(query))
     pairs = (spoken.items() if isinstance(spoken, Mapping)
              else ((phrase, phrase.replace(" ", "_")) for phrase in spoken))
-    return {fold(name) for phrase, name in pairs if f" {phrase} " in padded}
+    # One entry per *thing the question said*, not per predicate that answers to it.
+    # `born_in` and `born_out` both reduce to `born`, so "when was Alice born" matched two
+    # predicates and read as a chain — from one word. Which of them the caller sees is
+    # settled on the name so two stores holding the same schema agree.
+    best: dict[frozenset[str], str] = {}
+    for _phrase, name in pairs:
+        parts = _content(name)
+        if parts and parts <= tokens:
+            folded = fold(name)
+            if folded < best.get(parts, folded + "\uffff"):
+                best[parts] = folded
+    return set(best.values())
+
+
+def is_comparison(query: str) -> bool:
+    """Is this about which of two named things, rather than about a chain?
+
+    A disjunction between alternatives is a comparison frame. "Which film came out
+    earlier, A or B" is answered by looking both up and ranking them; there is no join
+    between the halves to walk, and the evidence for one says nothing about the other.
+
+    It matters because a predicate count cannot tell the two apart. "Which film has the
+    director died later, A or B" names `director` and `died_on` — two predicates, a chain
+    by that measure — while being two independent lookups whose answers are compared.
+    Measured on 2WikiMultihopQA, running the walk on that family costs 15.4 points,
+    because it spends `k` on a hub's neighbours instead of on the second half.
+
+    The disjunction, and not a list of comparative words. "Earlier", "first" and "younger"
+    are what that corpus happens to use, and a rule built from them would be fitted to it.
+    The disjunction is the structure underneath and holds for phrasings nobody wrote down.
+
+    >>> is_comparison("Which film came out earlier, The Wrong Box or Soft Shoes?")
+    True
+    >>> is_comparison("When was Britannicus's father born?")
+    False
+    """
+    return " or " in f" {query.lower().strip()} "
 
 
 def classify(query: str, registry: "PredicateRegistry | None" = None) -> Intent:
@@ -316,7 +369,8 @@ def classify(query: str, registry: "PredicateRegistry | None" = None) -> Intent:
         return Intent.TEMPORAL
     if (tokens & RELATIONAL_MARKERS or len(_POSSESSIVE.findall(query)) > 1
             or _BETWEEN_AND.search(query)
-            or (registry is not None and len(predicate_refs(query, registry)) > 1)):
+            or (registry is not None and not is_comparison(query)
+                and len(predicate_refs(query, registry)) > 1)):
         return Intent.RELATIONAL
     if tokens & LOOKUP_MARKERS:
         # A pointed question with no time and no relation in it. One row answers it, and
