@@ -539,10 +539,28 @@ class HybridRetriever:
         if not self.intent_weighting:
             return _Weights(self.w_vector, self.w_lexical, self.w_graph,
                             self.w_temporal, None)
-        intent = Intent.TEMPORAL if timed else classify(query)
+        shape = classify(query, self.registry)
+        intent = Intent.TEMPORAL if timed else shape
         vector, lexical, graph, temporal = intent_weights(
             intent, vector=self.w_vector, lexical=self.w_lexical, graph=self.w_graph,
             temporal=self.w_temporal)
+        if timed and shape is Intent.RELATIONAL:
+            # A question can be about a chain *and* about an instant, and the enum can
+            # only hold one of them. Naming an instant used to answer both: `timed`
+            # overrode the classifier outright, so `Intent.TEMPORAL`'s multipliers
+            # applied, and that row switches the graph leg off.
+            #
+            # The override earns its place for the temporal leg — a caller who resolved
+            # an instant has said more about time than any word could — but it was never
+            # meant to say anything about chains, and it silently said the strongest
+            # possible thing. "Where was Alice's employer based in 2019" is exactly the
+            # query this library exists for, and it was the shape that lost the walk.
+            #
+            # So the temporal row still decides three legs and the graph leg keeps the
+            # weight the query shape asked for. `Explanation.intent` still reports
+            # `temporal`, which is the honest primary reading; `graph_rank` on the rows
+            # says the walk ran.
+            graph = self.w_graph
         return _Weights(vector, lexical, graph, temporal, intent)
 
     def _observe(self, rec: Recorder, query: str, results: Sequence[Retrieved],

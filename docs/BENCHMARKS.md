@@ -151,8 +151,8 @@ PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-gr
 |---|---:|---|
 | LOCOMO, 1,531 questions | **0** | nothing — the two reports are byte-identical |
 | LongMemEval oracle, 500, `--share-store` | **78** | no R@k moved; MRR −0.5 on `single-session-preference`, −0.1 on `multi-session` |
-| `bench/multihop.py` (synthetic) | 4,498 | **2.9% → 21.6%** at k=12, **7.6% → 50.4%** at k=25 |
-| `bench/multihop.py`, **as shipped** | 4,498 | **nothing** — the intent gate routes 2 of the 3 question families past the walk |
+| `bench/multihop.py` (synthetic), gate off | 4,498 | **2.9% → 20.0%** at k=12, **7.6% → 50.0%** at k=25 |
+| `bench/multihop.py`, **as shipped** | 4,498 | **2.9% → 6.4%** at k=12, **7.6% → 21.8%** at k=25 |
 
 The leg walks *claims*, and both public runs are episode retrieval: `SalienceGate` drops
 any turn whose role is not `user`, LOCOMO writes each turn under the speaker's name, and
@@ -173,28 +173,51 @@ could previously get by hand (take the seed entity off the top hit and call
 
 ```
   set           k   search   +graph  +graph!  search x2  traverse  +min_hops    +both   linked
-  two-hop      12     4.0%     4.0%    31.7%      64.3%     69.7%     100.0%   100.0%    99.7%
-  two-hop      25     9.3%     9.3%    73.3%      96.3%    100.0%     100.0%   100.0%    99.7%
-  three-hop    25     4.0%     4.0%     4.7%       4.7%     34.7%      48.7%   100.0%    46.7%
-  all          12     2.9%     2.9%    21.6%      43.1%     46.4%      78.7%    83.1%    77.8%
-  all          25     7.6%     7.6%    50.4%      65.8%     78.2%      82.9%   100.0%    82.0%
+  two-hop      12     4.0%     9.3%    29.7%      64.3%     69.7%     100.0%   100.0%    99.7%
+  two-hop      25     9.3%    30.3%    72.7%      96.3%    100.0%     100.0%   100.0%    99.7%
+  three-hop    25     4.0%     4.7%     4.7%       4.7%     34.7%      48.7%   100.0%    46.7%
+  all          12     2.9%     6.4%    20.0%      43.1%     46.4%      78.7%    83.1%    77.8%
+  all          25     7.6%    21.8%    50.0%      65.8%     78.2%      82.9%   100.0%    82.0%
 ```
 
 **`+graph` is the shipped configuration and `+graph!` is the same with
-`intent_weighting=False`. The gap between them is the second finding, and it is not a
-small one.** Two of the three question families here contain no word in
-`intent.RELATIONAL_MARKERS` — "which city is the company X works at based in", "who
-founded the company that X works at" — so the gate reads them as `lookup` and routes them
-past the walk. The leg is switched off on exactly the questions it was built for, and the
-column collapses onto `search`.
+`intent_weighting=False`.** The `+graph` column used to read `2.9%` and `7.6%` — exactly
+`search`, as though the leg were not installed.
 
-That is a gap in the vocabulary rather than in the gate: `works at` and `founded` are
-relations by any reading, and both are *predicates in this store's own registry*. The fix
-is to derive the relational markers from the registry's predicate names rather than from a
-hand-written list, which is written down here rather than done, because widening the list
-by hand against a benchmark this repository wrote is how a classifier gets fitted to its
-own corpus. Until then, a deployment turning the graph leg on should turn
-`intent_weighting` off with it and pay the walk on every query.
+**The published reason for that was wrong, and finding out why is the more useful half of
+this entry.** This document, the benchmark's own footnote and the classifier's source
+comment all said the same thing: two of the three question families contain no word in
+`intent.RELATIONAL_MARKERS`, so the gate reads them as `lookup`. They do not contain one,
+and that was not the cause. `evaluate()` passes `as_of=T0` on every call. `_weights` takes
+its `timed` branch whenever an axis is given, the classifier is never consulted, and
+`Intent.TEMPORAL`'s multipliers set the graph weight to **zero**. The column measured a
+configuration in which the leg could not run at all, and three separate documents
+explained the resulting number in terms of a mechanism that never executed.
+
+The `timed` override is right for the temporal leg — a caller who resolved an instant has
+said more about time than any word could — and it was never meant to say anything about
+chains. It said the strongest possible thing silently. *"Where was Alice's employer based
+in 2019"* is the query this library exists for, and it was the shape that lost the walk.
+
+Both halves are now fixed and the numbers above are after both:
+
+* **Naming an instant no longer switches the walk off.** The temporal row still decides
+  the other three legs; the graph leg keeps the weight the query shape asked for.
+* **The classifier counts predicates instead of matching a longer word list.**
+  `intent.predicate_refs` counts how many *distinct* predicates a question names, folded
+  onto canonical names, and two of them is a chain — one predicate is a question about one
+  slot. Derived from `PredicateRegistry`, so no word was added because this benchmark
+  needed it and the rule covers predicates a store learns at runtime. Matched as phrases
+  and never as tokens: `lives_in` splits into `lives` and `in`, and a token index would
+  read almost every question as a chain.
+
+**What is still gated is one family, and it is morphology rather than vocabulary.** "Who
+founded the company that X works at" names `works_at` and `founded_by`, but the store
+holds `founded_by` and the question says "founded the", so the phrase never matches.
+Matching the head token instead was measured and rejected: the head tokens of this
+registry's predicates include `in`, `is`, `do`, `has`, `date` and `place`, which turns
+"what is my name" into a two-predicate chain. A stemmer would close that gap; a longer
+word list would only close it here.
 
 The three-hop rows barely move because `graph_depth` ships at 2; that row measures the
 bound, not the traversal. And this benchmark is synthetic and self-authored — read it as

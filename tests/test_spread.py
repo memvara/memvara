@@ -420,3 +420,41 @@ def test_a_store_that_hydrates_more_than_it_was_asked_for_costs_a_seed_not_a_sea
         assert mem.search("who does Alice report to", k=5)
     finally:
         mem.store.get_claims = real
+
+
+def test_naming_an_instant_no_longer_switches_the_walk_off(mem):
+    """A question can be about a chain *and* about a moment. The enum holds one of them.
+
+    `_weights` overrides the classifier whenever a time axis was passed — a caller who
+    resolved an instant has said more about time than any word could, and deferring to
+    the marker list there would gate the temporal leg off on the one call that named an
+    instant. That override is right, and it was answering a second question nobody asked:
+    `Intent.TEMPORAL`'s multipliers set `graph` to 0.0, so every `as_of=` query lost the
+    walk.
+
+    "Where was Alice's employer based in 2019" is the query a bitemporal memory exists
+    for, and it was the shape that silently ran two legs instead of three. The benchmark
+    passes `as_of=T0` on every call, so its whole `+graph` column measured a path where
+    the leg never ran — and both the benchmark note and the module comment blamed the
+    relational vocabulary for it.
+    """
+    chain = "who does Alice report to"
+    at_an_instant = mem.search(chain, k=10, as_of=T0)
+    assert any(r.explain.graph_rank is not None for r in at_an_instant), (
+        "a time-anchored relational query lost the graph leg"
+    )
+    assert at_an_instant[0].explain.intent == "temporal", (
+        "the primary reading is still temporal; the walk running is not a reclassification"
+    )
+
+
+def test_a_plain_temporal_question_still_does_not_walk(mem):
+    """The other half, and the reason this is not simply `graph: 1.0` on the temporal row.
+
+    "What happened last March" is about when and not about chains. Running the walk on it
+    would spend the caller's `k` on a hub's neighbours — which is what the intent gate
+    exists to prevent, and what it still prevents.
+    """
+    results = mem.search("what happened last March", k=10, as_of=T0)
+    assert results, "the query should still return something"
+    assert all(r.explain.graph_rank is None for r in results)
