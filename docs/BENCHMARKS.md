@@ -153,6 +153,7 @@ PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-gr
 | LongMemEval oracle, 500, `--share-store` | **78** | no R@k moved; MRR −0.5 on `single-session-preference`, −0.1 on `multi-session` |
 | `bench/multihop.py` (synthetic), gate off | 4,498 | **2.9% → 20.0%** at k=12, **7.6% → 50.0%** at k=25 |
 | `bench/multihop.py`, **as shipped** | 4,498 | **2.9% → 6.4%** at k=12, **7.6% → 21.8%** at k=25 |
+| `bench/twowiki.py`, gate off, **public** | 26,403 | **28.2% → 70.7%** at k=12 on chained questions; **−15.4** on flat ones |
 
 The leg walks *claims*, and both public runs are episode retrieval: `SalienceGate` drops
 any turn whose role is not `user`, LOCOMO writes each turn under the speaker's name, and
@@ -207,7 +208,11 @@ Both halves are now fixed and the numbers above are after both:
   `intent.predicate_refs` counts how many *distinct* predicates a question names, folded
   onto canonical names, and two of them is a chain — one predicate is a question about one
   slot. Derived from `PredicateRegistry`, so no word was added because this benchmark
-  needed it and the rule covers predicates a store learns at runtime. Matched as phrases
+  needed it. **How far it reaches is narrower than "derived from the registry" suggests:**
+  `PredicateRegistry.learn()` is called only from the LLM-assisted resolution in
+  `write/pipeline.py`, so an offline store never teaches it and the rule sees the 23
+  builtins alone. `bench/twowiki.py` exposed that — every predicate in that corpus is a
+  learned one, so the rule does not fire there. Matched as phrases
   and never as tokens: `lives_in` splits into `lives` and `in`, and a token index would
   read almost every question as a chain.
 
@@ -219,13 +224,18 @@ registry's predicates include `in`, `is`, `do`, `has`, `date` and `place`, which
 "what is my name" into a two-predicate chain. A stemmer would close that gap; a longer
 word list would only close it here.
 
-**The standing advice is unchanged: a deployment turning the graph leg on should turn
-`intent_weighting` off with it and pay the walk on every query.** The gate costs less
-than it did — it was cancelling the leg outright and now it is not — but `+graph!` is
-still more than twice `+graph` at k=25 on this corpus, and a gate that runs the walk on
-fewer questions than it should is still a gate. The fix narrows the gap; it does not
-close it, and the honest reading of the two columns is that anyone who has decided the
-walk is worth paying for should stop deciding it per query.
+**The standing advice needs a condition on it, which `bench/twowiki.py` supplied.** It
+used to read: a deployment turning the graph leg on should turn `intent_weighting` off
+with it. On public multi-hop data that buys 42 points on chained questions and **costs
+15 on flat ones**, so it is right for a workload of relationship questions and wrong for
+a workload of lookups. Net on a corpus that is 54% chained it is +15.8 points at k=12;
+invert the mix and it inverts.
+
+The honest statement is that the gate is right in principle and badly calibrated: it
+captures almost none of the gain and still pays part of the cost. A deployment should
+turn `intent_weighting` off if its traffic is mostly relationship questions, and leave
+the graph leg off entirely if it is mostly lookups. Neither is a default this repository
+can pick for you, which is why `w_graph` ships at 0.0.
 
 The three-hop rows barely move because `graph_depth` ships at 2; that row measures the
 bound, not the traversal. And this benchmark is synthetic and self-authored — read it as
@@ -244,6 +254,71 @@ mem = Memvara("memory.db", read_w_graph=1.0)
 model-free classifier routes `lookup` and `temporal` queries past the walk entirely — and
 the table above is also what it currently costs. Every multiplier in it other than the two
 gates is 1.0 and stays 1.0 until a per-category sweep moves it.
+
+### The graph leg on public data, with the extractor out of the loop
+
+**The leg is worth 2.5x on multi-hop questions, and costs 15 points on questions that are
+not.** Both halves are new information, and the second is the more useful one.
+
+Everything above this section says the leg is unmeasurable on public data, because LOCOMO
+and LongMemEval are prose and the offline extractor gets 0 claims from LOCOMO's 5,882
+turns. That is a fact about *extraction*, and it was being reported as a fact about
+retrieval. `bench/twowiki.py` separates them: 2WikiMultihopQA ships its evidence as
+`[subject, relation, object]` triples from Wikidata, so they load through `remember()`
+with no extractor running.
+
+Full dev set, 12,576 questions, 26,403 distinct claims in **one shared scope** — every
+question answered against every other question's facts. Each cell is *answer found in the
+returned rows / whole evidence chain returned*:
+
+```
+  k=12
+  set                     n         search         +graph        +graph!
+  all                12,576   50.7% / 27.2%   50.4% / 25.9%   66.5% / 35.7%
+  chained             6,785   28.2% / 19.3%   29.1% / 19.8%   70.7% / 46.2%
+  flat                5,791   76.9% / 36.4%   75.4% / 32.9%   61.5% / 23.5%
+  compositional       5,236   22.9% / 12.5%   24.0% / 13.2%   68.4% / 37.2%
+  inference           1,549   46.4% / 42.2%   46.4% / 42.2%   78.5% / 76.4%
+  comparison          3,040   74.4% / 69.4%   73.3% / 61.8%   58.3% / 38.7%
+  bridge_comparison   2,751   79.8% /  0.0%   77.7% /  1.1%   65.0% /  6.7%
+```
+
+**`chained` is the result.** `compositional` and `inference` questions chain one fact into
+the next — "who is the mother of the director of X" is `director` then `mother` — and the
+leg takes them from **28.2% to 70.7%**. `inference` also carries its derivation: chain
+recall 42.2% → 76.4%, so most answers arrive with every triple that supports them rather
+than with the gold entity alone.
+
+**`flat` is the control, and it did what a control is for.** `comparison` and
+`bridge_comparison` ask which of two independent entities came first. The evidence has two
+ends and no join, the leg has nothing to walk, and turning it on **costs 15.4 points**
+(76.9% → 61.5%) because the walk spends `k` on neighbours of a hub. Had that row improved,
+the `chained` row would be worth much less: it would suggest the leg helps by adding rows
+rather than by following edges.
+
+**So the intent gate is right in principle and badly calibrated in practice.** It exists to
+route flat questions past the walk, and on `flat` it does: 75.4% against search's 76.9%.
+On `chained` it blocks almost the entire gain — 29.1% where 70.7% was available. The
+current gate is close to the worst of both: it captures 0.9 points of a 42-point gain and
+still gives up 3.5 points of chain recall on `flat`, because `comparison` questions say
+"both" and that word is in `RELATIONAL_MARKERS`.
+
+`bridge_comparison` chain recall is 0.0% for `search` and 6.7% ungated. Those chains are
+four hops and `graph_depth` ships at 2, so that row measures the depth bound rather than
+traversal — the same caveat the synthetic benchmark's three-hop rows carry.
+
+**What this does not measure.** Retrieval given claims. The write path never runs, so
+nothing here says anything about extraction, which remains the bottleneck. Quote this as
+evidence about the graph leg or not at all.
+
+Contamination is a smaller problem here than the note in `bench/evalkit.py` describes, and
+structurally rather than by luck: scoring is R@k against gold evidence under `NullLLM`, so
+there is no reader that could have memorised an answer. A contaminated reader inflates
+end-to-end accuracy, which this file does not compute.
+
+These numbers are not comparable to the 2Wiki leaderboard, which retrieves from a
+per-question candidate set. That is reading comprehension; this is recall against 26,403
+competing facts.
 
 ### The temporal leg, and the abstention that is the actual finding
 

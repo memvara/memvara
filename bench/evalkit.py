@@ -286,8 +286,32 @@ LME_M = DatasetSpec(
     note="500 instances, ~500 sessions each. 2.7 GB.",
 )
 
+#: The one public dataset here whose evidence is already claims.
+#:
+#: LOCOMO and LongMemEval are prose, so measuring retrieval on them measures extraction
+#: first — and the offline extractor gets 0 claims from LOCOMO's 5,882 turns, which makes
+#: the graph leg unmeasurable rather than unhelpful. 2WikiMultihopQA ships its evidence as
+#: `[subject, relation, object]` triples from Wikidata, so they load through `remember()`
+#: with no extractor in the loop. That isolates the question the graph leg is actually
+#: about, and it is the only public instrument here that can see it at all.
+#:
+#: Contamination bites less than it does on the other two, and for a structural reason:
+#: `bench/twowiki.py` scores R@k against gold evidence with `NullLLM`, so there is no
+#: reader to have memorised anything. See the note above on why that matters.
+TWOWIKI_DEV = DatasetSpec(
+    key="twowiki_dev",
+    filename="2wiki_dev.json",
+    url=("https://huggingface.co/datasets/voidful/2WikiMultihopQA/"
+         "resolve/main/dev.json"),
+    size_bytes=55_934_464,
+    licence="Apache-2.0 (Alab-NII/2wikimultihop) — public mirror, no gate, no token",
+    note=("12,576 dev questions, 34 relations, ~31k evidence triples. Chains are 2 hops "
+          "(9,595) and 4 (2,806). Types: compositional, inference, comparison, "
+          "bridge_comparison — the first two are transitive, the other two are not."),
+)
+
 DATASETS: dict[str, DatasetSpec] = {
-    d.key: d for d in (LOCOMO10, LME_ORACLE, LME_S, LME_M)
+    d.key: d for d in (LOCOMO10, LME_ORACLE, LME_S, LME_M, TWOWIKI_DEV)
 }
 
 
