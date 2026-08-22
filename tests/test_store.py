@@ -2553,7 +2553,13 @@ def test_omittable_names_every_member_a_backend_may_actually_leave_out():
     """
     from memvara.store.base import OMITTABLE, Store
 
-    assert set(OMITTABLE) <= set(Store.__protocol_attrs__), (
+    # `vars(Store)`, not `Store.__protocol_attrs__`: that attribute arrived in CPython
+    # 3.12 and this package supports 3.10. The class dict of a Protocol is its declared
+    # members, on every version, and it agrees with `__protocol_attrs__` exactly where
+    # both exist.
+    members = {name for name in vars(Store) if not name.startswith("_")}
+
+    assert set(OMITTABLE) <= members, (
         "OMITTABLE names something that is not on the protocol at all"
     )
     assert "get_claims" in OMITTABLE, (
@@ -2567,4 +2573,4 @@ def test_omittable_names_every_member_a_backend_may_actually_leave_out():
     from memvara.store import SQLiteStore
     from memvara.store.remote import RemoteStore
     for cls in (SQLiteStore, RemoteStore):
-        assert not [m for m in Store.__protocol_attrs__ if not hasattr(cls, m)]
+        assert not [m for m in members if not hasattr(cls, m)]
