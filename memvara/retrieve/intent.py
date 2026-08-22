@@ -32,7 +32,12 @@ from __future__ import annotations
 import re
 from enum import Enum
 
+from typing import TYPE_CHECKING
+
 from .analyze import tokenize
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, annotation only
+    from ..schema import PredicateRegistry
 
 
 class Intent(str, Enum):
@@ -118,11 +123,19 @@ _YEAR = re.compile(r"^(?:19|20|21)\d\d$")
 #: works at" contain no word in it — so the shipped configuration scores what plain
 #: `search` scores and the leg's whole gain is gated away (`docs/BENCHMARKS.md`). Both
 #: `works at` and `founded` are relations by any reading, and both are *predicates in the
-#: store's own registry*, which is the shape of the answer: derive the markers from
-#: `PredicateRegistry` rather than from a list here. That is not done, because adding
-#: those two words because a benchmark this repository wrote needs them is how a
-#: classifier gets fitted to its own corpus, and the next person would have no way to
-#: tell which entries were reasoned and which were retrofitted.
+#: store's own registry*, which is the shape of the answer: derive the signal from
+#: `PredicateRegistry` rather than from a list here.
+#:
+#: That is now done, and this list is unchanged by it. `predicate_refs` counts how many
+#: *distinct* predicates a question names, and two of them is a chain — one predicate is
+#: a question about one slot. Deriving rather than extending is what keeps the classifier
+#: off its own corpus: no word was added because a benchmark needed it, and the rule
+#: applies to every predicate a store ever learns, including ones this repository has
+#: never seen.
+#:
+#: The list stays because it catches what the registry cannot. "Who is Alice's manager"
+#: names a relation in English and no predicate at all; `manager` is a role noun, not a
+#: slot name. The two signals fail in opposite directions, which is why both run.
 RELATIONAL_MARKERS: frozenset[str] = frozenset("""
     whose between via through connect connects connected connection connections
     relate relates related relation relations relationship relationships
@@ -157,7 +170,57 @@ _POSSESSIVE = re.compile(r"['’]s\b")
 _BETWEEN_AND = re.compile(r"\bbetween\b.+\band\b", re.IGNORECASE)
 
 
-def classify(query: str) -> Intent:
+#: Non-word characters collapse to spaces before a predicate phrase is looked for, so
+#: "works at?" and "works-at" both match `works at`.
+_WORDS = re.compile(r"[^a-z0-9]+")
+
+#: Cache of predicate phrases per registry, keyed on how many predicates it has learned.
+#: A registry grows at runtime — `learn()` adds a predicate the moment a store sees one —
+#: so a plain memo would go stale silently. `learned_count` moves whenever it does.
+_PHRASES: dict[tuple[int, int], frozenset[str]] = {}
+
+
+def _phrases(registry: "PredicateRegistry") -> frozenset[str]:
+    """Every predicate name and alias the registry knows, spelled the way a person would.
+
+    `works_at` becomes `works at`, because a question says the second and the registry
+    stores the first. Matched as phrases and never as tokens: `lives_in` splits into
+    `lives` and `in`, and `in` appears in most English questions, so a token index would
+    make almost every query look relational.
+    """
+    key = (id(registry), registry.learned_count)
+    cached = _PHRASES.get(key)
+    if cached is None:
+        cached = frozenset(
+            name.replace("_", " ")
+            for spec in registry.all_specs()
+            for name in (spec.name, *spec.aliases)
+        )
+        _PHRASES.clear()        # one registry per process in practice; bound the dict
+        _PHRASES[key] = cached
+    return cached
+
+
+def predicate_refs(query: str, registry: "PredicateRegistry") -> set[str]:
+    """The distinct predicates a question names, folded onto their canonical names.
+
+    Two of them is the signal this exists for: one predicate is a question about one
+    slot, which is a lookup, and two is a question that has to pass through one fact to
+    reach another, which is what the graph leg is for. "Which city is the company Ada
+    works at based in?" names `works_at` and `lives_in`, shares no word with
+    `RELATIONAL_MARKERS`, and is exactly the shape the hand-written vocabulary misses.
+
+    Folded before counting, so `based_in` and `located_in` are one predicate rather than
+    two — otherwise a question that spelled the same relation twice would look like a
+    chain.
+    """
+    padded = " " + _WORDS.sub(" ", query.lower()).strip() + " "
+    return {registry.normalize(phrase.replace(" ", "_"))
+            for phrase in _phrases(registry)
+            if f" {phrase} " in padded}
+
+
+def classify(query: str, registry: "PredicateRegistry | None" = None) -> Intent:
     """The query's shape, as one of four intents. Deterministic and model-free.
 
     Order matters and encodes a priority rather than a taxonomy. A question can be both
@@ -214,7 +277,8 @@ def classify(query: str) -> Intent:
     if tokens & TEMPORAL_MARKERS or any(_YEAR.match(t) for t in tokens):
         return Intent.TEMPORAL
     if (tokens & RELATIONAL_MARKERS or len(_POSSESSIVE.findall(query)) > 1
-            or _BETWEEN_AND.search(query)):
+            or _BETWEEN_AND.search(query)
+            or (registry is not None and len(predicate_refs(query, registry)) > 1)):
         return Intent.RELATIONAL
     if tokens & LOOKUP_MARKERS:
         # A pointed question with no time and no relation in it. One row answers it, and

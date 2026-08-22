@@ -284,6 +284,39 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   operator with write access can remove a row. The hash-chained log is a different feature
   and is commercial. What this defends against is a delete no record was ever written for.
 
+- **The graph leg now actually runs in the shipped configuration.** It was installed,
+  weighted and switched off by two separate things, and the published explanation named
+  neither of them.
+
+  **Naming an instant switched the walk off.** `HybridRetriever._weights` overrides the
+  classifier whenever `as_of` / `valid_at` / `known_at` is given — right for the temporal
+  leg, since a caller who resolved an instant has said more about time than any word
+  could. But the override sets the whole intent, and `Intent.TEMPORAL`'s multipliers put
+  the graph weight at zero, so every time-anchored query ran two legs instead of three.
+  "Where was Alice's employer based in 2019" is the query a bitemporal memory exists for
+  and it was the shape that lost the walk. The temporal row still decides the other three
+  legs; the graph leg now keeps the weight the query shape asked for. A plain temporal
+  question still does not walk.
+
+  **The classifier now counts predicates rather than matching a word list.**
+  `intent.predicate_refs()` counts how many *distinct* predicates a question names, and
+  two of them is a chain — one predicate is a question about one slot. Derived from
+  `PredicateRegistry`, so it covers predicates a store learns at runtime and no word was
+  added because a benchmark needed one. `RELATIONAL_MARKERS` is unchanged and still runs:
+  "who is Alice's manager" names a relation in English and no predicate at all. The two
+  signals fail in opposite directions. Matched as phrases, never tokens — `lives_in`
+  splits into `lives` and `in`, and a token index would read almost every question as a
+  chain. `classify()` takes an optional `registry` and behaves exactly as before without
+  one.
+
+  Measured on `bench/multihop.py`, shipped configuration: **2.9% → 6.4% at k=12 and
+  7.6% → 21.8% at k=25**; two-hop questions **9.3% → 30.3% at k=25**. The ungated ceiling
+  is 50.0%, and the remaining gap is one question family where the store holds
+  `founded_by` and the question says "founded the" — morphology, not vocabulary. Matching
+  head tokens instead was measured and rejected: this registry's head tokens include
+  `in`, `is`, `do` and `has`, which makes "what is my name" a chain. `docs/BENCHMARKS.md`
+  carries the table and the correction.
+
 - **A graph leg in `search()`**, off by default. `GraphTraverser` has been able to answer
   "who does Alice's manager report to" since it landed, and `bench/multihop.py` measured
   what that is worth — 34.7% against 4.7% for a search-then-search loop at three hops.

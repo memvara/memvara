@@ -181,10 +181,22 @@ def graph_reader(mem: Memvara, *, w_graph: float = 1.0, depth: int = 2,
     walk here is bounded exactly as `mem.neighborhood()`'s is.
 
     `gated` is `intent_weighting`, and it is a column of its own below rather than a
-    footnote: the shipped default routes a query the classifier reads as a `lookup` past
-    the walk entirely, and two of the three question families here are exactly that —
-    "who founded the company that X works at" contains no word in the relational
-    vocabulary. The gap between the two columns is what the gate costs on this workload.
+    footnote: the gap between the two columns is what the gate costs on this workload.
+
+    **That gap used to have the wrong explanation, including here.** This docstring said
+    the cause was vocabulary — that two of the three families contain no relational word.
+    They do not, and it was not the cause: `evaluate` passes `as_of=T0` on every call, so
+    `_weights` took its `timed` branch, `classify` was never reached, and
+    `Intent.TEMPORAL`'s multipliers set the graph weight to zero. The whole `+graph`
+    column measured a configuration in which the leg could not run at all.
+
+    Both halves are fixed. The classifier now counts distinct predicates, so
+    "which city is the company X works at based in" reads as a chain without any word
+    being added to the relational list; and naming an instant no longer switches the walk
+    off. What remains gated is "who founded the company that X works at", and that one is
+    morphology rather than vocabulary — the store holds `founded_by` and the question
+    says "founded the", so the phrase never matches. A stemmer would close it; a longer
+    word list would only close it here.
     """
     return HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=w_graph,
                            graph_depth=depth, traverser=mem.traverser,
@@ -274,10 +286,14 @@ def accuracy() -> None:
                   f" {got['linked']:>7.1f}%")
     print("  `+graph` is the shipped configuration and `+graph!` the same with "
           "intent_weighting off.\n   The gap between them is what the query-shape gate "
-          "costs here: two of the three\n   question families contain no word in the "
-          "relational vocabulary, so the gate\n   routes them past the walk. Both walk "
-          "two hops, the shipped `graph_depth`, which\n   is why the three-hop rows "
-          "measure that bound rather than traversal.")
+          "still costs here. It was larger, and\n   for a reason this note used to get "
+          "wrong: every call below passes `as_of=T0`, which\n   made the intent "
+          "`temporal` before the classifier ran, and the temporal row sets the\n   "
+          "graph weight to zero. What is left is one family — \"who founded the company "
+          "that\n   X works at\" — where the store holds `founded_by` and the question "
+          "says \"founded the\".\n   Both walk two hops, the shipped `graph_depth`, "
+          "which is why the three-hop rows\n   measure that bound rather than "
+          "traversal.")
 
     question, seed, gold, hops, preds = two[0]
     print(f"\n  example: {question}\n    gold: {gold}")

@@ -145,3 +145,75 @@ def test_adding_the_coarse_units_did_not_pull_in_ordinary_questions() -> None:
     were, so the widened vocabulary bought recall without spending precision."""
     assert classify("who does Alice report to") is Intent.RELATIONAL
     assert classify("what is my name") is Intent.LOOKUP
+
+
+def test_two_predicates_in_one_question_is_a_chain_and_one_is_a_lookup() -> None:
+    """The vocabulary gap the hand-written marker list cannot close.
+
+    "Which city is the company Ada works at based in?" names `works_at` and `lives_in`,
+    shares no word with `RELATIONAL_MARKERS`, and is a two-hop question by construction.
+    Adding "works at" to the list would fit the classifier to the corpus that needed it —
+    the module comment says so — so the signal comes from the store's own registry
+    instead, and the rule is structural: one predicate is a question about one slot, two
+    is a question that passes through one fact to reach another.
+
+    The lookups are the half that matters more. `name`, `city` and `birthday` are all
+    predicates, so a rule that fired on *any* predicate would route the purest lookup
+    there is into the graph leg.
+    """
+    from memvara.schema import PredicateRegistry
+
+    registry = PredicateRegistry()
+    chains = ["Which city is the company Ada works at based in?",
+              "what city does the company Bruno works at operate from"]
+    lookups = ["what is my name", "where do I live", "what languages do I speak",
+               "what is my email"]
+
+    for query in chains:
+        assert classify(query, registry) is Intent.RELATIONAL, query
+    for query in lookups:
+        assert classify(query, registry) is not Intent.RELATIONAL, query
+
+
+def test_the_rule_is_additive_and_off_without_a_registry() -> None:
+    """No registry, no change: `classify(query)` answers exactly what it used to.
+
+    The parameter is optional because `classify` is public and callers exist that have no
+    registry to hand. Nothing that was relational stops being relational either — the new
+    rule is another way to reach `RELATIONAL`, never a way to leave it.
+    """
+    from memvara.schema import PredicateRegistry
+
+    registry = PredicateRegistry()
+    assert classify("Which city is the company Ada works at based in?") is Intent.LOOKUP
+    assert classify("who does Alice report to", registry) is Intent.RELATIONAL
+    assert classify("what happened between 2019 and 2021", registry) is Intent.TEMPORAL
+
+
+def test_predicates_are_matched_as_phrases_not_as_tokens() -> None:
+    """`lives_in` splits into `lives` and `in`, and `in` is in most English questions.
+
+    A token index would make almost every query look like it named two predicates, which
+    would route the whole workload into the graph leg — the opposite failure to the one
+    being fixed, and harder to notice because it only shows up as latency.
+    """
+    from memvara.retrieve.intent import predicate_refs
+    from memvara.schema import PredicateRegistry
+
+    registry = PredicateRegistry()
+    assert predicate_refs("what is in the box and in the bag", registry) == set()
+    assert predicate_refs("she lives in Lisbon", registry) == {"lives_in"}
+
+
+def test_aliases_fold_before_they_are_counted() -> None:
+    """Otherwise a question that spells one relation two ways looks like a chain.
+
+    `based_in` and `located_in` are both `lives_in`; counting them separately would make
+    "is the office located in the city it is based in" a two-predicate question about one
+    predicate.
+    """
+    from memvara.retrieve.intent import predicate_refs
+    from memvara.schema import PredicateRegistry
+
+    registry = PredicateRegistry()
+    assert predicate_refs("is it based in or located in Lisbon", registry) == {"lives_in"}
