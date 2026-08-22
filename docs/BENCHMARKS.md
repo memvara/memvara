@@ -136,11 +136,12 @@ until this run**: `HybridRetriever` broke score ties on `claim.id`, a fresh `uui
 ingest, so two ingests of one corpus ranked differently and the numbers drifted 0.07
 points. Ties now break on a content hash and three full runs are byte-identical.
 
-### The graph leg, and why no row above moves
+### The graph leg, and what it costs on the corpora above
 
 `w_graph > 0` adds a third retrieval leg: a bounded walk out of the entities the vector
 and lexical legs just named (`memvara/retrieve/spread.py`). **It ships at `w_graph=0.0`,
-and the reason is that neither benchmark above can see it.**
+because neither corpus above holds enough of a graph for the walk to pay for itself:
+LOCOMO cannot see the leg at all, and LongMemEval sees it lose.**
 
 ```bash
 PYTHONPATH=. python3 bench/locomo.py      --score retrieval --w-graph 1.0
@@ -150,11 +151,11 @@ PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-gr
 | instrument | claims in the store | what the leg changed |
 |---|---:|---|
 | LOCOMO, 1,531 questions | **0** | nothing — the two reports are byte-identical |
-| LongMemEval oracle, 500, `--share-store` | **78** | no R@k moved; MRR −0.5 on `single-session-preference`, −0.1 on `multi-session` |
+| LongMemEval oracle, 500, `--share-store` | **78** | **a loss**: single-session-user R@12 92.2 → 90.6, all 70.4 → 70.1, nothing gained |
 | `bench/multihop.py` (synthetic), gate off | 4,498 | **2.9% → 20.0%** at k=12, **7.6% → 50.0%** at k=25 |
 | `bench/multihop.py`, **as shipped** | 4,498 | **2.9% → 6.4%** at k=12, **7.6% → 21.8%** at k=25 |
 | `bench/twowiki.py`, gate off, **public** | 26,403 | **28.2% → 70.7%** at k=12 on chained questions; **−15.4** on flat ones |
-| `bench/twowiki.py`, **as shipped** | 26,403 | **28.2% → 41.4%** answer and **25.5% → 38.8%** chain on chained questions, no cost on flat |
+| `bench/twowiki.py`, **as shipped** | 26,403 | **28.2% → 41.4%** answer and **25.5% → 38.8%** chain on chained questions; −1.5 on flat |
 
 The leg walks *claims*, and both public runs are episode retrieval: `SalienceGate` drops
 any turn whose role is not `user`, LOCOMO writes each turn under the speaker's name, and
@@ -242,10 +243,33 @@ The three-hop rows barely move because `graph_depth` ships at 2; that row measur
 bound, not the traversal. And this benchmark is synthetic and self-authored — read it as
 an illustration of a mechanism, which is not evidence for a default.
 
-**So it is opt-in, and the guardrails are why it is opt-in rather than rejected.** Every
-R@k in both public runs held exactly, including the two the thesis rests on:
-knowledge-update 91.0 → 91.0 and single-session-user 92.2 → 92.2. The precedent for
-shipping a measured stage at zero is the MMR rejection recorded in `hybrid.py`.
+**So it is opt-in, and on a store with almost no graph in it, turning it on costs
+something.** On LongMemEval the leg loses 1.6 points of single-session-user R@12
+(92.2 → 90.6) and 0.3 overall (70.4 → 70.1), and no category gains. Both runs ingest the
+same 78 claims and 12 reinforcements, so every part of that difference is the read path:
+a third leg that reaches almost nothing still votes, and fusion reads positions, so it
+puts a real zero on every candidate the walk did not touch. That is the same failure the
+temporal leg's `MIN_PROXIMITY` floor exists to prevent, and the graph leg has no
+equivalent. The precedent for shipping a measured stage at zero is the MMR rejection
+recorded in `hybrid.py`.
+
+<div data-type="panel-warning">
+
+**This paragraph used to claim the opposite, and the number moved under it.** It read
+"every R@k in both public runs held exactly ... single-session-user 92.2 → 92.2", which
+was true when it was written and stopped being true three commits later.
+
+The cause is the gate work in this section. Before it, `evaluate()` passing an instant
+forced `Intent.TEMPORAL`, whose multipliers zero the graph weight, so the leg barely ran
+on LongMemEval and could not cost anything. Fixing that, and then teaching the classifier
+to read vocabulary off retrieved rows, let the leg fire on queries it used to skip — on a
+store holding 78 claims, where there is nothing to walk to.
+
+Nothing caught it, because no test asserts a benchmark figure and the commits that moved
+this number edited a different file. Re-measured on `016afbf`; raw output is the two
+commands above.
+
+</div>
 
 ```python
 mem = Memvara("memory.db", read_w_graph=1.0)
