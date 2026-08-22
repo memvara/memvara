@@ -301,8 +301,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   **The classifier now counts predicates rather than matching a word list.**
   `intent.predicate_refs()` counts how many *distinct* predicates a question names, and
   two of them is a chain — one predicate is a question about one slot. Derived from
-  `PredicateRegistry`, so it covers predicates a store learns at runtime and no word was
-  added because a benchmark needed one. `RELATIONAL_MARKERS` is unchanged and still runs:
+  `PredicateRegistry`, so it grows with the registry rather than with this file. **How far that
+  reaches is narrower than it sounds, and worth stating**: `PredicateRegistry.learn()` is
+  called only from the LLM-assisted predicate resolution in `write/pipeline.py`, so an
+  offline store — or any predicate written straight through `remember()` — never teaches
+  it. On such a store the rule sees the 23 builtins and nothing else. That is a real
+  limit on the gain, and `bench/twowiki.py` is what made it visible: its predicates
+  (`director`, `mother`, `date of birth`) are all learned ones, so the rule does not fire
+  there at all. No word was added because a benchmark needed one. `RELATIONAL_MARKERS` is unchanged and still runs:
   "who is Alice's manager" names a relation in English and no predicate at all. The two
   signals fail in opposite directions. Matched as phrases, never tokens — `lives_in`
   splits into `lives` and `in`, and a token index would read almost every question as a
