@@ -148,10 +148,12 @@ list.
   (Zep's φ_bfs). It closes the gap between what `neighborhood()` can answer and what
   `search()` can: the caller no longer has to know the seed entity. **It ships at
   `w_graph=0.0`** — the measured table is in `docs/BENCHMARKS.md`, and the short version
-  is that neither public retrieval benchmark can see it, because both run the offline
-  write path over conversational data it extracts almost nothing from — 0 claims from
-  LOCOMO and 78 from LongMemEval. The only measured gain is on a synthetic multi-hop
-  workload, and there the shipped configuration gates it away entirely.
+  is that what the leg is worth depends on how much graph the store holds, and the two
+  numbers point opposite ways. On 2WikiMultihopQA, where 26,403 claims load through
+  `remember()` with no extractor running, it takes chained questions from 28.2% to 41.4%
+  at k=12. On LOCOMO and LongMemEval the offline write path extracts almost nothing —
+  0 claims and 78 — and there the leg is inert on the first and a small loss on the
+  second, 92.2% to 90.6% on single-session-user. A default cannot be right for both.
 - **The temporal leg of retrieval** — `Store.episodes_near()`, `retrieve/temporal.py`, and
   a fourth leg over raw turns ranked on proximity to the instant the search was asked
   about. Time was a filter and a multiplier on the read path and never a candidate

@@ -49,6 +49,25 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   file, and an older build must not open it and write to a text index whose format it does
   not understand.
 
+- **A published guardrail figure was stale, and the correction argues harder for the
+  default than the original claim did.** `docs/BENCHMARKS.md` said that turning the graph
+  leg on moved no `R@k` in either public run, and named single-session-user 92.2 → 92.2 as
+  one of the two rows the thesis rests on. Re-measured on this tree it is **92.2 → 90.6**,
+  with the overall figure 70.4 → 70.1 and no category gaining.
+
+  No code changed to cause it and no behaviour is wrong. The gate work earlier in this
+  release is what moved it: a query that named an instant used to force `Intent.TEMPORAL`,
+  whose multipliers zero the graph weight, so on LongMemEval the leg mostly did not run.
+  Once it could run, and once the classifier could read vocabulary off retrieved rows, it
+  began firing on a store that holds 78 claims across 940 sessions — where a walk reaches
+  almost nothing and still votes, and fusion reads positions. Nothing caught it because no
+  test asserts a benchmark figure and those commits edited a different file.
+
+  `w_graph` still ships at **0.0**, now on evidence rather than on an absence of it, and
+  `docs/ROADMAP.md`'s summary of the leg is corrected to match: what the leg is worth
+  depends on how much graph the store holds, and the public corpora disagree because they
+  hold 26,403 claims and 78.
+
 ### Added
 
 - **`now` on `Consolidator.run()`**, which evaluates the whole pass at one instant the way
