@@ -284,6 +284,34 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   operator with write access can remove a row. The hash-chained log is a different feature
   and is commercial. What this defends against is a delete no record was ever written for.
 
+- **`retrieve/compose.py`: relation terms that name a chain rather than a predicate.**
+  "Who is the maternal grandfather of X" is a two-hop question over `mother` and `father`
+  that names neither. Every rule in `intent.py` counts predicates a question says out
+  loud, so this shape was invisible to all of them — on 2WikiMultihopQA's `inference`
+  family the walk ran on none of 1,549 questions.
+
+  `compose.acquire()` asks a model **once, about a vocabulary**: given the predicates a
+  store uses, which English relation terms compose from two or more of them. The read
+  path does a set-membership test against the answer. `intent.py` promises to be
+  model-free and `hybrid.py` promises reproducible retrieval, and a search that could
+  block on an API call breaks both — so this is shaped like `resolve_predicate`, paid once
+  per vocabulary rather than once per query.
+
+  Measured on `inference` at k=12: **53.2% → 83.2%** answer and **50.2% → 81.2%** chain.
+  `compositional`, `comparison` and `bridge_comparison` are unchanged. A disjunction is
+  still a comparison when it names a derived relation, so `is_comparison` runs first.
+
+  `HybridRetriever(derived_terms=...)` is empty by default and a backend without
+  `compose_relations` yields nothing, so a store with no model behaves exactly as it did.
+  `RelationComposer` is its own Protocol rather than a third method on `LLM`: adding a
+  member to a `runtime_checkable` protocol makes every implementation that predates it
+  fail `isinstance`, which is how #26 broke a downstream type check.
+
+  The model's answer is filtered rather than trusted — arity below two, a term that is
+  itself a predicate, a phrase longer than three tokens, a non-integer arity — and a
+  backend that raises costs nothing, because an enrichment that raised into
+  `Memvara.__init__` would make an optional feature a startup dependency.
+
 - **Predicates are matched on content tokens, and comparison frames are excluded from
   the chain rule.** `date of birth` folds to `born_on`, whose spoken form is "born on",
   and questions say "when was X born" — the predicate was in the question and the

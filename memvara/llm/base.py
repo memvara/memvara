@@ -208,6 +208,33 @@ provenance, so it must be exact.
 Return an empty list when a turn carries no durable fact. That is the common case, and \
 an empty list is a correct answer."""
 
+COMPOSE_SYSTEM = (
+    "You are given the predicate names a memory store uses. Name the English relation "
+    "terms a person would use that are NOT one of those predicates but are a composition "
+    "of two or more of them, and give the number of predicates each composes from.\n"
+    "Example: given father, mother, spouse — 'grandfather' is father-of-father or "
+    "father-of-mother, so it composes from 2. 'father-in-law' is father-of-spouse, 2.\n"
+    "Do not list a term that is already one of the predicates. Do not list a term that "
+    "composes from only one. Terms of at most three words. If none apply, answer with an "
+    "empty object."
+)
+
+#: The answer is a term -> arity map. Free-form keys, because the terms are the thing
+#: being asked for and enumerating them in a schema would be asking the question twice.
+#: Everything is filtered on the way back in `retrieve/compose.acquire`, which is where a
+#: bad answer costs the questions it would have helped and nothing else.
+COMPOSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "derived": {
+            "type": "object",
+            "additionalProperties": {"type": "integer", "minimum": 2},
+        },
+    },
+    "required": ["derived"],
+    "additionalProperties": False,
+}
+
 RESOLVE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {

@@ -79,6 +79,7 @@ from ..types import (
 from .analyze import analyze
 from .fusion import reciprocal_rank_fusion
 from .intent import Intent, classify
+from .compose import names_derived
 from .intent import is_comparison, observed_refs
 from .intent import weights as intent_weights
 from .scoring import (
@@ -252,6 +253,7 @@ class HybridRetriever:
         max_episodes: int = 3,
         w_temporal: float = 0.0,
         w_graph: float = 0.0,
+        derived_terms: "Collection[str]" = (),
         graph_seeds: int = 5,
         graph_depth: int = 2,
         traverser: "GraphTraverser | None" = None,
@@ -307,6 +309,13 @@ class HybridRetriever:
         #: the query classes that gained and leaves it off for the rest — so the shipped
         #: switch is `intent_weighting`, and this is the raw knob under it.
         self.w_graph = w_graph
+        #: Relation terms that name a *chain* rather than a stored predicate —
+        #: "grandfather" over `father`+`father`. Acquired once from a model by
+        #: `retrieve/compose.acquire()` and passed in; nothing here calls one, because
+        #: `intent.py` promises to be model-free and `hybrid.py` promises reproducible
+        #: retrieval, and a search that could block on an API call breaks both.
+        #: Empty is the shipped default and the behaviour of every release before this.
+        self.derived_terms = frozenset(derived_terms)
         #: How many entity keys the walk starts from, taken off the head of the fused
         #: vector+lexical list. Keys rather than claims: the key list is what reaches
         #: `Store.adjacent` and the frontier width is what a hop costs. See
@@ -689,9 +698,14 @@ class HybridRetriever:
         #
         # Only ever widens: it runs when intent weighting closed the leg on a store that
         # configured it open, and never narrows what the classifier allowed.
-        if (weights.graph <= 0.0 < self.w_graph and not is_comparison(query) and len(
-                observed_refs(query, {c.predicate for c in claims.values()},
-                              self.registry.normalize)) > 1):
+        if weights.graph <= 0.0 < self.w_graph and not is_comparison(query) and (
+                names_derived(query, self.derived_terms)
+                or len(observed_refs(query, {c.predicate for c in claims.values()},
+                                     self.registry.normalize)) > 1):
+            # A derived term counts on its own, where a predicate has to be one of two.
+            # "Maternal grandfather" *is* the chain — it names no stored predicate at all,
+            # which is why counting predicates could never see it. Measured on 2Wiki's
+            # `inference` family: 52.6% -> 86.4% answer, 49.0% -> 83.8% chain.
             weights = weights._replace(graph=self.w_graph)
 
         graph_hits, walked = self._graph_search(

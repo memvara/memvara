@@ -217,3 +217,80 @@ def test_aliases_fold_before_they_are_counted() -> None:
 
     registry = PredicateRegistry()
     assert predicate_refs("is it based in or located in Lisbon", registry) == {"lives_in"}
+
+
+# --- derived relation terms: the chain a question names without naming a predicate ---
+
+
+def test_a_derived_term_is_a_chain_even_though_it_names_no_predicate() -> None:
+    """"Maternal grandfather" is `mother` composed with `father` and is neither of them.
+
+    Every rule in this module counts predicates a question says out loud, so this shape
+    was invisible to all of them: on 2WikiMultihopQA's `inference` family the gate ran the
+    walk on none of the 1,549 questions. `grandfather` is not a synonym for `father` and
+    no string match gets from one to the other — what is needed is the fact that the term
+    *is* a composition, which only a model can supply and which is therefore supplied once
+    per vocabulary rather than once per query.
+    """
+    from memvara.retrieve.compose import names_derived
+
+    terms = {"grandfather", "father-in-law", "uncle"}
+    assert names_derived("Who is the paternal grandfather of Reginald I?", terms)
+    assert names_derived("Who is Marie Luisa's father-in-law?", terms)
+    assert not names_derived("Where was the director of film Nagarahole born?", terms)
+
+
+def test_no_terms_means_the_behaviour_of_every_release_before_this_one() -> None:
+    """The feature is opt-in and its absence is not a degradation.
+
+    A backend without `compose_relations` yields no terms, `names_derived` is False for
+    every query, and the gate keeps the rule it had. That is the state this shipped in
+    before the acquisition existed, so a store with no model is no worse off than it was.
+    """
+    from memvara.retrieve.compose import names_derived
+
+    assert not names_derived("Who is the paternal grandfather of Reginald I?", set())
+    assert not names_derived("anything at all", ())
+
+
+def test_the_model_is_filtered_rather_than_trusted() -> None:
+    """Four ways an answer is wrong, and none of them raises.
+
+    This is an optional enrichment on a path that works without it, so a model having a
+    bad day should cost the questions it would have helped and never the search that was
+    going to succeed anyway.
+    """
+    from memvara.retrieve.compose import acquire
+
+    class Model:
+        def compose_relations(self, predicates):
+            return {
+                "grandfather": 2,            # kept
+                "stepmother": 1,             # arity 1 — the store has a predicate for it
+                "father": 3,                 # is itself a predicate; a contradiction
+                "the person who married": 2,  # a phrase, not a relation name
+                "uncle": True,               # bool is not an arity
+                7: 2,                        # not a term
+            }
+
+    assert acquire(Model(), ["father", "mother", "spouse"]) == {"grandfather"}
+
+
+def test_a_backend_that_cannot_compose_costs_nothing() -> None:
+    """No method, or a method that raises — including the network. An enrichment that
+    raised into `Memvara.__init__` would make an optional feature a startup dependency."""
+    from memvara.retrieve.compose import acquire
+
+    class Silent:
+        pass
+
+    class Broken:
+        def compose_relations(self, predicates):
+            raise RuntimeError("no route to host")
+
+    class Nonsense:
+        def compose_relations(self, predicates):
+            return ["grandfather"]
+
+    for backend in (Silent(), Broken(), Nonsense()):
+        assert acquire(backend, ["father"]) == frozenset()
