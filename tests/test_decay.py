@@ -173,6 +173,8 @@ def test_run_twice_leaves_identical_state(consolidator):
 
     Do not widen the comparison in `decay_pass` to fix this. Exact equality on the
     rounded value is what makes a skipped or doubled pass a no-op.
+
+    `scripts/decay_flake_repro.py` reproduces the failure and measures the rate.
     """
     store = consolidator.store
     add(store, "works_at", "acme", age_days=730)
