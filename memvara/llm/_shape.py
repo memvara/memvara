@@ -151,9 +151,17 @@ def shape_composition(parsed: dict[str, Any]) -> dict[str, int]:
     predicate or run to a whole phrase — because this function knows the response's shape
     and that one knows the store's vocabulary, and neither can do the other's job.
     """
-    derived = parsed.get("derived")
-    if not isinstance(derived, dict):
-        return {}
+    # Both shapes, because a model that is not being held to the schema returns the bare
+    # map. Measured: `nvidia/nemotron-3-ultra` answered with 21 correct kinship terms and
+    # no `derived` wrapper, and this function dropped every one of them and returned
+    # nothing — the acquisition looked like a model with no opinion rather than a parser
+    # reading the wrong shape. Anthropic's structured output does enforce the wrapper, so
+    # the unit test could not have caught it: the fake client returned the shape this
+    # code was written to expect.
+    # No guard on `derived` being a dict: `parse_json_object` returns one or `{}`, so
+    # both branches above already are.
+    inner = parsed.get("derived")
+    derived = inner if isinstance(inner, dict) else parsed
     out: dict[str, int] = {}
     for term, arity in derived.items():
         if isinstance(term, str) and isinstance(arity, int) and not isinstance(arity, bool):
