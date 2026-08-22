@@ -337,6 +337,24 @@ _ENGINE_NEEDS = frozenset({
     "competing_claims",
 })
 
+def cloud_gap() -> list[str]:
+    """The engine calls a `RemoteStore` cannot serve yet. Empty means cloud mode works.
+
+    The one place that question is answered, because two places were answering it
+    differently: `build_memvara` refused to start a cloud server, and `memvara-mcp init`
+    wrote a cloud config anyway — exit 0, "restart your client", and a server that then
+    refuses to come up. The gap between those two was silent by construction, since the
+    command that writes the config never starts the thing it configured.
+
+    Derived from `RemoteStore.WIRED` rather than hardcoded, so when the REST facade grows
+    the endpoints this empties out on its own and both callers start working. Nothing has
+    to remember to lift a flag.
+    """
+    from ..store.remote import RemoteStore
+
+    return sorted(_ENGINE_NEEDS - RemoteStore.WIRED)
+
+
 _CLOUD_NOT_WIRED = (
     "MEMVARA_MODE=cloud cannot start a server yet. RemoteStore is faithful to what the "
     "REST facade actually exposes — reading one memory by id, erasing one, erasing a "
@@ -380,7 +398,7 @@ def build_memvara(config: ServerConfig) -> Memvara:
                 "api_key. ServerConfig.from_env() never produces this combination; "
                 "a caller constructing ServerConfig directly must set api_key too.")
 
-        missing = sorted(_ENGINE_NEEDS - RemoteStore.WIRED)
+        missing = cloud_gap()
         if missing:
             raise ConfigError(_CLOUD_NOT_WIRED.format(missing=", ".join(missing)))
         return Memvara(   # pragma: no cover - unreachable until the endpoints exist

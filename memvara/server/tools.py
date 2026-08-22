@@ -955,11 +955,27 @@ def _neighborhood(ctx: ToolContext, args: dict[str, Any]) -> str:
         args["entity"], depth=args["depth"], k=args["k"],
         min_hops=args["min_hops"], as_of=as_of, valid_at=valid_at)
     if not paths:
+        entity = safe_line(args["entity"])
+        if args["min_hops"] > 1:
+            # The one case where the old wording was not merely incomplete but false.
+            # `min_hops` prunes short paths *after* walking them, so "nothing connects to
+            # Alice within 3 hops" was returned for a store holding `Alice works_at Acme`
+            # — and the model has no way to see the filter that produced it. It reads as
+            # a fact about the store and it is a fact about the arguments.
+            return (
+                f"No connection to {entity!r} at {args['min_hops']} or more hops, "
+                f"searching {args['depth']}. Closer connections are excluded by "
+                f"min_hops={args['min_hops']} and may well be stored: re-ask with "
+                "min_hops=1 to see them. Do not report that nothing is connected "
+                "without doing that first."
+            )
         return (
-            f"Nothing stored connects to {safe_line(args['entity'])!r} within "
-            f"{args['depth']} hop(s). Either nothing here mentions it, or what does "
-            "mentions it only as free text rather than as a fact with two ends. "
-            "memory_search is the tool for the second case."
+            f"Nothing stored connects to {entity!r} within {args['depth']} hop(s). "
+            "Either nothing here mentions it, or what does mentions it only as free "
+            "text rather than as a fact with two ends. memory_search is the tool for "
+            "the second case. As with memory_paths, the walk is bounded by a beam as "
+            "well as by depth, so this is an answer about this search rather than a "
+            "claim that the entity stands alone."
         )
     return _render_paths(
         paths,
@@ -1180,7 +1196,9 @@ TOOLS: tuple[Tool, ...] = (
             "chain per line, subject to object, with a strength between 0 and 1 that "
             "falls with each hop and with the age of the weakest link on it. Every hop "
             "is a fact you could have read directly, so a chain is a derivation you can "
-            "check, not an inference. Read-only, and evaluated at one instant "
+            "check, not an inference — every line carries the ids of the claims it is "
+            "made of, and memory_why will show you the turn any one of them came from. "
+            "Read-only, and evaluated at one instant "
             "throughout: a chain that comes back was true all at once, not assembled "
             "from different afternoons."
         ),
@@ -1255,7 +1273,9 @@ TOOLS: tuple[Tool, ...] = (
             "world.** The walk is bounded, so a real but longer or less direct route "
             "can exist and not be found: say nothing stored connects them, never that "
             "they are unrelated. Every hop is a fact you could have read directly, so a "
-            "route is a derivation the user can check. Read-only."
+            "route is a derivation the user can check: every line carries the ids of "
+            "the claims it is made of, and memory_why will show you the turn any one of "
+            "them came from. Read-only."
         ),
         properties={
             "source": {

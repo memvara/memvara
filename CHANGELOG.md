@@ -109,6 +109,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   would not merely widen a read, it would let a chain leave the caller's own memory
   mid-hop.
 
+  **An empty `memory_neighborhood` no longer denies what `min_hops` pruned.** The filter
+  removes short paths after they are walked, so a store holding `Alice reports_to Dana`
+  answered "nothing stored connects to 'Alice' within 3 hop(s)" and then explained the
+  absence with two causes, neither of which was the real one. A model has no way to look
+  behind a tool result, so what it does with that is tell the user Alice is unconnected.
+  The pruned case now names `min_hops`, says closer connections may well be stored, and
+  says how to see them. The genuinely-empty case gains the bounded-walk caveat
+  `memory_paths` has always carried — the same beam bounds both walks, and two tools
+  disagreeing about that is how a model learns to trust the wrong one.
+
   Two things the descriptions say because a model cannot check them for itself. An empty
   `memory_paths` result is an answer about **this search** — the walk is bounded by a beam
   as well as by depth, so a real route can be missed because its prefix was pruned — and
@@ -122,6 +132,22 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `memvara/skills/memvara/SKILL.md` gets the complementary half, since it states outright
   that it does not repeat what a tool description says: when a connection question beats a
   recall question, and to ask one *after* a thin recall rather than instead of one.
+
+- **`memvara-mcp init` no longer writes a config the server refuses to start.** With
+  `httpx` importable — which is a great many environments that never installed the cloud
+  extra — `init` defaulted to cloud mode, wrote `MEMVARA_MODE: cloud`, printed "restart
+  your client" and exited 0. `build_memvara` then refused, because the REST facade has no
+  endpoint for the surface the engine calls on every turn. Two commands answering the
+  same question differently, and the gap between them was silent by construction: the one
+  that writes the config never starts the thing it configured, so nothing in the
+  successful run could notice. What reached the user was a client with no memvara tools
+  in it and nothing anywhere connecting that to anything they had done.
+
+  Cloud named explicitly, by `--mode` or by `MEMVARA_MODE`, is now refused with the
+  server's own text, so the reason arrives while there is still something to do about it.
+  The httpx heuristic asks whether cloud works before preferring it. Both callers derive
+  the answer from `RemoteStore.WIRED` via the new `config.cloud_gap()`, so the day the
+  endpoints land this lifts itself rather than becoming a flag somebody has to remember.
 
 - **`Memvara.prove_erased()`, and `erase()` refusing to report a success it cannot
   support.** `erase()` returned `True` when `Store.erase_claim` said it had deleted a row.

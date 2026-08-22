@@ -2471,6 +2471,42 @@ def test_neighborhood_walks_out_of_one_entity_and_renders_the_chain(graph_server
     )
 
 
+def test_an_empty_neighborhood_does_not_deny_the_connections_min_hops_pruned(
+        graph_server):
+    """The message asserted two things that were false whenever `min_hops` did the work.
+
+    `min_hops` prunes short paths *after* they are walked, so a store holding
+    `Alice reports_to Dana` answered "nothing stored connects to 'Alice' within 3
+    hop(s)" — and then explained the absence with two causes, neither of which was the
+    real one, in a tool result the model has no way to look behind. A model reading it
+    tells the user Alice is unconnected. It is not a hedge that was missing; the
+    sentence was untrue.
+    """
+    out = text(graph_server, "memory_neighborhood",
+               {"entity": "Bruno", "depth": 3, "min_hops": 2})
+    assert "Nothing stored connects" not in out
+    assert "min_hops=2" in out and "min_hops=1" in out, out
+    # The two causes the old text offered are wrong here and must not be offered.
+    assert "only as free text" not in out
+
+    closer = text(graph_server, "memory_neighborhood",
+                  {"entity": "Bruno", "depth": 3, "min_hops": 1})
+    assert "Bruno -lives_in-> Lisbon" in closer, (
+        "the connection the pruned message must not deny"
+    )
+
+
+def test_a_genuinely_empty_neighborhood_still_answers_about_the_search(graph_server):
+    """At the default `min_hops` the two causes are right, and a third was missing:
+    `memory_paths` has said since it landed that a bounded walk can miss a real route,
+    and the same beam bounds this walk. Nothing about one entity makes that caveat less
+    true, and the two tools disagreeing about it is how a model learns to trust the
+    wrong one."""
+    out = text(graph_server, "memory_neighborhood", {"entity": "Zoltan", "depth": 2})
+    assert "Nothing stored connects" in out
+    assert "bounded" in out and "beam" in out
+
+
 def test_neighborhood_folds_the_spelling_the_user_used(graph_server):
     assert "Tallinn" in text(graph_server, "memory_neighborhood",
                              {"entity": "acme, inc.", "depth": 1})
