@@ -76,6 +76,75 @@ repository, or the decision is not final — say so in the PR body, name the fil
 an issue. That is a deferral somebody can see. A silent one is a defect with a delay on
 it.
 
+## How to write
+
+This section governs prose: documentation, comments, docstrings, commit subjects, PR bodies,
+and the tool descriptions the MCP server hands to a model at runtime. It **replaces** the
+voice in the existing files rather than describing it. Those files are being converted, so do
+not treat them as the target to match — see the amendment to §3 below.
+
+The method is **meaning first, then structure, then wording**. Work out what something
+actually means before deciding how to say it. Do not take the phrases from an existing doc, an
+issue, or an earlier commit message and rearrange them, because that produces text that is
+topically correct and communicates nothing. If the wording you started from is awkward,
+discard it and write the sentence again from the meaning.
+
+**Lead with the answer.** State the conclusion, then explain it. A paragraph that builds
+toward a point the reader could have had in the first sentence has wasted their time.
+
+**Write sentences a competent person would say out loud.** Read it back. If it sounds strange,
+rewrite it. Prefer active voice, keep every pronoun's referent obvious, and do not stack nouns
+into chains.
+
+**Prefer simple words when they are accurate.** "Use", not "leverage" or "utilize". Never pick
+a more sophisticated word to sound more capable, and never simplify to the point where the
+sentence stops being true.
+
+**Cut filler.** Every sentence should carry something. Drop "It is important to note that",
+"It is worth mentioning", "There are several considerations to take into account", and the
+habit of stating a claim and then restating its cost.
+
+**Do not compress until the text turns cryptic.** "Nothing was written to the ledger, so the
+balance never updated" is right. "Ledger had no writes therefore balance absent" is not.
+Concise is not the same as incomplete.
+
+**Use one term per concept.** A `session ID` does not become an "interaction identifier" three
+lines later. This matters more here than in most repositories, because `ended`, `retired` and
+`erased` name three different things and that difference is the product.
+
+**Match your confidence to the evidence.** "This means" for something established, "this
+likely means" for a strong inference, "this could mean" for a possibility, and say plainly
+when you do not have enough information to tell. Do not hedge a fact you have verified.
+
+**Write so both an engineer and an executive can follow it in one pass.** Keep the technical
+depth and make it accessible instead of removing it. Where a term is load-bearing and not
+obvious, explain it in a clause and move on. Do not write two versions unless asked.
+
+**Preserve meaning when you rewrite.** Improving a sentence must not change the technical
+relationship it describes. Watch for this while converting the existing docs: the old voice
+buries real distinctions inside clever constructions, and a fluent rewrite can quietly drop
+one.
+
+### Where this bites in this repository
+
+**Commit subjects and PR titles.** The existing ones are declarative sentences naming the
+false belief the code held — "A value that replaces nothing looks exactly like a value that
+replaced something". They read well and they do not say what changed. Say what changed, in a
+normal sentence, and put the reasoning in the body where there is room for it.
+
+**Tool descriptions in `memvara/server/tools.py` are the exemption.** "Prefer simple words"
+never outranks precision there. A model reading them cannot go and check, and the
+`ended` / `retired` distinction has already been got wrong once in a write receipt. Plain is
+good; vague is a defect. The same applies to `CHANGELOG.md` entries describing a behaviour
+change somebody will act on.
+
+**Docstrings execute.** `pyproject.toml` sets `--doctest-modules`, so a rewritten example
+still has to run. Rewriting the prose around an example does not exempt it from the suite.
+
+**The packaged skill is vendored downstream.** `memvara/skills/memvara/` is pinned by sha and
+diffed in seven plugin repositories. Converting its prose is a real change in all of them, so
+do it deliberately and in its own commit, never as a drive-by while editing something else.
+
 ## More than one agent may be working in this checkout at once
 
 Assume files you did not touch are somebody else's unfinished work, and that they have no
@@ -135,7 +204,9 @@ Ask: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
 
 - Don't "improve" adjacent code, comments, or formatting.
 - Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
+- Match existing *code* style, even if you'd do it differently. For prose, follow
+  [How to write](#how-to-write) instead — the voice in the existing files is being replaced,
+  not matched.
 - If you notice unrelated dead code, mention it — don't delete it.
 - Remove imports, variables and functions that *your* changes orphaned; leave
   pre-existing dead code alone unless asked.
