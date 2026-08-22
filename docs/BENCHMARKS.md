@@ -219,6 +219,14 @@ registry's predicates include `in`, `is`, `do`, `has`, `date` and `place`, which
 "what is my name" into a two-predicate chain. A stemmer would close that gap; a longer
 word list would only close it here.
 
+**The standing advice is unchanged: a deployment turning the graph leg on should turn
+`intent_weighting` off with it and pay the walk on every query.** The gate costs less
+than it did — it was cancelling the leg outright and now it is not — but `+graph!` is
+still more than twice `+graph` at k=25 on this corpus, and a gate that runs the walk on
+fewer questions than it should is still a gate. The fix narrows the gap; it does not
+close it, and the honest reading of the two columns is that anyone who has decided the
+walk is worth paying for should stop deciding it per query.
+
 The three-hop rows barely move because `graph_depth` ships at 2; that row measures the
 bound, not the traversal. And this benchmark is synthetic and self-authored — read it as
 an illustration of a mechanism, which is not evidence for a default.
