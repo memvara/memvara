@@ -143,6 +143,39 @@ list.
   all, and it is the feature that made the "the store has been a graph all along" claim
   true rather than rhetorical. Every edge on a path is evaluated at one pinned `as_of`,
   which is the property a search-then-search loop cannot have.
+- **The graph leg of retrieval** — `GraphTraverser.spread()`, `retrieve/spread.py`, and a
+  third leg in `HybridRetriever` seeded from the head of the fused vector+lexical list
+  (Zep's φ_bfs). It closes the gap between what `neighborhood()` can answer and what
+  `search()` can: the caller no longer has to know the seed entity. **It ships at
+  `w_graph=0.0`** — the measured table is in `docs/BENCHMARKS.md`, and the short version
+  is that neither public retrieval benchmark can see it, because both run the offline
+  write path over conversational data it extracts almost nothing from — 0 claims from
+  LOCOMO and 78 from LongMemEval. The only measured gain is on a synthetic multi-hop
+  workload, and there the shipped configuration gates it away entirely.
+- **The temporal leg of retrieval** — `Store.episodes_near()`, `retrieve/temporal.py`, and
+  a fourth leg over raw turns ranked on proximity to the instant the search was asked
+  about. Time was a filter and a multiplier on the read path and never a candidate
+  producer, so "what was going on around then" — whose only content words the analyzer
+  drops — had no leg that could answer it. **It ships at `w_temporal=0.0`.** The measured
+  finding is the abstention rather than the leg: without one it cost 2.4 points of
+  LongMemEval temporal-reasoning R@12, because a query with no instant anchors on *now*,
+  an archival corpus scores every turn at ~0.005, and fusion reads positions. With the
+  guard the other two legs already had, the loss goes to zero — and so does the gain, on an
+  instrument that never passes `valid_at`.
+- **Query-intent gating** — `retrieve/intent.py`, deterministic and model-free, four
+  classes matching the categories LOCOMO reports separately. It is what makes the graph
+  leg affordable to switch on: `lookup` and `temporal` queries skip the walk before the
+  traverser is called. Every multiplier that is not a gate is 1.0 and stays 1.0 until a
+  per-category sweep moves it.
+
+  **Its relational vocabulary is a hand-written list and it is too narrow, measured.** On
+  `bench/multihop.py` the gate routes two of the three question families past the walk —
+  "who founded the company that X works at" contains no word in it — so the shipped
+  configuration scores exactly what plain `search` scores and the leg's whole gain is
+  gated away. `works at` and `founded` are relations by any reading and both are
+  predicates in the store's own registry, so **deriving the markers from the registry is
+  the fix**. Not done, deliberately: widening the list by hand against a benchmark this
+  repository wrote is how a classifier gets fitted to its own corpus.
 - **Token accounting** — `WriteReceipt.tokens_in`/`tokens_out`, `LLM.Usage` with a
   caller-allocated accumulator, and the `write.tokens_in` / `write.tokens_out` /
   `write.extract_ms` series. `llm_calls` was the only cost signal and cannot be billed on:
@@ -382,6 +415,14 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
    because the reader never gave a superseded value. Still missing: a hosted reader, a
    second corpus size to turn the token argument from a slope into a measurement, and any
    comparison against mem0 on answers rather than on architecture.
+
+   What did land is the *guarded* half: `python3 demo/harness.py --reader stub` runs all
+   five arms end to end in one offline, deterministic process, and
+   `test_the_offline_run_is_identical_twice` pins it. That makes the apparatus runnable in
+   CI and a change to it bisectable. It does **not** move this item, and the distinction is
+   the point: a stub reader picks the retrieved line with the most words in common with the
+   question, so its accuracy column measures the corpus and the arms and nothing about
+   answers.
 2. **No external user has run this in production.** 2,734 tests prove the code does what we
    said it does. They prove nothing about what happens on someone else's data.
 3. **The English-centrism is measured, not fixed.** The salience gate and the fast extractor

@@ -15,7 +15,8 @@ import json
 import pytest
 
 from memvara.server.cli import main
-from memvara.server.config import CREDENTIALS_PATH, ConfigError, ServerConfig, build_memvara
+from memvara.server.config import (CREDENTIALS_PATH, ConfigError, ServerConfig,
+                                   _ENGINE_NEEDS, build_memvara)
 from memvara.store.remote import RemoteStore
 
 
@@ -113,27 +114,44 @@ def test_credentials_path_constant_matches_logins_own(monkeypatch):
 
 # -- build_memvara(mode="cloud") ---------------------------------------------------------
 
-def test_build_memvara_opens_a_remote_store_in_cloud_mode():
+def test_build_memvara_refuses_cloud_mode_rather_than_starting_a_server_that_cannot_work():
+    """It used to construct one, and that was the defect.
+
+    `Memvara(store=RemoteStore(...))` builds fine: `RemoteStore.__init__` only needs a
+    URL and a key. The engine then calls `put_claim`, `lexical_search` and
+    `competing_claims` on every turn and the REST facade has an endpoint for none of
+    them, so the server started, advertised twelve tools, and raised
+    `NotImplementedError` on the first one a model reached for. A failure that arrives
+    mid-conversation as a tool error is the worst place for it: the model cannot act on
+    it, and whoever configured the deployment is not in the room.
+
+    Refusing here puts the failure where the configuration was made, with the flag that
+    fixes it. It is a **decision** rather than a stopgap — `docs/OPEN-CORE.md` records
+    which side of the line each seam is on — and it un-refuses itself: the check is
+    `_ENGINE_NEEDS - RemoteStore.WIRED`, so the day those endpoints exist and `WIRED`
+    grows, this branch stops firing on its own.
+    """
     config = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
                                     "MEMVARA_TENANT": "acme", "MEMVARA_USER": "alice"})
-    memory = build_memvara(config)
-    try:
-        assert isinstance(memory.store, RemoteStore)
-        assert memory.store._base_url == "https://app.memvara.dev"
-        assert memory.default_scope.tenant == "acme"
-        assert memory.default_scope.user == "alice"
-    finally:
-        memory.close()
+    with pytest.raises(ConfigError) as exc:
+        build_memvara(config)
+    message = str(exc.value)
+    assert "put_claim" in message and "lexical_search" in message, (
+        "the message has to name what is missing, or it is untraceable"
+    )
+    assert "MEMVARA_MODE=local" in message, "and what to do instead"
 
 
-def test_build_memvara_cloud_mode_honours_a_custom_server_url():
-    config = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
-                                    "MEMVARA_SERVER_URL": "https://custom.example"})
-    memory = build_memvara(config)
-    try:
-        assert memory.store._base_url == "https://custom.example"
-    finally:
-        memory.close()
+def test_the_cloud_guard_is_derived_from_the_store_rather_than_hardcoded():
+    """The guard must not outlive the gap it names.
+
+    A literal `raise` here would keep refusing after the endpoints landed, and the person
+    who added them would have no reason to look in this file.
+    """
+    assert _ENGINE_NEEDS - RemoteStore.WIRED, (
+        "RemoteStore now wires everything the engine needs — delete the guard in "
+        "build_memvara and restore the cloud-mode construction tests above it"
+    )
 
 
 def test_build_memvara_rejects_a_hand_built_cloud_config_with_no_api_key():
@@ -155,7 +173,11 @@ def test_build_memvara_cloud_mode_respects_the_llm_backend(monkeypatch):
                         pytypes.SimpleNamespace(Anthropic=lambda: object()))
     config = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
                                     "MEMVARA_LLM": "anthropic"})
-    memory = build_memvara(config)
+    # Cloud mode refuses before it reaches the LLM branch, so the backend choice is
+    # asserted on the local path instead — same `_anthropic()` call, same line of code.
+    local = ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "anthropic"})
+    assert config.llm == "anthropic"
+    memory = build_memvara(local)
     try:
         assert memory.extractor.startswith("fast-path+anthropic/")
     finally:

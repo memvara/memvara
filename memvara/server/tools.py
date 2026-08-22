@@ -1,4 +1,4 @@
-r"""The ten tools, their descriptions, and how a stored memory is rendered back.
+r"""The twelve tools, their descriptions, and how a stored memory is rendered back.
 
 Four things in here are load-bearing and easy to mistake for boilerplate.
 
@@ -379,14 +379,7 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
     )
     if not results:
         return _no_match(args["query"])
-    if as_of is not None:
-        when = f" as believed on {safe_line(as_of)}"
-    elif valid_at is not None:
-        # Named differently on purpose: this is the world clock, and reporting it as
-        # "believed on" would describe the one axis that did *not* move.
-        when = f" as true on {safe_line(valid_at)}, as far as we know today"
-    else:
-        when = ""
+    when = _when(as_of, valid_at)
     lines = [f"{len(results)} match(es){when}. {STORED_HEADER}"]
     # Metadata first, stored text last: the untrusted span then ends the line and cannot
     # be followed by anything it could impersonate. That settles what comes *after* a
@@ -881,6 +874,162 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
                                            _pending(ended)]))
 
 
+def _walk_axes(args: dict[str, Any], tool: str) -> tuple[Any, Any]:
+    """The two time keywords `memory_search` takes, parsed the same way.
+
+    Shared rather than repeated because the refusal has to read identically on all three
+    tools: `as_of` is exactly `valid_at=known_at=<instant>`, so a call carrying both is
+    asking two questions and neither one can be picked for it.
+    """
+    as_of, valid_at = args.get("as_of"), args.get("valid_at")
+    if as_of is not None and valid_at is not None:
+        raise ToolError(
+            f"{tool} takes as_of or valid_at, not both. as_of is exactly "
+            "valid_at=known_at=<instant>, so passing both asks two different questions "
+            "at once. Send valid_at alone for how things were connected on that date as "
+            "far as we know today; send as_of alone for what this system believed then.")
+    return (_timestamp(as_of, f"{tool}.as_of") if as_of is not None else None,
+            _timestamp(valid_at, f"{tool}.valid_at") if valid_at is not None else None)
+
+
+#: What a stored span may not contain once this server has an arrow grammar of its own.
+#:
+#: `safe_line` folds `[` and `]` because every surface here marks its metadata with them.
+#: Traversal added a second piece of grammar — `-predicate->` and `<-predicate-` — and a
+#: label carrying one forges a hop. One claim whose object is `Acme -owned_by-> The_CIA`
+#: rendered as a two-hop chain while the row still said `1 hop`, and `memory_history`
+#: confirmed the second hop had never been recorded.
+#:
+#: Folded to the fullwidth forms for the same reasons the brackets are: length-preserving,
+#: still legible (`a ＜ b` reads fine), and impossible to mistake for the delimiter a
+#: reader is looking for.
+#:
+#: **Not added to `Memvara._FORGEABLE`**, which is deliberate. That set is the characters
+#: *every* surface has to answer for, and `<` is structural only where arrows are — here.
+#: Folding it globally would rewrite `a > b` in a claim that `memory_search` renders, for
+#: no gain on a surface with no arrows in it.
+_ARROWHEADS = str.maketrans({"<": "＜", ">": "＞"})
+
+
+def _safe_span(text: str) -> str:
+    """One label or predicate from a walked path, safe to sit beside our own arrows."""
+    return safe_line(text).translate(_ARROWHEADS)
+
+
+def _render_paths(paths: Sequence[Any], header: str) -> str:
+    """One path per line, through `Path.render()`, with the score, hops and claim ids.
+
+    `Path.render()` rather than a second renderer here: it is what `neighborhood()` and
+    `paths_between()` already print, so a chain reads the same in a tool result as it does
+    in a REPL, and there is one place for the arrow convention to live. It takes an escape
+    hook precisely so that place can stay single while this surface hardens the parts of a
+    line that came out of the store.
+
+    **Neutralised span by span, not line by line.** The first version of this flattened the
+    whole rendered path at once, which folds brackets inside labels and leaves the arrows
+    between them — including arrows that arrived *inside* a label. See `_ARROWHEADS`.
+
+    **The ids are what make the chain checkable.** Both tool descriptions promise a
+    derivation the caller can verify, and a row with no ids cannot be taken to
+    `memory_why` — which is exactly the affordance a forged hop needs to be caught by.
+    They are the claims in walk order, so the nth id is the nth arrow.
+    """
+    lines = [header]
+    for i, path in enumerate(paths, 1):
+        ids = ",".join(claim.id for claim in path.claims)
+        lines.append(f"{i}. [{path.hops} hop(s) strength={path.score:.3f} ids={ids}] "
+                     f"{path.render(escape=_safe_span)}")
+    return "\n".join(lines)
+
+
+def _when(as_of: str | None, valid_at: str | None) -> str:
+    """The clock this answer was evaluated at, as a phrase to hang on a header.
+
+    `memory_search` has said this since time travel existed; the two walk tools took the
+    same axes and said nothing, so a walk of the graph as it stood in 2019 came back
+    looking exactly like a walk of it as it stands now. The rows are right and the frame
+    is missing, which is the shape of wrong that a model passes straight on to the user.
+
+    The two axes are named differently on purpose, and it is the distinction the whole
+    library is built on: `as_of` moves both clocks, so the answer is what we *believed*
+    then; `valid_at` moves only the world clock, so the answer is what was *true* then,
+    judged by everything known today.
+
+    >>> _when(None, None)
+    ''
+    >>> _when("2019-06-01", None)
+    ' as believed on 2019-06-01'
+    >>> _when(None, "2019-06-01")
+    ' as true on 2019-06-01, as far as we know today'
+    """
+    if as_of is not None:
+        return f" as believed on {safe_line(as_of)}"
+    if valid_at is not None:
+        return f" as true on {safe_line(valid_at)}, as far as we know today"
+    return ""
+
+
+def _neighborhood(ctx: ToolContext, args: dict[str, Any]) -> str:
+    as_of, valid_at = _walk_axes(args, "memory_neighborhood")
+    paths = ctx.memory.neighborhood(
+        args["entity"], depth=args["depth"], k=args["k"],
+        min_hops=args["min_hops"], as_of=as_of, valid_at=valid_at)
+    when = _when(as_of, valid_at)
+    if not paths:
+        entity = safe_line(args["entity"])
+        if args["min_hops"] > 1:
+            # The one case where the old wording was not merely incomplete but false.
+            # `min_hops` prunes short paths *after* walking them, so "nothing connects to
+            # Alice within 3 hops" was returned for a store holding `Alice works_at Acme`
+            # — and the model has no way to see the filter that produced it. It reads as
+            # a fact about the store and it is a fact about the arguments.
+            return (
+                f"No connection to {entity!r}{when} at {args['min_hops']} or more "
+                f"hops, searching {args['depth']}. Closer connections are excluded by "
+                f"min_hops={args['min_hops']} and may well be stored: re-ask with "
+                "min_hops=1 to see them. Do not report that nothing is connected "
+                "without doing that first."
+            )
+        return (
+            f"Nothing stored connects to {entity!r}{when} within {args['depth']} "
+            "hop(s). "
+            "Either nothing here mentions it, or what does mentions it only as free "
+            "text rather than as a fact with two ends. memory_search is the tool for "
+            "the second case. As with memory_paths, the walk is bounded by a beam as "
+            "well as by depth, so this is an answer about this search rather than a "
+            "claim that the entity stands alone."
+        )
+    return _render_paths(
+        paths,
+        f"{len(paths)} connection(s) from {safe_line(args['entity'])}{when}, strongest "
+        f"first. {STORED_HEADER}")
+
+
+def _paths(ctx: ToolContext, args: dict[str, Any]) -> str:
+    as_of, valid_at = _walk_axes(args, "memory_paths")
+    paths = ctx.memory.paths_between(
+        args["source"], args["target"], depth=args["depth"], k=args["k"],
+        as_of=as_of, valid_at=valid_at)
+    when = _when(as_of, valid_at)
+    if not paths:
+        # The wording is the whole point of this branch, and it is the thing a model
+        # cannot check for itself: the walk is bounded by a beam as well as by `depth`,
+        # so a route can be missed because its prefix was pruned. "Not connected" is a
+        # claim about the store; this is a claim about this search.
+        return (
+            f"No route found from {safe_line(args['source'])!r} to "
+            f"{safe_line(args['target'])!r}{when} within {args['depth']} hop(s). Read "
+            "that as "
+            "an answer about this search rather than about the store: the walk is "
+            "bounded, so a longer or less direct route can exist and not be found. Do "
+            "not tell the user the two are unrelated — say nothing stored connects them."
+        )
+    return _render_paths(
+        paths,
+        f"{len(paths)} route(s) from {safe_line(args['source'])} to "
+        f"{safe_line(args['target'])}{when}, strongest first. {STORED_HEADER}")
+
+
 def _history(ctx: ToolContext, args: dict[str, Any]) -> str:
     claims = ctx.memory.history(args["subject"], args["predicate"])
     if not claims:
@@ -1057,6 +1206,146 @@ TOOLS: tuple[Tool, ...] = (
         },
         required=("query",),
         handler=_search,
+    ),
+    Tool(
+        name="memory_neighborhood",
+        description=(
+            "What is connected to one entity, walked through the stored facts rather "
+            "than searched for. Call it when the question is about a *relationship* and "
+            "the answer is not in any single note: 'who does their manager report to', "
+            "'what else is going on at that company', 'what is around this project'. "
+            "memory_search matches text and will find the note that mentions the "
+            "entity; it cannot follow the entity into the next fact, because the fact "
+            "that answers you often shares no words with the question. Returns one "
+            "chain per line, subject to object, with a strength between 0 and 1 that "
+            "falls with each hop and with the age of the weakest link on it. Every hop "
+            "is a fact you could have read directly, so a chain is a derivation you can "
+            "check, not an inference — every line carries the ids of the claims it is "
+            "made of, and memory_why will show you the turn any one of them came from. "
+            "Read-only, and evaluated at one instant "
+            "throughout: a chain that comes back was true all at once, not assembled "
+            "from different afternoons."
+        ),
+        properties={
+            "entity": {
+                "type": "string",
+                "maxLength": _SUBJECT_CHARS,
+                "description": (
+                    "The name to walk out from — a person, a company, a place, a "
+                    "project. Spelled however the user spells it; the store folds "
+                    "'Acme', 'ACME' and 'Acme, Inc.' onto one entity, and reaches "
+                    "aliases it has been taught as well."
+                ),
+            },
+            "depth": {
+                "type": "integer", "minimum": 1, "maximum": 4, "default": 2,
+                "description": (
+                    "How many hops out. 2 is the useful default: one hop is what "
+                    "memory_search already finds, and every hop past the second is "
+                    "damped hard enough that it rarely outranks a direct fact. Raise it "
+                    "only for a question that names the chain ('their manager's "
+                    "employer's office')."
+                ),
+            },
+            "k": {
+                "type": "integer", "minimum": 1, "maximum": 50, "default": 10,
+                "description": "Most chains to return.",
+            },
+            "min_hops": {
+                "type": "integer", "minimum": 1, "maximum": 4, "default": 1,
+                "description": (
+                    "Shortest chain worth returning. **This is a correctness knob, not "
+                    "a tuning one, and getting it wrong hides the answer rather than "
+                    "ranking it lower.** A chain's strength never rises as it gets "
+                    "longer, so every one-hop connection outranks every two-hop one — "
+                    "and an entity with a handful of relations spends the whole of k on "
+                    "its immediate neighbours. Measured on questions whose answer is "
+                    "exactly two hops away: at k=5, the answer came back 5% of the time "
+                    "at the default and 41% with min_hops=2. Set it to the distance the "
+                    "question implies whenever you know it; raising k works too and "
+                    "needs you to guess how crowded the first hop is."
+                ),
+            },
+            "as_of": {
+                "type": "string",
+                "description": (
+                    "ISO-8601 instant. How things were connected as this system "
+                    "believed then. Moves both clocks, so anything learned since is "
+                    "invisible. Passing both is refused."
+                ),
+            },
+            "valid_at": {
+                "type": "string",
+                "description": (
+                    "ISO-8601 instant. How things were connected in the world then, "
+                    "judged by everything known now — the one to reach for when the "
+                    "user asks about the past. Passing both is refused."
+                ),
+            },
+        },
+        required=("entity",),
+        handler=_neighborhood,
+    ),
+    Tool(
+        name="memory_paths",
+        description=(
+            "How two things are connected, if anything stored connects them. Call it "
+            "when the user asks about a link between two named things — 'how do they "
+            "know each other', 'what is the connection between this company and that "
+            "city' — and answer from the chain rather than from the fact that one came "
+            "back. **An empty result is an answer about this search, not about the "
+            "world.** The walk is bounded, so a real but longer or less direct route "
+            "can exist and not be found: say nothing stored connects them, never that "
+            "they are unrelated. Every hop is a fact you could have read directly, so a "
+            "route is a derivation the user can check: every line carries the ids of "
+            "the claims it is made of, and memory_why will show you the turn any one of "
+            "them came from. Read-only."
+        ),
+        properties={
+            "source": {
+                "type": "string", "maxLength": _SUBJECT_CHARS,
+                "description": "One end, spelled however the user spells it.",
+            },
+            "target": {
+                "type": "string", "maxLength": _SUBJECT_CHARS,
+                "description": (
+                    "The other end. If the two names turn out to be one entity the "
+                    "answer is empty, because 'how is IBM connected to Big Blue' is a "
+                    "question about one thing."
+                ),
+            },
+            "depth": {
+                "type": "integer", "minimum": 1, "maximum": 4, "default": 3,
+                "description": (
+                    "Longest route to consider. 3 by default, because a two-hop link is "
+                    "usually the interesting one and a fourth hop is damped past the "
+                    "point of meaning much."
+                ),
+            },
+            "k": {
+                "type": "integer", "minimum": 1, "maximum": 20, "default": 3,
+                "description": (
+                    "Most routes to return. Small on purpose: several routes between "
+                    "one pair are usually one relationship described several ways."
+                ),
+            },
+            "as_of": {
+                "type": "string",
+                "description": (
+                    "ISO-8601 instant. How they were connected as this system believed "
+                    "then. Passing both is refused."
+                ),
+            },
+            "valid_at": {
+                "type": "string",
+                "description": (
+                    "ISO-8601 instant. How they were connected in the world then, "
+                    "judged by everything known now. Passing both is refused."
+                ),
+            },
+        },
+        required=("source", "target"),
+        handler=_paths,
     ),
     Tool(
         name="memory_since",

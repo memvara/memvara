@@ -211,12 +211,20 @@ def test_the_migration_keeps_every_row_it_found(tmp_path):
 
 def test_the_schema_version_moved_so_an_older_build_refuses_the_file():
     """The setting is durable state in the file, so the stamp has to move with it —
-    otherwise an older build opens a version-7 file, sees 6, and writes to a text index
-    whose format it does not understand."""
-    assert SCHEMA_VERSION == 7
+    otherwise an older build opens the file, sees the version it knows, and writes to a
+    text index whose format it does not understand.
+
+    Asserted as "at least 7" rather than "exactly 7": this fix took version 7, and the
+    stamp keeps climbing as later migrations land. Pinning the number here would make
+    every future migration fail a test about erasure residue, which is not what it is
+    for. What has to hold is that the file is stamped no lower than the version that
+    introduced the setting.
+    """
+    assert SCHEMA_VERSION >= 7
     store = SQLiteStore(":memory:")
     try:
-        assert store._db.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert store._db.execute(
+            "PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     finally:
         store.close()
 

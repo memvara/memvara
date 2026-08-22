@@ -70,7 +70,7 @@ and no vector database.
 | 🔌 **Offline by default** | numpy and nothing else. No API key, no Docker, no vector database, no network on the write path. |
 | 🧾 **Nothing is silently lost** | Every write returns a receipt saying what it did — including what it could *not* extract. |
 | 🔍 **Hybrid retrieval that explains itself** | Vector and BM25, time-aware, and every score is inspectable rather than a ranking you have to trust. |
-| 🧬 **Claims are a graph** | Walk relationships, at a point in time. |
+| 🧬 **Claims are a graph** | Walk relationships, at a point in time — and optionally fuse that walk into search as a third retrieval leg. |
 
 ## Where to start
 
@@ -117,9 +117,10 @@ MEMVARA_DB=~/memory.db memvara-mcp        # JSON-RPC 2.0 over stdio
 memvara-mcp init --agent claude           # writes the client block, skill tree and note
 ```
 
-Ten tools — `memory_add`, `memory_remember`, `memory_recall`, `memory_search`,
-`memory_since`, `memory_history`, `memory_why`, `memory_forget`, `memory_end`,
-`memory_stats`. Hand-rolled against the MCP wire format rather than taking an SDK
+Twelve tools — `memory_add`, `memory_remember`, `memory_recall`, `memory_search`,
+`memory_neighborhood`, `memory_paths`, `memory_since`, `memory_history`, `memory_why`,
+`memory_forget`, `memory_end`, `memory_stats`. Hand-rolled against the MCP wire format
+rather than taking an SDK
 dependency, so the "numpy and nothing else" claim survives the server too.
 [`docs/DEPLOY.md`](docs/DEPLOY.md) covers running it for other people.
 

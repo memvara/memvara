@@ -23,7 +23,7 @@ memvara.server.validate.ToolError: demo.k must be an integer, got a string ('8')
 from __future__ import annotations
 
 import difflib
-from typing import Any, Mapping, Sequence
+from typing import Any, Collection, Mapping, Sequence
 
 __all__ = ["ToolError", "validate"]
 
@@ -75,7 +75,8 @@ def _suggest(key: str, vocabulary: Sequence[str]) -> str:
     return f"{key!r} (did you mean {' or '.join(repr(c) for c in close)}?)"
 
 
-def _checked(label: str, value: Any, spec: Mapping[str, Any]) -> Any:
+def _checked(label: str, value: Any, spec: Mapping[str, Any],
+             siblings: Collection[str] = ()) -> Any:
     kind = spec["type"]
     if kind in ("integer", "number"):
         # `bool` is a subclass of `int` in Python, so an unguarded isinstance check would
@@ -98,6 +99,25 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any]) -> Any:
     elif not isinstance(value, str):
         raise ToolError(
             f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")
+    else:
+        # A lone surrogate is a `str` that cannot be encoded. Python's JSON parser
+        # accepts `"\ud800"` and hands back exactly that, so it arrives here looking like
+        # any other string and fails later, at whatever line first tries to write it —
+        # for `memory_remember` that was the store, and what reached the model was
+        # "failed: UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800' in
+        # position 2", from the generic handler. That names a Python exception rather
+        # than an argument, so a model cannot tell which argument to fix or how.
+        #
+        # Checked for every string argument rather than for the ones that happened to
+        # crash: this is a property of the value, and any tool can be handed one.
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ToolError(
+                f"{label} contains an unpaired surrogate at position {exc.start} "
+                f"({value[exc.start]!r}) and cannot be encoded as UTF-8. It is half of "
+                "a character; the text it came from was probably truncated or decoded "
+                "twice. Send the whole character or drop it.") from None
 
     allowed = spec.get("enum")
     if allowed is not None and value not in allowed:
@@ -113,9 +133,17 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any]) -> Any:
     # to store.
     longest = spec.get("maxLength")
     if longest is not None and len(value) > longest:
+        # Where to put the text instead, and it depends on the tool. Only
+        # `memory_remember` has an `object` to move the detail into; the other five that
+        # carry a `maxLength` — forget, end, history, neighborhood, paths — take names
+        # that must *match* something already stored, and telling their caller to use an
+        # argument the tool does not accept turns one rejected call into two.
         raise ToolError(
-            f"{label} must be at most {longest} characters, got {len(value)}. This is a "
-            "name for a fact, not the fact itself — put the detail in 'object'.")
+            f"{label} must be at most {longest} characters, got {len(value)}. "
+            + ("This is a name for a fact, not the fact itself — put the detail in "
+               "'object'." if "object" in siblings else
+               "This is a name, not a description of one: it has to match how the thing "
+               "was stored, and nothing this long was stored as a name."))
     return value
 
 
@@ -150,7 +178,7 @@ def validate(properties: Mapping[str, Mapping[str, Any]], required: Sequence[str
     out: dict[str, Any] = {}
     for name, spec in properties.items():
         if name in arguments:
-            out[name] = _checked(f"{tool}.{name}", arguments[name], spec)
+            out[name] = _checked(f"{tool}.{name}", arguments[name], spec, properties)
         elif "default" in spec:
             out[name] = spec["default"]
     return out

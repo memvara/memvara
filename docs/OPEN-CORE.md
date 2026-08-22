@@ -75,3 +75,53 @@ how an offline integration gets the whole bitemporal machine. See
 
 ---
 
+## The remote/local seam: a decision, not a gap
+
+`MEMVARA_MODE=cloud` built a `Memvara` over a `RemoteStore` and started a server. That
+server listed twelve tools and raised `NotImplementedError` on the first one a model
+reached for, because `RemoteStore` wires seven `Store` methods and the engine calls a
+different set on every turn — `put_claim`, `add_episode`, `candidate_ids`,
+`lexical_search`, `vector_search`, `competing_claims`, none of which the REST facade has
+an endpoint for.
+
+The decision is **diverge, and gate**, and it is written down here rather than left as a
+TODO because "converge" is the option somebody will otherwise reach for and it is the
+wrong one.
+
+**Why not converge.** The two shapes are not two spellings of one interface.
+`Store` is what the engine writes against and every method on it is one hop from the row:
+a raw `Claim` to upsert, a `fact_key` to look up, a vector to compare, a tenant to page
+over. `memvara_cloud.rest.app` is a facade: `POST /v1/facts`, `GET /v1/history`,
+`POST /v1/erasures`, each doing its own reconciliation, each authorizing itself against
+the bearer token's own scope rather than against a `tenant` argument the caller supplies.
+Widening the REST surface until `Store` fits over it would move contradiction resolution,
+ranking and scope enforcement to the client — which is the multi-tenant control plane's
+job, on the other side of the line in the table above, and would make a browser session
+and a Python process two places where the same guarantee has to hold.
+
+**Which side each seam is on.**
+
+| seam | side | why |
+|---|---|---|
+| `memvara/store/base.py` — the `Store` protocol | **open** | Public, documented, implementable by anyone. A third-party Postgres backend is a legitimate thing to write and the design does not object. |
+| `memvara/core.py` — the engine over that protocol | **open** | It *is* the library. Nothing about running it changes when the rows live elsewhere. |
+| `memvara/store/remote.py` — the HTTP client | **open**, and thin on purpose | A caller of someone else's server. It maps what the facade actually exposes and raises for the rest; a `put_claim` that quietly wrote through `POST /v1/facts` would reinterpret every field the caller set, and a `competing_claims` returning `[]` would make every write believe a slot was empty. Both are worse than an exception. |
+| the `/v1` facade itself | **commercial** | Auth, multi-tenancy, quotas. Naming it "planned" here would be the dishonest version. |
+| running the engine *against* a remote store | **neither, for now** | Refused at construction. |
+
+**What that refusal does.** `build_memvara` compares the engine's needs against
+`RemoteStore.WIRED` and raises a `ConfigError` naming exactly which methods are missing
+and what to run instead. The failure lands where the configuration was made rather than
+mid-conversation as a tool error, which is the one place it cannot be acted on.
+
+It also **un-refuses itself**: the check is a set difference, so the day those endpoints
+exist and `WIRED` grows, the branch stops firing without anybody remembering this file.
+`tests/test_config_cloud.py::test_the_cloud_guard_is_derived_from_the_store_rather_than_
+hardcoded` fails when that day comes, and says what to delete.
+
+A hosted deployment is reached by pointing an MCP client at its own URL. It is not
+proxied through a local server, and that is the divergence: two clients of one facade,
+rather than one engine straddling both.
+
+---
+

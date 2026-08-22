@@ -40,6 +40,7 @@ from .core import (
     DegradedExtractionWarning,
     EmbedderChangedWarning,
     EmbedderMismatchError,
+    ErasureIncomplete,
     Memvara,
     ScopedMemvara,
 )
@@ -71,6 +72,7 @@ from .types import (
     Delta,
     Derivation,
     Episode,
+    ErasureProof,
     Explanation,
     MemoryType,
     Provenance,
@@ -119,6 +121,8 @@ __all__ = [
     "LLM", "NullLLM", "AnthropicLLM", "OpenAILLM",
     # diagnostics: importable so they can be filtered or caught by category
     "DegradedExtractionWarning", "EmbedderChangedWarning", "EmbedderMismatchError",
+    # erasure, and the evidence for it
+    "ErasureIncomplete", "ErasureProof",
     # subsystems
     "WritePipeline", "SalienceGate", "FastExtractor", "Reconciler",
     "UnembeddableTextWarning",

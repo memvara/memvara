@@ -7,6 +7,103 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `erase()` can now raise, and the schema is version 8
+
+### What changed
+
+`Memvara.erase()` used to report success from the store's return code. It now re-queries
+the disk afterwards (`prove_erased`) and raises `ErasureIncomplete` if anything survived,
+or if the store cannot be asked. The two ordinary outcomes are unchanged: `True` means
+proved gone, `False` still means there was nothing to erase.
+
+**The exception is reachable from a store you already have.** `RemoteStore` (cloud mode)
+cannot count rows, so every `erase()` against it now raises instead of returning `True`.
+That is the intended behaviour — it was returning `True` for an erasure it could not
+verify — but it is a behaviour change on a working configuration.
+
+The SQLite schema goes 7 → 8, adding an `erasures` audit table. The migration is the
+`CREATE TABLE` and nothing else: there is no data to backfill, and an upgraded file starts
+with an empty table, which means "nothing erased since the upgrade" and never "nothing was
+ever erased here". **A file opened by this build cannot be opened by an older one** —
+`_migrate` refuses a store stamped newer than the build reading it, which is deliberate
+and is the usual one-way door.
+
+### What to do about it
+
+If you call `erase()` in a loop over a legal erasure request, catch the exception and
+treat the erasure as incomplete:
+
+```python
+from memvara import ErasureIncomplete
+
+try:
+    mem.erase(claim_id)
+except ErasureIncomplete as exc:
+    log.error("half-erased: %s still holds rows", exc.proof.surviving)
+```
+
+To check an erasure that happened months ago, or in another process:
+
+```python
+mem.prove_erased(claim_id).proven
+```
+
+**It is not scope-checked**, and that is stated rather than fixed: the claim is gone, so
+there is nothing to scope-check against. It reveals whether any row with a given id
+survives, for an id the caller must already hold. Treat erasure verification as an
+operator action.
+
+---
+
+## `Explanation` gained four fields and two more retrieval legs exist
+
+
+### What changed
+
+`Explanation` now carries `graph_rank`, `graph_score`, `temporal_rank`, `temporal_score`
+and `intent`, and `HybridRetriever.__init__` takes `w_graph`, `graph_seeds`,
+`graph_depth`, `w_temporal`, `traverser` and `intent_weighting`. All are additive and
+every default reproduces the previous behaviour exactly: `w_graph=0.0` and
+`w_temporal=0.0` mean no walk and no time query run, nothing extra is fused, and both
+pairs of fields stay `None` on every result.
+
+`Store` gains one optional method, `episodes_near`. A store without it does not run the
+temporal leg, exactly as one without `vector_search_episodes` does not run the vector half
+of the episode search.
+
+Two things will announce themselves anyway.
+
+**`Explanation.summary()` and `repr(Result)` gained fields.** A test asserting on the
+whole string will see `graph#2(0.750)` and `time#1(0.500)` appear once those legs are on;
+neither is emitted while they are off, and both ship off.
+
+**`intent=` is different: it is emitted by default.** `intent_weighting` ships **on**, so
+a stock build already prints `intent=lookup` on an ordinary search — it is the one new
+field a test can meet without turning anything on. It is absent only when
+`intent_weighting=False`.
+
+**`Memvara` now hands its `GraphTraverser` to its retriever.** It is the same object
+`neighborhood()` walks, so the two cannot disagree about what the graph is. Pass
+`read_traverser=` to wire a differently-bounded walk into retrieval than the one the
+public method exposes.
+
+### What to do about it
+
+Nothing, unless you want the leg. To turn it on:
+
+```python
+mem = Memvara("memory.db", read_w_graph=1.0)
+```
+
+Read `docs/BENCHMARKS.md` first. Neither public retrieval benchmark can measure it — both
+run the offline write path over conversational data it extracts almost nothing from — so
+the default is 0.0 and the only measured gain is on a synthetic multi-hop workload.
+
+**If your `Store` is a third-party one**, the leg needs `adjacent()`. A store without it
+degrades to the two legs it had, with a `DegradedRetrievalWarning` raised once per
+retriever rather than silently. `RemoteStore` (cloud mode) is in that category: the method
+is present and raises.
+
 ## Erasure now actually removes the text, and the schema is version 7
 
 ### What changed

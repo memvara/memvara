@@ -1,6 +1,6 @@
 # Hosted MCP
 
-Paste a URL, click Allow, the ten tools appear. Nothing to install on the
+Paste a URL, click Allow, the twelve tools appear. Nothing to install on the
 machine. This is the default path.
 
 URL: `https://app.memvara.dev/mcp`

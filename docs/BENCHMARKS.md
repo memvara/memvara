@@ -136,6 +136,129 @@ until this run**: `HybridRetriever` broke score ties on `claim.id`, a fresh `uui
 ingest, so two ingests of one corpus ranked differently and the numbers drifted 0.07
 points. Ties now break on a content hash and three full runs are byte-identical.
 
+### The graph leg, and why no row above moves
+
+`w_graph > 0` adds a third retrieval leg: a bounded walk out of the entities the vector
+and lexical legs just named (`memvara/retrieve/spread.py`). **It ships at `w_graph=0.0`,
+and the reason is that neither benchmark above can see it.**
+
+```bash
+PYTHONPATH=. python3 bench/locomo.py      --score retrieval --w-graph 1.0
+PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-graph 1.0
+```
+
+| instrument | claims in the store | what the leg changed |
+|---|---:|---|
+| LOCOMO, 1,531 questions | **0** | nothing — the two reports are byte-identical |
+| LongMemEval oracle, 500, `--share-store` | **78** | no R@k moved; MRR −0.5 on `single-session-preference`, −0.1 on `multi-session` |
+| `bench/multihop.py` (synthetic) | 4,498 | **2.9% → 21.6%** at k=12, **7.6% → 50.4%** at k=25 |
+| `bench/multihop.py`, **as shipped** | 4,498 | **nothing** — the intent gate routes 2 of the 3 question families past the walk |
+
+The leg walks *claims*, and both public runs are episode retrieval: `SalienceGate` drops
+any turn whose role is not `user`, LOCOMO writes each turn under the speaker's name, and
+the deterministic extractor's vocabulary is first-person declaratives. LOCOMO extracts
+**0 claims from 5,882 turns** and LongMemEval **78 from 10,866**. With no claims the
+candidate set is empty and the leg is never reached, so the LOCOMO figure is not a null
+result — it is the leg being inert by construction.
+
+`bench/multihop.py` already said the other half of this, before the leg existed: LOCOMO's
+`multi-hop` category is single-fact lookups whose evidence happens to span one or two
+turns, not transitive relations over entities, "so a graph walk is not what that 36% row
+is short of."
+
+What the one instrument that *can* see it measures — `search` is the shipped read path,
+`+graph` the same call with one constructor argument changed, `linked` the best a caller
+could previously get by hand (take the seed entity off the top hit and call
+`neighborhood()` yourself):
+
+```
+  set           k   search   +graph  +graph!  search x2  traverse  +min_hops    +both   linked
+  two-hop      12     4.0%     4.0%    31.7%      64.3%     69.7%     100.0%   100.0%    99.7%
+  two-hop      25     9.3%     9.3%    73.3%      96.3%    100.0%     100.0%   100.0%    99.7%
+  three-hop    25     4.0%     4.0%     4.7%       4.7%     34.7%      48.7%   100.0%    46.7%
+  all          12     2.9%     2.9%    21.6%      43.1%     46.4%      78.7%    83.1%    77.8%
+  all          25     7.6%     7.6%    50.4%      65.8%     78.2%      82.9%   100.0%    82.0%
+```
+
+**`+graph` is the shipped configuration and `+graph!` is the same with
+`intent_weighting=False`. The gap between them is the second finding, and it is not a
+small one.** Two of the three question families here contain no word in
+`intent.RELATIONAL_MARKERS` — "which city is the company X works at based in", "who
+founded the company that X works at" — so the gate reads them as `lookup` and routes them
+past the walk. The leg is switched off on exactly the questions it was built for, and the
+column collapses onto `search`.
+
+That is a gap in the vocabulary rather than in the gate: `works at` and `founded` are
+relations by any reading, and both are *predicates in this store's own registry*. The fix
+is to derive the relational markers from the registry's predicate names rather than from a
+hand-written list, which is written down here rather than done, because widening the list
+by hand against a benchmark this repository wrote is how a classifier gets fitted to its
+own corpus. Until then, a deployment turning the graph leg on should turn
+`intent_weighting` off with it and pay the walk on every query.
+
+The three-hop rows barely move because `graph_depth` ships at 2; that row measures the
+bound, not the traversal. And this benchmark is synthetic and self-authored — read it as
+an illustration of a mechanism, which is not evidence for a default.
+
+**So it is opt-in, and the guardrails are why it is opt-in rather than rejected.** Every
+R@k in both public runs held exactly, including the two the thesis rests on:
+knowledge-update 91.0 → 91.0 and single-session-user 92.2 → 92.2. The precedent for
+shipping a measured stage at zero is the MMR rejection recorded in `hybrid.py`.
+
+```python
+mem = Memvara("memory.db", read_w_graph=1.0)
+```
+
+`memvara/retrieve/intent.py` is what makes turning it on affordable — a deterministic,
+model-free classifier routes `lookup` and `temporal` queries past the walk entirely — and
+the table above is also what it currently costs. Every multiplier in it other than the two
+gates is 1.0 and stays 1.0 until a per-category sweep moves it.
+
+### The temporal leg, and the abstention that is the actual finding
+
+`w_temporal > 0` adds a fourth leg over **raw turns**: the ones nearest in time to the
+instant the search was asked about, ranked on *when* and reading no text at all. It is the
+answer to "what was going on around then", whose only content words — `when`, `around`,
+`then` — the analyzer drops and the embedder maps onto nothing. **It also ships at 0.0.**
+
+```bash
+PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-temporal 1.0
+```
+
+| LongMemEval oracle, R@12 | baseline | + temporal, no floor | + temporal, with floor |
+|---|---:|---:|---:|
+| temporal-reasoning | **66.6** | 64.2 | **66.6** |
+| knowledge-update | 91.0 | 91.0 | 91.0 |
+| multi-session | 65.5 | 65.2 | 65.0 |
+| **all** | **70.4** | 69.7 | 70.3 |
+| all MRR | 62.0 | 57.4 | 62.0 |
+
+**The middle column is the finding, and it is about fusion rather than about time.** With
+no instant given the anchor is *now*, and these transcripts are dated years earlier, so
+every turn scored a proximity around 0.005 — and RRF reads *positions*, so a leg with no
+opinion still contributed rank 0, rank 1, rank 2. A ranking assembled from nothing is not
+a weak ranking, it is a fabricated one, and fusion cannot tell the difference. That cost
+**2.4 points of temporal-reasoning R@12 and 4.6 of MRR**.
+
+The other two legs have had the matching guard all along: the vector leg abstains on a
+zero-norm query, the lexical leg on a query with no content terms. `MIN_PROXIMITY` gives
+this one the same rule — nothing within a half-life of the anchor and it does not vote —
+and the loss goes to zero.
+
+What it does not do is clear the bar. Temporal-reasoning is unchanged and multi-session
+loses 0.5, so the default stays off. The reason is the same shape as the graph leg's: the
+leg is strongest when a caller passes `valid_at`, and no benchmark here passes one — both
+call `search(question, k)` with the question as prose. It is second strongest on a **live**
+store, where `add()` stamps turns with the wall clock and the recent ones genuinely are
+near the anchor; LongMemEval replays an archive, so the abstention fires nearly everywhere,
+which is right and also leaves nothing to measure.
+
+**The blocking dependency here is ingestion, not retrieval.** Both public instruments are
+blind to the graph leg for the same reason the `memvara` demo arm produces zero claims —
+see [What the fast path does not
+catch](#what-the-fast-path-does-not-catch-measured). Until the offline write path extracts
+from ordinary prose, no public retrieval number can move on this.
+
 ---
 
 ## A design comparison (synthetic, self-authored)
@@ -251,10 +374,25 @@ single-clock store gives as `trap`, and which clock closed as `closure`, so the 
 failures can be counted apart. The golds were written by hand from the transcript, never
 recorded from a memvara run.
 
+### The offline run, which is one command and repeats exactly
+
+```bash
+PYTHONPATH=. python3 demo/harness.py --reader stub
+```
+
+Every arm, every question, in one process, with no key. It is deterministic, so two runs
+of it differ only where the library does — which is what makes the apparatus something a
+test can hold and a bisect can walk. `test_the_offline_run_is_identical_twice` pins it.
+
+**Read nothing about answer quality out of it.** The reader is `evalkit.StubReader`: it
+returns the line of the retrieved context with the most words in common with the question.
+Its `correct` column is a property of the corpus and the arms, and the run prints two
+banners saying so. The rows below, and the table further down, are the numbers.
+
 ### Context size, which is deterministic and reproducible
 
-`PYTHONPATH=. python3 demo/harness.py --dump runs/demo.jsonl` builds the contexts. This
-table is a property of the corpus and the arms and comes out the same on every run:
+Either command builds the contexts. This table is a property of the corpus and the arms
+and comes out the same on every run:
 
 ```
   arm                 mean chars  max chars  mean ~tokens  items used / turns seen

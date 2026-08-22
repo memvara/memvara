@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from contextlib import AbstractContextManager
-from typing import (TYPE_CHECKING, Collection, Iterable, Literal, Protocol, Sequence,
+from typing import (TYPE_CHECKING, Any, Collection, Iterable, Literal, Protocol, Sequence,
                     runtime_checkable)
 
 import numpy as np
@@ -291,6 +291,62 @@ def live_predicate(at: str = "?", *, include_invalidated: bool = False,
     return state_predicate(
         at, states=resolve_states(include_invalidated=include_invalidated), alias=alias,
     )[0]
+
+
+def bulk_claims(store: "Store", claim_ids: Sequence[str]) -> dict[str, Claim]:
+    """`get_claims` where the store has it, one `get_claim` per id where it does not.
+
+    `get_claims` was added after the first third-party backends existed, and
+    `tests/test_edges.py` holds the promise that those keep working. That promise was
+    kept in exactly one of the three places that hydrate a list of ids: `search()` fell
+    back, and `Memvara.get_all` and `produced` called straight through, so a store
+    without it searched fine and raised `TypeError: 'NoneType' object is not callable`
+    the moment anybody listed their memories.
+
+    A guarantee honoured at one of three call sites is not a guarantee, and the way to
+    stop that recurring is for there to be one call site. Every hydrate goes through
+    here.
+
+    The fallback is genuinely worse — one query per candidate instead of one, the N+1
+    this method exists to avoid — which is the argument for implementing `get_claims`,
+    not for letting an old store crash.
+    """
+    bulk = getattr(store, "get_claims", None)
+    if bulk is not None:
+        return bulk(list(claim_ids))
+    return {cid: claim for cid in claim_ids
+            if (claim := store.get_claim(cid)) is not None}
+
+
+#: Members a backend may leave out, and what it costs to leave each one out.
+#:
+#: `Store` is `@runtime_checkable`, and `isinstance` on a Protocol is **all or nothing**:
+#: it asks whether every one of the ~43 members is present, so it cannot answer "can this
+#: store walk a graph". A backend that implements everything a memory needs and skips the
+#: four below is a perfectly good store and `isinstance(x, Store)` is `False` for it.
+#:
+#: So the capability check in this codebase is `getattr(store, name, None)`, per member,
+#: at the call site that needs it — and each of those call sites degrades in a way it
+#: names out loud rather than raising. This mapping is the list they are drawn from; it is
+#: documentation and a test asserts it stays true, not something the runtime consults.
+#:
+#: `get_claims` is the awkward one and it is on the list. The protocol declares it with no
+#: hedge and both shipped stores implement it, but it was added after the first
+#: third-party backends existed and `tests/test_edges.py` pins that those keep working —
+#: so it is optional by compatibility rather than by design. Reach it through
+#: `bulk_claims()` and the distinction stops mattering at the call site.
+OMITTABLE: dict[str, str] = {
+    "adjacent": "no graph leg in search(), and neighborhood()/paths_between() raise "
+                "NotImplementedError. HybridRetriever warns once per retriever.",
+    "episodes_near": "no temporal leg. Time still filters and still decays; it just "
+                     "stops producing candidates of its own.",
+    "residue": "erase() cannot be proved, so prove_erased() returns proven=False with a "
+               "reason and erase() raises rather than reporting an unverified success.",
+    "erasure_record": "no audit trail to read back. Erasure itself is unaffected.",
+    "get_claims": "hydration falls back to one get_claim per id — the N+1 that bulk "
+                  "fetch exists to avoid. Correct, and it makes retrieval scale with "
+                  "how many candidates were considered. Go through bulk_claims().",
+}
 
 
 @runtime_checkable
@@ -606,6 +662,32 @@ class Store(Protocol):
                                known_at: datetime | None = None
                                ) -> list[tuple[str, float]]: ...
 
+    def episodes_near(self, anchor: datetime, scopes: Sequence[Scope], limit: int, *,
+                      valid_at: datetime | None = None,
+                      known_at: datetime | None = None) -> list[tuple[str, float]]:
+        """The `limit` turns closest in time to `anchor`, nearest first, with their `ts`.
+
+        The third episode search, and the only one that ranks on *when* rather than on
+        what was said. "What was going on around then" is answered by a turn that need
+        share no vocabulary with the question — the words in it are `when`, `around` and
+        `then`, all of which the analyzer drops — so neither of the other two legs can
+        return one. See `memvara/retrieve/temporal.py`.
+
+        **The ordering and the cap must be in one statement.** A caller that listed a
+        scope's turns and dropped the ones after `valid_at` in Python would be filtering
+        a page the store had already truncated, and a time-travel query would come back
+        short with nothing saying it was partial — design invariant 7, and the same shape
+        that made `adjacent` return 8 of 20 readable claims.
+
+        Distance is symmetric: a turn a week before the anchor and a turn a week after it
+        are equally about that time. Returning `ts` rather than a score keeps the fitted
+        constant on the retrieval side, where it can be changed without a store release.
+
+        Optional. A store without it simply does not run the leg, exactly as one without
+        `vector_search_episodes` does not run the vector half.
+        """
+        ...
+
     def purge(self, scope: Scope) -> dict[str, int]:
         """Irreversibly erase a scope: claims, episodes, every vector, both text indexes.
 
@@ -631,6 +713,53 @@ class Store(Protocol):
         resolves. `cited=True` erases anyway and is what a retention obligation over
         transcripts needs; the dangling provenance is then a deliberate, recorded
         consequence rather than an accident.
+        """
+        ...
+
+    def residue(self, claim_id: str) -> dict[str, int]:
+        """How many rows still mention `claim_id`, per table. A **live query**, always.
+
+        The evidence behind `Memvara.prove_erased`, and it is worth being exact about
+        what makes it evidence: `erase_claim` already reports what it believes it
+        deleted, and a proof assembled from that number proves only that the code took
+        the branch it thought it took. This one goes back to the storage and counts what
+        is there *now*, so it is able to disagree with the delete. A re-hash of what was
+        returned, or a cached count, would not be.
+
+        Keys are the implementation's own tables — `SQLiteStore` returns `claims`,
+        `claims_fts`, `embeddings` and `claim_sources` — because "which tables can this
+        claim's content survive in" is a property of the backend and not of the protocol.
+        Every value zero is the answer that proves an erasure; any non-zero means it did
+        not complete, whatever `erase_claim` said.
+
+        An erasure audit table, if the implementation keeps one, is deliberately **not**
+        counted here: it is supposed to survive, and including it would make every proof
+        fail.
+
+        **The key set is trusted, and that is the limit of the guarantee.** Only the
+        implementation knows which of its tables hold a claim's content, so a store that
+        counts `claims` and forgets its text index gets a passing proof and nothing
+        generic can tell the short key set from an honest one. `prove_erased` refuses an
+        empty or malformed result, which catches a `residue` that did not really run; it
+        cannot catch one that ran over too few tables. An implementor adding a table that
+        can hold claim content has to add it here in the same commit.
+
+        Optional. A store without it cannot be asked to prove an erasure, and
+        `prove_erased` returns `proven=False` naming that rather than assuming success —
+        see `types.ErasureProof`.
+        """
+        ...
+
+    def erasure_record(self, claim_id: str) -> dict[str, Any] | None:
+        """What this store recorded about erasing `claim_id`, or `None`.
+
+        Optional, and `None` is genuinely ambiguous: it means "no record here", which
+        covers a store that keeps no audit trail, a store whose trail predates the claim,
+        and a claim that was never erased. It is a lookup, never a proof of absence.
+
+        `SQLiteStore` returns `claim_id`, `tenant`, `scope`, `erased_at`, `sources` and
+        the per-table `counts`, and deliberately **no text, subject, predicate or
+        object** — an audit trail the erased fact can be read out of is a copy of it.
         """
         ...
 

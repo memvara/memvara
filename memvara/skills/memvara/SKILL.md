@@ -53,6 +53,16 @@ prose handed to `memory_add` is often accepted and not stored.
 Store what would be **embarrassing** to get wrong next week. Do not restate the
 transcript. See `references/scopes.md`.
 
+A thin `memory_recall` on a question that names two things is a signal, not an
+empty store. Try `memory_neighborhood` next, or `memory_paths` when the user
+named both ends. Do it in that order — recall first — because most questions do
+have a single note behind them and a walk is the slower way to find one.
+
+What comes back is a chain, and it is worth handing over as a chain. Give the
+user the steps and let them see where you got it; a conclusion with the middle
+removed is something they have to take on trust, and the middle is the part
+they can correct.
+
 ## Other jobs
 
 | They asked | Open |
@@ -63,6 +73,11 @@ transcript. See `references/scopes.md`.
 | Moving off Supermemory | `references/migrate-supermemory.md` |
 | A worked turn | `references/examples.md` |
 | No skill folder on this client | `references/project-instructions.md` |
+
+When that comes back with nothing, you have learned something about your own
+lookup and nothing about the two people. Report it as such. "I have no record
+tying them together" is true; "they have no connection" is a claim about the
+world that no memory tool can support.
 
 `memory_forget` is not erasure. Real deletion is an operator action on the
 console or REST, and is deliberately not a tool. Never say you deleted data if

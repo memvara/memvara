@@ -1207,3 +1207,28 @@ def test_retracting_a_whole_slot_still_works_with_no_named_value():
         receipt = mem.remember("user", "works_at", "", polarity=-1)
         assert len(receipt.invalidated) == 1
         assert mem.get_all() == []
+
+
+def test_a_store_predating_bulk_fetch_can_also_list_its_memories():
+    """The other two hydrate sites, which never had the fallback `search()` had.
+
+    `Memvara.get_all` and `produced` called `store.get_claims` straight through, so the
+    exact store the test above promises to support raised `TypeError: 'NoneType' object
+    is not callable` the moment anybody listed their memories. A compatibility guarantee
+    honoured at one of three call sites is not a guarantee; all three now go through
+    `store.base.bulk_claims`, so there is one place for it to be true.
+    """
+    class OldStore(SQLiteStore):
+        get_claims = None
+
+    mem = Memvara(store=OldStore(":memory:"), embedder=HashingEmbedder(dim=64),
+                  user="alice")
+    try:
+        mem.remember("user", "lives_in", "Berlin")
+        mem.remember("user", "works_at", "Acme")
+        assert sorted(c.object for c in mem.get_all()) == ["Acme", "Berlin"]
+        stored = mem.get_all()[0]
+        if stored.sources:
+            assert [c.id for c in mem.produced(stored.sources[0])]
+    finally:
+        mem.close()

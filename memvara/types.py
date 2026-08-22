@@ -811,12 +811,53 @@ class Explanation:
     raw_score: float = 0.0
     final_score: float = 0.0        # == Result.score, i.e. normalized into [0, 1]
 
+    # --- fields added after 0.2.0, appended rather than slotted in beside their kin ---
+    #
+    # `graph_*` and `temporal_*` belong next to `vector_*` and `lexical_*` and are not
+    # there, because this is a dataclass and its field order is an API. Inserted in the
+    # readable place they shifted `fusion_score` and everything after it four positions
+    # right, so `Explanation(0, 0.9, 1, 0.8, 0.5)` — a perfectly ordinary call written
+    # against 0.2.x — put the fusion score into `graph_rank` and left `fusion_score` at
+    # its default. No exception: an `int | None` field silently holding 0.5, and a
+    # ranking explanation quietly reporting the wrong number about itself.
+    #
+    # Pickle is a separate question and appending does not answer it: `slots=True` makes
+    # `__getstate__` a *name*-keyed dict, so an older pickle restores its own fields
+    # correctly and simply leaves these five unset — reading one then raises
+    # `AttributeError` rather than returning the default. That is true wherever they sit.
+    #: Position and path score in the graph leg — the multi-hop walk seeded from the head
+    #: of the other two (see `memvara/retrieve/spread.py`). `None` means this claim was
+    #: not on any path the walk returned, which includes the ordinary case of the walk
+    #: not having run: it is gated by query intent, it needs a `Store` with `adjacent`,
+    #: and it is off entirely at `w_graph=0`. A number here says the claim was reached
+    #: *through* something else, which is the one thing the other two legs cannot report.
+    graph_rank: int | None = None
+    graph_score: float | None = None
+    #: Position and closeness in the temporal leg — the episode search that ranks on
+    #: *when* and reads no text (see `memvara/retrieve/temporal.py`). Only ever set on an
+    #: `EpisodeResult`: a claim's time signal is the predicate-keyed decay in `recency`,
+    #: which knows what raw proximity cannot, that a `born_in` from 2019 is as current as
+    #: it will ever be. `None` means the leg did not rank this turn, which includes the
+    #: ordinary case of it not having run.
+    temporal_rank: int | None = None
+    temporal_score: float | None = None
+    #: The query shape retrieval routed this search as, or `None` when intent weighting
+    #: was off. It is on the explanation rather than only in a log because it is the
+    #: answer to the question a surprising result set actually raises: not "why is this
+    #: row here" but "why was the leg that would have found the other one switched off".
+    #: See `memvara/retrieve/intent.py`.
+    intent: str | None = None
+
     def summary(self) -> str:
         bits = []
         if self.vector_rank is not None:
             bits.append(f"vector#{self.vector_rank}({self.vector_score:.3f})")
         if self.lexical_rank is not None:
             bits.append(f"bm25#{self.lexical_rank}({self.lexical_score:.2f})")
+        if self.graph_rank is not None:
+            bits.append(f"graph#{self.graph_rank}({self.graph_score:.3f})")
+        if self.temporal_rank is not None:
+            bits.append(f"time#{self.temporal_rank}({self.temporal_score:.3f})")
         bits.append(f"recency={self.recency:.2f}")
         bits.append(f"conf={self.confidence:.2f}")
         bits.append(f"sal={self.salience:.2f}")
@@ -826,10 +867,71 @@ class Explanation:
             # Shown only once a retriever populates it, so the line stays readable for
             # anything that scores without a normalization step.
             bits.append(f"raw={self.raw_score:.4f}")
+        if self.intent is not None:
+            bits.append(f"intent={self.intent}")
         return " ".join(bits) + f" -> {self.final_score:.4f}"
 
     def __repr__(self) -> str:
         return f"<Explanation {self.summary()}>"
+
+
+@dataclass(frozen=True, slots=True)
+class ErasureProof:
+    """Whether one claim is actually gone, checked against the disk rather than inferred.
+
+    `Memvara.erase()` used to report success from a return code: the store said it had
+    deleted a row, and that was the whole of the evidence. That proves the code took the
+    branch it thought it took, which is the same statement the return value already made.
+    A proof has to be able to *disagree* with the delete, so this is built from a physical
+    re-query — `Store.residue`, four `SELECT COUNT(*)`s over the tables a claim's content
+    can survive in.
+
+    **`proven` is false whenever it could not be established**, never merely when
+    something survived. A store with no `residue` method yields `proven=False` with a
+    reason naming it, and `erase()` refuses rather than reporting a success it cannot
+    support. Unproven and proven-gone are different answers and only one of them is an
+    erasure certificate; rendering the first as the second is the failure this type
+    exists to remove.
+
+    `residue` is the per-table count, and it is carried even when it is all zeroes,
+    because "checked these four tables and found nothing" is the evidence. An **empty**
+    residue is the opposite: it means nothing was counted, and it can never accompany
+    `proven=True` — `all(n == 0 for n in {})` is vacuously true, which is exactly the trap
+    this distinction exists to keep out of `erase()`. `record` is
+    the `erasures` row, or `None` — a store that keeps no audit trail can still prove the
+    rows are gone, and cannot prove that anything recorded their going.
+
+    >>> ErasureProof(claim_id="c1", proven=True, residue={"claims": 0}).surviving
+    {}
+    >>> gone_wrong = ErasureProof(claim_id="c1", proven=False,
+    ...                           residue={"claims": 0, "claims_fts": 1},
+    ...                           reason="rows survived the delete")
+    >>> gone_wrong.surviving
+    {'claims_fts': 1}
+    """
+
+    claim_id: str
+    #: True only when a physical re-query ran *and* every table came back empty.
+    proven: bool
+    #: Per-table surviving row counts, from `Store.residue`. Empty when nothing could be
+    #: counted, which is a different thing from every count being zero.
+    residue: dict[str, int] = field(default_factory=dict)
+    #: Why `proven` is false, in one sentence. Empty when it is true.
+    reason: str = ""
+    #: The audit row this erasure wrote, if the store keeps one. See
+    #: `SQLiteStore.erasure_record`; `None` also means "this store has no such table",
+    #: so it is never on its own evidence that nothing happened.
+    record: dict[str, Any] | None = None
+
+    @property
+    def surviving(self) -> dict[str, int]:
+        """The tables that still hold something. Empty is the answer you want."""
+        return {table: n for table, n in self.residue.items() if n}
+
+    def __repr__(self) -> str:
+        if self.proven:
+            return f"<ErasureProof {self.claim_id} gone {sorted(self.residue)}>"
+        return f"<ErasureProof {self.claim_id} UNPROVEN {self.reason!r}>"
 
 
 @dataclass(slots=True)
@@ -865,6 +967,11 @@ class Result:
             legs.append(f"vector#{self.explain.vector_rank}")
         if self.explain.lexical_rank is not None:
             legs.append(f"bm25#{self.explain.lexical_rank}")
+        if self.explain.graph_rank is not None:
+            # Without this line a claim reached only by traversal reprs as
+            # `no-retriever`, which is the one reading that is actually wrong: a
+            # retriever found it, and which one is the whole point of the leg.
+            legs.append(f"graph#{self.explain.graph_rank}")
         return (f"<Result {self.score:.4f} {_short(self.text)!r} "
                 f"{'+'.join(legs) or 'no-retriever'} {self.claim.id}>")
 

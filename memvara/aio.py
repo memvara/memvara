@@ -59,8 +59,8 @@ from typing import Any, Callable, Collection, Literal, Sequence, overload
 from .core import Memvara, Messages, ScopedMemvara, _approx_tokens
 from .embed import Embedder
 from .retrieve import Path, Retrieved
-from .types import (Claim, Delta, Episode, MemoryType, Provenance, RecallResult, Result,
-                    Scope, WriteReceipt)
+from .types import (Claim, Delta, Episode, ErasureProof, MemoryType, Provenance,
+                    RecallResult, Result, Scope, WriteReceipt)
 
 
 class AsyncMemvara:
@@ -163,6 +163,10 @@ class AsyncMemvara:
         return await asyncio.to_thread(
             self.memvara.erase, claim_id, sources=sources, tenant=tenant, user=user,
             agent=agent, session=session)
+
+    async def prove_erased(self, claim_id: str) -> "ErasureProof":
+        """See `Memvara.prove_erased`."""
+        return await asyncio.to_thread(self.memvara.prove_erased, claim_id)
 
     async def purge(self, *, tenant=None, user=None, agent=None,
                     session=None) -> dict[str, int]:
@@ -510,6 +514,9 @@ class AsyncScopedMemvara:
 
     async def erase(self, claim_id: str, *, sources: bool = False) -> bool:
         return await self._amem.erase(claim_id, sources=sources, **self._kw)
+
+    async def prove_erased(self, claim_id: str) -> "ErasureProof":
+        return await self._amem.prove_erased(claim_id)
 
     async def supersede(self, old_claim_id: str, new_claim: Claim, *,
                         at: datetime | None = None,
