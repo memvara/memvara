@@ -511,3 +511,54 @@ def test_the_second_chance_stays_off_when_the_rows_name_one_predicate(mem):
     assert all(r.explain.graph_rank is None for r in results), (
         "one predicate named twice is not a chain"
     )
+
+
+def test_a_derived_relation_term_opens_the_walk_where_predicate_counting_cannot(mem):
+    """The gate's last blind spot, and the only one that needed a model to close.
+
+    "Who is the maternal grandfather of Alice" is a two-hop question over `mother` and
+    `father` that names neither. Counting predicates finds one at best, so the walk never
+    ran — on 2WikiMultihopQA's `inference` family, none of 1,549 questions. Supplying the
+    derived terms takes that family from 53.2% to 83.2% answer and 50.2% to 81.2% chain.
+
+    The terms are supplied, never looked up here: `intent.py` promises to be model-free
+    and `hybrid.py` promises reproducible retrieval, and a search that could block on an
+    API call breaks both. `retrieve/compose.acquire()` pays once per vocabulary.
+    """
+    mem.remember("Alice", "mother", "Beth", recorded_at=T0)
+    mem.remember("Beth", "father", "Cyrus", recorded_at=T0)
+
+    question = "Who is the maternal grandfather of Alice?"
+    blind = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                            graph_depth=2, traverser=mem.traverser,
+                            intent_weighting=True)
+    assert all(r.explain.graph_rank is None
+               for r in blind.search(question, mem.default_scope, k=10)), (
+        "the premise: no predicate in the question, so counting them cannot help"
+    )
+
+    seeing = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                             graph_depth=2, traverser=mem.traverser,
+                             intent_weighting=True,
+                             derived_terms={"grandfather", "father-in-law"})
+    rows = seeing.search(question, mem.default_scope, k=10)
+    assert any(r.explain.graph_rank is not None for r in rows)
+    assert any(r.claim.object == "Cyrus" for r in rows), "the walk should reach the answer"
+
+
+def test_derived_terms_do_not_reopen_the_comparison_frame(mem):
+    """A disjunction is still a comparison even if it names a derived relation.
+
+    "Whose grandfather was born earlier, Alice or Bruno" is two independent two-hop
+    lookups compared, not one chain, and the walk costs 15.4 points on that family. The
+    guard runs before the derived-term test for that reason.
+    """
+    mem.remember("Alice", "mother", "Beth", recorded_at=T0)
+    mem.remember("Beth", "father", "Cyrus", recorded_at=T0)
+
+    reader = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                             graph_depth=2, traverser=mem.traverser,
+                             intent_weighting=True, derived_terms={"grandfather"})
+    rows = reader.search("Whose grandfather was born earlier, Alice or Bruno?",
+                         mem.default_scope, k=10)
+    assert all(r.explain.graph_rank is None for r in rows)

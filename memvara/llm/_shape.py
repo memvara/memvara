@@ -139,6 +139,28 @@ def resolve_prompt(surface: str, offered: Sequence[str]) -> str:
     )
 
 
+def compose_prompt(predicates: Sequence[str]) -> str:
+    return f"predicates:\n{', '.join(predicates) or '(none)'}"
+
+
+def shape_composition(parsed: dict[str, Any]) -> dict[str, int]:
+    """The `derived` map, with anything that is not a term-and-arity dropped.
+
+    Shaped here rather than trusted, like every other model answer in this package. The
+    caller filters again — `retrieve/compose.acquire` drops terms that collide with a real
+    predicate or run to a whole phrase — because this function knows the response's shape
+    and that one knows the store's vocabulary, and neither can do the other's job.
+    """
+    derived = parsed.get("derived")
+    if not isinstance(derived, dict):
+        return {}
+    out: dict[str, int] = {}
+    for term, arity in derived.items():
+        if isinstance(term, str) and isinstance(arity, int) and not isinstance(arity, bool):
+            out[term] = arity
+    return out
+
+
 def shape_claims(parsed: dict[str, Any], n_episodes: int) -> list[dict[str, Any]]:
     """Validated claim dicts from a parsed model response. Anything doubtful is dropped."""
     raw = parsed.get("claims")

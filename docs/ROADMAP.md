@@ -358,6 +358,22 @@ is a claim about evidence placement and not about answer accuracy.
 
 ## Deliberately deferred
 
+**Persisting derived relation terms.** `retrieve/compose.acquire()` pays one model call
+per vocabulary and the answer lives for the life of a `Memvara`, so a long-running server
+pays once at startup and a short script pays once per run. Making it "asked once, ever" —
+the standard `resolve_predicate` already meets — needs somewhere to put the terms, and
+both candidates are wrong. `put_spec` stores predicates and a derived term is not one:
+recording `grandfather` as a predicate would give it a cardinality and a decay half-life
+it has no business having, and `all_specs()` would then offer it to the extractor as a
+slot to write into. A new `Store` method is a protocol change, and #26 demonstrated what
+those cost — three members added there broke `mypy` in a downstream repository whose CI
+was switched off, and nothing went red.
+
+The honest shape is probably a small tenant-scoped key/value on the store, which is a
+surface this protocol does not have and should not grow for one feature. Until then the
+cost is one call per process, which is the same order as loading an embedding model.
+
+
 Each of these was considered and declined for a reason. They are recorded here so they stop
 reading as things that are coming.
 

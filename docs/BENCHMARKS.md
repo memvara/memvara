@@ -373,7 +373,43 @@ product.
 
 </div>
 
-**What it still does not reach: 69% of the gain, and one whole question type.**
+**The one question type no rule could reach, and the model call that reaches it.**
+`inference` questions ask "who is the maternal grandfather of X" over evidence
+`(X, mother, Y)` and `(Y, father, Z)`. They name a *derived* relation and no stored
+predicate at all, so every rule above — which counts predicates a question says out loud —
+found at most one and never ran the walk. On that family the leg was worth nothing.
+
+`grandfather` is not a synonym for `father`; it is `father` composed with `father`, and no
+string match gets from one to the other. What the gate needs is the single fact that the
+term **is** a composition — not which predicates it composes from, since its question is
+only ever "is this a chain".
+
+`retrieve/compose.py` asks a model that once, about a **vocabulary**, and never about a
+query: given the predicates a store uses, which English relation terms compose from two or
+more of them. The read path does a set-membership test against the answer.
+`retrieve/intent.py` promises to be model-free and `hybrid.py` promises reproducible
+retrieval; a search that could block on an API call breaks both, which is why the
+acquisition is shaped like `resolve_predicate` — pay once per vocabulary, keep it, never
+pay again.
+
+Measured on `inference`, k=12, terms supplied:
+
+```
+  without derived terms   53.2% answer / 50.2% chain
+  with derived terms      83.2%        / 81.2%
+```
+
+`compositional`, `comparison` and `bridge_comparison` are unchanged, so it reaches the
+family it was built for and nothing else. A disjunction is still a comparison even when it
+names a derived relation — "whose grandfather was born earlier, A or B" is two two-hop
+lookups compared — so `is_comparison` runs first.
+
+It is **opt-in and absent by default**: a backend without `compose_relations` yields no
+terms and the gate keeps the rule it had, which is what every release before this shipped.
+The terms are not persisted, so a server pays once at startup; `docs/ROADMAP.md` carries
+why, and it is that the two obvious places to put them are both wrong.
+
+**What it still does not reach.**
 `inference` gains **nothing** — 46.4% through every change in this series — and the reason
 is not a bug. Those
 questions ask "who is the maternal grandfather of X"; the evidence is `(X, mother, Y)` and
