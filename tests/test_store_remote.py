@@ -281,6 +281,44 @@ def test_stats_for_a_different_tenant_is_rejected():
     store.close()
 
 
+def test_connectivity_reads_the_two_join_counts_off_stats():
+    transport = FakeTransport().on(
+        "GET", "/v1/stats",
+        json_response(200, {"scope": {"tenant": "acme"},
+                            "tenant_counts": {"claims": 9, "live_claims": 8,
+                                              "joinable_claims": 3}}))
+    store = make_store(transport)
+    assert store.connectivity() == {"live_claims": 8, "joinable_claims": 3}
+    assert store.connectivity(tenant="acme") == {"live_claims": 8, "joinable_claims": 3}
+    store.close()
+
+
+def test_connectivity_says_nothing_rather_than_zero_on_an_older_facade():
+    """A hosted store that has not deployed the counts is not a store with no joins.
+
+    Zero would read as a measured star, which is a real and actionable finding, and
+    printing one from a facade that never looked would send an operator to the write
+    path over a deployment lag.
+    """
+    transport = FakeTransport().on(
+        "GET", "/v1/stats",
+        json_response(200, {"scope": {"tenant": "acme"},
+                            "tenant_counts": {"claims": 9, "live_claims": 8}}))
+    store = make_store(transport)
+    assert store.connectivity() == {}
+    store.close()
+
+
+def test_connectivity_for_a_different_tenant_is_rejected():
+    transport = FakeTransport().on(
+        "GET", "/v1/stats",
+        json_response(200, {"scope": {"tenant": "acme"}, "tenant_counts": {}}))
+    store = make_store(transport)
+    with pytest.raises(ValueError, match="acme"):
+        store.connectivity(tenant="other")
+    store.close()
+
+
 # -- _request: 204 / empty body -------------------------------------------------------
 
 def test_request_returns_none_on_204():

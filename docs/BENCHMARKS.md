@@ -239,6 +239,15 @@ turn `intent_weighting` off if its traffic is mostly relationship questions, and
 the graph leg off entirely if it is mostly lookups. Neither is a default this repository
 can pick for you, which is why `w_graph` ships at 0.0.
 
+**Ask the store before you guess at the traffic**, because the store is the half you can
+measure. `memory_stats` reports a **join rate** — the share of live claims whose object is
+the subject of another live claim, which is the share that leads anywhere at all. The two
+corpora below sit at 40.6% and 0.0% and the leg gains 13 points on one and loses 1.6 on
+the other, so the rate predicts the sign where a guess about query mix does not. Under
+about 1% the store is a *star*, every fact hanging off one subject, and there is no
+second hop to find however the traffic is shaped. `Memvara.connectivity()` is the same
+two counts in the library.
+
 The three-hop rows barely move because `graph_depth` ships at 2; that row measures the
 bound, not the traversal. And this benchmark is synthetic and self-authored — read it as
 an illustration of a mechanism, which is not evidence for a default.

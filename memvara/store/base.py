@@ -321,9 +321,9 @@ def bulk_claims(store: "Store", claim_ids: Sequence[str]) -> dict[str, Claim]:
 #: Members a backend may leave out, and what it costs to leave each one out.
 #:
 #: `Store` is `@runtime_checkable`, and `isinstance` on a Protocol is **all or nothing**:
-#: it asks whether every one of the ~43 members is present, so it cannot answer "can this
+#: it asks whether every one of the 44 members is present, so it cannot answer "can this
 #: store walk a graph". A backend that implements everything a memory needs and skips the
-#: four below is a perfectly good store and `isinstance(x, Store)` is `False` for it.
+#: six below is a perfectly good store and `isinstance(x, Store)` is `False` for it.
 #:
 #: So the capability check in this codebase is `getattr(store, name, None)`, per member,
 #: at the call site that needs it — and each of those call sites degrades in a way it
@@ -346,6 +346,9 @@ OMITTABLE: dict[str, str] = {
     "get_claims": "hydration falls back to one get_claim per id — the N+1 that bulk "
                   "fetch exists to avoid. Correct, and it makes retrieval scale with "
                   "how many candidates were considered. Go through bulk_claims().",
+    "connectivity": "memory_stats cannot report a join rate, so an operator deciding "
+                    "whether to turn the graph leg on has to guess. Nothing else "
+                    "reads it; retrieval is unaffected.",
 }
 
 
@@ -510,6 +513,51 @@ class Store(Protocol):
         filtered: a negation is genuinely a claim about those entities, and whether it
         may be walked as a link between them is a traversal question, answered once in
         `GraphTraverser` so that no store implementation can get it wrong.
+        """
+        ...
+
+    def connectivity(self, tenant: str | None = None) -> dict[str, int]:
+        """How much of this tenant's memory leads to more of it.
+
+        Two counts, from one snapshot: `live_claims`, and `joinable_claims` — live claims
+        whose `object_key` is the `subject_key` of at least one *other* live claim. Their
+        ratio is the **join rate**, and it is the single number that decides whether the
+        graph leg can pay for itself, because a walk can only spend its budget on edges
+        that lead somewhere.
+
+        It is not the same question as "is this store a graph". Every claim is an edge
+        already — `subject_key`, `predicate`, `object_key` — so the answer to that is
+        always yes and it predicts nothing. Measured on the two public corpora: 2Wiki
+        joins at **40.6%** and the leg takes chained questions from 28.2% to 41.4%;
+        LongMemEval joins at **0.0%** and the leg *loses* 1.6 points. Both are graphs.
+        One has paths.
+
+        A join rate near zero is usually a *star*, and usually correct. Facts extracted
+        from a user's own turns all have that user as their subject, so their objects are
+        leaves and no two of them connect — which is what a personal knowledge graph is,
+        not a defect in it. The rate rises when the store also holds facts about things
+        other than the user, and that is a property of the write path.
+
+        **Both sides of the join must be edges the traverser would actually follow**, or
+        the rate promises hops that will not happen. That is the liveness predicate, for
+        the reason `adjacent` carries it — a path through a retired claim is not a path —
+        plus `GraphTraverser._edges`' three rules: a negation is adjacency and not a link,
+        an empty end is what a retraction stores rather than a node, and a self-loop leads
+        back to where the walk is standing. SQLite spells an empty end `''` and Postgres
+        `NULL`, and that difference must not be observable here.
+
+        The *denominator* is `live_claims` and not the walkable ones. The question is what
+        share of this memory leads to more of it, and a leaf is an answer to that rather
+        than a row to exclude — a store of nothing but leaves is exactly the case this
+        method exists to name.
+
+        The counts must come from one read snapshot. Two calls could straddle a write and
+        report a ratio that was never true of any state the store was in.
+
+        Optional, and deliberately not folded into `stats()`: the join is a semi-join over
+        the whole claim table and `stats()` is called by `Memvara.__repr__`. On 26,403
+        claims it costs about 60 ms against that call's 69 ms, so putting it there would
+        roughly double the price of printing a store.
         """
         ...
 

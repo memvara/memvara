@@ -391,6 +391,11 @@ class AsyncMemvara:
         """See `Memvara.stats`."""
         return await asyncio.to_thread(self.memvara.stats, tenant=tenant)
 
+    async def connectivity(self, *, tenant: str | None = None) -> dict[str, int]:
+        """See `Memvara.connectivity`. Off the loop because it is a semi-join over the
+        whole claim table, which is the one counting call that is not cheap."""
+        return await asyncio.to_thread(self.memvara.connectivity, tenant=tenant)
+
     async def close(self) -> None:
         """See `Memvara.close`. Awaitable because it commits and fsyncs."""
         await asyncio.to_thread(self.memvara.close)
@@ -692,6 +697,9 @@ class AsyncScopedMemvara:
 
     async def stats(self) -> dict[str, int]:
         return await self._amem.stats(tenant=self.scope.tenant)
+
+    async def connectivity(self) -> dict[str, int]:
+        return await self._amem.connectivity(tenant=self.scope.tenant)
 
     def __repr__(self) -> str:
         return f"<AsyncScopedMemvara {self.scope.key()} of {self._amem!r}>"

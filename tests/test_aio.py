@@ -174,6 +174,7 @@ def test_the_write_surface(amem):
         assert (await amem.why(claim.id)) is not None
         assert (await amem.count()) == 1
         assert (await amem.stats())["claims"] == 1
+        assert await amem.connectivity() == {"live_claims": 1, "joinable_claims": 0}
         assert [c.object for c in await amem.history("user", "lives_in")] == ["Berlin"]
 
         await amem.supersede(claim.id, Claim(subject="user", predicate="lives_in",
@@ -415,6 +416,8 @@ def test_the_scoped_write_and_read_surface(amem):
         assert (await view.stats())["claims"] == 1
 
         await view.remember("Berlin", "in_country", "Germany")
+        # The path below is exactly what a join rate above zero is a count of.
+        assert await view.connectivity() == {"live_claims": 2, "joinable_claims": 1}
         assert [p.render() for p in await view.paths_between("user", "Germany")] \
             == ["user -lives_in-> Berlin -in_country-> Germany"]
         assert await view.neighborhood("user") != []

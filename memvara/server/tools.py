@@ -1071,17 +1071,44 @@ def _why(ctx: ToolContext, args: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _join_rate(memory: Any) -> str | None:
+    """The join-rate line, or `None` when there is nothing honest to print.
+
+    Two silences, and they are different. A backend without `connectivity` returns `{}`
+    and gets no line at all, because "0.0%" from a store that was never measured reads
+    exactly like a measured star. A store with no live claims has a real answer and no
+    ratio, so it gets the sentence without the number.
+    """
+    counts = memory.connectivity()
+    if not counts:
+        return None
+    live, joined = counts["live_claims"], counts["joinable_claims"]
+    if not live:
+        return "join rate: no live claims to measure"
+    pct = joined / live * 100
+    reading = ("a star — nothing links to anything, so a graph walk has nowhere to go"
+               if pct < 1.0 else
+               "sparse; the graph leg will rarely find a second hop" if pct < 10.0 else
+               "enough to walk")
+    return (f"join rate: {pct:.1f}%  ({joined} of {live} live claim(s) lead to another "
+            f"claim) — {reading}")
+
+
 def _stats(ctx: ToolContext, _args: dict[str, Any]) -> str:
     counts = ctx.memory.stats()
     scope = ctx.memory.scope
-    return "\n".join([
+    lines = [
         f"scope: {scope.key()}  (tenant/user/agent/session; '*' means unbound)",
         f"extractor: {ctx.extractor}",
         f"writes: {'disabled — this server is read-only' if ctx.read_only else 'enabled'}",
         f"visible at this scope: {ctx.memory.count()} claim(s)",
         f"tenant {scope.tenant!r}: {counts['live_claims']} live of {counts['claims']} "
         f"claim(s), {counts['episodes']} source turn(s), {counts['embeddings']} embedded",
-    ])
+    ]
+    rate = _join_rate(ctx.memory)
+    if rate is not None:
+        lines.append(rate)
+    return "\n".join(lines)
 
 
 # -- the registry ------------------------------------------------------------
@@ -1595,7 +1622,13 @@ TOOLS: tuple[Tool, ...] = (
             "whether writes are enabled. Call it when the user asks how much you "
             "remember, or when memory looks unexpectedly empty and you need to tell the "
             "difference between 'nothing is stored' and 'this server is misconfigured' "
-            "before telling the user you have forgotten them."
+            "before telling the user you have forgotten them. It also reports the join "
+            "rate: the share of stored facts whose object is the subject of another "
+            "fact, which is what says whether this memory is a web of linked things or "
+            "a list of attributes hanging off one person. A near-zero rate is normal for "
+            "a store built from one user's own sentences and means multi-hop questions "
+            "cannot be answered by following links, however many facts are stored. The "
+            "line is absent, rather than zero, when the backend cannot measure it."
         ),
         properties={},
         required=(),

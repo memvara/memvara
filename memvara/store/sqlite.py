@@ -639,6 +639,15 @@ def _object_key_of(meta: str, surface: str) -> str:
     return resolved_entity(json.loads(meta), OBJECT_ENTITY, surface)
 
 
+#: `GraphTraverser._edges`' three rules, as SQL, for the one counter that has to agree
+#: with them. A negation is adjacency and not a link; an empty end is what a retraction
+#: stores and not a node; a self-loop leads back to where the walk is standing. Written
+#: once because a join rate that counts edges the traverser refuses to follow promises
+#: hops that will not happen — the same failure as a benchmark scoring its own answer key.
+_WALKABLE = ("{a}.polarity > 0 AND {a}.subject_key != '' AND {a}.object_key != '' "
+             "AND {a}.subject_key != {a}.object_key")
+
+
 def _unit(vec: np.ndarray) -> np.ndarray:
     """A flat float32 copy scaled to unit length; a zero vector stays zero.
 
@@ -3098,6 +3107,50 @@ class SQLiteStore:
                         for t in _VEC_TABLES
                     )
                 ),
+            }
+
+    def connectivity(self, tenant: str | None = None) -> dict[str, int]:
+        """`live_claims` and `joinable_claims` for one tenant, from one snapshot.
+
+        See `base.Store.connectivity` for what the ratio means and why it is not in
+        `stats()`. Two things about this implementation are load-bearing.
+
+        **The join counts walkable edges on both sides, not live claims.** `_WALKABLE`
+        is `GraphTraverser._edges`' three rules written as SQL — a negation is adjacency
+        and not a link, an empty end is a stored value rather than a node, and a
+        self-loop leads back to where the walk stands. Counting a claim the traverser
+        would refuse to follow makes the rate promise hops that will not happen, which is
+        worse than not reporting one. The denominator stays `live_claims`, because the
+        question is what share of this memory leads to more of it, and a leaf is a
+        legitimate answer to that rather than an excluded row.
+
+        **`IN (SELECT ...)` and not `EXISTS (SELECT ...)`.** Same count, and SQLite plans
+        them completely differently: the correlated `EXISTS` re-runs its subquery per
+        candidate row, and on 26,403 claims that took **31.7 seconds** against **19.5 ms**
+        for the uncorrelated form, which builds the set of live subject keys once and
+        probes it. Three orders of magnitude from a rewrite that changes no semantics, so
+        a reader who tidies it back to `EXISTS` has reintroduced a hang.
+        """
+        live, lp = self._state_clause(None, None, ("live",))
+        inner, ip = self._state_clause(None, None, ("live",), alias="d")
+        tid = " tenant = ? AND" if tenant is not None else ""
+        ctid = " c.tenant = ? AND" if tenant is not None else ""
+        dtid = " d.tenant = ? AND" if tenant is not None else ""
+        params: tuple = (tenant,) if tenant is not None else ()
+
+        with self._read() as conn:
+            def q(sql: str, binds: Sequence[Any]) -> int:
+                return int(conn.execute(sql, binds).fetchone()[0])
+
+            return {
+                "live_claims": q(
+                    f"SELECT COUNT(*) FROM claims WHERE{tid} {live}", (*params, *lp)),
+                "joinable_claims": q(
+                    f"SELECT COUNT(*) FROM claims c WHERE{ctid} {live}"
+                    f" AND {_WALKABLE.format(a='c')}"
+                    f" AND c.object_key IN (SELECT d.subject_key FROM claims d"
+                    f" WHERE{dtid} {inner} AND {_WALKABLE.format(a='d')})",
+                    (*params, *lp, *params, *ip)),
             }
 
     def close(self) -> None:

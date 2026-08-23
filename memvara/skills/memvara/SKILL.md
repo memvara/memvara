@@ -56,7 +56,10 @@ transcript. See `references/scopes.md`.
 A thin `memory_recall` on a question that names two things is a signal, not an
 empty store. Try `memory_neighborhood` next, or `memory_paths` when the user
 named both ends. Do it in that order — recall first — because most questions do
-have a single note behind them and a walk is the slower way to find one.
+have a single note behind them and a walk is the slower way to find one. If
+`memory_stats` reported a join rate near zero, skip the walk: nothing in that
+store links to anything, so there is no second hop to find, however many facts
+it holds.
 
 What comes back is a chain, and it is worth handing over as a chain. Give the
 user the steps and let them see where you got it; a conclusion with the middle

@@ -852,6 +852,46 @@ one-column test is still valid SQL and still valid Python, it used to be right, 
 now over-counts with nothing to raise. [`docs/UPGRADING.md`](UPGRADING.md) carries the
 grep list for finding copies of it.
 
+### `connectivity()`
+
+```python
+{"live_claims", "joinable_claims"}
+```
+
+A separate method, and separate on purpose. `joinable_claims` counts live claims whose
+`object_key` is the `subject_key` of another live claim; the ratio against `live_claims`
+is the **join rate**, which is the number that decides whether `read_w_graph > 0` can
+pay for itself.
+
+It is not in `stats()` for two reasons. `Memvara.__repr__` calls `stats()`, and the join
+is a semi-join over the whole claim table — about 60 ms on 26,403 claims against that
+call's 69 ms, so folding it in would roughly double the cost of printing a store. And
+the spelling is load-bearing: `IN (SELECT ...)` builds the set of live subject keys once
+and probes it, while the correlated `EXISTS (SELECT ...)` re-runs its subquery per row.
+Same count, same semantics; **19.5 ms against 31.7 seconds** on that store. A reader who
+tidies it back to `EXISTS` has reintroduced a hang.
+
+Both sides of the join must be edges the traverser would follow: the liveness
+predicate, for `adjacent`'s reason that a path through a retired claim is not a path,
+plus `GraphTraverser._edges`' three rules — no negations, no empty ends, no self-loops.
+`_WALKABLE` in `store/sqlite.py` is those three written once, because a rate built from
+edges the walk refuses is a rate that promises hops which will not happen. The
+denominator stays `live_claims`: a leaf is an answer to "what share of this leads
+somewhere", not a row to exclude.
+
+It is in `OMITTABLE`. A backend that leaves it out costs `memory_stats` its join-rate
+line and nothing else; retrieval is unaffected. `Memvara.connectivity()` returns `{}` in
+that case, which is **not** `{"live_claims": 0, "joinable_claims": 0}` — the first is a
+backend that did not look, the second is a measured star, and only the second is a
+finding.
+
+Why the distinction earns a method at all: every claim is already an edge, so "is this
+store a graph" is always yes and predicts nothing. Connectivity is what varies. Measured
+on the two public corpora with identical retrieval code, 2Wiki joins at 40.6% and the
+graph leg takes chained questions from 28.2% to 41.4%; LongMemEval joins at **0.0%** —
+one subject, 78 leaf objects, no two-hop path in the store at all — and the leg loses 1.6
+points. See [`docs/BENCHMARKS.md`](BENCHMARKS.md).
+
 `invalidate()` and `set_valid_to()` are in `Store` and **no engine path calls either**.
 Closing a claim moves one clock; `invalidate` writes `invalidated_at` and
 `invalidated_by` together, which is the conflation that was removed, and `set_valid_to`

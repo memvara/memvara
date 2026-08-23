@@ -1279,6 +1279,46 @@ def test_stats_answers_is_this_thing_connected(server):
     assert "1 live of 1 claim(s)" in body
 
 
+def test_stats_reports_the_join_rate_and_reads_it_for_the_model(server):
+    """The line exists so an operator does not have to guess whether `read_w_graph > 0`
+    is worth turning on. Two facts about the same user do not link to each other, so the
+    honest reading of a fresh personal store is that a graph walk has nowhere to go.
+    """
+    text(server, "memory_remember", {"predicate": "uses", "object": "pytest"})
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Delhi"})
+    body = text(server, "memory_stats")
+    assert "join rate: 0.0%  (0 of 2 live claim(s) lead to another claim)" in body
+    assert "a star" in body
+
+    # A fact whose subject is not the user is what turns a star into something walkable.
+    text(server, "memory_remember", {"subject": "pytest", "predicate": "configured_in",
+                                     "object": "pyproject.toml"})
+    assert "join rate: 33.3%" in text(server, "memory_stats")
+
+
+def test_stats_reads_a_thin_join_rate_as_thin(server):
+    for i in range(19):
+        text(server, "memory_remember", {"predicate": f"likes_{i}", "object": f"v{i}"})
+    text(server, "memory_remember", {"predicate": "uses", "object": "pytest"})
+    text(server, "memory_remember", {"subject": "pytest", "predicate": "configured_in",
+                                     "object": "pyproject.toml"})
+    body = text(server, "memory_stats")
+    assert "join rate: 4.8%" in body and "sparse" in body
+
+
+def test_stats_does_not_print_a_join_rate_it_could_not_measure(server, monkeypatch):
+    """`{}` from the backend must not render as 0.0%. A measured star sends an operator
+    to the write path; an unmeasured one sends them there for nothing.
+    """
+    text(server, "memory_remember", {"predicate": "uses", "object": "pytest"})
+    monkeypatch.setattr(type(server._ctx.memory), "connectivity", lambda self: {})
+    assert "join rate" not in text(server, "memory_stats")
+
+
+def test_stats_on_an_empty_store_says_so_instead_of_dividing_by_zero(server):
+    assert "join rate: no live claims to measure" in text(server, "memory_stats")
+
+
 # -- writing tools -----------------------------------------------------------
 
 def test_add_reports_what_the_write_actually_did(server):

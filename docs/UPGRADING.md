@@ -7,6 +7,49 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `Store` gains `connectivity`, so `isinstance(x, Store)` flips for a third-party backend
+
+### What changed
+
+`memory_stats` reports a **join rate** — the share of live claims whose object is the
+subject of another live claim — and the counts come from a new optional `Store` method,
+`connectivity`. `Memvara`, `ScopedMemvara`, `AsyncMemvara` and `AsyncScopedMemvara` all
+gained a `connectivity()` of their own.
+
+Nothing in memvara requires it. Capability checks here are `getattr` per member, the
+method is listed in `store.base.OMITTABLE`, and a backend without it costs the
+`memory_stats` line and nothing else. Retrieval is untouched and no default moved.
+
+### The one thing that will not announce itself
+
+**`isinstance(your_store, Store)` was `True` and is now `False`**, if your backend
+implemented all 43 members and not this one. `Store` is `@runtime_checkable` and
+`isinstance` on a Protocol is all-or-nothing: it asks whether every member is present, so
+it has never been able to answer "can this store walk a graph", and it is not the check to
+gate on. Find your instances with:
+
+```bash
+grep -rn "isinstance(.*, Store)" .
+```
+
+Replace each with the capability you actually need — `getattr(store, "adjacent", None)`
+for the graph leg, `getattr(store, "connectivity", None)` for the join rate. That is what
+this codebase does at every call site, and each one degrades in a way it names out loud.
+
+To keep `isinstance` passing, implement the method. `SQLiteStore.connectivity` is the
+reference; `memvara_cloud`'s `PostgresStore` is the second, and the two differ only in how
+each spells an empty endpoint (`''` against `NULL`).
+
+### If you call `connectivity()` yourself
+
+**`{}` is not `{"live_claims": 0, "joinable_claims": 0}`.** The first is a backend that
+cannot measure it; the second is a store that was measured and has no joins in it — a
+*star*, which is what a memory built from one user's own sentences looks like, and which
+is a real finding about the write path. Treating a missing key as zero reports the finding
+without the measurement, so branch on the empty mapping before dividing.
+
+---
+
 ## `erase()` can now raise, and the schema is version 8
 
 ### What changed
