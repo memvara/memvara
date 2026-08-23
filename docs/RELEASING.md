@@ -1,7 +1,7 @@
 # Releasing memvara
 
-Nothing has been published. This is the checklist for the day something is, plus the
-things that have to be true first — one of which is a hard blocker nobody had checked.
+`0.1.0` and `0.2.0` are on PyPI. This is the checklist for the next one, and the things
+that have to be true first.
 
 Since `.github/workflows/release.yml` exists, most of what follows is automated: pushing
 a `v*` tag runs the whole gate on the tagged commit, builds in a clean runner, checks the
@@ -56,8 +56,8 @@ actually bumped.
 ### 1. Bump the version in both places
 
 ```
-pyproject.toml        version = "0.2.0"
-memvara/__init__.py    __version__ = "0.2.0"
+pyproject.toml        version = "0.3.0"
+memvara/__init__.py    __version__ = "0.3.0"
 ```
 
 Nothing in the build keeps these equal.
@@ -67,7 +67,7 @@ does, so a one-sided bump fails the suite rather than shipping a wheel whose
 
 ### 2. Close out the changelog
 
-Move everything under `## [Unreleased]` into `## [0.2.0] — YYYY-MM-DD`, and leave
+Move everything under `## [Unreleased]` into `## [0.3.0] — YYYY-MM-DD`, and leave
 `[Unreleased]` empty behind it. Keep the *Fixed* entries specific — "a backdated
 supersession left two live values for a single-valued predicate" is the entry someone
 searches for; "bug fixes" is not.
@@ -75,8 +75,8 @@ searches for; "bug fixes" is not.
 ### 3. Tag the commit CI went green on
 
 ```bash
-git tag -a v0.2.0 -m "memvara 0.2.0"
-git push origin v0.2.0
+git tag -a v0.3.0 -m "memvara 0.3.0"
+git push origin v0.3.0
 ```
 
 Tag the commit CI went green on, not the one you are standing on.
@@ -126,10 +126,11 @@ repository can create it and nothing should: it is the registration that says *t
 repository, this workflow, this environment may upload memvara*, and it is made from an
 account this repository has no access to.
 
-memvara has never been published, so the project does not exist on PyPI yet and the form to
-use is the **pending publisher** one — <https://pypi.org/manage/account/publishing/>
-(account settings → *Publishing*, not a project's settings, because there is no project).
-Under *GitHub*, enter exactly:
+**This is done.** It was the pending-publisher form when the project did not exist; now
+that `memvara` is on PyPI the same registration lives under the project's own *Publishing*
+tab, and the values below are what it should read. Kept because a publisher can be removed
+or edited, and because a wrong value here fails at upload with a message that does not say
+which field. Check against this table rather than against memory:
 
 | field | value |
 |---|---|

@@ -9,6 +9,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-23
+
 ### Fixed
 
 - **Two identical searches scored differently, and the read path now takes the instant it
