@@ -116,6 +116,23 @@ class Recorder(Protocol):
 #: drive toward zero, and a ratio needs both halves.
 WRITE_TURNS = "write.turns"
 
+#: Claims written directly, without extraction — `remember()`, `supersede()`,
+#: `assert_claim()` and the importer, which all converge on `WritePipeline.assert_claim`.
+#: One per call, whatever the call displaced.
+#:
+#: **`write.turns` does not count these, and on a deployment with no extraction model
+#: they are all of the write traffic there is.** That deployment's only reliable write
+#: path is the one that skips extraction, so a dashboard sourced from `write.turns` alone
+#: reports a store nobody is writing to while it fills up. The two series answer
+#: different questions — "how much conversation was ingested" against "how many facts
+#: were asserted" — and neither substitutes for the other, which is why this is a second
+#: series rather than a wider definition of the first.
+#:
+#: Not a billing series. `write.turns` is what an allowance is spent against, and an
+#: asserted fact spends none; adding this to that sum would charge for writes the
+#: published contract says are free.
+WRITE_CLAIMS = "write.claims"
+
 #: Model calls actually made, aggregated. `WriteReceipt.llm_calls` is the per-call
 #: answer; this is the one you alert on.
 WRITE_LLM_CALLS = "write.llm_calls"

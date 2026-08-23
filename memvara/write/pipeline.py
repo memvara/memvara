@@ -67,6 +67,7 @@ from ..telemetry import (
     PREDICATE_ALIAS,
     PREDICATE_CAPPED,
     PREDICATE_LEARNED,
+    WRITE_CLAIMS,
     WRITE_EMBEDDING_REJECTED,
     WRITE_EMBEDDING_UNUSABLE,
     WRITE_EXTRACT_MS,
@@ -281,6 +282,11 @@ class WritePipeline:
             # so there is no window to report and inventing one would make the write
             # path's two entry points look comparable when they are not.
             self.telemetry.timing(WRITE_LATENCY_MS, receipt.latency_ms)
+            # The counter `add()` has and this path did not, which left every write that
+            # skips extraction invisible to anything counting writes. One per call rather
+            # than per row absorbed, matching `write.turns`: both count what was handed
+            # in, so a fact that reinforced an existing claim still says a write happened.
+            self.telemetry.counter(WRITE_CLAIMS)
         return receipt
 
     # -- tier 0 ---------------------------------------------------------------
