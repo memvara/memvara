@@ -296,7 +296,7 @@ def is_comparison(query: str) -> bool:
     It matters because a predicate count cannot tell the two apart. "Which film has the
     director died later, A or B" names `director` and `died_on` — two predicates, a chain
     by that measure — while being two independent lookups whose answers are compared.
-    Measured on 2WikiMultihopQA, running the walk on that family costs 15.4 points,
+    Measured on 2WikiMultihopQA, running the walk on that family costs 13.7 points,
     because it spends `k` on a hub's neighbours instead of on the second half.
 
     The disjunction, and not a list of comparative words. "Earlier", "first" and "younger"

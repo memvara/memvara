@@ -410,7 +410,7 @@ class HybridRetriever:
         known_at: datetime | None = ..., states: Collection[str] | None = ...,
         include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
-        include_episodes: Literal[False] = ...,
+        include_episodes: Literal[False] = ..., now: datetime | None = ...,
     ) -> list[Result]: ...
 
     @overload
@@ -420,7 +420,7 @@ class HybridRetriever:
         known_at: datetime | None = ..., states: Collection[str] | None = ...,
         include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
-        include_episodes: Literal[True],
+        include_episodes: Literal[True], now: datetime | None = ...,
     ) -> list[Retrieved]: ...
 
     @overload
@@ -430,7 +430,7 @@ class HybridRetriever:
         known_at: datetime | None = ..., states: Collection[str] | None = ...,
         include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
-        include_episodes: bool,
+        include_episodes: bool, now: datetime | None = ...,
     ) -> list[Retrieved]: ...
 
     def search(
@@ -447,6 +447,7 @@ class HybridRetriever:
         memory_types: Sequence[MemoryType] | None = None,
         min_score: float = 0.0,
         include_episodes: bool = False,
+        now: datetime | None = None,
     ) -> list[Any]:
         """Return the top `k` results for `query`, each with a populated `Explanation`.
 
@@ -520,7 +521,16 @@ class HybridRetriever:
         # "how long ago did we last hear this, from where the question stands". Asking
         # what we now believe about June must not score an August restatement as two
         # months stale; asking what we believed on 1 August must score it from there.
-        now = _as_utc(known_at) if known_at is not None else utcnow()
+        # `now` replaces the *clock read*, never either axis: a caller who named
+        # `known_at` still decays from `known_at`. What it fixes is that two identical
+        # searches seconds apart score every claim slightly differently, because the
+        # fallback is the wall clock and `recency_factor` reads it. Measured on 2Wiki:
+        # 3,000 of 3,000 questions differ between two back-to-back passes, in the
+        # low-order digits only — enough, on a near-tie at the `k` boundary, to change
+        # which rows land inside the cut. `Consolidator.run(now=)` is the same parameter
+        # for the same reason on the write path.
+        now = _as_utc(known_at) if known_at is not None else (
+            _as_utc(now) if now is not None else utcnow())
 
         # Over-fetch per retriever: fusion can only rank what it was given, and a claim
         # that BM25 puts first is worthless if the vector list was cut before it and
@@ -766,8 +776,12 @@ class HybridRetriever:
         if weights.graph > 0.0 and not self._store_has_joins(scope.tenant):
             weights = weights._replace(graph=0.0)
 
+        # `now` handed down rather than re-read. Before this the traverser called
+        # `utcnow()` of its own, so one search decayed its quality multiplier and its edge
+        # strengths from two instants microseconds apart — coherent within each leg and
+        # not between them.
         graph_hits, walked = self._graph_search(
-            claims, fused, scope, limit, valid_at, known_at, states, weights.graph)
+            claims, fused, scope, limit, valid_at, known_at, states, weights.graph, now)
         if graph_hits:
             # Re-fused rather than merged, because RRF reads positions and the positions
             # in the two-leg fusion are not the positions in the three-leg one. Doing it
@@ -873,6 +887,7 @@ class HybridRetriever:
         known_at: datetime | None,
         states: Sequence[str],
         w_graph: float,
+        now: datetime,
     ) -> tuple[list[tuple[str, float]], dict[str, Claim]]:
         """The third leg: a bounded walk out of the entities the first two just named.
 
@@ -930,7 +945,7 @@ class HybridRetriever:
         try:
             paths = self.traverser.spread(
                 seeds, scope, depth=self.graph_depth, k=limit,
-                valid_at=valid_at, known_at=known_at)
+                valid_at=valid_at, known_at=known_at, now=now)
         except NotImplementedError as exc:
             self._graph_unsupported = True
             warnings.warn(

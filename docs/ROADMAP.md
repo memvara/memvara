@@ -150,7 +150,7 @@ list.
   `w_graph=0.0`** — the measured table is in `docs/BENCHMARKS.md`, and the short version
   is that what the leg is worth depends on how much graph the store holds, and the two
   numbers point opposite ways. On 2WikiMultihopQA, where 26,403 claims load through
-  `remember()` with no extractor running, it takes chained questions from 28.2% to 41.4%
+  `remember()` with no extractor running, it takes chained questions from 28.3% to 42.1%
   at k=12. On LOCOMO and LongMemEval the offline write path extracts almost nothing —
   0 claims and 78 — and there the leg is inert on the first and a small loss on the
   second, 92.2% to 90.6% on single-session-user. A default cannot be right for both.

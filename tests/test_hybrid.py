@@ -2091,3 +2091,44 @@ def test_a_store_that_chains_but_seeds_nothing_still_runs_no_walk(tmp_path):
         "no seeds means no walk, so nothing may carry a graph rank"
     )
     mem.close()
+
+
+# --- the read path's clock -----------------------------------------------------------
+
+def test_two_searches_at_a_pinned_instant_score_identically(tmp_path):
+    """The read path decays from the moment it is asked, so two identical searches
+    seconds apart score every claim differently — measured on 2WikiMultihopQA at 3,000 of
+    3,000 questions, in the low-order digits, which is enough to flip a near-tie at the
+    `k` boundary and move a published figure with no code change behind it.
+
+    `now` is the parameter `Consolidator.run()` already has, for the same reason: the
+    write path had this defect and it was fixed there first.
+    """
+    from datetime import datetime, timezone
+    mem = _joined_store(tmp_path, star=False)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
+    at = datetime(2030, 6, 1, tzinfo=timezone.utc)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        a = r.search(RELATIONAL, mem.default_scope, k=5, now=at)
+        b = r.search(RELATIONAL, mem.default_scope, k=5, now=at)
+    assert [(x.claim.id, x.score) for x in a] == [(y.claim.id, y.score) for y in b]
+    mem.close()
+
+
+def test_known_at_still_wins_over_a_pinned_now(tmp_path):
+    """`now` replaces the clock *read*, never the belief axis. A time-travel query keeps
+    decaying from the instant it asked about."""
+    from datetime import datetime, timezone
+    mem = _joined_store(tmp_path, star=False)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry)
+    known = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    far = datetime(2040, 1, 1, tzinfo=timezone.utc)
+    both = r.search("pytest", mem.default_scope, k=5, known_at=known, now=far)
+    just_known = r.search("pytest", mem.default_scope, k=5, known_at=known)
+    assert [(x.claim.id, x.score) for x in both] == \
+           [(y.claim.id, y.score) for y in just_known], (
+        "a pinned now must not shift a query that named its own instant"
+    )
+    mem.close()

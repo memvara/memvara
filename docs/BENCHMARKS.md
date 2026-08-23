@@ -136,6 +136,23 @@ until this run**: `HybridRetriever` broke score ties on `claim.id`, a fresh `uui
 ingest, so two ingests of one corpus ranked differently and the numbers drifted 0.07
 points. Ties now break on a content hash and three full runs are byte-identical.
 
+**That fix was one layer short, and `bench/twowiki.py` found the rest of it.** A score tie
+no longer depends on ingest, but the *score* still did: `remember()` stamps each claim
+with the wall clock, so 1,239 claims carried 1,239 distinct `valid_from` values and
+`recency_factor` turned write order into a strict ranking. On top of that a search decays
+from the moment it is asked, so two identical passes scored **3,000 of 3,000** questions
+differently — in the low-order digits, but enough to flip a near-tie at the `k` boundary.
+
+`HybridRetriever.search()` and `GraphTraverser.spread()` now take `now=`, the parameter
+`Consolidator.run()` already had, and that harness pins both the instant it writes at and
+the instant it reads at. Two runs of it are byte-identical. The 2Wiki table below moved by
+up to 1.6 points when this landed, and the new figures are the ones without write order in
+them.
+
+`bench/locomo.py`, `bench/longmemeval.py` and `bench/multihop.py` were checked and report
+identical figures across runs without a pin: their claims are either absent or carry
+timestamps years old, which is the flat part of the decay curve.
+
 ### The graph leg, and what it costs on the corpora above
 
 `w_graph > 0` adds a third retrieval leg: a bounded walk out of the entities the vector
@@ -154,8 +171,8 @@ PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-gr
 | LongMemEval oracle, 500, `--share-store` | **78** | **a loss**: single-session-user R@12 92.2 → 90.6, all 70.4 → 70.1, nothing gained |
 | `bench/multihop.py` (synthetic), gate off | 4,498 | **2.9% → 20.0%** at k=12, **7.6% → 50.0%** at k=25 |
 | `bench/multihop.py`, **as shipped** | 4,498 | **2.9% → 6.4%** at k=12, **7.6% → 21.8%** at k=25 |
-| `bench/twowiki.py`, gate off, **public** | 26,403 | **28.2% → 70.7%** at k=12 on chained questions; **−15.4** on flat ones |
-| `bench/twowiki.py`, **as shipped** | 26,403 | **28.2% → 41.4%** answer and **25.5% → 38.8%** chain on chained questions; −1.5 on flat |
+| `bench/twowiki.py`, gate off, **public** | 26,403 | **28.3% → 72.2%** at k=12 on chained questions; **−13.7** on flat ones |
+| `bench/twowiki.py`, **as shipped** | 26,403 | **28.3% → 42.1%** answer and **25.5% → 39.5%** chain on chained questions; −0.4 on flat |
 
 The leg walks *claims*, and both public runs are episode retrieval: `SalienceGate` drops
 any turn whose role is not `user`, LOCOMO writes each turn under the speaker's name, and
@@ -228,9 +245,9 @@ word list would only close it here.
 
 **The standing advice needs a condition on it, which `bench/twowiki.py` supplied.** It
 used to read: a deployment turning the graph leg on should turn `intent_weighting` off
-with it. On public multi-hop data that buys 42 points on chained questions and **costs
-15 on flat ones**, so it is right for a workload of relationship questions and wrong for
-a workload of lookups. Net on a corpus that is 54% chained it is +15.8 points at k=12;
+with it. On public multi-hop data that buys 44 points on chained questions and **costs
+14 on flat ones**, so it is right for a workload of relationship questions and wrong for
+a workload of lookups. Net on a corpus that is 54% chained it is +17.4 points at k=12;
 invert the mix and it inverts.
 
 The honest statement is that the gate is right in principle and badly calibrated: it
@@ -298,7 +315,7 @@ gates is 1.0 and stays 1.0 until a per-category sweep moves it.
 
 ### The graph leg on public data, with the extractor out of the loop
 
-**The leg is worth 2.5x on multi-hop questions, and costs 15 points on questions that are
+**The leg is worth 2.6x on multi-hop questions, and costs 14 points on questions that are
 not.** Both halves are new information, and the second is the more useful one.
 
 Everything above this section says the leg is unmeasurable on public data, because LOCOMO
@@ -315,32 +332,32 @@ returned rows / whole evidence chain returned*:
 ```
   k=12
   set                     n         search         +graph        +graph!
-  all                12,576   50.7% / 37.2%   57.1% / 43.5%   66.4% / 56.3%
-  chained             6,785   28.2% / 25.5%   41.4% / 38.8%   70.7% / 68.8%
-  flat                5,791   76.9% / 50.8%   75.4% / 49.0%   61.5% / 41.8%
-  compositional       5,236   22.9% / 20.6%   40.0% / 37.8%   68.4% / 66.5%
-  inference           1,549   46.4% / 42.2%   46.4% / 42.2%   78.5% / 76.4%
-  comparison          3,040   74.4% / 96.8%   73.3% / 88.8%   58.3% / 58.3%
-  bridge_comparison   2,751   79.8% /  0.0%   77.7% /  5.1%   65.0% / 23.6%
+  all                12,576   50.6% / 37.2%   57.9% / 43.8%   68.0% / 57.2%
+  chained             6,785   28.3% / 25.5%   42.1% / 39.5%   72.2% / 70.3%
+  flat                5,791   76.7% / 50.8%   76.3% / 48.9%   63.0% / 41.9%
+  compositional       5,236   22.8% / 20.5%   40.8% / 38.7%   70.1% / 68.3%
+  inference           1,549   46.6% / 42.3%   46.6% / 42.3%   79.3% / 77.3%
+  comparison          3,040   73.9% / 96.8%   74.9% / 88.7%   60.7% / 58.2%
+  bridge_comparison   2,751   79.8% /  0.0%   77.8% /  4.9%   65.5% / 23.8%
 ```
 
 **`chained` is the result.** `compositional` and `inference` questions chain one fact into
 the next — "who is the mother of the director of X" is `director` then `mother` — and the
-leg takes them from **28.2% to 70.7%**. `inference` also carries its derivation: chain
+leg takes them from **28.3% to 72.2%**. `inference` also carries its derivation: chain
 recall 42.2% → 76.4%, so most answers arrive with every triple that supports them rather
 than with the gold entity alone.
 
 **`flat` is the control, and it did what a control is for.** `comparison` and
 `bridge_comparison` ask which of two independent entities came first. The evidence has two
-ends and no join, the leg has nothing to walk, and turning it on **costs 15.4 points**
-(76.9% → 61.5%) because the walk spends `k` on neighbours of a hub. Had that row improved,
+ends and no join, the leg has nothing to walk, and turning it on **costs 13.7 points**
+(76.7% → 63.0%) because the walk spends `k` on neighbours of a hub. Had that row improved,
 the `chained` row would be worth much less: it would suggest the leg helps by adding rows
 rather than by following edges.
 
 **The intent gate is right in principle, and it now captures some of what it was
 blocking.** It exists to route flat questions past the walk, and on `flat` it does:
-75.3% against search's 76.9%. On `chained` it used to block almost the entire gain —
-29.1% where 70.7% was available, 0.9 points of 42.5.
+76.3% against search's 76.7%. On `chained` it used to block almost the entire gain —
+29.1% where 72.2% was available, 0.9 points of 43.9.
 
 The reason was vocabulary, and not the kind a word list fixes. `classify` counts the
 predicates a question names, drawn from `PredicateRegistry.all_specs()`, which lists what
@@ -375,7 +392,7 @@ failed 79% of compositional questions. Matching the content tokens of a predicat
 still needs both) took the trigger rate from 21% to 38.8%.
 
 That alone would have been a net loss. It also fired on a third of `bridge_comparison`,
-where the walk costs 15.4 points: "which film has the director died later, A or B" names
+where the walk costs 13.7 points: "which film has the director died later, A or B" names
 `director` and `died_on` — two predicates, a chain by that measure — while being two
 independent lookups whose answers are compared. `intent.is_comparison()` suppresses on the
 **disjunction** rather than on a list of comparative words, because "earlier", "first" and
@@ -387,9 +404,9 @@ One false positive found on the way: `born_in` and `born_on` share the content t
 Matches are now deduplicated by what the question said rather than by how many predicates
 answer to it.
 
-**Answers and derivations move together.** On `chained`, the leg is worth +13.2 points of
-answer recall and **+13.3 of chain recall** — 28.2% → 41.4% and 25.5% → 38.8%. Ungated the
-two columns nearly meet, 70.7% against 68.8%: almost every answer the walk finds arrives
+**Answers and derivations move together.** On `chained`, the leg is worth +13.8 points of
+answer recall and **+14.0 of chain recall** — 28.3% → 42.1% and 25.5% → 39.5%. Ungated the
+two columns nearly meet, 72.2% against 70.3%: almost every answer the walk finds arrives
 with every triple that supports it. That is the property the library is for, and it is the
 one worth quoting.
 
@@ -465,7 +482,7 @@ The terms are not persisted, so a server pays once at startup; `docs/ROADMAP.md`
 why, and it is that the two obvious places to put them are both wrong.
 
 **What it still does not reach.**
-`inference` gains **nothing** — 46.4% through every change in this series — and the reason
+`inference` gains **nothing** — 46.6% through every change in this series — and the reason
 is not a bug. Those
 questions ask "who is the maternal grandfather of X"; the evidence is `(X, mother, Y)` and
 `(Y, father, Z)`, and the question names neither `mother` nor `father`. It names a

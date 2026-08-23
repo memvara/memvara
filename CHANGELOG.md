@@ -11,6 +11,59 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **Two identical searches scored differently, and the read path now takes the instant it
+  is evaluated at.** `HybridRetriever.search()` and `GraphTraverser.spread()` gain
+  `now=`, the parameter `Consolidator.run()` already had — this was the same defect on
+  the read side and it went unnoticed longer.
+
+  A search decays every claim from the moment it is asked, and with no instant named that
+  moment is `utcnow()`. So two identical searches seconds apart return the same rows with
+  different scores. Measured on 2WikiMultihopQA: **3,000 of 3,000 questions differ between
+  two back-to-back passes**, in the low-order digits, ids and ranks unchanged. It matters
+  twice over — a claim sitting near `min_score` is returned on one turn and dropped on the
+  next with no write in between, and a benchmark re-run diverges from its own published
+  table with no code change behind it.
+
+  It was *two* clock reads, not one: the retriever's, feeding `recency_factor` in the
+  quality multiplier, and the traverser's own inside `_pin`, feeding `_strength`. One
+  search decayed its quality and its edge weights from two instants microseconds apart.
+  `now` is threaded from the first to the second, so a search is now evaluated at one
+  moment throughout.
+
+  **`now` replaces the clock read and neither time axis.** A caller who named `known_at`
+  still decays from `known_at`; time travel is unchanged and pinned by test.
+
+  **`bench/twowiki.py` pins both ends, and its published table moves.** Pinning the read
+  alone would have been worse than not pinning it: `remember()` stamps a claim with the
+  wall clock, so reading at a distant instant makes every claim years old and collapses
+  `recency_factor` to zero for all of them. Measured — reading at 2030 against claims
+  written today took ungated `chained` from 76.7% to 54.5%, which is a benchmark of
+  something else. Both ends are pinned instead, one minute apart, which is the regime an
+  unpinned run was already in.
+
+  That surfaced a second defect and is why the numbers moved rather than merely settling.
+  With ingest unpinned, **1,239 claims carried 1,239 distinct `valid_from` values** — one
+  per write, microseconds apart — so `recency_factor` gave a strict ordering that encoded
+  *ingest order*. This is the defect fixed once already for score ties, which used to
+  break on `claim.id`, a fresh `uuid4` per ingest; it survived one layer up, in the score
+  itself rather than in the tie-break. Pinning collapses those into real ties, which the
+  content hash resolves as intended.
+
+  The re-baselined figures are within 1.6 points of the old ones everywhere. Two runs of
+  the harness are now byte-identical, which three were not before.
+
+  **Figures elsewhere in this release follow one rule.** A number recording what *that*
+  change moved — `chained 35.4% → 41.4%` for the content-token match, `29.1% → 35.4%` for
+  the observed-predicate rule — is left as it was measured, because it is the record of
+  that measurement and re-running the intermediate configurations to restate it would be
+  archaeology. A number stating what the leg is worth *now* tracks the table and has been
+  updated. The two differ by at most 1.6 points, and `docs/BENCHMARKS.md` is the one to
+  quote.
+
+  **Only this harness needed it.** `bench/longmemeval.py` run twice differs in nothing but
+  its two timing lines: its claims carry transcript timestamps years old, so they sit on
+  the flat part of the decay curve where seconds of wall clock change nothing.
+
 - **`erase()` left the erased text readable in the database file.** It deleted the row,
   the index entry and the vector, returned per-table counts as evidence, and the words
   were still there — findable with `grep`, with no `VACUUM` needed to expose them and no
@@ -129,7 +182,7 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   carries `subject_key`, `predicate` and `object_key`, so the answer is always yes and it
   predicts nothing. Connectivity is what varies, and it varies enormously. Same retrieval
   code on the two public corpora: 2WikiMultihopQA joins at **40.6%** and `read_w_graph=1.0`
-  takes chained questions from 28.2% to 41.4%; LongMemEval joins at **0.0%** — one
+  takes chained questions from 28.3% to 42.1%; LongMemEval joins at **0.0%** — one
   subject, 78 leaf objects, not one two-hop path in the store — and the same setting
   *loses* 1.6 points. `docs/BENCHMARKS.md` has both.
 
@@ -452,11 +505,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   Measured on 2WikiMultihopQA, 12,576 questions, k=12: chained **35.4% → 41.4%**,
   compositional **32.1% → 40.0%**, and `flat`, `comparison` and `bridge_comparison` all
   unchanged, so the walk still does not run where it cannot help. The gate captured 0.9
-  points of a 42.5-point gain three releases ago and now captures 13.2.
+  points of a 43.9-point gain three releases ago and now captures 13.8.
 
-  **Answers and derivations move together.** The leg is worth +13.2 points of answer
-  recall on chained questions and **+13.3 of chain recall** — 28.2% → 41.4% and
-  25.5% → 38.8%. Ungated the two columns nearly meet, 70.7% against 68.8%: almost every
+  **Answers and derivations move together.** The leg is worth +13.8 points of answer
+  recall on chained questions and **+14.0 of chain recall** — 28.3% → 42.1% and
+  25.5% → 39.5%. Ungated the two columns nearly meet, 72.2% against 70.3%: almost every
   answer the walk finds arrives with every triple that supports it.
 
   **An earlier version of this entry said the opposite, and the error was in the
