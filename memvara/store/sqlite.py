@@ -3152,6 +3152,22 @@ class SQLiteStore:
         first answer and it is wrong. It is that a correlated subquery inherits its
         index's leading column as a *requirement*, and `tenant: str | None` means this
         one cannot always supply it.
+
+        **Why not index `subject_key` on its own and keep `EXISTS`?** Because it was
+        already fixed for nothing. `CREATE INDEX ON claims(subject_key)` does work — it
+        takes the unfiltered `EXISTS` from 52 s to 22 ms, costs 2% of the file and 1.3%
+        of write throughput, which is cheaper than this comment's author guessed — but
+        the rewrite above reaches 34 ms on the same call at no cost at all, so the index
+        buys 12 ms on a path no shipped caller takes. `Memvara.connectivity()` fills in
+        its own tenant and `memory_stats` goes through it; `tenant=None` is reachable
+        only by calling this store directly.
+
+        It would also be the first index on `claims` or `episodes` not led by `tenant`.
+        The other eight are, and that is what makes every scoped read an index range over
+        contiguous rows. An index that deliberately ignores the tenant exists to serve a
+        query crossing tenants, which is the shape this store restricts rather than
+        optimises. If a cross-tenant hot path ever appears, the index is twelve
+        milliseconds of build time away; until then it is weight carried for no reader.
         """
         live, lp = self._state_clause(None, None, ("live",))
         inner, ip = self._state_clause(None, None, ("live",), alias="d")
