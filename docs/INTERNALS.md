@@ -852,6 +852,38 @@ one-column test is still valid SQL and still valid Python, it used to be right, 
 now over-counts with nothing to raise. [`docs/UPGRADING.md`](UPGRADING.md) carries the
 grep list for finding copies of it.
 
+### The store-level graph gate
+
+`HybridRetriever` closes the graph leg — after the intent weighting, so it can undo what
+`classify` opened — when `connectivity()` says nothing in the tenant chains. The condition
+is `joinable_claims == 0`, not a threshold: a store with literally no joins provably has
+nowhere for a walk to go, whereas any percentage picked from the two corpora that exist
+would be a constant fitted to two points.
+
+**Why the leg hurts on such a store**, given that `joinable_claims == 0` does not stop the
+walk returning rows. It stops it returning *paths*. At depth 1 it still fans out from
+whichever hub the seeds share and returns other claims about it, ranked by a path score
+that is near-uniform when every path is one hop — and fusion reads positions. Measured on
+LongMemEval: 1.6 points of single-session-user R@12, and `graph_depth=1` and `2` cost
+exactly the same, so all of it is the fan-out and none of it is the second hop.
+
+**Placement is the design.** The second-chance rule in `_gather` can only widen: its guard
+is `weights.graph <= 0.0 < self.w_graph`. A veto wired into it returned False on all 802
+of LongMemEval's gate calls and the run still lost the same 1.6 points, because `classify`
+had already opened the leg. The gate therefore sits after `intent_weights`, not inside it.
+
+`_store_has_joins` caches per tenant and re-measures every `GATE_RECHECK_EVERY` searches,
+on a counter rather than a clock — a retriever that behaved differently at 3am would be
+untestable, and this repository pins `now=` everywhere for that reason. The staleness is
+one-directional: a store that gains joins stays gated for at most that many searches,
+which degrades to `w_graph=0.0`, the shipped default. It cannot fail the other way,
+because claims do not un-join except by retirement and the liveness predicate already
+excludes those.
+
+`{}` keeps the leg. A backend without `connectivity`, or a hosted facade too old to report
+the counts, has not measured anything — and reading that as "no joins" would switch a
+working graph leg off on every third-party store at once.
+
 ### `connectivity()`
 
 ```python

@@ -231,6 +231,43 @@ class _Legs:
     lexical_terms: int
 
 
+class UnjoinedStoreWarning(DegradedRetrievalWarning):
+    """The graph leg is configured, and this store holds nothing for it to walk.
+
+    A sibling of its parent rather than the same warning with different text, because the
+    two say different things and are fixed in different places. `DegradedRetrievalWarning`
+    means the *backend* cannot traverse — permanent for the process, fixed by changing
+    store. This means the *data* has no chains in it: every live claim's object is a leaf,
+    so a walk can only re-return the neighbourhood the lookup legs already ranked. It is
+    fixed in the write path, by storing facts whose subject is not the one hub everything
+    hangs off, and it stops being true the moment one lands.
+
+    Subclassed so an existing `filterwarnings` on the parent still catches it, and named
+    separately so nobody reads "your backend is wrong" off a store that is merely young.
+
+    Measured on LongMemEval, whose 78 claims share a single subject: running the leg there
+    costs 1.6 points of single-session-user R@12 and gains nothing anywhere, because
+    fusion reads positions and a leg with no paths still votes.
+    """
+
+
+#: Searches a tenant's connectivity reading is reused for before it is taken again.
+#:
+#: Not a clock, because a retriever that behaved differently at 3am would be untestable
+#: and this repository pins `now=` everywhere for that reason. A counter is deterministic:
+#: the same sequence of searches re-measures at the same points on every run.
+#:
+#: The staleness this admits only ever runs the leg *less*. A store gains joins and stays
+#: gated for up to this many searches, which degrades to `w_graph=0.0` — the shipped
+#: default. It cannot go the other way: claims do not un-join except by retirement, which
+#: the liveness predicate already excludes. So the error is bounded, one-directional, and
+#: lands on the configuration that ships.
+#:
+#: 256 against a measurement that costs 0.4 ms at 1,000 live claims and 2.6 ms at 10,000,
+#: so the amortised cost is under 10 microseconds a search on a store far larger than most.
+GATE_RECHECK_EVERY = 256
+
+
 class HybridRetriever:
     """Scope-aware, time-travelling hybrid search over the claim store."""
 
@@ -265,6 +302,10 @@ class HybridRetriever:
         self.store = store
         self.embedder = embedder
         self.registry = registry
+        #: Per-tenant `(searches since measured, does anything here chain?)`. Only ever
+        #: written when `w_graph > 0`, so the shipped default pays nothing for it.
+        self._joins: dict[str, tuple[int, bool]] = {}
+        self._warned_unjoined = False
         #: Aggregate metrics sink, or `None` (the default and the fast path). See
         #: `memvara.telemetry`: every emission is guarded, and the two numbers that cost
         #: something to produce - the rank correlation and the quality factors - are
@@ -708,6 +749,23 @@ class HybridRetriever:
             # `inference` family: 52.6% -> 86.4% answer, 49.0% -> 83.8% chain.
             weights = weights._replace(graph=self.w_graph)
 
+        # And the last word belongs to the store, because no reading of the *query* can
+        # answer this one. A walk needs somewhere to go, and on a store where no claim's
+        # object is another claim's subject there is nowhere: the leg degenerates into
+        # returning other facts about whatever hub the seeds hang off, ranked by a path
+        # score that is near-uniform when every path is one hop. Fusion reads positions,
+        # so that is a fabricated ranking — the failure `MIN_PROXIMITY` prevents for the
+        # temporal leg, which this leg had no equivalent of.
+        #
+        # After the intent weighting rather than inside it, and that is the whole design.
+        # The second chance above can only *widen* — its guard is `weights.graph <= 0.0`
+        # — so it cannot undo a walk `classify` opened. Measured: with that hook returning
+        # False on all 802 of LongMemEval's gate calls, the run still lost 1.6 points of
+        # single-session-user R@12, because `classify` had already opened the leg. A gate
+        # that closes what the classifier opened has to sit here.
+        if weights.graph > 0.0 and not self._store_has_joins(scope.tenant):
+            weights = weights._replace(graph=0.0)
+
         graph_hits, walked = self._graph_search(
             claims, fused, scope, limit, valid_at, known_at, states, weights.graph)
         if graph_hits:
@@ -753,6 +811,57 @@ class HybridRetriever:
                 continue
             results.append(result)
         return results, saturated
+
+    def _store_has_joins(self, tenant: str) -> bool:
+        """Does anything in this tenant lead to anything else in it?
+
+        `True` also when the question cannot be answered, and that is the important half.
+        A backend without `connectivity` returns `{}`, which means *it did not look* —
+        reading that as "no joins" would switch a working graph leg off on every
+        third-party store at once, on the strength of a measurement nobody took. The
+        rule is `Memvara.connectivity()`'s: `{}` is not zero.
+
+        Cached per tenant and re-measured every `GATE_RECHECK_EVERY` searches, because
+        the reading is a few milliseconds and a search is a few milliseconds. See that
+        constant for why the staleness is safe and why it counts searches and not seconds.
+
+        Warns once per retriever, and only when the store actually answered. A caller who
+        set `w_graph` and gets nothing is owed the reason, and the reason here is about
+        their data rather than their backend — which is why `UnjoinedStoreWarning` is its
+        own name.
+        """
+        seen, joined = self._joins.get(tenant, (GATE_RECHECK_EVERY, True))
+        if seen < GATE_RECHECK_EVERY:
+            self._joins[tenant] = (seen + 1, joined)
+            return joined
+
+        measure = getattr(self.store, "connectivity", None)
+        if measure is None:
+            self._joins[tenant] = (0, True)
+            return True
+        counts = measure(tenant)
+        if not counts:
+            # Present but unable to answer -- a hosted facade too old to report the
+            # counts does this. Same verdict as absent, for the same reason.
+            self._joins[tenant] = (0, True)
+            return True
+
+        joined = counts["joinable_claims"] > 0
+        self._joins[tenant] = (0, joined)
+        if not joined and not self._warned_unjoined:
+            self._warned_unjoined = True
+            warnings.warn(
+                f"graph retrieval is configured (w_graph={self.w_graph}) and nothing in "
+                f"this store chains: none of its {counts['live_claims']} live claim(s) "
+                f"have an object that is another claim's subject, so a walk has nowhere "
+                f"to go and the leg is not running. This is a property of what has been "
+                f"written, not of the backend -- memory_stats reports it as a join rate. "
+                f"It resolves on its own once the store holds a fact whose subject is "
+                f"not the one everything else hangs off.",
+                UnjoinedStoreWarning,
+                stacklevel=2,
+            )
+        return joined
 
     def _graph_search(
         self,

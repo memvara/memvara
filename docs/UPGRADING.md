@@ -7,6 +7,54 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## The graph leg stops running on a store where nothing chains
+
+### What changed
+
+If you set `w_graph > 0` (or `read_w_graph`), the leg now checks the store before it walks
+and does not run when no live claim's object is another live claim's subject. On a store
+with joins nothing changes: measured on 2WikiMultihopQA, the gate closed the leg on 0 of
+3,000 searches and every returned row is identical.
+
+`w_graph` still defaults to `0.0`, so a deployment that never turned the leg on is
+unaffected.
+
+### Who this changes, and in which direction
+
+**Anyone running `w_graph > 0` against a store built from one person's own sentences.**
+Extraction from a user's turns produces claims that all take that user as their subject,
+so their objects are leaves and nothing chains — and the leg was returning other facts
+about the hub, ranked by a near-uniform path score, into a fusion that reads positions.
+Measured on LongMemEval that cost 1.6 points of its strongest category. You will now get
+the two-leg result, which is the same result `w_graph=0.0` gives.
+
+If you were relying on the third leg as a recall booster rather than as a walk, this
+removes it. That was tested: `graph_depth=1` on the same store gains nothing in any
+category, so there was no recall to boost.
+
+### How you find out it applies to you
+
+It says so, once per retriever:
+
+```
+UnjoinedStoreWarning: graph retrieval is configured (w_graph=1.0) and nothing in this
+store chains: none of its 78 live claim(s) have an object that is another claim's
+subject, so a walk has nowhere to go and the leg is not running.
+```
+
+It is a subclass of `DegradedRetrievalWarning`, so an existing `filterwarnings` on the
+parent already catches it. `memory_stats` reports the same thing as a join rate, and
+`Memvara.connectivity()` returns the two counts.
+
+### If you want the old behaviour
+
+There is no flag, deliberately: it would be a switch whose only setting is "make retrieval
+worse in a way I have measured". The condition is a property of your data, so the way out
+is to write facts whose subject is not the hub everything else hangs off — one is enough
+to lift the gate, and it lifts within `GATE_RECHECK_EVERY` searches without a restart.
+
+---
+
 ## `Store` gains `connectivity`, so `isinstance(x, Store)` flips for a third-party backend
 
 ### What changed
