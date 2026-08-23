@@ -9,6 +9,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The release workflow could not collect the test suite.** Its `build` job installed
+  `.[dev]` where `ci.yml` installs `.[dev,cloud]`, and `httpx` is in the `cloud` extra —
+  so `tests/test_store_remote.py` failed at import and the suite ended with two collection
+  errors before running a test. `publish-pypi` is gated on that job, so the release
+  stopped exactly where it should have.
+
+  Latent since the workflow was written: `0.2.0` was published by hand before the file
+  existed, so the `v0.3.0` tag is the first time any of it ran. The cause is the one
+  `release.yml` already avoids for the matrix — it *calls* `ci.yml` rather than restating
+  it, "so there is one matrix in this repository and it cannot drift" — and then restated
+  the install list a few lines further down.
+
 ## [0.3.0] — 2026-08-23
 
 ### Fixed
