@@ -163,6 +163,36 @@ way to know you exist.
 6. **Use a private `COVERAGE_FILE`.** Two concurrent runs clobber a shared `.coverage`,
    and the report that comes out of that is wrong in the direction that looks fine.
 
+## What you learn here goes in Memvara
+
+Memvara is the memory store for work in this repository, reached through the plugin's MCP
+server. Recall from it at the start of a turn whenever the answer could depend on something
+established earlier, and write back what a session a week from now would be sorry to have
+lost. Do not write to Claude Code's file-based memory directory; it was migrated into Memvara
+on 2026-08-23 and a second store nothing reconciles is worse than one.
+
+Two mechanics decide whether a write survives, and both fail quietly.
+
+**Write triples, not prose.** This deployment runs with no extraction model, which
+`memory_stats` reports as `fast-path-only`. A paragraph handed to `memory_add` that matches
+none of the fixed sentence forms is accepted and stored as nothing. `memory_remember` with an
+explicit subject, predicate and object needs no model and cannot mis-parse.
+
+**Set `true_since` when the fact became true before now.** Backfilling a finding from last
+week without it records a claim that was never true across its own interval, and the store
+then answers historical questions wrongly with no symptom at write time.
+
+The conventions already in the store are worth matching rather than reinventing: `user` for
+standing instructions, and a component key — `memvara_cloud`, `memvara_web`, `agent-memory` —
+for a fact about the code. This matters more here than the tidiness of it: the graph leg pays
+off in proportion to how often one claim's object is another's subject, so a claim whose
+subject is not `user` is the thing that makes the store answer a question two hops deep.
+
+Correcting a claim is three different writes and they record different reasons. A value that
+was right and has been overtaken is a `memory_remember`; one that was right and has stopped
+being true is a `memory_end` at the instant it stopped; one that was never right is a
+`memory_forget`. None of them deletes anything, so never report a retirement as a deletion.
+
 ---
 
 # Karpathy guidelines
