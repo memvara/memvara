@@ -420,6 +420,7 @@ class GraphTraverser:
         valid_at: datetime | None = None,
         known_at: datetime | None = None,
         min_score: float = 0.0,
+        now: datetime | None = None,
     ) -> list[Path]:
         """`neighborhood`, from several already-folded keys at once and no surface form.
 
@@ -445,7 +446,7 @@ class GraphTraverser:
         walk started this way can reach is anything the caller could not have read
         directly; see `_visible`.
         """
-        pin = self._pin(*time_axes(as_of, valid_at, known_at))
+        pin = self._pin(*time_axes(as_of, valid_at, known_at), now=now)
         seeds = tuple(dict.fromkeys(key for key in seed_keys if key))
         if not seeds:
             return []
@@ -456,7 +457,8 @@ class GraphTraverser:
     # -- internals ------------------------------------------------------------
 
     @staticmethod
-    def _pin(valid_at: datetime | None, known_at: datetime | None) -> _Pin:
+    def _pin(valid_at: datetime | None, known_at: datetime | None,
+             now: datetime | None = None) -> _Pin:
         """The one pair of instants the whole traversal is evaluated at.
 
         This is the load-bearing line of the module. An unset axis cannot be forwarded
@@ -478,10 +480,19 @@ class GraphTraverser:
         neither axis given is still evaluated at a single coherent moment rather than at
         two instants microseconds apart — which is what makes "what is around Alice
         right now" mean the same thing on hop three as on hop one, on both clocks.
+
+        `now` chooses *which* moment that is, and changes nothing else. It replaces the
+        clock read and not either axis, so time travel keeps its meaning: a caller who
+        named `known_at` still gets `known_at`. Without it two identical walks seconds
+        apart score their edges from two instants, and `_strength` decays from the belief
+        clock — so the same walk over the same store returns the same paths with
+        different weights, which is reproducible only if nobody looks closely. See
+        `Consolidator.run(now=)`, which is this same parameter for the same reason on the
+        write path.
         """
-        now = utcnow()
-        return _Pin(as_utc(valid_at) if valid_at is not None else now,
-                    as_utc(known_at) if known_at is not None else now)
+        moment = as_utc(now) if now is not None else utcnow()
+        return _Pin(as_utc(valid_at) if valid_at is not None else moment,
+                    as_utc(known_at) if known_at is not None else moment)
 
     def _predicates(self, predicates: Sequence[str] | None) -> list[str] | None:
         """Caller-supplied predicate names, folded onto the registry's canonical ones.

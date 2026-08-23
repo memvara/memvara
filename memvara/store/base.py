@@ -528,7 +528,7 @@ class Store(Protocol):
         It is not the same question as "is this store a graph". Every claim is an edge
         already — `subject_key`, `predicate`, `object_key` — so the answer to that is
         always yes and it predicts nothing. Measured on the two public corpora: 2Wiki
-        joins at **40.6%** and the leg takes chained questions from 28.2% to 41.4%;
+        joins at **40.6%** and the leg takes chained questions from 28.3% to 42.1%;
         LongMemEval joins at **0.0%** and the leg *loses* 1.6 points. Both are graphs.
         One has paths.
 

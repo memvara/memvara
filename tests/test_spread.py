@@ -562,3 +562,38 @@ def test_derived_terms_do_not_reopen_the_comparison_frame(mem):
     rows = reader.search("Whose grandfather was born earlier, Alice or Bruno?",
                          mem.default_scope, k=10)
     assert all(r.explain.graph_rank is None for r in rows)
+
+
+def test_spread_can_be_pinned_to_an_instant_the_caller_chooses(mem):
+    """`now` replaces the clock read and neither axis, so two walks seconds apart weigh
+    their edges identically.
+
+    Without it `_pin` calls `utcnow()` itself, `_strength` decays from the belief clock,
+    and the same walk over the same store returns the same paths with different scores —
+    reproducible only if nobody looks past the third decimal.
+    """
+    from datetime import datetime, timedelta, timezone
+    at = datetime(2030, 6, 1, tzinfo=timezone.utc)
+    a = mem.traverser.spread(["alice"], mem.default_scope, depth=2, k=10, now=at)
+    b = mem.traverser.spread(["alice"], mem.default_scope, depth=2, k=10, now=at)
+    assert [(p.render(), round(p.score, 12)) for p in a] == \
+           [(p.render(), round(p.score, 12)) for p in b]
+
+    # A later instant decays the same edges further: the pin is doing something.
+    later = mem.traverser.spread(["alice"], mem.default_scope, depth=2, k=10,
+                                 now=at + timedelta(days=365))
+    assert [p.render() for p in later] == [p.render() for p in a]
+    assert all(x.score >= y.score for x, y in zip(a, later))
+    assert any(x.score > y.score for x, y in zip(a, later)), (
+        "a year later must weigh less, or the pin is being ignored"
+    )
+
+
+def test_pinning_now_does_not_move_either_time_axis(mem):
+    """Time travel keeps its meaning: a caller who named `known_at` still gets it, and
+    `now` only fills the default the clock used to fill."""
+    from datetime import datetime, timezone
+    known = datetime(2031, 1, 1, tzinfo=timezone.utc)
+    pinned = mem.traverser._pin(None, known, now=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    assert pinned.known_at == known, "known_at must win over now"
+    assert pinned.valid_at == datetime(2020, 1, 1, tzinfo=timezone.utc)

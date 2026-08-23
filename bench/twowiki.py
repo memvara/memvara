@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timedelta, timezone
 import sys
 import time
 from collections import Counter
@@ -133,7 +134,8 @@ def ingest(samples: Sequence[Sample]) -> Memvara:
                 if triple in seen:
                     continue
                 seen.add(triple)
-                mem.remember(*triple)
+                mem.remember(*triple, valid_from=WRITTEN_AT,
+                             recorded_at=WRITTEN_AT)
                 written += 1
                 if written % 5_000 == 0:
                     rate = written / (time.perf_counter() - started)
@@ -146,6 +148,29 @@ def ingest(samples: Sequence[Sample]) -> Memvara:
     print(f"  ingested {written:,} distinct claims from {len(samples):,} questions "
           f"in {took:,.1f}s")
     return mem
+
+
+#: When this corpus is written, and when it is read. Both fixed, and the gap between
+#: them is the point.
+#:
+#: Retrieval decays a claim's score from the moment it is asked, so an unpinned run
+#: scores every question differently on every pass — measured at 3,000 of 3,000, in the
+#: low-order digits, which is enough to flip a near-tie at the `k` boundary and move a
+#: published figure by a tenth of a point with no code change behind it.
+#:
+#: Pinning the read alone is not enough and is actively wrong: `remember()` stamps a
+#: claim with the wall clock, so a read pinned to a distant instant makes every claim
+#: years old, `recency_factor` collapses to zero for all of them, and the quality
+#: multiplier loses the spread the shipped configuration has. Measured: reading at 2030
+#: against claims written today moved ungated `chained` from 76.7% to 54.5%. That is not
+#: a benchmark of the same thing.
+#:
+#: So both ends are pinned and the gap is one minute, which is the regime an unpinned
+#: run is already in — a corpus ingested seconds ago and queried over the following
+#: minute or two. 2WikiMultihopQA carries no timestamps of its own, so nothing here is
+#: being overridden; the wall clock was arbitrary and this is arbitrary and repeatable.
+WRITTEN_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
+NOW = WRITTEN_AT + timedelta(minutes=1)
 
 
 def _reader(mem: Memvara, *, w_graph: float, gated: bool) -> HybridRetriever:
@@ -179,8 +204,24 @@ def _found(results: Iterable, sample: Sample) -> tuple[bool, bool]:
 
 
 def evaluate(mem: Memvara, samples: Sequence[Sample], *, k: int,
-             graph: HybridRetriever, ungated: HybridRetriever) -> dict[str, Counter]:
-    """One pass over the questions, three readers, split by question type."""
+             plain: HybridRetriever, graph: HybridRetriever,
+             ungated: HybridRetriever) -> dict[str, Counter]:
+    """One pass over the questions, three readers, split by question type.
+
+    **Every arm reads the clock at `NOW`, and that is what makes two runs comparable.**
+    Retrieval decays a claim's score from the moment it is asked, so without a pinned
+    instant every question scores differently on every pass — measured here at 3,000 of
+    3,000, in the low-order digits. That is correct for a live store and useless for a
+    benchmark: on a near-tie at the `k` boundary the drift flips which row lands inside
+    the cut, and a re-run then differs from the published table by a tenth of a point
+    with no code change behind it. An hour was spent attributing one such diff to a
+    change that had not caused it.
+
+    `mem.search()` is not used for the `search` arm any more, because it has no way to
+    take the instant. `plain` is the same read path with the same defaults — `w_graph`
+    is 0.0 there, which is what `mem.search()` was — reached through the object that can
+    be pinned.
+    """
     hits: dict[str, Counter] = {
         arm: Counter() for arm in ("search", "+graph", "+graph!", "n")
     }
@@ -189,9 +230,10 @@ def evaluate(mem: Memvara, samples: Sequence[Sample], *, k: int,
         for bucket in buckets:
             hits["n"][bucket] += 1
         for arm, rows in (
-            ("search", mem.search(sample.question, k=k)),
-            ("+graph", graph.search(sample.question, mem.default_scope, k=k)),
-            ("+graph!", ungated.search(sample.question, mem.default_scope, k=k)),
+            ("search", plain.search(sample.question, mem.default_scope, k=k, now=NOW)),
+            ("+graph", graph.search(sample.question, mem.default_scope, k=k, now=NOW)),
+            ("+graph!",
+             ungated.search(sample.question, mem.default_scope, k=k, now=NOW)),
         ):
             answer, chain = _found(rows, sample)
             for bucket in buckets:
@@ -247,11 +289,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     mem = ingest(samples)
     try:
+        plain = _reader(mem, w_graph=0.0, gated=True)
         graph = _reader(mem, w_graph=1.0, gated=True)
         ungated = _reader(mem, w_graph=1.0, gated=False)
         buckets = ["all", "chained", "flat", *sorted(kinds)]
         for k in (int(x) for x in args.k.split(",")):
-            report(evaluate(mem, samples, k=k, graph=graph, ungated=ungated), k, buckets)
+            report(evaluate(mem, samples, k=k, plain=plain, graph=graph,
+                            ungated=ungated), k, buckets)
     finally:
         mem.close()
 

@@ -938,7 +938,7 @@ finding.
 Why the distinction earns a method at all: every claim is already an edge, so "is this
 store a graph" is always yes and predicts nothing. Connectivity is what varies. Measured
 on the two public corpora with identical retrieval code, 2Wiki joins at 40.6% and the
-graph leg takes chained questions from 28.2% to 41.4%; LongMemEval joins at **0.0%** —
+graph leg takes chained questions from 28.3% to 42.1%; LongMemEval joins at **0.0%** —
 one subject, 78 leaf objects, no two-hop path in the store at all — and the leg loses 1.6
 points. See [`docs/BENCHMARKS.md`](BENCHMARKS.md).
 
