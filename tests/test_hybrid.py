@@ -1955,7 +1955,8 @@ def test_a_store_where_nothing_chains_does_not_run_the_graph_leg(tmp_path):
     positions, so that is a fabricated ranking, and on LongMemEval it cost 1.6 points.
     """
     mem = _joined_store(tmp_path, star=True)
-    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
     with pytest.warns(UnjoinedStoreWarning, match="nothing in this store chains"):
         r.search(RELATIONAL, mem.default_scope, k=5)
     assert r._joins["default"] == (0, False)
@@ -1964,7 +1965,8 @@ def test_a_store_where_nothing_chains_does_not_run_the_graph_leg(tmp_path):
 
 def test_a_store_that_chains_is_left_alone(tmp_path):
     mem = _joined_store(tmp_path, star=False)
-    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
     with warnings.catch_warnings():
         warnings.simplefilter("error")          # any warning here is a failure
         r.search(RELATIONAL, mem.default_scope, k=5)
@@ -1976,7 +1978,8 @@ def test_the_gate_warns_once_per_retriever_and_not_once_per_search(tmp_path):
     """Same reason its parent class does: a store's shape does not change per query, and
     a warning per search buries the finding under itself."""
     mem = _joined_store(tmp_path, star=True)
-    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         for _ in range(3):
@@ -1989,7 +1992,8 @@ def test_the_reading_is_cached_and_retaken_on_a_counter_not_a_clock(tmp_path):
     """Deterministic by construction: the same sequence of searches re-measures at the
     same points on every run, which a wall-clock TTL could not promise."""
     mem = _joined_store(tmp_path, star=False)
-    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
     calls = []
     real = mem.store.connectivity
     mem.store.connectivity = lambda t=None: (calls.append(t), real(t))[1]  # type: ignore
@@ -2004,7 +2008,8 @@ def test_a_backend_that_cannot_measure_is_not_read_as_a_store_with_no_joins(tmp_
     off on every third-party store at once, on a measurement nobody took.
     """
     mem = _joined_store(tmp_path, star=True)
-    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
     mem.store.connectivity = lambda t=None: {}          # type: ignore
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -2015,7 +2020,8 @@ def test_a_backend_that_cannot_measure_is_not_read_as_a_store_with_no_joins(tmp_
 
 def test_a_store_without_connectivity_at_all_keeps_its_graph_leg(tmp_path):
     mem = _joined_store(tmp_path, star=True)
-    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
     mem.store.connectivity = None                       # type: ignore[assignment]
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -2028,7 +2034,10 @@ def test_the_shipped_default_never_asks_the_store_about_joins(tmp_path):
     """`w_graph=0.0` is the shipped configuration and must pay nothing for a gate on a
     leg it is not running."""
     mem = _joined_store(tmp_path, star=True)
-    r = HybridRetriever(mem.store, mem.embedder, mem.registry)   # w_graph defaults to 0
+    # `w_graph` defaults to 0, and a real traverser is supplied so the only reason the
+    # store is not consulted is the gate declining to ask.
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry,
+                        traverser=mem.traverser)
     calls = []
     mem.store.connectivity = lambda t=None: calls.append(t) or {}   # type: ignore
     r.search(RELATIONAL, mem.default_scope, k=5)
@@ -2047,10 +2056,38 @@ def test_each_tenant_is_measured_on_its_own(tmp_path):
     mem.remember("user", "lives_in", "Delhi", tenant="star")
     mem.remember("user", "uses", "pytest", tenant="web")
     mem.remember("pytest", "configured_in", "pyproject.toml", tenant="web")
-    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r.search(RELATIONAL, Scope(tenant="star"), k=5)
         r.search(RELATIONAL, Scope(tenant="web"), k=5)
     assert r._joins == {"star": (0, False), "web": (0, True)}
+    mem.close()
+
+
+def test_a_store_that_chains_but_seeds_nothing_still_runs_no_walk(tmp_path):
+    """`graph_seeds=0` is the documented spelling for "seed nothing", and it has to be
+    reachable *past* the store-level gate.
+
+    The gate opens here — this store chains — so the leg is entered and gives up on the
+    seed list instead, which is a different early return with a different meaning. Pinned
+    because the gate took over the path that used to cover it: before it, a star store
+    reached the seed check and returned empty from there, and that read as the same line
+    being exercised when the two exits say quite different things. One is "there is
+    nowhere to walk", the other is "there is nowhere to start".
+    """
+    mem = _joined_store(tmp_path, star=False)
+    # `intent_weighting=False` so the classifier cannot close the leg before the seed
+    # check is reached; this test is about the seed check and nothing else.
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser, graph_seeds=0,
+                        intent_weighting=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")          # the gate must not fire on this store
+        rows = r.search(RELATIONAL, mem.default_scope, k=5)
+    assert r._joins["default"] == (0, True)
+    assert all(x.explain.graph_rank is None for x in rows), (
+        "no seeds means no walk, so nothing may carry a graph rank"
+    )
     mem.close()
