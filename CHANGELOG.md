@@ -101,9 +101,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   - **It is not folded into `stats()`.** `Memvara.__repr__` calls `stats()`, and the join
     is a semi-join over the whole claim table: about 60 ms on 26,403 claims against that
     call's 69 ms.
-  - **`IN (SELECT ...)`, not `EXISTS (SELECT ...)`.** Same count, same semantics,
-    **19.5 ms against 31.7 seconds** on that store, because the correlated form re-runs
-    its subquery per candidate row.
+  - **`IN (SELECT ...)`, not `EXISTS (SELECT ...)`**, because `tenant` is optional and
+    only `IN` is fast for both calls. Median on that store: `IN` 39 ms filtered and 34 ms
+    unfiltered; `EXISTS` **27 ms** filtered and **42,302 ms** unfiltered. `cl_subj` leads
+    on `tenant`, and a correlated subquery that cannot bind it gets no index at all.
 
   New optional `Store` member `connectivity`, listed in `OMITTABLE`; `connectivity()` on
   `Memvara`, `ScopedMemvara`, `AsyncMemvara` and `AsyncScopedMemvara`. Leaving it out
