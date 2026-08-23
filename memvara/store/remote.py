@@ -91,7 +91,8 @@ class RemoteStore:
     #: list is the failure mode that matters: it would make the guard below think a
     #: capability exists.
     WIRED: frozenset[str] = frozenset({
-        "batch", "close", "erase_claim", "get_claim", "get_claims", "purge", "stats",
+        "batch", "close", "connectivity", "erase_claim", "get_claim", "get_claims",
+        "purge", "stats",
     })
 
     def __init__(self, base_url: str, api_key: str, *, timeout: float = 30.0) -> None:
@@ -553,3 +554,30 @@ class RemoteStore:
                 "resolves tenant from the bearer token; there is no way to ask about a "
                 "different one from the same key.")
         return dict(result["tenant_counts"])
+
+    def connectivity(self, tenant: str | None = None) -> dict[str, int]:
+        """The two join-rate counts off `GET /v1/stats`, or `{}` from a facade too old
+        to report them.
+
+        `{}` rather than zeros, and the distinction is the whole point of the method. A
+        hosted store that has not deployed the counts yet is not a store with no joins in
+        it, and `memory_stats` prints a join rate only when it has actually been
+        measured — so an operator is never shown a 0.0% that came from an old facade
+        instead of from their data.
+
+        The tenant check is `stats()`'s, for `stats()`'s reason: the facade resolves
+        tenant from the bearer token, so a mismatched argument is a caller error rather
+        than a question the endpoint could answer.
+        """
+        result = self._request("GET", "/v1/stats")
+        if tenant is not None and tenant != result["scope"]["tenant"]:
+            raise ValueError(
+                f"RemoteStore.connectivity(tenant={tenant!r}) was asked about a tenant "
+                f"other than this API key's own ({result['scope']['tenant']!r}). The "
+                "facade resolves tenant from the bearer token; there is no way to ask "
+                "about a different one from the same key.")
+        counts = result["tenant_counts"]
+        if "joinable_claims" not in counts:
+            return {}
+        return {"live_claims": int(counts["live_claims"]),
+                "joinable_claims": int(counts["joinable_claims"])}

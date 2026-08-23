@@ -70,6 +70,45 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`memory_stats` reports a join rate**, and it is the number that says whether the
+  graph leg can do anything for you. `joinable_claims / live_claims` — the share of
+  stored facts whose object is the subject of another fact — measured over one read
+  snapshot. Both sides of the join are held to the rules `GraphTraverser._edges` uses,
+  liveness included: no negations, no empty ends, no self-loops, nothing retired. A rate
+  built from edges the walk would refuse promises hops that will not happen.
+
+  It exists because "is this store a graph" is not a question worth asking: every claim
+  carries `subject_key`, `predicate` and `object_key`, so the answer is always yes and it
+  predicts nothing. Connectivity is what varies, and it varies enormously. Same retrieval
+  code on the two public corpora: 2WikiMultihopQA joins at **40.6%** and `read_w_graph=1.0`
+  takes chained questions from 28.2% to 41.4%; LongMemEval joins at **0.0%** — one
+  subject, 78 leaf objects, not one two-hop path in the store — and the same setting
+  *loses* 1.6 points. `docs/BENCHMARKS.md` has both.
+
+  A rate near zero is usually a **star** and usually correct. Facts extracted from a
+  user's own sentences all have that user as their subject, so their objects are leaves
+  and no two of them connect. Raising it is a write-path question — store facts whose
+  subject is not the user — not a retrieval one.
+
+  Three details that are decisions rather than defaults:
+
+  - **A backend that cannot measure it prints no line at all**, rather than 0.0%.
+    `Memvara.connectivity()` returns `{}` for such a store and
+    `{"live_claims": 0, "joinable_claims": 0}` for an empty one. A measured star is a
+    finding an operator should act on; an unmeasured one would send them to the write
+    path over a deployment lag. `RemoteStore` returns `{}` against a facade that does not
+    yet report the counts.
+  - **It is not folded into `stats()`.** `Memvara.__repr__` calls `stats()`, and the join
+    is a semi-join over the whole claim table: about 60 ms on 26,403 claims against that
+    call's 69 ms.
+  - **`IN (SELECT ...)`, not `EXISTS (SELECT ...)`.** Same count, same semantics,
+    **19.5 ms against 31.7 seconds** on that store, because the correlated form re-runs
+    its subquery per candidate row.
+
+  New optional `Store` member `connectivity`, listed in `OMITTABLE`; `connectivity()` on
+  `Memvara`, `ScopedMemvara`, `AsyncMemvara` and `AsyncScopedMemvara`. Leaving it out
+  costs the `memory_stats` line and nothing else.
+
 - **`now` on `Consolidator.run()`**, which evaluates the whole pass at one instant the way
   `decay()` already could. `Sweep` reads the wall clock once per pass, and the decay target
   depends on that instant as well as on stored state, so two back-to-back passes land

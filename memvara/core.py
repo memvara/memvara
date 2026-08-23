@@ -2387,6 +2387,41 @@ class Memvara:
             # A third-party Store predating the tenant argument.
             return self.store.stats()
 
+    def connectivity(self, *, tenant: str | None = None) -> dict[str, int]:
+        """`live_claims` and `joinable_claims` for one tenant — the join rate, unrounded.
+
+        A claim is *joinable* when its object is the subject of another live claim, so
+        the ratio is the share of this memory that leads to more of it. It is what
+        decides whether `read_w_graph > 0` can pay for itself: the walk spends its budget
+        following edges, and on a store where nothing joins there is nowhere to go. Two
+        public corpora, same retrieval code: 40.6% joinable and the graph leg gains 13
+        points on chained questions; 0.0% joinable and it loses 1.6.
+
+        A rate near zero usually means a **star** — every fact hanging off one subject —
+        which is what facts extracted from a user's own turns look like, and is correct
+        rather than broken. Raising it is a write-path question: store facts whose
+        subject is not the user.
+
+        Returns `{}` when the backend cannot answer, which is *not* the same as a store
+        with nothing in it. An empty store answers `{"live_claims": 0,
+        "joinable_claims": 0}`; a backend without `connectivity` says nothing at all, and
+        a caller that read a missing key as zero would report a star it never measured.
+
+        >>> mem = Memvara(":memory:", llm=NullLLM())
+        >>> _ = mem.remember("user", "uses", "pytest")
+        >>> mem.connectivity()
+        {'live_claims': 1, 'joinable_claims': 0}
+        >>> _ = mem.remember("pytest", "configured_in", "pyproject.toml")
+        >>> mem.connectivity()
+        {'live_claims': 2, 'joinable_claims': 1}
+        >>> mem.close()
+        """
+        measure = getattr(self.store, "connectivity", None)
+        if measure is None:
+            return {}
+        want = tenant if tenant is not None else self.default_scope.tenant
+        return measure(want)
+
     def close(self) -> None:
         self.store.close()
 
@@ -2651,6 +2686,9 @@ class ScopedMemvara:
 
     def stats(self) -> dict[str, int]:
         return self._mem.stats(tenant=self.scope.tenant)
+
+    def connectivity(self) -> dict[str, int]:
+        return self._mem.connectivity(tenant=self.scope.tenant)
 
     def __repr__(self) -> str:
         return f"<ScopedMemvara {self.scope.key()} of {self._mem!r}>"

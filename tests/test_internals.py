@@ -481,6 +481,39 @@ def test_response_parsing_skips_non_text_blocks_before_the_answer():
     assert _first_text(Response(None)) == ""
 
 
+def test_connectivity_is_empty_rather_than_zero_for_a_store_that_cannot_measure_it():
+    """`{}` and `{"live_claims": 0, "joinable_claims": 0}` mean different things.
+
+    The second is a measured star, which is a real finding an operator should act on by
+    changing what the write path stores. The first is a backend that never looked. A
+    caller that read a missing key as zero would report the finding without the
+    measurement, and `memory_stats` prints no join-rate line at all in that case.
+    """
+    class NoConnectivity(SQLiteStore):
+        connectivity = None            # type: ignore[assignment]
+
+    mem = Memvara(store=NoConnectivity(":memory:"), embedder=HashingEmbedder(dim=32),
+                 user="alice")
+    assert mem.connectivity() == {}
+    mem.close()
+
+
+def test_connectivity_defaults_to_this_instances_tenant(monkeypatch):
+    """Same rule as `stats()`: a shared store must not leak another tenant's shape, and
+    the join rate is a shape.
+    """
+    mem = Memvara(":memory:", embedder=HashingEmbedder(dim=32), tenant="acme",
+                 user="alice")
+    asked: list = []
+    real = mem.store.connectivity
+    monkeypatch.setattr(mem.store, "connectivity",
+                        lambda t=None: (asked.append(t), real(t))[1])
+    mem.connectivity()
+    mem.connectivity(tenant="other")
+    assert asked == ["acme", "other"]
+    mem.close()
+
+
 def test_stats_falls_back_for_a_store_without_tenant_scoping():
     """A third-party Store predating the tenant argument must keep working."""
     class OldStore(SQLiteStore):
