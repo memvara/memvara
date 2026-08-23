@@ -239,8 +239,15 @@ turn `intent_weighting` off if its traffic is mostly relationship questions, and
 the graph leg off entirely if it is mostly lookups. Neither is a default this repository
 can pick for you, which is why `w_graph` ships at 0.0.
 
-**Ask the store before you guess at the traffic**, because the store is the half you can
-measure. `memory_stats` reports a **join rate** — the share of live claims whose object is
+**The store now asks itself.** Where no live claim's object is another live claim's
+subject, the graph leg does not run whatever `w_graph` says — so turning it on costs
+nothing on a store that cannot use it. Measured on LongMemEval with `w_graph=1.0`: every
+category exactly baseline, where it previously lost 1.6 points of single-session-user
+R@12. On 2Wiki the gate closed the leg on 0 of 3,000 searches and no returned row moved.
+See `UnjoinedStoreWarning`, which says so out loud once per retriever.
+
+That is a floor, not a recommendation. **Ask the store before you guess at the traffic**,
+because the store is the half you can measure. `memory_stats` reports a **join rate** — the share of live claims whose object is
 the subject of another live claim, which is the share that leads anywhere at all. The two
 corpora below sit at 40.6% and 0.0% and the leg gains 13 points on one and loses 1.6 on
 the other, so the rate predicts the sign where a guess about query mix does not. Under

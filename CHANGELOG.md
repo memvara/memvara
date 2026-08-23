@@ -70,6 +70,54 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **A store where nothing chains no longer runs the graph leg**, whatever `w_graph` is set
+  to and whatever the query says. Closes memvara/memvara#42.
+
+  A walk needs somewhere to go. Where no live claim's object is another live claim's
+  subject there is nowhere, and the leg degenerates into returning other facts about
+  whichever hub the seeds hang off — ranked by a path score that is near-uniform when
+  every path is one hop. Fusion reads *positions*, so that is a fabricated ranking. It is
+  the failure `MIN_PROXIMITY` prevents for the temporal leg, and the graph leg had no
+  equivalent.
+
+  Measured on LongMemEval, whose 78 claims all take `user` as their subject. With
+  `w_graph=1.0`:
+
+  | R@12 | baseline | before | after |
+  |---|---:|---:|---:|
+  | all | 70.4 | 70.1 | **70.4** |
+  | single-session-user | 92.2 | 90.6 | **92.2** |
+  | multi-session | 65.5 | 65.0 | **65.5** |
+
+  Every category exactly baseline, so **turning the graph leg on is now free where it
+  cannot help.** On 2WikiMultihopQA the gate closed the leg on 0 of 3,000 searches and
+  every returned row is unchanged, which is the other half of the claim.
+
+  Four decisions worth reading before changing it:
+
+  - **It sits after the intent weighting, not inside it.** The second-chance rule added
+    in 0.3.0 can only *widen* — its guard is `weights.graph <= 0.0` — so it cannot undo a
+    walk `classify` opened. Measured: a veto wired into that hook returned False on all
+    802 of LongMemEval's gate calls and the run still lost 1.6 points.
+  - **`{}` from a backend is not zero.** A store without `connectivity`, or a hosted
+    facade too old to report the counts, keeps its graph leg. Reading "did not look" as
+    "no joins" would switch the leg off on every third-party store at once.
+  - **No threshold.** The condition is `joinable_claims == 0`, a structural fact about the
+    data. A tuned floor picked from the two corpora available — 0.0% and 40.6% — would be
+    a constant fitted to two points.
+  - **Cached per tenant, re-measured every 256 searches**, on a counter rather than a
+    clock so the same sequence of searches re-measures at the same points on every run.
+    The staleness only ever runs the leg *less*, which degrades to the shipped default.
+
+  New `UnjoinedStoreWarning`, a subclass of `DegradedRetrievalWarning` so existing filters
+  still catch it, raised once per retriever. It says the *data* has no chains, which is
+  fixed in the write path — distinct from the parent's "this backend cannot traverse",
+  which is fixed by changing store.
+
+  **`w_graph` still defaults to `0.0`.** What this changes is that turning it on is now
+  safe; whether it should be on by default needs a corpus between 0.0% and 40.6% join
+  rate, and no public one exists.
+
 - **`memory_stats` reports a join rate**, and it is the number that says whether the
   graph leg can do anything for you. `joinable_claims / live_claims` — the share of
   stored facts whose object is the subject of another fact — measured over one read
