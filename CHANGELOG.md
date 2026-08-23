@@ -70,6 +70,25 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`write.claims` counts the writes that skip extraction**, which nothing counted before.
+  Emitted once per call from `WritePipeline.assert_claim`, so it covers `remember()`,
+  `supersede()`, `assert_claim()` and the importer — every path that asserts a fact
+  directly.
+
+  `write.turns` counts turns handed to `WritePipeline.add` and nothing else, which is
+  correct for what it measures and leaves a hole for anyone reading it as write activity.
+  **On a deployment configured with no extraction model the hole is the whole picture**:
+  prose sent to `add()` matches only a fixed set of sentence forms and is otherwise stored
+  as nothing, so the direct write is the only reliable path and `write.turns` sits flat
+  while the store fills up. Measured on a hosted deployment on 2026-08-23: 26 `remember()`
+  calls took a store from 120 claims to 145 with `write.turns` unchanged at 88.
+
+  The two series are not interchangeable and this is deliberately a second series rather
+  than a wider definition of the first. `write.turns` answers "how much conversation was
+  ingested" and is what a turn allowance is spent against; `write.claims` answers "how
+  many facts were asserted" and spends no allowance. Summing them would bill for writes
+  the API documents as free.
+
 - **A store where nothing chains no longer runs the graph leg**, whatever `w_graph` is set
   to and whatever the query says. Closes memvara/memvara#42.
 

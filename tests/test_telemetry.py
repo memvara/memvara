@@ -57,6 +57,7 @@ from memvara.telemetry import (
     RETRIEVAL_QUALITY_FACTOR,
     RETRIEVAL_QUERY,
     RETRIEVAL_RESULTS,
+    WRITE_CLAIMS,
     WRITE_EXTRACT_MS,
     WRITE_LATENCY_MS,
     WRITE_LLM_CALLS,
@@ -483,6 +484,27 @@ def test_the_write_and_read_paths_report_their_own_latency():
     assert rec.total(WRITE_RECONCILE, action="add") == 1
     assert rec.total(RETRIEVAL_QUERY, script="latin") == 1
     assert rec.values(RETRIEVAL_RESULTS) == [1.0]
+    rig.close()
+
+
+def test_a_write_that_skips_extraction_is_still_counted_as_a_write():
+    """`write.turns` counts turns handed to `add()` and nothing else, so every write that
+    asserts a fact directly was invisible to anything counting write activity. That is not
+    an edge case: a deployment with no extraction model stores prose as nothing unless it
+    matches a fixed sentence form, which makes the direct write the only reliable path and
+    leaves `write.turns` flat while the store fills up."""
+    rec = MemoryRecorder()
+    rig = Rig(rec)
+    for city in ("Berlin", "Lisbon"):
+        rig.writer.assert_claim(Claim(subject="alice", predicate="lives_in", object=city,
+                                      scope=SCOPE))
+    assert rec.total(WRITE_CLAIMS) == 2
+    # And the two series stay separate. `write.turns` is what a turn allowance is spent
+    # against and an asserted fact spends none, so folding one into the other would bill
+    # for writes the API documents as free.
+    assert rec.total(WRITE_TURNS) == 0
+    rig.writer.add([ep("I live in Berlin.")])
+    assert rec.total(WRITE_TURNS) == 1 and rec.total(WRITE_CLAIMS) == 2
     rig.close()
 
 
