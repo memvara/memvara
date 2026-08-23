@@ -52,9 +52,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   The re-baselined figures are within 1.6 points of the old ones everywhere. Two runs of
   the harness are now byte-identical, which three were not before.
 
-  **Earlier entries in this release quote pre-pin figures** where they describe a
-  measurement taken at the time, and are left as the record of it. `docs/BENCHMARKS.md`
-  carries the current table and is the one to quote.
+  **Figures elsewhere in this release follow one rule.** A number recording what *that*
+  change moved — `chained 35.4% → 41.4%` for the content-token match, `29.1% → 35.4%` for
+  the observed-predicate rule — is left as it was measured, because it is the record of
+  that measurement and re-running the intermediate configurations to restate it would be
+  archaeology. A number stating what the leg is worth *now* tracks the table and has been
+  updated. The two differ by at most 1.6 points, and `docs/BENCHMARKS.md` is the one to
+  quote.
 
   **Only this harness needed it.** `bench/longmemeval.py` run twice differs in nothing but
   its two timing lines: its claims carry transcript timestamps years old, so they sit on
@@ -501,9 +505,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   Measured on 2WikiMultihopQA, 12,576 questions, k=12: chained **35.4% → 41.4%**,
   compositional **32.1% → 40.0%**, and `flat`, `comparison` and `bridge_comparison` all
   unchanged, so the walk still does not run where it cannot help. The gate captured 0.9
-  points of a 42.5-point gain three releases ago and now captures 13.2.
+  points of a 43.9-point gain three releases ago and now captures 13.8.
 
-  **Answers and derivations move together.** The leg is worth +13.2 points of answer
+  **Answers and derivations move together.** The leg is worth +13.8 points of answer
   recall on chained questions and **+14.0 of chain recall** — 28.3% → 42.1% and
   25.5% → 39.5%. Ungated the two columns nearly meet, 72.2% against 70.3%: almost every
   answer the walk finds arrives with every triple that supports it.
