@@ -863,13 +863,31 @@ A separate method, and separate on purpose. `joinable_claims` counts live claims
 is the **join rate**, which is the number that decides whether `read_w_graph > 0` can
 pay for itself.
 
-It is not in `stats()` for two reasons. `Memvara.__repr__` calls `stats()`, and the join
-is a semi-join over the whole claim table — about 60 ms on 26,403 claims against that
-call's 69 ms, so folding it in would roughly double the cost of printing a store. And
-the spelling is load-bearing: `IN (SELECT ...)` builds the set of live subject keys once
-and probes it, while the correlated `EXISTS (SELECT ...)` re-runs its subquery per row.
-Same count, same semantics; **19.5 ms against 31.7 seconds** on that store. A reader who
-tidies it back to `EXISTS` has reintroduced a hang.
+It is not in `stats()` because `Memvara.__repr__` calls `stats()`, and the join is a
+semi-join over the whole claim table — about 60 ms on 26,403 claims against that call's
+69 ms, so folding it in would roughly double the cost of printing a store.
+
+**The spelling is load-bearing, and the reason is not the one this section first gave.**
+`IN (SELECT ...)` is chosen over `EXISTS (SELECT ...)` because the method takes
+`tenant: str | None` and only `IN` is fast for both. Median on 26,403 claims:
+
+| form | `tenant='2wiki'` | `tenant=None` |
+|---|---:|---:|
+| `IN`, uncorrelated | 39 ms | 34 ms |
+| `EXISTS`, correlated | **27 ms** | **42,302 ms** |
+
+`EXISTS` is the faster form when it has an index and unusable when it does not. It
+correlates on `c.object_key`, so it runs per outer row, and whether that is cheap depends
+on `cl_subj` — which is `(tenant, subject_key, invalidated_at)`. A composite index is only
+usable from its leading column, so the subquery reaches it only when `tenant` is bound.
+`EXPLAIN QUERY PLAN` shows `SEARCH d USING INDEX cl_subj (tenant=? AND subject_key=?)`
+in one case and a bare `SCAN d` in the other: 26,401 rows visited 26,401 times.
+
+`IN` does not correlate. SQLite evaluates the subquery once into a transient list behind a
+bloom filter, index or no index, so it gives up 12 ms on the tenant path to be immune on
+the other. **The rule is not "correlated subqueries are slow"** — it is that a correlated
+subquery inherits its index's leading column as a requirement, and an optional `tenant`
+cannot always supply one.
 
 Both sides of the join must be edges the traverser would follow: the liveness
 predicate, for `adjacent`'s reason that a path through a retired claim is not a path,

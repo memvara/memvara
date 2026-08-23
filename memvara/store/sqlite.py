@@ -3124,12 +3124,34 @@ class SQLiteStore:
         question is what share of this memory leads to more of it, and a leaf is a
         legitimate answer to that rather than an excluded row.
 
-        **`IN (SELECT ...)` and not `EXISTS (SELECT ...)`.** Same count, and SQLite plans
-        them completely differently: the correlated `EXISTS` re-runs its subquery per
-        candidate row, and on 26,403 claims that took **31.7 seconds** against **19.5 ms**
-        for the uncorrelated form, which builds the set of live subject keys once and
-        probes it. Three orders of magnitude from a rewrite that changes no semantics, so
-        a reader who tidies it back to `EXISTS` has reintroduced a hang.
+        **`IN (SELECT ...)` and not `EXISTS (SELECT ...)`, because this method has two
+        callers and only `IN` is fast for both.** On 26,403 claims, median:
+
+        =========================  ================  ==================
+        form                       `tenant='2wiki'`  `tenant=None`
+        =========================  ================  ==================
+        `IN`, uncorrelated               39 ms             34 ms
+        `EXISTS`, correlated             27 ms         **42,302 ms**
+        =========================  ================  ==================
+
+        `EXISTS` is the *faster* form when it has an index, and it is unusable when it
+        does not. The subquery correlates on `c.object_key`, so it runs once per outer
+        row; whether that is cheap depends entirely on whether `cl_subj` applies, and
+        `cl_subj` is `(tenant, subject_key, invalidated_at)`. A composite index is only
+        usable from its leading column, so the subquery reaches it only when `tenant` is
+        bound. `EXPLAIN QUERY PLAN` says so in one line each — `SEARCH d USING INDEX
+        cl_subj (tenant=? AND subject_key=?)` against a bare `SCAN d`, which is 26,401
+        rows visited 26,401 times.
+
+        `IN` cannot fall into that hole, because it does not correlate: SQLite evaluates
+        the subquery **once** into a transient list with a bloom filter in front of it,
+        index or no index. It gives up 12 ms on the tenant-filtered path to be immune on
+        the unfiltered one.
+
+        So the rule is not "correlated subqueries are slow" — that was this docstring's
+        first answer and it is wrong. It is that a correlated subquery inherits its
+        index's leading column as a *requirement*, and `tenant: str | None` means this
+        one cannot always supply it.
         """
         live, lp = self._state_clause(None, None, ("live",))
         inner, ip = self._state_clause(None, None, ("live",), alias="d")
