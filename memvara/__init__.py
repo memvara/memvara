@@ -93,7 +93,7 @@ from .write import (
 )
 from .write.reconcile import backfill_entities
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "Memvara", "ScopedMemvara", "AsyncMemvara", "AsyncScopedMemvara",
