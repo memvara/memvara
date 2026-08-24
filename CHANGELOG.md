@@ -9,6 +9,29 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **Two counters for the memories a write actually landed**, `write.memory_claims` and
+  `write.memory_episodes`. Between them they answer "what did this store gain", which no
+  existing series does.
+
+  `write.memory_claims` is `len(WriteReceipt.added)` — the `add` and `supersede`
+  reconciliation outcomes, emitted from both `add()` and `assert_claim()`. `reinforce`,
+  `retract` and `noop` create no row and move nothing, which makes "writing the same thing
+  twice is free" a property of the meter rather than a claim about it: two differently
+  worded sentences carrying one fact reconcile to `reinforce`, and neither is counted.
+
+  `write.memory_episodes` counts episodes that reached `store.add_episode`, which is not
+  what `write.turns` counts. `write.turns` is the whole input batch, and exact repeats are
+  dropped without being stored. It exists because an episode is retrievable on its own
+  through `include_episodes`: on a deployment with no extraction model, prose matching no
+  rule is stored and answers queries while producing no claim, so a meter counting claims
+  alone would report almost nothing for most of that deployment's traffic.
+
+  Both are deliberately separate from `write.claims`, which counts one per `assert_claim`
+  *call* whatever the call displaced, and which says in its own docstring that it is not a
+  billing series. These two are.
+
 ### Fixed
 
 - **The release workflow could not collect the test suite.** Its `build` job installed

@@ -72,6 +72,8 @@ from ..telemetry import (
     WRITE_EMBEDDING_UNUSABLE,
     WRITE_EXTRACT_MS,
     WRITE_LATENCY_MS,
+    WRITE_MEMORY_CLAIMS,
+    WRITE_MEMORY_EPISODES,
     WRITE_LLM_CALLS,
     WRITE_LOCK_HELD_MS,
     WRITE_RECONCILE,
@@ -238,6 +240,16 @@ class WritePipeline:
             rec.timing(WRITE_LATENCY_MS, receipt.latency_ms)
             rec.counter(WRITE_TURNS, len(episodes))
             rec.counter(WRITE_LLM_CALLS, receipt.llm_calls)
+            # What this write actually added, which is what a bill is computed from.
+            # `added` is the `add` and `supersede` outcomes and nothing else, so a batch
+            # that only reinforced what was already known moves neither of these — the
+            # dedup promise, stated as an emission rather than as prose.
+            #
+            # `len(fresh)` rather than `len(episodes)`: `_tier0_partition` sent exact
+            # repeats to `pending` without storing them, and charging for a row nobody
+            # wrote is the failure `write.turns` cannot avoid by construction.
+            rec.counter(WRITE_MEMORY_CLAIMS, len(receipt.added))
+            rec.counter(WRITE_MEMORY_EPISODES, len(fresh))
         return receipt
 
     def _transaction(self):
@@ -287,6 +299,11 @@ class WritePipeline:
             # than per row absorbed, matching `write.turns`: both count what was handed
             # in, so a fact that reinforced an existing claim still says a write happened.
             self.telemetry.counter(WRITE_CLAIMS)
+            # And the billable half, on the same terms `add()` emits it. `write.claims`
+            # above says a call happened; this says what the call left behind, which are
+            # different numbers whenever the assertion reinforced or retracted rather
+            # than landing. No episode counterpart: this path stores none.
+            self.telemetry.counter(WRITE_MEMORY_CLAIMS, len(receipt.added))
         return receipt
 
     # -- tier 0 ---------------------------------------------------------------

@@ -58,6 +58,8 @@ from memvara.telemetry import (
     RETRIEVAL_QUERY,
     RETRIEVAL_RESULTS,
     WRITE_CLAIMS,
+    WRITE_MEMORY_CLAIMS,
+    WRITE_MEMORY_EPISODES,
     WRITE_EXTRACT_MS,
     WRITE_LATENCY_MS,
     WRITE_LLM_CALLS,
@@ -505,6 +507,75 @@ def test_a_write_that_skips_extraction_is_still_counted_as_a_write():
     assert rec.total(WRITE_TURNS) == 0
     rig.writer.add([ep("I live in Berlin.")])
     assert rec.total(WRITE_TURNS) == 1 and rec.total(WRITE_CLAIMS) == 2
+    rig.close()
+
+
+def test_the_billing_counters_count_rows_landed_not_calls_made():
+    """`write.memory_claims` is `len(receipt.added)`, which reconciliation fills with the
+    `add` and `supersede` outcomes and nothing else.
+
+    That is the distinction `write.claims` deliberately does not make. It counts one per
+    assert *call* whatever the call displaced, so the two diverge the moment an assertion
+    reinforces something already known — and a bill computed from the wrong one charges
+    for work that created no row.
+    """
+    rec = MemoryRecorder()
+    rig = Rig(rec)
+    rig.writer.assert_claim(Claim(subject="alice", predicate="lives_in", object="Berlin",
+                                  scope=SCOPE))
+    assert rec.total(WRITE_CLAIMS) == 1 and rec.total(WRITE_MEMORY_CLAIMS) == 1
+
+    # The same fact again: a call happened and no row was created.
+    rig.writer.assert_claim(Claim(subject="alice", predicate="lives_in", object="Berlin",
+                                  scope=SCOPE))
+    assert rec.total(WRITE_CLAIMS) == 2, "the call counter must still move"
+    assert rec.total(WRITE_MEMORY_CLAIMS) == 1, "reinforcement created no row and is free"
+
+    # A correction does create one, and must be billed. Metering `add` alone would miss
+    # every one of these, which is most of what a memory store does after month one.
+    rig.writer.assert_claim(Claim(subject="alice", predicate="lives_in", object="Lisbon",
+                                  scope=SCOPE))
+    assert rec.total(WRITE_MEMORY_CLAIMS) == 2
+    rig.close()
+
+
+def test_re_ingesting_a_transcript_costs_nothing_on_either_billing_counter():
+    """The dedup promise, asserted as an emission rather than left as prose.
+
+    `write.turns` moves on the second pass because a turn really was handed in. Neither
+    billing counter does: `_tier0_partition` sends an exact repeat to `pending` without
+    storing it, so `fresh` is empty, and the claims it carried reconcile to `reinforce`,
+    so `added` is empty too.
+    """
+    rec = MemoryRecorder()
+    rig = Rig(rec)
+    turns = [ep("I live in Berlin.")]
+    rig.writer.add(turns)
+    claims, episodes = (rec.total(WRITE_MEMORY_CLAIMS), rec.total(WRITE_MEMORY_EPISODES))
+    assert episodes == 1
+
+    rig.writer.add(turns)
+    assert rec.total(WRITE_TURNS) == 2, "a turn was handed in twice and that is countable"
+    assert rec.total(WRITE_MEMORY_CLAIMS) == claims, "no row landed, so nothing is billed"
+    assert rec.total(WRITE_MEMORY_EPISODES) == episodes, "the repeat was never stored"
+    rig.close()
+
+
+def test_a_stored_episode_is_counted_even_when_it_yields_no_claim():
+    """The half a claims-only meter misses, and on the shipped configuration it is most of
+    the traffic.
+
+    An episode commits before extraction runs and is retrievable in its own right through
+    `include_episodes`. On a deployment with no extraction model, prose matching no rule is
+    stored, searchable and answering queries while producing no claim at all — so a meter
+    counting claims alone bills nothing for what that deployment actually delivers.
+    """
+    rec = MemoryRecorder()
+    rig = Rig(rec)
+    rig.writer.add([ep("The quarterly review is a recurring source of mild dread.")])
+
+    assert rec.total(WRITE_MEMORY_EPISODES) == 1
+    assert rec.total(WRITE_MEMORY_CLAIMS) == 0
     rig.close()
 
 
