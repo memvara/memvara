@@ -1116,6 +1116,16 @@ class WriteReceipt:
     #: configured it is where a conversation's facts go, and without it the default
     #: configuration reports a clean, successful, empty write.
     unextracted: int = 0
+    #: Claims the extractor proposed and this write refused to store because nothing
+    #: tied them to the turn they cite as their source -- `WritePipeline`'s
+    #: `reject_ungrounded`, which defaults to `"auto"`: no shared vocabulary at all, and
+    #: no embedding similarity either, so the claim reads as invented rather than
+    #: paraphrased. Zero here means either nothing tripped or the option was turned off
+    #: -- the receipt cannot tell a reader which, so absence of this number is not
+    #: evidence of absence of fabrication. A claim counted here also counts toward
+    #: `unextracted` if it was the only thing proposed for its turn, since `out` never
+    #: received it either way -- one rejection, two honest numbers, not a double count.
+    ungrounded: int = 0
     #: Model calls actually made. Must stay 0 for a backend that advertises itself as a
     #: no-op (`llm.is_noop`): billing for a call that never left the process makes the
     #: one number this design exists to minimize into a lie.
@@ -1208,13 +1218,15 @@ class WriteReceipt:
         return self.closed
 
     def __str__(self) -> str:
-        # `unextracted` and `accumulated` appear only when non-zero, so they read as
-        # events rather than as noise on the writes that lost and piled up nothing.
+        # `unextracted`, `ungrounded` and `accumulated` appear only when non-zero, so
+        # they read as events rather than as noise on the writes that lost, rejected
+        # and piled up nothing.
         lost = f" unextracted={self.unextracted}" if self.unextracted else ""
+        refused = f" ungrounded={self.ungrounded}" if self.ungrounded else ""
         piled = f" accumulated={len(self.accumulated)}" if self.accumulated else ""
         return (
             f"<WriteReceipt +{len(self.added)} ~{len(self.reinforced)} "
-            f"-{len(self.closed)} skip={self.skipped}{lost}{piled} "
+            f"-{len(self.closed)} skip={self.skipped}{lost}{refused}{piled} "
             f"llm={self.llm_calls} "
             f"{self.latency_ms:.1f}ms{' deferred' if self.deferred else ''}>"
         )

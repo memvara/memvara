@@ -523,6 +523,8 @@ def _receipt_summary(ctx: ToolContext, receipt: WriteReceipt) -> list[str]:
     lines += [f"- [{c.id} {_state(c)}] {safe_line(c.text)}" for c in receipt.closed]
     if receipt.unextracted:
         lines.append(_unextracted_note(ctx, receipt.unextracted))
+    if receipt.ungrounded:
+        lines.append(_ungrounded_note(receipt.ungrounded))
     if receipt.accumulated:
         lines.append(_accumulated_note(receipt.accumulated))
     return lines
@@ -544,6 +546,21 @@ def _unextracted_note(ctx: ToolContext, count: int) -> str:
             "operator to set MEMVARA_LLM=anthropic on the server."
         )
     return note
+
+
+def _ungrounded_note(count: int) -> str:
+    """Say when the extractor proposed something this store refused to believe.
+
+    Appears under `reject_ungrounded`'s default `"auto"` mode -- see `WritePipeline` --
+    whenever a model-proposed claim had neither shared vocabulary nor embedding
+    similarity with the turn it cited. Distinct from `_unextracted_note`: that one is
+    "recognised nothing", this one is "proposed something with no support in the turn
+    it cited", which is the failure a small extractor is more prone to than a large
+    one. Absence of the note on a deployment that turned the option off is not
+    evidence nothing was fabricated; it means nothing was checked.
+    """
+    return (f"note: {count} proposed claim(s) had no support in the turn they cited "
+            f"as their source and were not stored.")
 
 
 def _accumulated_note(items: Sequence[Accumulation]) -> str:

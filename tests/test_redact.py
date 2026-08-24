@@ -354,7 +354,13 @@ def test_a_claim_value_the_model_supplies_is_redacted_even_though_the_turn_alrea
     is 'every claim passes the hook once' rather than 'claims inherit their turn's'."""
     llm = RecordingLLM([{"subject": "user", "predicate": "contact_at",
                          "object": RAW_PHONE, "source_index": 0, "confidence": 0.9}])
-    mem = memory(redactor=PatternRedactor(), llm=llm)
+    # The grounding filter is turned off because this fixture is, deliberately, an
+    # invented value -- the exact class that filter rejects upstream. Redaction is a
+    # separate layer that must hold on deployments that turn the filter off, and for
+    # model-reassembled values with enough partial overlap to pass it.
+    mem = Memvara(embedder=HashingEmbedder(dim=64), llm=llm,
+                  user="alice", redactor=PatternRedactor(),
+                  write_reject_ungrounded=False)
     [claim] = mem.add("there is a number somewhere in my profile").added
 
     assert claim.object == "[redacted:phone]"
