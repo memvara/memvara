@@ -365,6 +365,88 @@ class WritePipeline:
             rec.counter(WRITE_MEMORY_EPISODES, len(fresh))
         return receipt
 
+    def reextract(self, episodes: Sequence[Episode]) -> WriteReceipt:
+        """Extract from turns that are already stored. `add()` minus tier 0.
+
+        The case this exists for: a turn reached the store and no claim was ever derived
+        from it. That happens two ways and both are ordinary. A deployment running with
+        no model keeps every turn and extracts from almost none of them — 96 of 129
+        episodes on one measured store. And a provider failure mid-write sets
+        `receipt.deferred`, keeps the episodes and returns; nothing retried them until
+        this existed, so the facts in that batch were lost while the text sat on disk.
+
+        Tier 0 is skipped and must be: these episodes are stored and embedded already, so
+        re-running it would find each one as an exact repeat of itself. Tier 1 runs, and
+        runs *first*, because the salience gate is free and the model is not — episodes
+        commit before the gate in `add()`, so every acknowledgement and one-word reply in
+        the store looks exactly like an unextracted fact from the outside. Without the
+        gate here a scheduled sweep would spend a model call on "thanks" on every pass,
+        forever.
+
+        **An episode that already has claims is skipped, and that is the idempotency
+        guarantee.** Not a convenience: re-reading a stored turn is not new evidence about
+        anything, but the reconciler cannot tell that from a genuine repeat, so an
+        identical claim arriving twice reconciles to `reinforce` and bumps salience.
+        Measured, not assumed — a second extraction of one stored turn returns
+        `action="reinforce"`. A sweep that ran twice would therefore quietly promote
+        whatever it had already extracted, which is a ranking change nobody asked for and
+        nothing would report. Counted on `receipt.already_extracted`.
+
+        What this cannot tell is "the model read this and found nothing" from "no model
+        has read this yet": neither leaves a mark on the episode. That population is real
+        and `reject_ungrounded` feeds it — a turn whose only extracted claim was refused
+        as ungrounded ends with no claims citing it and looks untouched. So every turn
+        read here is reported on `receipt.episode_ids`, and a scheduler hands those back
+        as `Memvara.pending_extraction(exclude=...)`. Core does not record attempts on the
+        episode, because the durable set belongs to whatever is doing the scheduling.
+        """
+        receipt = WriteReceipt()
+        t0, rec = perf_counter(), self.telemetry
+        now = utcnow()
+
+        fresh: list[Episode] = []
+        for ep in episodes:
+            if self.store.claims_citing(ep.scope.tenant, ep.id):
+                receipt.already_extracted += 1
+                continue
+            fresh.append(ep)
+        receipt.episode_ids = [ep.id for ep in fresh]
+
+        gated, fast_claims = self._tier1(fresh, receipt)
+        llm_claims = self._tier2(gated, receipt, now)
+
+        candidates: list[Claim] = []
+        for ep in fresh:
+            candidates.extend(fast_claims.get(ep.id, ()))
+            candidates.extend(llm_claims.get(ep.id, ()))
+        if self.redactor is not None:
+            # The same belt-and-braces `add()` applies, for the same reason: "every claim
+            # in the store passed the redactor exactly once" has to hold for every write
+            # path or it is an argument about transitivity rather than a property.
+            for claim in candidates:
+                redact_claim(self.redactor, claim, telemetry=rec)
+
+        lock_t0 = perf_counter() if rec is not None else 0.0
+        with self._transaction():
+            to_embed: list[Claim] = []
+            for claim in candidates:
+                claim.recorded_at = now
+                self._absorb(claim, self.reconciler.apply(claim, now=now),
+                             receipt, to_embed)
+            self._write_embeddings(to_embed)
+
+        receipt.latency_ms = (perf_counter() - t0) * 1000.0
+        if rec is not None:
+            rec.timing(WRITE_LOCK_HELD_MS, (perf_counter() - lock_t0) * 1000.0)
+            rec.timing(WRITE_LATENCY_MS, receipt.latency_ms)
+            rec.counter(WRITE_TURNS, len(fresh))
+            rec.counter(WRITE_LLM_CALLS, receipt.llm_calls)
+            rec.counter(WRITE_MEMORY_CLAIMS, len(receipt.added))
+            # No `write.memory_episodes`: this path stores no episode. Emitting a zero
+            # would be indistinguishable from a write that stored none and was charged
+            # for it, which is the confusion that series was added to end.
+        return receipt
+
     def _transaction(self):
         """Batch commits when the store supports it; a no-op otherwise.
 

@@ -343,6 +343,7 @@ class WritePipeline:
                  reject_ungrounded: bool | str = "auto") -> None
 
     def add(self, episodes: Sequence[Episode]) -> WriteReceipt
+    def reextract(self, episodes: Sequence[Episode]) -> WriteReceipt
     def assert_claim(self, claim: Claim) -> WriteReceipt
 ```
 
@@ -377,6 +378,17 @@ including `llm_calls` (0 whenever the LLM is not consulted) and `latency_ms`:
   fails open, keeping the claim and warning once. Under the default `HashingEmbedder`
   nothing is ever rescued (n-gram cosines on zero-overlap pairs measure 0.0–0.11,
   far under the floor), so `"auto"` degrades to the strict check there.
+
+`reextract()` is `add()` with tier 0 removed, for turns already in the store: a
+deployment that ran without a model, or a batch a provider failure left `deferred`. Tier 1
+runs and runs first, because the gate is free and the model is not — `add()` commits
+episodes *before* gating them, so chitchat in the store is indistinguishable from an
+unextracted fact from the outside. An episode that already has claims is skipped and
+counted on `receipt.already_extracted`: re-reading stored text is not new evidence, but an
+identical claim reconciles to `reinforce`, so a sweep run twice would silently promote what
+it had already stored. `Memvara.pending_extraction()` is the work list and applies the same
+gate; what it cannot see is a turn a model read and declined, so `reextract()` reports what
+it read on `receipt.episode_ids` and the caller feeds those back as `exclude=`.
 
   Resolution, not classification, is the point. Asking "what cardinality is this?" lets
   `works_at`, `employed_by_company`, `job_employer` and `workplace` become four separate

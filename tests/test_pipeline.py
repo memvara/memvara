@@ -21,7 +21,11 @@ from typing import Any, Sequence
 
 import pytest
 
+import pathlib
+
+from memvara import Memvara
 from memvara.embed import HashingEmbedder
+from memvara.llm.base import NullLLM
 from memvara.retrieve import HybridRetriever
 from memvara.schema import Cardinality, PredicateRegistry
 from memvara.store import SQLiteStore
@@ -35,6 +39,8 @@ from memvara.telemetry import (
     PREDICATE_CAPPED,
     PREDICATE_LEARNED,
     WRITE_EMBEDDING_REJECTED,
+    WRITE_MEMORY_CLAIMS,
+    WRITE_MEMORY_EPISODES,
     WRITE_LATENCY_MS,
     WRITE_LOCK_HELD_MS,
     WRITE_RECONCILE,
@@ -43,6 +49,8 @@ from memvara.telemetry import (
 )
 from memvara.types import Claim, Derivation, Episode, Scope, utcnow
 from memvara.write import SalienceGate, WritePipeline
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 class CountingLLM:
@@ -631,6 +639,243 @@ def test_a_failed_extraction_reports_every_turn_as_unextracted():
                         ep("The offsite moved to the Lisbon office.")])
     assert receipt.deferred and receipt.unextracted == 2
     store.close()
+
+
+def test_a_deferred_batch_can_be_read_again_once_the_provider_recovers():
+    """The failure `receipt.deferred` names, and what could not be done about it before.
+
+    A 429 keeps the episodes and loses the extraction. Nothing retried them, so the facts
+    in that batch were gone while the text sat on disk. This is the retry.
+    """
+    class Flaky(CountingLLM):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.fail = True
+
+        def extract(self, episodes, known_predicates):
+            if self.fail:
+                raise RuntimeError("429 rate limited")
+            return super().extract(episodes, known_predicates)
+
+    llm = Flaky(claims=[
+        {"subject": "user", "predicate": "works_at", "object": "Globex", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=llm, user="alice")
+    first = mem.add("Payroll moved over to Globex after the acquisition closed.")
+    assert first.deferred and first.added == []
+
+    llm.fail = False
+    receipt = mem.reextract()
+    assert [(c.predicate, c.object) for c in receipt.added] == [("works_at", "Globex")]
+    assert mem.pending_extraction() == [], "the turn is no longer pending"
+    mem.close()
+
+
+def test_the_work_list_drops_what_the_gate_would_drop():
+    """`add()` stores episodes before gating them, so chitchat has no claims either.
+
+    Without this the work list would hold every "thanks" in the store forever, and a
+    scheduled pass would pay a model call to rediscover that on every sweep. The gate is
+    deterministic and free, so it runs in the query.
+    """
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=NullLLM(), user="alice")
+    mem.add("The deployment failed because of a race condition in the scheduler.")
+    mem.add("thanks")
+    contents = [e.content for e in mem.pending_extraction()]
+    assert contents == ["The deployment failed because of a race condition in the scheduler."]
+    mem.close()
+
+
+def test_a_turn_the_model_already_declined_is_excluded_by_the_caller():
+    """The population nothing on the episode can record, and the one `exclude` is for.
+
+    A turn extraction read and produced nothing from — or produced only claims
+    `reject_ungrounded` refused — ends with no claims citing it, which from the store is
+    indistinguishable from never having been read. Measured against a local 4B: such a
+    turn came back pending on the next sweep and cost another ~250s of CPU to be rejected
+    again. `reextract` reports every turn it read, and the scheduler hands them back.
+    """
+    llm = CountingLLM(claims=[])          # reads the turn, finds nothing
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=llm, user="alice")
+    mem.add("The deployment failed because of a race condition in the scheduler.")
+
+    first = mem.reextract()
+    assert first.llm_calls == 1 and first.added == []
+    assert len(first.episode_ids) == 1, "it must report what it read, or nothing can"
+
+    # Without the feedback it is pending again — this is the loop, asserted rather than
+    # described, so a regression that drops `exclude` fails here.
+    assert len(mem.pending_extraction()) == 1
+    assert mem.pending_extraction(exclude=first.episode_ids) == []
+
+    second = mem.reextract(exclude=first.episode_ids)
+    assert second.llm_calls == 0, "a converged sweep spends nothing"
+    mem.close()
+
+
+def test_re_reading_a_turn_that_already_has_claims_is_refused_not_reinforced():
+    """Re-reading stored text is not new evidence, but the reconciler cannot tell.
+
+    An identical claim arriving twice reconciles to `reinforce` and bumps salience, so a
+    sweep that ran over the same episode twice would quietly promote what it had already
+    extracted — a ranking change nobody asked for and nothing reports. Skipping is the
+    idempotency guarantee, and the count is how a scheduler notices it is re-selecting.
+    """
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "works_at", "object": "Globex", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=llm, user="alice")
+    mem.add("Payroll moved over to Globex after the acquisition closed.")
+    [claim] = mem.get_all()
+    before, calls = claim.salience_base, llm.extract_calls
+
+    # Explicit ids, which is the only way to reach an already-extracted turn: the work
+    # list excludes it by construction.
+    receipt = mem.reextract([claim.sources[0]])
+    assert receipt.already_extracted == 1
+    assert receipt.added == [] and llm.extract_calls == calls, "no model call, no write"
+    assert mem.get_all()[0].salience_base == before, "and no silent promotion"
+    mem.close()
+
+
+def test_explicit_ids_still_go_through_the_gate():
+    """The work list filters chitchat, so only a caller naming ids can smuggle it in.
+
+    That is the path a retry takes — `receipt.episode_ids` from a failed batch, handed
+    straight back — and a batch that failed at tier 2 contains whatever was in it,
+    including turns the gate had already dropped. Without the gate here those reach the
+    model, which on a CPU-bound local extractor is minutes of work to rediscover that
+    "thanks" carries no fact.
+    """
+    llm = CountingLLM(claims=[])
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=llm, user="alice")
+    mem.add("thanks")
+    [chitchat] = list(store.iter_episodes("default"))
+
+    receipt = mem.reextract([chitchat.id])
+    assert llm.extract_calls == 0, "the gate must run before the model, not after"
+    assert receipt.skipped == 1
+    mem.close()
+
+
+def test_reextract_reports_the_same_series_a_write_does():
+    """Except `write.memory_episodes`, which this path must not emit at all.
+
+    A zero there would be indistinguishable from a write that stored no episode and was
+    charged for it, which is the confusion that series exists to end. The rest are the
+    ordinary write series: a scheduled pass has to show up in the same dashboards.
+    """
+    rec = MemoryRecorder()
+    store = SQLiteStore(":memory:")
+    # Stored with no extractor, which is the state this whole feature is for.
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=NullLLM(), user="alice",
+                  telemetry=rec)
+    mem.add("Payroll moved over to Globex after the acquisition closed.")
+
+    mem.writer.llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "works_at", "object": "Globex", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    before_episodes = rec.total(WRITE_MEMORY_EPISODES)
+    receipt = mem.reextract()
+
+    assert len(receipt.added) == 1
+    assert rec.total(WRITE_MEMORY_EPISODES) == before_episodes, (
+        "reextract stores no episode, so it must not move that counter")
+    assert rec.total(WRITE_MEMORY_CLAIMS) >= 1 and receipt.latency_ms >= 0.0
+    mem.close()
+
+
+def test_reextract_runs_the_redactor_over_what_it_extracts():
+    """"Every claim in the store passed the redactor exactly once" has to hold on every
+    write path, or it is an argument about transitivity rather than a property."""
+    from memvara.redact import PatternRedactor
+
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=NullLLM(), user="alice",
+                  redactor=PatternRedactor(), write_reject_ungrounded=False)
+    mem.add("There is a number written down somewhere in my profile notes.")
+
+    mem.writer.llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "contact_at", "object": "call 555-123-4567",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
+         "source_index": 0},
+    ])
+    receipt = mem.reextract()
+    assert receipt.added, "the claim must land, redacted rather than dropped"
+    assert "555-123-4567" not in receipt.added[0].object
+    mem.close()
+
+
+def test_the_scoped_and_async_views_reach_both_new_methods():
+    """`ScopedMemvara` and the async facades are the objects a server actually holds."""
+    import asyncio
+
+    from memvara.aio import AsyncMemvara
+
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "works_at", "object": "Globex", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=CountingLLM(claims=[]),
+                  user="alice")
+    mem.add("Payroll moved over to Globex after the acquisition closed.")
+
+    scoped = mem.scope(user="alice")
+    assert len(scoped.pending_extraction()) == 1
+    mem.writer.llm = llm
+    assert scoped.reextract(limit=5).added, "the scoped view must reach the write"
+
+    async def via_async():
+        amem = AsyncMemvara(mem)
+        pending = await amem.pending_extraction()
+        receipt = await amem.reextract(exclude=[e.id for e in pending])
+        ascoped = amem.scope(user="alice")
+        await ascoped.pending_extraction()
+        await ascoped.reextract(exclude=[e.id for e in pending])
+        return receipt
+
+    assert asyncio.run(via_async()).llm_calls == 0, "everything was already excluded"
+    mem.close()
+
+
+def test_limit_stops_the_scan_rather_than_trimming_afterwards():
+    """The bound a scheduled pass runs behind, and the reason it is a bound at all.
+
+    On CPU-bound extraction a turn costs minutes, so a sweep has to take a fixed bite and
+    stop. Short-circuiting the scan is also what keeps the per-episode `claims_citing`
+    affordable: it is the N+1 named in `pending_extraction`, and `limit` is what stops it
+    walking the whole store to build a list the caller will discard.
+    """
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=NullLLM(), user="alice")
+    for n in range(5):
+        mem.add(f"The deployment failed because of race condition number {n}.")
+
+    assert len(mem.pending_extraction()) == 5
+    assert len(mem.pending_extraction(limit=2)) == 2
+    mem.close()
+
+
+def test_reextract_never_stores_an_episode():
+    """Tier 0 is skipped: these turns are already stored and already embedded.
+
+    Running it would find each episode as an exact repeat of itself, which is why the
+    `write.memory_episodes` counter this path deliberately does not emit would be a lie.
+    """
+    source = (ROOT / "memvara" / "write" / "pipeline.py").read_text(encoding="utf-8")
+    body = source[source.index("def reextract"):source.index("def _transaction")]
+    assert "add_episode" not in body
+    assert "_tier0" not in body
+    assert "WRITE_MEMORY_EPISODES" not in body
 
 
 def test_the_learned_cap_folds_instead_of_growing_the_schema():

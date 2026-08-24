@@ -11,6 +11,38 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`Memvara.reextract()` and `Memvara.pending_extraction()`: extract from turns that are
+  already stored.** A turn reaching the store with no claim ever derived from it is
+  ordinary in two ways, and until now neither had a way back. A deployment running with no
+  model keeps every turn and extracts from almost none of them — 96 of 129 episodes on one
+  measured store. And a provider failure mid-write sets `receipt.deferred`, keeps the
+  episodes and returns, so the facts in that batch were lost while the text sat on disk.
+
+  `reextract()` is `add()` minus tier 0: the episodes are stored and embedded already, so
+  re-running it would find each as an exact repeat of itself. With no argument it sweeps
+  `pending_extraction(limit=...)`, which makes a scheduled pass `mem.reextract(limit=20)`;
+  given episodes or ids it does those, which is what retrying one known-failed batch wants.
+
+  **A turn that already has claims is skipped, and that is the idempotency guarantee.**
+  Re-reading stored text is not new evidence about anything, but the reconciler cannot
+  tell that from a genuine repeat — an identical claim arriving twice reconciles to
+  `reinforce` and bumps salience, measured. A sweep run twice would otherwise quietly
+  promote what it had already extracted, which nothing would report. Counted on the new
+  `WriteReceipt.already_extracted`.
+
+  `pending_extraction()` applies the salience gate, because `add()` commits episodes
+  *before* gating them: every "thanks" in the store has no claims either, and without this
+  a sweep would pay a model call to rediscover that on every pass. The gate is
+  deterministic and free, so it runs in the query.
+
+  What no filter here can see is a turn a model read and produced nothing from — including
+  one whose only claims `reject_ungrounded` refused, which that feature actively creates.
+  Nothing on the episode records the attempt. So `reextract()` reports every turn it read
+  on `receipt.episode_ids` and `pending_extraction(exclude=...)` takes them back: the
+  durable set of what has been tried belongs to whatever is doing the scheduling. Found by
+  running a sweep twice against a local 4B model and watching a rejected turn cost another
+  250s of CPU to be rejected again.
+
 - **`WritePipeline(reject_ungrounded=...)`, a grounding check on model-proposed claims,
   on by default as `"auto"`.** A claim whose object shares not one content word with the
   episode it cites as its source is treated as a fabrication candidate; under `"auto"`
