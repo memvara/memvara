@@ -47,6 +47,7 @@ ordering loses raw text to a provider timeout, and nothing can reconstruct that.
 
 from __future__ import annotations
 
+import re
 import warnings
 from contextlib import nullcontext
 from datetime import datetime
@@ -91,6 +92,52 @@ from .reconcile import ReconcileResult, Reconciler
 
 _EXAMPLE_CHARS = 400
 
+#: English function words, excluded from the grounding check below so a claim is not
+#: credited for sharing "the" or "with" with its source -- every sentence does.
+_GROUNDING_STOPWORDS = frozenset("""
+a an the of to in on for and or is are was were be been being with as by
+at from this that these those it its it's their his her they he she you
+your i we our not no do does did has have had can will would should may
+might must if then than so but into over under about after before
+""".split())
+
+_GROUNDING_WORD_RE = re.compile(r"[a-z0-9][a-z0-9_./\-]*")
+
+
+def _content_words(text: str) -> list[str]:
+    return [w for w in _GROUNDING_WORD_RE.findall(text.lower())
+            if w not in _GROUNDING_STOPWORDS and len(w) > 1]
+
+
+def _wholly_ungrounded(obj: str, source: str) -> bool:
+    """True when none of `obj`'s content words appear anywhere in `source`.
+
+    Deliberately blunt. It catches total fabrication -- an object sharing not one word
+    with the turn it is supposedly drawn from -- and nothing subtler. A claim that
+    reuses real vocabulary but inverts or misattributes it (wrong polarity, the right
+    words on the wrong subject) passes this check clean; it is a precision filter for
+    wholesale invention, not a semantic-correctness checker.
+
+    Substring containment, not exact-token membership, because this store's own content
+    is full of paths and hyphenated identifiers: an object of "expense-tracker" has to
+    match inside a source token like "expense-tracker-bb03f971", and a set of exact
+    tokens would call that ungrounded.
+
+    Validated against 144 claims from two 4B-class local models run over 20 real
+    conversational episodes: zero false positives at this exact rule -- every claim it
+    flagged turned out, on manual re-reading of the source, to be fabricated. It does
+    not generalise past what was measured. A claim that correctly paraphrases its source
+    with no vocabulary in common at all would also be rejected here, and that risk is
+    real, just unobserved in the sample; it is why this ships opt-in.
+    """
+    words = _content_words(obj)
+    if not words:
+        # Nothing to check is not evidence of fabrication -- an object this check
+        # cannot parse into words must not be rejected on the strength of that alone.
+        return False
+    src = source.lower()
+    return not any(w in src for w in words)
+
 #: A re-observation identified outside the transaction and applied inside it: the claim
 #: to bump, the episodes that evidence it, and when the evidence was uttered. Deferred
 #: rather than applied on the spot because the identification is a read and the bump is
@@ -117,12 +164,19 @@ class WritePipeline:
                  reinforce_bump: float = 0.25,
                  evidence_roles: Iterable[str] | None = SalienceGate.DEFAULT_EVIDENCE_ROLES,
                  telemetry: Recorder | None = None,
-                 redactor: Redactor | None = None) -> None:
+                 redactor: Redactor | None = None,
+                 reject_ungrounded: bool = False) -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
         self.llm = llm
         self.near_dup_threshold = near_dup_threshold
+        #: Off by default. `_wholly_ungrounded` was validated on one sample against two
+        #: small models and is not proven safe for every backend or every domain -- a
+        #: caller who has measured their own extractor's hallucination rate turns this
+        #: on; one who has not is not defaulted into a behaviour nobody asked for. See
+        #: `Memvara(write_reject_ungrounded=True, ...)`.
+        self.reject_ungrounded = reject_ungrounded
         #: Rewrites text before anything durable happens to it, or `None` — the default,
         #: and a fast path rather than a no-op object on the same terms as `telemetry`:
         #: one `is not None` test per call, not per turn. See `memvara.redact` for why
@@ -521,7 +575,7 @@ class WritePipeline:
         self._report_usage(receipt, usage)
 
         for item in raw:
-            claim = self._claim_from_dict(item, episodes, now)
+            claim = self._claim_from_dict(item, episodes, now, receipt)
             if claim is not None:
                 out.setdefault(claim.sources[0], []).append(claim)
         receipt.unextracted = sum(1 for ep in episodes if ep.id not in out)
@@ -684,8 +738,14 @@ class WritePipeline:
         return str(item.get("object", ""))[:_EXAMPLE_CHARS]
 
     def _claim_from_dict(self, item: Mapping[str, Any], episodes: Sequence[Episode],
-                         now) -> Claim | None:
-        """Trust boundary for model output: anything malformed is dropped, not repaired."""
+                         now, receipt: WriteReceipt) -> Claim | None:
+        """Trust boundary for model output: anything malformed is dropped, not repaired.
+
+        `receipt` is threaded through only so a rejection for lack of grounding can be
+        counted where the decision is made -- see `reject_ungrounded`. A structurally
+        malformed item (missing predicate, out-of-range source) is dropped the same way
+        it always was, uncounted; only the new reason has a number attached to it.
+        """
         idx = item.get("source_index")
         if not isinstance(idx, int) or isinstance(idx, bool) or not 0 <= idx < len(episodes):
             # Without a source we cannot attach provenance, and a claim with no
@@ -697,6 +757,10 @@ class WritePipeline:
         predicate = self.registry.normalize(str(item.get("predicate", "") or ""))
         obj = str(item.get("object", "") or "").strip()
         if not predicate or not obj:
+            return None
+
+        if self.reject_ungrounded and _wholly_ungrounded(obj, ep.content):
+            receipt.ungrounded += 1
             return None
 
         try:

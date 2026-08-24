@@ -11,6 +11,28 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`WritePipeline(reject_ungrounded=True)`, a precision filter for wholesale
+  fabrication.** A proposed claim whose object shares not one content word with the
+  episode it cites as its source is dropped rather than written, and counted on the new
+  `WriteReceipt.ungrounded` (surfaced on the MCP transport the same way `unextracted` is,
+  via a new note in `memory_add`'s receipt).
+
+  Built from a measured failure, not a hypothetical one: two 4B-class instruct models
+  run over 20 real conversational episodes, under `extract()`'s real prompt and schema,
+  both invented a placeholder `works_at: "Acme"` on turns containing no such fact at all
+  — 36% and 18% of their respective usable outputs — rather than returning the empty
+  list `EXTRACT_SYSTEM` explicitly permits. Substring-matched, not exact-token matched,
+  because this store's own content is full of paths and hyphenated identifiers where
+  exact-token matching produced false positives in testing.
+
+  Off by default. Validated on one sample against two small models with zero false
+  positives there, which is not the same as proven safe for every extractor or every
+  domain — it is a filter for total fabrication specifically, and a claim that reuses
+  real vocabulary with an inverted or misattributed meaning is not what it catches. A
+  caller who has measured their own extractor's hallucination rate turns it on via
+  `Memvara(write_reject_ungrounded=True, ...)`; nobody is defaulted into a behaviour
+  change nobody asked for.
+
 - **Two counters for the memories a write actually landed**, `write.memory_claims` and
   `write.memory_episodes`. Between them they answer "what did this store gain", which no
   existing series does.

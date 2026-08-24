@@ -1660,6 +1660,40 @@ def test_a_configured_extractor_gets_different_advice():
     srv.close()
 
 
+class FabricatingLLM(ScriptedLLM):
+    """Proposes one claim sharing no vocabulary with the turn it cites."""
+
+    name = "fabricating"
+
+    def extract(self, episodes, known_predicates):
+        return [{"subject": "user", "predicate": "works_at", "object": "Acme",
+                 "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
+                 "source_index": 0}]
+
+
+def test_the_ungrounded_note_only_appears_when_the_option_is_on():
+    """Absence is not evidence nothing was rejected -- it means nothing was checked.
+
+    Same fact `reject_ungrounded` states at the library layer, verified here at the
+    transport a model actually reads: the note is opt-in, not a silent default the tool
+    surface adds on its own.
+    """
+    off = MemvaraMCPServer(make_memory(user="alice", llm=FabricatingLLM()), user="alice")
+    body_off = text(off, "memory_add", {
+        "text": "We migrated the billing job to run nightly instead of hourly."})
+    assert "shared no vocabulary" not in body_off
+    off.close()
+
+    on = MemvaraMCPServer(
+        make_memory(user="alice", llm=FabricatingLLM(), write_reject_ungrounded=True),
+        user="alice")
+    body_on = text(on, "memory_add", {
+        "text": "We migrated the billing job to run nightly instead of hourly."})
+    assert "note: 1 proposed claim(s) shared no vocabulary" in body_on
+    assert "Acme" not in body_on, "the fabricated claim itself must not have been stored"
+    on.close()
+
+
 def test_remember_writes_a_triple_without_a_model(server):
     body = text(server, "memory_remember", {
         "subject": "user", "predicate": "prefers", "object": "pytest",

@@ -339,7 +339,8 @@ so.
 class WritePipeline:
     def __init__(self, store, embedder, registry, llm, *,
                  near_dup_threshold: float = 0.97,
-                 reinforce_bump: float = 0.25) -> None
+                 reinforce_bump: float = 0.25,
+                 reject_ungrounded: bool = False) -> None
 
     def add(self, episodes: Sequence[Episode]) -> WriteReceipt
     def assert_claim(self, claim: Claim) -> WriteReceipt
@@ -360,6 +361,16 @@ including `llm_calls` (0 whenever the LLM is not consulted) and `latency_ms`:
   `llm.resolve_predicate(...)` per *new surface form*, cached via `registry.learn_alias`
   / `registry.learn` and persisted through `store.put_spec(spec, tenant)` so it is never
   asked again — including after a restart, and including by another process.
+
+  With `reject_ungrounded=True`, a proposed claim whose object shares not one content
+  word with the episode it cites as its source is dropped and counted on
+  `receipt.ungrounded` rather than committed — see `_wholly_ungrounded` in this module.
+  Off by default: it was validated against 144 claims from two 4B-class extractors on
+  real conversational data with zero false positives, but that is one sample, and it is
+  a precision filter for wholesale fabrication only — a claim that reuses real
+  vocabulary with an inverted or misattributed meaning passes clean. A caller who has
+  measured their own extractor's hallucination rate turns it on; nobody is defaulted
+  into it. Reachable through `Memvara(write_reject_ungrounded=True, ...)`.
 
   Resolution, not classification, is the point. Asking "what cardinality is this?" lets
   `works_at`, `employed_by_company`, `job_employer` and `workplace` become four separate

@@ -681,6 +681,103 @@ def test_malformed_model_output_is_dropped_not_repaired(bad):
     store.close()
 
 
+# -- reject_ungrounded ---------------------------------------------------------
+#
+# Off by default -- see WritePipeline.__init__ -- so every test above this section
+# keeps working with fabricated-but-structurally-valid objects like "tea" against
+# unrelated filler text. These turn the option on explicitly.
+
+def test_a_claim_sharing_no_vocabulary_with_its_source_is_dropped():
+    """The exact shape the option exists for: a well-formed claim, invented whole.
+
+    "tea" shares nothing with a sentence about a quarterly review. Structurally this
+    claim is fine -- real predicate, real object, valid source_index -- which is why
+    `test_malformed_model_output_is_dropped_not_repaired` above does not catch it: that
+    test is about form, not truth.
+    """
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "likes", "object": "tea", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    pipe, store, _ = build(llm, reject_ungrounded=True)
+    receipt = pipe.add([ep("The quarterly review is next Tuesday.")])
+    assert receipt.added == []
+    assert receipt.ungrounded == 1
+    # The rejected claim was the only thing proposed for this turn, so it also reads as
+    # unextracted -- `out` never received it either way. One rejection, two honest
+    # numbers describing the same event from two angles, not a double-count.
+    assert receipt.unextracted == 1
+    store.close()
+
+
+def test_a_grounded_claim_survives_the_same_option():
+    """The option is a filter, not a tax on every write that turns it on."""
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "works_at", "object": "Acme Robotics",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    pipe, store, _ = build(llm, reject_ungrounded=True)
+    receipt = pipe.add([ep("I just started at Acme Robotics as a machinist.")])
+    assert len(receipt.added) == 1
+    assert receipt.ungrounded == 0
+    store.close()
+
+
+def test_a_compound_identifier_is_matched_as_a_substring_not_an_exact_token():
+    """The check that motivated substring matching over exact-token matching.
+
+    Real content here is full of paths and hyphenated identifiers. An object of
+    "expense-tracker" must be found inside a source token like
+    "expense-tracker-bb03f971", or every claim naming a project by its short form would
+    be rejected for citing the same project by its long one.
+    """
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "working_on", "object": "expense-tracker",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    pipe, store, _ = build(llm, reject_ungrounded=True)
+    receipt = pipe.add([ep(
+        "[MIGRATION_CHUNK source=/Users/x/.grok/memory/expense-tracker-bb03f971/MEMORY.md]"
+    )])
+    assert len(receipt.added) == 1
+    assert receipt.ungrounded == 0
+    store.close()
+
+
+def test_an_object_with_nothing_to_check_is_not_rejected_on_that_alone():
+    """An object that tokenizes to zero content words -- all stopwords, or too short --
+    means no signal either way, and no signal must not read as a bad signal.
+
+    Rejecting on an empty check would be worse than not checking: it turns "this object
+    could not be parsed into words" into "this object is fabricated", which it is not
+    evidence of. `"it"` is deliberately chosen: `_content_words("it")` is `[]` (a
+    stopword), so this exercises the early return in `_wholly_ungrounded` directly
+    rather than relying on coincidental word overlap.
+    """
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "mood", "object": "it", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    pipe, store, _ = build(llm, reject_ungrounded=True)
+    receipt = pipe.add([ep("Completely unrelated conversation about something else.")])
+    assert len(receipt.added) == 1
+    assert receipt.ungrounded == 0
+    store.close()
+
+
+def test_the_option_is_reachable_through_memvara_s_tuning_prefix():
+    """`Memvara(write_reject_ungrounded=True, ...)` -- no plumbing needed beyond the
+    constructor parameter, because `_split_tuning` validates against the real signature.
+    """
+    from memvara import Memvara
+    from memvara.llm.base import NullLLM
+
+    mem = Memvara(":memory:", user="alice", llm=NullLLM(),
+                  embedder=HashingEmbedder(), write_reject_ungrounded=True)
+    assert mem.writer.reject_ungrounded is True
+    mem.close()
+
+
 def test_confidence_is_clamped():
     llm = CountingLLM(claims=[
         {"subject": "user", "predicate": "likes", "object": "tea", "polarity": 1,
