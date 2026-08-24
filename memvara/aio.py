@@ -124,6 +124,23 @@ class AsyncMemvara:
             self.memvara.add, messages, tenant=tenant, user=user, agent=agent,
             session=session, role=role, ts=ts)
 
+    async def pending_extraction(self, *, limit: int | None = None,
+                                 exclude: Collection[str] = (), tenant=None, user=None,
+                                 agent=None, session=None) -> list[Episode]:
+        """See `Memvara.pending_extraction`. Off the loop because it scans the store."""
+        return await asyncio.to_thread(
+            self.memvara.pending_extraction, limit=limit, exclude=exclude,
+            tenant=tenant, user=user, agent=agent, session=session)
+
+    async def reextract(self, episodes: Sequence[Episode | str] | None = None, *,
+                        limit: int | None = None, exclude: Collection[str] = (),
+                        tenant=None, user=None, agent=None,
+                        session=None) -> WriteReceipt:
+        """See `Memvara.reextract`. Calls a model, so it belongs off the loop twice over."""
+        return await asyncio.to_thread(
+            self.memvara.reextract, episodes, limit=limit, exclude=exclude,
+            tenant=tenant, user=user, agent=agent, session=session)
+
     async def remember(self, subject: str, predicate: str, obj: str,
                        **kw: Any) -> WriteReceipt:
         """See `Memvara.remember`."""
@@ -503,6 +520,17 @@ class AsyncScopedMemvara:
     async def add(self, messages: Messages, *, role: str = "user",
                   ts: datetime | None = None) -> WriteReceipt:
         return await self._amem.add(messages, role=role, ts=ts, **self._kw)
+
+    async def pending_extraction(self, *, limit: int | None = None,
+                                 exclude: Collection[str] = ()) -> list[Episode]:
+        return await self._amem.pending_extraction(limit=limit, exclude=exclude,
+                                                   **self._kw)
+
+    async def reextract(self, episodes: Sequence[Episode | str] | None = None, *,
+                        limit: int | None = None,
+                        exclude: Collection[str] = ()) -> WriteReceipt:
+        return await self._amem.reextract(episodes, limit=limit, exclude=exclude,
+                                          **self._kw)
 
     async def remember(self, subject: str, predicate: str, obj: str,
                        **kw: Any) -> WriteReceipt:

@@ -1126,6 +1126,15 @@ class WriteReceipt:
     #: `unextracted` if it was the only thing proposed for its turn, since `out` never
     #: received it either way -- one rejection, two honest numbers, not a double count.
     ungrounded: int = 0
+    #: Turns `reextract()` was handed that already had claims citing them, and so did not
+    #: read again. Always 0 from `add()`, which never sees an episode twice.
+    #:
+    #: It is a skip rather than a no-op worth hiding: re-reading a stored turn is not new
+    #: evidence, but an identical claim arriving twice reconciles to `reinforce` and bumps
+    #: salience, so a sweep that ran over the same episode twice would quietly promote
+    #: what it had already extracted. This is the count of the times that was avoided,
+    #: and a scheduler seeing it climb is selecting episodes it has already done.
+    already_extracted: int = 0
     #: Model calls actually made. Must stay 0 for a backend that advertises itself as a
     #: no-op (`llm.is_noop`): billing for a call that never left the process makes the
     #: one number this design exists to minimize into a lie.

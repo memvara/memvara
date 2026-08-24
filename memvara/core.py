@@ -743,6 +743,95 @@ class Memvara:
             self._index_episodes(receipt.episode_ids)
         return receipt
 
+    def pending_extraction(self, *, limit: int | None = None,
+                           exclude: Collection[str] = (), tenant=None, user=None,
+                           agent=None, session=None) -> list[Episode]:
+        """Stored turns worth reading a model over, oldest first.
+
+        The work list a scheduled extraction pass reads. It is deliberately a query rather
+        than a queue: an episode with no claims *is* the pending record, it survives a
+        restart because it is the store, and it needs no second place for the answer to
+        drift out of step with.
+
+        Two filters, and the difference between them is what a caller has to understand.
+
+        **The gate is applied here, and it is free.** `add()` commits episodes before the
+        salience gate runs, so every "thanks" and "sounds good" in the store has no claims
+        and would otherwise sit in this list forever. `SalienceGate` is deterministic and
+        costs nothing, so running it in the query drops those permanently rather than
+        paying a model call to rediscover it on every pass.
+
+        **What a model already declined cannot be seen from here, and that is what
+        `exclude` is for.** A turn extraction read and produced nothing from — or produced
+        only claims `reject_ungrounded` refused — ends with no claims citing it, which is
+        indistinguishable from never having been read. Measured on exactly that: a turn
+        whose only extracted claim was rejected as ungrounded came back pending on the
+        next sweep and cost another 250s of CPU to be rejected again. Nothing on the
+        episode records the attempt, so the caller records it: `reextract()` reports every
+        turn it read on `receipt.episode_ids`, and a scheduler feeds those back here.
+
+        Cost is a scan with one `claims_citing` per episode, short-circuited by `limit`.
+        Named rather than hidden: on a large store this is the N+1 that `bulk_claims()`
+        exists to avoid elsewhere, and it is acceptable only because the caller is a
+        bounded background pass rather than a request path.
+        """
+        scope = self._scope(tenant, user, agent, session)
+        skip = set(exclude)
+        out: list[Episode] = []
+        for ep in self.store.scope_episodes([scope]):
+            if limit is not None and len(out) >= limit:
+                break
+            if ep.id in skip:
+                continue
+            if not self.writer.gate.carries_fact(ep)[0]:
+                continue
+            if not self.store.claims_citing(ep.scope.tenant, ep.id):
+                out.append(ep)
+        return out
+
+    def reextract(self, episodes: Sequence[Episode | str] | None = None, *,
+                  limit: int | None = None, exclude: Collection[str] = (),
+                  tenant=None, user=None, agent=None,
+                  session=None) -> WriteReceipt:
+        """Extract from turns already in the store, and report it as any other write.
+
+        With no argument it sweeps: `pending_extraction(limit=...)` chooses the turns, so
+        a scheduled pass is `mem.reextract(limit=20)` and nothing else. Given episodes or
+        their ids it does those, which is what a caller retrying one known-failed batch
+        wants — `receipt.deferred` names that batch and nothing else could act on it
+        before this.
+
+        Idempotent by skipping: a turn that already has claims is counted on
+        `receipt.already_extracted` and not read again. See `WritePipeline.reextract` for
+        why that is correctness rather than tidiness — the reconciler cannot tell a
+        re-read from a repeat, and would promote what it had already stored.
+
+        >>> from memvara import Memvara, HashingEmbedder
+        >>> from memvara.llm.base import NullLLM
+        >>> mem = Memvara(":memory:", user="alice", llm=NullLLM(),
+        ...               embedder=HashingEmbedder(dim=32))
+        >>> _ = mem.add("The deployment failed because of a race in the scheduler.")
+        >>> len(mem.pending_extraction())   # stored, and nothing extracted it
+        1
+        >>> mem.reextract().llm_calls       # still no model to read it with
+        0
+        >>> mem.close()
+        """
+        if episodes is None:
+            chosen = self.pending_extraction(limit=limit, exclude=exclude,
+                                             tenant=tenant, user=user,
+                                             agent=agent, session=session)
+        else:
+            chosen = []
+            for item in episodes:
+                ep = self.store.get_episode(item) if isinstance(item, str) else item
+                # A caller naming an id that is not there is told by omission rather than
+                # by an exception: a sweeper handing back ids it read a moment ago races
+                # an erase, and one vanished turn is not a reason to lose the batch.
+                if ep is not None:
+                    chosen.append(ep)
+        return self.writer.reextract(chosen)
+
     def _index_episodes(self, episode_ids: Sequence[str]) -> None:
         """Give every turn just stored a vector.
 
@@ -2499,6 +2588,15 @@ class ScopedMemvara:
     def add(self, messages: Messages, *, role: str = "user",
             ts: datetime | None = None) -> WriteReceipt:
         return self._mem.add(messages, role=role, ts=ts, **self._kw)
+
+    def pending_extraction(self, *, limit: int | None = None,
+                           exclude: Collection[str] = ()) -> list[Episode]:
+        return self._mem.pending_extraction(limit=limit, exclude=exclude, **self._kw)
+
+    def reextract(self, episodes: Sequence[Episode | str] | None = None, *,
+                  limit: int | None = None,
+                  exclude: Collection[str] = ()) -> WriteReceipt:
+        return self._mem.reextract(episodes, limit=limit, exclude=exclude, **self._kw)
 
     def remember(self, subject: str, predicate: str, obj: str, **kw: Any) -> WriteReceipt:
         return self._mem.remember(subject, predicate, obj, **self._kw, **kw)
