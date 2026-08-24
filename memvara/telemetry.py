@@ -133,6 +133,43 @@ WRITE_TURNS = "write.turns"
 #: published contract says are free.
 WRITE_CLAIMS = "write.claims"
 
+#: **Memories that landed, and the series a bill is computed from.** One per claim row this
+#: write created — `WriteReceipt.added`, which reconciliation fills with the `add` and
+#: `supersede` outcomes and with nothing else.
+#:
+#: Read that pairing carefully, because dropping either half is a different wrong answer.
+#: `add` alone bills nothing for a corrected fact, and correcting facts is most of what a
+#: memory store does after its first month. `supersede` alone bills nothing for a new one.
+#: `reinforce`, `retract` and `noop` create no row and are correctly free — which is what
+#: makes "writing the same thing twice costs nothing" a promise about meaning rather than
+#: about bytes: two differently worded sentences carrying one fact reconcile to `reinforce`
+#: and neither is charged.
+#:
+#: **Emitted from both entry points**, `add()` and `assert_claim()`, because both create
+#: rows and a customer cannot be expected to know which door a tool used. That is the
+#: distinction `write.claims` above does *not* make: it counts one per assert *call*
+#: whatever the call displaced, so a call that reinforced an existing fact and stored
+#: nothing still moves it. Useful for watching the direct path; wrong for a bill.
+#:
+#: This one is a billing series, and it is the only counter here that says so.
+WRITE_MEMORY_CLAIMS = "write.memory_claims"
+
+#: Episodes actually stored — the turns that were kept whole, as against handed in.
+#:
+#: **`write.turns` is not a substitute and over-counts.** It is `len(episodes)`, the whole
+#: input batch, and `_tier0_partition` then drops exact repeats to `pending` without
+#: storing them. This counts `fresh`: the episodes that reached `store.add_episode`.
+#:
+#: It exists because an episode is retrievable in its own right — `include_episodes` reads
+#: them, and on a deployment with no extraction model prose that matches no rule is stored,
+#: searchable, and answers queries while producing no claim at all. A meter that counted
+#: claims alone would bill nothing for most of what such a deployment actually delivers.
+#:
+#: A second series rather than a wider definition of the one above, for `write.claims`'s
+#: reason: a claim and an episode are different units, the sum of the two is what a bill
+#: adds up, and a caller calibrating one needs to see it apart from the other.
+WRITE_MEMORY_EPISODES = "write.memory_episodes"
+
 #: Model calls actually made, aggregated. `WriteReceipt.llm_calls` is the per-call
 #: answer; this is the one you alert on.
 WRITE_LLM_CALLS = "write.llm_calls"
