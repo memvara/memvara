@@ -1976,7 +1976,15 @@ def test_a_store_that_chains_is_left_alone(tmp_path):
 
 def test_the_gate_warns_once_per_retriever_and_not_once_per_search(tmp_path):
     """Same reason its parent class does: a store's shape does not change per query, and
-    a warning per search buries the finding under itself."""
+    a warning per search buries the finding under itself.
+
+    Counted by category rather than by asserting the whole caught list. `simplefilter
+    ("always")` catches everything raised inside the block, including `ResourceWarning`
+    from objects an earlier test left for the collector — which is a property of when the
+    garbage collector runs, not of this retriever. On Windows it does so reliably: seven of
+    them, on every run, failing a test about a gate that had behaved correctly. The
+    assertion below says what the name says.
+    """
     mem = _joined_store(tmp_path, star=True)
     r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
                         traverser=mem.traverser)
@@ -1984,7 +1992,8 @@ def test_the_gate_warns_once_per_retriever_and_not_once_per_search(tmp_path):
         warnings.simplefilter("always")
         for _ in range(3):
             r.search(RELATIONAL, mem.default_scope, k=5)
-    assert [w.category for w in caught] == [UnjoinedStoreWarning]
+    gate = [w for w in caught if issubclass(w.category, UnjoinedStoreWarning)]
+    assert len(gate) == 1, "three searches, one warning"
     mem.close()
 
 
