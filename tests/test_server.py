@@ -1710,6 +1710,36 @@ def test_remember_defaults_the_subject_to_the_user(server):
     assert server._ctx.memory.get_all()[0].subject == "user"
 
 
+def test_remember_records_what_derived_the_fact(server):
+    """`extractor` is what tells an inference from something the user said.
+
+    It defaults to `"api"`, and that default is not a blank -- `memory_why` renders it as
+    "Derived by user", which is an active claim about where the fact came from. A hook
+    mining a transcript that leaves it unset therefore records the model's own conclusion
+    as the user's statement, and the next session reads it back under a header that says
+    these are notes about the user and cites it to them as their own.
+
+    That is not hypothetical. It is why this argument was added: a claim written by a
+    capture hook out of the assistant's own analysis was quoted back to the user as
+    corroboration for the analysis, and `memory_why` could not distinguish it because the
+    hosted tool had no way to say so.
+    """
+    text(server, "memory_remember", {
+        "subject": "memvara", "predicate": "known_defect", "object": "budget is unset",
+        "extractor": "claude-code-hook"})
+    claim = server._ctx.memory.get_all()[0]
+    body = text(server, "memory_why", {"claim_id": claim.id})
+    assert "claude-code-hook" in body, body
+    assert "(api)" not in body, "an omitted extractor must not be reported anyway"
+
+
+def test_remember_still_reports_api_when_nothing_says_otherwise(server):
+    """The default is unchanged, so every existing caller keeps its current provenance."""
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Lisbon"})
+    claim = server._ctx.memory.get_all()[0]
+    assert "(api)" in text(server, "memory_why", {"claim_id": claim.id})
+
+
 def test_a_correction_takes_two_calls_and_records_the_right_reason(server):
     """The correction path end to end, and the reason it is two calls rather than one.
 
