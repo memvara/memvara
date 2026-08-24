@@ -64,7 +64,7 @@ from memvara.server.protocol import (
     iter_messages,
 )
 from memvara.server.tools import BY_NAME, ToolContext, safe_line
-from memvara.server.validate import validate
+from memvara.server.validate import _ARTICLES, validate
 
 
 # -- fixtures ----------------------------------------------------------------
@@ -2725,6 +2725,60 @@ def test_bad_arguments_come_back_as_readable_tool_errors(server, arguments, frag
 def test_type_errors_name_what_was_actually_sent(value, described):
     with pytest.raises(ToolError, match=f"got {described}"):
         validate({"x": {"type": "string"}}, (), {"x": value}, tool="t")
+
+
+def test_a_boolean_argument_accepts_booleans(server):
+    """The only boolean in the tool surface, and it had never once worked.
+
+    `include_episodes` was declared `boolean` in `tools.py` and the validator had no branch
+    for that type, so `true` and `false` both fell through to the string check and raised
+    `KeyError: 'boolean'` from inside the error path — an unhandled exception, not a tool
+    error, produced by sending the argument exactly as the schema asks for it.
+    """
+    for value in (True, False):
+        args = validate(BY_NAME["memory_recall"].properties, ("query",),
+                        {"query": "x", "include_episodes": value}, tool="memory_recall")
+        assert args["include_episodes"] is value
+
+    assert not call(server, "memory_recall",
+                    {"query": "Lisbon", "include_episodes": True})[1]
+
+
+def test_a_boolean_argument_refuses_a_string_that_looks_like_one(server):
+    """`"false"` used to validate, and then read as True.
+
+    This is the half that was worse than the crash. With no boolean branch, a boolean
+    argument reached the `not isinstance(value, str)` fallthrough — so a *string* passed,
+    and handlers read their flags through `bool(...)`, where every non-empty string is
+    True. Sending the correct type raised; sending the wrong type silently inverted the
+    meaning of the word "false".
+    """
+    for value in ("true", "false", 1, 0):
+        body, is_error = call(server, "memory_recall",
+                              {"query": "x", "include_episodes": value})
+        assert is_error and "must be a boolean" in body, f"{value!r} was accepted"
+
+
+def test_every_type_a_tool_declares_is_one_the_validator_knows():
+    """The check that would have caught this before it shipped, and the reason to keep it.
+
+    Nothing connected `tools.py` declaring a type to `validate.py` handling one. A tool
+    grew a `boolean`, the validator did not, and the two stayed out of step through a
+    release — with the schema itself tested (another test asserts `include_episodes` is
+    listed as an accepted argument) while the code path behind it never ran.
+
+    Asserting the two vocabularies match is cheap and does not care what is added next.
+    """
+    declared = set()
+    for tool in TOOLS:
+        for spec in tool.properties.values():
+            declared.add(spec["type"])
+            if spec["type"] == "array":
+                declared.add(spec["items"]["type"])
+    assert declared <= set(_ARTICLES), (
+        f"{sorted(declared - set(_ARTICLES))} declared by a tool but unknown to the "
+        "validator: arguments of that type raise KeyError from inside the error path"
+    )
 
 
 def test_arguments_must_be_an_object(server):
