@@ -222,7 +222,7 @@ def test_the_learned_schema_outranks_a_per_claim_guess():
     """Once a predicate has been classified, the registry is authoritative. Letting each
     extraction re-decide would leave claims of the same predicate disagreeing about what
     kind of memory they are, which is what the schema exists to prevent."""
-    payload = [{"subject": "user", "predicate": "collects_stamps", "object": "yes",
+    payload = [{"subject": "user", "predicate": "collects_stamps", "object": "at length",
                 "polarity": 1, "memory_type": "episodic", "confidence": 0.9,
                 "source_index": 0}]
     llm = CountingLLM(payload)  # classifies every novel predicate as "semantic"
@@ -247,7 +247,7 @@ class FailingClassifier(CountingLLM):
     (None, MemoryType.SEMANTIC),
 ])
 def test_a_failed_classification_falls_back_to_the_per_claim_memory_type(raw, expected):
-    payload = [{"subject": "user", "predicate": "collects_stamps", "object": "yes",
+    payload = [{"subject": "user", "predicate": "collects_stamps", "object": "at length",
                 "polarity": 1, "memory_type": raw, "confidence": 0.9,
                 "source_index": 0}]
     llm = FailingClassifier(payload)
@@ -259,7 +259,7 @@ def test_a_failed_classification_falls_back_to_the_per_claim_memory_type(raw, ex
 
 
 def test_a_failed_classification_is_not_retried_in_a_loop():
-    payload = [{"subject": "user", "predicate": "collects_stamps", "object": "yes",
+    payload = [{"subject": "user", "predicate": "collects_stamps", "object": "at length",
                 "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
                 "source_index": 0}]
     llm = FailingClassifier(payload)

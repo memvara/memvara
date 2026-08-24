@@ -469,8 +469,10 @@ class BadLLM:
 def test_malformed_model_fields_are_coerced_not_crashed(payload):
     llm = BadLLM(payload)
     with Memvara(embedder=HashingEmbedder(dim=64), llm=llm, user="alice") as mem:
-        mem.add("Something the fast path will not touch, spoken at length here.")
-        for c in mem.get_all():
+        mem.add("Something about Berlin the fast path will not touch, at length.")
+        stored = mem.get_all()
+        assert stored, "the coercions under test never ran if nothing landed"
+        for c in stored:
             assert c.polarity in (1, -1)
             assert 0.0 <= c.confidence <= 1.0
             assert isinstance(c.memory_type, MemoryType)

@@ -7,6 +7,51 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Model-extracted claims with no tie to their cited turn are now rejected
+
+### What changed
+
+`WritePipeline` gained `reject_ungrounded`, defaulting to `"auto"`: a claim the
+extraction model proposes is refused when its object shares not one content word with
+the episode it cites as its source **and** the configured embedder finds no semantic
+tie either (best chunk-cosine below 0.40). Refusals are counted on
+`WriteReceipt.ungrounded` and reported in `memory_add`'s receipt as
+`note: N proposed claim(s) had no support in the turn they cited as their source`.
+
+### Who this changes, and in which direction
+
+**Nobody running the shipped defaults.** The default `NullLLM` proposes no claims, so
+there is nothing to filter. `remember()` and the deterministic fast path are never
+checked at all — nothing a caller asserts directly is affected.
+
+**Deployments with an extraction model configured** (`MEMVARA_LLM=anthropic`, or an
+`llm=` passed in). Claims the model invents out of whole cloth — measured at 18–36% of
+usable output for 4B-class local models, typically a placeholder like
+`works_at: "Acme"` — no longer reach the store. Before this, such a claim did not sit
+harmlessly beside the truth: on a ONE-cardinality predicate it superseded and *ended*
+the true fact in the slot.
+
+**The direction that can cost you:** a genuine claim whose object is a paraphrase
+sharing zero vocabulary with its source, on a deployment whose embedder is the
+lexical `HashingEmbedder` (where the semantic rescue cannot fire). That combination
+was observed zero times in the 144 real claims measured, but it is possible, and it
+costs the one claim — the episode itself is already stored and retrievable.
+
+### How you find out it applies to you
+
+`receipt.ungrounded` is non-zero, `repr(receipt)` shows `ungrounded=N`, and the
+`memory_add` note above appears on the MCP transport. If the rescue's embedder fails,
+the pipeline warns once (`RuntimeWarning`, "embedding failed during the grounding
+rescue") and keeps the claims it could not check.
+
+### If you want the old behaviour
+
+`Memvara(write_reject_ungrounded=False, ...)` restores it exactly. `True` is a third
+mode: the lexical check alone, no embedding rescue, for callers who have measured
+their extractor and want the hard line.
+
+---
+
 ## `include_episodes` now requires a real boolean, where a string used to be accepted
 
 ### What changed

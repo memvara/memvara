@@ -1116,11 +1116,13 @@ class WriteReceipt:
     #: configured it is where a conversation's facts go, and without it the default
     #: configuration reports a clean, successful, empty write.
     unextracted: int = 0
-    #: Claims the extractor proposed and this write refused to store because nothing in
-    #: their object shared a single word with the turn they cite as their source --
-    #: `WritePipeline`'s `reject_ungrounded` option, off by default. Zero on every write
-    #: where the option is off, which is not the same as zero fabrication having
-    #: happened; it means nothing was checked. A claim counted here also counts toward
+    #: Claims the extractor proposed and this write refused to store because nothing
+    #: tied them to the turn they cite as their source -- `WritePipeline`'s
+    #: `reject_ungrounded`, which defaults to `"auto"`: no shared vocabulary at all, and
+    #: no embedding similarity either, so the claim reads as invented rather than
+    #: paraphrased. Zero here means either nothing tripped or the option was turned off
+    #: -- the receipt cannot tell a reader which, so absence of this number is not
+    #: evidence of absence of fabrication. A claim counted here also counts toward
     #: `unextracted` if it was the only thing proposed for its turn, since `out` never
     #: received it either way -- one rejection, two honest numbers, not a double count.
     ungrounded: int = 0

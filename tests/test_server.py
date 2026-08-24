@@ -1671,27 +1671,29 @@ class FabricatingLLM(ScriptedLLM):
                  "source_index": 0}]
 
 
-def test_the_ungrounded_note_only_appears_when_the_option_is_on():
-    """Absence is not evidence nothing was rejected -- it means nothing was checked.
-
-    Same fact `reject_ungrounded` states at the library layer, verified here at the
-    transport a model actually reads: the note is opt-in, not a silent default the tool
-    surface adds on its own.
+def test_the_ungrounded_note_appears_by_default_and_off_means_silent():
+    """The default is "auto", so a fabricated claim is refused with a note -- and a
+    deployment that turns the option off gets silence, which is the honest reading:
+    absence of the note there is not evidence nothing was fabricated, it means
+    nothing was checked. The default server runs the HashingEmbedder, whose rescue
+    correctly never fires on zero-overlap pairs, so "auto" behaves as the strict
+    lexical check here.
     """
-    off = MemvaraMCPServer(make_memory(user="alice", llm=FabricatingLLM()), user="alice")
-    body_off = text(off, "memory_add", {
-        "text": "We migrated the billing job to run nightly instead of hourly."})
-    assert "shared no vocabulary" not in body_off
-    off.close()
-
-    on = MemvaraMCPServer(
-        make_memory(user="alice", llm=FabricatingLLM(), write_reject_ungrounded=True),
-        user="alice")
+    on = MemvaraMCPServer(make_memory(user="alice", llm=FabricatingLLM()), user="alice")
     body_on = text(on, "memory_add", {
         "text": "We migrated the billing job to run nightly instead of hourly."})
-    assert "note: 1 proposed claim(s) shared no vocabulary" in body_on
+    assert "note: 1 proposed claim(s) had no support in the turn" in body_on
     assert "Acme" not in body_on, "the fabricated claim itself must not have been stored"
     on.close()
+
+    off = MemvaraMCPServer(
+        make_memory(user="alice", llm=FabricatingLLM(), write_reject_ungrounded=False),
+        user="alice")
+    body_off = text(off, "memory_add", {
+        "text": "We migrated the billing job to run nightly instead of hourly."})
+    assert "had no support in the turn" not in body_off
+    assert "+ [" in body_off, "with the filter off, the fabrication is stored"
+    off.close()
 
 
 def test_remember_writes_a_triple_without_a_model(server):

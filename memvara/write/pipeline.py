@@ -126,9 +126,10 @@ def _wholly_ungrounded(obj: str, source: str) -> bool:
     Validated against 144 claims from two 4B-class local models run over 20 real
     conversational episodes: zero false positives at this exact rule -- every claim it
     flagged turned out, on manual re-reading of the source, to be fabricated. It does
-    not generalise past what was measured. A claim that correctly paraphrases its source
-    with no vocabulary in common at all would also be rejected here, and that risk is
-    real, just unobserved in the sample; it is why this ships opt-in.
+    not generalise past what was measured: a claim that correctly paraphrases its
+    source with no vocabulary in common would also trip it, which is why this is only
+    the *trigger* under the default `"auto"` mode -- the embedding rescue below gets a
+    veto before anything is rejected.
     """
     words = _content_words(obj)
     if not words:
@@ -136,7 +137,46 @@ def _wholly_ungrounded(obj: str, source: str) -> bool:
         # cannot parse into words must not be rejected on the strength of that alone.
         return False
     src = source.lower()
+    if not _GROUNDING_WORD_RE.search(src):
+        # The same rule, mirrored onto the source. A turn the tokenizer cannot read at
+        # all -- 我住在北京, from which the model correctly extracts `lives_in: Beijing`
+        # -- would trip this check on every claim it yields, because no Latin-script
+        # object can share a token with it. That is the check being out of its depth,
+        # not the claim being ungrounded, so it abstains. Cross-script grounding is the
+        # semantic rescue's job, and only a multilingual embedder can actually do it;
+        # a *mixed*-script source with any tokenizable content still gets the ordinary
+        # check, which is a known limit of this shape rather than an oversight -- see
+        # the English-centrism entry in docs/ROADMAP.md for the umbrella.
+        return False
     return not any(w in src for w in words)
+
+
+#: Cosine floor for the embedding rescue under `reject_ungrounded="auto"`. A lexically
+#: ungrounded object whose best chunk-cosine against its source episode reaches this is
+#: kept -- read as a paraphrase rather than an invention.
+#:
+#: Measured, not guessed, on the 33 fabricated claims from the eval behind this feature
+#: plus 8 hand-built genuine paraphrases sharing zero vocabulary with their sources,
+#: under the MiniLM `LocalEmbedder`. Every wholesale invention -- the "Acme" employer,
+#: the fictional pet-and-pollen persona, the `"unknown"` template stubs -- scored 0.33
+#: or below; the paraphrases that rescue exists for scored 0.45 and up; the separating
+#: region on that data is [0.34, 0.42] and this sits inside it with margin on the side
+#: that matters. The only two fabrications above it (0.43, 0.46) were typo-variants of
+#: text genuinely in the source -- misreadings, not inventions, and the least dangerous
+#: thing this filter can miss.
+#:
+#: Under the default `HashingEmbedder` the same pairs score 0.0-0.11 -- character
+#: n-grams have nothing to say about meaning -- so nothing is ever rescued and "auto"
+#: degrades to the strict lexical check. That is graceful rather than accidental: the
+#: rescue's quality follows the embedder's, and a deployment that cares about paraphrase
+#: rescue is one that has configured a semantic embedder.
+_GROUNDING_RESCUE_COSINE = 0.40
+
+#: The rescue compares the object against the source in chunks this wide, taking the
+#: best score. MiniLM-class embedders truncate around 512 tokens, and episodes here run
+#: to several thousand characters -- a fact grounded late in a long turn would otherwise
+#: be invisible to a single whole-episode embedding.
+_GROUNDING_CHUNK_CHARS = 1200
 
 #: A re-observation identified outside the transaction and applied inside it: the claim
 #: to bump, the episodes that evidence it, and when the evidence was uttered. Deferred
@@ -165,17 +205,31 @@ class WritePipeline:
                  evidence_roles: Iterable[str] | None = SalienceGate.DEFAULT_EVIDENCE_ROLES,
                  telemetry: Recorder | None = None,
                  redactor: Redactor | None = None,
-                 reject_ungrounded: bool = False) -> None:
+                 reject_ungrounded: bool | str = "auto") -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
         self.llm = llm
         self.near_dup_threshold = near_dup_threshold
-        #: Off by default. `_wholly_ungrounded` was validated on one sample against two
-        #: small models and is not proven safe for every backend or every domain -- a
-        #: caller who has measured their own extractor's hallucination rate turns this
-        #: on; one who has not is not defaulted into a behaviour nobody asked for. See
-        #: `Memvara(write_reject_ungrounded=True, ...)`.
+        if not (reject_ungrounded is True or reject_ungrounded is False
+                or reject_ungrounded == "auto"):
+            raise TypeError(
+                f"reject_ungrounded={reject_ungrounded!r} is not a mode. Use \"auto\" "
+                "(the default: reject a model-proposed claim only when it shares no "
+                "vocabulary with its cited turn AND the embedder finds no semantic tie "
+                "either), True (the lexical check alone, no rescue), or False (off).")
+        #: `"auto"` by default, and defaulting *on* is a considered reversal of how this
+        #: shipped. Three facts make it defensible. The check only ever runs on claims a
+        #: model proposed -- `remember()` and the fast path never reach it, so nothing a
+        #: caller asserts is ever filtered. The destructive direction is *storing*, not
+        #: rejecting: a fabricated value in a ONE-cardinality slot supersedes and ends
+        #: the true fact that was there (`works_at: "Acme"` retires the user's real
+        #: employer), so letting fabrication through destroys information the way this
+        #: library exists not to. And the residual false-positive class -- a genuine
+        #: paraphrase sharing zero vocabulary with its source that the embedder *also*
+        #: cannot connect -- was observed zero times in 144 real claims, survives only
+        #: as 3 of 8 hand-built adversarial cases, and costs one claim from one turn
+        #: rather than anything already stored.
         self.reject_ungrounded = reject_ungrounded
         #: Rewrites text before anything durable happens to it, or `None` — the default,
         #: and a fast path rather than a no-op object on the same terms as `telemetry`:
@@ -204,6 +258,11 @@ class WritePipeline:
         # a store hitting both does not have one silence the other, which would leave the
         # quieter of the two indistinguishable from not happening.
         self._warned_unembeddable = False
+        # An embedder that fails during the grounding rescue is warned about once per
+        # pipeline, same rule as the two flags above: the rescue fails open (the claim
+        # is kept), so the only lasting harm of a broken embedder here is silence about
+        # the mode quietly running lexical-only.
+        self._warned_grounding = False
 
     # -- public ---------------------------------------------------------------
 
@@ -737,6 +796,40 @@ class WritePipeline:
             return episodes[idx].content[:_EXAMPLE_CHARS]
         return str(item.get("object", ""))[:_EXAMPLE_CHARS]
 
+    def _grounding_rescued(self, obj: str, source: str) -> bool:
+        """The embedder's veto over the lexical trigger, under `"auto"`.
+
+        A lexically ungrounded object is kept anyway when its best chunk-cosine against
+        the source reaches `_GROUNDING_RESCUE_COSINE` -- that is what a genuine
+        paraphrase looks like and what a wholesale invention does not (the constant's
+        docstring carries the measurements). Chunked because MiniLM-class embedders
+        truncate long input, and a fact grounded late in a 7,000-character turn must
+        not be invisible to the comparison.
+
+        Fails open. A broken embedder here must cost the rescue's *precision*, never a
+        claim: the mode degrades to keeping what it cannot check, warns once, and the
+        lexical trigger alone is not grounds for rejection when the second opinion the
+        mode promises cannot be obtained.
+        """
+        try:
+            chunks = [source[i:i + _GROUNDING_CHUNK_CHARS]
+                      for i in range(0, max(len(source), 1), _GROUNDING_CHUNK_CHARS)]
+            vectors = self.embedder.encode([obj] + chunks)
+            norms = (vectors ** 2).sum(axis=1) ** 0.5
+            norms[norms == 0.0] = 1.0
+            unit = vectors / norms[:, None]
+            best = float(max(unit[1:] @ unit[0]))
+        except Exception as e:
+            if not self._warned_grounding:
+                self._warned_grounding = True
+                warnings.warn(
+                    f"embedding failed during the grounding rescue ({e}); ungrounded "
+                    "claims are being kept rather than rejected until it recovers",
+                    RuntimeWarning, stacklevel=2,
+                )
+            return True
+        return best >= _GROUNDING_RESCUE_COSINE
+
     def _claim_from_dict(self, item: Mapping[str, Any], episodes: Sequence[Episode],
                          now, receipt: WriteReceipt) -> Claim | None:
         """Trust boundary for model output: anything malformed is dropped, not repaired.
@@ -760,8 +853,10 @@ class WritePipeline:
             return None
 
         if self.reject_ungrounded and _wholly_ungrounded(obj, ep.content):
-            receipt.ungrounded += 1
-            return None
+            if not (self.reject_ungrounded == "auto"
+                    and self._grounding_rescued(obj, ep.content)):
+                receipt.ungrounded += 1
+                return None
 
         try:
             polarity = -1 if int(item.get("polarity", 1)) < 0 else 1

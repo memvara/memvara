@@ -340,7 +340,7 @@ class WritePipeline:
     def __init__(self, store, embedder, registry, llm, *,
                  near_dup_threshold: float = 0.97,
                  reinforce_bump: float = 0.25,
-                 reject_ungrounded: bool = False) -> None
+                 reject_ungrounded: bool | str = "auto") -> None
 
     def add(self, episodes: Sequence[Episode]) -> WriteReceipt
     def assert_claim(self, claim: Claim) -> WriteReceipt
@@ -362,15 +362,21 @@ including `llm_calls` (0 whenever the LLM is not consulted) and `latency_ms`:
   / `registry.learn` and persisted through `store.put_spec(spec, tenant)` so it is never
   asked again — including after a restart, and including by another process.
 
-  With `reject_ungrounded=True`, a proposed claim whose object shares not one content
-  word with the episode it cites as its source is dropped and counted on
-  `receipt.ungrounded` rather than committed — see `_wholly_ungrounded` in this module.
-  Off by default: it was validated against 144 claims from two 4B-class extractors on
-  real conversational data with zero false positives, but that is one sample, and it is
-  a precision filter for wholesale fabrication only — a claim that reuses real
-  vocabulary with an inverted or misattributed meaning passes clean. A caller who has
-  measured their own extractor's hallucination rate turns it on; nobody is defaulted
-  into it. Reachable through `Memvara(write_reject_ungrounded=True, ...)`.
+  `reject_ungrounded` guards this tier's output, defaulting to `"auto"`: a proposed
+  claim whose object shares not one content word with the episode it cites is a
+  fabrication candidate, and the embedder then gets a veto — kept if the best
+  chunk-cosine against the source reaches `_GROUNDING_RESCUE_COSINE` (0.40, measured;
+  the constant's docstring carries the distributions), refused and counted on
+  `receipt.ungrounded` otherwise. `True` is the lexical check alone; `False` is off.
+  Only model-proposed claims are ever checked — `remember()` and the fast path do not
+  pass through `_claim_from_dict` — and the reason the default is on rather than off is
+  that the destructive direction is storing: a fabricated value in a ONE-cardinality
+  slot supersedes and ends the true fact that was there. It remains a precision filter
+  for wholesale fabrication only — a claim that reuses real vocabulary with an inverted
+  or misattributed meaning passes clean — and an embedder failure during the rescue
+  fails open, keeping the claim and warning once. Under the default `HashingEmbedder`
+  nothing is ever rescued (n-gram cosines on zero-overlap pairs measure 0.0–0.11,
+  far under the floor), so `"auto"` degrades to the strict check there.
 
   Resolution, not classification, is the point. Asking "what cardinality is this?" lets
   `works_at`, `employed_by_company`, `job_employer` and `workplace` become four separate

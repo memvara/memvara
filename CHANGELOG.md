@@ -11,27 +11,40 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
-- **`WritePipeline(reject_ungrounded=True)`, a precision filter for wholesale
-  fabrication.** A proposed claim whose object shares not one content word with the
-  episode it cites as its source is dropped rather than written, and counted on the new
-  `WriteReceipt.ungrounded` (surfaced on the MCP transport the same way `unextracted` is,
-  via a new note in `memory_add`'s receipt).
+- **`WritePipeline(reject_ungrounded=...)`, a grounding check on model-proposed claims,
+  on by default as `"auto"`.** A claim whose object shares not one content word with the
+  episode it cites as its source is treated as a fabrication candidate; under `"auto"`
+  the pipeline's own embedder then gets a veto — the claim is kept if its best
+  chunk-cosine against the source reaches 0.40, which is what a genuine paraphrase looks
+  like and a wholesale invention does not — and only a claim failing both checks is
+  refused. Refusals are counted on the new `WriteReceipt.ungrounded` and surfaced on the
+  MCP transport the same way `unextracted` is, via a new note in `memory_add`'s receipt.
+  `True` runs the lexical check alone; `False` turns the whole thing off.
 
   Built from a measured failure, not a hypothetical one: two 4B-class instruct models
   run over 20 real conversational episodes, under `extract()`'s real prompt and schema,
   both invented a placeholder `works_at: "Acme"` on turns containing no such fact at all
   — 36% and 18% of their respective usable outputs — rather than returning the empty
-  list `EXTRACT_SYSTEM` explicitly permits. Substring-matched, not exact-token matched,
+  list `EXTRACT_SYSTEM` explicitly permits. The rescue floor is measured too, on those
+  33 fabrications plus 8 hand-built zero-vocabulary paraphrases under the MiniLM
+  embedder: every wholesale invention scored 0.33 or below, the paraphrases the rescue
+  exists for scored 0.45 and up, and 0.40 sits inside the separating region. Under the
+  default `HashingEmbedder` the same pairs score 0.0–0.11, so nothing is ever rescued
+  and `"auto"` degrades to the strict lexical check — gracefully, since character
+  n-grams have nothing to say about meaning. Substring-matched, not exact-token matched,
   because this store's own content is full of paths and hyphenated identifiers where
   exact-token matching produced false positives in testing.
 
-  Off by default. Validated on one sample against two small models with zero false
-  positives there, which is not the same as proven safe for every extractor or every
-  domain — it is a filter for total fabrication specifically, and a claim that reuses
-  real vocabulary with an inverted or misattributed meaning is not what it catches. A
-  caller who has measured their own extractor's hallucination rate turns it on via
-  `Memvara(write_reject_ungrounded=True, ...)`; nobody is defaulted into a behaviour
-  change nobody asked for.
+  Defaulting on is a considered decision, argued from three facts. The check only ever
+  runs on claims a model proposed — `remember()` and the deterministic fast path never
+  reach it, so nothing a caller asserts is filtered. The destructive direction is
+  storing, not rejecting: a fabricated value in a ONE-cardinality slot supersedes and
+  *ends* the true fact that was there (`works_at: "Acme"` retires the user's real
+  employer — there is a test that measures exactly this with the filter off). And the
+  residual false-positive class — a genuine paraphrase with no shared vocabulary that
+  the embedder also cannot connect — was observed zero times in 144 real claims and
+  costs one claim from one turn, never anything already stored. An embedder that fails
+  during the rescue fails open: the claim is kept and the pipeline warns once.
 
 - **Two counters for the memories a write actually landed**, `write.memory_claims` and
   `write.memory_episodes`. Between them they answer "what did this store gain", which no
