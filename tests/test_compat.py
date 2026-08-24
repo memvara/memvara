@@ -568,6 +568,7 @@ def test_the_tilde_path_the_readme_documents_is_the_one_that_has_to_work(mem, tm
     home = tmp_path / "home"
     (home / ".mem0").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     write_history(home / ".mem0" / "history.db", [row("h1", "m1", "ADD", 0, new="Berlin")])
 
     assert [r.id for r in read_history_db("~/.mem0/history.db")] == ["h1"]
@@ -579,6 +580,7 @@ def test_a_log_that_is_not_there_names_the_file_it_resolved_to(tmp_path, monkeyp
     """The message has to carry the absolute path, because the whole failure mode is a
     path that resolved somewhere the caller did not picture."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     with pytest.raises(sqlite3.OperationalError) as excinfo:
         read_history_db("~/.mem0/history.db")
     message = str(excinfo.value)
