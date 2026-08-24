@@ -34,6 +34,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`include_episodes` on `memory_recall` had never worked, and the wrong value worked
+  better than the right one.** `validate.py` handled `string`, `integer`, `number` and
+  `array`, and `tools.py` declared `include_episodes` as `boolean` — a type the validator
+  did not know. It has been the only boolean in the twelve-tool surface since it shipped,
+  so nothing else was affected and nothing surfaced it.
+
+  Both halves are worth stating, because the second is the dangerous one. Sending the
+  argument as the schema asks — `true` or `false` — reached the type-mismatch branch,
+  which looked its article up in a table with no `boolean` key and raised
+  `KeyError: 'boolean'` *from inside the error path*: an unhandled exception rather than a
+  tool error, for a correctly-typed argument. Sending it as a **string** was accepted
+  instead, because a boolean fell through to the `not isinstance(value, str)` check — and
+  handlers read flags through `bool(...)`, where every non-empty string is truthy. So
+  `"false"` turned episodes on.
+
+  The validator now knows `boolean` and accepts only a real one: not `1`, and not the
+  string `"false"`. A new test asserts that every type any tool declares is a type the
+  validator handles, which is the link that did not exist — the schema was covered (one
+  test already asserted `include_episodes` was listed as accepted) while the code path
+  behind it had never run.
+
 - **The release workflow could not collect the test suite.** Its `build` job installed
   `.[dev]` where `ci.yml` installs `.[dev,cloud]`, and `httpx` is in the `cloud` extra —
   so `tests/test_store_remote.py` failed at import and the suite ended with two collection

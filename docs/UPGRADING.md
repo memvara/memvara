@@ -7,6 +7,51 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `include_episodes` now requires a real boolean, where a string used to be accepted
+
+### What changed
+
+`memory_recall` declares `include_episodes` as `boolean`, and the tool-call validator had
+no branch for that type. Two things followed, and only the second one can break you.
+
+A caller sending the argument the way the schema asks — `true` or `false` — got an
+unhandled `KeyError: 'boolean'` raised out of the error path itself. That never worked, so
+nothing depended on it.
+
+A caller sending the **string** `"true"` was accepted, because a boolean fell through to
+the validator's "must be a string" check and passed it. The handler then read the flag
+through `bool(...)`, where every non-empty string is truthy — so `"true"` turned episodes
+on, and so did `"false"`. Both are now rejected with a normal tool error.
+
+### Who this changes, and in which direction
+
+**Anyone whose client stringifies arguments.** Since the correctly-typed call raised, a
+caller who was successfully getting episodes back was necessarily sending a string, and
+that call now returns an error instead of results.
+
+**Anyone sending `"false"` and expecting it to mean false.** That call was turning
+episodes on. It now fails loudly rather than doing the opposite of what it says.
+
+Callers sending real JSON booleans are unaffected, except that the call now works.
+
+### How you find out it applies to you
+
+The rejection names the argument and what arrived:
+
+```
+memory_recall.include_episodes must be a boolean, got a string ('true')
+```
+
+It arrives as a tool result with `isError: true`, the way every other argument rejection
+does, so a model reading it can correct itself on the next turn.
+
+### If you want the old behaviour
+
+There is none to restore: one half raised `KeyError` and the other read `"false"` as true.
+Send `true` or `false` as JSON booleans, not as strings.
+
+---
+
 ## The graph leg stops running on a store where nothing chains
 
 ### What changed

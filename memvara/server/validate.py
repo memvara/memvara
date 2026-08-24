@@ -8,9 +8,18 @@ a JSON-RPC error — the model sees results, whereas protocol errors are address
 client, which typically renders them as a failed call and moves on.
 
 The validated subset of JSON Schema is exactly what the tools in this package declare:
-`type` (string/integer/number/array), `enum`, `minimum`, `maximum`, `maxLength`,
+`type` (string/integer/number/boolean/array), `enum`, `minimum`, `maximum`, `maxLength`,
 `default`, `required`, and `additionalProperties: false`. Anything wider would be untested
 code in a validator, which is the one place that is not acceptable.
+
+That sentence is load-bearing, and `boolean` was missing from it for as long as it was
+missing from the code. `memory_recall` grew an `include_episodes` argument, declared it
+`boolean` in `tools.py`, and nothing here knew the word — so the only boolean in the whole
+tool surface behaved like this: a caller sending `true` or `false` got an unhandled
+`KeyError` raised out of the error path itself, while a caller sending the *string*
+`"false"` was accepted and read through `bool(...)` as True. The correct type crashed and
+the wrong one silently inverted. Adding a type to a tool means adding it here in the same
+commit; the list above is the checklist.
 
 >>> validate({"k": {"type": "integer", "default": 8}}, (), {}, tool="demo")
 {'k': 8}
@@ -18,6 +27,12 @@ code in a validator, which is the one place that is not acceptable.
 Traceback (most recent call last):
     ...
 memvara.server.validate.ToolError: demo.k must be an integer, got a string ('8')
+>>> validate({"raw": {"type": "boolean"}}, (), {"raw": False}, tool="demo")
+{'raw': False}
+>>> validate({"raw": {"type": "boolean"}}, (), {"raw": "false"}, tool="demo")
+Traceback (most recent call last):
+    ...
+memvara.server.validate.ToolError: demo.raw must be a boolean, got a string ('false')
 """
 
 from __future__ import annotations
@@ -42,6 +57,7 @@ _ARTICLES = {
     "string": "a string",
     "integer": "an integer",
     "number": "a number",
+    "boolean": "a boolean",
     "array": "an array",
 }
 
@@ -90,6 +106,19 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
             raise ToolError(f"{label} must be >= {low}, got {value!r}")
         if high is not None and value > high:
             raise ToolError(f"{label} must be <= {high}, got {value!r}")
+    elif kind == "boolean":
+        # Only a real `bool`. Not `1`, which `isinstance(value, int)` would wave through
+        # the way the integer branch above has to guard against in the other direction --
+        # and not the string `"false"`, which is the case that actually reached
+        # production: without this branch a boolean argument fell through to the string
+        # check below, so `"false"` validated, and every handler reads its flags through
+        # `bool(...)`, where a non-empty string is True. The strict check is the point.
+        if not isinstance(value, bool):
+            raise ToolError(
+                f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")
+        # Returned here rather than falling through, as `array` does: `enum` and
+        # `maxLength` have no meaning on two values, and `len()` on a bool raises.
+        return value
     elif kind == "array":
         if not isinstance(value, list):
             raise ToolError(
