@@ -757,6 +757,7 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
         confidence=args["confidence"],
         memory_type=MemoryType(memory_type) if memory_type is not None else None,
         valid_from=since, valid_to=until,
+        extractor=args.get("extractor") or "api",
     )
     return "\n".join(filter(None, _receipt_summary(ctx, receipt)
                             + [_fold_note(ctx, args["predicate"], writing=True),
@@ -1507,6 +1508,20 @@ TOOLS: tuple[Tool, ...] = (
                     "claim's published relevance by a few percent, which is enough to "
                     "reorder rows that matched about equally well. Inflating it on "
                     "everything removes the signal rather than raising it."
+                ),
+            },
+            "extractor": {
+                "type": "string", "maxLength": 64,
+                "description": (
+                    "What derived this fact, when that is not the caller asserting "
+                    "something it already knew. Defaults to 'api', and 'api' is a claim "
+                    "about provenance rather than a blank: memory_why renders it as "
+                    "'Derived by user'. So a hook or an agent that mined a fact out of a "
+                    "conversation and left this unset has recorded that the user said "
+                    "it, and a later session reads it back as the user's own knowledge "
+                    "and cites it as corroboration. Name the thing that did the "
+                    "deriving — 'claude-code-hook', 'import:notion' — so an inference "
+                    "can be told from a statement."
                 ),
             },
         },
