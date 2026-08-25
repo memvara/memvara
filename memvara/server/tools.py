@@ -1574,6 +1574,13 @@ TOOLS: tuple[Tool, ...] = (
                 "description": (
                     "'semantic' for a durable fact, 'episodic' for something that "
                     "happened at a time, 'procedural' for how the user wants work done. "
+                    "Decide it by asking who the claim is about: if the subject is not "
+                    "the person you are talking to, it is almost never 'procedural'. A "
+                    "fact about a repository, a system or a deployment is 'semantic' "
+                    "however operational it sounds, and filing one as 'procedural' is "
+                    "not a filing error — that is the standing set memory_standing "
+                    "returns, which clients inject at the top of every session, so the "
+                    "note is then carried on every turn whether or not it is relevant. "
                     "Omitting it uses the predicate's declared type, and predicates this "
                     "store has never seen have none — they become 'semantic', which is "
                     "the safe default rather than a reading of what you wrote. Nothing "

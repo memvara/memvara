@@ -2,7 +2,9 @@
 
 Short patterns. Each one shows the tool sequence, then the mistake that
 records the wrong history. Tool descriptions already say when to call each
-tool; these turns are about the order.
+tool; these turns are about the order, and the sections below are about the
+shape of the call — the thing a paragraph cannot show you next to the call you
+should not have made.
 
 ## 1. The record was never right
 
@@ -49,3 +51,88 @@ User pastes a stack trace, or asks you to explain a function.
 Do not `memory_add` it. The transcript already has it. Next week's agent
 does not need the dump, and stuffing the store with restated context
 makes the durable facts harder to find.
+
+
+# Two calls that differ only in the type
+
+Same discovery, written twice. The first spent context on every turn of every
+session afterwards; the second did not.
+
+    memory_remember(subject="memvara_cloud", predicate="deploy_gotcha",
+                    object="polar-drain and polar-send share a profile and do "
+                           "opposite jobs, so naming one starts only that one",
+                    memory_type="procedural")     # joins the standing set
+
+    memory_remember(subject="memvara_cloud", predicate="known_defect",
+                    object="polar-drain and polar-send share a profile and do "
+                           "opposite jobs, so naming one starts only that one",
+                    memory_type="semantic")       # found when someone asks
+
+Nobody instructed anything in either. The subject is a container, not a person.
+Ten of thirty-two notes in one live store were written the first way.
+
+Compare an instruction that really is one, which the person said out loud:
+
+    memory_remember(subject="user", predicate="never_do",
+                    object="never add an AI attribution to a commit, PR or "
+                           "issue, in any repository",
+                    memory_type="procedural")
+
+Two more that are easy to get backwards:
+
+    memory_remember(subject="memvara", predicate="version", object="0.4.0",
+                    memory_type="episodic")   # "we shipped it this morning"
+
+    memory_remember(subject="memvara_cloud", predicate="uses_tool",
+                    object="pytest", memory_type="semantic")
+
+The second is about a repository. "The person prefers pytest" would be the
+other type, with `user` as the subject — same word, different owner.
+
+# One call each
+
+The argument shape, and beside it the call to avoid. Reasons live in the tool
+descriptions; these are the calls.
+
+    memory_recall(query="how does this person want commits written?")
+    # avoid: reaching for it when you need an id — nothing here has one
+
+    memory_search(query="attribution in commits", k=5,
+                  memory_types=["procedural"])
+    # avoid: reading its numbers out to anyone
+
+    memory_standing()
+    # avoid: memory_standing(query=...) — there is no such argument
+
+    memory_since(since="2026-08-25T04:00:00Z")
+    # avoid: a local time. Anything west of Greenwich lands in the future
+
+    memory_neighborhood(entity="memvara-cloud", depth=2, k=10)
+    # avoid: opening with this. Try the single-note question first
+
+    memory_paths(source="Alice", target="Acme", depth=3)
+    # avoid: passing one end and hoping
+
+    memory_remember(subject="user", predicate="prefers",
+                    object="always work in a git worktree, never the main "
+                           "checkout, because work spans three sibling repos",
+                    memory_type="procedural", true_since="2026-08-20")
+    # avoid: omitting true_since on anything you learned about the past
+
+    memory_add(text="I moved to Lisbon last March and I am staying")
+    # avoid: this entirely where stats said fast-path-only
+
+    memory_forget(claim_id="cl_1a2b3c")
+    # avoid: using it because a value went out of date
+
+    memory_end(claim_id="cl_1a2b3c", at="2026-03-01")
+    # avoid: omitting `at` and letting now stand in for when it stopped
+
+    memory_why(claim_id="cl_1a2b3c")
+    # avoid: skipping it and writing from the complaint instead
+
+    memory_history(subject="user", predicate="lives_in")
+    # avoid: quoting its rows as current
+
+    memory_stats()
+    # avoid: calling it to check whether one particular fact is stored
