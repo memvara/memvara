@@ -155,3 +155,31 @@ jobs:
           assert not failed, failed
           print('all modules import with numpy alone')
           "
+
+  npm-bridge:
+    # `npx memvara` is JavaScript, and until 0.1.0 no JavaScript ran in this workflow at
+    # all — the npm tests were Python assertions about files, spawned through the matrix
+    # and skipped whenever node happened to be unloadable. That arrangement let a real
+    # bug reach a release: `publish-npm` handed npm a path it read as a git repository,
+    # and the only thing that would have caught it was running the thing.
+    #
+    # A matrix, not one version, because this package's whole dependency story is "Node's
+    # standard library" — so the standard library is the dependency, and a behaviour that
+    # differs across supported majors is exactly the class of defect nobody would find
+    # locally. 20 is the floor `package.json` declares.
+    name: npx memvara on node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22", "24"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      # No `npm ci` and no cache: there is nothing to install. A step that installed
+      # something would be the first thing to notice if that ever stopped being true.
+      - name: The suite runs offline
+        working-directory: npm/memvara
+        run: node --test

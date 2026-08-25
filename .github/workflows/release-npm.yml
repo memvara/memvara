@@ -1,0 +1,222 @@
+# Publishing `memvara` to npm, on its own tag, independent of the Python release.
+#
+# This used to live in `release.yml` and fire on `v*`, which meant the npm package could
+# only ship when a Python version shipped. The bill came due on 2026-08-25: `0.4.1` was a
+# PyPI release containing **no Python changes at all**, cut solely because npm serves the
+# README and description of the published version and there is no way to edit either in
+# place. One code-less release is a curiosity; a JS package with its own cadence would
+# have produced one per fix.
+#
+# So the trigger is `npm-v*`. `release.yml` matches `tags: ["v*"]` and `npm-v0.1.0` does
+# not match it, so the two release trains cannot start each other. That is why this is a
+# separate file rather than more `if:` conditions on shared jobs — conditioning would have
+# left every job in `release.yml` carrying a clause about a package it does not build.
+#
+# The publish is trusted-publisher OIDC into the `npm` environment, holding no token. See
+# `docs/RELEASING.md` for the one-time registration.
+
+name: Release npm
+
+on:
+  push:
+    tags: ["npm-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: the tag and package.json agree
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      exists: ${{ steps.read.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: read
+        # The tag comes from the environment rather than `${{ }}` interpolation: a tag
+        # name is attacker-supplied text as far as this shell is concerned, and
+        # `${{ github.ref_name }}` inside a `run:` block is pasted in as source code.
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open("npm/memvara/package.json"))["version"])')"
+          if [ -z "$version" ]; then
+            echo "::error::could not read a version out of npm/memvara/package.json"
+            exit 1
+          fi
+
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            from_tag="${GITHUB_REF_NAME#npm-v}"
+            if [ "$from_tag" = "$GITHUB_REF_NAME" ]; then
+              echo "::error::tag '$GITHUB_REF_NAME' is not an npm-v* tag"
+              exit 1
+            fi
+            if [ "$from_tag" != "$version" ]; then
+              echo "::error::version mismatch: tag says '$from_tag', npm/memvara/package.json says '$version'. Publishing this would put a tarball on npm whose metadata disagrees with the tag it was cut from, permanently — npm does not allow a version to be reused. Fix the bump, move the tag, push it again."
+              exit 1
+            fi
+          fi
+
+          code="$(curl -sS -o /tmp/npm-meta.json -w '%{http_code}' https://registry.npmjs.org/memvara)"
+          if [ "$code" = "404" ]; then
+            exists=false
+          elif [ "$code" = "200" ]; then
+            exists="$(python3 -c 'import json,sys; print(str(sys.argv[1] in json.load(open("/tmp/npm-meta.json")).get("versions", {})).lower())' "$version")"
+          else
+            echo "::error::registry.npmjs.org/memvara answered HTTP $code"
+            exit 1
+          fi
+
+          echo "npm/memvara version: $version"
+          if [ "$exists" = "true" ]; then
+            echo "action: SKIP — $version is already on the registry"
+          else
+            echo "action: PUBLISH — $version is new"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "exists=$exists" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22", "24"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      # No `npm ci`: this package has no dependencies and no lockfile, which is the
+      # point. A step that installed something would be the first thing to notice if
+      # that ever stopped being true.
+      - run: node --test
+        working-directory: npm/memvara
+
+  build:
+    name: pack the tarball and hash it
+    needs: [version, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: npm CLI new enough for trusted publishing
+        run: npm install -g 'npm@^11.5.1'
+
+      - name: Pack, hash, and refuse a surprise file list
+        working-directory: npm/memvara
+        run: |
+          set -euo pipefail
+          npm publish --dry-run --access public
+          npm pack
+          shopt -s nullglob
+          tarballs=(memvara-*.tgz)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one memvara-*.tgz, got: ${tarballs[*]:-none}"
+            exit 1
+          fi
+          tarball="${tarballs[0]}"
+
+          listed="$(tar -tzf "$tarball" | grep -v '/$' | sed 's|^package/||' | sort)"
+          # package.json is always in the tarball even when it is not in `files`.
+          # `test/` deliberately is not: the suite is run by the job above, from the
+          # repository, and shipping it to every installer is weight with no reader.
+          expected="$(printf '%s\n' \
+            LICENSE README.md index.d.ts index.js package.json \
+            bin/memvara.js lib/bridge.js lib/creds.js lib/oauth.js lib/transport.js \
+            | sort)"
+          if [ "$listed" != "$expected" ]; then
+            echo "::error::tarball contents are not the expected file list"
+            echo "listed:"; echo "$listed"
+            echo "expected:"; echo "$expected"
+            exit 1
+          fi
+
+          # A dependency here would be a dependency in everyone's install of a process
+          # that holds a bearer token. Asserted rather than trusted to review.
+          deps="$(python3 -c 'import json; m=json.load(open("package.json")); print(len(m.get("dependencies") or {}))')"
+          if [ "$deps" != "0" ]; then
+            echo "::error::package.json declares $deps runtime dependencies; this package ships zero by design"
+            exit 1
+          fi
+
+          sha256sum "$tarball" | awk '{print $1}' > sha256.txt
+          echo "tarball $tarball"
+          echo "sha256  $(cat sha256.txt)"
+          echo "sha256=$(cat sha256.txt)" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-dist
+          path: |
+            npm/memvara/memvara-*.tgz
+            npm/memvara/sha256.txt
+          if-no-files-found: error
+
+  publish:
+    name: publish to npm
+    needs: [version, build]
+    if: github.event_name == 'push' && needs.version.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/memvara
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: npm CLI new enough for trusted publishing
+        run: npm install -g 'npm@^11.5.1'
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm-dist
+          path: npm-dist/
+
+      - name: Check the hash before spending it
+        working-directory: npm-dist
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=(memvara-*.tgz)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one tarball in npm-dist, got: ${tarballs[*]:-none}"
+            exit 1
+          fi
+          tarball="${tarballs[0]}"
+          test -f sha256.txt
+          got="$(sha256sum "$tarball" | awk '{print $1}')"
+          want="$(tr -d ' \n\r' < sha256.txt)"
+          echo "want $want"
+          echo "got  $got"
+          if [ "$got" != "$want" ]; then
+            echo "::error::SHA-256 mismatch: packed $want, downloaded $got. Refusing to publish bytes we did not check."
+            exit 1
+          fi
+
+      - name: Publish the tarball
+        # `cd` first, and publish a bare filename. To npm an argument containing a slash
+        # and no leading `./` is a **git shorthand**, so `npm publish npm-dist/x.tgz`
+        # resolved to owner `npm-dist`, repo `x.tgz` and died in `git ls-remote` with
+        # `Permission denied (publickey)` — an authentication error naming a repository
+        # nobody meant to reach. It cost the first `v0.4.0` run.
+        working-directory: npm-dist
+        run: |
+          set -euo pipefail
+          tarball="$(ls memvara-*.tgz)"
+          case "$tarball" in
+            */*) echo "::error::refusing to publish '$tarball': npm reads a slashed spec without a leading ./ as a git repository, not a file"; exit 1 ;;
+          esac
+          npm publish "$tarball" --access public

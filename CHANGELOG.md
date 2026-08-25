@@ -9,7 +9,64 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`npx memvara` — the npm package is a program now.** `memvara` on npm was a name
+  reservation from 2026-08-14 to `0.0.3`: four keys, `implemented: false`, nothing to
+  run. `0.1.0` makes it a CLI that bridges a stdio MCP client to the hosted server at
+  `app.memvara.dev/mcp`, so a JavaScript developer with **no Python at all** gets a
+  working memory in one command.
+
+  Asked why this had never been built, the answer was that nobody had decided against
+  it — a JS client appeared in neither *Deliberately deferred* nor *What is still
+  missing*, and the package's own README parked the question on "the number of people
+  who ask", a signal nobody was collecting. `docs/ROADMAP.md` now records the decision
+  that was actually made, including the two shapes declined: a JavaScript engine, which
+  would have to re-derive every invariant in `INTERNALS.md` identically, and a REST
+  client library, which serves a case nobody has asked for.
+
+  **The value is narrower than it looks, and saying so is part of shipping it.**
+  `app.memvara.dev/mcp` advertises standard MCP OAuth — dynamic registration, PKCE
+  S256, refresh — so any client that speaks to remote servers connects directly and
+  needs no bridge. This is for clients that only spawn a command over stdio. Its one
+  advantage over the generic `mcp-remote` is that it needs no configuration and finds
+  an existing `~/.memvara/credentials.json`, so anyone who has run `memvara-mcp login`
+  is never shown a browser.
+
+  Credentials resolve `MEMVARA_API_KEY` → `~/.memvara/credentials.json` →
+  `~/.memvara/oauth.json`, and with none of them present it signs in with a browser.
+  The login file is **read and never written**: `memvara/server/config.py` owns that
+  schema and a token pair does not fit in it, so writing our shape there would break
+  the Python server on the same machine, silently, at its next start.
+
+  **Zero runtime dependencies**, asserted in CI rather than intended — this process
+  holds a bearer token, and "we will review what we add" is a policy, not a control.
+  Everything is Node stdlib, which is the same argument `memvara/server/` makes for
+  being hand-rolled against the MCP wire format.
+
+### Changed
+
+- **npm releases on `npm-v*`, not on the Python tag.** The coupling cost a real
+  release: `0.4.1` was a PyPI version containing no Python changes at all, cut only
+  because npm serves the README of the *published* version and there is no way to edit
+  one in place. One code-less release is a curiosity; a package with its own cadence
+  would have produced one per fix. `release.yml` matches `v*`, which `npm-v0.1.0` does
+  not, so the two trains cannot start each other — extracted into `release-npm.yml`
+  rather than conditioned, so no job in either file carries a clause about the other's
+  package.
+
+- **Node runs in CI for the first time.** `ci.yml` was four Python jobs; the npm tests
+  were Python assertions about files, spawned through the matrix and skipped whenever
+  node was unloadable. That arrangement let a real bug reach a release. `npm-bridge`
+  now runs `node --test` on 20, 22 and 24 — a matrix because this package's entire
+  dependency story is the standard library, so the standard library is the dependency.
+
+- **`tests/test_npm_release.py` pins the opposite of what it used to.** It enforced the
+  reservation: four keys, no client surface, nothing to run. It now enforces the CLI —
+  the bin exists and has a shebang, the tarball ships `bin/` and `lib/` and not `test/`,
+  there are no dependencies, and no public document still calls the package a name
+  reservation. That last check found three (`RELEASING`, `DEPLOY`, `SECURITY`) on its
+  first run, which is the drift the 0.0.2 listing was corrected for a day earlier.
 
 ## [0.4.1] — 2026-08-25
 

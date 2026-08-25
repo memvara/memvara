@@ -1,7 +1,7 @@
 {
   "name": "memvara",
-  "version": "0.0.3",
-  "description": "Bitemporal memory for AI agents — two independent time axes, deterministic contradiction resolution, hybrid retrieval, offline write path. Python library plus an MCP server; this npm package is a name reservation, not a JS client.",
+  "version": "0.1.0",
+  "description": "npx memvara — connect a stdio MCP client to memvara, bitemporal memory for AI agents. Zero config: no URL to paste, and no browser at all when you already have a key.",
   "keywords": [
     "memvara",
     "memory",
@@ -10,11 +10,12 @@
     "llm",
     "mcp",
     "model-context-protocol",
+    "mcp-server",
     "agent-memory",
     "ai-memory",
     "knowledge-graph",
     "temporal",
-    "placeholder"
+    "cli"
   ],
   "homepage": "https://github.com/memvara/memvara#readme",
   "bugs": {
@@ -26,16 +27,24 @@
     "directory": "npm/memvara"
   },
   "license": "Apache-2.0",
+  "bin": {
+    "memvara": "bin/memvara.js"
+  },
   "main": "index.js",
   "types": "index.d.ts",
   "files": [
+    "bin",
+    "lib",
     "index.js",
     "index.d.ts",
     "README.md",
     "LICENSE"
   ],
+  "scripts": {
+    "test": "node --test"
+  },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "sideEffects": false,
   "private": false

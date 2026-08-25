@@ -1,22 +1,20 @@
 /**
- * Types for the placeholder.
+ * Types for the module export, which is a signpost rather than an API.
  *
- * What actually protects a caller is that this type has four properties and no methods,
- * so any attempt to use the package as a client is a compile error:
- * `memvara.recall(...)` is TS2339, "Property 'recall' does not exist". That is the
- * earliest point at which anyone can be told the package is empty.
+ * The shape has no methods on purpose, so using this package as a client is a compile
+ * error at the earliest possible moment: `memvara.recall(...)` is TS2339, "Property
+ * 'recall' does not exist". `isLibrary` is the literal `false` rather than `boolean` as a
+ * secondary signal — it reads as `false` on hover, and `const ok: true =
+ * memvara.isLibrary` is TS2322.
  *
- * `implemented` is the literal `false` rather than `boolean` as a secondary signal: it
- * shows as `false` on hover, and anything assuming it could be true fails — `const ok:
- * true = memvara.implemented` is TS2322.
- *
- * It does **not** make `if (memvara.implemented) { ... }` an error, which an earlier
- * version of this comment claimed. The branch narrows to `never` and is unreachable, but
- * TypeScript does not report type-dead branches, and `allowUnreachableCode: false` does
- * not change that — it is a syntactic check. Verified against tsc 5, not assumed.
+ * It does **not** make `if (memvara.isLibrary) { ... }` an error. The branch narrows to
+ * `never` and is unreachable, but TypeScript does not report type-dead branches and
+ * `allowUnreachableCode: false` does not change that — it is a syntactic check.
+ * Verified against tsc 5 rather than assumed.
  */
 declare const memvara: {
-  readonly implemented: false;
+  readonly isLibrary: false;
+  readonly cli: string;
   readonly notice: string;
   readonly python: string;
   readonly homepage: string;
