@@ -9,6 +9,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.0] — 2026-08-25
+
 ### Added
 
 - **`Memvara.reextract()` and `Memvara.pending_extraction()`: extract from turns that are
