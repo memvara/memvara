@@ -40,6 +40,30 @@ class TestLoading:
         names = {s.name for s in load_specs("engineering")}
         assert {"git_state", "deploys_to", "rejected"} <= names
 
+    def test_the_decisions_pack_ships_and_does_not_shadow_engineering(self):
+        """Two shipped packs declaring one predicate would make load order decide the
+        store: later entries win, so `engineering,decisions` and `decisions,engineering`
+        would disagree about that predicate's `memory_type` from the same data, silently.
+
+        `rejected` and `known_defect` are in `engineering` already and are deliberately
+        not redeclared here, which is what makes the union order-independent."""
+        assert "decisions" in available_packs()
+        decisions = {s.name for s in load_specs("decisions")}
+        assert decisions == {"decided", "observed"}
+        assert not decisions & {s.name for s in load_specs("engineering")}
+
+    def test_a_decision_accumulates_where_a_fact_would_supersede(self):
+        """The whole shape of this family. A project makes many decisions and a later one
+        does not make an earlier one untrue — it stopped being *current*, which is what
+        `memory_end` says. `one` here would make every new decision silently end the last,
+        which is the failure the cardinality column exists to prevent."""
+        specs = {s.name: s for s in load_specs("decisions")}
+        assert specs["decided"].cardinality is Cardinality.MANY
+        assert specs["decided"].volatility is Volatility.STATIC, (
+            "a decision made in March was made in March for ever")
+        assert specs["observed"].volatility is Volatility.SLOW, (
+            "an observation is a reading of a world that moves, and ages")
+
     def test_declared_specs_are_not_learned(self):
         # The distinction is load-bearing: `Memvara` refuses to let a persisted *learned*
         # spec overwrite a declared one, and that is what lets a pack correct a store.

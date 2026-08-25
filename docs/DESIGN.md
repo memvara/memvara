@@ -144,7 +144,7 @@ more declared vocabularies — a shipped pack, a TOML file of your own, or a com
 mix — and `engineering` ships with the package:
 
 ```bash
-MEMVARA_PREDICATES=engineering memvara-mcp          # or: engineering,./ours.toml
+MEMVARA_PREDICATES=engineering memvara-mcp          # or: engineering,decisions,./ours.toml
 ```
 
 ```toml

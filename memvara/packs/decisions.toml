@@ -1,0 +1,87 @@
+# What an agent writes down about its own work: decisions, and things it noticed.
+#
+# Load with MEMVARA_PREDICATES=decisions, or beside another pack:
+# MEMVARA_PREDICATES=engineering,decisions.
+#
+# ## Why this is a pack and not two new memory types
+#
+# The agent-state brief asks for eight memory kinds where this library has three, and
+# names *decision* and *observation* as the pair missing for agent work. They are not
+# missing. They are vocabulary, and vocabulary is what a predicate pack is for — see
+# `docs/ROADMAP.md`, which records the decision and what it would have cost to make them
+# `MemoryType` members instead.
+#
+# The short version, because it decides how to read every line below. `MemoryType` is
+# persisted as a string and hydrated with `MemoryType(value)`, which raises on a name it
+# does not know — so a fourth member is a schema bump and a store an older build can no
+# longer open, permanently, each time. And it drives exactly one behaviour: a hardcoded
+# `EPISODIC -> SEMANTIC` promotion. A third value there needs a rule in a pairwise machine
+# that does not generalise, or a documented exemption. A predicate needs neither, is
+# reversible, and is the extension point this library already built and documents under
+# "Teach it your vocabulary".
+#
+# ## Why these predicates and not the brief's taxonomy
+#
+# Measured rather than derived. `docs/ROADMAP.md` records a production store of 387 live
+# claims in which **95% used a predicate outside the declared vocabulary** — the names it
+# lists are `known_defect`, `deploy_gotcha`, `version` and `rejected`, invented at write
+# time because `remember()` does not register anything. Those are the decisions and
+# observations the brief is asking about, already being written, already falling to the
+# unregistered default: multi-valued so nothing supersedes, and *slow* so a note about a
+# defect fixed this morning still ranks as fresh in two years.
+#
+# So this pack declares what a store like that is already writing, rather than a taxonomy
+# nobody has typed.
+#
+# **Two of those four names are already in `engineering` — `rejected` and `known_defect` —
+# and this pack deliberately does not redeclare them.** Two shipped packs declaring one
+# predicate would make `MEMVARA_PREDICATES=engineering,decisions` and
+# `decisions,engineering` produce different stores from the same data: later entries win,
+# so the `memory_type` would flip between `semantic` and `episodic` on load order alone,
+# silently. Load both packs together and you get the union; neither can shadow the other.
+# What is left here is the two the vocabulary genuinely lacks.
+#
+# ## Reading the three columns
+#
+# `cardinality` is "can this hold several values at once for one subject?". Every
+# predicate here is `many`, and that is the whole shape of the family: a project makes
+# many decisions, and a later one does not make an earlier one untrue. It stopped being
+# *current*, which is what `memory_end` is for — and the difference matters, because a
+# `one` here would make every new decision silently end the last.
+#
+# `volatility` is "how fast does it go stale?", and it is the one column the two
+# predicates here disagree on. See the note under `observed` for why.
+#
+# `memory_type` is what kind of thing it is. `episodic` for both, because both record
+# something that happened at an instant — and note the consequence, because it is the one
+# thing here that is not inert: `consolidate.merge.promote_pass` reclassifies an
+# `episodic` claim as `semantic` once it has been independently observed three times. A
+# decision restated three separate times becoming a standing fact is the right outcome
+# and is worth knowing about rather than discovering.
+
+[[predicate]]
+name = "decided"
+cardinality = "many"
+volatility = "static"
+memory_type = "episodic"
+aliases = ["decision", "chose", "settled_on", "agreed_on"]
+
+[[predicate]]
+name = "observed"
+cardinality = "many"
+volatility = "slow"
+memory_type = "episodic"
+aliases = ["noticed", "measured", "found"]
+
+# `slow` rather than `static`, and this is the one place the two families genuinely
+# differ. A decision is a commitment and stays true as a record of itself; an observation
+# is a reading of a world that moves, so "the p95 was 400ms" is worth less every month
+# that passes without a fresh one. Static here would keep a year-old measurement ranking
+# beside this morning's.
+#
+# **Note what this predicate is not.** "An agent noticed it" rather than "a person said
+# it" is a statement about *where a claim came from*, and that axis already exists:
+# `Derivation`, which every write path sets and `why()` reports. Set `extractor=` on the
+# write and the provenance is recorded properly. This predicate is for the *content* — a
+# thing observed — and using it to mean "I inferred this" duplicates `Derivation` in a
+# place nothing keeps in step with it.
