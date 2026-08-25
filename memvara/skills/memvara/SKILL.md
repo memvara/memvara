@@ -53,6 +53,14 @@ prose handed to `memory_add` is often accepted and not stored.
 Store what would be **embarrassing** to get wrong next week. Do not restate the
 transcript. See `references/scopes.md`.
 
+The type field on a write decides whether a note joins the standing set, and
+that set is what a client hands a session before its first turn. So a misfiled
+note is not merely in the wrong drawer — it is read aloud from then on,
+whatever the turn is about. Measured on a live store: ten of thirty-two standing
+notes were facts about repositories rather than instructions from the person,
+a quarter of what every session opened with. Side-by-side calls:
+`references/examples.md`.
+
 A thin `memory_recall` on a question that names two things is a signal, not an
 empty store. Try `memory_neighborhood` next, or `memory_paths` when the user
 named both ends. Do it in that order — recall first — because most questions do
