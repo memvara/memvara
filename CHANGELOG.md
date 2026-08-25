@@ -57,6 +57,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   that is born invalidated, and leaving its target live beside that would put both
   sentences in the store at once.
 
+  **Nor does `supersede()`, `forget()` or `delete()`.** All three close a claim the
+  caller named, before the reconciler is asked anything, so there is no candidate to
+  weigh against it — the rule arbitrates an inference the write path drew, and naming
+  the row to close is an instruction rather than an inference. So a store audited after
+  this release can conclude that no low-confidence *extraction* ended a high-confidence
+  fact; it cannot conclude that no low-confidence claim did, because `supersede()` can
+  still be told to do exactly that.
+
 - **A supersession that leaves a value true at no instant now says so.** Two writes
   sharing a `valid_from` — any same-day correction, and every import that stamps dates
   rather than timestamps — left the older claim with `valid_from == valid_to`:

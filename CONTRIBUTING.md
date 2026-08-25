@@ -18,7 +18,7 @@ point of the project and it is also the development setup:
 python3 -m venv .venv && source .venv/bin/activate
 python3 -m pip install -e ".[dev]"
 
-python3 -m pytest -q                                              # 3,491 tests
+python3 -m pytest -q                                              # 3,492 tests
 python3 -m coverage run -m pytest && python3 -m coverage report    # gated at 100%
 python3 -m mypy -p memvara                                         # must be clean
 ```

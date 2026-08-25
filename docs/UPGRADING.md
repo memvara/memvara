@@ -30,6 +30,11 @@ and now do not. Two live values in a single-valued slot is the visible cost, and
 recoverable direction: keeping two competing facts degrades ranking, and ending a true one
 destroys information. Retrieval already prefers the more confident of the two.
 
+**`supersede()`, `forget()` and `delete()` are unchanged.** Each closes a claim the
+caller named, before the reconciler weighs anything, so the rule does not reach them —
+it arbitrates an inference the write path drew, and naming the row to close is not one.
+Worth knowing before auditing a store on the strength of this entry.
+
 **What you were losing before is worse than what you lose now.** The displaced claim was
 stamped `ended`, which in this library asserts that the world changed. A guess that
 collided with a known fact recorded a world event that never happened, on the axis whose
