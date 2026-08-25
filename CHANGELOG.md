@@ -44,6 +44,26 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   Everything is Node stdlib, which is the same argument `memvara/server/` makes for
   being hand-rolled against the MCP wire format.
 
+### Fixed
+
+- **The npm trusted publisher named the workflow the publish job had just left.**
+  Splitting npm onto `release-npm.yml` invalidated the registration on npmjs.com, which
+  names exactly one workflow filename and compares it against the OIDC token's
+  `job_workflow_ref`. Repository, environment and package were all still correct, and
+  the publish still failed. `docs/RELEASING.md` said `release.yml` and now says
+  `release-npm.yml`.
+
+  **The error gives no hint what happened**, which is the part worth recording: npm
+  answers `E404 Not Found - PUT https://registry.npmjs.org/memvara` for a package that
+  plainly exists and that `npm view` returns — not `ENEEDAUTH`, not a 403. It declines to
+  distinguish "no such package" from "not yours to write" so a probe cannot enumerate
+  private names. Read a 404 on `PUT` as unauthorized. Nothing is published when it
+  happens, so recovery is to fix the registration and re-run the failed job on the
+  original run; a `workflow_dispatch` re-run will not publish, by design.
+
+  A test now pins `RELEASING.md`'s stated filename to the workflow that actually
+  contains `npm publish`, and was confirmed red against the old value before being kept.
+
 ### Changed
 
 - **npm releases on `npm-v*`, not on the Python tag.** The coupling cost a real
