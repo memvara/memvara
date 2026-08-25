@@ -81,6 +81,7 @@ from ..types import (
     Scope,
     as_utc,
     close_out,
+    content_hash,
     default_entity,
     fact_key_for,
     owner_key,
@@ -847,7 +848,7 @@ class SplitReport:
 
     scanned: int = 0     # claims examined under the surface form
     moved: int = 0       # claims re-stamped onto the earlier identity
-    reopened: int = 0    # supersessions undone because they crossed the boundary
+    reopened: int = 0    # closures undone because they crossed the boundary
     retired_left: int = 0  # closures left alone because they were retirements
     dry_run: bool = True
 
@@ -864,8 +865,16 @@ class SplitReport:
 #: idempotent and the second read of a split claim would land somewhere else. Verified
 #: rather than assumed: `entity_key("john smith split 20200101")` returns itself.
 #:
-#: Readable on purpose. It lands in `Claim.meta` and comes back out of `why()`, so an
-#: operator reading a split store sees "john smith split 20200101" and not a hash.
+#: **That holds only while the base has content the fold keeps**, which is why
+#: `split_entity` substitutes a `content_hash` for a surface form the fold empties — "..."
+#: or a bare emoji, the case `types.default_entity` exists for. `entity_key("... split
+#: 20200101")` is `"split 20200101"`, so such a marker is neither idempotent nor unique:
+#: two unfoldable names split at one instant would fold onto a single `fact_key` and start
+#: superseding each other, which is the exact defect this module exists to prevent.
+#:
+#: Readable on purpose, everywhere the base survives. It lands in `Claim.meta` and comes
+#: back out of `why()`, so an operator reading a split store sees "john smith split
+#: 20200101" and not a hash.
 SPLIT_MARKER = "{base} split {stamp}"
 
 
@@ -906,13 +915,30 @@ def split_entity(reconciler: Reconciler, scope: Scope, surface: str, at: datetim
        loses the past it exists to show if the closed rows do not move with the live ones.
        Only claims whose `valid_from` is *before* `at` move; the rest keep the identity
        they had, so the later person stays addressable by the name as written.
-    2. A supersession that crossed the boundary is undone. The two claims were never
-       competing, so the earlier one's `valid_to` and `invalidated_by` are cleared and it
-       is live again. Within a partition nothing is touched: those claims did compete and
-       still do, in the same order.
+    2. A closure that crossed the boundary is undone. The two claims were never competing,
+       so the earlier one's `valid_to` and `invalidated_by` are cleared and it is live
+       again. Within a partition nothing is touched: those claims did compete and still
+       do, in the same order.
     3. Each moved claim is stamped with a dated `ENTITY_REKEY` record, exactly as a
        backfill stamps one, so `why()` can say why history changed and not merely that it
        did.
+
+    **"Under this identity" is every identity the surface form asks about**, resolved
+    through `EntityRegistry.probe_keys` — the same widening `Memvara.history()` reads
+    through, and for the same reason. A merge does not re-key the past, so once an alias
+    has joined two spellings the claims sit under whichever key each was written with.
+    Matching only `entity_key(surface)` would repair one half of the entity the operator
+    was looking at, and where the merge landed on the other spelling, none of it: a
+    `scanned=0` report on a store whose manufactured job change is in plain view.
+
+    **A crossing closure does not always carry a pointer**, and the one that does not is
+    the case a reader will miss. Writes arriving in valid-time order supersede: the later
+    employment closes the earlier one and `invalidated_by` names it. A *backdated* write —
+    the 2018 job recorded after the 2026 one, which is what importing somebody's history
+    looks like — takes the closure on itself instead, in `Reconciler.apply`'s `newer`
+    branch, which clamps the candidate's own `valid_to` to where the later claim begins
+    and writes no pointer at all. Same manufactured history, no `invalidated_by` to key
+    off, so this matches that end against the instant the clamp would have used.
 
     **A retirement is never undone**, and that is the one asymmetry worth stating. Ending
     a claim is something the write path inferred from the fold, so the fold being wrong
@@ -932,35 +958,51 @@ def split_entity(reconciler: Reconciler, scope: Scope, surface: str, at: datetim
     t = now or utcnow()
     boundary = as_utc(at)
     owner = owner_key(scope)
-    identity = entity_key(surface) or surface
+    identities = reconciler.entities.probe_keys(owner, surface)
     report = SplitReport(dry_run=dry_run)
 
     mine = [c for c in reconciler.store.iter_claims(scope.tenant,
                                                     include_invalidated=True)
-            if owner_key(c.scope) == owner and c.subject_key == identity]
+            if owner_key(c.scope) == owner and c.subject_key in identities]
     report.scanned = len(mine)
     earlier = [c for c in mine if as_utc(c.valid_from) < boundary]
-    later_ids = {c.id for c in mine if as_utc(c.valid_from) >= boundary}
+    stayed = [c for c in mine if as_utc(c.valid_from) >= boundary]
     if not earlier:
         return report
 
-    marker = SPLIT_MARKER.format(base=identity,
+    later_ids = {c.id for c in stayed}
+    # Where a claim that stayed behind begins, earliest first, per predicate. That is the
+    # instant `Reconciler.apply` clamps a backdated claim's own `valid_to` to, and since
+    # that path writes no `invalidated_by`, it is the only evidence the end was the later
+    # identity's doing rather than the caller's.
+    clamps: dict[str, datetime] = {}
+    for claim in stayed:
+        began = as_utc(claim.valid_from)
+        held = clamps.get(claim.predicate)
+        if held is None or began < held:
+            clamps[claim.predicate] = began
+
+    # The fold, unless the surface form has nothing the fold keeps — see `SPLIT_MARKER`.
+    folded = entity_key(surface)
+    marker = SPLIT_MARKER.format(base=folded or content_hash(surface),
                                  stamp=boundary.strftime("%Y%m%d%H%M%S"))
     for claim in earlier:
         claim.meta[SUBJECT_ENTITY] = marker
         _note(claim, t, "split", marker)
         report.moved += 1
-        if claim.invalidated_by not in later_ids:
+        crossed = (claim.invalidated_by in later_ids
+                   or (claim.invalidated_by is None and claim.valid_to is not None
+                       and as_utc(claim.valid_to) == clamps.get(claim.predicate)))
+        if not crossed:
             continue
         if claim.invalidated_at is not None:
             # Retired, not merely ended. Somebody said the record was wrong, and the fold
             # is not what made them say it. Left exactly as it is, and counted.
             report.retired_left += 1
             continue
-        if claim.valid_to is not None:
-            claim.valid_to = None
-            claim.invalidated_by = None
-            report.reopened += 1
+        claim.valid_to = None
+        claim.invalidated_by = None
+        report.reopened += 1
 
     if not dry_run:
         batch = getattr(reconciler.store, "batch", None)

@@ -11,6 +11,7 @@ network, exactly as `tests/test_predicates.py` does for predicates.
 
 from __future__ import annotations
 
+import datetime as _dt
 import random
 
 import pytest
@@ -25,27 +26,21 @@ from memvara.entities import (
     entity_key,
     split_entity_id,
 )
-from memvara.schema import PredicateRegistry
+from memvara.schema import Cardinality, PredicateRegistry, PredicateSpec
 from memvara.store import SQLiteStore
-from memvara.types import Claim, Scope
+from memvara.types import ENTITY_REKEY, Claim, Scope, owner_key
 from memvara.write import Reconciler
-from memvara.write.reconcile import backfill_entities
+from memvara.write.reconcile import backfill_entities, split_entity
 
 OWNER = "acme\x1falice"
 OTHER = "acme\x1fbob"
 
-import datetime as _dt
-
-from memvara import HashingEmbedder, Memvara, NullLLM, Scope
-from memvara.entities import entity_key
-from memvara.types import ENTITY_REKEY
-from memvara.write.reconcile import split_entity
-
 SCOPE_HR = Scope("t", "hr")
 J18 = _dt.datetime(2018, 1, 1, tzinfo=_dt.timezone.utc)
+J19 = _dt.datetime(2019, 1, 1, tzinfo=_dt.timezone.utc)
 J20 = _dt.datetime(2020, 1, 1, tzinfo=_dt.timezone.utc)
 J26 = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
-
+J27 = _dt.datetime(2027, 1, 1, tzinfo=_dt.timezone.utc)
 
 
 # --- the deterministic fold ---------------------------------------------------
@@ -997,3 +992,130 @@ def test_a_split_does_not_reach_another_owner():
         assert (report.scanned, report.moved) == (1, 1)
         sibling = mem.get_all(user="payroll")[0]
         assert sibling.subject_key == "john smith", "untouched"
+
+
+def test_a_split_finds_the_claims_an_alias_already_merged():
+    """A merge does not re-key the past, so after `learn_alias` the entity's claims sit
+    under whichever key each was written with. A repair matching only `entity_key` finds
+    the half written under the fold — and where the merge landed the other way, none of
+    it, reporting `scanned=0` on a store whose manufactured job change is in plain view.
+    `history()` widens through `probe_keys`; so must this, or the operator repairs
+    something other than what they were shown."""
+    with _hr() as mem:
+        registry = mem.writer.reconciler.entities
+        mem.remember("Jonathan Smith", "works_at", "Acme",
+                     valid_from=J18, recorded_at=J18)
+        registry.learn_alias(owner_key(SCOPE_HR), "Jonathan Smith", "John Smith")
+        mem.remember("John Smith", "works_at", "Globex", valid_from=J26, recorded_at=J26)
+        assert {c.subject_key for c in mem.history("John Smith", "works_at")} == {
+            "jonathan smith"}, "both claims are filed under the merged identity"
+
+        report = split_entity(mem.writer.reconciler, SCOPE_HR, "John Smith", J20,
+                              dry_run=False)
+
+        assert (report.scanned, report.moved, report.reopened) == (2, 1, 1)
+        assert sorted(c.object for c in mem.get_all()) == ["Acme", "Globex"]
+
+
+def test_an_end_the_other_identity_caused_reopens_without_a_pointer():
+    """The same manufactured history, written by a backdated import instead of a live
+    conversation — and the shape a reader will miss, because there is no `invalidated_by`
+    to key off. `Reconciler.apply`'s `newer` branch clamps the *candidate's* own
+    `valid_to` to where the already-recorded later claim begins, and writes no pointer at
+    all. The 2018 job then ends the day the other John Smith's 2026 job starts."""
+    with _hr() as mem:
+        mem.remember("John Smith", "works_at", "Globex", valid_from=J26, recorded_at=J26)
+        mem.remember("John Smith", "works_at", "Acme", valid_from=J18, recorded_at=J27)
+        acme = [c for c in mem.history("John Smith", "works_at") if c.object == "Acme"][0]
+        assert (acme.state, acme.invalidated_by) == ("ended", None)
+        assert acme.valid_to == J26, "ended by the other person's start, unattributed"
+
+        report = split_entity(mem.writer.reconciler, SCOPE_HR, "John Smith", J20,
+                              dry_run=False)
+
+        assert (report.moved, report.reopened) == (1, 1)
+        assert sorted(c.object for c in mem.get_all()) == ["Acme", "Globex"]
+
+
+def test_an_end_date_the_caller_wrote_survives_the_split():
+    """The other side of that rule, and the reason it is a match on the clamp instant
+    rather than "clear every `valid_to`". A caller who said the job ended in 2019 said
+    something the fold had no part in, and a repair that blanked it would replace a
+    manufactured job change with a manufactured job."""
+    with _hr() as mem:
+        mem.remember("John Smith", "works_at", "Acme",
+                     valid_from=J18, valid_to=J19, recorded_at=J18)
+        mem.remember("John Smith", "works_at", "Globex", valid_from=J26, recorded_at=J26)
+
+        report = split_entity(mem.writer.reconciler, SCOPE_HR, "John Smith", J20,
+                              dry_run=False)
+
+        assert (report.moved, report.reopened) == (1, 0)
+        acme = mem.history("john smith split 20200101000000", "works_at")[0]
+        assert (acme.state, acme.valid_to) == ("ended", J19)
+
+
+def test_a_split_reopens_across_predicates_too():
+    """A claim can be closed by a successor in a *different* slot: `PredicateSpec.
+    supersedes` is how asserting `unemployed` ends `works_at`. The two predicates hash to
+    two `fact_key`s and one subject, so the reopen has to be keyed on the subject
+    partition — one person's unemployment must not end another's job."""
+    registry = PredicateRegistry()
+    registry.register(PredicateSpec("unemployed", Cardinality.ONE,
+                                    supersedes=("works_at",)))
+    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64), tenant="t", user="hr",
+                 registry=registry) as mem:
+        mem.remember("John Smith", "works_at", "Acme", valid_from=J18, recorded_at=J18)
+        mem.remember("John Smith", "unemployed", "yes", valid_from=J26, recorded_at=J26)
+        assert [c.state for c in mem.get_all(include_invalidated=True)
+                if c.predicate == "works_at"] == ["ended"]
+
+        report = split_entity(mem.writer.reconciler, SCOPE_HR, "John Smith", J20,
+                              dry_run=False)
+
+        assert (report.moved, report.reopened) == (1, 1)
+        assert sorted((c.predicate, c.object) for c in mem.get_all()) == [
+            ("unemployed", "yes"), ("works_at", "Acme")]
+
+
+def test_a_surface_the_fold_empties_still_splits_onto_a_key_of_its_own():
+    """`entity_key("...")` is the empty string, and `types.default_entity` exists because
+    every such surface form would otherwise be one entity. The marker inherits that
+    problem: `"... split 20200101"` folds to `"split 20200101"`, so it is neither
+    idempotent nor unique, and two unfoldable names split at one instant would land in a
+    single slot and start superseding each other. Substituting a hash for a base the fold
+    keeps nothing of is what stops that."""
+    keys = []
+    for name in ("...", "!!!"):
+        with _hr() as mem:
+            mem.remember(name, "works_at", "Acme", valid_from=J18, recorded_at=J18)
+            mem.remember(name, "works_at", "Globex", valid_from=J26, recorded_at=J26)
+            split_entity(mem.writer.reconciler, SCOPE_HR, name, J20, dry_run=False)
+
+            moved = [c for c in mem.get_all() if c.object == "Acme"][0]
+            assert entity_key(moved.subject_key) == moved.subject_key
+            assert [c.object for c in mem.history(moved.subject_key, "works_at")] == [
+                "Acme"], "still addressable by the key it was given"
+            keys.append(moved.subject_key)
+    assert keys[0] != keys[1], "two unfoldable names are still two entities"
+
+
+def test_splitting_the_same_surface_twice_changes_nothing_the_second_time():
+    """The moved claims carry the earlier identity now, so the second pass does not see
+    them and has nothing to move. Worth stating because the alternative — a second marker
+    stamped over the first — would be silent, and would leave the earlier person's claims
+    under a key nobody had recorded."""
+    with _hr() as mem:
+        mem.remember("John Smith", "works_at", "Acme", valid_from=J18, recorded_at=J18)
+        mem.remember("John Smith", "works_at", "Globex", valid_from=J26, recorded_at=J26)
+        first = split_entity(mem.writer.reconciler, SCOPE_HR, "John Smith", J20,
+                             dry_run=False)
+
+        again = split_entity(mem.writer.reconciler, SCOPE_HR, "John Smith", J20,
+                             dry_run=False)
+
+        assert (first.moved, again.moved) == (1, 0)
+        assert (again.scanned, again.reopened) == (1, 0)
+        acme = [c for c in mem.get_all() if c.object == "Acme"][0]
+        assert acme.subject_key == "john smith split 20200101000000"
+        assert len(acme.meta[ENTITY_REKEY]) == 1, "stamped once, not twice"

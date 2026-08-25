@@ -27,12 +27,22 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   the *spelling* axis, arrived at from the other side.
 
   `split_entity(reconciler, scope, "John Smith", at)` re-stamps every claim before `at`
-  onto a distinct identity, undoes the supersessions that crossed the boundary so both
+  onto a distinct identity, undoes the closures that crossed the boundary so both
   employments are live again, and leaves a dated `ENTITY_REKEY` record on each moved claim
   so `why()` can say why history changed. Retired claims move but are never *un*-retired:
   ending a claim is something the write path inferred from the fold, and retiring one is a
   caller saying it was never true. Those are counted in `retired_left` rather than silently
   kept. `dry_run=True` by default, for `backfill_entities`' reason.
+
+  Two details decide whether it repairs what the operator was actually shown. The surface
+  form is resolved through `EntityRegistry.probe_keys`, the same widening `history()`
+  reads through, so a name an alias has already merged is found under every key its claims
+  were written with rather than only under its own fold. And a crossing closure is matched
+  whether or not it carries an `invalidated_by`: a *backdated* write — the 2018 job
+  recorded after the 2026 one, which is what importing somebody's history looks like —
+  takes the closure on itself in `Reconciler.apply`'s `newer` branch and names no
+  successor at all. An end the caller wrote is left alone, because the fold had no part
+  in it.
 
   **A repair and deliberately not a detector.** Nothing in the data separates "one person
   changed jobs after eight years" from "two people share a name" — not the gap, since

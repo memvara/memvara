@@ -571,8 +571,8 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
    notes that do mean something.
 
    What ships is the repair rather than the detector: `split_entity` records what a person
-   knows, dated, dry-run by default, undoing the supersessions that crossed the boundary
-   and leaving retirements alone. It is the inverse of `learn_alias` and the mirror of
+   knows, dated, dry-run by default, undoing the closures that crossed the boundary and
+   leaving retirements alone. It is the inverse of `learn_alias` and the mirror of
    `backfill_entities`.
 
 ---
