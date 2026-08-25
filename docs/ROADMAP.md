@@ -407,6 +407,39 @@ undone because nothing in the library needs it and every user who wants one can 
 an afternoon. That is a weak reason and this is the item most likely to move back onto the
 list; a contributed implementation would be accepted.
 
+**Making a personal or project store joinable.** The graph leg ships at `w_graph=0.0`
+because it does not pay for itself on the corpora in `docs/BENCHMARKS.md`. What was not
+written down is why a *real* store looks the same way, and the reason is not the one that
+suggests itself.
+
+Measured on a production store of 387 live claims, join rate **0.5%** — two claims lead to
+another. The tempting explanation is the extraction rules, which require rich self-contained
+prose objects (`the object IS the memory`, `MIN_RICH_OBJECT_CHARS`): a paragraph can never be
+another claim's subject, so rich objects and joinable objects look like opposites. **That is
+not what is happening here**, and acting on it would reopen guidance that has nothing to do
+with the problem.
+
+The numbers say something else. **95% of that store's claims use a predicate outside the
+declared vocabulary** — `known_defect`, `deploy_gotcha`, `version`, `rejected`, invented at
+write time — because `remember()` bypasses predicate registration, as `CLAUDE.md` says. Only
+18 claims use a declared predicate at all, and **exactly one** sits on an entity-valued one.
+So the least invasive fix, emitting a short entity object alongside the prose for predicates
+that have an entity, has a ceiling of one claim. It is not a trade-off worth weighing.
+
+What the store is instead is an annotated log — `<component> <observation> <description>` —
+and the shape is honest rather than deficient. 32% of its claims *mention* another claim's
+subject somewhere in their prose, which looks like latent linkage and is not: those are
+references inside a description, not the value of the relation, and promoting one to the
+object position would misstate the claim it came from.
+
+Two things worth knowing before anyone measures this again. Subject spellings fragment —
+`memvara_cloud` (80 claims) and `memvara-cloud` (17) — and it is cosmetic: both normalise to
+`subject_key='memvara cloud'`, so the store already counts them as one entity. And
+`UnjoinedStoreWarning` already names this exact case and says where it is fixed: "in the
+write path, by storing facts whose subject is not the one hub everything hangs off". That
+remains true. It is a description of what such a store would have to become, not a defect in
+this one.
+
 **An approximate vector index (HNSW/IVF).** Exact search over a scope is O(|scope| · d) and
 the matmul is already BLAS, so this is the floor, and it is correct and fast to roughly a
 million claims. Beating it trades recall for speed, which belongs behind the `Store`
