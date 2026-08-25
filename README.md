@@ -121,9 +121,10 @@ Or, with no Python at all — `npx memvara` bridges a stdio MCP client to the
 hosted service and signs you in on first run. It is a way *in*, not a second
 implementation: the engine is this library.
 
-Twelve tools — `memory_add`, `memory_remember`, `memory_recall`, `memory_search`,
-`memory_neighborhood`, `memory_paths`, `memory_since`, `memory_history`, `memory_why`,
-`memory_forget`, `memory_end`, `memory_stats`. Hand-rolled against the MCP wire format
+Thirteen tools — `memory_add`, `memory_remember`, `memory_recall`, `memory_search`,
+`memory_neighborhood`, `memory_paths`, `memory_since`, `memory_standing`,
+`memory_history`, `memory_why`, `memory_forget`, `memory_end`, `memory_stats`.
+Hand-rolled against the MCP wire format
 rather than taking an SDK
 dependency, so the "numpy and nothing else" claim survives the server too.
 [`docs/DEPLOY.md`](docs/DEPLOY.md) covers running it for other people.
