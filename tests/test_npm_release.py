@@ -91,16 +91,33 @@ def test_package_json_files_list_is_exactly_the_reservation():
         assert (PKG / name).is_file(), name
 
 
+# The resolved path, not the bare name. On Windows npm is `npm.cmd`, and a bare
+# "npm" in an argv list is not a thing CreateProcess can find — no PATHEXT search
+# happens without a shell, so it raises WinError 2 rather than skipping. `which`
+# returns the full `npm.cmd` path there and CreateProcess does run a batch file
+# given one. This is why the Windows job was the last red square while the other
+# five went green: the guard below asked `which`, and `which` said yes.
+NPM = shutil.which("npm")
+
+
 def _node_runs() -> bool:
     """`which node` is not the same as a working node. Homebrew's current
     binary on this machine aborts on a missing simdjson dylib; treating that
-    as a failed assertion would make the suite a function of the laptop."""
-    if shutil.which("node") is None or shutil.which("npm") is None:
+    as a failed assertion would make the suite a function of the laptop.
+
+    Both binaries are actually run, for the same reason: the tests below spawn
+    npm as well as node, so a guard that only proved node works leaves npm's
+    failures to arrive as errors instead of skips."""
+    if shutil.which("node") is None or NPM is None:
         return False
     try:
         subprocess.run(
             ["node", "-e", "process.exit(0)"],
             check=True, capture_output=True, timeout=8,
+        )
+        subprocess.run(
+            [NPM, "--version"],
+            check=True, capture_output=True, timeout=30,
         )
         return True
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
@@ -111,8 +128,9 @@ def _node_runs() -> bool:
 def test_a_packed_tarball_contains_exactly_the_files_list():
     """The Actions job asserts this too; this is the copy that fails on the laptop
     that edited package.json, before the tag is pushed."""
+    assert NPM is not None  # the skipif guarantees this; mypy does not know that
     proc = subprocess.run(
-        ["npm", "pack", "--json"],
+        [NPM, "pack", "--json"],
         cwd=PKG,
         check=True,
         capture_output=True,
