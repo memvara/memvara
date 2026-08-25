@@ -2071,6 +2071,20 @@ def test_the_baseline_leaves_headroom_in_every_family_that_reads_a_clock():
                       "contradiction", "correction"}
 
 
+def test_an_unrecognised_question_kind_raises_rather_than_being_scored():
+    """The scoring function is the one place a silent wrong answer is worst, and a string
+    kind with two valid values is one typo from being scored by the other rule.
+
+    Pinned with the near-miss rather than with nonsense: `survive` for `survives` is the
+    mistake somebody actually makes, and before the guard it scored `True` against a live
+    set holding exactly the gold pair — a pass, for the wrong reason, in a harness whose
+    docstring says a benchmark that flatters its author is the one to distrust most."""
+    gold = frozenset({("lives_in", "London")})
+
+    with pytest.raises(ValueError, match="unknown question kind"):
+        temporal.correct(temporal.Question("survive", {}, gold, "typo"), gold)
+
+
 def test_the_run_is_identical_twice():
     """Determinism, for the reason `evalkit`'s docstring gives about `--score retrieval`:
     a benchmark whose numbers move between runs cannot be used for a regression or a
