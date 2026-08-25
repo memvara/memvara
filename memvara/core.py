@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import difflib
 import inspect
+import json
 import os
 import warnings
 from contextlib import nullcontext
@@ -89,6 +90,24 @@ from .write import WritePipeline
 # What `add()` accepts. The dict form matches the OpenAI/mem0 message shape so an
 # existing agent loop can pass its transcript straight through.
 Messages = str | Episode | Mapping[str, Any] | Sequence[str | Episode | Mapping[str, Any]]
+
+#: MCP argument names for `remember()` keywords, mapped to the keyword each one means.
+#:
+#: The two surfaces spell the valid interval differently on purpose — `memory_remember`
+#: takes `true_since`/`true_until` because a model reads those as English, and the
+#: library takes `valid_from`/`valid_to` because that is what the axis is called
+#: everywhere else in it. The cost of the two spellings is paid here: `**meta` accepts
+#: any keyword, so the tool's spelling used to be swallowed into `Claim.meta` and the
+#: interval the caller asked for was never set.
+#:
+#: Both halves of that failure are worth naming, because only one of them is loud. A
+#: `datetime` reached `json.dumps` in the storage layer and raised four frames down,
+#: naming neither the key nor the call. An ISO *string* — which is what the tool
+#: actually sends — serializes perfectly, so the claim stored clean, dated now, with the
+#: caller's `true_since` filed as an unread annotation beside it. The likeliest caller is
+#: an agent that read the tool description and then wrote Python, which is this
+#: library's own primary user.
+MCP_ALIASES: dict[str, str] = {"true_since": "valid_from", "true_until": "valid_to"}
 
 
 class DegradedExtractionWarning(UserWarning):
@@ -937,6 +956,17 @@ class Memvara:
         itself — see `RESERVED_META`, and note that two of them are a ranking override.
         Rejected here at the boundary rather than stripped, because a silently dropped
         argument is how a caller comes to believe something untrue about what they wrote.
+
+        Two more rejections follow from that same sentence, and both are cases where
+        `**meta` was accepting an argument the caller did not mean as metadata:
+
+        * A keyword this method has under another name — `true_since` for `valid_from`,
+          `true_until` for `valid_to`, as `memory_remember` spells them. See
+          `MCP_ALIASES` for why a mis-spelled interval is the one worth catching by name.
+        * A value the store cannot persist. `Claim.meta` is a JSON column, so anything
+          `json.dumps` refuses gets no further than `put_claim`, which raises with the
+          key nowhere in the message and the traceback pointing at the storage layer
+          rather than at this call.
         """
         if reserved := RESERVED_META & set(meta):
             raise TypeError(
@@ -946,6 +976,37 @@ class Memvara:
                 "decay, so setting one is a permanent ranking override; the entity keys "
                 "are restamped by the reconciler on every write."
             )
+        if aliased := MCP_ALIASES.keys() & set(meta):
+            raise TypeError(
+                "remember() does not take " + ", ".join(
+                    f"{k!r} (did you mean {MCP_ALIASES[k]!r}?)" for k in sorted(aliased))
+                + ". That is memory_remember's spelling of the same interval; here the "
+                "axis is called valid_from/valid_to. Passed through **meta it would have "
+                "been stored as an annotation and the interval left unset, so the claim "
+                "would date from now however far back you meant it."
+            )
+        for key, value in meta.items():
+            try:
+                json.dumps(value)
+            except (TypeError, ValueError, RecursionError) as exc:
+                # Three types, because `json.dumps` has three ways to refuse and only the
+                # first is obvious: `TypeError` for a value it has no encoder for,
+                # `ValueError` for a circular reference, `RecursionError` for a structure
+                # deeper than the interpreter's limit. Catching only `TypeError` left the
+                # other two raising with the key nowhere in the message, which is the
+                # failure this block exists to remove rather than to reproduce twice.
+                #
+                # The original message is quoted rather than the value's type described,
+                # because the offending value is often *inside* a serializable one:
+                # `note={"filed": datetime(...)}` is a dict, and saying "a dict is not
+                # JSON" sends the caller to fix the container instead of the member.
+                # `json` already names the member; repeating it here was the error.
+                raise TypeError(
+                    f"remember() cannot store meta[{key!r}]: {exc}. Claim.meta is a JSON "
+                    "column. Send it as a string — an instant as ISO-8601, anything else "
+                    "as whatever your reader will parse — or, if it belongs on the claim "
+                    "rather than beside it, as one of this method's own arguments."
+                ) from exc
         scope = self._scope(tenant, user, agent, session)
         pred = self.registry.normalize(predicate)
         now = utcnow()

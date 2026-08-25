@@ -7,6 +7,49 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `remember()` raises on `true_since`, where it used to store it as metadata
+
+### What changed
+
+`memory_remember` calls the valid interval `true_since`/`true_until`; `Memvara.remember`
+calls it `valid_from`/`valid_to`. Passing the tool's spelling to the method used to land
+in `**meta`. It is now a `TypeError` naming the keyword it meant. The same call also
+rejects any `meta` value `json.dumps` cannot serialize.
+
+### Who this changes, and in which direction
+
+**Anyone whose code passed `true_since=` a string and believed the interval was set.**
+This is the case worth finding: it never raised. The claim was stored dated from the
+instant of the write, with `true_since` filed beside it in `Claim.meta` — so a store
+backfilled that way holds facts whose valid time is the import, not the history, and
+every `valid_at` query about the period they cover answers nothing.
+
+**Anyone who passed a `datetime` there** already had a hard failure, four frames down in
+`put_claim`. Same for a non-JSON `meta` value. Those calls now fail at the call site with
+the key named; nothing that used to succeed stops succeeding.
+
+### How you find out it applies to you
+
+Search your store for claims carrying the annotation, and read the gap between the two
+axes:
+
+```python
+for c in mem.get_all(states=["live", "ended", "retired"]):
+    if "true_since" in c.meta or "true_until" in c.meta:
+        print(c.id, c.subject, c.predicate, c.object, "|",
+              "meant", c.meta.get("true_since"), "| stored", c.valid_from)
+```
+
+Each one is a claim whose valid time is its import instant. Rewrite it with
+`valid_from=`, which is the honest backfill this library documents.
+
+### If you want the old behaviour
+
+There is no flag. The old behaviour was the argument being dropped, and the argument
+named an instant.
+
+---
+
 ## Model-extracted claims with no tie to their cited turn are now rejected
 
 ### What changed

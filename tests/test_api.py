@@ -19,7 +19,7 @@ import subprocess
 import sys
 import types
 import warnings
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
@@ -2401,6 +2401,77 @@ def test_ordinary_meta_still_goes_through_untouched(mem):
 
     assert written.added[0].meta["source_system"] == "crm"
     assert written.added[0].meta["salience"] == "high", "a near-miss is still the caller's"
+
+
+@pytest.mark.parametrize("key, meant", [("true_since", "valid_from"),
+                                        ("true_until", "valid_to")])
+@pytest.mark.parametrize("value", [datetime(2023, 1, 1, tzinfo=timezone.utc),
+                                   "2023-01-01T00:00:00+00:00"])
+def test_remember_refuses_the_mcp_spelling_of_the_valid_interval(mem, key, meant, value):
+    """`memory_remember` calls the interval `true_since`/`true_until` and this method
+    calls it `valid_from`/`valid_to`, so an agent that read the tool description and then
+    wrote Python lands in `**meta`. Both values matter and only one of them was ever
+    loud: a `datetime` died in `json.dumps` four frames down in the storage layer, naming
+    neither the key nor this call, while the ISO *string* the tool actually sends
+    serialized perfectly and stored a claim dated now, with the interval the caller asked
+    for filed beside it as an unread annotation."""
+    with pytest.raises(TypeError, match=f"{key}.*{meant}"):
+        mem.remember("user", "lives_in", "Berlin", **{key: value})
+
+
+def test_remember_refuses_a_meta_value_the_store_cannot_persist(mem):
+    """`Claim.meta` is a JSON column, so a value `json.dumps` refuses is not metadata —
+    it is a write that fails inside `put_claim`, with the offending key absent from the
+    message and the traceback pointing at the storage layer. Rejected here for the reason
+    this method already rejects `RESERVED_META`: at the boundary, naming the key."""
+    with pytest.raises(TypeError, match="filed_at"):
+        mem.remember("user", "lives_in", "Berlin",
+                     filed_at=datetime(2023, 1, 1, tzinfo=timezone.utc))
+
+    assert mem.get_all() == [], "and nothing was written on the way to the refusal"
+
+
+def test_every_way_json_can_refuse_a_value_names_the_key(mem):
+    """`json.dumps` has three ways to say no and only one of them is a `TypeError`.
+
+    Catching that one alone left a circular reference raising `ValueError` and an
+    over-deep structure raising `RecursionError`, both with the key nowhere in the
+    message — which is the failure this guard exists to remove, reproduced twice under
+    different exception types. Callers are told to catch `TypeError`, by the docstring
+    and by the two guards above this one, so these were the inputs that behaved unlike
+    everything else the method promises.
+    """
+    circular: dict[str, object] = {}
+    circular["self"] = circular
+    # 20,000 rather than a few hundred: the depth `json` gives up at is its C encoder's
+    # own stack, not `sys.getrecursionlimit()`, which is 1,000 here and irrelevant.
+    # Measured on this interpreter, 5,000 serializes and 20,000 raises; both in under a
+    # millisecond, so the margin costs nothing.
+    deep: dict[str, object] = {}
+    cursor = deep
+    for _ in range(20_000):
+        nxt: dict[str, object] = {}
+        cursor["n"] = nxt
+        cursor = nxt
+
+    for value in (circular, deep):
+        with pytest.raises(TypeError, match="stubborn"):
+            mem.remember("user", "lives_in", "Berlin", stubborn=value)
+
+    assert mem.get_all() == []
+
+
+def test_the_refusal_names_the_value_json_rejected_not_the_one_it_was_inside(mem):
+    """A dict *is* JSON. Saying "a dict is not JSON" for a dict holding one `datetime`
+    sends the caller to convert the container when the fix was to convert one member —
+    and this method exists to stop a caller believing something untrue about what they
+    wrote, so a message that misidentifies the culprit is the defect wearing a hat.
+
+    `json`'s own message already names the member, so it is quoted rather than
+    reconstructed."""
+    with pytest.raises(TypeError, match="Object of type datetime is not JSON"):
+        mem.remember("user", "lives_in", "Berlin",
+                     note={"filed": datetime(2023, 1, 1, tzinfo=timezone.utc)})
 
 
 # --- provenance, backwards -------------------------------------------------------
