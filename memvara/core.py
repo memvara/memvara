@@ -59,6 +59,7 @@ from .types import (
     SUBJECT_ENTITY,
     Claim,
     Closure,
+    Collapse,
     Delta,
     Derivation,
     Episode,
@@ -915,6 +916,15 @@ class Memvara:
         a 2019 valid time and a today transaction time, and `as_of` queries stay correct
         for both axes.
 
+        `valid_to` at or before `valid_from` is a `ValueError`, matching what
+        `memory_remember` does with the same interval. Both ends arrive in one call here,
+        so an interval that ends where it starts is not a partially-recoverable request —
+        it is self-contradictory, and the caller can restate it. Storing it would produce
+        a claim true at no instant: `added 1` on the receipt, and nothing returned by any
+        `valid_at`, on either clock, ever. Contrast `forget()` and `delete()`, which
+        clamp rather than refuse, because there the row already exists and refusing would
+        leave no way to close it at all.
+
         `sources` are the turns this fact came from: ids of turns already stored, or
         `Episode` objects to store *with* the claim, in one transaction. Without them
         `why()` on the result has nothing to show, which for an imported or
@@ -1010,11 +1020,25 @@ class Memvara:
         scope = self._scope(tenant, user, agent, session)
         pred = self.registry.normalize(predicate)
         now = utcnow()
+        began = valid_from or recorded_at or now
+        if valid_to is not None and as_utc(valid_to) <= as_utc(began):
+            raise ValueError(
+                f"valid_to ({as_utc(valid_to).isoformat()}) is not after the instant the "
+                f"fact began ({as_utc(began).isoformat()}"
+                + ("" if valid_from is not None else
+                   ", which is this moment because valid_from was omitted")
+                + "). A fact cannot stop being true before it starts, and an interval of "
+                "no length is true at no instant — it would be stored, counted on the "
+                "receipt, and returned by no query on either clock. If it began earlier "
+                "than you said, pass valid_from; if it is still true, leave valid_to "
+                "unset; if it was never true at all, that is a wrong record rather than "
+                "a finished one, and forget() is the call that says so."
+            )
         claim = Claim(
             subject=subject, predicate=pred, object=obj, scope=scope,
             polarity=polarity, confidence=confidence,
             memory_type=memory_type or self.registry.spec(pred).memory_type,
-            valid_from=valid_from or recorded_at or now,
+            valid_from=began,
             valid_to=valid_to,
             recorded_at=recorded_at or now,
             text=text or "",   # empty means "render the triple"; see `Claim.__post_init__`
@@ -1114,6 +1138,7 @@ class Memvara:
                 # transaction below exists to prevent, so the fallback is the same
                 # instant `supersede` computes rather than a cast.
                 when = at if at is not None else claim.recorded_at
+                began = as_utc(retire.valid_from)
                 close_out(retire, when, claim.id, close)
                 # One `put_claim` rather than `invalidate` + `set_valid_to`, for the
                 # reason `Reconciler._retire` gives: the Store protocol cannot write
@@ -1154,6 +1179,17 @@ class Memvara:
         # naming the same claim twice would double every count taken off this list.
         if retire is not None and not any(c.id == retire.id for c in receipt.closed):
             receipt.closed.append(retire)
+        # And say so when closing it left it true at no instant. `close_out` clamps a
+        # closure to the claim's own start rather than inverting the interval, so
+        # superseding a claim at or before the instant it began empties it: it survives
+        # in `history()` and is returned by no `valid_at`, at any `T`. The reconciler
+        # reports the same outcome from its own path (`Reconciler._retire`); without this
+        # the one method whose entire purpose is closing a claim out was the one that
+        # would not mention it. See `types.Collapse`.
+        if retire is not None and retire.valid_to is not None \
+                and as_utc(retire.valid_to) == began:
+            receipt.collapsed.append(Collapse(retire.id, retire.subject,
+                                              retire.predicate, retire.object, began))
         return receipt
 
     def supersede(self, old_claim_id: str, new_claim: Claim, *,

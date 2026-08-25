@@ -20,7 +20,7 @@ from memvara.schema import (
     Volatility,
 )
 from memvara.store import SQLiteStore
-from memvara.types import Claim, Episode, Scope, utcnow
+from memvara.types import Claim, Episode, Scope, close_out, utcnow
 from memvara.write import Reconciler
 
 
@@ -450,6 +450,191 @@ def test_supersede_ignores_case_and_whitespace_noise_in_the_predicate(rec):
     rec.apply(claim("lives_in", "Berlin"))
     res = rec.apply(claim("  Lives In  ", "Lisbon"))
     assert res.action == "supersede"
+
+
+# --- authority: what a candidate has to be worth to close something ----------
+#
+# Until `AUTHORITY_SHARE` existed the answer was "nothing". Contradiction resolution was
+# predicate cardinality plus write order, so a 0.10 guess replaced a 1.00 statement — and
+# stamped it `ended`, which asserts the world changed. Nothing about the world had
+# changed; a machine had guessed, and the store recorded a world event as the reason.
+
+def test_a_guess_does_not_end_a_statement_it_is_worth_a_tenth_of(rec, store):
+    """The reported defect, exactly. `confidence` appeared nowhere in this module.
+
+    Note which half of it matters more. The bad ranking is recoverable — both values are
+    live, the confident one ranks first, and a caller can settle it. The false `ended` is
+    not: it is an assertion about the world that no evidence supports, written into the
+    one axis whose whole purpose is answering "what do we now believe was true then", and
+    `CLAUDE.md` names this distinction as the one mistake here that cannot be found by
+    reading the data afterwards.
+    """
+    london = rec.apply(claim("lives_in", "London", confidence=1.00)).claim
+    res = rec.apply(claim("lives_in", "Paris", confidence=0.10))
+
+    assert res.action == "add", "it was stored; nothing here refuses a write"
+    assert res.invalidated == [], "and it closed nothing"
+    assert store.get_claim(london.id).state == "live", "no world event was invented"
+    assert live_objects(store, res.claim) == ["London", "Paris"]
+
+
+def test_the_dispute_names_both_values_and_what_each_is_worth(rec):
+    """A caller acting on this has one decision to make about one pair of claims, so the
+    report carries the pair rather than the count `Accumulation` carries. Without it the
+    receipt reads `added 1, ended 0`, which is also what a correct first write reads."""
+    london = rec.apply(claim("lives_in", "London", confidence=1.00)).claim
+    res = rec.apply(claim("lives_in", "Paris", confidence=0.10))
+
+    (dispute,) = res.disputed
+    assert dispute.claim_id == london.id
+    assert (dispute.incumbent, dispute.incumbent_confidence) == ("London", 1.00)
+    assert (dispute.candidate, dispute.candidate_confidence) == ("Paris", 0.10)
+
+
+def test_an_ordinary_supersession_between_comparable_claims_still_supersedes(rec, store):
+    """The regression this rule could most easily have caused, named so it cannot happen
+    quietly. Every confidence the shipped write paths produce sits at or above half of
+    every other one — 1.00 from `remember()`, 0.95 from the fast path, 0.70 from an
+    extraction whose model gave no figure, 0.50 from one that ignored the schema — so
+    ordinary traffic must pass this rule untouched. A store that stopped superseding is a
+    store that stopped learning."""
+    berlin = rec.apply(claim("lives_in", "Berlin", confidence=1.00)).claim
+    res = rec.apply(claim("lives_in", "Lisbon", confidence=0.70))
+
+    assert res.action == "supersede"
+    assert [c.id for c in res.invalidated] == [berlin.id]
+    assert res.disputed == []
+    assert live_objects(store, res.claim) == ["Lisbon"]
+
+
+@pytest.mark.parametrize("candidate, displaces", [
+    (0.50, True),    # exactly the share: an even match closes
+    (0.49, False),   # just under it
+])
+def test_the_share_is_a_floor_and_not_a_margin(rec, store, candidate, displaces):
+    """At exactly half the candidate wins, because the test is "worth at least" and not
+    "worth more than". The boundary is pinned because it is the whole of the rule: 0.50 is
+    `llm._shape.UNKNOWN_CONFIDENCE`, what a model that ignored the schema gets, and that
+    is not evidence of a guess — it is an absence of evidence about how sure the model
+    was, which must not be read as an admission."""
+    rec.apply(claim("lives_in", "London", confidence=1.00))
+    res = rec.apply(claim("lives_in", "Paris", confidence=candidate))
+
+    assert (res.action == "supersede") is displaces
+    assert live_objects(store, res.claim) == (["Paris"] if displaces
+                                              else ["London", "Paris"])
+
+
+def test_authority_is_read_against_the_incumbent_and_not_against_a_fixed_floor(rec, store):
+    """A share, not a threshold. The same 0.30 claim is a guess beside a stated fact and
+    an even match beside another uncertain one, and only a ratio says both."""
+    rec.apply(claim("lives_in", "London", confidence=0.50))
+    res = rec.apply(claim("lives_in", "Paris", confidence=0.30))
+
+    assert res.action == "supersede", "0.30 is more than half of 0.50"
+    assert live_objects(store, res.claim) == ["Paris"]
+
+
+def test_the_authority_rule_does_not_reach_a_caller_who_named_the_victim(rec, store):
+    """Pinned because four documents state the rule as an invariant, and an invariant with
+    a silent exception is worse than a narrower one stated plainly.
+
+    `Memvara.supersede`, `forget` and `delete` all close a claim the caller named, before
+    this module is asked anything — so there is no candidate to weigh against it. That is
+    the same boundary `close="retired"` sits on: the rule arbitrates an *inference* the
+    write path drew, and naming the row to close is an instruction rather than an
+    inference. Asserted here at the reconciler, where the absence of a victim is the
+    mechanism: a claim already closed is not live, so it is never a competing claim.
+    """
+    london = rec.apply(claim("lives_in", "London", confidence=1.00)).claim
+    close_out(london, utcnow(), None, "ended")     # what `supersede` does first
+    store.put_claim(london)
+
+    res = rec.apply(claim("lives_in", "Paris", confidence=0.10))
+
+    assert res.disputed == [], "there was nothing live left to dispute with"
+    assert res.action == "add"
+    assert store.get_claim(london.id).state == "ended"
+
+
+def test_a_low_confidence_retraction_still_retracts(rec, store):
+    """`AUTHORITY_SHARE` is deliberately not consulted on the retraction path, and this
+    pins the decision so it does not read later as a place the rule was forgotten. A
+    retraction writes a tombstone that is born invalidated — "we stopped believing X" —
+    and leaving the target live beside it would put both sentences in the store at once,
+    which is a worse record than either."""
+    berlin = rec.apply(claim("lives_in", "Berlin", confidence=1.00)).claim
+    res = rec.apply(claim("lives_in", "Berlin", polarity=-1, confidence=0.10))
+
+    assert res.action == "retract"
+    assert [c.id for c in res.invalidated] == [berlin.id]
+    assert store.get_claim(berlin.id).state == "ended"
+
+
+# --- the interval a supersession can empty -----------------------------------
+#
+# `close_out` clamps a closure to the claim's own start rather than inverting the
+# interval, which is right: a fact that ends before it begins is a row no `as_of` window
+# can return consistently. What the clamp cannot do is make the row answer anything.
+
+def test_a_value_replaced_at_the_instant_it_began_is_true_at_no_instant(rec, store):
+    """Two writes sharing a `valid_from` — any same-day correction, and every import that
+    stamps dates rather than timestamps. The displaced claim keeps `state == "ended"`,
+    which `core.py` documents as "still answers `valid_at=<while it held>`", and there is
+    no instant at which it held."""
+    at = utcnow() - timedelta(days=30)
+    delhi = rec.apply(claim("lives_in", "Delhi", valid_from=at, recorded_at=at),
+                      now=at).claim
+    rec.apply(claim("lives_in", "Mumbai", valid_from=at, recorded_at=at), now=at)
+
+    old = store.get_claim(delhi.id)
+    assert old.valid_from == old.valid_to, "the interval is empty"
+    for probe in (at - timedelta(days=1), at, at + timedelta(days=1)):
+        assert "Delhi" not in live_objects(store, old, as_of=probe)
+
+
+def test_the_write_that_empties_an_interval_says_so(rec, store):
+    """The reason this is a defect and not merely a shape. `invalidated 1` is what an
+    ordinary supersession reports too, so the difference between "still answers about the
+    period it held" and "answers nothing, ever" had no symptom at the write, and the one
+    query that would reveal it is the one nobody runs against a claim they just closed."""
+    at = utcnow() - timedelta(days=30)
+    delhi = rec.apply(claim("lives_in", "Delhi", valid_from=at, recorded_at=at),
+                      now=at).claim
+    res = rec.apply(claim("lives_in", "Mumbai", valid_from=at, recorded_at=at), now=at)
+
+    (collapse,) = res.collapsed
+    assert collapse.claim_id == delhi.id
+    assert (collapse.subject, collapse.predicate, collapse.object) == (
+        "user", "lives_in", "Delhi")
+    assert collapse.at == at
+
+
+def test_an_ordinary_supersession_leaves_the_displaced_interval_alone(rec, store):
+    """The other half, or the report would fire on every supersession in the store.
+    Berlin held for nine days and goes on answering about them."""
+    t0 = utcnow() - timedelta(days=10)
+    t1 = utcnow() - timedelta(days=1)
+    berlin = rec.apply(claim("lives_in", "Berlin", valid_from=t0, recorded_at=t0),
+                       now=t0).claim
+    res = rec.apply(claim("lives_in", "Lisbon", valid_from=t1, recorded_at=t1), now=t1)
+
+    assert res.collapsed == []
+    assert live_objects(store, berlin, as_of=t0 + timedelta(days=1)) == ["Berlin"]
+
+
+def test_a_retired_closure_cannot_empty_an_interval(rec, store):
+    """`close="retired"` stops the belief clock and leaves valid time exactly as written,
+    so there is no interval to empty and nothing to report. Pinned because the detection
+    reads `valid_to`, and a closure that never sets it must not trip it."""
+    at = utcnow() - timedelta(days=30)
+    delhi = rec.apply(claim("lives_in", "Delhi", valid_from=at, recorded_at=at),
+                      now=at).claim
+    res = rec.apply(claim("lives_in", "Mumbai", valid_from=at, recorded_at=at),
+                    now=at, close="retired")
+
+    assert res.collapsed == []
+    assert store.get_claim(delhi.id).valid_to is None
 
 
 # --- retraction --------------------------------------------------------------

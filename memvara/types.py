@@ -1089,6 +1089,84 @@ class Accumulation:
 
 
 @dataclass(slots=True)
+class Dispute:
+    """A value that did not displace the one already in its slot, because it is worth less.
+
+    The write path resolves a contradiction by predicate cardinality and, until this
+    existed, by nothing else — so a 0.10-confidence guess replaced a 1.00-confidence
+    statement and stamped the displaced claim `ended`, which asserts that *the world
+    changed*. It did not; a machine guessed. See `memvara.write.reconcile.AUTHORITY_SHARE`
+    for the rule and for why confidence is the axis it reads.
+
+    The candidate is stored either way. Nothing here refuses a write: the slot simply
+    holds both values, the more confident one ranks above the other, and this says so.
+    Which is the recoverable direction — keeping two competing facts degrades ranking,
+    ending a true one destroys information.
+
+    Unlike `Accumulation`, this carries the values rather than a count. A caller reading
+    it has one decision to make about one pair of claims, and "which value stayed" is the
+    whole of what they need to make it.
+
+    >>> Dispute("cl_1a2b", "user", "lives_in", "London", 1.0, "Paris", 0.1)
+    <Dispute user lives_in: 'London' 1.00 kept, 'Paris' 0.10 stored beside it>
+    """
+
+    #: The incumbent that stayed live. Addressable, because acting on this means
+    #: deciding between two claims and the caller needs to be able to name one of them.
+    claim_id: str
+    subject: str
+    predicate: str
+    incumbent: str
+    incumbent_confidence: float
+    candidate: str
+    candidate_confidence: float
+
+    def __repr__(self) -> str:
+        return (f"<Dispute {self.subject} {self.predicate}: "
+                f"{self.incumbent!r} {self.incumbent_confidence:.2f} kept, "
+                f"{self.candidate!r} {self.candidate_confidence:.2f} stored beside it>")
+
+
+@dataclass(slots=True)
+class Collapse:
+    """A claim closed at or before its own start, so it is now true at no instant.
+
+    `close_out` clamps a closure to the claim's `valid_from` rather than letting the
+    interval invert, and that clamp is right: a fact that ends before it begins is not a
+    shorter fact, it is a row no `as_of` window can return consistently. What the clamp
+    cannot do is make the row answer anything. `valid_from == valid_to` is an empty
+    interval — `valid_at=T` returns it at no `T`, `is_live` is false at every instant,
+    and the receipt above still reads `added 1`.
+
+    It arises whenever a value is superseded by one that begins at the same instant: any
+    same-day correction, and every import that stamps dates rather than timestamps.
+
+    Reported rather than prevented, and the alternative is worth naming so nobody
+    re-opens it as an oversight. Nudging the edge forward by a tick would give the
+    displaced claim an interval — one that nothing witnessed and nobody asserted, in a
+    store whose whole argument is that its intervals come from evidence. The honest
+    answer is that this claim has no interval, said out loud at the write that did it.
+    `memory_remember` refuses the same shape when both ends arrive in one call, where the
+    caller can simply restate it; here the row already exists and refusing would leave no
+    way to close it at all.
+
+    >>> Collapse("cl_1a2b", "user", "city", "Delhi", datetime(2026, 1, 10, tzinfo=timezone.utc))
+    <Collapse user city 'Delhi' true at no instant, both ends 2026-01-10T00:00:00+00:00>
+    """
+
+    claim_id: str
+    subject: str
+    predicate: str
+    object: str
+    #: Where the interval now both begins and ends.
+    at: datetime
+
+    def __repr__(self) -> str:
+        return (f"<Collapse {self.subject} {self.predicate} {self.object!r} "
+                f"true at no instant, both ends {self.at.isoformat()}>")
+
+
+@dataclass(slots=True)
 class WriteReceipt:
     """What `add()` returns. Explicit about what the write path actually did.
 
@@ -1170,6 +1248,21 @@ class WriteReceipt:
     #: and is behaving correctly; see `memvara.write.reconcile` for why the write path
     #: cannot tell the two apart and deliberately does not try.
     accumulated: list[Accumulation] = field(default_factory=list)
+    #: Values this write stored *without* displacing what was already in their slot,
+    #: because the incumbent is worth more than twice as much — see
+    #: `memvara.write.reconcile.AUTHORITY_SHARE`. Empty on every write between claims of
+    #: comparable confidence, which is every write the shipped extraction paths produce.
+    #:
+    #: The outcome it names used to be indistinguishable from a correct replacement, and
+    #: it was the wrong one: a low-confidence guess ended a high-confidence statement,
+    #: and `ended` says the world changed. What actually happened is that two sources
+    #: disagree, so both values are live and this says which one stayed.
+    disputed: list[Dispute] = field(default_factory=list)
+    #: Claims this write closed at or before the instant they began, leaving them true at
+    #: no instant. See `Collapse`: it is what a supersession by a value starting at the
+    #: same instant does, and `closed 1` looks exactly like an ordinary supersession
+    #: without it.
+    collapsed: list[Collapse] = field(default_factory=list)
 
     # --- the two halves of `closed` -------------------------------------------
     # Derived rather than stored, so they cannot disagree with the claims themselves.
@@ -1227,15 +1320,17 @@ class WriteReceipt:
         return self.closed
 
     def __str__(self) -> str:
-        # `unextracted`, `ungrounded` and `accumulated` appear only when non-zero, so
-        # they read as events rather than as noise on the writes that lost, rejected
-        # and piled up nothing.
+        # `unextracted`, `ungrounded`, `accumulated`, `disputed` and `collapsed` appear
+        # only when non-zero, so they read as events rather than as noise on the writes
+        # that lost, rejected, piled up, disputed and emptied nothing.
         lost = f" unextracted={self.unextracted}" if self.unextracted else ""
         refused = f" ungrounded={self.ungrounded}" if self.ungrounded else ""
         piled = f" accumulated={len(self.accumulated)}" if self.accumulated else ""
+        split = f" disputed={len(self.disputed)}" if self.disputed else ""
+        empty = f" collapsed={len(self.collapsed)}" if self.collapsed else ""
         return (
             f"<WriteReceipt +{len(self.added)} ~{len(self.reinforced)} "
-            f"-{len(self.closed)} skip={self.skipped}{lost}{refused}{piled} "
+            f"-{len(self.closed)} skip={self.skipped}{lost}{refused}{piled}{split}{empty} "
             f"llm={self.llm_calls} "
             f"{self.latency_ms:.1f}ms{' deferred' if self.deferred else ''}>"
         )
