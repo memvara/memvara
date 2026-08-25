@@ -1,13 +1,19 @@
 {
   "name": "memvara",
-  "version": "0.0.2",
-  "description": "Name reservation. memvara is a bitemporal memory layer for AI agents; the library is Python and speaks MCP, so there is no JavaScript client. See the repository.",
+  "version": "0.0.3",
+  "description": "Bitemporal memory for AI agents — two independent time axes, deterministic contradiction resolution, hybrid retrieval, offline write path. Python library plus an MCP server; this npm package is a name reservation, not a JS client.",
   "keywords": [
     "memvara",
     "memory",
     "bitemporal",
     "agents",
     "llm",
+    "mcp",
+    "model-context-protocol",
+    "agent-memory",
+    "ai-memory",
+    "knowledge-graph",
+    "temporal",
     "placeholder"
   ],
   "homepage": "https://github.com/memvara/memvara#readme",
