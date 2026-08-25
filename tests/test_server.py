@@ -314,6 +314,12 @@ _COUNT_SURFACES = (
     "memvara/server/__init__.py",
     "README.md",
     "docs/DEPLOY.md",
+    # The fifth, added after it proved the point. `config.py` states the count twice —
+    # once in `_CLOUD_NOT_WIRED`, which is an error message a user reads when a
+    # cloud-mode server refuses to start, and once in the docstring beside it — and it
+    # was never in this tuple, so it sat at "thirteen" through two tool additions while
+    # all four guarded surfaces stayed correct. A guard is only as wide as its list.
+    "memvara/server/config.py",
 )
 
 
