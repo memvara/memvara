@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Sequence
 
-from ..entities import EntityRegistry
+from ..entities import EntityRegistry, entity_key
 from ..schema import PredicateRegistry
 from ..store.base import Store
 from ..types import (
@@ -78,8 +78,10 @@ from ..types import (
     Closure,
     Collapse,
     Dispute,
+    Scope,
     as_utc,
     close_out,
+    content_hash,
     default_entity,
     fact_key_for,
     owner_key,
@@ -838,3 +840,173 @@ def _supersede(older: Claim, newer: Claim, at: datetime) -> None:
     if older.valid_to is None or older.valid_to > edge:
         older.valid_to = edge
     _note(older, at, "superseded", newer.id)
+
+
+@dataclass(slots=True)
+class SplitReport:
+    """What a `split_entity` pass did, or would do."""
+
+    scanned: int = 0     # claims examined under the surface form
+    moved: int = 0       # claims re-stamped onto the earlier identity
+    reopened: int = 0    # closures undone because they crossed the boundary
+    retired_left: int = 0  # closures left alone because they were retirements
+    dry_run: bool = True
+
+    def __str__(self) -> str:
+        return (f"<SplitReport scanned={self.scanned} moved={self.moved} "
+                f"reopened={self.reopened} retired_left={self.retired_left}"
+                f"{' (dry run)' if self.dry_run else ''}>")
+
+    __repr__ = __str__
+
+
+#: How a split marks the earlier identity. Chosen to survive `entity_key` unchanged —
+#: `#`, `::` and `-` are all folded to spaces by it, so a marker using them would not be
+#: idempotent and the second read of a split claim would land somewhere else. Verified
+#: rather than assumed: `entity_key("john smith split 20200101")` returns itself.
+#:
+#: **That holds only while the base has content the fold keeps**, which is why
+#: `split_entity` substitutes a `content_hash` for a surface form the fold empties — "..."
+#: or a bare emoji, the case `types.default_entity` exists for. `entity_key("... split
+#: 20200101")` is `"split 20200101"`, so such a marker is neither idempotent nor unique:
+#: two unfoldable names split at one instant would fold onto a single `fact_key` and start
+#: superseding each other, which is the exact defect this module exists to prevent.
+#:
+#: Readable on purpose, everywhere the base survives. It lands in `Claim.meta` and comes
+#: back out of `why()`, so an operator reading a split store sees "john smith split
+#: 20200101" and not a hash.
+SPLIT_MARKER = "{base} split {stamp}"
+
+
+def split_entity(reconciler: Reconciler, scope: Scope, surface: str, at: datetime, *,
+                 dry_run: bool = True, now: datetime | None = None) -> SplitReport:
+    """Say that one surface form has been two different things, either side of `at`.
+
+    The inverse of `EntityRegistry.learn_alias`, and the repair `backfill_entities` is for
+    the other direction. The registry can be told two spellings are one thing; until this
+    existed nothing could tell it that one spelling is two.
+
+    **The failure it repairs.** Identity is a fold over the surface form and nothing else,
+    so two different people who happen to share a name are one entity, and on a
+    single-valued predicate the second retires the first:
+
+        John Smith works_at Acme    (2018)
+        John Smith works_at Globex  (2026)
+        -> Acme ended, `why(Globex).superseded == [Acme]`
+
+    The store now asserts a job change nobody wrote, `history()` reports it as a timeline,
+    and `why()` explains it with a supersession pointer. That is the same failure
+    `entities.py` was built to fix on the *spelling* axis — four spellings of one employer
+    producing "three job changes that never happened, each one well-provenanced" — arrived
+    at from the other side.
+
+    **Why this is a repair and not a detector.** Nothing in the data separates "one person
+    changed jobs after eight years" from "two people share a name". Not the gap: `works_at`
+    is `Volatility.SLOW`, a two-year half-life, so eight years is four half-lives and an
+    entirely ordinary job change. Not the provenance, not the confidence, not the
+    predicate. The distinction is knowledge the store does not have and cannot acquire,
+    which is why there is no write-time warning here: a signal that fires on every
+    long-gap supersession is noise, and noise in this position trains a reader to ignore
+    the notes that do mean something. What a person knows, this records.
+
+    **What it does, in the order it has to happen.**
+
+    1. Every claim under this identity is re-stamped, retired ones included — `history()`
+       loses the past it exists to show if the closed rows do not move with the live ones.
+       Only claims whose `valid_from` is *before* `at` move; the rest keep the identity
+       they had, so the later person stays addressable by the name as written.
+    2. A closure that crossed the boundary is undone. The two claims were never competing,
+       so the earlier one's `valid_to` and `invalidated_by` are cleared and it is live
+       again. Within a partition nothing is touched: those claims did compete and still
+       do, in the same order.
+    3. Each moved claim is stamped with a dated `ENTITY_REKEY` record, exactly as a
+       backfill stamps one, so `why()` can say why history changed and not merely that it
+       did.
+
+    **"Under this identity" is every identity the surface form asks about**, resolved
+    through `EntityRegistry.probe_keys` — the same widening `Memvara.history()` reads
+    through, and for the same reason. A merge does not re-key the past, so once an alias
+    has joined two spellings the claims sit under whichever key each was written with.
+    Matching only `entity_key(surface)` would repair one half of the entity the operator
+    was looking at, and where the merge landed on the other spelling, none of it: a
+    `scanned=0` report on a store whose manufactured job change is in plain view.
+
+    **A crossing closure does not always carry a pointer**, and the one that does not is
+    the case a reader will miss. Writes arriving in valid-time order supersede: the later
+    employment closes the earlier one and `invalidated_by` names it. A *backdated* write —
+    the 2018 job recorded after the 2026 one, which is what importing somebody's history
+    looks like — takes the closure on itself instead, in `Reconciler.apply`'s `newer`
+    branch, which clamps the candidate's own `valid_to` to where the later claim begins
+    and writes no pointer at all. Same manufactured history, no `invalidated_by` to key
+    off, so this matches that end against the instant the clamp would have used.
+
+    **A retirement is never undone**, and that is the one asymmetry worth stating. Ending
+    a claim is something the write path inferred from the fold, so the fold being wrong
+    makes the ending wrong. Retiring one is a caller saying "this was never true" — a
+    statement about the record that this function has no standing to reverse. Those are
+    counted in `retired_left` rather than silently kept, so a caller can see there were
+    some and go and look.
+
+    **Subjects only.** An object-side identity decides `value_key`, which is exact-duplicate
+    detection rather than slot occupancy, so splitting one is a different operation with
+    different consequences and is not this one.
+
+    `dry_run=True` by default, for `backfill_entities`' reason: this rewrites history, and
+    history is rewritten when an operator asks and never as a side effect. Run it dry, read
+    the report, then run it for real.
+    """
+    t = now or utcnow()
+    boundary = as_utc(at)
+    owner = owner_key(scope)
+    identities = reconciler.entities.probe_keys(owner, surface)
+    report = SplitReport(dry_run=dry_run)
+
+    mine = [c for c in reconciler.store.iter_claims(scope.tenant,
+                                                    include_invalidated=True)
+            if owner_key(c.scope) == owner and c.subject_key in identities]
+    report.scanned = len(mine)
+    earlier = [c for c in mine if as_utc(c.valid_from) < boundary]
+    stayed = [c for c in mine if as_utc(c.valid_from) >= boundary]
+    if not earlier:
+        return report
+
+    later_ids = {c.id for c in stayed}
+    # Where a claim that stayed behind begins, earliest first, per predicate. That is the
+    # instant `Reconciler.apply` clamps a backdated claim's own `valid_to` to, and since
+    # that path writes no `invalidated_by`, it is the only evidence the end was the later
+    # identity's doing rather than the caller's.
+    clamps: dict[str, datetime] = {}
+    for claim in stayed:
+        began = as_utc(claim.valid_from)
+        held = clamps.get(claim.predicate)
+        if held is None or began < held:
+            clamps[claim.predicate] = began
+
+    # The fold, unless the surface form has nothing the fold keeps — see `SPLIT_MARKER`.
+    folded = entity_key(surface)
+    marker = SPLIT_MARKER.format(base=folded or content_hash(surface),
+                                 stamp=boundary.strftime("%Y%m%d%H%M%S"))
+    for claim in earlier:
+        claim.meta[SUBJECT_ENTITY] = marker
+        _note(claim, t, "split", marker)
+        report.moved += 1
+        crossed = (claim.invalidated_by in later_ids
+                   or (claim.invalidated_by is None and claim.valid_to is not None
+                       and as_utc(claim.valid_to) == clamps.get(claim.predicate)))
+        if not crossed:
+            continue
+        if claim.invalidated_at is not None:
+            # Retired, not merely ended. Somebody said the record was wrong, and the fold
+            # is not what made them say it. Left exactly as it is, and counted.
+            report.retired_left += 1
+            continue
+        claim.valid_to = None
+        claim.invalidated_by = None
+        report.reopened += 1
+
+    if not dry_run:
+        batch = getattr(reconciler.store, "batch", None)
+        with (batch() if batch is not None else nullcontext()):
+            for claim in earlier:
+                reconciler.store.put_claim(claim)
+    return report

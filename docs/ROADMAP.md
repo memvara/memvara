@@ -594,7 +594,25 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
    behaviour and a real cost. `gate.drop` and `fast.miss` are tagged by script so the gap is
    visible rather than assumed — but visible is not closed.
 4. **Entity resolution folds surface forms, it does not know the world.** `Stark` versus
-   `Stark Industries` is genuinely ambiguous and is left that way.
+   `Stark Industries` is genuinely ambiguous and is left that way. So is the other
+   direction — one surface form that has been two different things — and it is worse,
+   because the fold is confident: two people who share a name are one entity, and on a
+   single-valued predicate the later one's employment retires the earlier one's,
+   manufacturing a job change that `history()` reports as a timeline and `why()` explains
+   with a supersession pointer.
+
+   **Nothing in the data can detect it**, which is why there is no warning for it and why
+   there should not be. The gap does not separate the cases: `works_at` is
+   `Volatility.SLOW`, a two-year half-life, so eight years between employers is four
+   half-lives and an entirely ordinary job change. Neither does provenance, confidence or
+   predicate. The distinction is knowledge the store does not have, and a signal that
+   fired on every long-gap supersession would be noise that teaches a reader to ignore the
+   notes that do mean something.
+
+   What ships is the repair rather than the detector: `split_entity` records what a person
+   knows, dated, dry-run by default, undoing the closures that crossed the boundary and
+   leaving retirements alone. It is the inverse of `learn_alias` and the mirror of
+   `backfill_entities`.
 
 ---
 

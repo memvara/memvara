@@ -199,6 +199,24 @@ written with, so nothing on disk is re-keyed the day the model learns something;
 an alias retroactively is `backfill_entities()`, dry-run by default, which stamps every
 touched claim so `why()` can explain why history changed.
 
+The other direction has the same shape and the opposite sign. `split_entity()` says one
+surface form has been two different things either side of an instant — two people who
+happen to share a name, which the fold cannot see and confidently merges. It re-stamps the
+earlier claims onto a distinct identity and undoes the closures that crossed the boundary,
+so a fact *ended* by somebody else's job change is live again. Ended, not retired: nobody
+ever stopped believing the first job, so the belief clock never moved and a retirement is
+left standing on the rare occasion one is there. Which claims it reaches is decided by
+`probe_keys` rather than by the fold alone, so a name an alias has already merged is
+repaired under every key its claims were written with — the read below is widened the same
+way, and a repair that saw less than the read would fix something other than what the
+operator was looking at. Dry-run by default and stamped for `why()`, exactly as the
+backfill is.
+
+Neither is a detector, and for `split_entity` that is the interesting half: nothing in the
+data separates one person changing jobs after eight years from two people sharing a name.
+Not the gap — `works_at` decays *slow*, a two-year half-life, so eight years is four of
+them and thoroughly ordinary. The store records what a person knows; it does not guess it.
+
 What *is* widened is the read. `history()`, `neighborhood()` and `paths_between()` take a
 surface form as a **probe** rather than as a stored string, so once the owner has decided
 two names are one entity, either spelling reaches the claims written under both keys —

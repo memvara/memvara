@@ -336,7 +336,7 @@ Memvara is built around the observation that **most of this doesn't need a model
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 3,522 tests, offline, no API key
+python3 -m pytest -q                              # 3,536 tests, offline, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/temporal.py            # the two clocks, six families
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison
