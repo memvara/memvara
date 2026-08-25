@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Sequence
 
-from ..entities import EntityRegistry
+from ..entities import EntityRegistry, entity_key
 from ..schema import PredicateRegistry
 from ..store.base import Store
 from ..types import (
@@ -78,6 +78,7 @@ from ..types import (
     Closure,
     Collapse,
     Dispute,
+    Scope,
     as_utc,
     close_out,
     default_entity,
@@ -838,3 +839,132 @@ def _supersede(older: Claim, newer: Claim, at: datetime) -> None:
     if older.valid_to is None or older.valid_to > edge:
         older.valid_to = edge
     _note(older, at, "superseded", newer.id)
+
+
+@dataclass(slots=True)
+class SplitReport:
+    """What a `split_entity` pass did, or would do."""
+
+    scanned: int = 0     # claims examined under the surface form
+    moved: int = 0       # claims re-stamped onto the earlier identity
+    reopened: int = 0    # supersessions undone because they crossed the boundary
+    retired_left: int = 0  # closures left alone because they were retirements
+    dry_run: bool = True
+
+    def __str__(self) -> str:
+        return (f"<SplitReport scanned={self.scanned} moved={self.moved} "
+                f"reopened={self.reopened} retired_left={self.retired_left}"
+                f"{' (dry run)' if self.dry_run else ''}>")
+
+    __repr__ = __str__
+
+
+#: How a split marks the earlier identity. Chosen to survive `entity_key` unchanged —
+#: `#`, `::` and `-` are all folded to spaces by it, so a marker using them would not be
+#: idempotent and the second read of a split claim would land somewhere else. Verified
+#: rather than assumed: `entity_key("john smith split 20200101")` returns itself.
+#:
+#: Readable on purpose. It lands in `Claim.meta` and comes back out of `why()`, so an
+#: operator reading a split store sees "john smith split 20200101" and not a hash.
+SPLIT_MARKER = "{base} split {stamp}"
+
+
+def split_entity(reconciler: Reconciler, scope: Scope, surface: str, at: datetime, *,
+                 dry_run: bool = True, now: datetime | None = None) -> SplitReport:
+    """Say that one surface form has been two different things, either side of `at`.
+
+    The inverse of `EntityRegistry.learn_alias`, and the repair `backfill_entities` is for
+    the other direction. The registry can be told two spellings are one thing; until this
+    existed nothing could tell it that one spelling is two.
+
+    **The failure it repairs.** Identity is a fold over the surface form and nothing else,
+    so two different people who happen to share a name are one entity, and on a
+    single-valued predicate the second retires the first:
+
+        John Smith works_at Acme    (2018)
+        John Smith works_at Globex  (2026)
+        -> Acme ended, `why(Globex).superseded == [Acme]`
+
+    The store now asserts a job change nobody wrote, `history()` reports it as a timeline,
+    and `why()` explains it with a supersession pointer. That is the same failure
+    `entities.py` was built to fix on the *spelling* axis — four spellings of one employer
+    producing "three job changes that never happened, each one well-provenanced" — arrived
+    at from the other side.
+
+    **Why this is a repair and not a detector.** Nothing in the data separates "one person
+    changed jobs after eight years" from "two people share a name". Not the gap: `works_at`
+    is `Volatility.SLOW`, a two-year half-life, so eight years is four half-lives and an
+    entirely ordinary job change. Not the provenance, not the confidence, not the
+    predicate. The distinction is knowledge the store does not have and cannot acquire,
+    which is why there is no write-time warning here: a signal that fires on every
+    long-gap supersession is noise, and noise in this position trains a reader to ignore
+    the notes that do mean something. What a person knows, this records.
+
+    **What it does, in the order it has to happen.**
+
+    1. Every claim under this identity is re-stamped, retired ones included — `history()`
+       loses the past it exists to show if the closed rows do not move with the live ones.
+       Only claims whose `valid_from` is *before* `at` move; the rest keep the identity
+       they had, so the later person stays addressable by the name as written.
+    2. A supersession that crossed the boundary is undone. The two claims were never
+       competing, so the earlier one's `valid_to` and `invalidated_by` are cleared and it
+       is live again. Within a partition nothing is touched: those claims did compete and
+       still do, in the same order.
+    3. Each moved claim is stamped with a dated `ENTITY_REKEY` record, exactly as a
+       backfill stamps one, so `why()` can say why history changed and not merely that it
+       did.
+
+    **A retirement is never undone**, and that is the one asymmetry worth stating. Ending
+    a claim is something the write path inferred from the fold, so the fold being wrong
+    makes the ending wrong. Retiring one is a caller saying "this was never true" — a
+    statement about the record that this function has no standing to reverse. Those are
+    counted in `retired_left` rather than silently kept, so a caller can see there were
+    some and go and look.
+
+    **Subjects only.** An object-side identity decides `value_key`, which is exact-duplicate
+    detection rather than slot occupancy, so splitting one is a different operation with
+    different consequences and is not this one.
+
+    `dry_run=True` by default, for `backfill_entities`' reason: this rewrites history, and
+    history is rewritten when an operator asks and never as a side effect. Run it dry, read
+    the report, then run it for real.
+    """
+    t = now or utcnow()
+    boundary = as_utc(at)
+    owner = owner_key(scope)
+    identity = entity_key(surface) or surface
+    report = SplitReport(dry_run=dry_run)
+
+    mine = [c for c in reconciler.store.iter_claims(scope.tenant,
+                                                    include_invalidated=True)
+            if owner_key(c.scope) == owner and c.subject_key == identity]
+    report.scanned = len(mine)
+    earlier = [c for c in mine if as_utc(c.valid_from) < boundary]
+    later_ids = {c.id for c in mine if as_utc(c.valid_from) >= boundary}
+    if not earlier:
+        return report
+
+    marker = SPLIT_MARKER.format(base=identity,
+                                 stamp=boundary.strftime("%Y%m%d%H%M%S"))
+    for claim in earlier:
+        claim.meta[SUBJECT_ENTITY] = marker
+        _note(claim, t, "split", marker)
+        report.moved += 1
+        if claim.invalidated_by not in later_ids:
+            continue
+        if claim.invalidated_at is not None:
+            # Retired, not merely ended. Somebody said the record was wrong, and the fold
+            # is not what made them say it. Left exactly as it is, and counted.
+            report.retired_left += 1
+            continue
+        if claim.valid_to is not None:
+            claim.valid_to = None
+            claim.invalidated_by = None
+            report.reopened += 1
+
+    if not dry_run:
+        batch = getattr(reconciler.store, "batch", None)
+        with (batch() if batch is not None else nullcontext()):
+            for claim in earlier:
+                reconciler.store.put_claim(claim)
+    return report

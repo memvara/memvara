@@ -11,6 +11,37 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`split_entity` — one surface form that has been two different things.** The inverse of
+  `EntityRegistry.learn_alias`, and the repair `backfill_entities` is for the other
+  direction. Identity is a fold over the surface form and nothing else, so two people who
+  share a name are one entity:
+
+  ```
+  John Smith works_at Acme    (2018)
+  John Smith works_at Globex  (2026)
+  → Acme ended, why(Globex).superseded == [Acme]
+  ```
+
+  A job change nobody wrote, reported by `history()` as a timeline and explained by
+  `why()` with a supersession pointer — the same failure `entities.py` was built to fix on
+  the *spelling* axis, arrived at from the other side.
+
+  `split_entity(reconciler, scope, "John Smith", at)` re-stamps every claim before `at`
+  onto a distinct identity, undoes the supersessions that crossed the boundary so both
+  employments are live again, and leaves a dated `ENTITY_REKEY` record on each moved claim
+  so `why()` can say why history changed. Retired claims move but are never *un*-retired:
+  ending a claim is something the write path inferred from the fold, and retiring one is a
+  caller saying it was never true. Those are counted in `retired_left` rather than silently
+  kept. `dry_run=True` by default, for `backfill_entities`' reason.
+
+  **A repair and deliberately not a detector.** Nothing in the data separates "one person
+  changed jobs after eight years" from "two people share a name" — not the gap, since
+  `works_at` is `SLOW` and eight years is four half-lives of an ordinary job change; not
+  provenance, confidence or predicate. A write-time signal would fire on every long-gap
+  supersession, and noise in that position teaches a reader to ignore the notes that mean
+  something. What a person knows, this records.
+
+
 - **`ask()` — the question the two clocks exist for now has a method.** `recall()`
   renders the current answer. Nothing composed the one a bitemporal store can give and a
   single-clock one cannot:

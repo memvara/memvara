@@ -95,7 +95,7 @@ from .write import (
     UnembeddableTextWarning,
     WritePipeline,
 )
-from .write.reconcile import backfill_entities
+from .write.reconcile import SplitReport, backfill_entities, split_entity
 
 __version__ = "0.6.0"
 
@@ -145,6 +145,11 @@ __all__ = [
     "GraphTraverser", "Path", "Edge", "HOP_DAMPING",
     "EntityRegistry", "EntityResolution", "EntitySpec", "entity_key",
     "backfill_entities",
+    # The other direction: `learn_alias` says two spellings are one thing, and this says
+    # one spelling has been two. Exported with its report type for `backfill_entities`'
+    # reason — an operator reaching for one reaches for the other, and a caller reading
+    # the result has to be able to name it.
+    "split_entity", "SplitReport",
     "Recorder", "NullRecorder", "MemoryRecorder",
     "Redactor", "PatternRedactor", "Consolidator",
     # relevance floors are measured per deployment, never assumed
