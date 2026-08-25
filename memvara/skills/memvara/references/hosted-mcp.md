@@ -1,7 +1,10 @@
 # Hosted MCP
 
-Paste a URL, click Allow, the twelve tools appear. Nothing to install on the
+Paste a URL, click Allow, and the tools appear. Nothing to install on the
 machine. This is the default path.
+
+The set is listed below, and how many a given deployment serves is that
+deployment's business — a hosted one can be a release behind this library.
 
 URL: `https://app.memvara.dev/mcp`
 
