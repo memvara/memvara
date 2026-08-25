@@ -39,10 +39,17 @@ bug bounty, and we would rather say that here than have you find out after the w
 
 ## Supported versions
 
-`main`, and the most recent PyPI release (`0.3.0`). A fix goes to `main` and into the
+`main`, and the most recent PyPI release (`0.4.1`). A fix goes to `main` and into the
 next release; older wheels stay on the index and get an advisory if the defect reaches
-them. The npm package is a name reservation (`0.0.1` on the registry, `0.0.2` pending)
-with no runtime surface to backport to.
+them.
+
+The npm package (`memvara` on npm) is in scope from `0.1.0`, when it stopped being an
+inert placeholder and became a process that holds a bearer token. It ships **zero runtime
+dependencies** — asserted in `release-npm.yml`, not merely intended — so its supply chain
+is this repository and Node's standard library. It writes one credential file,
+`~/.memvara/oauth.json`, created at mode 600 before any content lands rather than
+chmod'd afterwards; a process that died between the two would otherwise leave a readable
+token on disk. It reads `~/.memvara/credentials.json` and never writes it.
 
 ## In scope
 

@@ -247,14 +247,12 @@ because it is a demonstration of the seam rather than a product.
   means nothing in any language, and is therefore a **fanciful mark** — the strongest class.
 - **The registry names are claimed.** An organization is still not a reservation — that
   is why the first uploads had to happen — but they did: PyPI `memvara` 0.1.0 on
-  2026-08-14, npm `memvara` 0.0.1 the same day (a placeholder, not a client). An npm
-  org still only reserves `@memvara/*`.
-- **npm trusted publisher** — one-time registration on the package, then a tag
-  push uploads the way PyPI does. `.github/workflows/release.yml` packs, hashes
-  and publishes with no reviewer wait. Until the publisher exists a *new* npm
-  version fails at upload — and `npm/memvara/package.json` now says `0.0.2` against
-  a registry holding only `0.0.1`, so the next tag is that new version. This is the
-  one remaining step that cannot be done from inside the repository.
+  2026-08-14, npm `memvara` 0.0.1 the same day. An npm org still only reserves
+  `@memvara/*`. The npm package was a placeholder until `0.1.0`, which made it a
+  CLI — see below.
+- **npm trusted publisher** — registered 2026-08-25. `release-npm.yml` packs,
+  hashes and publishes over OIDC with no stored token and no reviewer wait, on its
+  own `npm-v*` tag rather than the Python one.
 - **Community files** — `CONTRIBUTING.md`, `SECURITY.md` and issue templates are in place,
   and the README states the open-core boundary rather than leaving a reader to infer it
   from a pricing page.
@@ -415,6 +413,29 @@ million claims. Beating it trades recall for speed, which belongs behind the `St
 protocol as a choice a deployment makes, not in the default path.
 
 ---
+
+## A JavaScript client, and what was built instead
+
+Recorded here because this list is where *considered* belongs, and until 2026-08-25 a JS
+client appeared in neither section — it had not been declined, it had never been decided.
+The npm package asked readers to open an issue if they wanted one, which made the
+decision wait on a demand signal nobody was collecting.
+
+**Declined: a JavaScript engine.** A second implementation would have to re-derive the
+invariants in `INTERNALS.md` identically, and getting one wrong is not hypothetical — the
+paper below conflates the two clocks on supersession and measures its own time-travel
+retrieval scoring *worse* than plain search as a result.
+
+**Declined: a REST client library.** MCP already covers the agent case, which is the case
+that exists. A library would serve calling memvara from ordinary application code, and
+nobody has asked for that.
+
+**Built: `npx memvara`**, a stdio-to-HTTP MCP bridge to the hosted server, zero runtime
+dependencies. Its value is narrower than it looks and the narrowness is worth stating:
+`app.memvara.dev/mcp` advertises standard MCP OAuth, so any client that speaks to remote
+servers needs no bridge at all. This is for clients that only spawn a command over stdio,
+and its one advantage over the generic `mcp-remote` is that it needs no configuration and
+reuses an existing `~/.memvara/credentials.json` without opening a browser.
 
 ## What is still missing
 

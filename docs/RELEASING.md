@@ -1,9 +1,13 @@
 # Releasing memvara
 
-PyPI has `memvara` 0.3.0 (first upload 2026-08-14, `0.1.0`). npm has `memvara` 0.0.1, a
-name reservation with no JavaScript client (same day). This tree is `0.4.0` / npm `0.0.2`,
-neither of which is on its index yet — `v0.4.0` publishes both. This is the checklist for
-the next upload of either, plus the things that have to stay true.
+PyPI has `memvara` 0.4.1 (first upload 2026-08-14, `0.1.0`). npm has `memvara` 0.0.3.
+
+**The two release on separate tags and this document covers both.** `v*` publishes the
+Python package through `release.yml`; `npm-v*` publishes the npm package through
+`release-npm.yml`. They were coupled until 0.4.1, which was a PyPI release containing no
+Python changes at all, cut only because npm serves the README of the *published* version
+and there is no way to edit one in place. One code-less release is a curiosity; a JS
+package with its own cadence would have produced one per fix.
 
 Since `.github/workflows/release.yml` exists, most of what follows is automated: pushing
 a `v*` tag runs the whole gate on the tagged commit, builds in a clean runner, checks the
@@ -188,7 +192,7 @@ this tree.
 ```
 npm view memvara name          # memvara
 npm view memvara version       # 0.0.1, until the tag that ships 0.0.2 lands
-npm view memvara description   # still a name reservation
+npm view memvara description   # the bridge, not the old reservation
 ```
 
 Then, on npmjs.com → package `memvara` → Trusted Publisher → GitHub Actions:

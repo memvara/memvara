@@ -20,8 +20,10 @@ pip install memvara                # numpy, and nothing else
 That is the supported install. `pip install -e .` from a clone is the development
 install, and `python3 -m build --wheel` is how you get an artifact of the tree you
 are standing on. See [`RELEASING.md`](RELEASING.md) for how a version gets onto
-PyPI. There is an npm package of the same name; it is a name reservation and
-installs no client.
+PyPI. There is an npm package of the same name; since `0.1.0` it is a CLI —
+`npx memvara` bridges a stdio MCP client to the hosted server — and not a
+library to import. It is a way *in* to memvara, not a second implementation of
+it, and it is irrelevant to a self-hosted deployment.
 
 <!-- This paragraph previously said the name "already belongs to an unrelated
 differentiable-rendering library". That was true of `engram`, the project's former name,
