@@ -271,6 +271,33 @@ def test_the_node_suite_runs_in_the_release_and_on_more_than_one_node():
     assert len(versions.group(1).split(",")) >= 2
 
 
+def test_releasing_names_the_workflow_that_actually_publishes():
+    """npm's trusted publisher registration names **one workflow filename**, and the
+    OIDC exchange compares it against the token's `job_workflow_ref`. So moving the
+    publish job to a different file silently invalidates the registration — the
+    repository, the environment and the package are all still right, and the publish
+    still fails.
+
+    It failed exactly this way on `npm-v0.1.0`, hours after 0.0.3 published cleanly,
+    because the job moved to `release-npm.yml` and `docs/RELEASING.md` still said
+    `release.yml`. The error gives no hint: npm answers `E404` on `PUT` for a package
+    that plainly exists, rather than a 403, so that a probe cannot enumerate private
+    names.
+
+    This is the check that makes the document and the workflow move together."""
+    releasing = (REPO / "docs" / "RELEASING.md").read_text(encoding="utf-8")
+    table = re.search(r"\|\s*Workflow filename\s*\|\s*`([^`]+)`\s*\|", releasing)
+    assert table, "RELEASING.md no longer states a workflow filename for the npm publisher"
+    named = table.group(1)
+    assert named == WORKFLOW.name, (
+        f"RELEASING.md tells a maintainer to register {named!r}, but the job that runs "
+        f"`npm publish` is in {WORKFLOW.name!r}. Registering the named one produces an "
+        "E404 on PUT at publish time, which reads as 'no such package'."
+    )
+    # And the file it names must be the one that actually publishes.
+    assert "npm publish" in _workflow()
+
+
 def test_no_public_doc_calls_npm_unclaimed_while_linking_to_it():
     """Wrong docs are worse than missing ones. A sentence that says the name is free
     next to a link at the live package is how a reader concludes they can take it."""

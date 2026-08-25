@@ -181,17 +181,15 @@ the last place anyone thinks to look for a missing registration.
 
 ### npm trusted publisher
 
-The package already exists on npm (`memvara@0.0.1`), so there is no chicken-and-egg:
-the form is on the package's Settings → Trusted Publisher, not a pending registration.
+The package already exists on npm, so there is no chicken-and-egg: the form is on the
+package's Settings → Trusted Publisher, not a pending registration.
 
-**Preflight, before filling the form.** If any of these have changed, stop — the
-placeholder is no longer the thing this workflow is wired to publish. `version` is what
-the registry serves, which is the number *before* the pending publish, not the one in
-this tree.
+**Preflight, before filling the form.** `version` is what the registry serves, which is
+the number *before* any pending publish, not the one in this tree.
 
 ```
 npm view memvara name          # memvara
-npm view memvara version       # 0.0.1, until the tag that ships 0.0.2 lands
+npm view memvara version       # what is live now
 npm view memvara description   # the bridge, not the old reservation
 ```
 
@@ -201,12 +199,32 @@ Then, on npmjs.com → package `memvara` → Trusted Publisher → GitHub Action
 |---|---|
 | Organization or user | `memvara` |
 | Repository | `memvara` |
-| Workflow filename | `release.yml` |
+| Workflow filename | `release-npm.yml` |
 | Environment name | `npm` |
 | Allowed actions | `npm publish` |
 
-`release.yml` is the filename, including the extension. npm does not verify the
-configuration when you save it; a typo shows up at publish as `ENEEDAUTH`.
+**`release-npm.yml`, not `release.yml`** — including the extension. The registration
+names one workflow file, and npm's OIDC exchange compares it against the token's
+`job_workflow_ref`. Moving the publish job to a different file therefore invalidates the
+registration even though the repository, the environment and the package are unchanged.
+
+That is not hypothetical: `npm-v0.1.0` failed on exactly this, hours after `0.0.3`
+published cleanly from `release.yml`. **And the error does not say so.** It is neither
+`ENEEDAUTH` nor a 403:
+
+```
+npm error code E404
+npm error 404 Not Found - PUT https://registry.npmjs.org/memvara - Not found
+npm error 404  The requested resource 'memvara@0.1.0' could not be found
+npm error 404  or you do not have permission to access it.
+```
+
+A 404 on `PUT`, for a package that plainly exists and that you can `npm view`. Read it as
+*unauthorized*; npm declines to distinguish "no such package" from "not yours to write"
+so that a probe cannot enumerate private names. Nothing is published when it happens, so
+the recovery is to fix the registration and **re-run the failed job on the original run**
+— a `workflow_dispatch` re-run will not publish, because `publish` requires
+`github.event_name == 'push'`, and that is deliberate.
 
 npm CLI ≥ 11.5.1 and Node ≥ 22.14 are required for the OIDC exchange. The job installs
 that CLI; do not pin an older one to "what the runner happened to have".
