@@ -251,8 +251,9 @@ Memvara is built around the observation that **most of this doesn't need a model
   the library runs offline in milliseconds with no download, and it makes tests
   deterministic. It will not put "physician" near "doctor". Install
   `memvara[local-embed]` or pass your own embedder for real semantic recall.
-- **Two benchmarks, and only one of them runs the real thing.** `bench/mem0_real.py`
-  drives the actual `mem0ai` package; `bench/compare.py` drives `bench/baseline.py`, a
+- **Two harnesses compare against mem0, and only one of them runs the real thing.**
+  `bench/mem0_real.py` drives the actual `mem0ai` package; `bench/compare.py` drives
+  `bench/baseline.py`, a
   reimplementation of mem0's documented architecture, and is kept because it can vary
   parameters (top-k, threshold, chitchat ratio) that the real package does not expose.
   Both share one extraction oracle, so both isolate architecture from model quality — and
@@ -322,10 +323,16 @@ Memvara is built around the observation that **most of this doesn't need a model
   way to get the full machine, and it is what a real integration does; see
   [What the fast path does not catch](#what-the-fast-path-does-not-catch-measured).
   Retrieval, contradiction resolution and consolidation never needed a model.
-- **No REST server in the open core.** MCP over stdio is the shipped remote surface. A
-  REST API is a component of the commercial product rather than a gap in this one — see
+- **No REST server in the open core, and there is not going to be one.** MCP over stdio is
+  the shipped remote surface here. The REST API is a component of the commercial product
+  rather than a gap in this one — see
   [Open core](#open-core-and-exactly-where-the-line-is), which says where that line is and
-  why it does not move.
+  why it does not move. What this repository does ship is the *client* half,
+  `memvara/store/remote.py`, and it is partial on purpose: it implements what the REST
+  facade actually exposes and raises `NotImplementedError`, with a docstring, everywhere it
+  does not. A `put_claim` that quietly wrote through `POST /v1/facts` would reinterpret
+  every field the caller set, and a `competing_claims` returning `[]` for want of an
+  endpoint would tell every write path a slot was empty. Both are worse than an exception.
 - **The framework adapters do not all preserve what makes memvara different.** LangChain
   and LlamaIndex *retrievers* keep everything, including `as_of=`, because "query in,
   documents out" is what `search()` already is. A LangChain `ChatMessageHistory` keeps
