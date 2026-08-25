@@ -20,7 +20,7 @@ from memvara.schema import (
     Volatility,
 )
 from memvara.store import SQLiteStore
-from memvara.types import Claim, Episode, Scope, utcnow
+from memvara.types import Claim, Episode, Scope, close_out, utcnow
 from memvara.write import Reconciler
 
 
@@ -533,6 +533,28 @@ def test_authority_is_read_against_the_incumbent_and_not_against_a_fixed_floor(r
 
     assert res.action == "supersede", "0.30 is more than half of 0.50"
     assert live_objects(store, res.claim) == ["Paris"]
+
+
+def test_the_authority_rule_does_not_reach_a_caller_who_named_the_victim(rec, store):
+    """Pinned because four documents state the rule as an invariant, and an invariant with
+    a silent exception is worse than a narrower one stated plainly.
+
+    `Memvara.supersede`, `forget` and `delete` all close a claim the caller named, before
+    this module is asked anything — so there is no candidate to weigh against it. That is
+    the same boundary `close="retired"` sits on: the rule arbitrates an *inference* the
+    write path drew, and naming the row to close is an instruction rather than an
+    inference. Asserted here at the reconciler, where the absence of a victim is the
+    mechanism: a claim already closed is not live, so it is never a competing claim.
+    """
+    london = rec.apply(claim("lives_in", "London", confidence=1.00)).claim
+    close_out(london, utcnow(), None, "ended")     # what `supersede` does first
+    store.put_claim(london)
+
+    res = rec.apply(claim("lives_in", "Paris", confidence=0.10))
+
+    assert res.disputed == [], "there was nothing live left to dispute with"
+    assert res.action == "add"
+    assert store.get_claim(london.id).state == "ended"
 
 
 def test_a_low_confidence_retraction_still_retracts(rec, store):

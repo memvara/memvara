@@ -998,14 +998,25 @@ class Memvara:
         for key, value in meta.items():
             try:
                 json.dumps(value)
-            except TypeError:
+            except (TypeError, ValueError, RecursionError) as exc:
+                # Three types, because `json.dumps` has three ways to refuse and only the
+                # first is obvious: `TypeError` for a value it has no encoder for,
+                # `ValueError` for a circular reference, `RecursionError` for a structure
+                # deeper than the interpreter's limit. Catching only `TypeError` left the
+                # other two raising with the key nowhere in the message, which is the
+                # failure this block exists to remove rather than to reproduce twice.
+                #
+                # The original message is quoted rather than the value's type described,
+                # because the offending value is often *inside* a serializable one:
+                # `note={"filed": datetime(...)}` is a dict, and saying "a dict is not
+                # JSON" sends the caller to fix the container instead of the member.
+                # `json` already names the member; repeating it here was the error.
                 raise TypeError(
-                    f"remember() cannot store meta[{key!r}]: a {type(value).__name__} "
-                    "is not JSON, and Claim.meta is a JSON column. Send it as a string "
-                    "— an instant as ISO-8601, anything else as whatever your reader "
-                    "will parse — or, if it belongs on the claim rather than beside it, "
-                    "as one of this method's own arguments."
-                ) from None
+                    f"remember() cannot store meta[{key!r}]: {exc}. Claim.meta is a JSON "
+                    "column. Send it as a string — an instant as ISO-8601, anything else "
+                    "as whatever your reader will parse — or, if it belongs on the claim "
+                    "rather than beside it, as one of this method's own arguments."
+                ) from exc
         scope = self._scope(tenant, user, agent, session)
         pred = self.registry.normalize(predicate)
         now = utcnow()

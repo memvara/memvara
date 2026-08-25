@@ -69,8 +69,10 @@ from .types import (
     Accumulation,
     Claim,
     Closure,
+    Collapse,
     Delta,
     Derivation,
+    Dispute,
     Episode,
     ErasureProof,
     Explanation,
@@ -93,7 +95,7 @@ from .write import (
 )
 from .write.reconcile import backfill_entities
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "Memvara", "ScopedMemvara", "AsyncMemvara", "AsyncScopedMemvara",
@@ -104,6 +106,11 @@ __all__ = [
     # in the same slot, under a predicate whose cardinality nobody has declared. Exported
     # because a caller reading that field needs to be able to name its element type.
     "Accumulation",
+    # The element types of `WriteReceipt.disputed` and `.collapsed`, exported for the
+    # reason above and not a new one: a caller reading either field has to be able to
+    # name what is in it, and this package ships `py.typed`, so the caller who cannot is
+    # the one whose type checker is doing its job.
+    "Dispute", "Collapse",
     # Which clock a write stops when it ends a claim: "ended" (the world changed) or
     # "retired" (the record was wrong). Exported because it is in `Reconciler.apply`'s
     # signature and in four facade methods, so a typed caller needs to be able to name it.

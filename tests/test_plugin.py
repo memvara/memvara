@@ -101,6 +101,27 @@ def test_the_dispatcher_points_at_a_reference_that_exists(name: str) -> None:
     assert (SKILL / "references" / name).is_file()
 
 
+def test_the_canonical_plugin_claude_md_has_exactly_one_local_marker() -> None:
+    """`plugin-claude.md` is copied into every repo in `plugin-repos.txt` as its CLAUDE.md.
+
+    The marker is where each repository's own sections go, and a sync splices around it.
+    Two markers and the splice takes the wrong span; none and every repo loses the two
+    sections that legitimately differ — its runtime facts and, for the one plugin that
+    ships hooks, its hook rules.
+
+    Eleven of the fourteen sections were already byte-identical across all seven plugin
+    repositories when this was written; only those two differed, which is what makes a
+    canonical file possible at all and why the split is a delimited block rather than a
+    prefix.
+    """
+    text = (REPO / "plugin-claude.md").read_text(encoding="utf-8")
+    assert text.count("@@LOCAL@@") == 1, "exactly one splice point"
+    assert text.startswith("# Working in a memvara plugin repository"), (
+        "the copied file is a CLAUDE.md and opens as one")
+    assert "plugin-repos.txt" in text, (
+        "it must say where it is copied to, since the copy is what people will read")
+
+
 def test_plugin_repos_list_is_the_public_set() -> None:
     names = [
         line.strip()

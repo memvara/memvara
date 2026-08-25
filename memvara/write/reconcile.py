@@ -29,6 +29,15 @@ Three invariants the implementation is built around:
   nothing about the world had changed. See `AUTHORITY_SHARE` for the rule and
   `_outranked` for what happens to a candidate that loses.
 
+  **It binds the reconciler, not `Memvara.supersede`.** That method closes its target
+  before this module is asked anything, so there is no candidate-against-victim
+  comparison to make and a 0.10 claim named there still ends a 1.00 one. That is the
+  same distinction `close="retired"` rests on: the rule arbitrates an *inference* the
+  write path drew, and a caller naming the exact claim to close has drawn none. Said
+  here because an invariant with a silent exception is worse than a narrower one
+  stated plainly — `forget()` and `delete()` are outside it for the same reason, having
+  no candidate at all.
+
 **The second invariant is right and it was silent, which is a different problem.** MANY
 is the safe default for a predicate nobody has decided about, but the write that lands on
 one reported nothing: `remember("quota_gate", "status", "installed")` over `"not

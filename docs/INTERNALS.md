@@ -317,6 +317,12 @@ claim:
    Every confidence the shipped paths produce — 1.00, 0.95, 0.70, 0.50 — clears half of
    every other, so ordinary traffic passes untouched.
 
+   **The rule binds this step and not `Memvara.supersede`**, which closes its target
+   before the reconciler is asked anything — there is no comparison to make when the
+   caller has named the victim. Same boundary `close="retired"` sits on: this arbitrates
+   an inference, and an instruction is not one. `forget()` and `delete()` are outside it
+   too, having no candidate to weigh.
+
    **A closure clamped to the victim's own start empties its interval**, and the write
    reports a `Collapse`. `close_out` never inverts an interval, so superseding a claim at
    or before the instant it began leaves `valid_from == valid_to`: it survives in
