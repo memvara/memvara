@@ -19,7 +19,7 @@ import subprocess
 import sys
 import types
 import warnings
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
@@ -2401,6 +2401,34 @@ def test_ordinary_meta_still_goes_through_untouched(mem):
 
     assert written.added[0].meta["source_system"] == "crm"
     assert written.added[0].meta["salience"] == "high", "a near-miss is still the caller's"
+
+
+@pytest.mark.parametrize("key, meant", [("true_since", "valid_from"),
+                                        ("true_until", "valid_to")])
+@pytest.mark.parametrize("value", [datetime(2023, 1, 1, tzinfo=timezone.utc),
+                                   "2023-01-01T00:00:00+00:00"])
+def test_remember_refuses_the_mcp_spelling_of_the_valid_interval(mem, key, meant, value):
+    """`memory_remember` calls the interval `true_since`/`true_until` and this method
+    calls it `valid_from`/`valid_to`, so an agent that read the tool description and then
+    wrote Python lands in `**meta`. Both values matter and only one of them was ever
+    loud: a `datetime` died in `json.dumps` four frames down in the storage layer, naming
+    neither the key nor this call, while the ISO *string* the tool actually sends
+    serialized perfectly and stored a claim dated now, with the interval the caller asked
+    for filed beside it as an unread annotation."""
+    with pytest.raises(TypeError, match=f"{key}.*{meant}"):
+        mem.remember("user", "lives_in", "Berlin", **{key: value})
+
+
+def test_remember_refuses_a_meta_value_the_store_cannot_persist(mem):
+    """`Claim.meta` is a JSON column, so a value `json.dumps` refuses is not metadata —
+    it is a write that fails inside `put_claim`, with the offending key absent from the
+    message and the traceback pointing at the storage layer. Rejected here for the reason
+    this method already rejects `RESERVED_META`: at the boundary, naming the key."""
+    with pytest.raises(TypeError, match="filed_at"):
+        mem.remember("user", "lives_in", "Berlin",
+                     filed_at=datetime(2023, 1, 1, tzinfo=timezone.utc))
+
+    assert mem.get_all() == [], "and nothing was written on the way to the refusal"
 
 
 # --- provenance, backwards -------------------------------------------------------

@@ -9,7 +9,38 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **`remember()` refuses `true_since` and `true_until` instead of filing them as
+  metadata.** The two surfaces spell the valid interval differently — `memory_remember`
+  takes `true_since`/`true_until`, the Python API takes `valid_from`/`valid_to` — and
+  `**meta` accepted the tool's spelling from either. The failure had two halves and only
+  one of them was loud:
+
+  ```python
+  m.remember("user", "lives_in", "Bangalore", true_since=datetime(2023, 1, 1, tzinfo=utc))
+  # TypeError: Object of type datetime is not JSON serializable
+  #   ...raised in memvara/store/sqlite.py, in put_claim, naming no key
+  ```
+
+  A `datetime` reached `json.dumps` in the storage layer and died four frames from the
+  call, with the offending argument nowhere in the message. An ISO **string** — which is
+  what the tool actually sends — serialized cleanly, so the claim stored dated *now*,
+  with the interval the caller asked for sitting beside it as an annotation nothing
+  reads. That one is silent, and it is the one an agent hits: the likeliest caller here
+  is a model that read the tool description and then wrote Python, which is this
+  library's own primary user.
+
+  Both are now a `TypeError` at the call, naming the key and the keyword it meant.
+  `MCP_ALIASES` in `memvara/core.py` is the map, so a third spelling cannot be added on
+  one surface without the other refusing it.
+
+- **`remember()` rejects a `meta` value the store cannot persist.** `Claim.meta` is a
+  JSON column, so anything `json.dumps` refuses never reaches disk — it raises inside
+  `put_claim` with the key absent from the message. The check now runs at the boundary,
+  where `RESERVED_META` is already checked, and names the key and its type. The docstring
+  already argued for exactly this: *"a silently dropped argument is how a caller comes to
+  believe something untrue about what they wrote."*
 
 ## [0.5.0] — 2026-08-25
 
