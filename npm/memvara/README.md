@@ -85,7 +85,11 @@ the past.
 A correction never destroys history. It closes the old value at the instant it stopped
 being true, so that value goes on answering questions about the period it held.
 
-## The twelve tools
+## The tools
+
+The set follows the library, and **a hosted deployment can be a release behind it** —
+this bridge shows whatever the server it connects to advertises. `tools/list` is the
+authority for a given day; the table below is what `app.memvara.dev` serves now.
 
 | tool | for |
 | --- | --- |
