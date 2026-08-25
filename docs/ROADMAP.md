@@ -59,6 +59,24 @@ Two findings worth keeping:
   `claim.id`, a fresh `uuid4` per ingest, so two ingests of one corpus ranked differently.
   Ties now break on a content hash and three full runs are byte-identical.
 
+### 4c. The differentiator, measured — done
+
+Both of the above measure *retrieval*, which is the commodity half. `bench/temporal.py`
+measures the other one: six families — point-in-time, delayed knowledge, `as_of` audit,
+contradiction, correction, source authority — over 48 authored scenarios, scored as exact
+set matches, with no model and no network, byte-identical on every run.
+
+It was built because the moat had no number at all, and it earned its place immediately:
+against `origin/main` at `7b91a9a` it scored `source_authority` at **50.0%** — a
+0.10-confidence guess displaced a 1.00-confidence statement in every scenario — and
+reported 8 `ended` claims that answer at no instant with 0 of them named by the write path.
+Both are defects that had lived on the write path while 3,448 tests passed. Figures, the
+baseline column and the anti-flattery constraints are in `docs/BENCHMARKS.md`.
+
+The suite is wired into `tests/test_bench_eval.py` as a gate rather than left as a script,
+because everything it scores is a promise the library makes in prose and prose does not go
+red.
+
 **The half that is still open** is end-to-end judged accuracy, which does need a reader
 model and does cost money. The harness already reports a `none` / `memory` / `full`
 triple when a reader is configured, because a memory score with no reader-only floor and no

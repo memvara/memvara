@@ -44,6 +44,81 @@ one to distrust most, so the mechanism is documented in `bench/mem0_real.py`.
 
 ---
 
+## The two clocks, measured (synthetic, self-authored)
+
+`PYTHONPATH=. python3 bench/temporal.py` — no model, no network, no reader, no judge, and
+byte-identical on every run because every instant in it is a module constant.
+
+Everything else on this page measures *retrieval*. That is the commodity half, and it is
+the half benchmarked against competitors. The differentiator — two independent clocks,
+supersession that closes exactly one of them, source authority — had **no number at all**
+until this harness existed, and the cost of that was not hypothetical: two defects lived
+on the write path while 3,448 tests passed.
+
+Six families over 48 authored scenarios and 160 writes, scored as exact set matches
+against golds the generator builds before anything is written:
+
+| family | n | memvara | `no-clocks` | `disc` |
+|---|---:|---:|---:|---:|
+| `point_in_time` — `valid_at=T` | 24 | **100.0%** | 33.3% | 66.7% |
+| `delayed_knowledge` — `known_at` against `valid_at` | 16 | **100.0%** | 50.0% | 50.0% |
+| `as_of_audit` — both clocks together | 24 | **100.0%** | 33.3% | 66.7% |
+| `contradiction` — ONE resolving, MANY not | 24 | **100.0%** | 66.7% | 33.3% |
+| `correction` — `ended` against `retired` | 16 | **100.0%** | 50.0% | 50.0% |
+| `source_authority` — a guess meeting a statement | 16 | **100.0%** | 100.0% | 0.0% |
+| **all** | **120** | **100.0%** | **53.3%** | **46.7%** |
+
+`no-clocks` answers every question with the present-tense live set: what a store with one
+clock can say, asked the same questions. `disc` is the share of a family's questions it
+gets wrong. **A family at 0.0% is one the baseline handles**, and the table says so rather
+than hiding it — `source_authority` is present-tense by construction, so a read-side
+baseline ties there and the comparator has to be this repository's own history.
+
+### The before-and-after, which is the point
+
+The same file against `origin/main` at `7b91a9a`, before the two write-path fixes:
+
+| | `7b91a9a` | after |
+|---|---:|---:|
+| `source_authority` | **50.0%** | 100.0% |
+| all | 93.3% | **100.0%** |
+| `ended` claims that answer at no instant | 8 of 56 | 8 of 48 |
+| ...of which the write path reported | **0** | **8** |
+
+`source_authority` at 50.0% is eight of eight scenarios in which a 0.10-confidence guess
+displaced a 1.00-confidence statement — and stamped it `ended`, which asserts the world
+changed. The `ended` totals differ (56 against 48) for the same reason: on `7b91a9a` each
+of those eight guesses ended a claim that should not have been ended.
+
+The last row is not an accuracy question and cannot be one. A claim closed at or before
+the instant it began holds for no interval, so it is absent from every answer at every
+instant on either clock, and no gold can name a row no query returns. It is checked
+against the rows instead: how many `ended` claims answer nothing, and how many of those
+the write said so about while making them. The corpus produces them deliberately — the
+`contradiction` family writes the same-instant case that every import stamping dates
+rather than timestamps produces.
+
+### What it is not
+
+**Synthetic and self-authored**, in the same category as `bench/multihop.py` and
+`bench/compare.py` and to be discounted the same way. It is an illustration of a
+mechanism, not evidence against another system; nothing here is a head-to-head. The
+scenarios are triples with instants and contain no English, so none of the extraction path
+is exercised and none of its cost or failure modes appear.
+
+**It probes `get_all`, not `search`.** That is deliberate: it measures the temporal axes
+and not the ranker, so a temporal regression cannot be confused with a ranking one. The
+retrieval side of temporal questions is [the temporal leg](#the-temporal-leg-and-the-abstention-that-is-the-actual-finding),
+below, and it is a different measurement.
+
+**One gold in it was wrong before the harness caught it.** The `contradiction` family used
+`prefers_tool` for its accumulating slot on the strength of the name; it is
+`Cardinality.ONE`, and the family reported 33.3% until the gold was corrected to use
+`speaks`. The four anti-flattery constraints in the file's docstring exist because that is
+the normal failure mode of a self-authored benchmark, and this one hit it on the first run.
+
+---
+
 ## LOCOMO and LongMemEval — retrieval, measured
 
 Not answer accuracy, and **not comparable to published LOCOMO/LongMemEval scores**, which
