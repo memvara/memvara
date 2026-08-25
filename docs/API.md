@@ -129,7 +129,7 @@ memory whose text contains newlines and a fake section header cannot forge promp
 structure around itself. Its signature is explicit rather than `**kwargs` for the same
 reason: the time and state keywords are not reachable from here, and `include_history=True`
 is the one bounded exception — see
-[What a prompt block may carry from the past](#what-a-prompt-block-may-carry-from-the-past).
+[What a prompt block may carry from the past](DESIGN.md#what-a-prompt-block-may-carry-from-the-past).
 
 ### Two meanings of "delete", kept apart
 
