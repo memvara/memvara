@@ -84,7 +84,9 @@ and no vector database.
 | | |
 |---|---|
 | 🕰️ **Two clocks, not one** | When it was true, and when you learned it — independently. Ask what you believed in March about June, and get an answer that is not a guess. |
+| 🗣️ **It answers the audit question in words** | `ask()` gives what is true now, what was true then, and what this store *would have told you* then — plus the day the record changed. No model composes it. |
 | ⚖️ **Contradictions resolve without a model** | Cardinality is a schema property, so a conflict is an indexed lookup. Same two facts, same result, every run. |
+| 🛡️ **A guess cannot quietly overwrite a statement** | A value worth less than half of what it would replace is kept beside it instead, and the receipt names both. Overwriting would have recorded that the world changed, when nothing had. |
 | 🔌 **Offline by default** | numpy and nothing else. No API key, no Docker, no vector database, no network on the write path. |
 | 🧾 **Nothing is silently lost** | Every write returns a receipt saying what it did — including what it could *not* extract. |
 | 🔍 **Hybrid retrieval that explains itself** | Vector and BM25, time-aware, and every score is inspectable rather than a ranking you have to trust. |
@@ -119,8 +121,8 @@ pip install memvara
 ```
 
 The library is the product; the hosted service runs this
-same code. Start with [`docs/API.md`](docs/API.md), then
-[`docs/DESIGN.md`](docs/DESIGN.md) for why it is shaped
+same code. Start with [`docs/API.md`](https://github.com/memvara/memvara/blob/main/docs/API.md), then
+[`docs/DESIGN.md`](https://github.com/memvara/memvara/blob/main/docs/DESIGN.md) for why it is shaped
 that way.
 
 </td>
@@ -146,7 +148,7 @@ Fourteen tools — `memory_add`, `memory_remember`, `memory_recall`, `memory_sea
 Hand-rolled against the MCP wire format
 rather than taking an SDK
 dependency, so the "numpy and nothing else" claim survives the server too.
-[`docs/DEPLOY.md`](docs/DEPLOY.md) covers running it for other people.
+[`docs/DEPLOY.md`](https://github.com/memvara/memvara/blob/main/docs/DEPLOY.md) covers running it for other people.
 
 </td>
 </tr>
@@ -191,10 +193,10 @@ also a method-level mem0 shim if you want its call surface on this store.
 
 | | |
 |---|---|
-| The two clocks, six question families | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) |
-| Against the real `mem0ai` package | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) |
-| LOCOMO and LongMemEval, retrieval | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) |
-| Answer quality, end to end | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) |
+| The two clocks, six question families | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md) |
+| Against the real `mem0ai` package | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md) |
+| LOCOMO and LongMemEval, retrieval | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md) |
+| Answer quality, end to end | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md) |
 
 The harnesses are in `bench/` and `demo/` and every number is reproducible from this
 repository. Where a result is synthetic or self-authored, its own heading says so.
@@ -203,14 +205,14 @@ repository. Where a result is synthetic or self-authored, its own heading says s
 
 | | |
 |---|---|
-| [`docs/API.md`](docs/API.md) | The whole surface, in the order you meet it |
-| [`docs/DESIGN.md`](docs/DESIGN.md) | How it works, and the failure each decision prevents |
-| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Every measured claim, with its method |
-| [`docs/INTERNALS.md`](docs/INTERNALS.md) | Module map and invariants |
-| [`docs/DEPLOY.md`](docs/DEPLOY.md) | Running it for other people |
-| [`docs/UPGRADING.md`](docs/UPGRADING.md) | What changed under you |
-| [`docs/ROADMAP.md`](docs/ROADMAP.md) | What is done, deferred, and still missing |
-| [`docs/OPEN-CORE.md`](docs/OPEN-CORE.md) | What is Apache-2.0, and what is not |
+| [`docs/API.md`](https://github.com/memvara/memvara/blob/main/docs/API.md) | The whole surface, in the order you meet it |
+| [`docs/DESIGN.md`](https://github.com/memvara/memvara/blob/main/docs/DESIGN.md) | How it works, and the failure each decision prevents |
+| [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md) | Every measured claim, with its method |
+| [`docs/INTERNALS.md`](https://github.com/memvara/memvara/blob/main/docs/INTERNALS.md) | Module map and invariants |
+| [`docs/DEPLOY.md`](https://github.com/memvara/memvara/blob/main/docs/DEPLOY.md) | Running it for other people |
+| [`docs/UPGRADING.md`](https://github.com/memvara/memvara/blob/main/docs/UPGRADING.md) | What changed under you |
+| [`docs/ROADMAP.md`](https://github.com/memvara/memvara/blob/main/docs/ROADMAP.md) | What is done, deferred, and still missing |
+| [`docs/OPEN-CORE.md`](https://github.com/memvara/memvara/blob/main/docs/OPEN-CORE.md) | What is Apache-2.0, and what is not |
 
 ## Why this exists
 
@@ -300,7 +302,11 @@ Memvara is built around the observation that **most of this doesn't need a model
 - **Entity resolution folds surface forms, it does not know the world.** `Acme Corp` and
   `acme, inc.` collapse; `Big Blue` and `IBM` do not, unless you enable the opt-in model
   path or declare the alias. `Stark` versus `Stark Industries` is genuinely ambiguous and
-  is left that way.
+  is left that way. The fold is confident in the other direction too — two people who
+  share a name are one entity, so on a single-valued predicate the later one's job
+  retires the earlier one's. Nothing in the data can tell that from an ordinary job
+  change, so there is no warning for it; `split_entity()` is the repair, dated and
+  dry-run by default, for when a person knows what the store cannot.
 - **`AsyncMemvara` is a thread-pool wrapper, not an async rewrite.** It keeps an asyncio
   event loop unblocked, which is what it is for; it does not make the store itself async.
 - **With no `llm=`, `add()` keeps only what its rules recognise — and on some corpora that
@@ -390,12 +396,12 @@ The twelve remaining *branch* partials are verified-unreachable defensive guards
 disjunct, so the second can never decide the branch. They are kept as guards rather than
 deleted, and documented as such.
 
-Design notes and the module-by-module contract live in [docs/INTERNALS.md](docs/INTERNALS.md).
-[docs/UPGRADING.md](docs/UPGRADING.md) is the short list of changes that do not announce
+Design notes and the module-by-module contract live in [docs/INTERNALS.md](https://github.com/memvara/memvara/blob/main/docs/INTERNALS.md).
+[docs/UPGRADING.md](https://github.com/memvara/memvara/blob/main/docs/UPGRADING.md) is the short list of changes that do not announce
 themselves — read it before upgrading, starting with the one where `invalidated_at is
 None` stopped meaning "live" without breaking anything.
-[CONTRIBUTING.md](CONTRIBUTING.md) covers the bar a patch has to clear and what will and
-will not be accepted; [SECURITY.md](SECURITY.md) covers private vulnerability reporting.
+[CONTRIBUTING.md](https://github.com/memvara/memvara/blob/main/CONTRIBUTING.md) covers the bar a patch has to clear and what will and
+will not be accepted; [SECURITY.md](https://github.com/memvara/memvara/blob/main/SECURITY.md) covers private vulnerability reporting.
 
 ## License
 
