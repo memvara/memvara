@@ -348,7 +348,7 @@ structured integration, declaring cardinality is always the caller's job.
 A ticketing system, a CRM or a billing table already holds these as columns and needs no
 model to read them back out of its own prose. That path needs no API key, exercises the
 whole bitemporal machine, and is the one the
-[answer-quality run](#answer-quality-end-to-end-an-authored-corpus-an-agent-as-the-reader)
+[answer-quality run](BENCHMARKS.md#answer-quality-end-to-end-an-authored-corpus-an-agent-as-the-reader)
 measures as `memvara_structured`.
 
 ### Retrieval is hybrid, time-aware, and explains itself
@@ -425,7 +425,7 @@ That bound is why this can exist at all on a surface that otherwise refuses to r
 anything non-live: `recall()` takes no `as_of`, no `states=` and no `include_invalidated=`,
 because `states=["retired"]` would build a prompt out of nothing but the records we
 stopped believing. Time travel and audit reads stay on `search()`, where they are an
-explicit choice. [SECURITY.md](SECURITY.md#the-prompt-injection-surface-in-recall) treats
+explicit choice. [SECURITY.md](../SECURITY.md#the-prompt-injection-surface-in-recall) treats
 reaching a retired claim through `recall(include_history=True)` as an in-scope
 vulnerability, and
 `tests/test_api.py::test_recall_can_carry_the_past_of_a_fact_without_carrying_a_retired_one`
@@ -510,7 +510,7 @@ The deliberate exceptions are `erase()` and `purge()` — one claim and one scop
 is a separate, explicit, irreversible call rather than a flag on `forget`, and it removes
 everything derived from the text. Purging a user takes their agents and sessions with
 them, and both return per-table counts as evidence. See
-[Two meanings of "delete"](#two-meanings-of-delete-kept-apart).
+[Two meanings of "delete"](API.md#two-meanings-of-delete-kept-apart).
 
 ### The learned schema is durable
 

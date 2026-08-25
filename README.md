@@ -321,12 +321,12 @@ Memvara is built around the observation that **most of this doesn't need a model
   qualifier on the offline claim: the *library* runs with no API key, extraction from
   arbitrary prose does not. `remember()` with a declared `PredicateSpec` is the offline
   way to get the full machine, and it is what a real integration does; see
-  [What the fast path does not catch](#what-the-fast-path-does-not-catch-measured).
+  [What the fast path does not catch](https://github.com/memvara/memvara/blob/main/docs/DESIGN.md#what-the-fast-path-does-not-catch-measured).
   Retrieval, contradiction resolution and consolidation never needed a model.
 - **No REST server in the open core, and there is not going to be one.** MCP over stdio is
   the shipped remote surface here. The REST API is a component of the commercial product
   rather than a gap in this one — see
-  [Open core](#open-core-and-exactly-where-the-line-is), which says where that line is and
+  [Open core](https://github.com/memvara/memvara/blob/main/docs/OPEN-CORE.md), which says where that line is and
   why it does not move. What this repository does ship is the *client* half,
   `memvara/store/remote.py`, and it is partial on purpose: it implements what the REST
   facade actually exposes and raises `NotImplementedError`, with a docstring, everywhere it
@@ -367,7 +367,7 @@ Memvara is built around the observation that **most of this doesn't need a model
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 3,539 tests, offline, no API key
+python3 -m pytest -q                              # 3,572 tests, offline, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/temporal.py            # the two clocks, six families
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison
@@ -413,4 +413,4 @@ will not be accepted; [SECURITY.md](https://github.com/memvara/memvara/blob/main
 ## License
 
 Apache-2.0, for everything in this repository. See
-[Open core](#open-core-and-exactly-where-the-line-is) for what is and is not in it.
+[Open core](https://github.com/memvara/memvara/blob/main/docs/OPEN-CORE.md) for what is and is not in it.

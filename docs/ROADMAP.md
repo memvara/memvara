@@ -5,7 +5,7 @@ the commercial layer relate. Kept honest about status: an item is `done` only wh
 something in the tree does it, `deferred` when it was considered and declined with a
 reason, and `next` when it is actually queued.
 
-**Status as of `0.7.0`.** 3,539 tests, 100% statement coverage, mypy clean, CI on
+**Status as of `0.7.0`.** 3,572 tests, 100% statement coverage, mypy clean, CI on
 3.10–3.13 across Linux, macOS and Windows. The library does what the README says. Phase 4
 — the evidence phase that gated everything below — is **done**, which changes the shape of
 this document: the organizing risk was credibility, and it is no longer that every
@@ -587,7 +587,7 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
    the point: a stub reader picks the retrieved line with the most words in common with the
    question, so its accuracy column measures the corpus and the arms and nothing about
    answers.
-2. **No external user has run this in production.** 3,539 tests prove the code does what we
+2. **No external user has run this in production.** 3,572 tests prove the code does what we
    said it does. They prove nothing about what happens on someone else's data.
 3. **The English-centrism is measured, not fixed.** The salience gate and the fast extractor
    are English sentence forms; other scripts fall through to the model, which is correct

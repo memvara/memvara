@@ -201,7 +201,7 @@ search. That cost, not the accuracy, is why the default is still `None`.
 The dependency-free `CoverageReranker` is a **control, not a recommendation**: it is
 lexical, it measures what the *stage* does without a model, and on this suite it nets
 −0.1. Full table, per-category breakdown and the reproduce commands are in
-[docs/ROADMAP.md](docs/ROADMAP.md).
+[docs/ROADMAP.md](ROADMAP.md).
 
 Two findings from building this. **LongMemEval's `oracle` split cannot measure evidence
 retrieval at all** — in all 500 instances every haystack session *is* an evidence session,
@@ -625,7 +625,7 @@ which is right and also leaves nothing to measure.
 **The blocking dependency here is ingestion, not retrieval.** Both public instruments are
 blind to the graph leg for the same reason the `memvara` demo arm produces zero claims —
 see [What the fast path does not
-catch](#what-the-fast-path-does-not-catch-measured). Until the offline write path extracts
+catch](DESIGN.md#what-the-fast-path-does-not-catch-measured). Until the offline write path extracts
 from ordinary prose, no public retrieval number can move on this.
 
 ---
@@ -709,7 +709,7 @@ Exact vector search over a scope is O(|scope| · d) and that is the floor — th
 already BLAS. Beating it requires an approximate index (HNSW/IVF), which trades recall
 for speed and belongs behind the `Store` protocol, not in the default path.
 
-Read [`bench/baseline.py`](bench/baseline.py) before quoting any of this: the comparison
+Read [`bench/baseline.py`](../bench/baseline.py) before quoting any of this: the comparison
 target is a reimplementation of mem0's *documented architecture*, not the mem0 package,
 and both systems are driven by the same extraction oracle so the comparison isolates
 architecture from model quality. The benchmark does **not** demonstrate the hybrid-retrieval
@@ -723,8 +723,8 @@ semantic embedder to test, and is stated here rather than claimed.
 
 Every number above measures **retrieval** — did the right claim come back, ranked where it
 should be. None of them measures **answers**: whether an agent reading memvara's output
-tells the customer the right thing. [`demo/`](demo/) is the apparatus for that, and
-[`demo/README.md`](demo/README.md) is its full documentation.
+tells the customer the right thing. [`demo/`](../demo/) is the apparatus for that, and
+[`demo/README.md`](../demo/README.md) is its full documentation.
 
 ```
 demo/scenario.py    64 turns of one customer's support history, and 20 questions
@@ -833,7 +833,7 @@ in that configuration there is no supersession and no bitemporal reasoning: it i
 episode retrieval with a different ranker, and its 95% is not a measurement of the thing
 this comparison exists to test. `memvara_structured`'s is. The mechanism, the receipt
 counts and the way out are in
-[What the fast path does not catch](#what-the-fast-path-does-not-catch-measured).
+[What the fast path does not catch](DESIGN.md#what-the-fast-path-does-not-catch-measured).
 
 That is why there are two memvara arms and why neither may be deleted: the first is what
 an evaluator meets on a weekend, and the second is what a deployment ships.
