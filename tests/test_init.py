@@ -595,6 +595,48 @@ def test_the_skill_carries_what_no_single_description_can(carries: str, marker: 
     assert marker in skill_text(), f"the skill no longer carries {carries}"
 
 
+_NUMBER_WORDS = (
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+)
+
+
+def test_the_skill_states_the_tool_surface_and_names_all_of_it() -> None:
+    """`references/hosted-mcp.md` enumerates the tools. Nothing checked it, and it rotted.
+
+    It said "## The ten tools" and listed ten, having never gained `memory_neighborhood`
+    or `memory_paths`, and then not `memory_standing` either. That page ships vendored into
+    seven plugin repositories, so one unguarded sentence here was wrong in eight places at
+    once.
+
+    Reading `TOOLS` is right *here* and would be wrong downstream. The plugin repos
+    deliberately do not reach into this library — a test that read a sibling working tree
+    would fail on a stale checkout. In this repository the list and its source are the same
+    tree, so there is no checkout to be stale.
+
+    Both halves are asserted because the incident that motivated the equivalent guard on
+    the website was a missing *name* rather than a wrong number: a list one short of its own
+    stated count agrees with itself perfectly. Order is asserted too, so the page reads in
+    the order the server declares.
+    """
+    page = (SKILL_PACKAGE / "references" / "hosted-mcp.md").read_text(encoding="utf-8")
+    word = _NUMBER_WORDS[len(TOOLS)]
+
+    assert f"The {word} tools" in page, (
+        f"the page must state the count as 'The {word} tools'; stating it positively is "
+        "what makes a deleted sentence fail as loudly as a wrong one")
+
+    listed = re.findall(r"`(memory_[a-z_]+)`", page)
+    seen, ordered = set(), []
+    for name in listed:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    assert ordered == [t.name for t in TOOLS], (
+        "the page must name every tool, once, in the order the server declares them; "
+        f"got {ordered}")
+
+
 def test_every_tool_the_skill_names_is_one_the_server_serves() -> None:
     """The skill routes a model between tools by name; `TOOLS` decides which exist.
 
