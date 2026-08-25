@@ -1,8 +1,9 @@
 # Releasing memvara
 
 PyPI has `memvara` 0.3.0 (first upload 2026-08-14, `0.1.0`). npm has `memvara` 0.0.1, a
-name reservation with no JavaScript client (same day). This is the checklist for the
-next upload of either, plus the things that have to stay true.
+name reservation with no JavaScript client (same day), and `npm/memvara/package.json` in
+this tree says `0.0.2` — so the next `v*` tag publishes npm rather than skipping it. This
+is the checklist for the next upload of either, plus the things that have to stay true.
 
 Since `.github/workflows/release.yml` exists, most of what follows is automated: pushing
 a `v*` tag runs the whole gate on the tagged commit, builds in a clean runner, checks the
@@ -18,9 +19,14 @@ that bumps a version and may push a branch. Approving a publish is a maintainer'
 manual step below stops at TestPyPI / `npm publish --dry-run`.
 
 npm versions are independent of the Python tag. `v0.2.1` does not imply npm `0.2.1`.
-If `npm/memvara/package.json` still says `0.0.1` — and the registry already has that
-number — `publish-npm` is skipped and the release is still green. That is the expected
-first run of the npm job.
+Whether npm publishes at all is decided by one comparison: `check-npm` reads the version
+out of `npm/memvara/package.json`, asks the registry, and skips `publish-npm` if it is
+already there. A tag pushed while that file still said `0.0.1` would have been a green
+release that published nothing to npm, which was the expected first run.
+
+**That is no longer the state.** The file says `0.0.2`, the registry has only `0.0.1`, so
+the next tag runs the publish for real — and the trusted publisher below has to exist
+before it does, or the job fails at the upload.
 
 ---
 
@@ -175,11 +181,13 @@ The package already exists on npm (`memvara@0.0.1`), so there is no chicken-and-
 the form is on the package's Settings → Trusted Publisher, not a pending registration.
 
 **Preflight, before filling the form.** If any of these have changed, stop — the
-placeholder is no longer the thing this workflow is wired to publish.
+placeholder is no longer the thing this workflow is wired to publish. `version` is what
+the registry serves, which is the number *before* the pending publish, not the one in
+this tree.
 
 ```
 npm view memvara name          # memvara
-npm view memvara version       # 0.0.1
+npm view memvara version       # 0.0.1, until the tag that ships 0.0.2 lands
 npm view memvara description   # still a name reservation
 ```
 
@@ -406,8 +414,10 @@ name you have not published.
   The npm half is the same shape and is **not** done — the trusted publisher on the
   package, and the `npm` GitHub Environment, above. Until they exist `publish-npm` fails
   at the upload the first time the version is actually new, which is the right order:
-  machinery should not be able to grant itself permission to publish. The skip on 0.0.1
-  does not need them.
+  machinery should not be able to grant itself permission to publish. The `npm`
+  environment now exists; the trusted publisher on the package is the outstanding half,
+  and `npm/memvara/package.json` is at `0.0.2`, so "the first time the version is
+  actually new" is the next tag. Register it before tagging.
 - **Nothing from the closed side, ever.** `docs/ROADMAP.md` puts governance (PII,
   encryption, the audit chain, RBAC) and the Postgres/pgvector store in a private
   repository, and "never committed" is the actual requirement — git history is public

@@ -252,7 +252,9 @@ because it is a demonstration of the seam rather than a product.
 - **npm trusted publisher** — one-time registration on the package, then a tag
   push uploads the way PyPI does. `.github/workflows/release.yml` packs, hashes
   and publishes with no reviewer wait. Until the publisher exists a *new* npm
-  version fails at upload. `0.0.1` is already on the index and the job skips it.
+  version fails at upload — and `npm/memvara/package.json` now says `0.0.2` against
+  a registry holding only `0.0.1`, so the next tag is that new version. This is the
+  one remaining step that cannot be done from inside the repository.
 - **Community files** — `CONTRIBUTING.md`, `SECURITY.md` and issue templates are in place,
   and the README states the open-core boundary rather than leaving a reader to infer it
   from a pricing page.

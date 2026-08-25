@@ -39,10 +39,10 @@ bug bounty, and we would rather say that here than have you find out after the w
 
 ## Supported versions
 
-`main`, and the most recent PyPI release (`0.2.0`). A fix goes to `main` and into the
+`main`, and the most recent PyPI release (`0.3.0`). A fix goes to `main` and into the
 next release; older wheels stay on the index and get an advisory if the defect reaches
-them. The npm package is a name reservation (`0.0.1`) with no runtime surface to
-backport to.
+them. The npm package is a name reservation (`0.0.1` on the registry, `0.0.2` pending)
+with no runtime surface to backport to.
 
 ## In scope
 

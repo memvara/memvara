@@ -104,10 +104,25 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   the tarball), and `publish-npm` (download those bytes, verify the hash, upload
   the tarball). Unlike `publish-pypi`, no reviewer wait: the `npm` environment
   exists so the trusted publisher can name it, not as an approval gate, and the
-  tag push is the publish. npm versions stay independent of the Python tag:
-  if the placeholder is still `0.0.1` and the registry already has it, the publish
-  job is skipped and the release is still green. There is no JavaScript client;
-  `npm/memvara` remains a four-field notice object.
+  tag push is the publish. npm versions stay independent of the Python tag: the
+  job compares `npm/memvara/package.json` against the registry and skips a number
+  that is already there, so a tag that does not touch the package is green and
+  publishes nothing. There is no JavaScript client; `npm/memvara` remains a
+  four-field notice object.
+
+- **`memvara@0.0.2` on npm — the reservation, saying something useful.** `0.0.1`
+  told a JavaScript reader the library is Python and stopped, which reads as *come
+  back later*. That is not the situation: memvara ships an MCP server, MCP is the
+  interface a JavaScript agent already speaks, and a JS binding would sit between
+  two things that are already connected. The notice and the README now say so, and
+  name both routes — `memvara-mcp` over stdio against a local file, needing no
+  account, and the hosted endpoint at `app.memvara.dev/mcp`, needing one. The
+  README had the hosted half and not the local half, which is the half a reader
+  can use in the next minute.
+
+  Still four keys, still `implemented: false`, still no runtime surface — the
+  package's promise is unchanged and the tests that pin it are unchanged. This is
+  the first version to go up through `release.yml` rather than a local script.
 
 ### Fixed
 

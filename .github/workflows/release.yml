@@ -273,10 +273,11 @@ jobs:
           if-no-files-found: error
 
   check-npm:
-    # Separate from packing on purpose. The first run of this workflow is expected to
-    # SKIP: npm/memvara is already 0.0.1 on the registry, and that version is spent.
-    # Putting the lookup in its own job makes that skip a log line you can read, not an
-    # absent publish job you have to infer.
+    # Separate from packing on purpose. Whether npm publishes is one comparison, and it
+    # deserves to be a log line you can read rather than an absent publish job you have
+    # to infer. It reports SKIP while package.json holds a number the registry already
+    # has — which is what the very first run of this workflow was written for, when the
+    # tree said 0.0.1 and 0.0.2 did not exist — and PUBLISH once it does not.
     #
     # npm versions are independent of the Python tag. This job does not compare
     # package.json to the tag, and it must not: a v0.2.1 Python release is not an

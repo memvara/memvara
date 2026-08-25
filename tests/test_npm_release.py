@@ -1,7 +1,7 @@
 """Promises the npm release process makes, as opposed to promises the package makes.
 
-The placeholder at npm/memvara is already on the registry as 0.0.1. The workflow in
-release.yml is how the next version — if there is one — gets there. These tests pin the
+The placeholder at npm/memvara is on the registry as 0.0.1, and this tree holds 0.0.2.
+The workflow in release.yml is how a new version gets there. These tests pin the
 decisions that are cheap to break in a YAML edit and expensive to notice afterwards:
 
 - the publish job cannot pack (or it will upload different bytes than the ones hashed)
@@ -176,9 +176,11 @@ def test_check_npm_writes_the_two_outputs_the_skip_depends_on():
 
 
 def test_publish_npm_skips_when_the_version_already_exists():
-    """The first tag after this lands will be a Python bump of a tree whose npm
-    version is still 0.0.1. If this `if:` is rewritten to always run, that tag
-    tries to republish 0.0.1 and the release goes red for a spent number."""
+    """A version already on the registry is a skip, not a republish. npm refuses a
+    reused version outright, so rewriting this `if:` to always run turns every tag
+    that does not happen to bump package.json into a red release — and the tags that
+    do not bump it are most of them, since npm versions here are independent of the
+    Python tag."""
     job = _job("publish-npm")
     header = _workflow()
     # The if: sits on the job, just above the body `_job` captured. Read the block

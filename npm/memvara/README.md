@@ -39,6 +39,11 @@ against `https://app.memvara.dev/mcp`, or call the commercial REST API. The
 [skill](https://github.com/memvara/memvara/blob/main/memvara/skills/memvara/SKILL.md)
 is markdown you can paste into a system prompt.
 
+That endpoint needs an account, and the local one does not: `pip install memvara` also
+installs `memvara-mcp`, the same server over stdio against a file on disk. Python has to
+be present to run it; nothing about your own project has to be Python. It is the shortest
+path from here to a working store, and it was missing from this page until 0.0.2.
+
 Say so on the [issue tracker](https://github.com/memvara/memvara/issues) if a real
 client would change that. The number of people who ask is most of the answer.
 
