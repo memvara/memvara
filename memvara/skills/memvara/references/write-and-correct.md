@@ -79,6 +79,31 @@ undeclared predicate decays at the slow default — a two-year half-life — so
 a fact that changed this morning still ranks as fresh long after it stopped
 being true, and nothing ever reports it.
 
+## Carry the turn ids forward
+
+Half the dispute sequence above runs on the excerpt: step 3 puts it in front
+of them, step 4 writes from it rather than from the complaint. `memory_why`
+has an excerpt to show only if one was attached when the claim was written, so
+a claim stored without that leaves you at step 2 with nothing to do but argue.
+
+Attaching it spans two tools, which is why neither tool's own description can
+tell you to do it:
+
+1. `memory_add` reports the turn ids it created.
+2. `memory_remember` takes those ids in `sources`.
+
+Lose them between the two and nothing errors. The write succeeds, the claim
+looks ordinary, and the cost lands weeks later on the one occasion it matters —
+someone challenges the fact and the honest reply is that there is nothing to
+show them. Extraction wires this up on its own; a triple you compose by hand
+does not, and by hand is the normal case on a `fast-path-only` deployment.
+
+Ids, not prose. The turn is already stored; handing back its text writes a
+duplicate of something this store is holding.
+
+Nothing backfills. Claims written before you started doing this stay
+unexplainable, so the sooner it becomes habit the smaller that set is.
+
 ## Valid time on a write
 
 `memory_remember` takes `true_since` and `true_until` — when it was true in
