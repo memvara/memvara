@@ -81,10 +81,13 @@ being true, and nothing ever reports it.
 
 ## Carry the turn ids forward
 
-The dispute sequence above ends at `memory_why`, and `memory_why` can only show
-an excerpt if one was attached when the claim was written. Attaching it is a
-two-step thing that spans two tools, which is why neither tool's own
-description can tell you to do it:
+Half the dispute sequence above runs on the excerpt: step 3 puts it in front
+of them, step 4 writes from it rather than from the complaint. `memory_why`
+has an excerpt to show only if one was attached when the claim was written, so
+a claim stored without that leaves you at step 2 with nothing to do but argue.
+
+Attaching it spans two tools, which is why neither tool's own description can
+tell you to do it:
 
 1. `memory_add` reports the turn ids it created.
 2. `memory_remember` takes those ids in `sources`.

@@ -36,10 +36,15 @@ approximate it with the two you have.
 ## When one reading is not enough, `memory_ask`
 
 Everything above hands you a single view: you pick a clock, you get that
-clock's answer. `memory_ask` refuses to pick. Give it a question and an `at`,
-and it reports the same fact from all three positions at once — today's value,
-today's understanding of that moment, and the reply this store itself would
-have given at that moment.
+clock's answer. `memory_ask` refuses to pick. Give it a question and the
+instant to ask about, and it reports the same fact from all three positions at
+once — today's value, today's understanding of that moment, and the reply this
+store itself would have given at that moment.
+
+Only `question` is required. Leave `at` off and there is nothing to compare
+against — the third reading needs an instant that has already passed — so the
+three-way answer is the reason to call this at all, and the reason to name the
+instant.
 
 Reach for it when the *disagreement* is the subject. "You told me something
 different last week" is not a request for a value; it is a request for two
