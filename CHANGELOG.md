@@ -11,6 +11,34 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`MEMVARA_PREDICATES=decisions` — a vocabulary for what an agent writes about its own
+  work.** Two predicates, `decided` and `observed`, both multi-valued, both `episodic`,
+  differing on volatility: a decision is `static` because one made in March was made in
+  March for ever, and an observation is `slow` because it is a reading of a world that
+  moves.
+
+  This is the answer to the agent-state brief's ask for `decision` and `observation` as
+  **memory types**, and the answer is that they are vocabulary. `MemoryType` is persisted
+  and hydrated with `MemoryType(value)`, so a fourth member is a `SCHEMA_VERSION` bump and
+  a store older builds cannot open — a cost that recurs for the fifth. The only rule a new
+  member would have to enter is a hardcoded `EPISODIC -> SEMANTIC` promotion, which a
+  further value cannot join without becoming a policy table nothing needs; the two other
+  places that read `memory_type` to decide something, the `memory_types=` filter and
+  `memory_standing`'s procedural-only selection, take a new member or ignore it without
+  changing at all. And `observation` is a statement
+  about *where a claim came from*, which is `Derivation`, already recorded and already
+  reported by `why()`.
+
+  The predicates were chosen from a measurement rather than from the taxonomy:
+  `docs/ROADMAP.md` records a production store with **95% of its claims on undeclared
+  predicates**, and `rejected` and `known_defect` from that list are already in the
+  `engineering` pack — deliberately not redeclared here, because two shipped packs
+  declaring one predicate would let load order decide its `memory_type` silently.
+
+  Reversible, which is the argument that settles it: nothing here forecloses adding the
+  enum member later, with usage behind it.
+
+
 - **`ask()` — the question the two clocks exist for now has a method.** `recall()`
   renders the current answer. Nothing composed the one a bitemporal store can give and a
   single-clock one cannot:

@@ -40,6 +40,55 @@ class TestLoading:
         names = {s.name for s in load_specs("engineering")}
         assert {"git_state", "deploys_to", "rejected"} <= names
 
+    def test_the_decisions_pack_ships_and_does_not_redeclare_engineering(self):
+        """Two shipped packs declaring one predicate would make load order decide the
+        store: later entries win, so `engineering,decisions` and `decisions,engineering`
+        would disagree about that predicate's `memory_type` from the same data, silently.
+
+        `rejected` and `known_defect` are in `engineering` already and are deliberately
+        not redeclared here. That is the name half of the invariant; the surface-form
+        half is the next test, and it is the half that fails quietly."""
+        assert "decisions" in available_packs()
+        decisions = {s.name for s in load_specs("decisions")}
+        assert decisions == {"decided", "observed"}
+        assert not decisions & {s.name for s in load_specs("engineering")}
+
+    def test_no_two_shipped_vocabularies_claim_the_same_surface_form(self):
+        """Disjoint *names* are not enough, because an alias resolves before a name does
+        and collides on different machinery. `_reindex` builds `_alias` last-wins, so two
+        packs declaring one alias send the same write to different predicates depending on
+        the order `MEMVARA_PREDICATES` lists them in — and cardinality travels with the
+        predicate, so one order supersedes the previous value and the other accumulates.
+        Nothing reports it, and the names would still be disjoint.
+
+        Written over `available_packs()` rather than over the two that ship today, so a
+        third pack inherits the check instead of needing someone to remember it."""
+        packs = {name: load_specs(name) for name in available_packs()}
+        assert len(packs) >= 2, "with one pack there is no load order to disagree about"
+
+        forwards = PredicateRegistry(
+            BUILTIN_PREDICATES + load_all_specs(",".join(sorted(packs))))
+        backwards = PredicateRegistry(
+            BUILTIN_PREDICATES + load_all_specs(",".join(sorted(packs, reverse=True))))
+
+        for specs in (BUILTIN_PREDICATES, *packs.values()):
+            for spec in specs:
+                for surface in (spec.name, *spec.aliases):
+                    assert forwards.normalize(surface) == spec.name, surface
+                    assert backwards.normalize(surface) == spec.name, surface
+
+    def test_a_decision_accumulates_where_a_fact_would_supersede(self):
+        """The whole shape of this family. A project makes many decisions and a later one
+        does not make an earlier one untrue — it stopped being *current*, which is what
+        `memory_end` says. `one` here would make every new decision silently end the last,
+        which is the failure the cardinality column exists to prevent."""
+        specs = {s.name: s for s in load_specs("decisions")}
+        assert specs["decided"].cardinality is Cardinality.MANY
+        assert specs["decided"].volatility is Volatility.STATIC, (
+            "a decision made in March was made in March for ever")
+        assert specs["observed"].volatility is Volatility.SLOW, (
+            "an observation is a reading of a world that moves, and ages")
+
     def test_declared_specs_are_not_learned(self):
         # The distinction is load-bearing: `Memvara` refuses to let a persisted *learned*
         # spec overwrite a declared one, and that is what lets a pack correct a store.
