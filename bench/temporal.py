@@ -377,9 +377,23 @@ def observe(mem: Memvara, s: Scenario, axes: dict[str, datetime]
 
 
 def correct(question: Question, answer: frozenset[tuple[str, str]]) -> bool:
+    """Whether the store's answer satisfies the question. Exact either way.
+
+    The unknown kind raises rather than falling through to the set comparison, and that
+    is the whole reason this is not a two-line expression. A mistyped kind — `survive`
+    for `survives` — would otherwise be scored by the wrong rule with nothing said: with
+    a gold of one pair it reports False where the right rule reports True, and against a
+    live set that happens to hold exactly that pair it reports True *for the wrong
+    reason*. A scoring function that silently applies the wrong rule is the failure this
+    file's docstring calls the one to distrust most, arrived at from the inside. `bench/`
+    is outside `mypy -p memvara`, so the annotation cannot catch it and this has to.
+    """
     if question.kind == "survives":
         return question.gold <= answer
-    return answer == question.gold
+    if question.kind == "set":
+        return answer == question.gold
+    raise ValueError(
+        f"unknown question kind {question.kind!r}; expected 'set' or 'survives'")
 
 
 def score(mem: Memvara, scenarios: list[Scenario], verbose: bool) -> None:

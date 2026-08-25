@@ -123,6 +123,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   that is born invalidated, and leaving its target live beside that would put both
   sentences in the store at once.
 
+  **Nor does `supersede()`, `forget()` or `delete()`.** All three close a claim the
+  caller named, before the reconciler is asked anything, so there is no candidate to
+  weigh against it — the rule arbitrates an inference the write path drew, and naming
+  the row to close is an instruction rather than an inference. So a store audited after
+  this release can conclude that no low-confidence *extraction* ended a high-confidence
+  fact; it cannot conclude that no low-confidence claim did, because `supersede()` can
+  still be told to do exactly that.
+
 - **A supersession that leaves a value true at no instant now says so.** Two writes
   sharing a `valid_from` — any same-day correction, and every import that stamps dates
   rather than timestamps — left the older claim with `valid_from == valid_to`:
@@ -184,6 +192,60 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   where `RESERVED_META` is already checked, and names the key and its type. The docstring
   already argued for exactly this: *"a silently dropped argument is how a caller comes to
   believe something untrue about what they wrote."*
+
+## [0.6.0] — 2026-08-25
+
+### Added
+
+- **`memory_remember` takes `sources`, so a fact written over MCP can say where it
+  came from.** `memory_why` exists to put the excerpt in front of the user when they
+  challenge a memory, and for every claim a hosted client had ever written it answered
+  "No source turns are retained for this claim".
+
+  Nothing in the library was missing — `Memvara.remember` has always taken `sources`
+  and `_cite` has always accepted ids or `Episode`s. Two halves of the *transport* were
+  absent, and each made the other useless: the tool did not declare the argument, so no
+  caller could pass one; and `WriteReceipt.episode_ids` existed while `_receipt_summary`
+  did not render it, so a caller that stored a turn could not learn what it had stored
+  and had nothing to cite even if the argument had existed.
+
+  **Ids, not text.** `_cite` stores anything handed to it as an `Episode` and merely
+  links a string, so accepting turn text would duplicate a turn the caller has usually
+  just stored through `memory_add` — which is exactly what the plugin does. The
+  description says ids and a test pins that it says so, because a model reading
+  "sources" and sending a sentence is the mistake worth preventing.
+
+  Absence stays a degradation rather than a refusal: every client that exists writes
+  without provenance today, and a tool that began rejecting those writes would break
+  them all to fix a gap they do not know about.
+
+- **`plugin-claude.md` — the instructions every plugin repository shares, held where they
+  can be synced.** All seven repositories in `plugin-repos.txt` carry the same `CLAUDE.md`
+  and nothing carried it between them: it was hand-copied, and it drifted, so a section
+  written in one of them reached none of the others.
+
+  A whole-file copy would have been a regression rather than a sync. Eleven of the fourteen
+  sections were already byte-identical; the two that differ are about what each repository
+  *ships* — its own runtime facts, and hook rules only one plugin needs — so copying
+  wholesale would overwrite six repositories' correct, lighter sections. Those two sit in
+  the middle of the document, so a head/tail split cannot express it without reordering a
+  file seven repositories read.
+
+  Hence one splice point, `@@LOCAL@@`. A sync replaces everything around it and preserves
+  what is inside, and refuses to splice at all when the markers are missing rather than
+  guessing — guessing there loses text no sync can put back.
+
+### Fixed
+
+- **`sqlite3.connect` reports a missing file and an unreadable one identically**, and
+  does not expand `~` — so the documented `~/.mem0/history.db` import path failed in a
+  way that read like a permissions problem. The re-raised error now says which of the
+  two it is and names the absolute path it resolved to.
+
+- **Windows CI: `os.path.expanduser` reads `USERPROFILE`, not `HOME`.** Monkeypatching
+  `HOME` alone left `~` resolving to the real Windows profile directory instead of the
+  test's `tmp_path`, so the tilde-expansion tests were asserting against whatever that
+  machine happened to contain.
 
 ## [0.5.0] — 2026-08-25
 
