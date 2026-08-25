@@ -57,6 +57,7 @@ from .types import (
     OBJECT_ENTITY,
     SALIENCE_BASE,
     SUBJECT_ENTITY,
+    Answer,
     Claim,
     Closure,
     Collapse,
@@ -66,6 +67,7 @@ from .types import (
     ErasureProof,
     MemoryType,
     Provenance,
+    Reading,
     RecallResult,
     Result,
     Scope,
@@ -278,6 +280,152 @@ def _in_timeline(claim: Claim, valid_at: datetime | None,
     at = as_utc(valid_at)
     return (as_utc(claim.valid_from) <= at
             and (claim.valid_to is None or as_utc(claim.valid_to) > at))
+
+
+def _stated_at(claim: Claim, at: datetime,
+               successors: Mapping[str, Claim]) -> bool:
+    """Would this store have answered with `claim` at `at`? Both clocks, reconstructed.
+
+    `Claim.is_live(as_of=T)` cannot answer this and is not wrong to be unable to. A row's
+    `valid_to` is written **in place** by the write that displaces it, so the row carries
+    the ending but not the instant the ending came to be believed — and applying an
+    ending that had not yet been recorded reports a store as having known something it
+    did not. That is the whole gap between `get_all(as_of=T)` and this: one reads four
+    columns off a row, and this has the supersession chain in front of it.
+
+    Four tests, in the order that makes each one cheap:
+
+    1. `recorded_at > at` — not written yet.
+    2. `valid_from > at` — not in force yet.
+    3. retired by `at`. `invalidated_at` is itself a belief-clock stamp, so it needs no
+       reconstruction and is exact.
+    4. ended, **and the ending was on record by `at`**. `Memvara._displaced_by` dates that
+       at the successor's `recorded_at`, for the reason its docstring gives at length: a
+       claim cannot have been replaced before its replacement existed, and the pointer
+       carries no timestamp of its own. A `valid_to` with no successor behind it was
+       written by this row's own write, and (1) has already admitted that instant.
+
+    The case it cannot recover is an ending whose successor has since been erased: the
+    pointer survives and its target does not. That falls to the same branch as a
+    self-written `valid_to` — the closure is treated as known from `recorded_at`, the
+    earliest instant it could have been — so the claim stops answering sooner rather
+    than later. In a store somebody is auditing, under-reporting a past answer is the
+    safe direction, and it is the same direction `_displaced_by` chose for `why()`.
+    """
+    if as_utc(claim.recorded_at) > at or as_utc(claim.valid_from) > at:
+        return False
+    if claim.invalidated_at is not None and as_utc(claim.invalidated_at) <= at:
+        return False
+    if claim.valid_to is None:
+        return True
+    successor = (successors.get(claim.invalidated_by)
+                 if claim.invalidated_by is not None else None)
+    if successor is not None and not _displaced_by(successor, at):
+        return True         # the ending had not been recorded yet; it still stood
+    return as_utc(claim.valid_to) > at
+
+
+def _narrate(question: str, at: datetime, readings: Sequence[Reading]) -> str:
+    """Compose `Answer.text`. Every sentence is rendered from a stored column.
+
+    Written as sentences rather than a table because the thing worth reading is a
+    *change* — a value, when it stopped being that value, and when this store found out —
+    and a table of instants makes the reader do the subtraction that is the whole point.
+
+    Each slot gets its answer first and its explanation after, per the house rule about
+    leading with the answer. The divergence line is the one that earns the method, so it
+    is never folded into a clause: when the record has changed under the instant asked
+    about, that gets its own sentence naming both readings and the day the difference
+    arrived.
+    """
+    if not readings:
+        return f"Nothing on record for: {question}"
+    blocks = [f"{question}\n  asked about {_when(at)}"]
+    for r in readings:
+        blocks.append("\n".join(_slot_lines(r, at)))
+    return "\n\n".join(blocks)
+
+
+def _slot_lines(r: Reading, at: datetime) -> list[str]:
+    """One slot's paragraph. The branches are the cases, not a rendering convenience."""
+    head = f"{r.subject} {r.predicate}"
+    lines = [f"{head}: {_values(r.then)}." if r.then
+             else f"{head}: nothing was true on {_when(at)}."]
+    if r.diverged:
+        # The sentence this method exists for. Both readings, and the day the difference
+        # arrived — the earliest write this store had not yet seen at `at`, which is the
+        # instant the record moved under the question.
+        arrived = min(_moved_after(r.timeline, at), default=None)
+        moved = ("" if arrived is None else
+                 f" The difference was recorded {_when(arrived)},"
+                 f" {(arrived - at).days} days after the instant you asked about.")
+        lines.append(
+            f"  On {_when(at)} this store would have said {_values(r.stated)}, and that"
+            f" is what anyone acting on it then acted on.{moved}")
+    if r.moved:
+        finished = [c.valid_to for c in r.then if c.valid_to is not None]
+        if finished:
+            lines.append(f"  It stopped being true {_when(max(finished))}.")
+        lines.append(f"  Now: {_values(r.now)}.")
+    elif not r.diverged and (
+            late := [c for c in r.now
+                     if as_utc(c.recorded_at) > as_utc(c.valid_from)]):
+        # Nothing moved and nothing diverged, so there is no correction to report — and
+        # the two clocks can still be apart. A value true since March and recorded in
+        # June was invisible here for three months, and that gap is the other half of
+        # what this store knows and a single-clock one does not. Reported on the widest
+        # one, because a slot whose worst lag was a quarter is the slot worth knowing
+        # about. Skipped when the record diverged, because that sentence has already
+        # dated the write and adding a second date to the same paragraph reads as two
+        # events.
+        worst = max(late, key=lambda c: as_utc(c.recorded_at) - as_utc(c.valid_from))
+        days = (as_utc(worst.recorded_at) - as_utc(worst.valid_from)).days
+        lines.append(
+            f"  True since {_when(worst.valid_from)}, recorded {_when(worst.recorded_at)}"
+            + (f" — {days} days later." if days else " the same day."))
+    elif not r.now:
+        # Nothing then, nothing now, and no divergence: every version of this slot has
+        # been retired. Said outright, because three lines of "nothing" with no reason
+        # beside them read as a store that lost the fact rather than one that was
+        # corrected.
+        lines.append(f"  Every value ever recorded for it has been retired"
+                     f" ({len(r.timeline)} in all); memory_history shows them.")
+    return lines
+
+
+def _moved_after(timeline: Sequence[Claim], at: datetime) -> list[datetime]:
+    """Every instant after `at` at which this slot's record changed.
+
+    **Both clocks stamp a change, and reading only one of them dates the wrong event.**
+    A claim arriving is `recorded_at`; a claim being retired is `invalidated_at`, which is
+    itself a belief-clock instant and is the whole of what a retirement records. A
+    supersession needs no third case — it is dated by the successor's `recorded_at`, which
+    the first already covers.
+
+    Missing the second was a wrong answer rather than an omission. Rome recorded in
+    January, retired on 1 March, Oslo written on 1 April: asked about February, the
+    divergence between "what was true" and "what we would have said" is caused by the
+    retirement, and dating it from `recorded_at` alone reported 1 April — a month late,
+    attributed to a write that had nothing to do with it. Saying when the record moved is
+    what `ask()` is for, so that sentence being wrong is the method failing at its one job.
+
+    `valid_to` is deliberately not here. It is the world clock: it dates when a fact
+    stopped being true, not when this store came to believe it had, and the successor's
+    `recorded_at` is already the instant that belief was written.
+    """
+    moved = [as_utc(c.recorded_at) for c in timeline if as_utc(c.recorded_at) > at]
+    moved += [as_utc(c.invalidated_at) for c in timeline
+              if c.invalidated_at is not None and as_utc(c.invalidated_at) > at]
+    return moved
+
+
+def _values(claims: Sequence[Claim]) -> str:
+    return ", ".join(c.object for c in claims) or "nothing"
+
+
+def _when(at: datetime) -> str:
+    """An instant, to the day. `ask()` narrates changes and a change is a date."""
+    return as_utc(at).strftime("%Y-%m-%d")
 
 
 def _displaced_by(successor: Claim, known_at: datetime | None) -> bool:
@@ -2250,6 +2398,107 @@ class Memvara:
         """
         return self.writer.reconciler.entities.probe_keys(owner_key(scope), surface)
 
+    def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
+            min_score: float = 0.0, tenant=None, user=None, agent=None,
+            session=None) -> Answer:
+        """Answer a question about one instant, and say whether the record has changed.
+
+        `recall()` renders the current answer. This renders the *three* answers a
+        bitemporal store holds and a single-clock one cannot separate:
+
+        * what is in force **now**;
+        * what we believe **today** was true at `at` — including a correction that
+          arrived last week, because it is about the world and we now know better;
+        * what this store **would have answered** at `at`, which is the answer somebody
+          acted on and the one an audit is against.
+
+        The second and third disagreeing is the finding. It is the sentence the whole
+        two-clock model exists to produce and the one no other memory layer can write:
+        *"as of 15 March the renewal date was 1 September; it was changed on 1 June and
+        that change did not reach this store until 22 March, a week after the instant
+        you asked about."*
+
+        Nothing here consults a model and nothing here is inferred. It is a composition
+        over `search()`, `history()` and the supersession pointers, and every sentence in
+        `Answer.text` is rendered from a stored column.
+
+        `at` is the world instant the question is about, defaulting to now — where the
+        third answer is trivially the second, and what is left to say is how long the
+        current value took to reach this store. `k` is how many fact slots to answer
+        over, best match first.
+
+        **This ranks; it does not judge relevance.** `min_score` defaults to 0.0, exactly
+        as it does on `search()` and `recall()` and for the reason argued there: the
+        usable window moves with the size of the store and no constant is correct, so an
+        operator sets it from `calibrate_min_score`. Left at 0.0 a question this store
+        knows nothing about is still answered from the nearest slot it has, and the
+        narrative will be confident about it. Every `Reading` names the subject and
+        predicate it answered from, which is what lets a caller see that it answered the
+        wrong one; nothing here can tell them.
+
+        **`Reading.stated` deliberately disagrees with `get_all(as_of=T)`**, and that is
+        the one thing to know before quoting either. See `Reading`, which sets out why a
+        row read on its own cannot date its own ending and this can.
+
+        >>> from datetime import datetime, timezone
+        >>> jan, mar = (datetime(2026, 1, 1, tzinfo=timezone.utc),
+        ...             datetime(2026, 3, 1, tzinfo=timezone.utc))
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> _ = mem.remember("user", "lives_in", "Rome", valid_from=jan, recorded_at=jan)
+        >>> _ = mem.remember("user", "lives_in", "Berlin", valid_from=mar,
+        ...                  recorded_at=datetime(2026, 3, 22, tzinfo=timezone.utc))
+        >>> answer = mem.ask("where do they live?",
+        ...                  at=datetime(2026, 3, 15, tzinfo=timezone.utc))
+        >>> reading = answer.readings[0]
+        >>> [c.object for c in reading.then], [c.object for c in reading.stated]
+        (['Berlin'], ['Rome'])
+        >>> reading.diverged
+        True
+        """
+        scope = self._scope(tenant, user, agent, session)
+        when = as_utc(at) if at is not None else utcnow()
+        # Every state, because a slot whose values have all finished is exactly the slot
+        # a question about the past is asking after, and the default population is the
+        # live one. `k * 4` because several versions of one slot answer one query and
+        # what is being counted here is slots.
+        hits = self.search(question, k=max(k * 4, k), min_score=min_score,
+                           tenant=tenant, user=user, agent=agent, session=session,
+                           states=["live", "ended", "retired"])
+        slots: list[tuple[str, str]] = []
+        for hit in hits:
+            slot = (hit.claim.subject, hit.claim.predicate)
+            if slot not in slots:
+                slots.append(slot)
+            if len(slots) == k:
+                break
+        readings = tuple(self._read(subject, predicate, when, scope)
+                         for subject, predicate in slots)
+        return Answer(question, when, readings, _narrate(question, when, readings))
+
+    def _read(self, subject: str, predicate: str, when: datetime,
+              scope: Scope) -> Reading:
+        """One slot's three answers, from one timeline.
+
+        The successors are resolved once for the whole slot rather than per row, and from
+        the store when the pointer leaves it — cross-predicate supersession ("unemployed"
+        ending "works_at") puts a successor in a different slot, so a timeline is not a
+        closed world even though it usually looks like one.
+        """
+        timeline = self.history(subject, predicate, tenant=scope.tenant,
+                                user=scope.user, agent=scope.agent,
+                                session=scope.session)
+        known = {c.id: c for c in timeline}
+        wanted = {c.invalidated_by for c in timeline
+                  if c.invalidated_by is not None and c.invalidated_by not in known}
+        successors = {**known, **bulk_claims(self.store, sorted(wanted))}
+        return Reading(
+            subject, predicate,
+            now=tuple(c for c in timeline if c.is_live()),
+            then=tuple(c for c in timeline if c.is_live(valid_at=when)),
+            stated=tuple(c for c in timeline if _stated_at(c, when, successors)),
+            timeline=tuple(timeline),
+        )
+
     def why(self, claim_id: str, *, tenant=None, user=None, agent=None,
             session=None, as_of: datetime | None = None,
             valid_at: datetime | None = None,
@@ -2813,6 +3062,10 @@ class ScopedMemvara:
                                 include_history=include_history,
                                 history_header=history_header, budget=budget,
                                 counter=counter, with_ids=with_ids, **self._kw)
+
+    def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
+            min_score: float = 0.0) -> Answer:
+        return self._mem.ask(question, at=at, k=k, min_score=min_score, **self._kw)
 
     def since(self, when: datetime) -> Delta:
         return self._mem.since(when, **self._kw)

@@ -1060,6 +1060,108 @@ class Delta:
 
 
 @dataclass(frozen=True, slots=True)
+class Reading:
+    """One fact slot, read three ways at one instant. The unit `Answer` is made of.
+
+    Three populations, and the whole value of the type is that they can differ:
+
+    * `now` — in force at this moment.
+    * `then` — what we believe **today** was true at the instant asked about. A
+      correction that arrived last week is in this answer, because it is about the world
+      and we now know better.
+    * `stated` — what this store **would have answered** at that instant. A correction
+      that arrived last week is *not* in this answer, because it had not arrived.
+
+    `then` and `stated` disagreeing is the finding, not an inconsistency: it means the
+    record changed under a decision somebody already made. An agent that acted on
+    2026-03-15 acted on `stated`, and is being audited against `then`.
+
+    **`stated` is reconstructed, and `get_all(as_of=T)` does not agree with it.** That is
+    deliberate and it is the one thing to understand about this type. A row's `valid_to`
+    is written *in place* by the write that displaces it, so a row read on its own cannot
+    say when its own ending came to be believed — `get_all(as_of=T)` therefore applies an
+    ending that had not been recorded at `T`. `Reading` has the supersession chain in
+    front of it, so it can date the ending at the successor's `recorded_at`, which is the
+    instant the pointer was written. `Memvara._displaced_by` is the same rule, and
+    `why()` has used it since a July view started reporting an August replacement.
+
+    What it cannot recover: an ending whose successor has since been erased. The pointer
+    survives the erasure and its target does not, so the closure is dated at this row's
+    own `recorded_at` — the earliest instant it could have been known, which makes the
+    claim stop answering sooner rather than later. Under-reporting a past answer is the
+    safe direction in a store somebody is auditing.
+
+    >>> Reading("user", "lives_in")
+    <Reading user lives_in now=0 then=0 stated=0>
+    """
+
+    subject: str
+    predicate: str
+    #: In force now. Oldest first, as `history()` returns them.
+    now: tuple["Claim", ...] = ()
+    #: What we believe today was true at the instant asked about.
+    then: tuple["Claim", ...] = ()
+    #: What this store would have answered at that instant.
+    stated: tuple["Claim", ...] = ()
+    #: Every version of this slot, oldest first — including the ones no query returns.
+    timeline: tuple["Claim", ...] = ()
+
+    @property
+    def diverged(self) -> bool:
+        """Whether the record changed under the instant asked about.
+
+        Compared on claim id rather than on value, because a value re-asserted as a new
+        claim is a different record of the same string and the audit question is which
+        record answered.
+        """
+        return {c.id for c in self.then} != {c.id for c in self.stated}
+
+    @property
+    def moved(self) -> bool:
+        """Whether the world moved between the instant asked about and now."""
+        return {c.id for c in self.then} != {c.id for c in self.now}
+
+    def __repr__(self) -> str:
+        return (f"<Reading {self.subject} {self.predicate} now={len(self.now)} "
+                f"then={len(self.then)} stated={len(self.stated)}>")
+
+
+@dataclass(frozen=True, slots=True)
+class Answer:
+    """What `ask()` returns: a question, the instant it was about, and the readings.
+
+    `text` is the composed narrative and is the reason this type exists — `recall()`
+    already returns ranked notes, and a ranked note cannot say *"that is what we believe
+    today, and it is not what we would have told you then"*. Every sentence in it is
+    rendered from a stored column; nothing here consults a model, and nothing here is
+    inferred.
+
+    >>> from datetime import datetime, timezone
+    >>> Answer("where do they live?", datetime(2026, 3, 15, tzinfo=timezone.utc))
+    <Answer 'where do they live?' at 2026-03-15T00:00:00+00:00, 0 slot(s)>
+    """
+
+    question: str
+    #: The world instant the question was about, resolved to UTC. `ask()` defaults it to
+    #: now, and carries it back so a caller logging the result cannot separate the answer
+    #: from the question it answers — the same reason `Delta` carries `since`.
+    at: datetime
+    #: One per fact slot, best match first.
+    readings: tuple[Reading, ...] = ()
+    #: The narrative, rendered. Empty only when nothing matched.
+    text: str = ""
+
+    @property
+    def diverged(self) -> tuple[Reading, ...]:
+        """Readings where the record changed under the instant asked about."""
+        return tuple(r for r in self.readings if r.diverged)
+
+    def __repr__(self) -> str:
+        return (f"<Answer {_short(self.question)!r} at {self.at.isoformat()}, "
+                f"{len(self.readings)} slot(s)>")
+
+
+@dataclass(frozen=True, slots=True)
 class Accumulation:
     """One value that landed beside values already live in the same slot.
 

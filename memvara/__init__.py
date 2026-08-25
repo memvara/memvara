@@ -67,6 +67,7 @@ from .schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
 from .store import SQLiteStore, Store
 from .types import (
     Accumulation,
+    Answer,
     Claim,
     Closure,
     Collapse,
@@ -78,6 +79,7 @@ from .types import (
     Explanation,
     MemoryType,
     Provenance,
+    Reading,
     RecallResult,
     Result,
     Scope,
@@ -119,6 +121,11 @@ __all__ = [
     # `Closure` is: both are return types on four facade methods each, so a caller who
     # annotates anything cannot name them otherwise.
     "RecallResult", "Delta",
+    # What `ask()` hands back, and the per-slot element inside it. Exported for the same
+    # reason: both are return types on four facade methods, and a `Reading` is the object
+    # a caller reads `then` and `stated` off when they need the structure rather than the
+    # rendered narrative.
+    "Answer", "Reading",
     # schema
     "PredicateRegistry", "PredicateSpec", "Cardinality", "Volatility",
     # pluggable backends

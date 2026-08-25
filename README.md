@@ -121,9 +121,10 @@ Or, with no Python at all — `npx memvara` bridges a stdio MCP client to the
 hosted service and signs you in on first run. It is a way *in*, not a second
 implementation: the engine is this library.
 
-Thirteen tools — `memory_add`, `memory_remember`, `memory_recall`, `memory_search`,
-`memory_neighborhood`, `memory_paths`, `memory_since`, `memory_standing`,
-`memory_history`, `memory_why`, `memory_forget`, `memory_end`, `memory_stats`.
+Fourteen tools — `memory_add`, `memory_remember`, `memory_recall`, `memory_search`,
+`memory_ask`, `memory_neighborhood`, `memory_paths`, `memory_since`,
+`memory_standing`, `memory_history`, `memory_why`, `memory_forget`,
+`memory_end`, `memory_stats`.
 Hand-rolled against the MCP wire format
 rather than taking an SDK
 dependency, so the "numpy and nothing else" claim survives the server too.
@@ -335,7 +336,7 @@ Memvara is built around the observation that **most of this doesn't need a model
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 3,500 tests, offline, no API key
+python3 -m pytest -q                              # 3,519 tests, offline, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/temporal.py            # the two clocks, six families
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison

@@ -21,7 +21,7 @@ it would provide is a hundred lines — one JSON object per line — against a d
 tree of a dozen packages. The core's single hard dependency is a selling point; spending
 it on framing would be a poor trade. See `protocol.py`.
 
-**Thirteen tools, and no way to erase anything.** `consolidate` is an operator action that an
+**Fourteen tools, and no way to erase anything.** `consolidate` is an operator action that an
 agent, given it, will call in a loop. `purge` and `reset` are irreversible erasure, which
 must never be one tool call away from a model that read "forget that" as "delete
 everything". The two closures are offered instead, as two tools: `memory_forget` retires

@@ -62,6 +62,19 @@ mem.history(subject, predicate, *, T=None)        -> list[Claim]    # timeline o
 mem.why(claim_id, *, T=None)                      -> Provenance | None
 mem.produced(episode_id, *, T=None)               -> list[Claim]    # why(), backwards
 mem.since(when)                                   -> Delta          # what changed since
+mem.ask(question, *, at=None, k=3, min_score=0.0)  -> Answer        # three readings, narrated
+#   Answer(question, at, readings, text). One `Reading` per fact slot, each holding
+#   `now`, `then` (what we believe today was true at `at`) and `stated` (what this
+#   store would have answered at `at`). The last two differing is the finding, and
+#   `text` is the composed narrative — no model, every sentence from a stored column.
+#   `Reading.stated` deliberately disagrees with `get_all(as_of=T)`: a row's `valid_to`
+#     is written in place by the write that displaces it, so a row read on its own
+#     applies an ending that had not been recorded yet. `ask()` has the supersession
+#     chain and dates the ending at the successor's `recorded_at`, which is `why()`'s
+#     rule already. See `Reading` for the one case it cannot recover.
+#   `min_score` defaults to 0.0 exactly as on search() and recall(): this ranks, it
+#     does not judge relevance, so on a store that knows nothing about the question it
+#     answers confidently from the nearest slot it has. Every Reading names the slot.
 #   Delta(since, added, gone): believed now and not then, believed then and not now.
 #   A supersession lands in **both** halves, which is the point — an agent coming back
 #   to a delta that showed only the arrival would hold the replaced value as well.
@@ -87,6 +100,14 @@ mem.close()                                       -> None           # or use as 
 `add()` takes a string, a list of strings, pre-built `Episode`s, or OpenAI/mem0-style
 `{"role": ..., "content": ...}` transcripts, so an existing agent loop can pass its
 messages straight through.
+
+`ask()` is the one that uses both clocks. `recall()` renders the current answer;
+`ask()` renders the current answer, what we believe today was true at some past instant,
+and what this store *would have said* at that instant — and says so when the last two
+differ. That difference is not an inconsistency: it means somebody corrected the record
+after the moment being asked about, so the answer a person acted on is not the answer
+they would get today. It is the sentence the two-clock model exists to produce, and
+nothing else in this API composes it.
 
 `recall()` is the one you put in a prompt. It returns a framed block that labels itself as
 retrieved data rather than instructions, and flattens each claim to a single line — a

@@ -59,8 +59,8 @@ from typing import Any, Callable, Collection, Literal, Sequence, overload
 from .core import Memvara, Messages, ScopedMemvara, _approx_tokens
 from .embed import Embedder
 from .retrieve import Path, Retrieved
-from .types import (Claim, Delta, Episode, ErasureProof, MemoryType, Provenance,
-                    RecallResult, Result, Scope, WriteReceipt)
+from .types import (Answer, Claim, Delta, Episode, ErasureProof, MemoryType,
+                    Provenance, RecallResult, Result, Scope, WriteReceipt)
 
 
 class AsyncMemvara:
@@ -297,6 +297,15 @@ class AsyncMemvara:
             episode_header=episode_header, include_history=include_history,
             history_header=history_header, budget=budget, counter=counter,
             with_ids=with_ids)
+
+    async def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
+                  min_score: float = 0.0, tenant=None, user=None, agent=None,
+                  session=None) -> Answer:
+        """See `Memvara.ask`. A retrieval plus one timeline read per slot, so it belongs
+        off the loop for the reason every other read here does."""
+        return await asyncio.to_thread(
+            self.memvara.ask, question, at=at, k=k, min_score=min_score, tenant=tenant,
+            user=user, agent=agent, session=session)
 
     async def since(self, when: datetime, *, tenant=None, user=None, agent=None,
                     session=None) -> Delta:
@@ -652,6 +661,11 @@ class AsyncScopedMemvara:
             include_episodes=include_episodes, episode_header=episode_header,
             include_history=include_history, history_header=history_header,
             budget=budget, counter=counter, with_ids=with_ids, **self._kw)
+
+    async def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
+                  min_score: float = 0.0) -> Answer:
+        return await self._amem.ask(question, at=at, k=k, min_score=min_score,
+                                    **self._kw)
 
     async def since(self, when: datetime) -> Delta:
         return await self._amem.since(when, **self._kw)

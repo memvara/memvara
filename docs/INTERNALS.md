@@ -742,6 +742,41 @@ _live_clause(valid_at, known_at, include_invalidated, alias="") -> tuple[str, li
 _happened_clause(valid_at, known_at, alias="")                  -> tuple[str, list]
 ```
 
+### `ask()` reconstructs an ending the row cannot date
+
+`Reading.stated` — "what would this store have answered on T" — is the one read in the
+API that does **not** reduce to the four columns, and it is the one that disagrees with
+`get_all(as_of=T)`. The disagreement is deliberate and it is the point of the method.
+
+A row's `valid_to` is written **in place** by the write that displaces it. So the row
+carries its own ending but not the instant that ending came to be believed, and any
+predicate over the four columns applies an ending that had not been recorded at `T`:
+
+```
+Rome    valid 2026-01-01 → 2026-03-01,  recorded 2026-01-01
+Berlin  valid 2026-03-01 → open,        recorded 2026-03-22
+
+get_all(as_of=2026-03-15)         -> []       Rome's ending applied a week early
+ask(..., at=2026-03-15).stated    -> [Rome]   what the store actually held that day
+```
+
+`core._stated_at` closes the gap with the supersession chain, which the row does carry:
+an ending is dated at `invalidated_by`'s `recorded_at`, the instant the pointer was
+written. That is `_displaced_by`'s rule, unchanged — `why()` has used it since a July
+view started reporting an August replacement, and its docstring argues it at length,
+including why `invalidated_at` is the wrong stamp on a double-closed row. `invalidated_at`
+*is* consulted here, for the retirement, where it dates exactly the right event.
+
+The case it cannot recover is an ending whose successor has since been erased: the
+pointer survives and its target does not, so the closure falls back to the row's own
+`recorded_at` — the earliest instant it could have been known, which makes the claim stop
+answering sooner rather than later. Under-reporting a past answer is the safe direction
+in a store somebody is auditing, and it is the direction `_displaced_by` already chose.
+
+`get_all(as_of=T)` is not being fixed to match. It is a scope-wide predicate over rows
+and has no timeline in front of it; making it walk the chain would turn every read into a
+per-slot join. The two answer different questions and both are documented as doing so.
+
 ### The three states
 
 A claim is `live` (neither clock closed), `ended` (valid time closed — the world moved
