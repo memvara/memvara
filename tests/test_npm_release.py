@@ -209,6 +209,37 @@ def test_publish_npm_cannot_pack_and_must_verify_the_hash():
     assert re.search(r"name:\s*npm\b", env_slice)
 
 
+def test_publish_npm_hands_npm_a_path_and_not_a_git_shorthand():
+    """`npm publish npm-dist/memvara-0.0.2.tgz` does not publish that file. To npm a
+    spec with a slash and no leading `./` is `owner/repo`, so it shelled out to
+    `git ls-remote ssh://git@github.com/npm-dist/memvara-0.0.2.tgz.git` and failed
+    with `Permission denied (publickey)` — an auth error naming a repository nobody
+    meant to reach, for what was a punctuation bug. That was the first `v0.4.0` run.
+
+    Nothing else caught it. `rehearse_npm.py` passed `Path` objects, which are
+    absolute, and npm reads an absolute path as a file — so the rehearsal and the
+    workflow were never running the same test. The rehearsal now publishes a bare
+    name from the tarball's own directory, and this pins the workflow to the same
+    shape: whatever is handed to `npm publish` must not contain a slash unless it
+    starts with `./`."""
+    job = _job("publish-npm")
+    spec = re.search(r"npm publish \"?\$?\{?(\S+?)\}?\"? --access", job)
+    assert spec, f"could not find the npm publish argument in:\n{job}"
+    argument = spec.group(1)
+
+    # The argument is a shell variable, so follow it to what it was assigned.
+    assigned = re.search(rf"{re.escape(argument.lstrip('$'))}=\"?\$\((.+?)\)", job)
+    assert assigned, f"{argument} is not assigned from a command in this job"
+    produces = assigned.group(1)
+    assert "/" not in produces or produces.lstrip().startswith("./"), (
+        f"`{produces}` yields a slashed spec; npm would read it as owner/repo. "
+        "Either cd into the directory and use a bare name, or prefix with ./"
+    )
+    assert "working-directory: npm-dist" in job, (
+        "the bare tarball name only resolves if the step runs inside npm-dist"
+    )
+
+
 def test_build_npm_packs_and_hashes_and_does_not_publish():
     job = _job("build-npm")
     assert re.search(r"npm pack\b", job)

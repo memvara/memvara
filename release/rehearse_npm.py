@@ -143,15 +143,20 @@ def try_verdaccio(tarball: Path, version: str) -> bool:
             # Any token is enough when max_users is -1; the CLI still wants a line.
             npmrc = tmp_path / "npmrc"
             npmrc.write_text(f"//{registry.split('://', 1)[1]}:_authToken=rehearsal\n")
+            # `cwd` is the tarball's own directory and the argument is its bare name,
+            # because that is the shape `publish-npm` uses. Passing `str(tarball)` here
+            # — an absolute path — is what made this rehearsal pass while the workflow
+            # failed: npm reads an absolute path as a file and a *relative* one with a
+            # slash as `owner/repo`, so the two invocations were never the same test.
             subprocess.run(
                 [
-                    "npm", "publish", str(tarball),
+                    "npm", "publish", tarball.name,
                     "--access", "public",
                     "--registry", registry,
                     "--userconfig", str(npmrc),
                 ],
                 check=True,
-                cwd=tmp_path,
+                cwd=tarball.parent,
             )
             viewed = subprocess.check_output(
                 ["npm", "view", f"memvara@{version}", "version", "--registry", registry],
@@ -191,9 +196,9 @@ def main() -> int:
                 raise SystemExit(f"copy changed the bytes: {digest} -> {again}")
             say("copy matches")
             subprocess.run(
-                ["npm", "publish", str(copied), "--dry-run", "--access", "public"],
+                ["npm", "publish", copied.name, "--dry-run", "--access", "public"],
                 check=True,
-                cwd=tmp,
+                cwd=copied.parent,
             )
             say("npm publish <tarball> --dry-run ok")
         try_verdaccio(tarball, version)
