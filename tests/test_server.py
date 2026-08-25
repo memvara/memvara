@@ -195,8 +195,8 @@ def test_no_tool_can_erase_anything():
     names = {t.name for t in TOOLS}
     assert names == {
         "memory_recall", "memory_search", "memory_neighborhood", "memory_paths",
-        "memory_since", "memory_standing", "memory_add", "memory_remember",
-        "memory_forget",
+        "memory_ask", "memory_since", "memory_standing", "memory_add",
+        "memory_remember", "memory_forget",
         "memory_end", "memory_history", "memory_why", "memory_stats",
     }
     forbidden = ("purge", "reset", "consolidate", "reembed", "erase", "delete")
@@ -243,6 +243,10 @@ _FORWARDING_CASES = {
                              "as_of": "2024-03-01"}],
     "memory_paths": [{"source": "Alice", "target": "Acme", "depth": 3, "k": 3,
                       "valid_at": "2024-03-01"}],
+    # Two sets: `at` omitted is the present-tense question, which reaches a different
+    # branch of the narrative than a dated one, and the tool's whole point is the second.
+    "memory_ask": [{"question": "where do they live", "k": 2},
+                   {"question": "where do they live", "at": "2024-03-01"}],
     "memory_since": [{"since": "2024-03-01"}],
     "memory_standing": [{"k": 5}],
     "memory_add": [{"text": "I live in Lisbon"}],
@@ -1502,6 +1506,55 @@ def test_add_carries_the_same_note_as_remember(server):
     assert "2 value(s) landed" in lines[1]
     assert "quota_gate status — 1 already live, 2 now" in lines[1]
     assert "user stage — 2 already live, 3 now" in lines[1]
+
+
+# -- memory_ask ---------------------------------------------------------------
+#
+# The one tool here whose whole output is a paragraph rather than rows with ids. Every
+# other read hands the model records to decide about; this one has already decided, and
+# what it returns is meant to be read to the user.
+
+
+def test_ask_renders_the_narrative_and_names_the_divergence(server):
+    """The finding gets its own line, because it is the one thing a model skimming a
+    paragraph will read past — and reading past it means telling the user today's answer
+    when they asked what they were told at the time."""
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Rome",
+                                     "true_since": "2026-01-01T00:00:00Z"})
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Berlin",
+                                     "true_since": "2026-03-01T00:00:00Z"})
+    answered = text(server, "memory_ask", {"question": "where do they live",
+                                           "at": "2026-02-01T00:00:00Z"})
+
+    assert "user lives_in: Rome." in answered, "what we believe now about February"
+    assert "would have said nothing" in answered, (
+        "on 1 February neither value had been written — both were recorded today")
+    assert "note: 1 of these read differently on" in answered
+    assert "memory_history on the subject and predicate" in answered, (
+        "the ids are not in this reply, so it has to say where they are")
+
+
+def test_ask_about_now_carries_no_note_because_nothing_has_diverged(server):
+    """The note is an event, not a footer. Attached to every answer it would become
+    furniture, and a model that has learned to skim a paragraph's last line is a model
+    that skims the one line the tool exists to print."""
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Rome"})
+
+    answered = text(server, "memory_ask", {"question": "where do they live"})
+
+    assert "user lives_in: Rome." in answered
+    assert "note:" not in answered
+    assert "would have said" not in answered
+
+
+def test_ask_says_so_rather_than_answering_from_an_empty_store(server):
+    """Distinct from answering the *wrong* slot, which is what a floorless `min_score`
+    does on a store that holds something. Nothing to rank is the one case the tool can
+    detect, so it is the one case it reports."""
+    answered = text(server, "memory_ask", {"question": "where do they live"})
+
+    assert "Nothing in this scope matches" in answered
+    assert "memory_search with a shorter query" in answered
 
 
 def test_a_write_that_replaced_nothing_because_it_lost_says_so(server):
@@ -2810,7 +2863,7 @@ def test_read_only_hides_the_write_tools(read_only):
     """Hidden, not listed-and-refused: a visible tool is a turn the model will spend."""
     names = [t["name"] for t in request(read_only, "tools/list")["result"]["tools"]]
     assert names == ["memory_recall", "memory_search", "memory_neighborhood",
-                     "memory_paths", "memory_since", "memory_standing",
+                     "memory_paths", "memory_ask", "memory_since", "memory_standing",
                      "memory_history", "memory_why", "memory_stats"], (
         "traversal is read-only and must survive here: a deployment that cannot be "
         "written to is exactly the one that wants to be asked about connections"

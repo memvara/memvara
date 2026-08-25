@@ -33,6 +33,7 @@ import pytest
 
 from memvara import Claim, Episode, HashingEmbedder, Memvara, NullLLM, Scope, utcnow
 from memvara.aio import AsyncMemvara
+from memvara.schema import Cardinality, PredicateSpec, Volatility
 from memvara.store import STATES
 from memvara.types import time_axes
 
@@ -42,6 +43,7 @@ MAR = datetime(2026, 3, 1, tzinfo=TZ)
 JUNE = datetime(2026, 6, 1, tzinfo=TZ)
 JULY = datetime(2026, 7, 1, tzinfo=TZ)
 JULY_MID = datetime(2026, 7, 15, tzinfo=TZ)
+MID_MAR = datetime(2026, 3, 15, tzinfo=TZ)
 AUG = datetime(2026, 8, 1, tzinfo=TZ)
 
 # The reproduction below spans years rather than months, so it stays a past-tense story
@@ -943,6 +945,172 @@ def test_remember_backdates_both_axes_and_the_reads_agree(mem):
     assert mem.get_all(as_of=JUNE) == [], "but we had not heard it in June"
     assert mem.get_all() == [], "and it is over now"
     assert cities(mem.history("user", "lived_in")) == ["Rome"]
+
+
+# --- ask(): the three readings, and the one that had no surface ---------------
+#
+# `recall()` renders the current answer. The question the whole two-clock model exists
+# for — "and is that what you would have told me then?" — had no method at all, so an
+# agent asked it had to run two reads and do the comparison itself, which is exactly the
+# arithmetic `_stated_at` exists to stop anyone doing by hand.
+
+
+@pytest.fixture()
+def corrected(mem):
+    """Rome until March, Berlin from March — and Berlin not recorded until 22 March.
+
+    The brief's own scenario, and the one shape where the two clocks give three different
+    answers to one question about one slot.
+    """
+    mem.remember("user", "lives_in", "Rome", valid_from=JAN, recorded_at=JAN)
+    mem.remember("user", "lives_in", "Berlin", valid_from=MAR,
+                 recorded_at=datetime(2026, 3, 22, tzinfo=TZ))
+    return mem
+
+
+def test_ask_separates_what_was_true_from_what_we_would_have_said(corrected):
+    """The finding, and the sentence no single-clock store can write.
+
+    On 15 March this store held Rome and nothing else — Berlin arrived a week later. So
+    "what was true then", judged by everything known now, is Berlin; and "what would you
+    have told me then" is Rome. Both are correct answers to different questions, and an
+    audit is the difference between them."""
+    reading = corrected.ask("where do they live?", at=MID_MAR).readings[0]
+
+    assert cities(reading.then) == ["Berlin"], "what we believe today about 15 March"
+    assert cities(reading.stated) == ["Rome"], "what this store would have said that day"
+    assert cities(reading.now) == ["Berlin"]
+    assert reading.diverged
+
+
+def test_stated_disagrees_with_get_all_as_of_and_that_is_the_point(corrected):
+    """The one thing to understand before quoting either, pinned so it cannot drift.
+
+    `get_all(as_of=T)` reads four columns off a row, and a row's `valid_to` is written
+    *in place* by the write that displaces it — so on 15 March it applies an ending that
+    would not be recorded until the 22nd, and Rome falls out with nothing to replace it.
+    `ask()` has the supersession chain in front of it and dates the ending at the
+    successor's `recorded_at`, which is when the pointer was actually written. Same rule
+    `why()` has used since a July view started reporting an August replacement."""
+    reading = corrected.ask("where do they live?", at=MID_MAR).readings[0]
+
+    assert corrected.get_all(as_of=MID_MAR) == [], "the row-at-a-time answer"
+    assert cities(reading.stated) == ["Rome"], "the reconstructed one"
+
+
+def test_the_narrative_names_both_readings_and_the_day_the_record_moved(corrected):
+    """`Answer.text` is the product, and it is rendered from stored columns only.
+
+    Asserted on the sentences rather than on the whole block, because the block is prose
+    and pinning it byte for byte would make every wording improvement a test edit — but
+    the three facts in it are not prose, and dropping any one of them turns the paragraph
+    back into something `recall()` could have said."""
+    text = corrected.ask("where do they live?", at=MID_MAR).text
+
+    assert "user lives_in: Berlin." in text
+    assert "On 2026-03-15 this store would have said Rome" in text
+    assert "recorded 2026-03-22, 7 days after the instant you asked about" in text
+
+
+def test_ask_about_now_reports_the_lag_instead_of_a_divergence(corrected):
+    """With no past instant to ask about there is no correction to report, and the two
+    clocks can still be apart. Berlin was true from 1 March and invisible here until the
+    22nd, and that gap is the other half of what this store knows."""
+    text = corrected.ask("where do they live?").text
+
+    assert "would have said" not in text, "nothing has diverged from the present"
+    assert "True since 2026-03-01, recorded 2026-03-22 — 21 days later." in text
+
+
+def test_ask_before_anything_was_true_says_so_and_still_gives_the_present(mem):
+    """The empty reading is an answer. Without the second line it reads as a store that
+    lost the fact rather than one that had not been told yet."""
+    mem.remember("user", "lives_in", "Rome", valid_from=JUNE, recorded_at=JUNE)
+
+    text = mem.ask("where do they live?", at=JAN).text
+
+    assert "nothing was true on 2026-01-01" in text
+    assert "Now: Rome." in text
+
+
+def test_ask_reports_a_slot_whose_every_value_was_retired(mem):
+    """Nothing then, nothing now, and no divergence — three lines of "nothing" with no
+    reason beside them. The store did not lose it; somebody said it was never true."""
+    mem.remember("user", "lives_in", "Rome", valid_from=JAN, recorded_at=JAN)
+    mem.forget("user", "lives_in")
+
+    text = mem.ask("where do they live?", at=MAR).text
+
+    assert "Every value ever recorded for it has been retired (1 in all)" in text
+
+
+def test_ask_answers_nothing_when_the_store_is_empty(mem):
+    """Distinct from answering the wrong slot, which is what happens when the store holds
+    something and `min_score` is left at its floorless default — see `ask()`'s docstring,
+    which says outright that this ranks and does not judge relevance."""
+    answer = mem.ask("where do they live?")
+
+    assert answer.readings == ()
+    assert answer.text == "Nothing on record for: where do they live?"
+
+
+def test_ask_dates_an_ending_whose_successor_lives_in_another_slot(mem):
+    """Cross-predicate supersession puts the successor outside the timeline being read,
+    so a slot is not the closed world it looks like. Resolved from the store rather than
+    from the timeline, or the ending would fall back to this row's own `recorded_at` and
+    the claim would stop answering months before anyone knew it had."""
+    mem.registry.register(PredicateSpec(name="unemployed", cardinality=Cardinality.ONE,
+                                        volatility=Volatility.SLOW,
+                                        supersedes=("works_at",)))
+    mem.remember("user", "works_at", "Acme", valid_from=JAN, recorded_at=JAN)
+    mem.remember("user", "unemployed", "yes", valid_from=JULY, recorded_at=AUG)
+
+    reading = mem.ask("where do they work?", at=JUNE, k=1).readings[0]
+
+    assert (reading.subject, reading.predicate) == ("user", "works_at")
+    assert [c.object for c in reading.stated] == ["Acme"], (
+        "in June this store had not heard of the July change; it arrived in August")
+
+
+def test_ask_does_not_quote_a_value_we_had_already_stopped_believing(mem):
+    """`invalidated_at` needs no reconstruction and gets none: it is a belief-clock stamp
+    already, so "had we retired it by then" is a comparison and not an inference. Pinned
+    separately from the ending branch because the two closures date different events, and
+    reading the wrong one is the mistake this library says cannot be found afterwards."""
+    mem.remember("user", "lives_in", "Rome", valid_from=JAN, recorded_at=JAN)
+    mem.forget("user", "lives_in", at=MAR)
+
+    assert cities(mem.ask("where do they live?", at=JAN).readings[0].stated) == ["Rome"]
+    assert mem.ask("where do they live?", at=JUNE).readings[0].stated == (), \
+        "by June we had stopped believing it, so June would not have quoted it"
+
+
+def test_ask_carries_the_instant_it_answered_about(mem):
+    """The same reason `Delta` carries `since`: a caller logging the result must not be
+    able to separate the answer from the question it answers."""
+    mem.remember("user", "lives_in", "Rome", valid_from=JAN, recorded_at=JAN)
+
+    assert mem.ask("where do they live?", at=MAR).at == MAR
+    assert mem.ask("where do they live?").at > MAR, "defaults to now"
+
+
+def test_the_scoped_and_async_facades_forward_ask(mem, corrected):
+    """Every other read is on all four facades; a killer feature reachable from one of
+    them is reachable from the one an integration is least likely to hold."""
+    scoped = corrected.scope(user="alice")
+    assert cities(scoped.ask("where do they live?", at=MID_MAR).readings[0].stated) == \
+        ["Rome"]
+
+    async def go():
+        amem = AsyncMemvara(corrected)
+        answer = await amem.ask("where do they live?", at=MID_MAR, user="alice")
+        scoped_answer = await amem.scope(user="alice").ask("where do they live?",
+                                                           at=MID_MAR)
+        return answer, scoped_answer
+
+    answer, scoped_answer = asyncio.run(go())
+    assert cities(answer.readings[0].stated) == ["Rome"]
+    assert cities(scoped_answer.readings[0].stated) == ["Rome"]
 
 
 # --- an interval of no length is not a shorter fact --------------------------

@@ -11,6 +11,48 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`ask()` — the question the two clocks exist for now has a method.** `recall()`
+  renders the current answer. Nothing composed the one a bitemporal store can give and a
+  single-clock one cannot:
+
+  ```python
+  answer = mem.ask("where do they live?", at=datetime(2026, 3, 15, tzinfo=utc))
+  print(answer.text)
+
+    where do they live?
+      asked about 2026-03-15
+
+    user lives_in: Berlin.
+      On 2026-03-15 this store would have said Rome, and that is what anyone acting
+      on it then acted on. The difference was recorded 2026-03-22, 7 days after the
+      instant you asked about.
+  ```
+
+  Three readings per fact slot — `now`, `then` (what we believe today was true at that
+  instant) and `stated` (what this store would have answered at it). The last two
+  differing is the finding, not an inconsistency: it means the record was corrected after
+  the moment being asked about, so the answer somebody acted on is not the answer they
+  would get today. `Answer.text` is the composed narrative and every sentence in it is
+  rendered from a stored column — no model is consulted and nothing is inferred.
+
+  **`Reading.stated` deliberately disagrees with `get_all(as_of=T)`, and that is the one
+  thing to know before quoting either.** A row's `valid_to` is written *in place* by the
+  write that displaces it, so a row read on its own cannot say when its own ending came
+  to be believed — `get_all(as_of=2026-03-15)` returns `[]` above, applying an ending a
+  week before it was recorded. `ask()` has the supersession chain in front of it and
+  dates the ending at the successor's `recorded_at`, which is `why()`'s rule already. The
+  full argument, including the one case it cannot recover, is in `docs/INTERNALS.md`.
+
+  On all four facades, and over MCP as `memory_ask`, which takes the tool count to
+  fourteen.
+
+  It ranks; it does not judge relevance. `min_score` defaults to 0.0 exactly as on
+  `search()` and `recall()`, for the reason argued there — so on a store that knows
+  nothing about the question, `ask()` answers confidently from the nearest slot it has.
+  Every `Reading` names the subject and predicate it answered from, which is what lets a
+  caller see that.
+
+
 - **`bench/temporal.py` — the differentiator has a number.** Every other harness in
   `bench/` measures retrieval: LOCOMO, LongMemEval, 2WikiMultihop, mem0, the multi-hop
   walk. That is the commodity half, and it is the half benchmarked against competitors.
