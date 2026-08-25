@@ -71,8 +71,8 @@ If it keeps happening on the same predicate, the fix is not per-write. The
 server can declare its vocabulary with `MEMVARA_PREDICATES` — a shipped pack
 name, a TOML file, or a comma-separated mix — and a declared predicate
 supersedes or accumulates because someone said so, instead of defaulting.
-`engineering` ships with the package. Tell them; you cannot set it yourself,
-it is server configuration read at startup.
+`engineering` and `decisions` ship with the package. Tell them; you cannot
+set it yourself, it is server configuration read at startup.
 
 Declaring also sets **volatility**, which has no note of its own. An
 undeclared predicate decays at the slow default — a two-year half-life — so
