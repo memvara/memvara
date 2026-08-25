@@ -245,17 +245,16 @@ because it is a demonstration of the seam rather than a product.
   is the standard neuroscience term for a memory trace, which makes it *descriptive* of the
   product's own function, the hardest class to register or defend. `memvara` is coined,
   means nothing in any language, and is therefore a **fanciful mark** — the strongest class.
-- **The registry names are still takeable, and an organization is not a reservation.**
-  `github.com/memvara` exists and PyPI and npm *organizations* are registered, but PyPI's
-  project namespace is flat and is claimed only by the first upload or a PEP 541 request,
-  and an npm org gives you `@memvara/*` while the bare `memvara` stays open. Both bare names
-  verified 404 as of the last check. Publishing the repository is a public mention of a name
-  that anyone can still take, and we already lost `engram` by assuming a name was ours — so
-  **claim both registry names in the same sitting as the first public push.**
-- **PyPI publish** — the one thing outstanding. Outward-facing and effectively
-  irreversible; a name, once published against, cannot be quietly un-published. It requires
-  an explicit decision by whoever owns the project, and `docs/RELEASING.md` deliberately
-  stops at TestPyPI.
+- **The registry names are claimed.** An organization is still not a reservation — that
+  is why the first uploads had to happen — but they did: PyPI `memvara` 0.1.0 on
+  2026-08-14, npm `memvara` 0.0.1 the same day (a placeholder, not a client). An npm
+  org still only reserves `@memvara/*`.
+- **npm trusted publisher** — one-time registration on the package, then a tag
+  push uploads the way PyPI does. `.github/workflows/release.yml` packs, hashes
+  and publishes with no reviewer wait. Until the publisher exists a *new* npm
+  version fails at upload — and `npm/memvara/package.json` now says `0.0.2` against
+  a registry holding only `0.0.1`, so the next tag is that new version. This is the
+  one remaining step that cannot be done from inside the repository.
 - **Community files** — `CONTRIBUTING.md`, `SECURITY.md` and issue templates are in place,
   and the README states the open-core boundary rather than leaving a reader to infer it
   from a pricing page.

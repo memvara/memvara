@@ -99,6 +99,31 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   *call* whatever the call displaced, and which says in its own docstring that it is not a
   billing series. These two are.
 
+- **npm on the same release workflow as PyPI.** A `v*` tag now runs `check-npm`
+  (does this `package.json` version already exist?), `build-npm` (pack once, hash
+  the tarball), and `publish-npm` (download those bytes, verify the hash, upload
+  the tarball). Unlike `publish-pypi`, no reviewer wait: the `npm` environment
+  exists so the trusted publisher can name it, not as an approval gate, and the
+  tag push is the publish. npm versions stay independent of the Python tag: the
+  job compares `npm/memvara/package.json` against the registry and skips a number
+  that is already there, so a tag that does not touch the package is green and
+  publishes nothing. There is no JavaScript client; `npm/memvara` remains a
+  four-field notice object.
+
+- **`memvara@0.0.2` on npm — the reservation, saying something useful.** `0.0.1`
+  told a JavaScript reader the library is Python and stopped, which reads as *come
+  back later*. That is not the situation: memvara ships an MCP server, MCP is the
+  interface a JavaScript agent already speaks, and a JS binding would sit between
+  two things that are already connected. The notice and the README now say so, and
+  name both routes — `memvara-mcp` over stdio against a local file, needing no
+  account, and the hosted endpoint at `app.memvara.dev/mcp`, needing one. The
+  README had the hosted half and not the local half, which is the half a reader
+  can use in the next minute.
+
+  Still four keys, still `implemented: false`, still no runtime surface — the
+  package's promise is unchanged and the tests that pin it are unchanged. This is
+  the first version to go up through `release.yml` rather than a local script.
+
 ### Fixed
 
 - **`include_episodes` on `memory_recall` had never worked, and the wrong value worked
@@ -133,6 +158,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `release.yml` already avoids for the matrix — it *calls* `ci.yml` rather than restating
   it, "so there is one matrix in this repository and it cannot drift" — and then restated
   the install list a few lines further down.
+
+- **The docs still described a world in which nothing had been published.**
+  `docs/RELEASING.md`, `docs/DEPLOY.md`, `SECURITY.md`, `docs/ROADMAP.md` and
+  `release/README.md` said the PyPI and npm names were free, or that
+  `pip install memvara` was not the install. Both names were claimed on
+  2026-08-14. A reader acting on those sentences would have treated a live
+  package as takeable, or cloned a tree to get a library that has been on
+  the index for days.
 
 ## [0.3.0] — 2026-08-23
 
