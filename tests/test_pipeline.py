@@ -15,6 +15,7 @@ import threading
 import time
 import warnings
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import timedelta
 from time import perf_counter
 from typing import Any, Sequence
@@ -38,6 +39,8 @@ from memvara.telemetry import (
     PREDICATE_ALIAS,
     PREDICATE_CAPPED,
     PREDICATE_LEARNED,
+    WRITE_COLLAPSED,
+    WRITE_DISPUTED,
     WRITE_EMBEDDING_REJECTED,
     WRITE_MEMORY_CLAIMS,
     WRITE_MEMORY_EPISODES,
@@ -1770,6 +1773,47 @@ def test_the_receipt_reports_it_with_no_telemetry_configured():
     assert pipe.telemetry is None
     assert [a.predicate for a in receipt.accumulated] == ["status"]
     assert "accumulated=1" in str(receipt)
+    store.close()
+
+
+def test_a_write_that_could_not_outrank_the_incumbent_is_counted():
+    """`write.disputed`: one per write that stored a value without displacing the one
+    already in its slot, because the incumbent is worth more than twice as much.
+
+    Same silence as the counter above and for the same reason: the candidate is stored
+    either way, so `write.reconcile{action="add"}` reports exactly what an ordinary first
+    write reports. One per *write*, not per displaced claim — the question is how often
+    writes are landing on facts they cannot outrank, not how wide the slots are."""
+    rec = MemoryRecorder()
+    pipe, store, _ = build(telemetry=rec)
+    pipe.assert_claim(replace(slot_claim("lives_in", "London"), confidence=1.0))
+    second = pipe.assert_claim(replace(slot_claim("lives_in", "Paris"), confidence=0.1))
+
+    assert rec.total(WRITE_DISPUTED) == 1
+    assert [(d.incumbent, d.candidate) for d in second.disputed] == [("London", "Paris")]
+    assert second.closed == [], "and it is the absence of a closure that matters"
+    # …and an ordinary supersession between comparable claims moves neither series.
+    pipe.assert_claim(replace(slot_claim("lives_in", "Lisbon"), confidence=0.7))
+    assert rec.total(WRITE_DISPUTED) == 1
+    assert rec.total(PREDICATE_ACCUMULATED) == 0
+    store.close()
+
+
+def test_a_claim_closed_at_its_own_start_is_counted():
+    """`write.collapsed`: one per claim left true at no instant, counted per claim
+    because it is the claim that is unreachable. `write.reconcile{action="supersede"}`
+    looks identical whether the displaced value kept an interval or lost one."""
+    rec = MemoryRecorder()
+    at = utcnow() - timedelta(days=30)
+    pipe, store, _ = build(telemetry=rec)
+    pipe.assert_claim(replace(slot_claim("lives_in", "Delhi"),
+                              valid_from=at, recorded_at=at))
+    second = pipe.assert_claim(replace(slot_claim("lives_in", "Mumbai"),
+                                       valid_from=at, recorded_at=at))
+
+    assert rec.total(WRITE_COLLAPSED) == 1
+    assert [c.object for c in second.collapsed] == ["Delhi"]
+    assert "collapsed=1" in str(second)
     store.close()
 
 

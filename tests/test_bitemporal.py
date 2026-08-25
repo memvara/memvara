@@ -945,6 +945,75 @@ def test_remember_backdates_both_axes_and_the_reads_agree(mem):
     assert cities(mem.history("user", "lived_in")) == ["Rome"]
 
 
+# --- an interval of no length is not a shorter fact --------------------------
+#
+# `memory_remember` has refused these since it existed and the library accepted them, so
+# the two surfaces disagreed about the same sentence. Both ends arrive in one call here,
+# which is what makes refusing right: "true from Tuesday until Tuesday" is not a
+# partially-recoverable request, it is self-contradictory, and the caller can restate it.
+
+@pytest.mark.parametrize("valid_to, why", [
+    (MAR, "ends where it begins"),
+    (JAN, "ends before it begins"),
+])
+def test_remember_refuses_an_interval_true_at_no_instant(mem, valid_to, why):
+    """Stored, this is a claim `added 1` reports and no query on either clock returns.
+    That is the shape `true_since` exists to prevent, in a second costume — and the MCP
+    adapter's `_interval` says exactly that about the same input."""
+    with pytest.raises(ValueError, match="not after the instant the fact began"):
+        mem.remember("user", "lived_in", "Rome", valid_from=MAR, valid_to=valid_to)
+
+    assert mem.history("user", "lived_in") == [], why
+
+
+def test_the_refusal_says_which_instant_it_measured_against_when_you_named_none(mem):
+    """`valid_to` alone is measured against now, and a message quoting an instant the
+    caller never sent is unreadable without that sentence."""
+    with pytest.raises(ValueError, match="because valid_from was omitted"):
+        mem.remember("user", "lived_in", "Rome", valid_to=JAN)
+
+
+def test_an_interval_with_length_is_still_accepted(mem):
+    """The other half. Backfilling a finished fact is the documented use of both
+    arguments together, and refusing it would break the import case outright."""
+    mem.remember("user", "lived_in", "Rome", valid_from=MAR, valid_to=JULY)
+
+    assert cities(mem.get_all(valid_at=JUNE)) == ["Rome"]
+
+
+def test_supersede_reports_a_predecessor_it_left_true_at_no_instant(mem):
+    """`close_out` clamps a closure to the claim's own start rather than inverting the
+    interval, so superseding a claim at the instant it began empties it. The clamp is
+    right — an inverted interval is a row no `as_of` window can return consistently — and
+    it cannot make the row answer anything, so the write says so instead.
+
+    Through `supersede()` rather than the reconciler because this is the method whose
+    entire purpose is closing a claim out, and it reaches `close_out` by its own door."""
+    written = mem.remember("user", "lives_in", "Berlin", valid_from=JAN, recorded_at=JAN)
+    berlin = written.added[0]
+    lisbon = Claim(subject="user", predicate="lives_in", object="Lisbon", scope=SCOPE,
+                   valid_from=JAN, recorded_at=JAN)
+
+    receipt = mem.supersede(berlin.id, lisbon, at=JAN)
+
+    (collapse,) = receipt.collapsed
+    assert (collapse.claim_id, collapse.object, collapse.at) == (berlin.id, "Berlin", JAN)
+    (stored,) = [c for c in mem.history("user", "lives_in") if c.id == berlin.id]
+    assert stored.valid_from == stored.valid_to == JAN, "the interval is empty"
+    assert cities(mem.get_all(valid_at=JAN)) == ["Lisbon"], "Berlin answers nothing"
+
+
+def test_an_ordinary_supersede_reports_no_collapse(mem):
+    """Or the report would fire on every supersession there is."""
+    berlin = mem.remember("user", "lives_in", "Berlin",
+                          valid_from=JAN, recorded_at=JAN).added[0]
+    lisbon = Claim(subject="user", predicate="lives_in", object="Lisbon", scope=SCOPE,
+                   valid_from=JULY, recorded_at=JULY)
+
+    assert mem.supersede(berlin.id, lisbon, at=JULY).collapsed == []
+    assert cities(mem.get_all(valid_at=JUNE)) == ["Berlin"]
+
+
 def test_is_live_mirrors_the_store_clause_on_both_axes(mem, four):
     """The Python predicate and the SQL one must agree row for row, because `history()`
     hands back stored rows and tells the caller to judge them with `is_live`. Two

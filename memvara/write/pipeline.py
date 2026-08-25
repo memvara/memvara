@@ -69,6 +69,8 @@ from ..telemetry import (
     PREDICATE_CAPPED,
     PREDICATE_LEARNED,
     WRITE_CLAIMS,
+    WRITE_COLLAPSED,
+    WRITE_DISPUTED,
     WRITE_EMBEDDING_REJECTED,
     WRITE_EMBEDDING_UNUSABLE,
     WRITE_EXTRACT_MS,
@@ -990,6 +992,8 @@ class WritePipeline:
             # what this write did and must not depend on whether anyone wired a metrics
             # backend. Same rule `unextracted` follows.
             receipt.accumulated.append(res.accumulated)
+        receipt.disputed.extend(res.disputed)
+        receipt.collapsed.extend(res.collapsed)
 
         rec = self.telemetry
         if rec is None:
@@ -1002,6 +1006,18 @@ class WritePipeline:
             # an outcome the API reports as an ordinary success, because it is one — the
             # row is fine and the schema is the thing that was never decided.
             rec.counter(PREDICATE_ACCUMULATED)
+        if res.disputed:
+            # **A write that resolved nothing**, which every other series reports as an
+            # ordinary success: the claim is stored, so `write.reconcile{action="add"}`
+            # moves exactly as it does for a first write into an empty slot. One per
+            # candidate rather than per victim, so the series counts writes that hit a
+            # more confident incumbent rather than the size of the slot they hit.
+            rec.counter(WRITE_DISPUTED)
+        for _ in res.collapsed:
+            # **A closed claim that answers nothing**, counted per claim because that is
+            # what is unreachable. `write.reconcile{action="supersede"}` looks identical
+            # whether the displaced value kept an interval or lost one.
+            rec.counter(WRITE_COLLAPSED)
         if candidate.polarity < 0:
             # **A retraction that retires nothing is an anomaly**, and the API cannot
             # tell you so: `forget()` returns an ordinary receipt whether it cleared the

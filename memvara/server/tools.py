@@ -59,7 +59,8 @@ from typing import Any, Callable, Mapping, Sequence, cast
 
 from ..core import Memvara, ScopedMemvara
 from ..schema import Cardinality
-from ..types import Accumulation, Claim, MemoryType, WriteReceipt, utcnow
+from ..types import (Accumulation, Claim, Collapse, Dispute, MemoryType, WriteReceipt,
+                     utcnow)
 from .validate import ToolError, validate
 
 __all__ = ["TOOLS", "Tool", "ToolContext", "ToolError", "safe_detail", "safe_line"]
@@ -591,6 +592,10 @@ def _receipt_summary(ctx: ToolContext, receipt: WriteReceipt) -> list[str]:
         lines.append(_ungrounded_note(receipt.ungrounded))
     if receipt.accumulated:
         lines.append(_accumulated_note(receipt.accumulated))
+    if receipt.disputed:
+        lines.append(_disputed_note(receipt.disputed))
+    if receipt.collapsed:
+        lines.append(_collapsed_note(receipt.collapsed))
     return lines
 
 
@@ -663,6 +668,80 @@ def _accumulated_note(items: Sequence[Accumulation]) -> str:
         "would end the value you just wrote. If the fact really does hold several values "
         "at once, this is correct and needs nothing. Either way the operator can settle "
         "it permanently by declaring the predicate's cardinality in the schema."
+    )
+
+
+def _disputed_note(items: Sequence[Dispute]) -> str:
+    """Say when a value was stored and replaced nothing, because it is the weaker claim.
+
+    The third member of the family `_unextracted_note` and `_accumulated_note` belong to,
+    and the same failure shape again: `added 1, ended 0` is what a correct replacement
+    reports, so on this transport a write that resolved nothing reads as one that did.
+
+    What separates it from `_accumulated_note` is which question is open. There the
+    predicate has no declared cardinality and the write may well be right; here the
+    cardinality is declared, the two values genuinely compete, and the store kept the
+    more confident one. So this note names both values and asks the model to settle
+    which is true, rather than asking anyone to decide a schema.
+
+    The confidences are quoted because they are the whole of the reason, and because the
+    fix is usually to restate the value with one that says how sure the model actually
+    is — a fact it has just confirmed with the user is not a 0.2.
+
+    >>> note = _disputed_note([Dispute("cl_1a", "user", "lives_in",
+    ...                                "London", 1.0, "Paris", 0.1)])
+    >>> "kept 'London' (confidence 1.00" in note
+    True
+    >>> "stored 'Paris' (confidence 0.10)" in note
+    True
+    """
+    pairs = "; ".join(
+        f"{safe_line(d.subject)} {safe_line(d.predicate)}: kept "
+        f"'{safe_line(d.incumbent)}' (confidence {d.incumbent_confidence:.2f}, "
+        f"claim_id {d.claim_id}), stored '{safe_line(d.candidate)}' "
+        f"(confidence {d.candidate_confidence:.2f}) beside it" for d in items)
+    return (
+        f"note: {len(items)} value(s) were stored without replacing what was already "
+        f"there, because the value already there is more than twice as confident: "
+        f"{pairs}. Both now answer memory_recall, more confident first. Nothing was "
+        "ended, and that is deliberate — ending a value says the world changed, and what "
+        "happened here is that two sources disagree. If the value you just wrote is the "
+        "true one, say so: write it again with a confidence that reflects how sure you "
+        "actually are, and it will replace the other. If the old value is simply wrong, "
+        "memory_forget is the tool that says the record was wrong."
+    )
+
+
+def _collapsed_note(items: Sequence[Collapse]) -> str:
+    """Say when closing a value out left it true at no instant.
+
+    A value superseded by one that begins at the same instant gets an interval of zero
+    length: `memory_history` still shows it, and no `valid_at` returns it, at any
+    instant. The receipt says `ended 1`, which is what an ordinary supersession says, so
+    without this the difference between "still answers about the period it held" and
+    "answers nothing, ever" is invisible on this transport — and the first of those is
+    what the tool description promises `ended` means.
+
+    Same family as `_pending` and `_interval_note`: a write that worked, whose visible
+    effect is indistinguishable from a write that did not.
+
+    >>> note = _collapsed_note([Collapse("cl_1a", "user", "city", "Delhi",
+    ...                                  datetime(2026, 1, 10, tzinfo=timezone.utc))])
+    >>> "'Delhi'" in note, "true at no instant" in note
+    (True, True)
+    """
+    rows = "; ".join(
+        f"'{safe_line(c.object)}' as {safe_line(c.subject)} "
+        f"{safe_line(c.predicate)}, both ends at {_stamp(c.at)} (claim_id {c.claim_id})"
+        for c in items)
+    return (
+        f"note: {len(items)} value(s) were closed at the instant they began, so they are "
+        f"now true at no instant: {rows}. That happens when the value replacing one "
+        "starts at the same moment the old one did — usually because both were written "
+        "with the same true_since, or with none. They stay in memory_history and they "
+        "answer no memory_search at any valid_at, so the period they covered is now "
+        "unaccounted for. If the old value really did hold for a while, say when it "
+        "started: write it again with a true_since earlier than the new value's."
     )
 
 
@@ -1564,6 +1643,9 @@ TOOLS: tuple[Tool, ...] = (
             "world moved on and the old one still answers about the period it held. If "
             "the old value was never right, storing over it is not enough: call "
             "memory_forget as well, which is the tool that says the record was wrong. "
+            "The one case where it ends nothing is a write you marked as a guess: see "
+            "confidence, and read the receipt, which names both values when that "
+            "happens. "
             "Example: subject 'user', predicate 'lives_in', object 'Lisbon'. If the "
             "fact did not start being true at this moment — you are recording something "
             "from earlier in the session, from a log, or from what the user just told "
@@ -1624,7 +1706,12 @@ TOOLS: tuple[Tool, ...] = (
                     "real lever and not a label: the gap between 1.0 and 0.5 moves a "
                     "claim's published relevance by a few percent, which is enough to "
                     "reorder rows that matched about equally well. Inflating it on "
-                    "everything removes the signal rather than raising it."
+                    "everything removes the signal rather than raising it. It also "
+                    "decides what this write is allowed to displace: a value worth less "
+                    "than half of the one already in the slot is stored beside it "
+                    "instead of ending it, and the receipt says so. Nothing you write at "
+                    "the default 1.0 is affected — it is what stops a guess recording "
+                    "that the world changed."
                 ),
             },
             "extractor": {

@@ -13,7 +13,7 @@ score well. Whether occupying the same slot is a conflict is then a schema quest
 `PredicateRegistry` already answers. No embeddings, no top-k cliff, no model, and the
 same inputs produce the same result on every run.
 
-Two invariants the implementation is built around:
+Three invariants the implementation is built around:
 
 * Nothing is deleted. Superseding closes the old claim's *valid* time and points
   `invalidated_by` at its successor, so `as_of` still returns what we believed at any
@@ -21,6 +21,13 @@ Two invariants the implementation is built around:
 * Unknown predicates are `Cardinality.MANY`. Keeping two competing facts degrades
   ranking; retiring a true one destroys information. Only errors of the first kind are
   recoverable.
+* A candidate closes a claim only if it is worth at least half of it. Cardinality says
+  whether two values compete; it never said which one wins, and until `AUTHORITY_SHARE`
+  existed nothing did — resolution was cardinality plus write order, so a 0.10-confidence
+  guess replaced a 1.00-confidence statement. The bad ranking was the smaller half of
+  that. Displacing a claim stamps it `ended`, which asserts *the world changed*, and
+  nothing about the world had changed. See `AUTHORITY_SHARE` for the rule and
+  `_outranked` for what happens to a candidate that loses.
 
 **The second invariant is right and it was silent, which is a different problem.** MANY
 is the safe default for a predicate nobody has decided about, but the write that lands on
@@ -60,6 +67,8 @@ from ..types import (
     Accumulation,
     Claim,
     Closure,
+    Collapse,
+    Dispute,
     as_utc,
     close_out,
     default_entity,
@@ -88,6 +97,33 @@ from ..types import (
 #: a 2.6x ordering that points the right way.
 MASSED_SHARE = 0.1
 
+#: The least a candidate may be worth, as a share of the claim it would close, and still
+#: close it. Below this the incumbent stays live, the candidate is stored beside it, and
+#: the write reports a `Dispute`.
+#:
+#: **Why confidence is the axis, and `Derivation` is not.** The write paths already encode
+#: source authority as a number, deliberately: `write.fast.CONFIDENCE` is 0.95 rather than
+#: 1.0, and its comment says why — "leaving headroom below 1.0 keeps LLM- and user-asserted
+#: claims rankable above rule output when they disagree". So the ordering exists and was
+#: designed; the reconciler simply never read it. Ranking by `Derivation` instead would say
+#: that nothing extracted from a conversation may ever displace anything an application
+#: asserted, which stops the store learning: "I moved to Lisbon" arrives as `LLM_EXTRACT`
+#: and has to be able to end a `USER` claim written last year. Recency is what settles that
+#: case, and it already does — `_victims` splits on valid time before anything here runs.
+#:
+#: **Why one half and not some other fraction.** The number has to sit below every
+#: confidence the shipped write paths produce, or an ordinary write would trip it. Those
+#: are 1.00 (`remember()`), 0.95 (the fast path), 0.70 (an extraction whose model gave no
+#: figure) and 0.50 (`llm._shape.UNKNOWN_CONFIDENCE`, a model that ignored the schema). The
+#: lowest is exactly half of the highest, so a half is the largest share that leaves every
+#: default alone. What it catches is what is left: a claim whose extractor said, in the one
+#: field provided for saying it, that this is a guess.
+#:
+#: A ratio rather than a fixed floor, because the comparison is between two claims and not
+#: against an absolute standard. A 0.30 candidate is a guess against a stated fact and an
+#: even match against a 0.50 one, and only a share can say both.
+AUTHORITY_SHARE = 0.5
+
 
 @dataclass(slots=True)
 class ReconcileResult:
@@ -101,6 +137,12 @@ class ReconcileResult:
     #: registry has no spec for — see `Reconciler._accumulation`. `None` on every other
     #: action and on the overwhelming majority of adds.
     accumulated: Accumulation | None = None
+    #: Live claims this candidate was not confident enough to close, one entry each. They
+    #: are still live and this claim is stored beside them — see `AUTHORITY_SHARE`.
+    disputed: list[Dispute] = field(default_factory=list)
+    #: Claims this candidate closed at or before the instant they began. Their intervals
+    #: are empty, so they answer no query on either clock — see `Collapse`.
+    collapsed: list[Collapse] = field(default_factory=list)
 
 
 class Reconciler:
@@ -182,8 +224,12 @@ class Reconciler:
         superseded, newer = self._victims(claim, t, owner)
         # Before `put_claim`, or this claim is itself an occupant of the slot it is
         # asking about. `superseded` first, so the ordinary single-valued write —
-        # registered predicate, victim found — short-circuits without a lookup.
+        # registered predicate, victim found — short-circuits without a lookup. It is
+        # the *unfiltered* list that short-circuits, and the distinction costs nothing:
+        # a victim exists only under a registered predicate, and `_accumulation` returns
+        # `None` for every one of those.
         accumulated = None if superseded else self._accumulation(claim, t, owner)
+        superseded, disputed = self._outranked(claim, superseded)
         if newer:
             # This claim is history: something already on record was true *later*. Close
             # its valid interval where the next value begins, so it is retrievable via
@@ -196,9 +242,11 @@ class Reconciler:
         if superseded:
             # The new value's `valid_from` is when the old one stopped being true — not
             # `t`, which is merely when we found out.
-            self._retire(superseded, t, claim.id, claim.valid_from, close=close)
-            return ReconcileResult("supersede", claim, superseded)
-        return ReconcileResult("add", claim, [], accumulated)
+            collapsed = self._retire(superseded, t, claim.id, claim.valid_from,
+                                     close=close)
+            return ReconcileResult("supersede", claim, superseded,
+                                   disputed=disputed, collapsed=collapsed)
+        return ReconcileResult("add", claim, [], accumulated, disputed=disputed)
 
     def reinforce(self, claim: Claim, sources: Sequence[str],
                   observed_at: datetime | None = None) -> Claim:
@@ -396,6 +444,42 @@ class Reconciler:
             (newer if c.valid_from > claim.valid_from else older).append(c)
         return older, newer
 
+    @staticmethod
+    def _outranked(claim: Claim,
+                   victims: Sequence[Claim]) -> tuple[list[Claim], list[Dispute]]:
+        """Split displaceable victims from ones this candidate is not worth enough to close.
+
+        The rule is one comparison and it is stated in full at `AUTHORITY_SHARE`: a
+        candidate closes a claim only if it is worth at least half as much, measured on
+        `confidence`, which is where every write path already records how sure its source
+        was.
+
+        **The defect this exists to stop is not a bad ranking, it is a false record.**
+        Displacing a claim stamps it `ended`, and `ended` asserts that the world changed.
+        When a 0.10-confidence extraction displaced a 1.00-confidence statement, nothing
+        about the world had changed — a machine had guessed — and the store recorded a
+        world event as the reason. `CLAUDE.md` calls the `ended`/`retired` distinction the
+        one mistake here that cannot be found by reading the data afterwards; this wrote
+        it automatically, on every low-confidence extraction that collided with a known
+        fact.
+
+        **The candidate is still stored, and both values stay live.** That is this
+        module's second invariant applied to a case it did not previously reach: keeping
+        two competing facts degrades ranking, retiring a true one destroys information,
+        and only errors of the first kind are recoverable. Retrieval already prefers the
+        more confident of the two (`retrieve.scoring`, `w_confidence`), so the cost of the
+        recoverable error is that the slot answers with both, best first.
+        """
+        keep: list[Claim] = []
+        split: list[Dispute] = []
+        for v in victims:
+            if claim.confidence >= AUTHORITY_SHARE * v.confidence:
+                keep.append(v)
+            else:
+                split.append(Dispute(v.id, v.subject, v.predicate, v.object,
+                                     v.confidence, claim.object, claim.confidence))
+        return keep, split
+
     def _accumulation(self, claim: Claim, t: datetime,
                       owner: str) -> Accumulation | None:
         """Report a value landing beside live values in a slot with no declared schema.
@@ -470,7 +554,7 @@ class Reconciler:
 
     def _retire(self, victims: Sequence[Claim], t: datetime, by: str | None,
                 valid_to: datetime | None = None, *,
-                close: Closure = "ended") -> None:
+                close: Closure = "ended") -> list[Collapse]:
         """Close out displaced claims on **one** axis: the one that says why.
 
         `close="ended"` stops the world clock at `valid_to`: the claim was true and is
@@ -502,13 +586,24 @@ class Reconciler:
         one thing here and another at the facade.
         """
         boundary = t if valid_to is None else valid_to
+        emptied: list[Collapse] = []
         for v in victims:
+            began = as_utc(v.valid_from)
             close_out(v, t if close == "retired" else boundary, by, close)
             # `put_claim` rather than `store.invalidate`, because the Store protocol has
             # no way to set `valid_to`, and no way to write `invalidated_by` without also
             # writing `invalidated_at` — which is exactly the conflation this method
             # exists to stop making.
             self.store.put_claim(v)
+            if v.valid_to is not None and as_utc(v.valid_to) == began:
+                # `close_out` clamped the closure to this claim's own start, so its
+                # interval is empty and it is now true at no instant. Legal, deliberate,
+                # and the one outcome of a supersession that no query will ever return —
+                # so the write says so rather than reporting `closed 1` and leaving the
+                # caller to discover it from a `valid_at` that answers nothing. See
+                # `Collapse` for why the edge is not nudged forward instead.
+                emptied.append(Collapse(v.id, v.subject, v.predicate, v.object, began))
+        return emptied
 
     def _retract(self, claim: Claim, t: datetime, owner: str,
                  close: Closure = "ended") -> ReconcileResult:
@@ -566,6 +661,15 @@ class Reconciler:
         claim.valid_to = t
         self.store.put_claim(claim)
 
+        collapsed: list[Collapse] = []
+        # **`AUTHORITY_SHARE` is deliberately not consulted here**, and it is worth saying
+        # why so this does not read as a place the rule was forgotten. A retraction writes
+        # a tombstone that is born invalidated — "we stopped believing X" — and leaving
+        # the target live beside it would put both sentences in the store at once, which
+        # is a worse record than either. Nothing needs it in practice either: every
+        # negative this write path can produce comes from `write/fast.py` at 0.95 or from
+        # a caller naming a confidence on `remember(polarity=-1)`, and 0.95 outranks
+        # everything the shipped paths write.
         if matches:
             # **A retraction is a world event, not a correction**, so it ends its targets
             # rather than retiring them. Every negative the write path can produce says
@@ -579,8 +683,8 @@ class Reconciler:
             #
             # A retraction dated in the past ("I stopped working there in March") closes
             # the interval in March, not today — same distinction as a supersession.
-            self._retire(matches, t, claim.id, claim.valid_from, close=close)
-        return ReconcileResult("retract", claim, matches)
+            collapsed = self._retire(matches, t, claim.id, claim.valid_from, close=close)
+        return ReconcileResult("retract", claim, matches, collapsed=collapsed)
 
 
 # --- late-alias backfill --------------------------------------------------------

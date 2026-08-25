@@ -7,6 +7,58 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A write worth less than half of what it would replace no longer replaces it
+
+### What changed
+
+Contradiction resolution reads `confidence`. A candidate closes a live claim only if it is
+worth at least half of it (`write.reconcile.AUTHORITY_SHARE`); below that the incumbent
+stays live, the candidate is stored beside it, and the write reports a `Dispute` on
+`WriteReceipt.disputed`. `remember()` also refuses `valid_to` at or before `valid_from`,
+which used to store a claim no query returns.
+
+### Who this changes, and in which direction
+
+**Nobody writing at the confidences the shipped paths produce.** Those are 1.00
+(`remember()` and `memory_remember`), 0.95 (the fast path), 0.70 (an extraction whose
+model returned no figure) and 0.50 (one that ignored the schema). Every one of them clears
+half of every other, so ordinary traffic supersedes exactly as before.
+
+**Deployments that pass a low `confidence` deliberately** — an extraction model that
+scores implied facts down, or an importer marking uncertain rows. Those writes used to win
+and now do not. Two live values in a single-valued slot is the visible cost, and it is the
+recoverable direction: keeping two competing facts degrades ranking, and ending a true one
+destroys information. Retrieval already prefers the more confident of the two.
+
+**What you were losing before is worse than what you lose now.** The displaced claim was
+stamped `ended`, which in this library asserts that the world changed. A guess that
+collided with a known fact recorded a world event that never happened, on the axis whose
+whole purpose is answering "what do we now believe was true then".
+
+### How you find out it applies to you
+
+`receipt.disputed` is non-empty, `repr(receipt)` shows `disputed=N`, the `write.disputed`
+counter climbs, and `memory_remember` prints a note naming both values and both
+confidences. A series that climbs from zero on this upgrade is not a new problem — it is
+how often the old behaviour was firing.
+
+For history already written this way, the pairs are gone: an `ended` claim displaced by a
+guess is indistinguishable from one displaced by a fact, which is exactly why this was
+worth fixing rather than migrating. What you can find is the population worth re-reading:
+
+```python
+for c in mem.get_all(states=["ended"]):
+    successor = mem.store.get_claim(c.invalidated_by) if c.invalidated_by else None
+    if successor is not None and successor.confidence < 0.5 * c.confidence:
+        print(c.id, c.object, c.confidence, "→", successor.object, successor.confidence)
+```
+
+### If you want the old behaviour
+
+There is no flag. The old behaviour recorded a reason it had not established.
+
+---
+
 ## `remember()` raises on `true_since`, where it used to store it as metadata
 
 ### What changed

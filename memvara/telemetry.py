@@ -329,6 +329,45 @@ PREDICATE_CAPPED = "predicate.capped"
 #: this counter will not fall until it is.
 PREDICATE_ACCUMULATED = "predicate.accumulated"
 
+#: A write that stored a value without displacing the one already in its slot, because
+#: the incumbent is worth more than twice as much — see
+#: `memvara.write.reconcile.AUTHORITY_SHARE`. One per write, not per displaced claim: the
+#: question this answers is how often writes are landing on facts they cannot outrank,
+#: not how wide the slots are.
+#:
+#: **What a non-zero value means.** Some source in this deployment is writing low-
+#: confidence values over facts a more reliable source established. Before the rule
+#: existed those writes *won*, and stamped the fact they displaced `ended`, which asserts
+#: the world changed rather than that two sources disagree. So a series that climbs from
+#: zero on an upgrade is not a new problem — it is the old one becoming visible.
+#:
+#: Nothing else moves when it happens. The candidate is stored either way, so
+#: `write.reconcile{action="add"}` reports exactly what an ordinary first write reports.
+#: The pairs are on the receipts (`WriteReceipt.disputed`), which is where a per-slot
+#: question belongs; here, as with `predicate.accumulated`, the dimension anyone would
+#: want to slice by is unbounded and would be a cardinality bomb.
+#:
+#: **What to do about it.** Read the pairs off the receipts and decide them. If the
+#: low-confidence source is right, write the value again with a confidence that says so;
+#: if it is wrong, nothing needs doing, because it did not displace anything.
+WRITE_DISPUTED = "write.disputed"
+
+#: A claim closed at or before the instant it began, leaving it true at no instant — see
+#: `memvara.types.Collapse`. One per claim, because it is the claim that is unreachable.
+#:
+#: **What a non-zero value means.** Values are being superseded by values that begin at
+#: the same instant. Two things produce it, and both are ordinary: a correction made in
+#: the same second as the fact it corrects, and any import that stamps dates rather than
+#: timestamps, where every value written for one day shares one `valid_from`. The
+#: displaced rows survive in `memory_history` and answer no `valid_at`, ever.
+#:
+#: **What to do about it.** For an import, stamp real instants, or space the versions
+#: within the day — a day's worth of values sharing one `valid_from` cannot be ordered by
+#: the world clock, and this is what that looks like from the store's side. For live
+#: writes there is usually nothing to do: a value corrected in the same instant genuinely
+#: held for no time.
+WRITE_COLLAPSED = "write.collapsed"
+
 #: One per `search()`, tagged `script`. Pairs with the gate slices: a script with query
 #: volume and no `gate.pass` is a population whose writes are being dropped.
 RETRIEVAL_QUERY = "retrieval.query"

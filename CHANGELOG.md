@@ -11,6 +11,83 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A low-confidence guess no longer displaces a high-confidence statement, or records a
+  world event as the reason.** Contradiction resolution was predicate cardinality plus
+  write order and nothing else — `confidence` appeared nowhere in
+  `memvara/write/reconcile.py`:
+
+  ```python
+  m.remember("user", "lives_in", "London", confidence=1.00, extractor="api")
+  m.remember("user", "lives_in", "Paris",  confidence=0.10, extractor="llm-guess")
+
+    London   conf=1.0   via api          state=ended
+    Paris    conf=0.1   via llm-guess    state=live
+    live now → ['Paris']
+  ```
+
+  The bad ranking is the smaller half of it. `ended` asserts that **the world changed**,
+  and nothing about the world had changed — a machine had guessed. The correct reading is
+  that the record is disputed, and the store had no way to say so. `CLAUDE.md` calls the
+  `ended`/`retired` distinction the one mistake here that cannot be found by reading the
+  data afterwards; this wrote it automatically, on every low-confidence extraction that
+  collided with a known fact.
+
+  A candidate now closes a claim only if it is worth at least half of it, measured on
+  `confidence` — `write.reconcile.AUTHORITY_SHARE`. Below that share the incumbent stays
+  live, the candidate is stored beside it, and the write reports a `Dispute` naming both
+  values on `WriteReceipt.disputed`, on the `write.disputed` counter, and in the
+  `memory_remember` receipt.
+
+  **Confidence, not `Derivation`, and deliberately.** The write paths already encode
+  source authority as a number: `write.fast.CONFIDENCE` is 0.95 rather than 1.0, and its
+  comment says the headroom exists "to keep LLM- and user-asserted claims rankable above
+  rule output when they disagree". Ranking by `Derivation` instead would mean a
+  conversational extraction could never displace anything an application asserted, which
+  stops the store learning — "I moved to Lisbon" arrives as `LLM_EXTRACT` and has to be
+  able to end a `USER` claim written last year.
+
+  **Half, and not some other fraction.** The share has to sit below every confidence the
+  shipped write paths produce, or ordinary writes would trip it: 1.00 from `remember()`,
+  0.95 from the fast path, 0.70 from an extraction whose model gave no figure, 0.50 from
+  one that ignored the schema. The lowest is exactly half the highest. What is left is a
+  claim whose extractor said, in the one field provided for saying it, that this is a
+  guess.
+
+  The retraction path deliberately does not consult it. A retraction writes a tombstone
+  that is born invalidated, and leaving its target live beside that would put both
+  sentences in the store at once.
+
+- **A supersession that leaves a value true at no instant now says so.** Two writes
+  sharing a `valid_from` — any same-day correction, and every import that stamps dates
+  rather than timestamps — left the older claim with `valid_from == valid_to`:
+
+  ```
+  Delhi  state=ended   valid_from == valid_to == 2026-01-10T00:00:00Z
+    valid_at=2026-01-09 → []
+    valid_at=2026-01-10 → ['Mumbai']      Delhi answers nothing
+    valid_at=2026-01-11 → ['Mumbai']
+  ```
+
+  The clamp in `close_out` is right and stays: an interval that ends before it begins is
+  not a shorter fact, it is a row no `as_of` window can return consistently. What it
+  cannot do is make the row answer anything, and the receipt still read `ended 1`, which
+  is what an ordinary supersession reads — while `core.py` promises that `ended` means
+  "`get_all(valid_at=<while it held>)` still answers". `server/tools._interval` already
+  *refused* this exact shape one module over, calling it "true at no instant, returned by
+  no query"; the reconciler produced it in silence.
+
+  It is reported rather than prevented, on `WriteReceipt.collapsed`, the `write.collapsed`
+  counter and the `memory_remember` receipt. The alternative — nudging the edge forward by
+  a tick — would give the displaced claim an interval that nothing witnessed, in a store
+  whose argument is that its intervals come from evidence. `Memvara.supersede()` reports
+  the same outcome from its own path.
+
+- **`remember()` refuses an interval of no length**, matching what `memory_remember` has
+  always done with the same input. `remember(valid_from=T, valid_to=T)` used to store a
+  claim that `added 1` reported and no query on either clock returned. It is now a
+  `ValueError`. `forget()` and `delete()` still clamp rather than refuse, because there
+  the row already exists and refusing would leave no way to close it at all.
+
 - **`remember()` refuses `true_since` and `true_until` instead of filing them as
   metadata.** The two surfaces spell the valid interval differently — `memory_remember`
   takes `true_since`/`true_until`, the Python API takes `valid_from`/`valid_to` — and

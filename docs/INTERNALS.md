@@ -302,6 +302,27 @@ claim:
    `get_all(valid_at=<back then>)` still returns it. Under `close="retired"` the axes
    swap: `invalidated_at=now` and `valid_to` untouched, because a correction witnessed
    no world event. Return `action="supersede"` with the list.
+
+   Two things about that step are worth stating separately, because both were silent
+   until they were not.
+
+   **A candidate closes a victim only if it is worth at least half of it**, measured on
+   `confidence` — `AUTHORITY_SHARE`. Below that the incumbent stays live, the candidate is
+   stored beside it, the action is `add`, and a `Dispute` names both values. The rule
+   reads `confidence` and not `Derivation` because the write paths already encode source
+   authority as a number and say so — `write.fast.CONFIDENCE` is 0.95 rather than 1.0,
+   with a comment explaining that the headroom is what keeps user-asserted claims above
+   rule output. Ranking by `Derivation` instead would stop a conversational extraction
+   ever displacing an application-asserted fact, which is a store that stops learning.
+   Every confidence the shipped paths produce — 1.00, 0.95, 0.70, 0.50 — clears half of
+   every other, so ordinary traffic passes untouched.
+
+   **A closure clamped to the victim's own start empties its interval**, and the write
+   reports a `Collapse`. `close_out` never inverts an interval, so superseding a claim at
+   or before the instant it began leaves `valid_from == valid_to`: it survives in
+   `history()` and is returned by no `valid_at`, at any instant. It is not nudged forward
+   by a tick, because that would invent an interval nothing witnessed. `Memvara.supersede`
+   reports the same outcome from its own path.
 3. **Retraction** — candidate has `polarity == -1`: close out matching live claims and
    store the negative claim as a tombstone (invalidated *and* ended at `now`, so it can
    never be live) rather than as a live fact. The matches are **ended**, not retired:
@@ -317,6 +338,12 @@ class ReconcileResult:
     claim: Claim | None          # the stored/updated claim
     invalidated: list[Claim]     # claims this one closed out — on whichever clock
                                  # `close=` stopped, so `ended` by default, not retired
+    accumulated: Accumulation | None   # landed beside live values under a predicate
+                                       # nobody has declared a cardinality for
+    disputed: list[Dispute]      # live claims this candidate was not confident enough
+                                 # to close; they stayed, it was stored beside them
+    collapsed: list[Collapse]    # claims closed at or before their own start, so their
+                                 # interval is empty and answers nothing on either clock
 ```
 
 `WritePipeline` copies that list onto `WriteReceipt.closed`, where `receipt.ended` and

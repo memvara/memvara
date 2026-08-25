@@ -125,6 +125,16 @@ same two facts resolve the same way every run. Unknown predicates default to `MA
 because keeping two facts degrades ranking while dropping a true one destroys
 information — errors should fall on the recoverable side.
 
+Cardinality says whether two values *compete*. It does not say which one wins, and for a
+while nothing did: resolution was cardinality plus write order, so a 0.10-confidence guess
+replaced a 1.00-confidence statement and stamped it `ended`, which asserts the world
+changed. It had not. So a candidate now closes a value only if it is worth at least half
+of it, on `confidence` — the same field ranking already reads, and the same field
+`write.fast.CONFIDENCE` already uses to keep rule output below what a person asserted.
+Below that share the incumbent stays live, the candidate is stored beside it, and the
+receipt names both. That is the recoverable side again, applied to the same question one
+level down.
+
 The model's job moves off the write path and onto *schema acquisition*: the first time an
 unfamiliar predicate appears, one call asks whether it's single-valued; the answer is
 cached forever. The thousandth occurrence costs nothing.
