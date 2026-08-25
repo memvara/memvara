@@ -1,9 +1,9 @@
 # Releasing memvara
 
 PyPI has `memvara` 0.3.0 (first upload 2026-08-14, `0.1.0`). npm has `memvara` 0.0.1, a
-name reservation with no JavaScript client (same day), and `npm/memvara/package.json` in
-this tree says `0.0.2` — so the next `v*` tag publishes npm rather than skipping it. This
-is the checklist for the next upload of either, plus the things that have to stay true.
+name reservation with no JavaScript client (same day). This tree is `0.4.0` / npm `0.0.2`,
+neither of which is on its index yet — `v0.4.0` publishes both. This is the checklist for
+the next upload of either, plus the things that have to stay true.
 
 Since `.github/workflows/release.yml` exists, most of what follows is automated: pushing
 a `v*` tag runs the whole gate on the tagged commit, builds in a clean runner, checks the
@@ -68,8 +68,8 @@ actually bumped.
 ### 1. Bump the version in both places
 
 ```
-pyproject.toml        version = "0.3.0"
-memvara/__init__.py    __version__ = "0.3.0"
+pyproject.toml        version = "0.4.0"
+memvara/__init__.py    __version__ = "0.4.0"
 ```
 
 Nothing in the build keeps these equal.
@@ -79,7 +79,7 @@ does, so a one-sided bump fails the suite rather than shipping a wheel whose
 
 ### 2. Close out the changelog
 
-Move everything under `## [Unreleased]` into `## [0.3.0] — YYYY-MM-DD`, and leave
+Move everything under `## [Unreleased]` into `## [0.4.0] — YYYY-MM-DD`, and leave
 `[Unreleased]` empty behind it. Keep the *Fixed* entries specific — "a backdated
 supersession left two live values for a single-valued predicate" is the entry someone
 searches for; "bug fixes" is not.
@@ -87,8 +87,8 @@ searches for; "bug fixes" is not.
 ### 3. Tag the commit CI went green on
 
 ```bash
-git tag -a v0.3.0 -m "memvara 0.3.0"
-git push origin v0.3.0
+git tag -a v0.4.0 -m "memvara 0.4.0"
+git push origin v0.4.0
 ```
 
 Tag the commit CI went green on, not the one you are standing on.
@@ -100,7 +100,7 @@ That push is the whole trigger. `.github/workflows/release.yml` then runs, in or
 | `version` | Refuses unless the tag, `pyproject.toml`'s `version` and `memvara/__init__.py`'s `__version__` are the same string. First and fastest, so a one-sided bump fails in seconds rather than after the matrix — or, the failure it really exists for, not at all, leaving a wheel on PyPI whose metadata disagrees with its tag. |
 | `ci` | Calls `.github/workflows/ci.yml` **on the tagged commit**: 3.10–3.13 on Linux plus macOS and Windows, coverage gated at 100%, mypy, and the no-extras import job. It calls rather than restates, so there is one matrix in this repository and it cannot drift. A tag push starts nothing else, so without this job the release would be gated on whatever CI last happened to run. |
 | `build` | `python -m build`, `twine check`, then the whole suite again *after* the build, which is the only run in which the four dist-gated tests execute at all — three in `tests/test_packaging.py` and one in `tests/test_init.py`. Then it installs the wheel into a fresh venv outside the repository and checks that the dependency set is exactly memvara and numpy, that the library works, and that `reveal_type` reports `str` rather than `Any`. |
-| `check-npm` | Reads `npm/memvara/package.json` and asks the registry whether that version already exists. Writes `npm_version` and `npm_exists`. Logs `SKIP` or `PUBLISH` in those words, so the first run — which is a skip — is readable rather than an absent job. Does not compare the npm version to the Python tag. |
+| `check-npm` | Reads `npm/memvara/package.json` and asks the registry whether that version already exists. Writes `npm_version` and `npm_exists`. Logs `SKIP` or `PUBLISH` in those words, so a skip is readable rather than an absent job. Does not compare the npm version to the Python tag. |
 | `build-npm` | `npm pack` once, hashes the tarball, refuses a file list that is not `package.json`'s `files`, uploads `npm-dist`. The publish job is not allowed to pack. |
 | `publish-pypi` | Uploads the artifact `build` produced — those bytes, not a rebuild — over PyPI trusted publishing. Waits for a human first; see step 4. |
 | `publish-npm` | Runs on a tag push when `npm_exists == false`. Downloads `npm-dist`, checks the SHA-256, and `npm publish`es **the tarball**. No `npm pack`, no reviewer wait. A TestPyPI dispatch does not publish npm. |
