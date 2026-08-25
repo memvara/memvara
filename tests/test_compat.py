@@ -562,6 +562,45 @@ def test_history_rows_are_replayed_in_the_logs_time_order_not_its_row_order(mem,
     assert [c.text for c in mem.get_all()] == ["Lisbon"]
 
 
+def test_the_tilde_path_the_readme_documents_is_the_one_that_has_to_work(mem, tmp_path,
+                                                                        monkeypatch):
+    """`~/.mem0/history.db` is mem0's default location and the first line of the
+    documented migration, and `sqlite3.connect` does not expand `~` — so the exact call
+    in the README failed with "unable to open database file", which reads like a
+    permissions problem. Asserted through `import_mem0` too: the reader working is no use
+    if the entry point callers actually type does not."""
+    home = tmp_path / "home"
+    (home / ".mem0").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    write_history(home / ".mem0" / "history.db", [row("h1", "m1", "ADD", 0, new="Berlin")])
+
+    assert [r.id for r in read_history_db("~/.mem0/history.db")] == ["h1"]
+    assert import_mem0(mem, history_db="~/.mem0/history.db").claims == 1
+    assert [c.text for c in mem.get_all()] == ["Berlin"]
+
+
+def test_a_log_that_is_not_there_names_the_file_it_resolved_to(tmp_path, monkeypatch):
+    """The message has to carry the absolute path, because the whole failure mode is a
+    path that resolved somewhere the caller did not picture."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    with pytest.raises(sqlite3.OperationalError) as excinfo:
+        read_history_db("~/.mem0/history.db")
+    message = str(excinfo.value)
+    assert str(tmp_path / ".mem0" / "history.db") in message
+    assert "not a permissions one" in message
+
+
+def test_a_log_that_is_there_and_will_not_open_says_so_instead(tmp_path):
+    """Pointing at `~/.mem0` rather than the file inside it is the easy version of this,
+    and telling that caller "does not exist" would send them to check a path that is
+    fine."""
+    with pytest.raises(sqlite3.OperationalError) as excinfo:
+        read_history_db(tmp_path)
+    assert f"{tmp_path} — which exists but could not be opened" in str(excinfo.value)
+
+
 def test_an_update_with_no_add_row_still_imports_its_text(mem, tmp_path):
     """A pruned log must not import as an empty store."""
     db = write_history(tmp_path / "h.db", [row("h1", "m1", "UPDATE", 3, new="Lisbon")])

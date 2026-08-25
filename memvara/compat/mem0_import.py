@@ -125,6 +125,18 @@ def _column(row: sqlite3.Row, name: str) -> Any:
     return row[name] if name in row.keys() else None
 
 
+def _why_not(resolved: str) -> str:
+    """Which half of an open failure this was, since sqlite reports both the same way.
+
+    A missing file and an unreadable one are both "unable to open database file", so the
+    default reading is permissions — and the cause that brought a caller here is usually
+    the path. Saying which one it is says which of the two to go and look at.
+    """
+    if os.path.exists(resolved):
+        return " — which exists but could not be opened for reading."
+    return " — which does not exist, so this is a path problem and not a permissions one."
+
+
 def read_history_db(path: str | os.PathLike[str]) -> list[HistoryRow]:
     """Read mem0's mutation log, oldest first.
 
@@ -137,9 +149,19 @@ def read_history_db(path: str | os.PathLike[str]) -> list[HistoryRow]:
     file", which reads like a permissions problem rather than a path problem. The MCP
     server already expands `~` for `MEMVARA_DB` "because that is what people type in a
     JSON file"; the same is true of a migration one-liner.
+
+    When the open fails anyway, the error names the absolute path it resolved to. That is
+    the one fact "unable to open database file" withholds, and it is the fact a caller who
+    typed `~` needs: without it there is no way to tell a path that resolved somewhere
+    unexpected from a file that is really there and really unreadable.
     """
-    con = sqlite3.connect(
-        f"file:{os.path.expanduser(os.fspath(path))}?mode=ro", uri=True)
+    resolved = os.path.abspath(os.path.expanduser(os.fspath(path)))
+    try:
+        con = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        # Re-raised as the same class sqlite used, so a migration script already catching
+        # OperationalError around this call keeps working and only the message improves.
+        raise sqlite3.OperationalError(f"{exc}: {resolved}{_why_not(resolved)}") from exc
     try:
         con.row_factory = sqlite3.Row
         raw = con.execute("SELECT * FROM history").fetchall()
