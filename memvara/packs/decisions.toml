@@ -14,11 +14,14 @@
 # The short version, because it decides how to read every line below. `MemoryType` is
 # persisted as a string and hydrated with `MemoryType(value)`, which raises on a name it
 # does not know — so a fourth member is a schema bump and a store an older build can no
-# longer open, permanently, each time. And it drives exactly one behaviour: a hardcoded
-# `EPISODIC -> SEMANTIC` promotion. A third value there needs a rule in a pairwise machine
-# that does not generalise, or a documented exemption. A predicate needs neither, is
-# reversible, and is the extension point this library already built and documents under
-# "Teach it your vocabulary".
+# longer open, permanently, each time. And the only rule a new member would have to enter
+# is a hardcoded `EPISODIC -> SEMANTIC` promotion: a further value there needs a rule in a
+# pairwise machine that does not generalise, or a documented exemption. The two other
+# places that read `memory_type` to decide something — the `memory_types=` filter, and
+# `memory_standing` returning the `procedural` claims and nothing else — take a new member
+# or ignore it without changing. A predicate needs none of this, is reversible, and is the
+# extension point this library already built and documents under "Teach it your
+# vocabulary".
 #
 # ## Why these predicates and not the brief's taxonomy
 #

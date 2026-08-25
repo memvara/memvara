@@ -20,9 +20,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   This is the answer to the agent-state brief's ask for `decision` and `observation` as
   **memory types**, and the answer is that they are vocabulary. `MemoryType` is persisted
   and hydrated with `MemoryType(value)`, so a fourth member is a `SCHEMA_VERSION` bump and
-  a store older builds cannot open — a cost that recurs for the fifth. It drives exactly
-  one behaviour, a hardcoded `EPISODIC -> SEMANTIC` promotion that a third value cannot
-  join without becoming a policy table nothing needs. And `observation` is a statement
+  a store older builds cannot open — a cost that recurs for the fifth. The only rule a new
+  member would have to enter is a hardcoded `EPISODIC -> SEMANTIC` promotion, which a
+  further value cannot join without becoming a policy table nothing needs; the two other
+  places that read `memory_type` to decide something, the `memory_types=` filter and
+  `memory_standing`'s procedural-only selection, take a new member or ignore it without
+  changing at all. And `observation` is a statement
   about *where a claim came from*, which is `Derivation`, already recorded and already
   reported by `why()`.
 

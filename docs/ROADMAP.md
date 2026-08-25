@@ -403,12 +403,15 @@ member makes a store that an older build can no longer open, permanently — a
 `SCHEMA_VERSION` bump of the same kind `docs/UPGRADING.md` already records for the FTS5
 option. That cost recurs for the fifth member and the sixth.
 
-**And it drives one behaviour, which does not generalise.** `memory_type` is read in
-exactly three places: `consolidate.merge.promote_pass`, the `memory_types=` filter, and
-`PredicateSpec`'s default. Decay is `Volatility`, not this. So the only *behaviour* a new
-member would join is a hardcoded `EPISODIC -> SEMANTIC` promotion — a pairwise rule that a
-third value cannot enter without becoming a policy table nothing currently needs, or a
-documented exemption that reads as an oversight later.
+**And the one rule a new member would have to enter does not generalise.** Three things
+read `memory_type` to decide something: `consolidate.merge.promote_pass`, the
+`memory_types=` filter on `recall()` and `search()`, and `memory_standing`, which returns
+the live claims whose type is `PROCEDURAL` and nothing else. Everything else that touches
+it renders it or stores it. Decay is `Volatility`, not this. The filter takes any member
+for free and `memory_standing` would go on ignoring a fourth one, so the only *rule* a new
+member has to enter is a hardcoded `EPISODIC -> SEMANTIC` promotion — a pairwise machine
+that a further value cannot join without becoming a policy table nothing currently needs,
+or a documented exemption that reads as an oversight later.
 
 **`observation` is the wrong axis outright.** "An agent noticed this" rather than "a person
 said it" is a statement about where a claim came from, and that axis exists: `Derivation`,
