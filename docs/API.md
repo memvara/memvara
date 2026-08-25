@@ -87,6 +87,20 @@ mem.neighborhood(entity, *, depth=2, k=10, min_hops=1, predicates=None,
 mem.paths_between(source, target, *, depth=3, k=3, predicates=None,
                   T=None, min_score=0.0)                   -> list[Path]
 
+# identity repair — both dry-run by default, both rewrite history when they are not
+from memvara import backfill_entities, split_entity
+backfill_entities(mem.writer.reconciler, tenant)           -> RekeyReport
+#   Applies aliases learned since a claim was written. A claim keeps the identity it
+#   was written with, so learning "Big Blue" is IBM in month six does not re-key
+#   month one; this is how you ask for that, dated and attributable.
+split_entity(mem.writer.reconciler, scope, surface, at)    -> SplitReport
+#   The inverse: one surface form that has been two different things either side of
+#   `at`. Two people who share a name are one entity, and on a single-valued predicate
+#   the later one's employment retires the earlier one's — a job change nobody wrote.
+#   Re-stamps the earlier claims onto a distinct identity and undoes the supersessions
+#   that crossed the boundary. Retirements move but are never un-retired: ending a
+#   claim is something the write path inferred, retiring one is a caller's statement.
+
 # maintenance
 mem.consolidate()                                 -> dict[str, int]
 mem.reembed(embedder=None)                        -> int            # after a model change

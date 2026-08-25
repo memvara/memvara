@@ -360,7 +360,7 @@ _CLOUD_NOT_WIRED = (
     "REST facade actually exposes — reading one memory by id, erasing one, erasing a "
     "scope, tenant stats — and the facade has no endpoint for the low-level surface the "
     "engine calls on every turn: {missing}.\n\n"
-    "Building it anyway would start a server that lists thirteen tools and fails on the "
+    "Building it anyway would start a server that lists fourteen tools and fails on the "
     "first one a model reaches for, which is worse than not starting: the failure would "
     "arrive mid-conversation, as a tool error, to a model with no way to act on it.\n\n"
     "Use MEMVARA_MODE=local (or --mode local) with MEMVARA_DB pointing at a file. To use "
@@ -381,7 +381,7 @@ def build_memvara(config: ServerConfig) -> Memvara:
     `store=` as an alternative to `path=` for exactly this case. **It is refused instead,
     at construction**, and `_CLOUD_NOT_WIRED` says why: the REST facade has no endpoint
     for the low-level surface the engine calls on every turn, so a server built this way
-    starts, lists thirteen tools, and fails on the first one a model reaches for. See
+    starts, lists fourteen tools, and fails on the first one a model reaches for. See
     `docs/OPEN-CORE.md` for the decision and which side of the line each seam is on.
     """
     if config.mode == "cloud":
