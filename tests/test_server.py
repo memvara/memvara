@@ -247,7 +247,7 @@ _FORWARDING_CASES = {
     "memory_standing": [{"k": 5}],
     "memory_add": [{"text": "I live in Lisbon"}],
     "memory_remember": [{"predicate": "lives_in", "object": "Lisbon",
-                         "memory_type": "semantic"}],
+                         "memory_type": "semantic", "sources": []}],
     "memory_forget": [{"predicate": "lives_in"}, {"claim_id": "cl_absent"}],
     # Two sets for the same reason `memory_forget` needs two: the tool refuses both
     # addressing modes at once, so neither set alone reaches every property. `at` rides
@@ -3426,3 +3426,60 @@ def test_standing_drops_a_preference_that_was_retired(standing_server):
     standing_server._ctx.memory.forget("user", "prefers")
     body = text(standing_server, "memory_standing")
     assert "No standing preferences" in body
+
+
+# -- provenance across the transport -----------------------------------------
+
+
+def test_a_fact_written_with_a_turn_id_can_be_explained(server):
+    """`memory_why` could not explain anything a hosted client wrote, and this is the pair
+    of calls that fixes it.
+
+    `Memvara.remember` has always taken `sources`; the tool did not declare it, so no
+    caller could pass one. Every claim written through `memory_remember` therefore had an
+    empty `sources`, and `memory_why` — whose whole purpose is to put the excerpt in front
+    of the user — answered "No source turns are retained for this claim" for all of them.
+
+    The id was the missing half. `WriteReceipt.episode_ids` existed and `_receipt_summary`
+    did not render it, so a caller that stored a turn could not learn what it had stored
+    and had nothing to cite.
+    """
+    stored = text(server, "memory_add", {"text": "I moved to Lisbon in March."})
+    assert "turn id(s):" in stored, "memory_add must report the id it just created"
+    turn_id = stored.split("turn id(s):", 1)[1].split("—")[0].strip().split(",")[0].strip()
+    assert turn_id.startswith("ep"), turn_id
+
+    text(server, "memory_remember", {"subject": "user", "predicate": "lives_in",
+                                     "object": "Lisbon", "sources": [turn_id]})
+    claim = next(c for c in server._ctx.memory.get_all()
+                 if c.predicate == "lives_in" and c.object == "Lisbon")
+    why = text(server, "memory_why", {"claim_id": claim.id})
+    assert "moved to Lisbon in March" in why, why
+
+
+def test_a_fact_written_without_one_still_stores(server):
+    """Provenance is optional and its absence must stay a degradation, not a refusal.
+
+    Every client that exists today writes without it, and a tool that started rejecting
+    those would take a store that explains nothing and make it a store that accepts
+    nothing.
+    """
+    body, is_error = call(server, "memory_remember",
+                          {"subject": "user", "predicate": "likes", "object": "rain"})
+    assert not is_error, body
+    assert "added 1" in body
+
+
+def test_sources_takes_ids_and_not_text(server):
+    """Ids link; text would store a second copy.
+
+    `_cite` stores anything handed to it as an `Episode` and merely links a string, so a
+    tool that accepted the turn text would duplicate a turn the caller has usually just
+    stored through `memory_add`. The schema says ids, and this pins that the description
+    says so — a model reading "sources" and sending a sentence is the mistake to prevent.
+    """
+    prop = BY_NAME["memory_remember"].properties["sources"]
+    assert prop["type"] == "array"
+    assert prop["items"]["type"] == "string"
+    assert "memory_add" in prop["description"]
+    assert "Ids only" in prop["description"]

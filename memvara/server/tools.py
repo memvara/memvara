@@ -576,6 +576,15 @@ def _receipt_summary(ctx: ToolContext, receipt: WriteReceipt) -> list[str]:
     # `_state` on each, because with both counts on the header line a bare "-" no longer
     # says which of the two this particular claim was.
     lines += [f"- [{c.id} {_state(c)}] {safe_line(c.text)}" for c in receipt.closed]
+    if receipt.episode_ids:
+        # The ids are the only way a caller can cite this turn afterwards. `remember`
+        # accepts them as `sources`, and until they were rendered here there was no route
+        # from a stored turn to a claim that came out of it: `memory_why` answered "No
+        # source turns are retained" for every fact any hosted client had ever written,
+        # because the id it needed had never left the process.
+        lines.append("turn id(s): " + ", ".join(receipt.episode_ids)
+                     + " — pass these to memory_remember.sources to make a fact you write"
+                       " from this turn explainable.")
     if receipt.unextracted:
         lines.append(_unextracted_note(ctx, receipt.unextracted))
     if receipt.ungrounded:
@@ -813,6 +822,10 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
         memory_type=MemoryType(memory_type) if memory_type is not None else None,
         valid_from=since, valid_to=until,
         extractor=args.get("extractor") or "api",
+        # Ids, never Episode objects. `_cite` stores anything it is handed as an Episode
+        # and merely links a string, so accepting text here would duplicate a turn the
+        # caller has usually just stored through memory_add.
+        sources=args.get("sources") or None,
     )
     return "\n".join(filter(None, _receipt_summary(ctx, receipt)
                             + [_fold_note(ctx, args["predicate"], writing=True),
@@ -1568,6 +1581,18 @@ TOOLS: tuple[Tool, ...] = (
             },
             "true_since": _TRUE_SINCE,
             "true_until": _TRUE_UNTIL,
+            "sources": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Turn ids this fact came from, as memory_add reports them. Pass them "
+                    "and memory_why can show the user the sentence you read it in; omit "
+                    "them and the claim is stored with nothing behind it, which is the "
+                    "difference between a provenance store and a dictionary. Ids only — "
+                    "sending the text again stores a second copy of a turn this store "
+                    "already has."
+                ),
+            },
             "memory_type": {
                 "type": "string",
                 "enum": _MEMORY_TYPE_VALUES,
