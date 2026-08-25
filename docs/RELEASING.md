@@ -1,6 +1,6 @@
 # Releasing memvara
 
-PyPI has `memvara` 0.2.0 (first upload 2026-08-14). npm has `memvara` 0.0.1, a
+PyPI has `memvara` 0.3.0 (first upload 2026-08-14, `0.1.0`). npm has `memvara` 0.0.1, a
 name reservation with no JavaScript client (same day). This is the checklist for the
 next upload of either, plus the things that have to stay true.
 
@@ -62,8 +62,8 @@ actually bumped.
 ### 1. Bump the version in both places
 
 ```
-pyproject.toml        version = "0.2.0"
-memvara/__init__.py    __version__ = "0.2.0"
+pyproject.toml        version = "0.3.0"
+memvara/__init__.py    __version__ = "0.3.0"
 ```
 
 Nothing in the build keeps these equal.
@@ -73,7 +73,7 @@ does, so a one-sided bump fails the suite rather than shipping a wheel whose
 
 ### 2. Close out the changelog
 
-Move everything under `## [Unreleased]` into `## [0.2.0] — YYYY-MM-DD`, and leave
+Move everything under `## [Unreleased]` into `## [0.3.0] — YYYY-MM-DD`, and leave
 `[Unreleased]` empty behind it. Keep the *Fixed* entries specific — "a backdated
 supersession left two live values for a single-valued predicate" is the entry someone
 searches for; "bug fixes" is not.
@@ -81,8 +81,8 @@ searches for; "bug fixes" is not.
 ### 3. Tag the commit CI went green on
 
 ```bash
-git tag -a v0.2.0 -m "memvara 0.2.0"
-git push origin v0.2.0
+git tag -a v0.3.0 -m "memvara 0.3.0"
+git push origin v0.3.0
 ```
 
 Tag the commit CI went green on, not the one you are standing on.
@@ -137,8 +137,11 @@ this repository can create one and nothing should: it is the registration that s
 repository, this workflow, this environment may upload memvara*, and it is made from an
 account this repository has no access to.
 
-PyPI already has the project, so the form lives under the project's own *Publishing* tab
-rather than the pending-publisher one. Under *GitHub*, the values are:
+**PyPI: this is done.** It was the pending-publisher form when the project did not exist;
+now that `memvara` is on PyPI the same registration lives under the project's own
+*Publishing* tab, and the values below are what it should read. Kept because a publisher
+can be removed or edited, and because a wrong value here fails at upload with a message
+that does not say which field. Check against this table rather than against memory:
 
 | field | value |
 |---|---|

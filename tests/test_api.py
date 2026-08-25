@@ -38,9 +38,11 @@ from memvara import (
     Result,
     Scope,
     SQLiteStore,
+    UnembeddableTextWarning,
     utcnow,
 )
 from memvara import core as core_module
+from memvara.telemetry import WRITE_EMBEDDING_UNUSABLE, MemoryRecorder
 from memvara.core import _drop_vectors
 from memvara.embed import fingerprint as fingerprint_module
 from memvara.embed.fingerprint import (
@@ -1303,8 +1305,39 @@ def test_a_budget_says_how_many_notes_it_dropped(five_cities):
 def test_the_dropped_line_counts_one_note_in_the_singular(five_cities):
     """"1 further notes" reads as a rendering bug, and a model that distrusts the framing
     has no reason to trust the facts under it."""
-    assert Memvara._dropped_line(1).startswith("(1 further note matched")
-    assert Memvara._dropped_line(2).startswith("(2 further notes matched")
+    assert Memvara._dropped_line(1).startswith("(1 further note did not fit")
+    assert Memvara._dropped_line(2).startswith("(2 further notes did not fit")
+
+
+def test_the_dropped_count_does_not_claim_to_be_a_total(five_cities):
+    """It counts what retrieval returned, and retrieval was already capped by `k`.
+
+    The number is `len(claims) + len(episodes)` minus what was rendered, over a pool
+    `search()` had truncated to `k` before the budget ever saw it. So it says how many
+    *retrieved* notes were cut and nothing about how many more the store holds. The old
+    wording — "n further notes matched" — reads as a total, and a model told three more
+    matched will believe there are exactly three.
+
+    Asserted on the absence of the word rather than only on the replacement, because the
+    replacement can be reworded again and the claim that must not come back is "matched".
+    """
+    line = Memvara._dropped_line(3)
+    assert "matched" not in line
+    assert "the search was capped too" in line
+    assert "not everything known" in line, "the original point still has to survive"
+
+
+def test_the_dropped_line_is_not_longer_than_the_sentence_it_replaced(five_cities):
+    """Every character here is one a real note cannot have.
+
+    The notice is counted against `budget=` like any other line and is the floor of a
+    squeezed block, so lengthening it silently lowers how many notes fit. The first
+    rewrite of this line was twenty-nine characters longer and cost a note at the budget
+    `test_a_budget_drops_a_facts_past_along_with_the_fact` uses — it failed there rather
+    than here, on a count of rendered notes, which is a long way from the string that
+    caused it. This pins the constraint where it can be read.
+    """
+    assert len(Memvara._dropped_line(5)) <= 87, "the wording this replaced was 87 chars"
 
 
 def test_the_line_reporting_the_cut_is_itself_inside_the_budget(five_cities):
@@ -1763,6 +1796,95 @@ def test_one_constructor_argument_reaches_all_three_subsystems():
         # to skip it rather than report a perfect score for something never scored.
         mem.search("where do they live", include_episodes=True)
         assert sink.seen
+
+
+def test_text_the_embedder_cannot_read_is_stored_and_says_so():
+    """The one failure in the write path that produced no signal at all.
+
+    `HashingEmbedder` matches `[a-z0-9']+`, and its character n-grams are built over the
+    rejoined word list rather than the original text, so a claim with no Latin in it
+    reduces to an all-zero vector. Every layer then behaves correctly: the store accepts
+    the row, retrieval abstains on a zero norm instead of inventing a rank, and the claim
+    still answers by predicate. Nothing raises, and the outcome is a fact that vector
+    search can never return.
+
+    The claim must still be stored — refusing the write would lose data over a retrieval
+    limitation — so the write succeeds and warns.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with Memvara(embedder=HashingEmbedder(dim=32), llm=NullLLM(), user="alice") as mem:
+            mem.remember("我", "喜欢", "咖啡")
+            stored = mem.get_all()
+
+    assert [c.object for c in stored] == ["咖啡"], "the claim is kept, not refused"
+    unembeddable = [w for w in caught if w.category is UnembeddableTextWarning]
+    assert len(unembeddable) == 1
+    body = str(unembeddable[0].message)
+    assert "han" in body, "the script is what makes the warning actionable"
+    assert "HashingEmbedder" in body
+
+
+def test_the_unembeddable_warning_fires_once_but_every_claim_is_counted():
+    """One line on stderr answers "is this happening"; only the counter answers "how much".
+
+    Warn-once is right for a human and useless six months later, which is the same
+    reasoning `WRITE_EMBEDDING_REJECTED` is written down for. The script is a tag rather
+    than part of the series so a store holding two unreadable scripts can tell them apart
+    without the count of either being lost in a total.
+    """
+    rec = MemoryRecorder()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with Memvara(embedder=HashingEmbedder(dim=32), llm=NullLLM(), user="alice",
+                     telemetry=rec) as mem:
+            mem.remember("我", "喜欢", "咖啡")
+            mem.remember("我", "住在", "里斯本")
+            mem.remember("사용자", "좋아함", "커피")
+
+    assert len([w for w in caught if w.category is UnembeddableTextWarning]) == 1
+    assert rec.total(WRITE_EMBEDDING_UNUSABLE) == 3
+    assert rec.total(WRITE_EMBEDDING_UNUSABLE, script="han") == 2
+    assert rec.total(WRITE_EMBEDDING_UNUSABLE, script="hangul") == 1
+
+
+def test_ordinary_text_never_reaches_the_unembeddable_warning():
+    """A warning that fires on a healthy store is one nobody reads on a sick one."""
+    rec = MemoryRecorder()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with Memvara(embedder=HashingEmbedder(dim=32), llm=NullLLM(), user="alice",
+                     telemetry=rec) as mem:
+            mem.remember("user", "lives_in", "Lisbon")
+            mem.add("I live in Lisbon and I like coffee")
+
+    assert not [w for w in caught if w.category is UnembeddableTextWarning]
+    assert rec.total(WRITE_EMBEDDING_UNUSABLE) == 0
+
+
+def test_a_mixed_script_claim_is_not_caught_and_that_is_the_known_limit():
+    """Documented as a limit so it is not mistaken for the guard working.
+
+    A norm is a whole-string measure. `remember("user", "lives_in", "里斯本")` renders as
+    `user lives in 里斯本`, which embeds fine — from the Latin scaffolding alone. The
+    vector is identical in every respect that matters to one for a different city, so
+    the object is invisible to vector search while the claim looks perfectly healthy.
+
+    This is the larger half of the problem and the guard does not reach it; only an
+    embedder that tokenises the script does. Asserted rather than left implicit, because
+    a future reader finding no warning here should learn that it is expected.
+    """
+    rec = MemoryRecorder()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with Memvara(embedder=HashingEmbedder(dim=32), llm=NullLLM(), user="alice",
+                     telemetry=rec) as mem:
+            mem.remember("user", "lives_in", "里斯本")
+            lisbon = mem.remember("user", "likes", "東京")
+
+    assert lisbon.added, "stored, and with a perfectly ordinary-looking vector"
+    assert not [w for w in caught if w.category is UnembeddableTextWarning]
+    assert rec.total(WRITE_EMBEDDING_UNUSABLE) == 0
 
 
 def test_telemetry_is_off_by_default_rather_than_a_no_op_object():

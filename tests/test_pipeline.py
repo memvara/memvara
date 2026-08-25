@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import threading
 import time
+import warnings
 from contextlib import contextmanager
 from datetime import timedelta
 from time import perf_counter
@@ -20,7 +21,11 @@ from typing import Any, Sequence
 
 import pytest
 
+import pathlib
+
+from memvara import Memvara
 from memvara.embed import HashingEmbedder
+from memvara.llm.base import NullLLM
 from memvara.retrieve import HybridRetriever
 from memvara.schema import Cardinality, PredicateRegistry
 from memvara.store import SQLiteStore
@@ -34,6 +39,8 @@ from memvara.telemetry import (
     PREDICATE_CAPPED,
     PREDICATE_LEARNED,
     WRITE_EMBEDDING_REJECTED,
+    WRITE_MEMORY_CLAIMS,
+    WRITE_MEMORY_EPISODES,
     WRITE_LATENCY_MS,
     WRITE_LOCK_HELD_MS,
     WRITE_RECONCILE,
@@ -42,6 +49,8 @@ from memvara.telemetry import (
 )
 from memvara.types import Claim, Derivation, Episode, Scope, utcnow
 from memvara.write import SalienceGate, WritePipeline
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 class CountingLLM:
@@ -155,9 +164,9 @@ def test_twenty_turns_three_facts_costs_exactly_one_call():
     def responder(episodes):
         return [{"subject": "user", "predicate": p, "object": o, "polarity": 1,
                  "memory_type": "semantic", "confidence": 0.8, "source_index": i}
-                for i, (p, o) in enumerate([("owns_pet", "greyhound"),
-                                            ("goal", "learn rust"),
-                                            ("likes", "oakwood elementary")])]
+                for i, (p, o) in enumerate([("likes", "oakwood elementary"),
+                                            ("owns_pet", "greyhound"),
+                                            ("goal", "learn rust")])]
 
     llm = CountingLLM(responder=responder)
     pipe, store, _ = build(llm)
@@ -509,8 +518,8 @@ def test_unknown_predicate_defaults_to_many_and_retires_nothing():
 
     llm = CountingLLM(responder=responder)   # classifies as "many"
     pipe, store, _ = build(llm)
-    pipe.add([ep("Been hunting rare pressings again.")])
-    receipt = pipe.add([ep("Found a crate of pre-war postage today.")])
+    pipe.add([ep("Been hunting rare vinyl pressings again.")])
+    receipt = pipe.add([ep("Found a crate of pre-war postage stamps today.")])
 
     assert receipt.invalidated == []
     assert live(store) == [("collects", "stamps"), ("collects", "vinyl")]
@@ -530,7 +539,7 @@ def test_a_predicate_classified_as_one_does_supersede():
                                       "memory_type": "semantic"})
     pipe, store, registry = build(llm)
     pipe.add([ep("Switched over to a split board this week.")])
-    receipt = pipe.add([ep("Went with the flatter switches in the end.")])
+    receipt = pipe.add([ep("Went with the low profile switches in the end.")])
 
     # Retiring is only allowed because the LLM classified it ONE and it was registered.
     assert registry.spec("keyboard_layout").cardinality is Cardinality.ONE
@@ -571,8 +580,8 @@ def test_a_novel_surface_form_costs_one_resolution_call_and_then_folds():
 
     llm = ResolvingLLM(responder=responder, canonical="works_at")
     pipe, store, registry = build(llm)
-    pipe.add([ep("Payroll switched over to the new provider this quarter.")])
-    receipt = pipe.add([ep("Payroll moved again after the acquisition closed.")])
+    pipe.add([ep("Payroll switched over to Acme this quarter.")])
+    receipt = pipe.add([ep("Payroll moved to Globex after the acquisition closed.")])
 
     assert llm.resolve_calls == 1          # once for the surface form, ever
     assert llm.classify_calls == 0
@@ -589,7 +598,7 @@ def test_a_deterministically_foldable_form_never_reaches_the_model():
          "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
     ], canonical="works_at")
     pipe, store, _ = build(llm)
-    receipt = pipe.add([ep("The payroll record was updated during the review.")])
+    receipt = pipe.add([ep("The payroll record now names Acme after the review.")])
 
     assert llm.resolve_calls == 0, "morphology must run before anything is billed"
     assert receipt.llm_calls == 1
@@ -610,8 +619,8 @@ def test_a_no_op_backend_is_not_billed_and_reports_the_loss():
 
 def test_unextracted_counts_only_the_turns_that_yielded_nothing():
     llm = CountingLLM(claims=[
-        {"subject": "user", "predicate": "likes", "object": "tea", "polarity": 1,
-         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+        {"subject": "user", "predicate": "likes", "object": "quarterly reviews",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
     ])
     pipe, store, _ = build(llm)
     receipt = pipe.add([ep("The quarterly review is next Tuesday."),
@@ -630,6 +639,243 @@ def test_a_failed_extraction_reports_every_turn_as_unextracted():
                         ep("The offsite moved to the Lisbon office.")])
     assert receipt.deferred and receipt.unextracted == 2
     store.close()
+
+
+def test_a_deferred_batch_can_be_read_again_once_the_provider_recovers():
+    """The failure `receipt.deferred` names, and what could not be done about it before.
+
+    A 429 keeps the episodes and loses the extraction. Nothing retried them, so the facts
+    in that batch were gone while the text sat on disk. This is the retry.
+    """
+    class Flaky(CountingLLM):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.fail = True
+
+        def extract(self, episodes, known_predicates):
+            if self.fail:
+                raise RuntimeError("429 rate limited")
+            return super().extract(episodes, known_predicates)
+
+    llm = Flaky(claims=[
+        {"subject": "user", "predicate": "works_at", "object": "Globex", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=llm, user="alice")
+    first = mem.add("Payroll moved over to Globex after the acquisition closed.")
+    assert first.deferred and first.added == []
+
+    llm.fail = False
+    receipt = mem.reextract()
+    assert [(c.predicate, c.object) for c in receipt.added] == [("works_at", "Globex")]
+    assert mem.pending_extraction() == [], "the turn is no longer pending"
+    mem.close()
+
+
+def test_the_work_list_drops_what_the_gate_would_drop():
+    """`add()` stores episodes before gating them, so chitchat has no claims either.
+
+    Without this the work list would hold every "thanks" in the store forever, and a
+    scheduled pass would pay a model call to rediscover that on every sweep. The gate is
+    deterministic and free, so it runs in the query.
+    """
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=NullLLM(), user="alice")
+    mem.add("The deployment failed because of a race condition in the scheduler.")
+    mem.add("thanks")
+    contents = [e.content for e in mem.pending_extraction()]
+    assert contents == ["The deployment failed because of a race condition in the scheduler."]
+    mem.close()
+
+
+def test_a_turn_the_model_already_declined_is_excluded_by_the_caller():
+    """The population nothing on the episode can record, and the one `exclude` is for.
+
+    A turn extraction read and produced nothing from — or produced only claims
+    `reject_ungrounded` refused — ends with no claims citing it, which from the store is
+    indistinguishable from never having been read. Measured against a local 4B: such a
+    turn came back pending on the next sweep and cost another ~250s of CPU to be rejected
+    again. `reextract` reports every turn it read, and the scheduler hands them back.
+    """
+    llm = CountingLLM(claims=[])          # reads the turn, finds nothing
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=llm, user="alice")
+    mem.add("The deployment failed because of a race condition in the scheduler.")
+
+    first = mem.reextract()
+    assert first.llm_calls == 1 and first.added == []
+    assert len(first.episode_ids) == 1, "it must report what it read, or nothing can"
+
+    # Without the feedback it is pending again — this is the loop, asserted rather than
+    # described, so a regression that drops `exclude` fails here.
+    assert len(mem.pending_extraction()) == 1
+    assert mem.pending_extraction(exclude=first.episode_ids) == []
+
+    second = mem.reextract(exclude=first.episode_ids)
+    assert second.llm_calls == 0, "a converged sweep spends nothing"
+    mem.close()
+
+
+def test_re_reading_a_turn_that_already_has_claims_is_refused_not_reinforced():
+    """Re-reading stored text is not new evidence, but the reconciler cannot tell.
+
+    An identical claim arriving twice reconciles to `reinforce` and bumps salience, so a
+    sweep that ran over the same episode twice would quietly promote what it had already
+    extracted — a ranking change nobody asked for and nothing reports. Skipping is the
+    idempotency guarantee, and the count is how a scheduler notices it is re-selecting.
+    """
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "works_at", "object": "Globex", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=llm, user="alice")
+    mem.add("Payroll moved over to Globex after the acquisition closed.")
+    [claim] = mem.get_all()
+    before, calls = claim.salience_base, llm.extract_calls
+
+    # Explicit ids, which is the only way to reach an already-extracted turn: the work
+    # list excludes it by construction.
+    receipt = mem.reextract([claim.sources[0]])
+    assert receipt.already_extracted == 1
+    assert receipt.added == [] and llm.extract_calls == calls, "no model call, no write"
+    assert mem.get_all()[0].salience_base == before, "and no silent promotion"
+    mem.close()
+
+
+def test_explicit_ids_still_go_through_the_gate():
+    """The work list filters chitchat, so only a caller naming ids can smuggle it in.
+
+    That is the path a retry takes — `receipt.episode_ids` from a failed batch, handed
+    straight back — and a batch that failed at tier 2 contains whatever was in it,
+    including turns the gate had already dropped. Without the gate here those reach the
+    model, which on a CPU-bound local extractor is minutes of work to rediscover that
+    "thanks" carries no fact.
+    """
+    llm = CountingLLM(claims=[])
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=llm, user="alice")
+    mem.add("thanks")
+    [chitchat] = list(store.iter_episodes("default"))
+
+    receipt = mem.reextract([chitchat.id])
+    assert llm.extract_calls == 0, "the gate must run before the model, not after"
+    assert receipt.skipped == 1
+    mem.close()
+
+
+def test_reextract_reports_the_same_series_a_write_does():
+    """Except `write.memory_episodes`, which this path must not emit at all.
+
+    A zero there would be indistinguishable from a write that stored no episode and was
+    charged for it, which is the confusion that series exists to end. The rest are the
+    ordinary write series: a scheduled pass has to show up in the same dashboards.
+    """
+    rec = MemoryRecorder()
+    store = SQLiteStore(":memory:")
+    # Stored with no extractor, which is the state this whole feature is for.
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=NullLLM(), user="alice",
+                  telemetry=rec)
+    mem.add("Payroll moved over to Globex after the acquisition closed.")
+
+    mem.writer.llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "works_at", "object": "Globex", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    before_episodes = rec.total(WRITE_MEMORY_EPISODES)
+    receipt = mem.reextract()
+
+    assert len(receipt.added) == 1
+    assert rec.total(WRITE_MEMORY_EPISODES) == before_episodes, (
+        "reextract stores no episode, so it must not move that counter")
+    assert rec.total(WRITE_MEMORY_CLAIMS) >= 1 and receipt.latency_ms >= 0.0
+    mem.close()
+
+
+def test_reextract_runs_the_redactor_over_what_it_extracts():
+    """"Every claim in the store passed the redactor exactly once" has to hold on every
+    write path, or it is an argument about transitivity rather than a property."""
+    from memvara.redact import PatternRedactor
+
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=NullLLM(), user="alice",
+                  redactor=PatternRedactor(), write_reject_ungrounded=False)
+    mem.add("There is a number written down somewhere in my profile notes.")
+
+    mem.writer.llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "contact_at", "object": "call 555-123-4567",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
+         "source_index": 0},
+    ])
+    receipt = mem.reextract()
+    assert receipt.added, "the claim must land, redacted rather than dropped"
+    assert "555-123-4567" not in receipt.added[0].object
+    mem.close()
+
+
+def test_the_scoped_and_async_views_reach_both_new_methods():
+    """`ScopedMemvara` and the async facades are the objects a server actually holds."""
+    import asyncio
+
+    from memvara.aio import AsyncMemvara
+
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "works_at", "object": "Globex", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=CountingLLM(claims=[]),
+                  user="alice")
+    mem.add("Payroll moved over to Globex after the acquisition closed.")
+
+    scoped = mem.scope(user="alice")
+    assert len(scoped.pending_extraction()) == 1
+    mem.writer.llm = llm
+    assert scoped.reextract(limit=5).added, "the scoped view must reach the write"
+
+    async def via_async():
+        amem = AsyncMemvara(mem)
+        pending = await amem.pending_extraction()
+        receipt = await amem.reextract(exclude=[e.id for e in pending])
+        ascoped = amem.scope(user="alice")
+        await ascoped.pending_extraction()
+        await ascoped.reextract(exclude=[e.id for e in pending])
+        return receipt
+
+    assert asyncio.run(via_async()).llm_calls == 0, "everything was already excluded"
+    mem.close()
+
+
+def test_limit_stops_the_scan_rather_than_trimming_afterwards():
+    """The bound a scheduled pass runs behind, and the reason it is a bound at all.
+
+    On CPU-bound extraction a turn costs minutes, so a sweep has to take a fixed bite and
+    stop. Short-circuiting the scan is also what keeps the per-episode `claims_citing`
+    affordable: it is the N+1 named in `pending_extraction`, and `limit` is what stops it
+    walking the whole store to build a list the caller will discard.
+    """
+    store = SQLiteStore(":memory:")
+    mem = Memvara(store=store, embedder=HashingEmbedder(), llm=NullLLM(), user="alice")
+    for n in range(5):
+        mem.add(f"The deployment failed because of race condition number {n}.")
+
+    assert len(mem.pending_extraction()) == 5
+    assert len(mem.pending_extraction(limit=2)) == 2
+    mem.close()
+
+
+def test_reextract_never_stores_an_episode():
+    """Tier 0 is skipped: these turns are already stored and already embedded.
+
+    Running it would find each episode as an exact repeat of itself, which is why the
+    `write.memory_episodes` counter this path deliberately does not emit would be a lie.
+    """
+    source = (ROOT / "memvara" / "write" / "pipeline.py").read_text(encoding="utf-8")
+    body = source[source.index("def reextract"):source.index("def _transaction")]
+    assert "add_episode" not in body
+    assert "_tier0" not in body
+    assert "WRITE_MEMORY_EPISODES" not in body
 
 
 def test_the_learned_cap_folds_instead_of_growing_the_schema():
@@ -681,10 +927,334 @@ def test_malformed_model_output_is_dropped_not_repaired(bad):
     store.close()
 
 
-def test_confidence_is_clamped():
+# -- reject_ungrounded ---------------------------------------------------------
+#
+# Off by default -- see WritePipeline.__init__ -- so every test above this section
+# keeps working with fabricated-but-structurally-valid objects like "tea" against
+# unrelated filler text. These turn the option on explicitly.
+
+def test_a_claim_sharing_no_vocabulary_with_its_source_is_dropped():
+    """The exact shape the option exists for: a well-formed claim, invented whole.
+
+    "tea" shares nothing with a sentence about a quarterly review. Structurally this
+    claim is fine -- real predicate, real object, valid source_index -- which is why
+    `test_malformed_model_output_is_dropped_not_repaired` above does not catch it: that
+    test is about form, not truth.
+    """
     llm = CountingLLM(claims=[
         {"subject": "user", "predicate": "likes", "object": "tea", "polarity": 1,
-         "memory_type": "semantic", "confidence": 7.5, "source_index": 0},
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    pipe, store, _ = build(llm, reject_ungrounded=True)
+    receipt = pipe.add([ep("The quarterly review is next Tuesday.")])
+    assert receipt.added == []
+    assert receipt.ungrounded == 1
+    # The rejected claim was the only thing proposed for this turn, so it also reads as
+    # unextracted -- `out` never received it either way. One rejection, two honest
+    # numbers describing the same event from two angles, not a double-count.
+    assert receipt.unextracted == 1
+    store.close()
+
+
+def test_a_grounded_claim_survives_the_same_option():
+    """The option is a filter, not a tax on every write that turns it on."""
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "works_at", "object": "Acme Robotics",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    pipe, store, _ = build(llm, reject_ungrounded=True)
+    receipt = pipe.add([ep("I just started at Acme Robotics as a machinist.")])
+    assert len(receipt.added) == 1
+    assert receipt.ungrounded == 0
+    store.close()
+
+
+def test_a_compound_identifier_is_matched_as_a_substring_not_an_exact_token():
+    """The check that motivated substring matching over exact-token matching.
+
+    Real content here is full of paths and hyphenated identifiers. An object of
+    "expense-tracker" must be found inside a source token like
+    "expense-tracker-bb03f971", or every claim naming a project by its short form would
+    be rejected for citing the same project by its long one.
+    """
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "working_on", "object": "expense-tracker",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    pipe, store, _ = build(llm, reject_ungrounded=True)
+    receipt = pipe.add([ep(
+        "[MIGRATION_CHUNK source=/Users/x/.grok/memory/expense-tracker-bb03f971/MEMORY.md]"
+    )])
+    assert len(receipt.added) == 1
+    assert receipt.ungrounded == 0
+    store.close()
+
+
+def test_an_object_with_nothing_to_check_is_not_rejected_on_that_alone():
+    """An object that tokenizes to zero content words -- all stopwords, or too short --
+    means no signal either way, and no signal must not read as a bad signal.
+
+    Rejecting on an empty check would be worse than not checking: it turns "this object
+    could not be parsed into words" into "this object is fabricated", which it is not
+    evidence of. `"it"` is deliberately chosen: `_content_words("it")` is `[]` (a
+    stopword), so this exercises the early return in `_wholly_ungrounded` directly
+    rather than relying on coincidental word overlap.
+    """
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "mood", "object": "it", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    pipe, store, _ = build(llm, reject_ungrounded=True)
+    receipt = pipe.add([ep("Completely unrelated conversation about something else.")])
+    assert len(receipt.added) == 1
+    assert receipt.ungrounded == 0
+    store.close()
+
+
+class KeyedEmbedder:
+    """Deterministic stand-in for a semantic embedder, keyed on marker substrings.
+
+    A text containing a marker embeds as that marker's unit vector; anything else gets
+    a vector orthogonal to all of them. That is the whole of what the rescue relies on
+    a real semantic embedder for -- paraphrases land near their sources, inventions do
+    not -- reduced to something offline and exact. `HashingEmbedder` cannot play this
+    role in a test *because* the rescue correctly no-ops on it: character n-grams score
+    ~0.0-0.11 on zero-overlap pairs, well under the floor.
+
+    Markers are only seen inside the first `HORIZON` characters of each text, because
+    the real property being modelled includes the failure: MiniLM-class embedders
+    truncate around 512 tokens, and content past the truncation point contributes
+    nothing to the vector. Without this, the chunking test passes against a rescue
+    that embeds the whole episode in one piece -- which is exactly the defect chunking
+    exists to prevent, invisible to a fake that reads to the end.
+    """
+
+    dim = 4
+    HORIZON = 1200
+
+    def __init__(self, markers: dict[str, int], fail_on_first: str | None = None) -> None:
+        self._markers = markers
+        self._fail_on_first = fail_on_first
+
+    def encode(self, texts):
+        import numpy as np
+
+        if self._fail_on_first is not None and texts and texts[0] == self._fail_on_first:
+            raise RuntimeError("embedder fell over mid-rescue")
+        out = np.zeros((len(texts), self.dim))
+        for row, text in enumerate(texts):
+            axis = 3
+            for marker, index in self._markers.items():
+                # Case-insensitive, as the real thing is by nature: "Short answers"
+                # and "short answers" are the same meaning to a semantic embedder.
+                if marker in text[:self.HORIZON].lower():
+                    axis = index
+                    break
+            out[row, axis] = 1.0
+        return out
+
+
+def test_auto_rescues_a_paraphrase_the_lexical_check_would_reject():
+    """The reason "auto" exists, and the reason it can default on.
+
+    "keep replies brief" shares not one content word with "I prefer short answers" --
+    the strict lexical check rejects it, and it is a true fact. Under "auto" the
+    embedder gets a veto first: a genuine paraphrase embeds near its source (measured
+    0.45-0.58 on MiniLM for pairs like this, against <=0.33 for every wholesale
+    invention), so it is kept. The fake maps both phrasings onto one axis, which is the
+    property being borrowed from the real embedder, made exact.
+    """
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "prefers", "object": "keep replies brief",
+         "polarity": 1, "memory_type": "procedural", "confidence": 0.9,
+         "source_index": 0},
+    ])
+    store = SQLiteStore(":memory:")
+    embedder = KeyedEmbedder({"brief": 0, "short answers": 0})
+    pipe = WritePipeline(store, embedder, PredicateRegistry(), llm)
+    # Not "I prefer short answers": that is a deterministic fast-path form, and a turn
+    # the fast path handles never reaches the model or this rescue at all.
+    receipt = pipe.add([ep("Short answers only please, and no padding.")])
+    assert llm.extract_calls == 1, "the turn must actually reach tier 2"
+    assert len(receipt.added) == 1
+    assert receipt.ungrounded == 0
+    store.close()
+
+
+def test_auto_still_rejects_what_the_embedder_cannot_connect_either():
+    """A fabrication fails both checks: no shared vocabulary, orthogonal embedding."""
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "works_at", "object": "Acme", "polarity": 1,
+         "memory_type": "semantic", "confidence": 1.0, "source_index": 0},
+    ])
+    store = SQLiteStore(":memory:")
+    # "billing" pins the source to its own axis; the object matches no marker and
+    # lands on the default axis, orthogonal to it -- which is what a wholesale
+    # invention looks like through a real semantic embedder.
+    pipe = WritePipeline(store, KeyedEmbedder({"billing": 1}), PredicateRegistry(), llm)
+    receipt = pipe.add([ep("We migrated the billing job to run nightly.")])
+    assert llm.extract_calls == 1
+    assert receipt.added == []
+    assert receipt.ungrounded == 1
+    assert "ungrounded=1" in str(receipt)
+    store.close()
+
+
+def test_strict_mode_takes_no_second_opinion():
+    """`True` is the lexical check alone, even with a semantic embedder configured.
+
+    The mode exists for a caller who has measured their extractor and wants the
+    hard line; a rescue that ran anyway would make True and "auto" the same mode.
+    """
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "prefers", "object": "keep replies brief",
+         "polarity": 1, "memory_type": "procedural", "confidence": 0.9,
+         "source_index": 0},
+    ])
+    store = SQLiteStore(":memory:")
+    embedder = KeyedEmbedder({"brief": 0, "short answers": 0})
+    pipe = WritePipeline(store, embedder, PredicateRegistry(), llm,
+                         reject_ungrounded=True)
+    receipt = pipe.add([ep("Short answers only please, and no padding.")])
+    assert llm.extract_calls == 1
+    assert receipt.added == []
+    assert receipt.ungrounded == 1
+    store.close()
+
+
+def test_the_rescue_reads_a_long_turn_in_chunks():
+    """A fact grounded late in a 7,000-character turn must not be invisible.
+
+    MiniLM-class embedders truncate around 512 tokens, so a single whole-episode
+    embedding is blind to everything past the truncation point. The rescue compares
+    against chunks and keeps the best score; the marker here sits past the first chunk
+    boundary, so a whole-episode comparison through this fake would have missed it.
+    """
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "likes", "object": "felines", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    store = SQLiteStore(":memory:")
+    # The fake keys the *first* marker found; filler text carries none, so only the
+    # chunk containing "cats" lands on the object's axis.
+    embedder = KeyedEmbedder({"felines": 0, "cats": 0})
+    pipe = WritePipeline(store, embedder, PredicateRegistry(), llm)
+    long_turn = ("The deploy pipeline rebuilt every image twice today. " * 30
+                 + "Completely unrelatedly: cats are wonderful companions.")
+    assert len(long_turn) > 1200, "the marker must sit past the first chunk"
+    receipt = pipe.add([ep(long_turn)])
+    assert len(receipt.added) == 1
+    assert receipt.ungrounded == 0
+    store.close()
+
+
+def test_a_broken_embedder_fails_the_rescue_open_and_says_so_once():
+    """The rescue's failure must cost precision, never a claim.
+
+    An embedder that raises mid-rescue leaves "auto" unable to obtain the second
+    opinion it promises -- and the lexical trigger alone is not grounds for rejection
+    under that mode, so the claim is kept. Warned once per pipeline, same rule as the
+    embedding-rejection warnings beside it: silence here would leave the mode quietly
+    running lexical-only with nothing saying so.
+    """
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "works_at", "object": "Initech", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    store = SQLiteStore(":memory:")
+    # Fails only when handed the rescue's batch (which leads with the object); the
+    # tier-0 near-duplicate embedding of episode content is left working.
+    embedder = KeyedEmbedder({}, fail_on_first="Initech")
+    pipe = WritePipeline(store, embedder, PredicateRegistry(), llm)
+    with pytest.warns(RuntimeWarning, match="grounding rescue"):
+        receipt = pipe.add([ep("The billing job moved to a nightly schedule.")])
+    assert len(receipt.added) == 1
+    assert receipt.ungrounded == 0
+    # Once per pipeline: a second trip through the same failure stays quiet.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        pipe.add([ep("The nightly schedule was confirmed by the operator.")])
+    store.close()
+
+
+def test_a_fabricated_claim_cannot_retire_a_true_fact_by_default():
+    """The stake, stated as behaviour: why this defaults on rather than off.
+
+    `works_at` is a builtin ONE-cardinality predicate, so a fabricated employer does
+    not sit harmlessly beside the real one -- it supersedes it, and the true fact is
+    *ended*. Storing fabrication is the destructive direction; rejection only ever
+    costs a claim from one turn. Both halves asserted: the default blocks it, and
+    turning the option off demonstrates exactly the damage it would have done.
+    """
+    def scenario(**kw):
+        llm = CountingLLM(claims=[
+            {"subject": "user", "predicate": "works_at", "object": "Acme",
+             "polarity": 1, "memory_type": "semantic", "confidence": 1.0,
+             "source_index": 0},
+        ])
+        pipe, store, _ = build(llm, **kw)
+        pipe.add([ep("I work at Globex.")])  # fast path, grounded, true
+        pipe.add([ep("We migrated the billing job to run nightly.")])
+        outcome = live(store)
+        store.close()
+        return outcome
+
+    assert scenario() == [("works_at", "Globex")], "the default keeps the true employer"
+    assert scenario(reject_ungrounded=False) == [("works_at", "Acme")], (
+        "with the filter off, the fabrication supersedes and ends the true fact -- "
+        "this line is the measurement of what the default prevents")
+
+
+def test_a_cross_script_claim_is_not_rejected_by_a_check_that_cannot_read_it():
+    """`lives_in: Beijing` from 我住在北京 is grounded; the tokenizer just cannot see it.
+
+    The lexical check is built from a Latin-script word regex, so a source it cannot
+    tokenize at all would trip on every claim extracted from it -- every fact a CJK,
+    Cyrillic or Arabic turn yields, rejected not because it is ungrounded but because
+    the check is out of its depth. It abstains instead, the same rule the empty-object
+    early return applies, mirrored onto the source. Found by an existing telemetry
+    test, not foresight: the keyword-compatibility test extracts exactly this claim
+    from exactly this sentence, and the default flip broke it.
+    """
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "lives_in", "object": "Beijing", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    pipe, store, _ = build(llm)
+    receipt = pipe.add([ep("我住在北京，工作也在这里。")])
+    assert len(receipt.added) == 1
+    assert receipt.ungrounded == 0
+    store.close()
+
+
+def test_a_mode_nobody_defined_is_a_construction_error():
+    with pytest.raises(TypeError, match="is not a mode"):
+        build(reject_ungrounded="yes")
+
+
+def test_the_default_mode_is_auto():
+    pipe, store, _ = build()
+    assert pipe.reject_ungrounded == "auto"
+    store.close()
+
+
+def test_the_option_is_reachable_through_memvara_s_tuning_prefix():
+    """`Memvara(write_reject_ungrounded=True, ...)` -- no plumbing needed beyond the
+    constructor parameter, because `_split_tuning` validates against the real signature.
+    """
+    from memvara import Memvara
+    from memvara.llm.base import NullLLM
+
+    mem = Memvara(":memory:", user="alice", llm=NullLLM(),
+                  embedder=HashingEmbedder(), write_reject_ungrounded=True)
+    assert mem.writer.reject_ungrounded is True
+    mem.close()
+
+
+def test_confidence_is_clamped():
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "likes", "object": "quarterly reviews",
+         "polarity": 1, "memory_type": "semantic", "confidence": 7.5, "source_index": 0},
     ])
     pipe, store, _ = build(llm)
     receipt = pipe.add([ep("The quarterly review is next Tuesday.")])
@@ -694,8 +1264,8 @@ def test_confidence_is_clamped():
 
 def test_source_index_maps_back_to_the_right_episode():
     llm = CountingLLM(claims=[
-        {"subject": "user", "predicate": "likes", "object": "tea", "polarity": 1,
-         "memory_type": "semantic", "confidence": 0.9, "source_index": 1},
+        {"subject": "user", "predicate": "likes", "object": "the Lisbon office",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": 1},
     ])
     pipe, store, _ = build(llm)
     a = ep("The quarterly review is next Tuesday.")
@@ -1217,8 +1787,8 @@ def test_extraction_that_acquires_a_spec_first_reports_nothing():
                            {"subject": "quota_gate", "predicate": "status",
                             "object": next(objs), "polarity": 1, "source_index": 0}])
     pipe, store, registry = build(llm, telemetry=rec)
-    pipe.add([ep("The quota gate has not been put in yet.")])
-    second = pipe.add([ep("The quota gate went in this morning.")])
+    pipe.add([ep("The quota gate is not installed yet.")])
+    second = pipe.add([ep("The quota gate was installed this morning.")])
 
     assert registry.known("status") and registry.spec("status").functional
     assert second.accumulated == [] and rec.total(PREDICATE_ACCUMULATED) == 0

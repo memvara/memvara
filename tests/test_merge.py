@@ -261,17 +261,22 @@ def test_pooling_leaves_the_survivor_on_the_decay_curve(consolidator):
     Folding the decayed values instead would leave the survivor above its own curve,
     and the following night's decay would pull it back down - a sweep that changes
     state on every run is not idempotent, whatever the merge stage reports.
+
+    Both passes run at one instant. Unpinned, each reads the wall clock for itself, and
+    the second finds work to do whenever the recomputed salience crosses a rounding
+    boundary in the gap - see `test_decay.py::test_run_twice_leaves_identical_state`.
     """
     store = consolidator.store
-    add(store, "cl_win", "acme", obs=5, age_days=730)   # one SLOW half-life
-    add(store, "cl_lose", "Acme", obs=1, age_days=730)
+    at = utcnow()
+    add(store, "cl_win", "acme", obs=5, age_days=730, at=at)   # one SLOW half-life
+    add(store, "cl_lose", "Acme", obs=1, age_days=730, at=at)
 
-    assert consolidator.run("acme") == {"decayed": 2, "merged": 1, "promoted": 0}
+    assert consolidator.run("acme", now=at) == {"decayed": 2, "merged": 1, "promoted": 0}
     survivor = store.get_claim("cl_win")
     assert survivor.salience_base == pytest.approx(2.0)
     assert survivor.salience == pytest.approx(1.0)      # 2.0 * 0.5
 
-    assert consolidator.run("acme") == {"decayed": 0, "merged": 0, "promoted": 0}
+    assert consolidator.run("acme", now=at) == {"decayed": 0, "merged": 0, "promoted": 0}
     assert store.get_claim("cl_win").salience == pytest.approx(1.0)
 
 

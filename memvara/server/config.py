@@ -22,6 +22,8 @@ from typing import Any, Mapping, Sequence
 from ..core import Memvara
 from ..embed import CachedEmbedder, HashingEmbedder
 from ..llm import NullLLM
+from ..schema import (BUILTIN_PREDICATES, PredicatePackError,
+                      PredicateRegistry, load_all_specs)
 
 __all__ = ["ConfigError", "ServerConfig", "build_memvara"]
 
@@ -110,6 +112,11 @@ class ServerConfig:
     #: identity a property of the machine's package set. `pip install memvara[rerank]`
     #: is the case that proves it — see `build_memvara`.
     embedder: str = _DEFAULT_EMBEDDER
+    #: Declared predicate vocabularies: shipped pack names, paths to TOML files, or a
+    #: comma-separated mix of both, later entries winning. Empty means the 23 builtins
+    #: alone — which is what every server-backed store had before this field existed,
+    #: and why a predicate outside them accumulated instead of superseding.
+    predicates: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ServerConfig":
@@ -156,6 +163,17 @@ class ServerConfig:
                 "works offline, but stores only the sentence forms the deterministic "
                 "extractor recognises.")
 
+        predicates = (env.get("MEMVARA_PREDICATES") or "").strip()
+        if predicates:
+            # Read now and discard the result: a typo in a pack name or an unreadable file
+            # must be a startup error beside the rest of the configuration, not a
+            # surprise at the first write — by which point the process has already
+            # accepted facts into the very slots the pack was meant to shape.
+            try:
+                load_all_specs(predicates)
+            except PredicatePackError as exc:
+                raise ConfigError(f"MEMVARA_PREDICATES: {exc}") from None
+
         return cls(
             # `~` is what a human types in a JSON settings file, and nothing else in the
             # launch path will expand it.
@@ -171,6 +189,7 @@ class ServerConfig:
             mode=mode,
             server_url=server_url,
             api_key=api_key,
+            predicates=predicates,
         )
 
     @property
@@ -297,6 +316,59 @@ def _embedder(spec: str) -> Any:
         HashingEmbedder(dim=int(argument) if argument else _DEFAULT_DIM))
 
 
+def _registry(config: ServerConfig) -> PredicateRegistry | None:
+    """The vocabulary this server declares, or None to take the builtins alone.
+
+    `None` rather than an empty registry on purpose: `Memvara()` builds its own default
+    when given nothing, and handing it one built here would duplicate that decision in a
+    second place.
+    """
+    if not config.predicates:
+        return None
+    return PredicateRegistry(
+        specs=BUILTIN_PREDICATES + load_all_specs(config.predicates))
+
+#: The `Store` methods the engine calls on an ordinary turn. Not the whole protocol —
+#: this is the subset whose absence makes a *server* useless rather than a feature narrow.
+#: `put_claim` and `add_episode` are every write; the three searches are every read;
+#: `competing_claims` is contradiction resolution, which is the product.
+_ENGINE_NEEDS = frozenset({
+    "put_claim", "add_episode", "candidate_ids", "lexical_search", "vector_search",
+    "competing_claims",
+})
+
+def cloud_gap() -> list[str]:
+    """The engine calls a `RemoteStore` cannot serve yet. Empty means cloud mode works.
+
+    The one place that question is answered, because two places were answering it
+    differently: `build_memvara` refused to start a cloud server, and `memvara-mcp init`
+    wrote a cloud config anyway — exit 0, "restart your client", and a server that then
+    refuses to come up. The gap between those two was silent by construction, since the
+    command that writes the config never starts the thing it configured.
+
+    Derived from `RemoteStore.WIRED` rather than hardcoded, so when the REST facade grows
+    the endpoints this empties out on its own and both callers start working. Nothing has
+    to remember to lift a flag.
+    """
+    from ..store.remote import RemoteStore
+
+    return sorted(_ENGINE_NEEDS - RemoteStore.WIRED)
+
+
+_CLOUD_NOT_WIRED = (
+    "MEMVARA_MODE=cloud cannot start a server yet. RemoteStore is faithful to what the "
+    "REST facade actually exposes — reading one memory by id, erasing one, erasing a "
+    "scope, tenant stats — and the facade has no endpoint for the low-level surface the "
+    "engine calls on every turn: {missing}.\n\n"
+    "Building it anyway would start a server that lists twelve tools and fails on the "
+    "first one a model reaches for, which is worse than not starting: the failure would "
+    "arrive mid-conversation, as a tool error, to a model with no way to act on it.\n\n"
+    "Use MEMVARA_MODE=local (or --mode local) with MEMVARA_DB pointing at a file. To use "
+    "a hosted deployment, point an MCP client at its own URL rather than proxying it "
+    "through this server; see docs/OPEN-CORE.md."
+)
+
+
 def build_memvara(config: ServerConfig) -> Memvara:
     """Open the store this server speaks for.
 
@@ -304,9 +376,13 @@ def build_memvara(config: ServerConfig) -> Memvara:
     tenant decides which learned predicate vocabulary is rehydrated at open — a server
     that scoped only its calls would classify every predicate again on every launch.
 
-    In "cloud" mode there is no local file at all: the store is a `RemoteStore` talking
-    to `config.server_url` with `config.api_key`, and `Memvara.__init__` accepts `store=`
-    as an alternative to `path=` for exactly this case.
+    In "cloud" mode there is no local file at all: the store would be a `RemoteStore`
+    talking to `config.server_url` with `config.api_key`, and `Memvara.__init__` accepts
+    `store=` as an alternative to `path=` for exactly this case. **It is refused instead,
+    at construction**, and `_CLOUD_NOT_WIRED` says why: the REST facade has no endpoint
+    for the low-level surface the engine calls on every turn, so a server built this way
+    starts, lists twelve tools, and fails on the first one a model reaches for. See
+    `docs/OPEN-CORE.md` for the decision and which side of the line each seam is on.
     """
     if config.mode == "cloud":
         from ..store.remote import RemoteStore
@@ -322,10 +398,14 @@ def build_memvara(config: ServerConfig) -> Memvara:
                 "api_key. ServerConfig.from_env() never produces this combination; "
                 "a caller constructing ServerConfig directly must set api_key too.")
 
-        return Memvara(
+        missing = cloud_gap()
+        if missing:
+            raise ConfigError(_CLOUD_NOT_WIRED.format(missing=", ".join(missing)))
+        return Memvara(   # pragma: no cover - unreachable until the endpoints exist
             store=RemoteStore(base_url=config.server_url, api_key=config.api_key),
             llm=NullLLM() if config.llm == "none" else _anthropic(),
             embedder=_embedder(config.embedder),
+            registry=_registry(config),
             **config.scope_kwargs,
         )
     return Memvara(
@@ -346,5 +426,9 @@ def build_memvara(config: ServerConfig) -> Memvara:
         # here. `MEMVARA_EMBEDDER` is that door, and naming a default rather than
         # discovering one is what keeps the store's vector space out of `pip`'s hands.
         embedder=_embedder(config.embedder),
+        # The door this server did not have. `Memvara` has always taken a registry, but
+        # an MCP client can only set environment variables, so a server-backed store was
+        # pinned to the builtins and everything outside them accumulated silently.
+        registry=_registry(config),
         **config.scope_kwargs,
     )

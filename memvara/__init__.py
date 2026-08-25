@@ -40,6 +40,7 @@ from .core import (
     DegradedExtractionWarning,
     EmbedderChangedWarning,
     EmbedderMismatchError,
+    ErasureIncomplete,
     Memvara,
     ScopedMemvara,
 )
@@ -71,6 +72,7 @@ from .types import (
     Delta,
     Derivation,
     Episode,
+    ErasureProof,
     Explanation,
     MemoryType,
     Provenance,
@@ -82,10 +84,16 @@ from .types import (
     utcnow,
 )
 from .telemetry import MemoryRecorder, NullRecorder, Recorder
-from .write import FastExtractor, Reconciler, SalienceGate, WritePipeline
+from .write import (
+    FastExtractor,
+    Reconciler,
+    SalienceGate,
+    UnembeddableTextWarning,
+    WritePipeline,
+)
 from .write.reconcile import backfill_entities
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "Memvara", "ScopedMemvara", "AsyncMemvara", "AsyncScopedMemvara",
@@ -113,8 +121,11 @@ __all__ = [
     "LLM", "NullLLM", "AnthropicLLM", "OpenAILLM",
     # diagnostics: importable so they can be filtered or caught by category
     "DegradedExtractionWarning", "EmbedderChangedWarning", "EmbedderMismatchError",
+    # erasure, and the evidence for it
+    "ErasureIncomplete", "ErasureProof",
     # subsystems
     "WritePipeline", "SalienceGate", "FastExtractor", "Reconciler",
+    "UnembeddableTextWarning",
     "HybridRetriever", "Retrieved", "EpisodeResult",
     # multi-hop traversal. `Path` is a chain of claims, not a filesystem path.
     "GraphTraverser", "Path", "Edge", "HOP_DAMPING",

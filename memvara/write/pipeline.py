@@ -47,6 +47,7 @@ ordering loses raw text to a provider timeout, and nothing can reconstruct that.
 
 from __future__ import annotations
 
+import re
 import warnings
 from contextlib import nullcontext
 from datetime import datetime
@@ -67,9 +68,13 @@ from ..telemetry import (
     PREDICATE_ALIAS,
     PREDICATE_CAPPED,
     PREDICATE_LEARNED,
+    WRITE_CLAIMS,
     WRITE_EMBEDDING_REJECTED,
+    WRITE_EMBEDDING_UNUSABLE,
     WRITE_EXTRACT_MS,
     WRITE_LATENCY_MS,
+    WRITE_MEMORY_CLAIMS,
+    WRITE_MEMORY_EPISODES,
     WRITE_LLM_CALLS,
     WRITE_LOCK_HELD_MS,
     WRITE_RECONCILE,
@@ -87,11 +92,108 @@ from .reconcile import ReconcileResult, Reconciler
 
 _EXAMPLE_CHARS = 400
 
+#: English function words, excluded from the grounding check below so a claim is not
+#: credited for sharing "the" or "with" with its source -- every sentence does.
+_GROUNDING_STOPWORDS = frozenset("""
+a an the of to in on for and or is are was were be been being with as by
+at from this that these those it its it's their his her they he she you
+your i we our not no do does did has have had can will would should may
+might must if then than so but into over under about after before
+""".split())
+
+_GROUNDING_WORD_RE = re.compile(r"[a-z0-9][a-z0-9_./\-]*")
+
+
+def _content_words(text: str) -> list[str]:
+    return [w for w in _GROUNDING_WORD_RE.findall(text.lower())
+            if w not in _GROUNDING_STOPWORDS and len(w) > 1]
+
+
+def _wholly_ungrounded(obj: str, source: str) -> bool:
+    """True when none of `obj`'s content words appear anywhere in `source`.
+
+    Deliberately blunt. It catches total fabrication -- an object sharing not one word
+    with the turn it is supposedly drawn from -- and nothing subtler. A claim that
+    reuses real vocabulary but inverts or misattributes it (wrong polarity, the right
+    words on the wrong subject) passes this check clean; it is a precision filter for
+    wholesale invention, not a semantic-correctness checker.
+
+    Substring containment, not exact-token membership, because this store's own content
+    is full of paths and hyphenated identifiers: an object of "expense-tracker" has to
+    match inside a source token like "expense-tracker-bb03f971", and a set of exact
+    tokens would call that ungrounded.
+
+    Validated against 144 claims from two 4B-class local models run over 20 real
+    conversational episodes: zero false positives at this exact rule -- every claim it
+    flagged turned out, on manual re-reading of the source, to be fabricated. It does
+    not generalise past what was measured: a claim that correctly paraphrases its
+    source with no vocabulary in common would also trip it, which is why this is only
+    the *trigger* under the default `"auto"` mode -- the embedding rescue below gets a
+    veto before anything is rejected.
+    """
+    words = _content_words(obj)
+    if not words:
+        # Nothing to check is not evidence of fabrication -- an object this check
+        # cannot parse into words must not be rejected on the strength of that alone.
+        return False
+    src = source.lower()
+    if not _GROUNDING_WORD_RE.search(src):
+        # The same rule, mirrored onto the source. A turn the tokenizer cannot read at
+        # all -- 我住在北京, from which the model correctly extracts `lives_in: Beijing`
+        # -- would trip this check on every claim it yields, because no Latin-script
+        # object can share a token with it. That is the check being out of its depth,
+        # not the claim being ungrounded, so it abstains. Cross-script grounding is the
+        # semantic rescue's job, and only a multilingual embedder can actually do it;
+        # a *mixed*-script source with any tokenizable content still gets the ordinary
+        # check, which is a known limit of this shape rather than an oversight -- see
+        # the English-centrism entry in docs/ROADMAP.md for the umbrella.
+        return False
+    return not any(w in src for w in words)
+
+
+#: Cosine floor for the embedding rescue under `reject_ungrounded="auto"`. A lexically
+#: ungrounded object whose best chunk-cosine against its source episode reaches this is
+#: kept -- read as a paraphrase rather than an invention.
+#:
+#: Measured, not guessed, on the 33 fabricated claims from the eval behind this feature
+#: plus 8 hand-built genuine paraphrases sharing zero vocabulary with their sources,
+#: under the MiniLM `LocalEmbedder`. Every wholesale invention -- the "Acme" employer,
+#: the fictional pet-and-pollen persona, the `"unknown"` template stubs -- scored 0.33
+#: or below; the paraphrases that rescue exists for scored 0.45 and up; the separating
+#: region on that data is [0.34, 0.42] and this sits inside it with margin on the side
+#: that matters. The only two fabrications above it (0.43, 0.46) were typo-variants of
+#: text genuinely in the source -- misreadings, not inventions, and the least dangerous
+#: thing this filter can miss.
+#:
+#: Under the default `HashingEmbedder` the same pairs score 0.0-0.11 -- character
+#: n-grams have nothing to say about meaning -- so nothing is ever rescued and "auto"
+#: degrades to the strict lexical check. That is graceful rather than accidental: the
+#: rescue's quality follows the embedder's, and a deployment that cares about paraphrase
+#: rescue is one that has configured a semantic embedder.
+_GROUNDING_RESCUE_COSINE = 0.40
+
+#: The rescue compares the object against the source in chunks this wide, taking the
+#: best score. MiniLM-class embedders truncate around 512 tokens, and episodes here run
+#: to several thousand characters -- a fact grounded late in a long turn would otherwise
+#: be invisible to a single whole-episode embedding.
+_GROUNDING_CHUNK_CHARS = 1200
+
 #: A re-observation identified outside the transaction and applied inside it: the claim
 #: to bump, the episodes that evidence it, and when the evidence was uttered. Deferred
 #: rather than applied on the spot because the identification is a read and the bump is
 #: a write, and only the write belongs in the transaction.
 _Reinforcement = tuple[Claim, list[str], datetime]
+
+
+class UnembeddableTextWarning(UserWarning):
+    """A claim was stored with an all-zero vector and can never be found by meaning.
+
+    Its own category for the reason `DegradedExtractionWarning` has one: a deployment
+    that knowingly stores text its embedder cannot read should be able to silence this by
+    policy without silencing everything else the library says. It is a `UserWarning`
+    rather than a `RuntimeWarning` because the fix is a configuration choice — which
+    embedder to run — and not a fault in the running code.
+    """
 
 
 class WritePipeline:
@@ -102,12 +204,33 @@ class WritePipeline:
                  reinforce_bump: float = 0.25,
                  evidence_roles: Iterable[str] | None = SalienceGate.DEFAULT_EVIDENCE_ROLES,
                  telemetry: Recorder | None = None,
-                 redactor: Redactor | None = None) -> None:
+                 redactor: Redactor | None = None,
+                 reject_ungrounded: bool | str = "auto") -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
         self.llm = llm
         self.near_dup_threshold = near_dup_threshold
+        if not (reject_ungrounded is True or reject_ungrounded is False
+                or reject_ungrounded == "auto"):
+            raise TypeError(
+                f"reject_ungrounded={reject_ungrounded!r} is not a mode. Use \"auto\" "
+                "(the default: reject a model-proposed claim only when it shares no "
+                "vocabulary with its cited turn AND the embedder finds no semantic tie "
+                "either), True (the lexical check alone, no rescue), or False (off).")
+        #: `"auto"` by default, and defaulting *on* is a considered reversal of how this
+        #: shipped. Three facts make it defensible. The check only ever runs on claims a
+        #: model proposed -- `remember()` and the fast path never reach it, so nothing a
+        #: caller asserts is ever filtered. The destructive direction is *storing*, not
+        #: rejecting: a fabricated value in a ONE-cardinality slot supersedes and ends
+        #: the true fact that was there (`works_at: "Acme"` retires the user's real
+        #: employer), so letting fabrication through destroys information the way this
+        #: library exists not to. And the residual false-positive class -- a genuine
+        #: paraphrase sharing zero vocabulary with its source that the embedder *also*
+        #: cannot connect -- was observed zero times in 144 real claims, survives only
+        #: as 3 of 8 hand-built adversarial cases, and costs one claim from one turn
+        #: rather than anything already stored.
+        self.reject_ungrounded = reject_ungrounded
         #: Rewrites text before anything durable happens to it, or `None` — the default,
         #: and a fast path rather than a no-op object on the same terms as `telemetry`:
         #: one `is not None` test per call, not per turn. See `memvara.redact` for why
@@ -131,6 +254,15 @@ class WritePipeline:
         # A rejected embedding is warned about once per pipeline, not once per claim —
         # a misconfigured embedder would otherwise emit one warning per write forever.
         self._warned_embedding = False
+        # Same rule, different failure: see `UnembeddableTextWarning`. Separate flags so
+        # a store hitting both does not have one silence the other, which would leave the
+        # quieter of the two indistinguishable from not happening.
+        self._warned_unembeddable = False
+        # An embedder that fails during the grounding rescue is warned about once per
+        # pipeline, same rule as the two flags above: the rescue fails open (the claim
+        # is kept), so the only lasting harm of a broken embedder here is silence about
+        # the mode quietly running lexical-only.
+        self._warned_grounding = False
 
     # -- public ---------------------------------------------------------------
 
@@ -221,6 +353,98 @@ class WritePipeline:
             rec.timing(WRITE_LATENCY_MS, receipt.latency_ms)
             rec.counter(WRITE_TURNS, len(episodes))
             rec.counter(WRITE_LLM_CALLS, receipt.llm_calls)
+            # What this write actually added, which is what a bill is computed from.
+            # `added` is the `add` and `supersede` outcomes and nothing else, so a batch
+            # that only reinforced what was already known moves neither of these — the
+            # dedup promise, stated as an emission rather than as prose.
+            #
+            # `len(fresh)` rather than `len(episodes)`: `_tier0_partition` sent exact
+            # repeats to `pending` without storing them, and charging for a row nobody
+            # wrote is the failure `write.turns` cannot avoid by construction.
+            rec.counter(WRITE_MEMORY_CLAIMS, len(receipt.added))
+            rec.counter(WRITE_MEMORY_EPISODES, len(fresh))
+        return receipt
+
+    def reextract(self, episodes: Sequence[Episode]) -> WriteReceipt:
+        """Extract from turns that are already stored. `add()` minus tier 0.
+
+        The case this exists for: a turn reached the store and no claim was ever derived
+        from it. That happens two ways and both are ordinary. A deployment running with
+        no model keeps every turn and extracts from almost none of them — 96 of 129
+        episodes on one measured store. And a provider failure mid-write sets
+        `receipt.deferred`, keeps the episodes and returns; nothing retried them until
+        this existed, so the facts in that batch were lost while the text sat on disk.
+
+        Tier 0 is skipped and must be: these episodes are stored and embedded already, so
+        re-running it would find each one as an exact repeat of itself. Tier 1 runs, and
+        runs *first*, because the salience gate is free and the model is not — episodes
+        commit before the gate in `add()`, so every acknowledgement and one-word reply in
+        the store looks exactly like an unextracted fact from the outside. Without the
+        gate here a scheduled sweep would spend a model call on "thanks" on every pass,
+        forever.
+
+        **An episode that already has claims is skipped, and that is the idempotency
+        guarantee.** Not a convenience: re-reading a stored turn is not new evidence about
+        anything, but the reconciler cannot tell that from a genuine repeat, so an
+        identical claim arriving twice reconciles to `reinforce` and bumps salience.
+        Measured, not assumed — a second extraction of one stored turn returns
+        `action="reinforce"`. A sweep that ran twice would therefore quietly promote
+        whatever it had already extracted, which is a ranking change nobody asked for and
+        nothing would report. Counted on `receipt.already_extracted`.
+
+        What this cannot tell is "the model read this and found nothing" from "no model
+        has read this yet": neither leaves a mark on the episode. That population is real
+        and `reject_ungrounded` feeds it — a turn whose only extracted claim was refused
+        as ungrounded ends with no claims citing it and looks untouched. So every turn
+        read here is reported on `receipt.episode_ids`, and a scheduler hands those back
+        as `Memvara.pending_extraction(exclude=...)`. Core does not record attempts on the
+        episode, because the durable set belongs to whatever is doing the scheduling.
+        """
+        receipt = WriteReceipt()
+        t0, rec = perf_counter(), self.telemetry
+        now = utcnow()
+
+        fresh: list[Episode] = []
+        for ep in episodes:
+            if self.store.claims_citing(ep.scope.tenant, ep.id):
+                receipt.already_extracted += 1
+                continue
+            fresh.append(ep)
+        receipt.episode_ids = [ep.id for ep in fresh]
+
+        gated, fast_claims = self._tier1(fresh, receipt)
+        llm_claims = self._tier2(gated, receipt, now)
+
+        candidates: list[Claim] = []
+        for ep in fresh:
+            candidates.extend(fast_claims.get(ep.id, ()))
+            candidates.extend(llm_claims.get(ep.id, ()))
+        if self.redactor is not None:
+            # The same belt-and-braces `add()` applies, for the same reason: "every claim
+            # in the store passed the redactor exactly once" has to hold for every write
+            # path or it is an argument about transitivity rather than a property.
+            for claim in candidates:
+                redact_claim(self.redactor, claim, telemetry=rec)
+
+        lock_t0 = perf_counter() if rec is not None else 0.0
+        with self._transaction():
+            to_embed: list[Claim] = []
+            for claim in candidates:
+                claim.recorded_at = now
+                self._absorb(claim, self.reconciler.apply(claim, now=now),
+                             receipt, to_embed)
+            self._write_embeddings(to_embed)
+
+        receipt.latency_ms = (perf_counter() - t0) * 1000.0
+        if rec is not None:
+            rec.timing(WRITE_LOCK_HELD_MS, (perf_counter() - lock_t0) * 1000.0)
+            rec.timing(WRITE_LATENCY_MS, receipt.latency_ms)
+            rec.counter(WRITE_TURNS, len(fresh))
+            rec.counter(WRITE_LLM_CALLS, receipt.llm_calls)
+            rec.counter(WRITE_MEMORY_CLAIMS, len(receipt.added))
+            # No `write.memory_episodes`: this path stores no episode. Emitting a zero
+            # would be indistinguishable from a write that stored none and was charged
+            # for it, which is the confusion that series was added to end.
         return receipt
 
     def _transaction(self):
@@ -265,6 +489,16 @@ class WritePipeline:
             # so there is no window to report and inventing one would make the write
             # path's two entry points look comparable when they are not.
             self.telemetry.timing(WRITE_LATENCY_MS, receipt.latency_ms)
+            # The counter `add()` has and this path did not, which left every write that
+            # skips extraction invisible to anything counting writes. One per call rather
+            # than per row absorbed, matching `write.turns`: both count what was handed
+            # in, so a fact that reinforced an existing claim still says a write happened.
+            self.telemetry.counter(WRITE_CLAIMS)
+            # And the billable half, on the same terms `add()` emits it. `write.claims`
+            # above says a call happened; this says what the call left behind, which are
+            # different numbers whenever the assertion reinforced or retracted rather
+            # than landing. No episode counterpart: this path stores none.
+            self.telemetry.counter(WRITE_MEMORY_CLAIMS, len(receipt.added))
         return receipt
 
     # -- tier 0 ---------------------------------------------------------------
@@ -482,7 +716,7 @@ class WritePipeline:
         self._report_usage(receipt, usage)
 
         for item in raw:
-            claim = self._claim_from_dict(item, episodes, now)
+            claim = self._claim_from_dict(item, episodes, now, receipt)
             if claim is not None:
                 out.setdefault(claim.sources[0], []).append(claim)
         receipt.unextracted = sum(1 for ep in episodes if ep.id not in out)
@@ -644,9 +878,49 @@ class WritePipeline:
             return episodes[idx].content[:_EXAMPLE_CHARS]
         return str(item.get("object", ""))[:_EXAMPLE_CHARS]
 
+    def _grounding_rescued(self, obj: str, source: str) -> bool:
+        """The embedder's veto over the lexical trigger, under `"auto"`.
+
+        A lexically ungrounded object is kept anyway when its best chunk-cosine against
+        the source reaches `_GROUNDING_RESCUE_COSINE` -- that is what a genuine
+        paraphrase looks like and what a wholesale invention does not (the constant's
+        docstring carries the measurements). Chunked because MiniLM-class embedders
+        truncate long input, and a fact grounded late in a 7,000-character turn must
+        not be invisible to the comparison.
+
+        Fails open. A broken embedder here must cost the rescue's *precision*, never a
+        claim: the mode degrades to keeping what it cannot check, warns once, and the
+        lexical trigger alone is not grounds for rejection when the second opinion the
+        mode promises cannot be obtained.
+        """
+        try:
+            chunks = [source[i:i + _GROUNDING_CHUNK_CHARS]
+                      for i in range(0, max(len(source), 1), _GROUNDING_CHUNK_CHARS)]
+            vectors = self.embedder.encode([obj] + chunks)
+            norms = (vectors ** 2).sum(axis=1) ** 0.5
+            norms[norms == 0.0] = 1.0
+            unit = vectors / norms[:, None]
+            best = float(max(unit[1:] @ unit[0]))
+        except Exception as e:
+            if not self._warned_grounding:
+                self._warned_grounding = True
+                warnings.warn(
+                    f"embedding failed during the grounding rescue ({e}); ungrounded "
+                    "claims are being kept rather than rejected until it recovers",
+                    RuntimeWarning, stacklevel=2,
+                )
+            return True
+        return best >= _GROUNDING_RESCUE_COSINE
+
     def _claim_from_dict(self, item: Mapping[str, Any], episodes: Sequence[Episode],
-                         now) -> Claim | None:
-        """Trust boundary for model output: anything malformed is dropped, not repaired."""
+                         now, receipt: WriteReceipt) -> Claim | None:
+        """Trust boundary for model output: anything malformed is dropped, not repaired.
+
+        `receipt` is threaded through only so a rejection for lack of grounding can be
+        counted where the decision is made -- see `reject_ungrounded`. A structurally
+        malformed item (missing predicate, out-of-range source) is dropped the same way
+        it always was, uncounted; only the new reason has a number attached to it.
+        """
         idx = item.get("source_index")
         if not isinstance(idx, int) or isinstance(idx, bool) or not 0 <= idx < len(episodes):
             # Without a source we cannot attach provenance, and a claim with no
@@ -659,6 +933,12 @@ class WritePipeline:
         obj = str(item.get("object", "") or "").strip()
         if not predicate or not obj:
             return None
+
+        if self.reject_ungrounded and _wholly_ungrounded(obj, ep.content):
+            if not (self.reject_ungrounded == "auto"
+                    and self._grounding_rescued(obj, ep.content)):
+                receipt.ungrounded += 1
+                return None
 
         try:
             polarity = -1 if int(item.get("polarity", 1)) < 0 else 1
@@ -734,11 +1014,55 @@ class WritePipeline:
             rec.counter(WRITE_RETRACTION,
                         outcome="retired" if res.invalidated else "noop")
 
+    def _unembeddable(self, claim: Claim) -> None:
+        """Report a claim whose vector carries nothing, which nothing else would.
+
+        A rejected embedding raises and is handled below. This one succeeds: an all-zero
+        row is stored like any other, retrieval correctly abstains on it rather than
+        inventing a rank, and the claim answers by predicate and by lexical match. Every
+        layer behaves well and the result is a fact that vector search can never return,
+        with no exception anywhere to say so. Detection is one norm the embedder has
+        already computed and thrown away.
+
+        The usual cause is a script the configured embedder cannot tokenise — the shipped
+        `HashingEmbedder` matches `[a-z0-9']+`, so Han, Kana, Hangul, Arabic and Hebrew
+        all reduce to no tokens and the character n-grams are built over the *rejoined
+        word list*, which is empty too. The script goes in the message because "this text
+        embedded to nothing" is not actionable and "your Han text embedded to nothing" is.
+
+        **What this does not catch**, and it is the larger half: a *mixed* text embeds to
+        a perfectly good vector built from the Latin part alone. `remember("user",
+        "lives_in", "里斯本")` renders as `user lives in 里斯本`, whose norm is 1.0 — so
+        every `lives_in` claim looks the same in vector space no matter which city it
+        names. A norm is a whole-string measure and cannot see a component contributing
+        nothing. This guard is the floor, not the fix; the fix is an embedder that
+        tokenises the script.
+        """
+        if self.telemetry is not None:
+            # Per-claim, because the warning fires once per process and a count is the
+            # only thing that answers "how much of this store is unsearchable".
+            self.telemetry.counter(WRITE_EMBEDDING_UNUSABLE, script=script_of(claim.text))
+        if self._warned_unembeddable:
+            return
+        self._warned_unembeddable = True
+        warnings.warn(
+            f"{self.embedder!r} produced an all-zero embedding for {script_of(claim.text)} "
+            "text, so those claims are stored but can never be returned by meaning — only "
+            "by predicate or by exact lexical match. The shipped HashingEmbedder only "
+            "tokenises [a-z0-9'], so any non-Latin script embeds to nothing. Configure an "
+            "embedder that covers the scripts you store. Mixed-script text does not reach "
+            "this warning and is affected too: the vector is built from the Latin part "
+            "alone.",
+            UnembeddableTextWarning, stacklevel=2,
+        )
+
     def _write_embeddings(self, claims: Sequence[Claim]) -> None:
         if not claims:
             return
         vecs = self.embedder.encode([c.text for c in claims])
         for claim, vec in zip(claims, vecs):
+            if not vec.any():
+                self._unembeddable(claim)
             try:
                 self.store.set_embedding(claim.id, vec)
             except ValueError as e:

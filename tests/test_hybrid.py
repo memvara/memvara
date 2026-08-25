@@ -9,6 +9,7 @@ explicitly - nothing here sleeps or patches a clock.
 from __future__ import annotations
 
 import re
+import warnings
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -29,6 +30,8 @@ from memvara.retrieve import (
     tokenize,
     vector_relevance,
 )
+from memvara.retrieve import hybrid as hybrid_mod
+from memvara.retrieve.hybrid import UnjoinedStoreWarning
 from memvara.schema import PredicateRegistry
 from memvara.store import SQLiteStore
 from memvara.telemetry import (
@@ -745,6 +748,30 @@ def test_the_analyzer_tokenizes_exactly_as_the_store_does() -> None:
                   "PLAT-2291", "東京 に 住んでいる", "a b cd", "!!! ???"):
         expected = [t.strip('"') for t in _fts_query(query).split(" OR ") if t]
         assert tokenize(query) == expected, query
+
+
+def test_an_unspaced_script_becomes_one_token_and_a_substring_of_it_finds_nothing() -> None:
+    """The limitation `tokenize`'s docstring describes, asserted rather than only stated.
+
+    CJK survives tokenization — it is alphanumeric, so nothing discards it — and that is
+    the sentence the docstring used to stop at. What it does not do is *segment*: with no
+    spaces to split on, a contiguous run comes out as one token holding the entire phrase,
+    so a search for a word inside it matches no term in the index.
+
+    Pinned here because the old wording read as though the case were handled, and a claim
+    about behaviour that no test exercises is one that can quietly stop being true — or,
+    as here, can never have been true in the way a reader took it.
+    """
+    phrase = "我住在里斯本"
+    assert tokenize(phrase) == [phrase], "the whole run, indexed under itself"
+
+    # The substring a user would actually search for is a term the index does not hold.
+    assert tokenize("里斯本") == ["里斯本"]
+    assert "里斯本" not in tokenize(phrase)
+
+    # Latin is unaffected, which is why this is easy to miss. Stopwords are a later
+    # stage, so "in" is still a token here and "I" is gone only for being one character.
+    assert tokenize("I live in Lisbon") == ["live", "in", "lisbon"]
 
 
 def test_only_closed_class_words_are_stopwords() -> None:
@@ -1901,3 +1928,216 @@ def test_the_tiebreak_key_is_not_derived_from_the_row_id():
         for line in sort_lines:
             assert "value_key" in line or "hash" in line, (
                 f"{method.__name__} breaks ties without a content-derived key: {line.strip()}")
+
+
+# --- the store-level graph gate ---------------------------------------------------
+
+def _joined_store(tmp_path, star: bool):
+    """A store that chains, or one that does not, and a retriever with the leg on."""
+    from memvara import Memvara
+    from memvara.llm import NullLLM
+    mem = Memvara(":memory:", llm=NullLLM(), embedder=HashingEmbedder(dim=64))
+    mem.remember("user", "uses", "pytest")
+    if star:
+        mem.remember("user", "lives_in", "Delhi")
+    else:
+        mem.remember("pytest", "configured_in", "pyproject.toml")
+    return mem
+
+
+RELATIONAL = "who is the manager of the person who uses pytest"
+
+
+def test_a_store_where_nothing_chains_does_not_run_the_graph_leg(tmp_path):
+    """A walk needs somewhere to go. Where no claim's object is another claim's subject
+    there is nowhere, and the leg degenerates into returning other facts about the hub —
+    ranked by a path score that is near-uniform when every path is one hop. Fusion reads
+    positions, so that is a fabricated ranking, and on LongMemEval it cost 1.6 points.
+    """
+    mem = _joined_store(tmp_path, star=True)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
+    with pytest.warns(UnjoinedStoreWarning, match="nothing in this store chains"):
+        r.search(RELATIONAL, mem.default_scope, k=5)
+    assert r._joins["default"] == (0, False)
+    mem.close()
+
+
+def test_a_store_that_chains_is_left_alone(tmp_path):
+    mem = _joined_store(tmp_path, star=False)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")          # any warning here is a failure
+        r.search(RELATIONAL, mem.default_scope, k=5)
+    assert r._joins["default"] == (0, True)
+    mem.close()
+
+
+def test_the_gate_warns_once_per_retriever_and_not_once_per_search(tmp_path):
+    """Same reason its parent class does: a store's shape does not change per query, and
+    a warning per search buries the finding under itself.
+
+    Counted by category rather than by asserting the whole caught list. `simplefilter
+    ("always")` catches everything raised inside the block, including `ResourceWarning`
+    from objects an earlier test left for the collector — which is a property of when the
+    garbage collector runs, not of this retriever. On Windows it does so reliably: seven of
+    them, on every run, failing a test about a gate that had behaved correctly. The
+    assertion below says what the name says.
+    """
+    mem = _joined_store(tmp_path, star=True)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for _ in range(3):
+            r.search(RELATIONAL, mem.default_scope, k=5)
+    gate = [w for w in caught if issubclass(w.category, UnjoinedStoreWarning)]
+    assert len(gate) == 1, "three searches, one warning"
+    mem.close()
+
+
+def test_the_reading_is_cached_and_retaken_on_a_counter_not_a_clock(tmp_path):
+    """Deterministic by construction: the same sequence of searches re-measures at the
+    same points on every run, which a wall-clock TTL could not promise."""
+    mem = _joined_store(tmp_path, star=False)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
+    calls = []
+    real = mem.store.connectivity
+    mem.store.connectivity = lambda t=None: (calls.append(t), real(t))[1]  # type: ignore
+    for _ in range(hybrid_mod.GATE_RECHECK_EVERY + 2):
+        r.search(RELATIONAL, mem.default_scope, k=5)
+    assert len(calls) == 2, "measured once, then once more when the counter came round"
+    mem.close()
+
+
+def test_a_backend_that_cannot_measure_is_not_read_as_a_store_with_no_joins(tmp_path):
+    """`{}` means it did not look. Reading that as zero would switch a working graph leg
+    off on every third-party store at once, on a measurement nobody took.
+    """
+    mem = _joined_store(tmp_path, star=True)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
+    mem.store.connectivity = lambda t=None: {}          # type: ignore
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        r.search(RELATIONAL, mem.default_scope, k=5)
+    assert r._joins["default"] == (0, True)
+    mem.close()
+
+
+def test_a_store_without_connectivity_at_all_keeps_its_graph_leg(tmp_path):
+    mem = _joined_store(tmp_path, star=True)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
+    mem.store.connectivity = None                       # type: ignore[assignment]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        r.search(RELATIONAL, mem.default_scope, k=5)
+    assert r._joins["default"] == (0, True)
+    mem.close()
+
+
+def test_the_shipped_default_never_asks_the_store_about_joins(tmp_path):
+    """`w_graph=0.0` is the shipped configuration and must pay nothing for a gate on a
+    leg it is not running."""
+    mem = _joined_store(tmp_path, star=True)
+    # `w_graph` defaults to 0, and a real traverser is supplied so the only reason the
+    # store is not consulted is the gate declining to ask.
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry,
+                        traverser=mem.traverser)
+    calls = []
+    mem.store.connectivity = lambda t=None: calls.append(t) or {}   # type: ignore
+    r.search(RELATIONAL, mem.default_scope, k=5)
+    assert calls == []
+    assert r._joins == {}
+    mem.close()
+
+
+def test_each_tenant_is_measured_on_its_own(tmp_path):
+    """One tenant's shape says nothing about another's, and a shared verdict would leak
+    the fact that a neighbour's store is a star."""
+    from memvara import Memvara
+    from memvara.llm import NullLLM
+    mem = Memvara(":memory:", llm=NullLLM(), embedder=HashingEmbedder(dim=64))
+    mem.remember("user", "uses", "pytest", tenant="star")
+    mem.remember("user", "lives_in", "Delhi", tenant="star")
+    mem.remember("user", "uses", "pytest", tenant="web")
+    mem.remember("pytest", "configured_in", "pyproject.toml", tenant="web")
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r.search(RELATIONAL, Scope(tenant="star"), k=5)
+        r.search(RELATIONAL, Scope(tenant="web"), k=5)
+    assert r._joins == {"star": (0, False), "web": (0, True)}
+    mem.close()
+
+
+def test_a_store_that_chains_but_seeds_nothing_still_runs_no_walk(tmp_path):
+    """`graph_seeds=0` is the documented spelling for "seed nothing", and it has to be
+    reachable *past* the store-level gate.
+
+    The gate opens here — this store chains — so the leg is entered and gives up on the
+    seed list instead, which is a different early return with a different meaning. Pinned
+    because the gate took over the path that used to cover it: before it, a star store
+    reached the seed check and returned empty from there, and that read as the same line
+    being exercised when the two exits say quite different things. One is "there is
+    nowhere to walk", the other is "there is nowhere to start".
+    """
+    mem = _joined_store(tmp_path, star=False)
+    # `intent_weighting=False` so the classifier cannot close the leg before the seed
+    # check is reached; this test is about the seed check and nothing else.
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser, graph_seeds=0,
+                        intent_weighting=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")          # the gate must not fire on this store
+        rows = r.search(RELATIONAL, mem.default_scope, k=5)
+    assert r._joins["default"] == (0, True)
+    assert all(x.explain.graph_rank is None for x in rows), (
+        "no seeds means no walk, so nothing may carry a graph rank"
+    )
+    mem.close()
+
+
+# --- the read path's clock -----------------------------------------------------------
+
+def test_two_searches_at_a_pinned_instant_score_identically(tmp_path):
+    """The read path decays from the moment it is asked, so two identical searches
+    seconds apart score every claim differently — measured on 2WikiMultihopQA at 3,000 of
+    3,000 questions, in the low-order digits, which is enough to flip a near-tie at the
+    `k` boundary and move a published figure with no code change behind it.
+
+    `now` is the parameter `Consolidator.run()` already has, for the same reason: the
+    write path had this defect and it was fixed there first.
+    """
+    from datetime import datetime, timezone
+    mem = _joined_store(tmp_path, star=False)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
+                        traverser=mem.traverser)
+    at = datetime(2030, 6, 1, tzinfo=timezone.utc)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        a = r.search(RELATIONAL, mem.default_scope, k=5, now=at)
+        b = r.search(RELATIONAL, mem.default_scope, k=5, now=at)
+    assert [(x.claim.id, x.score) for x in a] == [(y.claim.id, y.score) for y in b]
+    mem.close()
+
+
+def test_known_at_still_wins_over_a_pinned_now(tmp_path):
+    """`now` replaces the clock *read*, never the belief axis. A time-travel query keeps
+    decaying from the instant it asked about."""
+    from datetime import datetime, timezone
+    mem = _joined_store(tmp_path, star=False)
+    r = HybridRetriever(mem.store, mem.embedder, mem.registry)
+    known = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    far = datetime(2040, 1, 1, tzinfo=timezone.utc)
+    both = r.search("pytest", mem.default_scope, k=5, known_at=known, now=far)
+    just_known = r.search("pytest", mem.default_scope, k=5, known_at=known)
+    assert [(x.claim.id, x.score) for x in both] == \
+           [(y.claim.id, y.score) for y in just_known], (
+        "a pinned now must not shift a query that named its own instant"
+    )
+    mem.close()

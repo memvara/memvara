@@ -360,7 +360,8 @@ def fixture() -> list[Sample]:
 
 def build_memory(sample: Sample, budget: ek.RetrievalBudget, llm: Any = None,
                  read_k: int | None = None, reranker: Any = None,
-                 rerank_top_n: int = 0, embedder: Any = None) -> Memvara:
+                 rerank_top_n: int = 0, embedder: Any = None,
+                 w_graph: float = 0.0) -> Memvara:
     """A store per conversation, which is the unit a LOCOMO question is about.
 
     `read_max_episodes=k` because the library's default of 3 assumes raw turns are a
@@ -398,6 +399,7 @@ def build_memory(sample: Sample, budget: ek.RetrievalBudget, llm: Any = None,
         read_max_episodes=episodes,
         read_reranker=reranker,
         read_rerank_top_n=rerank_top_n or 20,
+        read_w_graph=w_graph,
     )
 
 
@@ -523,6 +525,7 @@ def run_retrieval(
     reranker: Any = None,
     rerank_top_n: int = 0,
     embedder: Any = None,
+    w_graph: float = 0.0,
 ) -> tuple[list[ek.RetrievalScore], ek.IngestStats, ek.RetrievalStats, Counter]:
     """The same ingest and the same retrieval as `run()`, scored with no reader.
 
@@ -539,6 +542,7 @@ def run_retrieval(
 
     for sample in samples:
         mem = build_memory(sample, budget, llm, read_k=plan.depth(budget),
+                           w_graph=w_graph,
                            reranker=reranker, rerank_top_n=rerank_top_n,
                            embedder=embedder)
         haystack = sample.haystack
@@ -782,7 +786,8 @@ def main(argv: Sequence[str] | None = None,
         plan = ek.build_plan(args)
         scores, ingest_stats, read_stats, excluded = run_retrieval(
             samples, budget=budget, plan=plan, limit=args.limit,
-            reranker=reranker, rerank_top_n=args.rerank, embedder=embedder)
+            reranker=reranker, rerank_top_n=args.rerank, embedder=embedder,
+            w_graph=args.w_graph)
         out(ek.retrieval_report(
             scores, ingest_stats, read_stats, title="LOCOMO", plan=plan, budget=budget,
             categories=[CATEGORIES[c] for c in ANSWERABLE],

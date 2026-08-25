@@ -66,7 +66,7 @@ every write. `remember()` is unaffected — a structured write never needed a mo
 MEMVARA_DB=~/.memvara/memory.db python3 -m memvara.server
 ```
 
-JSON-RPC 2.0 over stdio, ten tools, no SDK dependency. It refuses to start without
+JSON-RPC 2.0 over stdio, twelve tools, no SDK dependency. It refuses to start without
 `MEMVARA_DB` and prints the client configuration block instead — so if you have arrived
 here because your client said the server failed, run the command by hand and read what it
 says.
@@ -382,6 +382,19 @@ level up.
 dimensionally and every similarity is nonsense. You get an `EmbedderChangedWarning`,
 which is only possible because `memory.db.embedder.json` records the name.
 
+**Right model, text it cannot read.** The third shape, and the quietest: the embedder is
+the one you chose and it returns an all-zero vector for some of your text. With the
+default `HashingEmbedder` that is anything with no `[a-z0-9']` in it — Han, Kana, Hangul,
+Arabic, Hebrew. Nothing is misconfigured, so nothing raises and no migration helps; the
+claims are stored, answer by predicate, and are never returned by meaning. Watch
+`write.embedding_unusable`, which is tagged by script and is the only number that says how
+much of the store is affected — the accompanying `UnembeddableTextWarning` fires once per
+pipeline, so on a server building one `Memvara` per request it is one line per request and
+on a long-lived one it is a single line from whenever this started. A non-zero counter
+against a script you serve means installing an embedder that covers it, not a re-encode of
+what you have. Note also that a *mixed* line embeds fine from its Latin half alone and is
+never counted, so this is a floor on the problem rather than a measure of it.
+
 Either way the fix is one migration, which re-encodes every claim *and* every episode and
 rewrites the fingerprint:
 
@@ -419,4 +432,11 @@ inversion). Both return per-table counts as evidence. Neither is reachable from 
 server, deliberately.
 
 Note that erasure removes rows; it does not shrink the file. Run `VACUUM` if the on-disk
-footprint of deleted data matters to you as well as its readability.
+**footprint** of deleted data matters to you — its **readability** is handled by the store
+itself, which sets `PRAGMA secure_delete=ON` and FTS5's `secure-delete` so the bytes are
+overwritten rather than merely freed.
+
+That was not always true. Before schema 7 this paragraph offered `VACUUM` as the lever for
+readability too, and for the text index it did not work: a deleted FTS5 row leaves its
+terms as live rows in a shadow table, which a `VACUUM` does not touch. Opening an older
+store with this version scrubs it once, on the spot.

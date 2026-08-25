@@ -7,6 +7,674 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Model-extracted claims with no tie to their cited turn are now rejected
+
+### What changed
+
+`WritePipeline` gained `reject_ungrounded`, defaulting to `"auto"`: a claim the
+extraction model proposes is refused when its object shares not one content word with
+the episode it cites as its source **and** the configured embedder finds no semantic
+tie either (best chunk-cosine below 0.40). Refusals are counted on
+`WriteReceipt.ungrounded` and reported in `memory_add`'s receipt as
+`note: N proposed claim(s) had no support in the turn they cited as their source`.
+
+### Who this changes, and in which direction
+
+**Nobody running the shipped defaults.** The default `NullLLM` proposes no claims, so
+there is nothing to filter. `remember()` and the deterministic fast path are never
+checked at all — nothing a caller asserts directly is affected.
+
+**Deployments with an extraction model configured** (`MEMVARA_LLM=anthropic`, or an
+`llm=` passed in). Claims the model invents out of whole cloth — measured at 18–36% of
+usable output for 4B-class local models, typically a placeholder like
+`works_at: "Acme"` — no longer reach the store. Before this, such a claim did not sit
+harmlessly beside the truth: on a ONE-cardinality predicate it superseded and *ended*
+the true fact in the slot.
+
+**The direction that can cost you:** a genuine claim whose object is a paraphrase
+sharing zero vocabulary with its source, on a deployment whose embedder is the
+lexical `HashingEmbedder` (where the semantic rescue cannot fire). That combination
+was observed zero times in the 144 real claims measured, but it is possible, and it
+costs the one claim — the episode itself is already stored and retrievable.
+
+### How you find out it applies to you
+
+`receipt.ungrounded` is non-zero, `repr(receipt)` shows `ungrounded=N`, and the
+`memory_add` note above appears on the MCP transport. If the rescue's embedder fails,
+the pipeline warns once (`RuntimeWarning`, "embedding failed during the grounding
+rescue") and keeps the claims it could not check.
+
+### If you want the old behaviour
+
+`Memvara(write_reject_ungrounded=False, ...)` restores it exactly. `True` is a third
+mode: the lexical check alone, no embedding rescue, for callers who have measured
+their extractor and want the hard line.
+
+---
+
+## `include_episodes` now requires a real boolean, where a string used to be accepted
+
+### What changed
+
+`memory_recall` declares `include_episodes` as `boolean`, and the tool-call validator had
+no branch for that type. Two things followed, and only the second one can break you.
+
+A caller sending the argument the way the schema asks — `true` or `false` — got an
+unhandled `KeyError: 'boolean'` raised out of the error path itself. That never worked, so
+nothing depended on it.
+
+A caller sending the **string** `"true"` was accepted, because a boolean fell through to
+the validator's "must be a string" check and passed it. The handler then read the flag
+through `bool(...)`, where every non-empty string is truthy — so `"true"` turned episodes
+on, and so did `"false"`. Both are now rejected with a normal tool error.
+
+### Who this changes, and in which direction
+
+**Anyone whose client stringifies arguments.** Since the correctly-typed call raised, a
+caller who was successfully getting episodes back was necessarily sending a string, and
+that call now returns an error instead of results.
+
+**Anyone sending `"false"` and expecting it to mean false.** That call was turning
+episodes on. It now fails loudly rather than doing the opposite of what it says.
+
+Callers sending real JSON booleans are unaffected, except that the call now works.
+
+### How you find out it applies to you
+
+The rejection names the argument and what arrived:
+
+```
+memory_recall.include_episodes must be a boolean, got a string ('true')
+```
+
+It arrives as a tool result with `isError: true`, the way every other argument rejection
+does, so a model reading it can correct itself on the next turn.
+
+### If you want the old behaviour
+
+There is none to restore: one half raised `KeyError` and the other read `"false"` as true.
+Send `true` or `false` as JSON booleans, not as strings.
+
+---
+
+## The graph leg stops running on a store where nothing chains
+
+### What changed
+
+If you set `w_graph > 0` (or `read_w_graph`), the leg now checks the store before it walks
+and does not run when no live claim's object is another live claim's subject. On a store
+with joins nothing changes: measured on 2WikiMultihopQA, the gate closed the leg on 0 of
+3,000 searches and every returned row is identical.
+
+`w_graph` still defaults to `0.0`, so a deployment that never turned the leg on is
+unaffected.
+
+### Who this changes, and in which direction
+
+**Anyone running `w_graph > 0` against a store built from one person's own sentences.**
+Extraction from a user's turns produces claims that all take that user as their subject,
+so their objects are leaves and nothing chains — and the leg was returning other facts
+about the hub, ranked by a near-uniform path score, into a fusion that reads positions.
+Measured on LongMemEval that cost 1.6 points of its strongest category. You will now get
+the two-leg result, which is the same result `w_graph=0.0` gives.
+
+If you were relying on the third leg as a recall booster rather than as a walk, this
+removes it. That was tested: `graph_depth=1` on the same store gains nothing in any
+category, so there was no recall to boost.
+
+### How you find out it applies to you
+
+It says so, once per retriever:
+
+```
+UnjoinedStoreWarning: graph retrieval is configured (w_graph=1.0) and nothing in this
+store chains: none of its 78 live claim(s) have an object that is another claim's
+subject, so a walk has nowhere to go and the leg is not running.
+```
+
+It is a subclass of `DegradedRetrievalWarning`, so an existing `filterwarnings` on the
+parent already catches it. `memory_stats` reports the same thing as a join rate, and
+`Memvara.connectivity()` returns the two counts.
+
+### If you want the old behaviour
+
+There is no flag, deliberately: it would be a switch whose only setting is "make retrieval
+worse in a way I have measured". The condition is a property of your data, so the way out
+is to write facts whose subject is not the hub everything else hangs off — one is enough
+to lift the gate, and it lifts within `GATE_RECHECK_EVERY` searches without a restart.
+
+---
+
+## `Store` gains `connectivity`, so `isinstance(x, Store)` flips for a third-party backend
+
+### What changed
+
+`memory_stats` reports a **join rate** — the share of live claims whose object is the
+subject of another live claim — and the counts come from a new optional `Store` method,
+`connectivity`. `Memvara`, `ScopedMemvara`, `AsyncMemvara` and `AsyncScopedMemvara` all
+gained a `connectivity()` of their own.
+
+Nothing in memvara requires it. Capability checks here are `getattr` per member, the
+method is listed in `store.base.OMITTABLE`, and a backend without it costs the
+`memory_stats` line and nothing else. Retrieval is untouched and no default moved.
+
+### The one thing that will not announce itself
+
+**`isinstance(your_store, Store)` was `True` and is now `False`**, if your backend
+implemented all 43 members and not this one. `Store` is `@runtime_checkable` and
+`isinstance` on a Protocol is all-or-nothing: it asks whether every member is present, so
+it has never been able to answer "can this store walk a graph", and it is not the check to
+gate on. Find your instances with:
+
+```bash
+grep -rn "isinstance(.*, Store)" .
+```
+
+Replace each with the capability you actually need — `getattr(store, "adjacent", None)`
+for the graph leg, `getattr(store, "connectivity", None)` for the join rate. That is what
+this codebase does at every call site, and each one degrades in a way it names out loud.
+
+To keep `isinstance` passing, implement the method. `SQLiteStore.connectivity` is the
+reference; `memvara_cloud`'s `PostgresStore` is the second, and the two differ only in how
+each spells an empty endpoint (`''` against `NULL`).
+
+### If you call `connectivity()` yourself
+
+**`{}` is not `{"live_claims": 0, "joinable_claims": 0}`.** The first is a backend that
+cannot measure it; the second is a store that was measured and has no joins in it — a
+*star*, which is what a memory built from one user's own sentences looks like, and which
+is a real finding about the write path. Treating a missing key as zero reports the finding
+without the measurement, so branch on the empty mapping before dividing.
+
+---
+
+## `erase()` can now raise, and the schema is version 8
+
+### What changed
+
+`Memvara.erase()` used to report success from the store's return code. It now re-queries
+the disk afterwards (`prove_erased`) and raises `ErasureIncomplete` if anything survived,
+or if the store cannot be asked. The two ordinary outcomes are unchanged: `True` means
+proved gone, `False` still means there was nothing to erase.
+
+**The exception is reachable from a store you already have.** `RemoteStore` (cloud mode)
+cannot count rows, so every `erase()` against it now raises instead of returning `True`.
+That is the intended behaviour — it was returning `True` for an erasure it could not
+verify — but it is a behaviour change on a working configuration.
+
+The SQLite schema goes 7 → 8, adding an `erasures` audit table. The migration is the
+`CREATE TABLE` and nothing else: there is no data to backfill, and an upgraded file starts
+with an empty table, which means "nothing erased since the upgrade" and never "nothing was
+ever erased here". **A file opened by this build cannot be opened by an older one** —
+`_migrate` refuses a store stamped newer than the build reading it, which is deliberate
+and is the usual one-way door.
+
+### What to do about it
+
+If you call `erase()` in a loop over a legal erasure request, catch the exception and
+treat the erasure as incomplete:
+
+```python
+from memvara import ErasureIncomplete
+
+try:
+    mem.erase(claim_id)
+except ErasureIncomplete as exc:
+    log.error("half-erased: %s still holds rows", exc.proof.surviving)
+```
+
+To check an erasure that happened months ago, or in another process:
+
+```python
+mem.prove_erased(claim_id).proven
+```
+
+**It is not scope-checked**, and that is stated rather than fixed: the claim is gone, so
+there is nothing to scope-check against. It reveals whether any row with a given id
+survives, for an id the caller must already hold. Treat erasure verification as an
+operator action.
+
+---
+
+## `Explanation` gained four fields and two more retrieval legs exist
+
+
+### What changed
+
+`Explanation` now carries `graph_rank`, `graph_score`, `temporal_rank`, `temporal_score`
+and `intent`, and `HybridRetriever.__init__` takes `w_graph`, `graph_seeds`,
+`graph_depth`, `w_temporal`, `traverser` and `intent_weighting`. All are additive and
+every default reproduces the previous behaviour exactly: `w_graph=0.0` and
+`w_temporal=0.0` mean no walk and no time query run, nothing extra is fused, and both
+pairs of fields stay `None` on every result.
+
+`Store` gains one optional method, `episodes_near`. A store without it does not run the
+temporal leg, exactly as one without `vector_search_episodes` does not run the vector half
+of the episode search.
+
+Two things will announce themselves anyway.
+
+**`Explanation.summary()` and `repr(Result)` gained fields.** A test asserting on the
+whole string will see `graph#2(0.750)` and `time#1(0.500)` appear once those legs are on;
+neither is emitted while they are off, and both ship off.
+
+**`intent=` is different: it is emitted by default.** `intent_weighting` ships **on**, so
+a stock build already prints `intent=lookup` on an ordinary search — it is the one new
+field a test can meet without turning anything on. It is absent only when
+`intent_weighting=False`.
+
+**`Memvara` now hands its `GraphTraverser` to its retriever.** It is the same object
+`neighborhood()` walks, so the two cannot disagree about what the graph is. Pass
+`read_traverser=` to wire a differently-bounded walk into retrieval than the one the
+public method exposes.
+
+### What to do about it
+
+Nothing, unless you want the leg. To turn it on:
+
+```python
+mem = Memvara("memory.db", read_w_graph=1.0)
+```
+
+Read `docs/BENCHMARKS.md` first. Neither public retrieval benchmark can measure it — both
+run the offline write path over conversational data it extracts almost nothing from — so
+the default is 0.0 and the only measured gain is on a synthetic multi-hop workload.
+
+**If your `Store` is a third-party one**, the leg needs `adjacent()`. A store without it
+degrades to the two legs it had, with a `DegradedRetrievalWarning` raised once per
+retriever rather than silently. `RemoteStore` (cloud mode) is in that category: the method
+is present and raises.
+
+## Erasure now actually removes the text, and the schema is version 7
+
+### What changed
+
+`erase()`, `purge()` and `reset()` left the erased words readable in the database file.
+The store now sets `PRAGMA secure_delete=ON` and FTS5's `secure-delete`, so the bytes are
+overwritten rather than freed, and opening an existing store scrubs what is already on
+disk once.
+
+**If you have run an erasure on any earlier version, the text may still be in that file.**
+Opening it with this release cleans the text index. It does not rewrite pages that were
+freed before the upgrade — for those, one `VACUUM` after the first open finishes the job:
+
+```python
+from memvara import Memvara
+mem = Memvara("memory.db")      # migrates and scrubs the text index
+mem.store._db.execute("VACUUM") # reclaims pages freed by pre-upgrade deletes
+mem.close()
+```
+
+Check a file yourself — the point is to look at the file, not to ask the store, which
+answered correctly all along:
+
+```bash
+grep -c 'something-you-erased' memory.db || echo "not present"
+```
+
+### What to do about it
+
+Nothing, for most callers. Three things are worth knowing.
+
+**Writes cost about 6% more and `erase_claim` about 9% more.** Measured on a 5,000-claim
+run. That is the price of the bytes being overwritten.
+
+**The one-time `optimize` runs on first open.** 0.01 s over a 20,000-claim index, and
+bounded by segment count rather than row count, so a normally-written store has little to
+merge.
+
+**Schema 6 → 7, and it is a one-way door.** A file opened by this build is refused by an
+older one, which is deliberate: the FTS5 option is durable state in the file, and an older
+build would write to a text index whose format it does not understand. The option needs
+SQLite 3.35 — already the store's minimum, so nothing that could open the file before is
+locked out now.
+
+**Still not scrubbed: the `-wal`.** An erased claim's bytes can remain in the write-ahead
+log until it checkpoints. A clean `close()` or a checkpoint clears it; `SECURITY.md` now
+records this as the remaining residue rather than the claim it used to make.
+
+---
+
+## A blank part of a triple is now an error, not a quiet no-op
+
+### What changed
+
+`memory_remember` refuses an empty or whitespace-only `subject`, `predicate` or `object`.
+It used to accept the call, store nothing, and return every counter at zero with
+`isError` false.
+
+Three nearby messages changed text in the same release, all of them cases where the old
+wording was true-but-useless or self-contradictory:
+
+- `memory_end` on an **already-retired** claim now says so, instead of reporting it as
+  ended;
+- `memory_since` with a **future** instant says the instant has not arrived, instead of
+  "what you knew then still stands";
+- `recall(budget=)`'s cut notice no longer says "n further notes *matched*".
+
+### How the mistake shows up
+
+The refusal is the only one that changes a call's outcome, and it surfaces as a tool
+result with `isError: true` where there used to be a zero-count success. Anything that
+treated that success as "written" was already wrong — nothing was stored either way —
+but a caller that never checked will now see an error where it previously saw none.
+
+The other three are text. A log rule or assertion matching on `still stands`, `ended, not
+retired`, or `further notes matched` stops matching.
+
+### What to grep for
+
+```
+memory_remember
+further notes matched
+still stands
+```
+
+...in fixtures, assertions, and anything that builds a triple from interpolated values —
+an empty variable is where a blank part comes from.
+
+### What to replace it with
+
+Check the value before writing it. If a field can legitimately be empty, the fact is not
+ready to store: a triple missing one of its three parts is not a partial fact, it is not
+a fact.
+
+The library's `remember()` is unchanged — it does not raise on a blank part, and it does
+not store one either, returning a receipt with `added 0`. That is the same silent no-op,
+and it is left alone deliberately: a caller holding a `WriteReceipt` can read the zero and
+decide, whereas a model reading rendered text cannot tell that zero from any other. The
+guard belongs where the ambiguity is.
+
+---
+
+## Failure messages are flattened and cut
+
+### What changed
+
+Two error paths that used to pass text through whole:
+
+- a tool that raises returns `<name> failed: <ExceptionClass>: <message>`, and the
+  *message* is now flattened to one line and cut at 300 characters;
+- `memvara-mcp login` cuts an upstream error body at 200 characters.
+
+The exception class name is untouched, and so is any message already inside the cap —
+which is nearly all of them. A cut is marked with `…`.
+
+### How the mistake shows up
+
+While debugging. A long exception — a multi-line traceback repr, a driver error quoting a
+whole statement, an HTML error page from a gateway — is no longer complete in a tool
+result or in the login output, and the missing half is the half that used to matter to
+someone reading it. Newlines inside a message become spaces, so a message that was laid
+out to be read no longer is.
+
+Nothing is swallowed: the failure still surfaces, in the same place, with the same class
+name and status code.
+
+### What to grep for
+
+```
+failed: 
+isError
+```
+
+...in anything that parses tool results, and in log-scraping rules that match on error
+text. A rule anchored on a phrase deep inside a long message may stop matching.
+
+### What to replace it with
+
+For the real detail, read the process's own logs or run the failing call from the library,
+where exceptions are untouched — this cap is on what is handed to a *model*, and on what a
+CLI writes to a build log, not on Python's exception itself. A `try`/`except` around a
+library call still sees the whole thing.
+
+---
+
+## Storing non-Latin text now emits a warning
+
+### What changed
+
+A claim whose text embeds to an all-zero vector raises `UnembeddableTextWarning` (once
+per pipeline) and increments `write.embedding_unusable` (per claim, tagged by script).
+With the default `HashingEmbedder` that is any claim containing no `[a-z0-9']`
+characters — Han, Kana, Hangul, Arabic, Hebrew.
+
+Nothing about the write changed. The claim is stored, the vector is stored, and
+retrieval behaves exactly as before. This is a diagnostic for something that was already
+happening silently.
+
+### How the mistake shows up
+
+Only two ways, and both are about warnings rather than about memory:
+
+1. **A test suite or service running under `-W error`** — or
+   `filterwarnings = ["error"]` in `pytest.ini` — turns this into an exception on a write
+   that used to pass. That is the intended signal if you did not know your vectors were
+   empty, and a false alarm if you did.
+2. **Log volume**, if you knowingly store text your embedder cannot read. It is
+   warn-once per pipeline instance, so a process building one `Memvara` sees one line;
+   a server constructing one per request sees one per request.
+
+### What to grep for
+
+```
+UnembeddableTextWarning
+write.embedding_unusable
+```
+
+...after upgrading, in whatever collects your warnings or metrics. If the counter is
+non-zero, that is the share of your store vector search cannot reach.
+
+### What to replace it with
+
+If the warning is telling you something true, install a real embedder:
+
+```bash
+pip install 'memvara[local-embed]'
+```
+
+That produces non-zero vectors for those scripts. Genuine *cross-language* retrieval —
+querying in English for a fact stored in Chinese — needs a multilingual model and is not
+claimed by either option.
+
+If you have accepted the limitation and want the warning gone, it has its own category
+precisely so you can silence it alone:
+
+```python
+warnings.filterwarnings("ignore", category=UnembeddableTextWarning)
+```
+
+The counter keeps counting either way, which is the point of it being separate.
+
+---
+
+## `subject` and `predicate` are now length-bounded on the MCP tools
+
+### What changed
+
+`subject` is capped at 128 characters and `predicate` at 64. Both were previously
+unbounded — a 2,000-character subject was accepted — because the tool validator had no
+`maxLength` support and no schema declared one. Over the limit is now a normal tool error
+naming the limit, the length sent, and where the text should have gone.
+
+`object` is **not** capped. It carries the fact itself, and a long one is a legitimate
+value rather than a misuse.
+
+### How the mistake shows up
+
+A call that used to succeed now returns `isError: true`. In practice this only bites
+something writing a sentence into `subject` or `predicate` — using the slot name as if it
+were the value — which is the shape the cap exists to stop. Real predicates are far
+inside the bound: the longest built-in is 21 characters.
+
+Nothing already stored is affected. The cap is on new arguments, not on existing claims,
+and no read path filters on length.
+
+### What to grep for
+
+```
+memory_remember
+memory_forget
+memory_end
+memory_history
+```
+
+...in anything that builds a `subject` or `predicate` by interpolation rather than from a
+fixed vocabulary. Those are the calls that can exceed a bound without anyone intending it.
+
+### What to replace it with
+
+Put the detail in `object`, which is where a value belongs, and keep the predicate a
+short snake_case relation. If you genuinely need a longer slot name, the library's
+`remember()` is unchanged and applies no cap — this bound is on the MCP surface, where
+the argument is filled in by a model.
+
+---
+
+## `memory_history` rows gained a `true from` field
+
+### What changed
+
+Each row used to read:
+
+```
+1. [id=cl_… recorded 2026-08-21 07:33Z ended 2026-08-21 09:00Z] user lives in Berlin
+```
+
+and now reads:
+
+```
+1. [id=cl_… recorded 2026-08-21 07:33Z true from 2024-01-01 00:00Z ended …] user lives in Berlin
+```
+
+The header changed with it, to name which clock "oldest first" refers to. Row order is
+**unchanged** — still `recorded_at` ascending, which is the declared protocol behaviour
+for every backend.
+
+### How the mistake shows up
+
+Only for something parsing the rendered text. A regex anchored on `recorded <stamp>]`
+— that is, expecting the state word or the closing bracket immediately after the recorded
+instant — no longer matches, because `true from <stamp>` now sits between them. A fixed
+field-count split on the bracketed span comes out two tokens longer.
+
+Nothing about the ordering or the set of rows moved, so a test asserting *which* values
+come back, or in what order, is unaffected.
+
+### What to grep for
+
+```
+memory_history
+recorded 
+```
+
+...in anything that consumes tool output rather than the library.
+
+### What to replace it with
+
+Read the claim rather than the render: `history()` on the library returns `Claim` objects
+with `recorded_at`, `valid_from`, `valid_to` and `invalidated_at` as fields, which is
+where anything programmatic should have been reading them from. The rendered row is for a
+model to read.
+
+If you were reconstructing chronology from row order, that was never reliable and is the
+reason for this change — a backfilled value is listed last while being the earliest. Sort
+on `valid_from` if you want the world's order.
+
+---
+
+## Square brackets in stored text now render as `［` and `］`
+
+### What changed
+
+`Memvara._safe_line` — and so `recall()` and every line the MCP server emits — maps `[`
+and `]` to U+FF3B and U+FF3D anywhere in a claim, not just at the head. A stored value
+containing `[id=cl_… relevance=0.99] …` used to render as something that read like a
+second, higher-scoring result row; the brackets are what made it parse, so the brackets
+are what stopped being passed through. `SECURITY.md` has the reasoning.
+
+Storage is unchanged. `Claim.text` on disk still holds exactly what was written, and
+`search()` and `history()` still return the claim objects verbatim — this is a rendering
+change, and only the rendering methods are affected.
+
+### How the mistake shows up
+
+Anything that parses the *rendered* text rather than the claim objects. A scraper reading
+`recall()` output for `[...]` spans finds none where a note contained brackets; a golden
+file or snapshot test over `recall()` or a `memory_*` tool result goes red on any fixture
+with a bracket in it; a diff of two stores rendered before and after upgrading shows
+changes in rows nobody edited.
+
+An exact-match assertion is where this bites. Substring checks for the claim's words are
+unaffected — the text is all still there, and still in the same order.
+
+### What to grep for
+
+```
+recall(
+_safe_line
+safe_line
+```
+
+...in your own tree, then in whatever consumes their return value. Fixtures are the ones
+worth checking by eye: `grep -l '\[' tests/**/*.txt` over any snapshot of rendered output.
+
+### What to replace it with
+
+If you need the original characters, read the claim rather than the render — `search()`
+and `history()` hand back `Claim` objects whose `.text` is untouched. Rendered output is
+for a model to read, and has never been a parsing target; this change is the reason that
+distinction now matters in practice.
+
+---
+
+## The packaged skill moved, and `init` writes a directory
+
+### What changed
+
+The skill `memvara-mcp init` writes used to live at
+`memvara/skills/claude/SKILL.md` and land as a single file under
+`.claude/skills/memvara/SKILL.md`. It now lives at `memvara/skills/memvara/` —
+`SKILL.md` plus a `references/` directory — and `--agent` chooses where that
+tree is written (`claude`, `cursor`, `grok`). `--skill-only` writes the tree
+and the project note, and leaves `.mcp.json` alone.
+
+### How the mistake shows up
+
+An older `.claude/skills/memvara/SKILL.md` still loads. What it will not have
+is `references/examples.md` or `references/governance.md`, so an agent that
+follows the new body and tries to open those files finds nothing. A script
+that greps the old package path, or that treated `--agent cursor` as a usage
+error, is looking at a layout that is gone.
+
+### What to grep for
+
+```
+memvara/skills/claude
+.claude/skills/memvara/SKILL.md
+memvara-mcp init --agent
+```
+
+### What to replace it with
+
+```
+memvara-mcp init --agent claude --force
+```
+
+`--force` replaces a drifted `SKILL.md` and fills in the missing reference
+files. Without it, `init` keeps a file you edited and only writes the
+references that are absent. `--skill-only` if the client is already connected
+and you do not want a new `.mcp.json`.
+
+Coding agents that can install plugins can skip `init` for the hosted path:
+
+```
+/plugin marketplace add memvara/claude-memvara
+/plugin install memvara
+```
+
+---
+
 ## `memvara-mcp init`'s default output changed, if you installed `memvara[cloud]`
 
 ### What changed
@@ -49,7 +717,7 @@ MEMVARA_MODE=local
 
 `--mode local` (or `MEMVARA_MODE=local` on the server itself) is fully supported
 regardless of which extras are installed and does not require a network call at any
-point. See [README.md § Open core, and exactly where the line is](../README.md#open-core-and-exactly-where-the-line-is)
+point. See [docs/OPEN-CORE.md](OPEN-CORE.md)
 for what the `cloud` extra does and does not add.
 
 ---

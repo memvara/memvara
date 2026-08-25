@@ -123,9 +123,11 @@ def test_a_packed_tarball_contains_exactly_the_files_list():
     tarball = PKG / filename
     try:
         with tarfile.open(tarball) as tf:
-            names = {m.name.removeprefix("package/").removeprefix("package")
+            # Only "package/", and only once: chaining a second `removeprefix("package")`
+            # turns "package/package.json" into ".json", which is what this assertion
+            # reported for six CI jobs while the laptop that wrote it never ran the test.
+            names = {m.name.removeprefix("package/")
                      for m in tf.getmembers() if m.isfile()}
-            names.discard("")
         assert names == TARBALL_FILES
     finally:
         tarball.unlink(missing_ok=True)

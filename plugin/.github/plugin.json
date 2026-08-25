@@ -1,0 +1,14 @@
+{
+  "name": "memvara",
+  "description": "Bitemporal memory for agents: hosted MCP plus the skill that says how to use it.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Memvara",
+    "url": "https://memvara.dev"
+  },
+  "homepage": "https://memvara.dev/docs/agents",
+  "repository": "https://github.com/memvara/memvara",
+  "license": "Apache-2.0",
+  "keywords": ["memory", "mcp", "agents"],
+  "skills": ["./skills/memvara/"]
+}

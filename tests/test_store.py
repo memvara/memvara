@@ -841,6 +841,74 @@ def test_stats_counts_live_and_invalidated_separately(store, emb):
                  "invalidated": 1, "embeddings": 2}
 
 
+def test_connectivity_reports_a_star_as_a_star(store):
+    """Facts extracted from one person's sentences all share a subject, and their objects
+    are leaves. That is what a personal knowledge graph is, and it has no paths in it.
+
+    The number matters because it is the one that decides whether `read_w_graph > 0` can
+    pay for itself, and "is this a graph" cannot: every claim is an edge already.
+    """
+    put(store, predicate="uses", object="pytest")
+    put(store, predicate="lives_in", object="Delhi")
+    assert store.connectivity() == {"live_claims": 2, "joinable_claims": 0}
+
+
+def test_connectivity_counts_a_claim_that_leads_to_another_claim(store):
+    put(store, predicate="uses", object="pytest")
+    put(store, subject="pytest", predicate="configured_in", object="pyproject.toml")
+    # Only the first leads anywhere: `pyproject.toml` is nobody's subject.
+    assert store.connectivity() == {"live_claims": 2, "joinable_claims": 1}
+
+
+def test_connectivity_does_not_walk_through_a_retired_claim(store):
+    """A path through a claim we no longer believe is not a path, which is `adjacent`'s
+    rule and has to be this counter's too, or the rate promises hops the walk refuses.
+    """
+    put(store, predicate="uses", object="pytest")
+    bridge = put(store, subject="pytest", predicate="configured_in",
+                 object="pyproject.toml")
+    assert store.connectivity()["joinable_claims"] == 1
+    store.invalidate(bridge.id, T1, None)
+    assert store.connectivity() == {"live_claims": 1, "joinable_claims": 0}
+
+
+def test_connectivity_ignores_self_loops_and_empty_ends(store):
+    """A retraction stores `''` for the object it retracts. Counting empty ends would
+    join every retraction to every claim about the retracting subject, which is the same
+    giant-hub failure `adjacent` names — and a claim whose object folds onto its own
+    subject leads back to where the walk already stands.
+    """
+    put(store, predicate="knows", object="user")            # self-loop
+    put(store, predicate="retracted", object="")            # empty end
+    assert store.connectivity() == {"live_claims": 2, "joinable_claims": 0}
+
+
+def test_connectivity_does_not_count_a_negation_as_a_link(store):
+    """"Alice does not work at Acme" is adjacency and is not a link — `_edges` drops it,
+    so the counter must too. A rate built from edges the traverser refuses to follow
+    promises hops that will not happen, which is worse than reporting no rate at all.
+    """
+    put(store, predicate="uses", object="pytest", polarity=-1)
+    put(store, subject="pytest", predicate="configured_in", object="pyproject.toml")
+    assert store.connectivity() == {"live_claims": 2, "joinable_claims": 0}
+
+    # And the far end has to be walkable too, not merely present.
+    put(store, predicate="uses", object="tox")
+    put(store, subject="tox", predicate="configured_in", object="tox.ini", polarity=-1)
+    assert store.connectivity()["joinable_claims"] == 0
+
+
+def test_connectivity_is_scoped_to_one_tenant(store):
+    """Two tenants' claims must not join to each other, for `stats()`'s reason: the rate
+    would disclose a neighbour's shape, and it would be wrong about this one's.
+    """
+    put(store, predicate="uses", object="pytest")
+    put(store, subject="pytest", predicate="configured_in", object="pyproject.toml",
+        scope=Scope(tenant="other"))
+    assert store.connectivity("acme") == {"live_claims": 1, "joinable_claims": 0}
+    assert store.connectivity() == {"live_claims": 2, "joinable_claims": 1}
+
+
 def test_live_claims_is_the_liveness_predicate_and_not_the_invalidated_column(store, emb):
     """`live_claims` used to be `invalidated_at IS NULL`, which was the same number only
     while superseding closed both clocks. It closes valid time alone now, so the cheap
@@ -2471,3 +2539,106 @@ def test_the_sqlite_store_still_satisfies_the_runtime_store_protocol(store):
     there."""
     assert isinstance(store, Store)
     assert not hasattr(Store, "_live_clause")
+
+
+# --- ties, and the invariant that two stores holding the same data agree ------
+
+
+def _sardine_store(order):
+    """Eight claims that differ only in subject, so a query on the object ties them all."""
+    from memvara import Memvara, NullLLM
+    from memvara.embed import HashingEmbedder
+
+    mem = Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64), user="u")
+    for i in order:
+        mem.remember(f"Person{i}", "likes", "sardines")
+    return mem
+
+
+def test_bm25_ties_are_broken_on_content_so_ingest_order_cannot_decide_the_page():
+    """`ORDER BY s ASC` with no tiebreak made the answer a property of insertion order.
+
+    BM25 ties are not exotic: eight claims differing only in subject score identically
+    for a query on the object. With nothing after `s`, SQLite returned them in rowid
+    order — and because the `LIMIT` is inside the same statement (design invariant 7),
+    that decided *which rows came back at all*, not merely how they were arranged.
+
+    Two stores holding the same eight facts, filled in opposite orders, returned
+    disjoint top-3s. Every other tie-break in this codebase is keyed on `value_key` for
+    exactly this reason; this one was missed.
+    """
+    ascending = _sardine_store(range(8))
+    descending = _sardine_store(reversed(range(8)))
+    try:
+        def top3(mem):
+            return tuple(mem.store.get_claim(cid).subject for cid, _ in
+                         mem.store.lexical_search("sardines", [mem.default_scope], 3))
+
+        assert top3(ascending) == top3(descending), (
+            "same data, different ingest order, different answer"
+        )
+    finally:
+        ascending.close()
+        descending.close()
+
+
+def test_equidistant_turns_come_back_in_the_same_order_on_every_file():
+    """`episodes_near` broke ties on `id`, and its docstring claimed that was enough.
+
+    An episode id is minted at ingest, not derived from the turn, so `id` is stable
+    within one file and means nothing across two. The docstring said the opposite in as
+    many words, which is the kind of wrong that stops anybody checking.
+    """
+    import datetime as dt
+
+    from memvara import Memvara, NullLLM
+    from memvara.embed import HashingEmbedder
+
+    at = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+
+    def near(order):
+        mem = Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64), user="u")
+        try:
+            for word in order:
+                mem.add(word, role="user", ts=at)       # identical ts => a real tie
+            return tuple(mem.store.get_episode(eid).content for eid, _ in
+                         mem.store.episodes_near(at, [mem.default_scope], 3))
+        finally:
+            mem.close()
+
+    assert near(["alpha", "bravo", "charlie"]) == near(["charlie", "bravo", "alpha"])
+
+
+def test_omittable_names_every_member_a_backend_may_actually_leave_out():
+    """`Store` is `@runtime_checkable`, and `isinstance` on a Protocol is all-or-nothing.
+
+    So it cannot answer "can this store walk a graph" — it asks whether all 44 members
+    are present, and a backend that implements everything a memory needs and skips the
+    six optional ones is `False`. The capability check in this codebase is therefore
+    `getattr` per member, and `OMITTABLE` is the list those call sites are drawn from.
+    Asserted here because it is documentation: nothing at runtime reads it, so nothing
+    else would notice it going stale.
+    """
+    from memvara.store.base import OMITTABLE, Store
+
+    # `vars(Store)`, not `Store.__protocol_attrs__`: that attribute arrived in CPython
+    # 3.12 and this package supports 3.10. The class dict of a Protocol is its declared
+    # members, on every version, and it agrees with `__protocol_attrs__` exactly where
+    # both exist.
+    members = {name for name in vars(Store) if not name.startswith("_")}
+
+    assert set(OMITTABLE) <= members, (
+        "OMITTABLE names something that is not on the protocol at all"
+    )
+    assert "get_claims" in OMITTABLE, (
+        "get_claims was added after the first third-party backends existed and "
+        "tests/test_edges.py pins that those keep working — optional by compatibility "
+        "rather than by design, which is still optional"
+    )
+    # Both shipped stores implement everything, optional members included — which is why
+    # the isinstance trap is invisible in this repository and waiting for the first
+    # third-party backend.
+    from memvara.store import SQLiteStore
+    from memvara.store.remote import RemoteStore
+    for cls in (SQLiteStore, RemoteStore):
+        assert not [m for m in members if not hasattr(cls, m)]

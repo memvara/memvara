@@ -72,7 +72,9 @@ from ..types import (
     Episode,
     MemoryType,
     Scope,
+    as_utc,
     resolved_entity,
+    utcnow,
 )
 from .base import BELIEVED, resolve_states, state_predicate, stored_state_predicate
 
@@ -113,7 +115,22 @@ if TYPE_CHECKING:  # pragma: no cover
 #    the backfill is derivable — and it has to run, because an unfilled key column is
 #    indistinguishable from an entity nothing mentions, which would make a two-hop
 #    question over a store written last year return "not connected" rather than an error.
-SCHEMA_VERSION = 6
+# 7: erasure started actually erasing the text. `DELETE FROM claims_fts` writes a *delete
+#    marker*; the deleted document's terms stay behind as live rows in the `claims_fts_data`
+#    shadow table, where they survive a VACUUM and every subsequent write. So the tokens of
+#    an erased claim remained readable in the file indefinitely, while `erase_claim`
+#    reported success. FTS5's own `secure-delete` option is the fix, it is persistent once
+#    set, and it is not retroactive — hence a one-time `optimize` here to clear what is
+#    already on disk. See `_migrate_to_v7`.
+# 8: erasure became evidenced (`erasures`). One row per `erase_claim`, written *before*
+#    the delete and inside the same transaction, so a delete that happens without a
+#    record of it is not reachable: if the audit write fails, nothing is deleted. The
+#    table holds no text, subject, predicate or object — an audit trail that reconstructs
+#    the erased fact is a copy of it, not an audit trail — so there is nothing to
+#    backfill and nothing an earlier version could have written. The stamp is what tells
+#    the next migration whether the table it sees was built here or invented on the spot
+#    by its own `IF NOT EXISTS`.
+SCHEMA_VERSION = 8
 
 # Kept separate because the v1 -> v2 migration has to recreate this table: SQLite
 # cannot add a column to an existing primary key, and (tenant, name) is now the key.
@@ -134,6 +151,13 @@ CREATE TABLE IF NOT EXISTS predicates (
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
+-- Overwrite the content of a deleted row rather than merely marking its space free.
+-- `erase()` and `purge()` promise the text is gone, and without this it is still sitting
+-- in a free page of the file: readable with `grep`, with no VACUUM needed to expose it
+-- and no VACUUM run anywhere in normal operation. Measured at +6% on a 5,000-claim write
+-- run and +9% on `erase_claim`, which is the right side of that trade for the one
+-- operation in this library whose entire purpose is that the data stops existing.
+PRAGMA secure_delete=ON;
 
 CREATE TABLE IF NOT EXISTS episodes (
     id       TEXT PRIMARY KEY,
@@ -254,6 +278,37 @@ CREATE TABLE IF NOT EXISTS entities (
     aliases   TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (tenant, id)
 );
+
+-- What was erased, when, and by whom it was cited. Written *before* the delete and in
+-- the same transaction, which is the whole of what this table guarantees: a claim cannot
+-- be gone without a row here, because a failed audit write aborts the delete.
+--
+-- **It holds nothing that could reconstruct the fact.** No text, no subject, no
+-- predicate, no object — an audit trail you can read the erased memory out of is a copy
+-- of it wearing a different name, and would make `erase()` a rename rather than a
+-- deletion. What is left is enough to answer "was this erased, when, and how much went
+-- with it": the id, where it lived, the instant, how many source turns it cited, and the
+-- per-table counts the delete reported.
+--
+-- **Ordering and durability, not tamper-evidence.** Nothing here is chained or signed,
+-- so an operator with write access to this file can remove a row. A hash-chained log is
+-- a different feature and is not in this package; see docs/OPEN-CORE.md. What this
+-- defends against is a delete that no record was ever written for, which is the failure
+-- an unaudited `erase()` had.
+CREATE TABLE IF NOT EXISTS erasures (
+    claim_id   TEXT NOT NULL,
+    tenant     TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    erased_at  REAL NOT NULL,
+    sources    INTEGER NOT NULL DEFAULT 0,
+    counts     TEXT NOT NULL DEFAULT '{}',
+    -- Keyed on the pair, not on the claim. An id can be erased, restored from a backup,
+    -- and erased again, and those are two events: keying on `claim_id` alone made the
+    -- second silently overwrite the first, so an append-only trail lost exactly the entry
+    -- somebody would go looking for. `erasure_record` returns the most recent.
+    PRIMARY KEY (claim_id, erased_at)
+);
+CREATE INDEX IF NOT EXISTS erasures_tenant ON erasures(tenant, erased_at);
 
 -- Learned predicate schema. This has to be durable: cardinality is what makes a
 -- contradiction detectable, so a registry that evaporates on restart means a fresh
@@ -582,6 +637,15 @@ def _subject_key_of(meta: str, surface: str) -> str:
 
 def _object_key_of(meta: str, surface: str) -> str:
     return resolved_entity(json.loads(meta), OBJECT_ENTITY, surface)
+
+
+#: `GraphTraverser._edges`' three rules, as SQL, for the one counter that has to agree
+#: with them. A negation is adjacency and not a link; an empty end is what a retraction
+#: stores and not a node; a self-loop leads back to where the walk is standing. Written
+#: once because a join rate that counts edges the traverser refuses to follow promises
+#: hops that will not happen — the same failure as a benchmark scoring its own answer key.
+_WALKABLE = ("{a}.polarity > 0 AND {a}.subject_key != '' AND {a}.object_key != '' "
+             "AND {a}.subject_key != {a}.object_key")
 
 
 def _unit(vec: np.ndarray) -> np.ndarray:
@@ -1093,6 +1157,13 @@ class SQLiteStore:
             # so its `CREATE TABLE IF NOT EXISTS` genuinely was the whole migration.
             self._migrate_to_v5()
             self._migrate_to_v6()
+            self._migrate_to_v7()
+            # No `_migrate_to_v8`: version 8 added a table nothing had ever written to
+            # and that holds no derived data, so its `CREATE TABLE IF NOT EXISTS` above
+            # genuinely is the whole migration — the same shape as version 4. What it
+            # cannot do is invent history: a store upgraded to 7 has an empty `erasures`
+            # table, and an empty one means "nothing has been erased *since this file was
+            # upgraded*", never "nothing has ever been erased here".
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _migrate_to_v2(self) -> None:
@@ -1247,6 +1318,48 @@ class SQLiteStore:
         )
 
     # -- vector index --------------------------------------------------------
+
+    def _migrate_to_v7(self) -> None:
+        """Make the text indexes actually forget what `erase_claim` deleted.
+
+        **The defect this closes.** `DELETE FROM claims_fts WHERE ...` does not remove the
+        document's terms from an FTS5 index. It writes a *delete marker*, and the terms
+        stay behind as live rows in the `claims_fts_data` shadow table — not as residue in
+        a freed page, which a VACUUM would reclaim, but as current content of a current
+        table. So an erased claim's words remained readable in the file indefinitely: they
+        survived a VACUUM, and in a 3,000-claim store they survived 2,600 subsequent
+        writes. `erase_claim` reported success the whole time, and `docs/DEPLOY.md` said
+        the FTS entry was erased "including the FTS entry (which stores the tokens
+        directly)" — which was the sentence a careful operator would have relied on.
+
+        **Two settings, because they cover different halves.** `PRAGMA secure_delete=ON`
+        in `SCHEMA` handles ordinary tables, where the row's bytes sit in a free page until
+        something overwrites them. This handles the text indexes, where the bytes are not
+        free at all.
+
+        FTS5's `secure-delete` is **persistent** — it is stored in the table's own config
+        and survives every reopen — so it is set once, here, rather than on each open,
+        which also keeps a read-only open from needing a write. It is **not retroactive**,
+        which is why the `optimize` below has to run: an existing store already has the
+        markers, and only a merge discards what they cancel.
+
+        Setting it moves the FTS5 file format from version 4 to 5. That is safe for exactly
+        one reason: the option landed in SQLite 3.35, and `_MIN_SQLITE` already refuses to
+        open this store on anything older, so every build that can read the file at all can
+        read the newer format. The two version floors are the same number by coincidence,
+        and this comment exists so that lowering one is understood to break the other.
+
+        Cost, measured on this machine: `optimize` over a 20,000-claim index took 0.01 s,
+        and 0.01 s again over a deliberately fragmented 4,000-claim one — the merge is
+        bounded by segment count rather than by row count, and a store that has been
+        written to normally has few segments. Erasure afterwards costs about 9% more.
+        """
+        for table in ("claims_fts", "episodes_fts"):
+            self._db.execute(
+                f"INSERT INTO {table}({table}, rank) VALUES('secure-delete', 1)")
+            # Clears what the markers already hide. On a fresh file this is a no-op over
+            # an empty index; on an upgraded one it is the whole point of the migration.
+            self._db.execute(f"INSERT INTO {table}({table}) VALUES('optimize')")
 
     def _attach_vectors(self) -> None:
         """Point the index at its backing file. Deliberately reads no vectors.
@@ -2098,42 +2211,162 @@ class SQLiteStore:
 
         Nothing here is undoable and nothing is audited: `history()` will show a gap
         where the claim was, because that is what erasure means.
+
+        **The text is overwritten, not merely unlinked**, and neither half of that is
+        automatic in SQLite. `PRAGMA secure_delete=ON` (see `SCHEMA`) covers the ordinary
+        rows, whose bytes would otherwise sit in a free page; FTS5's `secure-delete` (see
+        `_migrate_to_v7`) covers the text indexes, where a delete writes a marker and
+        keeps the terms as live rows that no `VACUUM` reclaims. Without both, this method
+        returned a count of what it had deleted while the words were still greppable in
+        the file. `tests/test_erasure_residue.py` checks the file rather than the store.
+
+        What *is* recorded is that it happened: one row in `erasures`, written before the
+        delete and in the same transaction, holding no text, subject, predicate or object.
+        See the table's own comment for why it holds none of those, and for what the
+        ordering does and does not guarantee.
         """
         with self._lock:
             row = self._db.execute(
-                "SELECT tenant, sources FROM claims WHERE id=?", (claim_id,)).fetchone()
+                "SELECT tenant, usr, agent, session, sources FROM claims WHERE id=?",
+                (claim_id,)).fetchone()
             if row is None:
                 # Zeroes rather than an absent key, so a caller adding up an erasure
-                # campaign never has to special-case the id that was not there.
+                # campaign never has to special-case the id that was not there. No audit
+                # row either: nothing was erased, and a record saying otherwise would be
+                # the one kind of entry this table must never contain.
                 return {"claims": 0, "episodes": 0, "embeddings": 0, "entities": 0}
             tenant: str = row["tenant"]
             cited = json.loads(row["sources"]) if sources else []
-            # Before the claim row goes, and not as housekeeping afterwards: these rows
-            # are what `_orphan` reads three lines below to decide whether the turns this
-            # claim cited still have a citer. Left behind, the claim being erased votes
-            # to keep its own source turn alive — and `sources=True` quietly stops
-            # erasing anything.
-            self._db.execute("DELETE FROM claim_sources WHERE claim_id=?", (claim_id,))
-            # Nothing to test on the existence flag: the row was there one statement ago,
-            # on this connection, under this lock.
-            _, vectors = self._erase_row("claims", "claims_fts", _CLAIM_VECS, claim_id)
-            # Orphan-checked after the claim is gone, so it cannot count itself a citer.
-            episodes = 0
-            for episode_id in cited:
-                if self._orphan(episode_id):
-                    gone, vecs = self._erase_row(
-                        "episodes", "episodes_fts", _EPISODE_VECS, episode_id)
-                    episodes += gone
-                    vectors += vecs
-            # Same reason as `purge`: the entity row holds the subject's and object's
-            # first-seen spelling verbatim, so leaving it behind erases the claim and
-            # keeps the text. Reference-counted, because one entity is usually shared.
-            entities = self._gc_entities(tenant)
+            # **The audit row and the delete stand or fall together.** Writing the
+            # record first is what makes "gone without a record" unreachable; this
+            # handler is what makes the converse unreachable too. Without it an exception
+            # after the INSERT — a corrupt index, a disk error, a constraint — left the
+            # row pending in the open transaction, and the *next commit from anywhere*
+            # made it durable: a trail asserting an erasure that never happened, about a
+            # claim still readable, with nothing but an empty `counts` to hint at it.
+            #
+            # A compensating DELETE rather than a SAVEPOINT, and that is not a stylistic
+            # choice. `RELEASE` commits the savepoint's work into the enclosing
+            # transaction, so wrapping this in one breaks `batch()`: an erasure inside an
+            # abandoned batch stopped rolling back, and `test_erase_rolls_back_with_its_
+            # batch` caught it. Undoing the single row this method added leaves every
+            # transaction boundary exactly where the caller put it.
+            #
+            # `BaseException` because a KeyboardInterrupt mid-erase must not commit a lie
+            # either.
+            try:
+                # Audit first, delete second, one transaction. The ordering is the guarantee:
+                # if this INSERT raises — disk full, table missing, a constraint — the
+                # exception propagates out of the `with` and `_maybe_commit` is never
+                # reached, so the claim is still there. The other order would let a delete
+                # succeed and its record fail, which is exactly the state that cannot be
+                # detected afterwards. Counts are patched in below, once they are known.
+                stamp = utcnow().timestamp()
+                self._db.execute(
+                    "INSERT OR REPLACE INTO erasures "
+                    "(claim_id, tenant, scope, erased_at, sources, counts) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (claim_id, tenant,
+                     Scope(tenant, row["usr"], row["agent"], row["session"]).key(),
+                     stamp, len(json.loads(row["sources"])), "{}"))
+                # Before the claim row goes, and not as housekeeping afterwards: these rows
+                # are what `_orphan` reads three lines below to decide whether the turns this
+                # claim cited still have a citer. Left behind, the claim being erased votes
+                # to keep its own source turn alive — and `sources=True` quietly stops
+                # erasing anything.
+                self._db.execute("DELETE FROM claim_sources WHERE claim_id=?", (claim_id,))
+                # Nothing to test on the existence flag: the row was there one statement ago,
+                # on this connection, under this lock.
+                _, vectors = self._erase_row("claims", "claims_fts", _CLAIM_VECS, claim_id)
+                # Orphan-checked after the claim is gone, so it cannot count itself a citer.
+                episodes = 0
+                for episode_id in cited:
+                    if self._orphan(episode_id):
+                        gone, vecs = self._erase_row(
+                            "episodes", "episodes_fts", _EPISODE_VECS, episode_id)
+                        episodes += gone
+                        vectors += vecs
+                # Same reason as `purge`: the entity row holds the subject's and object's
+                # first-seen spelling verbatim, so leaving it behind erases the claim and
+                # keeps the text. Reference-counted, because one entity is usually shared.
+                entities = self._gc_entities(tenant)
+                # `embeddings` is the vector total across both tables, as in `purge`: it
+                # counts what was erased, not which table it sat in.
+                counts = {"claims": 1, "episodes": episodes, "embeddings": vectors,
+                          "entities": entities}
+                self._db.execute(
+                    "UPDATE erasures SET counts=? WHERE claim_id=? AND erased_at=?",
+                    (json.dumps(counts, sort_keys=True), claim_id, stamp))
+            except BaseException:
+                try:
+                    self._db.execute(
+                        "DELETE FROM erasures WHERE claim_id=? AND erased_at=?",
+                        (claim_id, stamp))
+                except sqlite3.Error:
+                    # The cleanup failed too, which usually means the same damage that
+                    # broke the delete. Swallowed so the original exception is what the
+                    # caller sees: it names the actual fault, and a secondary error from
+                    # the compensation would bury it.
+                    pass
+                raise
             self._maybe_commit()
-        # `embeddings` is the vector total across both tables, as in `purge`: it counts
-        # what was erased, not which table it sat in.
-        return {"claims": 1, "episodes": episodes, "embeddings": vectors,
-                "entities": entities}
+        return counts
+
+    def residue(self, claim_id: str) -> dict[str, int]:
+        """How many rows mentioning `claim_id` are still on disk, per table.
+
+        A **physical re-query**, and that is the entire point of it. `erase_claim`
+        already returns what it believes it deleted, and a proof built from that number
+        proves only that the code took the branch it thought it took — the same statement
+        the return value already made, restated. This goes back to the file and counts
+        what is there now, so it can disagree with the delete, which is the one thing that
+        makes it evidence.
+
+        Four tables, because those are the four a claim's content can survive in: the row
+        itself, the text index over it, its vector, and its provenance edges. A non-zero
+        anywhere means the erasure did not complete, whatever it reported.
+
+        `erasures` is deliberately not among them. It is the record that the erasure
+        happened and it is *supposed* to survive; counting it would make every proof fail.
+
+        >>> store = SQLiteStore(":memory:")
+        >>> store.residue("nothing-was-ever-stored-here")
+        {'claims': 0, 'claims_fts': 0, 'embeddings': 0, 'claim_sources': 0}
+        >>> store.close()
+        """
+        with self._lock:
+            def count(sql: str) -> int:
+                return int(self._db.execute(sql, (claim_id,)).fetchone()[0])
+            return {
+                "claims": count("SELECT COUNT(*) FROM claims WHERE id=?"),
+                "claims_fts": count(
+                    "SELECT COUNT(*) FROM claims_fts WHERE claim_id=?"),
+                "embeddings": count(
+                    "SELECT COUNT(*) FROM embeddings WHERE claim_id=?"),
+                "claim_sources": count(
+                    "SELECT COUNT(*) FROM claim_sources WHERE claim_id=?"),
+            }
+
+    def erasure_record(self, claim_id: str) -> dict[str, Any] | None:
+        """The `erasures` row for `claim_id`, or `None` if nothing here erased it.
+
+        Read-only, and the only way out of the audit table. `None` is not proof that the
+        claim was never erased — a store upgraded to schema 7 starts with an empty table
+        however much was deleted before — which is why it is a lookup rather than a
+        `bool`.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT claim_id, tenant, scope, erased_at, sources, counts "
+                "FROM erasures WHERE claim_id=? ORDER BY erased_at DESC LIMIT 1",
+                (claim_id,)).fetchone()
+        if row is None:
+            return None
+        return {"claim_id": row["claim_id"], "tenant": row["tenant"],
+                "scope": row["scope"],
+                "erased_at": datetime.fromtimestamp(row["erased_at"], tz=timezone.utc),
+                "sources": int(row["sources"]),
+                "counts": json.loads(row["counts"])}
 
     def purge(self, scope: Scope) -> dict[str, int]:
         """Irreversibly erase everything at `scope` and beneath it.
@@ -2640,6 +2873,47 @@ class SQLiteStore:
             cur.execute(f"SELECT id FROM episodes WHERE {sc} AND {hp}", sp + hpp)
             return [r[0] for r in cur.fetchall()]
 
+    def episodes_near(self, anchor: datetime, scopes: Sequence[Scope], limit: int, *,
+                      valid_at: datetime | None = None,
+                      known_at: datetime | None = None) -> list[tuple[str, float]]:
+        """The `limit` turns closest in time to `anchor`, nearest first, with their `ts`.
+
+        The third episode search, beside lexical and vector, and the only one that ranks
+        on *when* rather than on what was said. It exists because time was a filter and a
+        multiplier here and never a candidate producer: "what was going on around then"
+        is answered by a turn that need share no vocabulary with the question at all, and
+        neither of the other two legs can return one.
+
+        **The ordering and the cap are in the same statement, deliberately** — design
+        invariant 7. A caller that took `scope_episodes(newest_first=True, limit=n)` and
+        dropped the turns after `valid_at` in Python would be filtering a page the store
+        had already truncated, so a time-travel query would come back short by however
+        many recent turns happened to fill the page, with nothing saying it was partial.
+
+        `ABS(ts - anchor)` cannot use `ep_scope`'s trailing `ts` for the ordering, so this
+        sorts what the scope and happened-by clauses matched. That is the same shape
+        `scope_episodes` degrades to for several scopes, and it is bounded by the scope
+        rather than by the tenant.
+
+        Ties break on the content hash and then on `id`, so two turns equidistant from
+        the anchor come back in the same order on every file. It was `id` alone, which is
+        stable within one file and nothing more: an episode id is minted at ingest, so two
+        stores holding the same turns ordered a tie differently — and this docstring said
+        the opposite. `hash` is what `find_episode_by_hash` dedupes on, so identical turns
+        sort identically wherever they were written; `id` stays last to make it total.
+        """
+        sc, sp = self._scope_clause(scopes)
+        hp, hpp = self._happened_clause(valid_at, known_at)
+        at = as_utc(anchor).timestamp()
+        with self._read() as conn:
+            cur = conn.cursor()
+            cur.row_factory = None
+            cur.execute(
+                f"SELECT id, ts FROM episodes WHERE {sc} AND {hp} "
+                "ORDER BY ABS(ts - ?), hash, id LIMIT ?",
+                sp + hpp + [at, limit])
+            return [(row[0], float(row[1])) for row in cur.fetchall()]
+
     def lexical_search(self, query: str, scopes: Sequence[Scope], limit: int, *,
                        valid_at: datetime | None = None,
                        known_at: datetime | None = None,
@@ -2658,7 +2932,15 @@ class SQLiteStore:
             "SELECT f.claim_id AS cid, bm25(claims_fts) AS s "
             "FROM claims_fts f JOIN claims c ON c.id = f.claim_id "
             f"WHERE claims_fts MATCH ? AND {sc} AND {lv} "
-            "ORDER BY s ASC LIMIT ?"
+            # `value_key` before `id`, and neither is decoration: BM25 ties are common —
+            # eight claims differing only in subject score identically for a query on
+            # the object — and with no tiebreak the winners were whatever rowid order
+            # the ingest happened to produce. Two stores holding the *same* data, filled
+            # in opposite orders, returned disjoint top-3s. The cap is inside the
+            # statement, so this decides which rows come back at all, not merely how
+            # they are arranged. `value_key` is derived from content; `id` is a uuid4
+            # and is last, present only to make the order total.
+            "ORDER BY s ASC, c.value_key ASC, c.id ASC LIMIT ?"
         )
         with self._read() as conn:
             rows = conn.execute(sql, [m] + sp + lp + [limit]).fetchall()
@@ -2684,7 +2966,9 @@ class SQLiteStore:
             "SELECT f.episode_id AS eid, bm25(episodes_fts) AS s "
             "FROM episodes_fts f JOIN episodes e ON e.id = f.episode_id "
             f"WHERE episodes_fts MATCH ? AND {sc} AND {hp} "
-            "ORDER BY s ASC LIMIT ?"
+            # Same tie, same fix. A turn has no `value_key`; `hash` is the content hash
+            # `find_episode_by_hash` dedupes on, so it plays the same role.
+            "ORDER BY s ASC, e.hash ASC, e.id ASC LIMIT ?"
         )
         with self._read() as conn:
             rows = conn.execute(sql, [m] + sp + hpp + [limit]).fetchall()
@@ -2823,6 +3107,88 @@ class SQLiteStore:
                         for t in _VEC_TABLES
                     )
                 ),
+            }
+
+    def connectivity(self, tenant: str | None = None) -> dict[str, int]:
+        """`live_claims` and `joinable_claims` for one tenant, from one snapshot.
+
+        See `base.Store.connectivity` for what the ratio means and why it is not in
+        `stats()`. Two things about this implementation are load-bearing.
+
+        **The join counts walkable edges on both sides, not live claims.** `_WALKABLE`
+        is `GraphTraverser._edges`' three rules written as SQL — a negation is adjacency
+        and not a link, an empty end is a stored value rather than a node, and a
+        self-loop leads back to where the walk stands. Counting a claim the traverser
+        would refuse to follow makes the rate promise hops that will not happen, which is
+        worse than not reporting one. The denominator stays `live_claims`, because the
+        question is what share of this memory leads to more of it, and a leaf is a
+        legitimate answer to that rather than an excluded row.
+
+        **`IN (SELECT ...)` and not `EXISTS (SELECT ...)`, because this method has two
+        callers and only `IN` is fast for both.** On 26,403 claims, median:
+
+        =========================  ================  ==================
+        form                       `tenant='2wiki'`  `tenant=None`
+        =========================  ================  ==================
+        `IN`, uncorrelated               39 ms             34 ms
+        `EXISTS`, correlated             27 ms         **42,302 ms**
+        =========================  ================  ==================
+
+        `EXISTS` is the *faster* form when it has an index, and it is unusable when it
+        does not. The subquery correlates on `c.object_key`, so it runs once per outer
+        row; whether that is cheap depends entirely on whether `cl_subj` applies, and
+        `cl_subj` is `(tenant, subject_key, invalidated_at)`. A composite index is only
+        usable from its leading column, so the subquery reaches it only when `tenant` is
+        bound. `EXPLAIN QUERY PLAN` says so in one line each — `SEARCH d USING INDEX
+        cl_subj (tenant=? AND subject_key=?)` against a bare `SCAN d`, which is 26,401
+        rows visited 26,401 times.
+
+        `IN` cannot fall into that hole, because it does not correlate: SQLite evaluates
+        the subquery **once** into a transient list with a bloom filter in front of it,
+        index or no index. It gives up 12 ms on the tenant-filtered path to be immune on
+        the unfiltered one.
+
+        So the rule is not "correlated subqueries are slow" — that was this docstring's
+        first answer and it is wrong. It is that a correlated subquery inherits its
+        index's leading column as a *requirement*, and `tenant: str | None` means this
+        one cannot always supply it.
+
+        **Why not index `subject_key` on its own and keep `EXISTS`?** Because it was
+        already fixed for nothing. `CREATE INDEX ON claims(subject_key)` does work — it
+        takes the unfiltered `EXISTS` from 52 s to 22 ms, costs 2% of the file and 1.3%
+        of write throughput, which is cheaper than this comment's author guessed — but
+        the rewrite above reaches 34 ms on the same call at no cost at all, so the index
+        buys 12 ms on a path no shipped caller takes. `Memvara.connectivity()` fills in
+        its own tenant and `memory_stats` goes through it; `tenant=None` is reachable
+        only by calling this store directly.
+
+        It would also be the first index on `claims` or `episodes` not led by `tenant`.
+        The other eight are, and that is what makes every scoped read an index range over
+        contiguous rows. An index that deliberately ignores the tenant exists to serve a
+        query crossing tenants, which is the shape this store restricts rather than
+        optimises. If a cross-tenant hot path ever appears, the index is twelve
+        milliseconds of build time away; until then it is weight carried for no reader.
+        """
+        live, lp = self._state_clause(None, None, ("live",))
+        inner, ip = self._state_clause(None, None, ("live",), alias="d")
+        tid = " tenant = ? AND" if tenant is not None else ""
+        ctid = " c.tenant = ? AND" if tenant is not None else ""
+        dtid = " d.tenant = ? AND" if tenant is not None else ""
+        params: tuple = (tenant,) if tenant is not None else ()
+
+        with self._read() as conn:
+            def q(sql: str, binds: Sequence[Any]) -> int:
+                return int(conn.execute(sql, binds).fetchone()[0])
+
+            return {
+                "live_claims": q(
+                    f"SELECT COUNT(*) FROM claims WHERE{tid} {live}", (*params, *lp)),
+                "joinable_claims": q(
+                    f"SELECT COUNT(*) FROM claims c WHERE{ctid} {live}"
+                    f" AND {_WALKABLE.format(a='c')}"
+                    f" AND c.object_key IN (SELECT d.subject_key FROM claims d"
+                    f" WHERE{dtid} {inner} AND {_WALKABLE.format(a='d')})",
+                    (*params, *lp, *params, *ip)),
             }
 
     def close(self) -> None:

@@ -139,6 +139,36 @@ def resolve_prompt(surface: str, offered: Sequence[str]) -> str:
     )
 
 
+def compose_prompt(predicates: Sequence[str]) -> str:
+    return f"predicates:\n{', '.join(predicates) or '(none)'}"
+
+
+def shape_composition(parsed: dict[str, Any]) -> dict[str, int]:
+    """The `derived` map, with anything that is not a term-and-arity dropped.
+
+    Shaped here rather than trusted, like every other model answer in this package. The
+    caller filters again — `retrieve/compose.acquire` drops terms that collide with a real
+    predicate or run to a whole phrase — because this function knows the response's shape
+    and that one knows the store's vocabulary, and neither can do the other's job.
+    """
+    # Both shapes, because a model that is not being held to the schema returns the bare
+    # map. Measured: `nvidia/nemotron-3-ultra` answered with 21 correct kinship terms and
+    # no `derived` wrapper, and this function dropped every one of them and returned
+    # nothing — the acquisition looked like a model with no opinion rather than a parser
+    # reading the wrong shape. Anthropic's structured output does enforce the wrapper, so
+    # the unit test could not have caught it: the fake client returned the shape this
+    # code was written to expect.
+    # No guard on `derived` being a dict: `parse_json_object` returns one or `{}`, so
+    # both branches above already are.
+    inner = parsed.get("derived")
+    derived = inner if isinstance(inner, dict) else parsed
+    out: dict[str, int] = {}
+    for term, arity in derived.items():
+        if isinstance(term, str) and isinstance(arity, int) and not isinstance(arity, bool):
+            out[term] = arity
+    return out
+
+
 def shape_claims(parsed: dict[str, Any], n_episodes: int) -> list[dict[str, Any]]:
     """Validated claim dicts from a parsed model response. Anything doubtful is dropped."""
     raw = parsed.get("claims")

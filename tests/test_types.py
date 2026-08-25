@@ -471,6 +471,18 @@ def test_explanation_repr_is_its_summary():
 def test_explanation_summary_shows_the_raw_score_once_a_retriever_sets_one():
     """`raw_score` is the pre-normalization value. It is only meaningful next to the
     normalized one, and only present once something computes it."""
+    assert "graph#2(0.750)" in Explanation(graph_rank=2, graph_score=0.75,
+                                           final_score=0.5).summary()
+    assert "graph#" not in Explanation(final_score=0.5).summary(), (
+        "an absent graph leg is a finding — it says the walk did not reach this claim "
+        "— and rendering it as graph#None would read as though it had"
+    )
+    assert "time#1(0.500)" in Explanation(temporal_rank=1, temporal_score=0.5,
+                                          final_score=0.5).summary()
+    assert "time#" not in Explanation(final_score=0.5).summary()
+    assert "intent=relational" in Explanation(intent="relational",
+                                              final_score=0.5).summary()
+    assert "intent=" not in Explanation(final_score=0.5).summary()
     assert "raw=" not in Explanation(final_score=0.5).summary()
     assert "raw=0.0310" in Explanation(raw_score=0.031, final_score=0.5).summary()
 
@@ -487,3 +499,32 @@ def test_provenance_repr_summarises_the_trail_without_dumping_it():
 def test_provenance_repr_survives_an_unattributed_claim():
     p = Provenance(claim=mk(), episodes=[], derivation=Derivation.USER, extractor="")
     assert "via ? (user)" in repr(p)
+
+
+def test_explanation_fields_added_after_020_are_appended_not_slotted_in() -> None:
+    """A dataclass's field order is an API, and this one broke it silently.
+
+    `graph_*` and `temporal_*` read best beside `vector_*` and `lexical_*`, and putting
+    them there shifted `fusion_score` and everything after it four positions right. A
+    call written against 0.2.x — `Explanation(0, 0.9, 1, 0.8, 0.5)` — then put the fusion
+    score into `graph_rank` and left `fusion_score` at its default. No exception: an
+    `int | None` field holding 0.5, and a ranking explanation quietly reporting the wrong
+    number about itself.
+
+    Asserted as a prefix rather than as the whole list, so appending a tenth field later
+    is allowed and inserting one is not.
+    """
+    from dataclasses import fields
+
+    from memvara.types import Explanation
+
+    order = [f.name for f in fields(Explanation)]
+    assert order[:11] == ["vector_rank", "vector_score", "lexical_rank", "lexical_score",
+                          "fusion_score", "recency", "confidence", "salience",
+                          "rerank_score", "raw_score", "final_score"], (
+        "a field was inserted into the 0.2.0 prefix; append it instead"
+    )
+
+    old_call = Explanation(0, 0.9, 1, 0.8, 0.5)
+    assert old_call.fusion_score == 0.5
+    assert old_call.graph_rank is None

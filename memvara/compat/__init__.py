@@ -28,6 +28,8 @@ What differs, in the order it will bite:
 """
 
 from .mem0 import ENTITY_FILTERS, Mem0CompatError, Mem0DeletionWarning, Memory
+from .supermemory_import import (SupermemoryError, SupermemoryReceipt,
+                                 import_supermemory, read_supermemory_key)
 from .mem0_import import (
     ContestedSlot,
     HistoryRow,
@@ -47,6 +49,9 @@ __all__ = [
     "Memory", "Mem0CompatError", "Mem0DeletionWarning", "ENTITY_FILTERS",
     # the importer
     "import_mem0", "ImportReceipt", "ContestedSlot", "HistoryRow", "read_history_db",
+    # moving off supermemory
+    "import_supermemory", "SupermemoryReceipt", "SupermemoryError",
+    "read_supermemory_key",
     # how an opaque memory string is stored
     # `ensure_note_predicate` is public because it has three consumers now — the
     # shim, the importer, and the CrewAI adapter, which stores opaque sentences for

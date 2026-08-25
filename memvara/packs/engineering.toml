@@ -1,0 +1,82 @@
+# Engineering and operations vocabulary.
+#
+# The 23 builtins are a personal-assistant vocabulary — where someone lives, where they
+# work, what they are doing today. A store used for infrastructure facts never matches one
+# of them, so every predicate it writes falls to the unregistered default: multi-valued, so
+# nothing supersedes, and SLOW, so a fact about a deploy that changed this morning still
+# ranks as fresh in two years.
+#
+# Load with MEMVARA_PREDICATES=engineering.
+#
+# Cardinality is the question "can this hold several values at once for one subject?".
+# Volatility is "how fast does it go stale?" — static (never), slow (years), fast (a week).
+
+[[predicate]]
+name = "deploys_to"
+cardinality = "one"
+volatility = "slow"
+aliases = ["deployed_to", "deployment_target"]
+
+[[predicate]]
+name = "current_host"
+cardinality = "one"
+volatility = "slow"
+aliases = ["hosted_on", "runs_on"]
+
+[[predicate]]
+name = "git_state"
+cardinality = "one"
+volatility = "fast"
+aliases = ["git_status", "branch_state"]
+
+[[predicate]]
+name = "build_status"
+cardinality = "one"
+volatility = "fast"
+aliases = ["ci_status"]
+
+[[predicate]]
+name = "version"
+cardinality = "one"
+volatility = "fast"
+aliases = ["current_version", "released_version"]
+
+[[predicate]]
+name = "endpoint"
+cardinality = "one"
+volatility = "slow"
+aliases = ["base_url", "service_url"]
+
+[[predicate]]
+name = "owner"
+cardinality = "one"
+volatility = "slow"
+aliases = ["owned_by", "maintainer"]
+
+# Multi-valued on purpose. A project rejects many things and depends on many things, and
+# declaring these is not a formality: it is what stops the accumulation note firing on
+# writes that are completely correct.
+
+[[predicate]]
+name = "depends_on"
+cardinality = "many"
+volatility = "slow"
+aliases = ["requires"]
+
+[[predicate]]
+name = "rejected"
+cardinality = "many"
+volatility = "static"
+aliases = ["declined"]
+
+[[predicate]]
+name = "known_defect"
+cardinality = "many"
+volatility = "slow"
+aliases = ["known_issue", "known_bug"]
+
+[[predicate]]
+name = "blocked_by"
+cardinality = "many"
+volatility = "fast"
+aliases = ["blocker"]

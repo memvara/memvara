@@ -52,7 +52,8 @@ from memvara.server.init import (
 from memvara.server.tools import BY_NAME, TOOLS
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-SKILL_SOURCE = REPO / "memvara" / "skills" / "claude" / "SKILL.md"
+SKILL_SOURCE = REPO / "memvara" / "skills" / "memvara" / "SKILL.md"
+SKILL_PACKAGE = REPO / "memvara" / "skills" / "memvara"
 
 
 def _run(root: pathlib.Path, *extra: str,
@@ -94,6 +95,10 @@ def test_one_run_writes_the_three_files_a_client_looks_for(tmp_path) -> None:
 
     assert status == 0 and err == ""
     assert _skill_path(tmp_path).read_text(encoding="utf-8") == skill_text()
+    refs = tmp_path / ".claude" / "skills" / "memvara" / "references"
+    assert (refs / "examples.md").is_file()
+    assert (refs / "governance.md").is_file()
+    assert (refs / "project-instructions.md").is_file()
     assert MARKER in (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
     entry = _entry(tmp_path)
     assert entry["args"] == ["-m", "memvara.server"]
@@ -312,7 +317,7 @@ def test_with_nothing_injected_it_uses_the_process_streams(capsys) -> None:
 
 @pytest.mark.parametrize("argv, expected", [
     ([], "needs --agent"),
-    (["--agent", "cursor"], "not a client init can write files for"),
+    (["--agent", "windsurf"], "not a client init can write files for"),
     (["--agent"], "--agent needs a value"),
     (["--agent="], "--agent needs a value"),
     (["--agent", "claude", "--user", "   "], "--user needs a value"),
@@ -475,10 +480,10 @@ def test_the_skill_is_read_out_of_the_installed_package(tmp_path) -> None:
     assert skill_text().startswith("---\n"), "front matter is what makes it a skill"
 
 
-def test_the_only_agent_offered_is_the_only_one_with_a_skill_to_write() -> None:
-    """`--agent` is an inventory of file layouts, and each needs its own packaged prose."""
+def test_every_agent_init_knows_gets_the_same_packaged_skill() -> None:
+    """`--agent` is an inventory of file layouts, not of different prose."""
     for agent in AGENTS:
-        assert skill_text(agent).strip(), f"--agent {agent} has no skill behind it"
+        assert skill_text(agent) == skill_text(), f"--agent {agent} drifted from the package"
 
 
 def test_the_skill_is_not_hidden_from_the_build_by_an_ignore_rule() -> None:
@@ -518,7 +523,10 @@ def test_the_skill_reaches_the_wheel() -> None:
     for wheel in (REPO / "dist").glob(f"memvara-{memvara.__version__}-*.whl"):
         with zipfile.ZipFile(wheel) as archive:
             names |= set(archive.namelist())
-    assert "memvara/skills/claude/SKILL.md" in names
+    assert "memvara/skills/memvara/SKILL.md" in names
+    assert "memvara/skills/memvara/references/examples.md" in names
+    assert "memvara/skills/memvara/references/governance.md" in names
+    assert "memvara/skills/memvara/references/project-instructions.md" in names
 
 
 # -- the skill as prose ------------------------------------------------------------------
@@ -554,7 +562,10 @@ def test_the_skill_does_not_restate_a_tool_description() -> None:
     skill's job is to say that the *source turn* decides which one applies, which is a
     fact about the sequence and nothing a parameter description could carry.
     """
-    skill = _ngrams(skill_text())
+    packaged = skill_text()
+    for extra in sorted((SKILL_PACKAGE / "references").glob("*.md")):
+        packaged += "\n" + extra.read_text(encoding="utf-8")
+    skill = _ngrams(packaged)
     offenders = {source: sorted(" ".join(g) for g in skill & _ngrams(prose))
                  for source, prose in _tool_prose() if skill & _ngrams(prose)}
     assert not offenders, (
@@ -638,6 +649,58 @@ def test_the_skill_directory_is_the_name_the_front_matter_declares() -> None:
     assert declared.group(1) == _skill_path(pathlib.Path("/anywhere")).parent.name
 
 
+def test_cursor_and_grok_write_their_own_skill_directory(tmp_path) -> None:
+    """Same skill, different folder. The Claude path is not implied."""
+    layouts = (
+        ("cursor", pathlib.Path(".cursor") / "skills" / "memvara"),
+        ("grok", pathlib.Path(".grok") / "skills" / "memvara"),
+    )
+    for agent, rel in layouts:
+        dest = tmp_path / agent
+        dest.mkdir()
+        status, _, err = _run(dest, "--agent", agent, env={"USER": "alice"})
+        assert status == 0 and err == ""
+        assert (dest / rel / "SKILL.md").read_text(encoding="utf-8") == skill_text()
+        assert (dest / rel / "references" / "examples.md").is_file()
+        assert MARKER in (dest / "AGENTS.md").read_text(encoding="utf-8")
+        assert not (dest / "CLAUDE.md").exists()
+        assert not (dest / ".claude").exists()
+
+
+def test_skill_only_writes_the_tree_and_leaves_mcp_json_alone(tmp_path) -> None:
+    """Hosted-first users already have a URL in the client; they must not get a
+    local stdio block they did not ask for."""
+    status, out, err = _run(tmp_path, "--skill-only")
+    assert status == 0 and err == ""
+    assert _skill_path(tmp_path).is_file()
+    assert (tmp_path / ".claude" / "skills" / "memvara" / "references"
+            / "governance.md").is_file()
+    assert not (tmp_path / ".mcp.json").exists()
+    assert not (tmp_path / "store").exists()
+    assert "skill only" in out
+    assert "No .mcp.json" in out
+
+
+def test_skill_only_does_not_touch_an_existing_mcp_json(tmp_path) -> None:
+    original = '{ "mcpServers": { "other": { "command": "elsewhere" } } }\n'
+    (tmp_path / ".mcp.json").write_text(original, encoding="utf-8")
+
+    assert _run(tmp_path, "--skill-only")[0] == 0
+
+    assert (tmp_path / ".mcp.json").read_text(encoding="utf-8") == original
+
+
+def test_a_second_note_file_that_already_exists_is_updated_too(tmp_path) -> None:
+    """A repo that already has AGENTS.md should get the pointer there as well."""
+    (tmp_path / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
+
+    _run(tmp_path)
+
+    assert MARKER in (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    assert MARKER in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert (tmp_path / "AGENTS.md").read_text(encoding="utf-8").startswith("# Agents\n")
+
+
 # -- cloud mode --------------------------------------------------------------------------
 
 
@@ -654,7 +717,24 @@ def test_explicit_local_mode_matches_todays_behaviour_byte_for_byte(tmp_path) ->
     assert "(cloud)" not in out
 
 
-def test_cloud_mode_writes_mode_and_server_url_instead_of_db(tmp_path) -> None:
+@pytest.fixture()
+def cloud_wired(monkeypatch):
+    """A world where the REST facade has grown the endpoints the engine needs.
+
+    Everything `init` writes *for* cloud mode is unreachable while `config.cloud_gap()`
+    is non-empty, because the command now refuses before it writes — the server it would
+    configure cannot start, and exiting 0 with "restart your client" is how that used to
+    reach the user.
+
+    The cloud-writing code is not wrong, it is early, so these tests keep covering it
+    with the gap patched shut. Which is also what keeps them honest about what they are:
+    assertions about the *shape* of a cloud entry, not evidence that a cloud server runs.
+    The refusal itself is asserted below, without this fixture.
+    """
+    monkeypatch.setattr("memvara.server.init.cloud_gap", lambda: [])
+
+
+def test_cloud_mode_writes_mode_and_server_url_instead_of_db(cloud_wired, tmp_path) -> None:
     """Cloud mode has no local store, so the entry it writes has no MEMVARA_DB at all."""
     out = io.StringIO()
     status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "cloud"],
@@ -666,7 +746,7 @@ def test_cloud_mode_writes_mode_and_server_url_instead_of_db(tmp_path) -> None:
     assert "(cloud)" in out.getvalue()
 
 
-def test_cloud_mode_writes_the_server_url_only_when_not_the_default(tmp_path) -> None:
+def test_cloud_mode_writes_the_server_url_only_when_not_the_default(cloud_wired, tmp_path) -> None:
     out = io.StringIO()
     status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "cloud"],
                  env={"MEMVARA_SERVER_URL": "https://staging.memvara.dev"},
@@ -679,7 +759,7 @@ def test_cloud_mode_writes_the_server_url_only_when_not_the_default(tmp_path) ->
     }
 
 
-def test_cloud_mode_with_no_credentials_points_at_login(tmp_path, monkeypatch) -> None:
+def test_cloud_mode_with_no_credentials_points_at_login(cloud_wired, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("memvara.server.init._credentials_path",
                         lambda: tmp_path / "nonexistent" / "credentials.json")
     out = io.StringIO()
@@ -690,7 +770,7 @@ def test_cloud_mode_with_no_credentials_points_at_login(tmp_path, monkeypatch) -
     assert "memvara-mcp login" in out.getvalue()
 
 
-def test_cloud_mode_with_an_api_key_already_set_skips_the_login_reminder(tmp_path) -> None:
+def test_cloud_mode_with_an_api_key_already_set_skips_the_login_reminder(cloud_wired, tmp_path) -> None:
     out = io.StringIO()
     status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "cloud"],
                  env={"MEMVARA_API_KEY": "mv_something"}, stdout=out, stderr=io.StringIO())
@@ -699,7 +779,7 @@ def test_cloud_mode_with_an_api_key_already_set_skips_the_login_reminder(tmp_pat
     assert "memvara-mcp login" not in out.getvalue()
 
 
-def test_cloud_mode_with_an_existing_mcp_json_prints_the_block_to_paste(tmp_path) -> None:
+def test_cloud_mode_with_an_existing_mcp_json_prints_the_block_to_paste(cloud_wired, tmp_path) -> None:
     """The cloud-mode mirror of `test_an_existing_mcp_json_is_never_rewritten`: an
     `.mcp.json` already present means `_mcp_json` returns `paste=True`, and cloud mode's
     own branch has to print the entry the same way local mode's does."""
@@ -760,7 +840,7 @@ def test_no_mode_and_no_httpx_defaults_to_local(tmp_path, monkeypatch) -> None:
     assert "MEMVARA_DB" in _entry(tmp_path)["env"]
 
 
-def test_the_mode_environment_variable_is_honoured_without_the_flag(tmp_path) -> None:
+def test_the_mode_environment_variable_is_honoured_without_the_flag(cloud_wired, tmp_path) -> None:
     """MEMVARA_MODE in the shell picks the mode when --mode is not given, the same
     precedence the flag/environment pairs elsewhere in this command already use."""
     out = io.StringIO()
@@ -774,3 +854,87 @@ def test_the_mode_environment_variable_is_honoured_without_the_flag(tmp_path) ->
 def test_cloud_client_entry_omits_server_url_at_the_default() -> None:
     entry = cloud_client_entry(server_url="https://app.memvara.dev", command="p")
     assert entry["env"] == {"MEMVARA_MODE": "cloud"}
+
+
+# --- the config that could not start the server it configured -----------------
+
+
+def test_asking_for_cloud_is_refused_with_the_reason_the_server_would_have_given(
+        tmp_path) -> None:
+    """`init` wrote `MEMVARA_MODE: cloud`, said "restart your client", and exited 0.
+
+    The server then refused to start, because the REST facade has no endpoint for the
+    surface the engine calls on every turn. Two commands answering the same question
+    differently, and the gap between them was silent by construction: the one that writes
+    the config never starts the thing it configured, so nothing in the successful run
+    could notice. What reached the user was a client with no memvara tools in it and no
+    line of output anywhere connecting that to anything they had done.
+
+    The text is the server's own, so the reason arrives while there is still something to
+    be done about it.
+    """
+    out, err = io.StringIO(), io.StringIO()
+    status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "cloud"],
+                  env={"MEMVARA_API_KEY": "mv_live_x"}, stdout=out, stderr=err)
+
+    assert status != 0
+    assert "cannot start a server yet" in err.getvalue()
+    assert not (tmp_path / ".mcp.json").exists(), "refused, and still wrote the file"
+
+
+def test_the_environment_asking_for_cloud_is_refused_the_same_way(tmp_path) -> None:
+    """`MEMVARA_MODE=cloud` exported months ago is the same broken config arriving by a
+    quieter route, so it gets the same answer rather than a silent downgrade to local."""
+    err = io.StringIO()
+    status = init(["--agent", "claude", "--dir", str(tmp_path)],
+                  env={"MEMVARA_MODE": "cloud"}, stdout=io.StringIO(), stderr=err)
+
+    assert status != 0
+    assert "cannot start a server yet" in err.getvalue()
+
+
+def test_an_importable_httpx_no_longer_defaults_a_working_install_to_a_broken_one(
+        tmp_path) -> None:
+    """The default was `cloud` whenever `httpx` imported, which is a great many
+    environments that never installed the cloud extra — and every one of them got a
+    client that could not start. The heuristic now asks whether cloud works before
+    preferring it, so the fallback is the mode that does.
+    """
+    status = init(["--agent", "claude", "--dir", str(tmp_path)],
+                  env={}, stdout=io.StringIO(), stderr=io.StringIO())
+    assert status == 0
+    entry_env = _entry(tmp_path)["env"]
+    assert "MEMVARA_DB" in entry_env, entry_env
+    assert entry_env.get("MEMVARA_MODE") != "cloud"
+
+
+def test_the_refusal_lifts_itself_when_the_facade_grows_the_endpoints(
+        cloud_wired, tmp_path) -> None:
+    """Nothing has to remember to flip a flag.
+
+    Both `init` and `build_memvara` derive the answer from `RemoteStore.WIRED`, so the
+    day the endpoints exist this command starts writing cloud configs again — which is
+    the only version of this guard that does not become a second thing to maintain.
+    """
+    status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "cloud"],
+                  env={"MEMVARA_API_KEY": "mv_live_x"},
+                  stdout=io.StringIO(), stderr=io.StringIO())
+    assert status == 0
+    assert _entry(tmp_path)["env"]["MEMVARA_MODE"] == "cloud"
+
+
+def test_the_gap_is_derived_from_the_store_rather_than_hardcoded() -> None:
+    """`cloud_gap()` names the calls the engine makes that `RemoteStore` cannot serve.
+
+    Asserted as a set relationship rather than a literal list, so adding an endpoint
+    shortens it without editing a test, and adding an engine call that the facade does
+    not serve lengthens it without anyone having to notice.
+    """
+    from memvara.server.config import _ENGINE_NEEDS, cloud_gap
+    from memvara.store.remote import RemoteStore
+
+    assert set(cloud_gap()) == _ENGINE_NEEDS - RemoteStore.WIRED
+    assert cloud_gap(), (
+        "the facade has grown the low-level endpoints — that is good news, and it means "
+        "the refusal above is now dead code that should be removed rather than tested"
+    )

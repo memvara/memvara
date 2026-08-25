@@ -15,11 +15,13 @@ files in three different ways because the three files it touches are owned diffe
   `json.dumps` — losing whatever formatting or comments they had — and a bad merge shows
   up as a client that will not start, with nothing on screen saying why. Printing the
   entry to paste costs one paste and cannot destroy anything.
-* **`CLAUDE.md`** is append-shaped by nature, so it is appended to, behind a marker
-  comment that keeps a second run from adding the section twice.
-* **`SKILL.md`** is ours: generated data that ships in the wheel and therefore versions
-  with the tools it describes. It is the only file `--force` will replace, because it is
-  the only one whose current contents this program is entitled to have an opinion about.
+* **`CLAUDE.md` / `AGENTS.md`** are append-shaped, so they are appended to, behind a
+  marker comment that keeps a second run from adding the section twice. Which file is
+  primary depends on `--agent`; the other is updated too if it already exists.
+* **The skill tree** is ours: generated data that ships in the wheel and therefore
+  versions with the tools it describes. It is the only thing `--force` will replace,
+  because it is the only one whose current contents this program is entitled to have
+  an opinion about.
 
 Nothing is overwritten silently, every path touched is printed with the verb applied to
 it, and a rerun is meant to be boring: exit 0 with a column of `kept`. Exit 2 is reserved
@@ -39,20 +41,39 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Sequence, TextIO
 
+from .config import _CLOUD_NOT_WIRED, cloud_gap
+
 __all__ = ["AGENTS", "INIT_USAGE", "MARKER", "client_entry", "cloud_client_entry", "init",
            "skill_text"]
 
-#: Clients `init` knows the file layout of. Each name is also a directory of packaged
-#: skill data, so adding one is two edits rather than one, which is deliberate: a client
-#: this command claims to configure and has no skill for would be worse than an error.
-AGENTS = ("claude",)
+#: Clients `init` knows the file layout of. The packaged skill is one tree
+#: (`memvara/skills/memvara/`); these names only decide where that tree is written.
+AGENTS = ("claude", "cursor", "grok")
+
+#: Relative destination of the skill tree, per client. Cursor and Grok also read
+#: `.claude/skills/`, so the Claude path is enough for a mixed team; the other
+#: two exist for a project that will not have a `.claude/` directory.
+_SKILL_DEST = {
+    "claude": Path(".claude") / "skills" / "memvara",
+    "cursor": Path(".cursor") / "skills" / "memvara",
+    "grok": Path(".grok") / "skills" / "memvara",
+}
+
+_NOTE_FILE = {
+    "claude": "CLAUDE.md",
+    "cursor": "AGENTS.md",
+    "grok": "AGENTS.md",
+}
 
 #: What makes the CLAUDE.md section recognisable on a second run. A marker rather than a
 #: search for the word "memvara", because a project *about* memvara mentions it on every
 #: other line and would never get its snippet.
 MARKER = "<!-- memvara -->"
 
-_SNIPPET = f"""\
+
+def _note_text(skill_rel: Path) -> str:
+    """The CLAUDE.md / AGENTS.md section. `skill_rel` is the path this run writes."""
+    return f"""\
 {MARKER}
 ## Memory
 
@@ -61,19 +82,20 @@ thing that persists between sessions. Read memory before answering anything that
 depend on what this user told you earlier, and store what would be embarrassing to have
 forgotten next week.
 
-The `memvara` skill in `.claude/skills/memvara/` carries the rules that span tools — the
+The `memvara` skill in `{skill_rel.as_posix()}/` carries the rules that span tools — the
 sequence to follow when a stored fact is disputed, which scope your writes land in, and
 what changes on a server with no extraction model. Each tool's own description carries the
 rest.
 <!-- /memvara -->
 """
 
-INIT_USAGE = f"""\
-memvara-mcp init — write the MCP server block, the agent skill and a CLAUDE.md snippet.
 
-  --agent NAME  which client to configure. {AGENTS[0]!r} (Claude Code) is the only one
-                today, and naming it is required rather than defaulted: a second client
-                writes different files, and a default would silently pick one.
+INIT_USAGE = f"""\
+memvara-mcp init — write the MCP server block, the agent skill and a project note.
+
+  --agent NAME  which client to configure. {', '.join(repr(a) for a in AGENTS)}.
+                Naming it is required rather than defaulted: each one writes a
+                different directory, and a default would silently pick one.
   --dir PATH    project directory to write into. Default: the current directory.
   --mode NAME   'local' or 'cloud'. Default: MEMVARA_MODE if this shell has one,
                 otherwise 'cloud' when httpx is importable (a "pip install
@@ -82,6 +104,13 @@ memvara-mcp init — write the MCP server block, the agent skill and a CLAUDE.md
                 --mode existed. Cloud writes MEMVARA_MODE and, only when it is not the
                 default, MEMVARA_SERVER_URL — and if this machine has no credentials
                 yet, prints a reminder to run `memvara-mcp login` rather than running it.
+
+                Cloud is refused, by flag or by MEMVARA_MODE, for as long as the REST
+                facade has no endpoint for the surface the engine calls on every turn:
+                the server would not start, and writing the config anyway hands you a
+                broken client and a success message. The default never picks it while
+                that is true, whatever httpx says. This lifts itself when the endpoints
+                land — both this command and the server ask `config.cloud_gap()`.
   --db PATH     where the store lives, local mode only. Default: MEMVARA_DB if this
                 shell has one, otherwise ~/.memvara/memory.db. Written absolute either
                 way — that is the requirement no client enforces and everyone meets on
@@ -89,20 +118,24 @@ memvara-mcp init — write the MCP server block, the agent skill and a CLAUDE.md
   --user NAME   who the server remembers for, local mode only. Default: MEMVARA_USER,
                 else USER. Unset means the whole tenant, which is right for a
                 single-person machine.
-  --force       replace .claude/skills/memvara/SKILL.md when it differs from the
-                packaged one. Never touches .mcp.json or CLAUDE.md; those are yours.
+  --skill-only  write the skill tree and the project note, and leave .mcp.json
+                alone. For a client that is already connected to the hosted URL.
+  --force       replace a packaged skill file when it differs from this version.
+                Never touches .mcp.json or the project note; those are yours.
 
-What gets written, relative to --dir:
+What gets written, relative to --dir (Claude Code shown; --agent picks the layout):
 
   .mcp.json                        created if absent, never rewritten
-  .claude/skills/memvara/SKILL.md  the packaged skill
+  .claude/skills/memvara/SKILL.md  the packaged skill, plus references/
   CLAUDE.md                        appended to once, behind a marker comment
+                                   (AGENTS.md for --agent cursor and grok)
 
 The other environment variables keep their defaults and `memvara-mcp --help` lists them.
 This is the Python package; the npm package is a placeholder with no equivalent command.
 """
 
 _OPTIONS = ("--agent", "--db", "--dir", "--user", "--mode")
+_FLAGS = ("--force", "--skill-only")
 
 #: The server_url a client that never sets MEMVARA_SERVER_URL gets from config.py's own
 #: default. Written into .mcp.json only when the caller's value differs from it — writing
@@ -129,14 +162,29 @@ class _Step:
 
 
 def skill_text(agent: str = AGENTS[0]) -> str:
-    """The packaged skill for `agent`, read out of the installed package.
+    """The packaged skill body, read out of the installed package.
 
-    Package data rather than a string literal in this module, for the reason the skill
-    itself is short: it describes the tools, and a copy that ships separately from them is
-    the copy that drifts. `importlib.resources` is what makes that a promise about the
-    *installed* distribution rather than about this source tree.
+    `agent` is the client `init` is configuring. It used to pick a per-client file;
+    there is one skill now, and every client gets it. The argument stays so callers
+    that pass it keep working.
+
+    Package data rather than a string literal, for the reason the skill itself is
+    short: it describes the tools, and a copy that ships separately from them is
+    the copy that drifts. `importlib.resources` is what makes that a promise about
+    the *installed* distribution rather than about this source tree.
     """
-    return (files("memvara") / "skills" / agent / "SKILL.md").read_text(encoding="utf-8")
+    return (files("memvara") / "skills" / "memvara" / "SKILL.md").read_text(encoding="utf-8")
+
+
+def _packaged_skill_files() -> list[tuple[Path, str]]:
+    """Relative paths under the skill directory, and the text to write there."""
+    base = files("memvara") / "skills" / "memvara"
+    entries = [(Path("SKILL.md"), (base / "SKILL.md").read_text(encoding="utf-8"))]
+    refs = base / "references"
+    names = sorted(child.name for child in refs.iterdir() if child.name.endswith(".md"))
+    for name in names:
+        entries.append((Path("references") / name, (refs / name).read_text(encoding="utf-8")))
+    return entries
 
 
 def client_entry(*, db: str, user: str | None, command: str) -> dict[str, Any]:
@@ -223,7 +271,7 @@ def _absolute(raw: str) -> Path:
     return Path(os.path.abspath(os.path.expanduser(raw)))
 
 
-def _parse(argv: Sequence[str]) -> tuple[dict[str, str], bool]:
+def _parse(argv: Sequence[str]) -> tuple[dict[str, str], dict[str, bool]]:
     """`--name value` and `--name=value`, and a hand-written parser for the options.
 
     The same reasoning as the server's argument handling: a parser library here would be
@@ -232,13 +280,13 @@ def _parse(argv: Sequence[str]) -> tuple[dict[str, str], bool]:
     this testable out of the picture.
     """
     options: dict[str, str] = {}
-    force = False
+    flags = {name: False for name in _FLAGS}
     rest = list(argv)
     while rest:
         argument = rest.pop(0)
         name, joined, inline = argument.partition("=")
-        if name == "--force" and not joined:
-            force = True
+        if name in flags and not joined:
+            flags[name] = True
             continue
         if name not in _OPTIONS:
             raise _Usage(f"unexpected argument {argument!r}")
@@ -246,7 +294,7 @@ def _parse(argv: Sequence[str]) -> tuple[dict[str, str], bool]:
         if not value.strip():
             raise _Usage(f"{name} needs a value")
         options[name] = value.strip()
-    return options, force
+    return options, flags
 
 
 def _first(env: Mapping[str, str], *names: str) -> str | None:
@@ -257,20 +305,26 @@ def _first(env: Mapping[str, str], *names: str) -> str | None:
     return None
 
 
-def _skill_file(root: Path, agent: str, force: bool) -> _Step:
-    path = root / ".claude" / "skills" / "memvara" / "SKILL.md"
-    text = skill_text(agent)
-    if path.exists():
-        if path.read_text(encoding="utf-8") == text:
-            return _Step("kept", path, "already this version")
-        if not force:
-            return _Step("kept", path,
-                         "differs from the packaged skill; --force replaces it")
+def _skill_tree(root: Path, agent: str, force: bool) -> list[_Step]:
+    """Write the packaged skill directory. One step per file, same keep/force rules."""
+    dest = root / _SKILL_DEST[agent]
+    steps: list[_Step] = []
+    for relative, text in _packaged_skill_files():
+        path = dest / relative
+        if path.exists():
+            if path.read_text(encoding="utf-8") == text:
+                steps.append(_Step("kept", path, "already this version"))
+            elif not force:
+                steps.append(_Step("kept", path,
+                                   "differs from the packaged skill; --force replaces it"))
+            else:
+                path.write_text(text, encoding="utf-8")
+                steps.append(_Step("replaced", path))
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-        return _Step("replaced", path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    return _Step("wrote", path)
+        steps.append(_Step("wrote", path))
+    return steps
 
 
 def _mcp_json(root: Path, entry: dict[str, Any]) -> _Step:
@@ -288,21 +342,38 @@ def _mcp_json(root: Path, entry: dict[str, Any]) -> _Step:
                  paste=True)
 
 
-def _claude_md(root: Path) -> _Step:
-    path = root / "CLAUDE.md"
+def _append_note(root: Path, filename: str, skill_rel: Path) -> _Step:
+    path = root / filename
+    snippet = _note_text(skill_rel)
     if not path.exists():
-        path.write_text(_SNIPPET, encoding="utf-8")
+        path.write_text(snippet, encoding="utf-8")
         return _Step("wrote", path)
     body = path.read_text(encoding="utf-8")
     if MARKER in body:
         return _Step("kept", path, "already carries the memvara section")
     # One blank line before the section, whatever the file ended with — including nothing
-    # at all, which is what an empty CLAUDE.md somebody touched and never filled in looks
+    # at all, which is what an empty note somebody touched and never filled in looks
     # like, and it should not open with two blank lines.
     lead = "" if not body else "\n" if body.endswith("\n") else "\n\n"
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(lead + _SNIPPET)
+        handle.write(lead + snippet)
     return _Step("appended", path)
+
+
+def _notes(root: Path, agent: str) -> list[_Step]:
+    """The primary note for this client, plus the other one if it already exists.
+
+    A mixed team often has CLAUDE.md *and* AGENTS.md. Writing only the primary
+    file would leave the other client's standing instructions without the
+    pointer to the skill.
+    """
+    skill_rel = _SKILL_DEST[agent]
+    primary = _NOTE_FILE[agent]
+    names = [primary]
+    other = "AGENTS.md" if primary == "CLAUDE.md" else "CLAUDE.md"
+    if (root / other).exists():
+        names.append(other)
+    return [_append_note(root, name, skill_rel) for name in names]
 
 
 def _store_directory(db: Path) -> _Step:
@@ -336,7 +407,9 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
         return 0
 
     try:
-        options, force = _parse(argv)
+        options, flags = _parse(argv)
+        force = flags["--force"]
+        skill_only = flags["--skill-only"]
         agent = options.get("--agent")
         if agent is None:
             raise _Usage("init needs --agent, naming the client to configure: "
@@ -360,8 +433,19 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
             # strongest signal available that cloud mode will actually work here.
             env_mode = (env.get("MEMVARA_MODE") or "").strip()
             mode = env_mode if env_mode in ("local", "cloud") else (
-                "cloud" if _httpx_importable() else "local")
-        if mode == "local":
+                # ...and "will actually work here" is a question `config` can answer, so
+                # the heuristic asks rather than assuming. httpx is importable in plenty
+                # of environments nobody installed the cloud extra into.
+                "cloud" if _httpx_importable() and not cloud_gap() else "local")
+        if mode == "cloud" and (gap := cloud_gap()):
+            # Named explicitly, by flag or by environment, and it cannot start. Refusing
+            # here is the whole point: writing it exits 0, tells the reader to restart
+            # their client, and leaves them with a server that will not come up and no
+            # line of output connecting the two. Same text the server would have printed,
+            # so the reason arrives while there is still something to do about it.
+            raise _Usage(_CLOUD_NOT_WIRED.format(missing=", ".join(gap)))
+        raw_db = ""
+        if mode == "local" and not skill_only:
             raw_db = options.get("--db") or _default_db(env)
             if raw_db == ":memory:":
                 raise _Usage(
@@ -372,16 +456,25 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
         print(f"memvara-mcp init: {exc}\n\n{INIT_USAGE}", file=err)
         return 2
 
+    skills = _skill_tree(root, agent, force)
+    guidance = _notes(root, agent)
+
+    if skill_only:
+        lines = [f"memvara-mcp init — {agent}, in {root} (skill only)", ""]
+        lines += _report([*skills, *guidance])
+        lines += ["", "No .mcp.json written. Restart the client if it was already",
+                  "running, so it picks up the skill."]
+        print("\n".join(lines), file=out)
+        return 0
+
     if mode == "cloud":
         server_url = _first(env, "MEMVARA_SERVER_URL") or _DEFAULT_SERVER_URL
         entry = cloud_client_entry(server_url=server_url, command=_interpreter())
 
-        skill = _skill_file(root, agent, force)
         settings = _mcp_json(root, entry)
-        guidance = _claude_md(root)
 
         lines = [f"memvara-mcp init — {agent}, in {root} (cloud)", ""]
-        lines += _report([skill, settings, guidance])
+        lines += _report([*skills, settings, *guidance])
         if settings.paste:
             block = json.dumps({"memvara": entry}, indent=2).splitlines()[1:-1]
             lines += ["", 'Add this inside the "mcpServers" object of that file:', ""] + block
@@ -397,13 +490,11 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
     user = options.get("--user") or _first(env, "MEMVARA_USER", "USER", "USERNAME")
     entry = client_entry(db=str(db), user=user, command=_interpreter())
 
-    skill = _skill_file(root, agent, force)
     settings = _mcp_json(root, entry)
-    guidance = _claude_md(root)
     store = _store_directory(db)
 
     lines = [f"memvara-mcp init — {agent}, in {root}", ""]
-    lines += _report([skill, settings, guidance, store])
+    lines += _report([*skills, settings, *guidance, store])
     if settings.paste:
         # Printed without the enclosing braces, indented as it will sit. What the user has
         # to do is paste it inside an object that already exists, and a block that is

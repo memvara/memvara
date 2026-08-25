@@ -47,6 +47,13 @@ client, not run interactively. Configured entirely by environment:
                      can only be opened by the embedder that wrote it; if this server
                      refuses to start with a dimension mismatch, this is the variable
                      that fixes it, and the message names the width to give it.
+  MEMVARA_PREDICATES  declared predicate vocabularies: shipped pack names, paths to
+                     TOML files, or a comma-separated mix, later entries winning.
+                     Unset means the built-in vocabulary alone, and a predicate
+                     outside it accumulates values instead of superseding them and
+                     decays at the slow default. 'engineering' ships with the
+                     package; see docs/INTERNALS.md for the file format. Needs
+                     Python 3.11+, where tomllib arrives.
   MEMVARA_READ_ONLY   '1' to hide every tool that writes.
 
 The scope above is bound at startup and cannot be changed by a tool call, which is
@@ -55,9 +62,11 @@ what stops a model reaching another user's memory.
 Rather than writing that block by hand:
 
   memvara-mcp init --agent claude
-                     Writes the client's server block, the memvara skill and a
-                     CLAUDE.md snippet into a project, with MEMVARA_DB already
-                     absolute. `memvara-mcp init --help` for its options.
+                     Writes the client's server block, the memvara skill tree
+                     and a project note, with MEMVARA_DB already absolute.
+                     `--agent cursor` and `--agent grok` write the same skill
+                     into those clients' skill directories. `--skill-only`
+                     skips .mcp.json. `memvara-mcp init --help` for its options.
 
   memvara-mcp login --project NAME
                      Signs in to a memvara-cloud deployment over the device-code

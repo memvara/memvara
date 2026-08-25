@@ -18,7 +18,7 @@ point of the project and it is also the development setup:
 python3 -m venv .venv && source .venv/bin/activate
 python3 -m pip install -e ".[dev]"
 
-python3 -m pytest -q                                              # 2,734 tests
+python3 -m pytest -q                                              # 3,335 tests
 python3 -m coverage run -m pytest && python3 -m coverage report    # gated at 100%
 python3 -m mypy -p memvara                                         # must be clean
 ```
@@ -145,7 +145,7 @@ one is a product decision, not a packaging detail.
 ### Likely to be declined
 
 - **A feature that belongs in the commercial layer.** The
-  [open-core boundary](README.md#open-core-and-exactly-where-the-line-is) is real and this
+  [open-core boundary](docs/OPEN-CORE.md) is real and this
   is the honest part: a Postgres/pgvector store, a REST API, a multi-tenant control plane,
   usage metering or quotas, and the governance layer (retention policy, tamper-evident
   audit chain, RBAC) are a separate paid product, and a PR that adds one here is likely to

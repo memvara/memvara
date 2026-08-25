@@ -59,8 +59,8 @@ from typing import Any, Callable, Collection, Literal, Sequence, overload
 from .core import Memvara, Messages, ScopedMemvara, _approx_tokens
 from .embed import Embedder
 from .retrieve import Path, Retrieved
-from .types import (Claim, Delta, Episode, MemoryType, Provenance, RecallResult, Result,
-                    Scope, WriteReceipt)
+from .types import (Claim, Delta, Episode, ErasureProof, MemoryType, Provenance,
+                    RecallResult, Result, Scope, WriteReceipt)
 
 
 class AsyncMemvara:
@@ -124,6 +124,23 @@ class AsyncMemvara:
             self.memvara.add, messages, tenant=tenant, user=user, agent=agent,
             session=session, role=role, ts=ts)
 
+    async def pending_extraction(self, *, limit: int | None = None,
+                                 exclude: Collection[str] = (), tenant=None, user=None,
+                                 agent=None, session=None) -> list[Episode]:
+        """See `Memvara.pending_extraction`. Off the loop because it scans the store."""
+        return await asyncio.to_thread(
+            self.memvara.pending_extraction, limit=limit, exclude=exclude,
+            tenant=tenant, user=user, agent=agent, session=session)
+
+    async def reextract(self, episodes: Sequence[Episode | str] | None = None, *,
+                        limit: int | None = None, exclude: Collection[str] = (),
+                        tenant=None, user=None, agent=None,
+                        session=None) -> WriteReceipt:
+        """See `Memvara.reextract`. Calls a model, so it belongs off the loop twice over."""
+        return await asyncio.to_thread(
+            self.memvara.reextract, episodes, limit=limit, exclude=exclude,
+            tenant=tenant, user=user, agent=agent, session=session)
+
     async def remember(self, subject: str, predicate: str, obj: str,
                        **kw: Any) -> WriteReceipt:
         """See `Memvara.remember`."""
@@ -163,6 +180,10 @@ class AsyncMemvara:
         return await asyncio.to_thread(
             self.memvara.erase, claim_id, sources=sources, tenant=tenant, user=user,
             agent=agent, session=session)
+
+    async def prove_erased(self, claim_id: str) -> "ErasureProof":
+        """See `Memvara.prove_erased`."""
+        return await asyncio.to_thread(self.memvara.prove_erased, claim_id)
 
     async def purge(self, *, tenant=None, user=None, agent=None,
                     session=None) -> dict[str, int]:
@@ -387,6 +408,11 @@ class AsyncMemvara:
         """See `Memvara.stats`."""
         return await asyncio.to_thread(self.memvara.stats, tenant=tenant)
 
+    async def connectivity(self, *, tenant: str | None = None) -> dict[str, int]:
+        """See `Memvara.connectivity`. Off the loop because it is a semi-join over the
+        whole claim table, which is the one counting call that is not cheap."""
+        return await asyncio.to_thread(self.memvara.connectivity, tenant=tenant)
+
     async def close(self) -> None:
         """See `Memvara.close`. Awaitable because it commits and fsyncs."""
         await asyncio.to_thread(self.memvara.close)
@@ -495,6 +521,17 @@ class AsyncScopedMemvara:
                   ts: datetime | None = None) -> WriteReceipt:
         return await self._amem.add(messages, role=role, ts=ts, **self._kw)
 
+    async def pending_extraction(self, *, limit: int | None = None,
+                                 exclude: Collection[str] = ()) -> list[Episode]:
+        return await self._amem.pending_extraction(limit=limit, exclude=exclude,
+                                                   **self._kw)
+
+    async def reextract(self, episodes: Sequence[Episode | str] | None = None, *,
+                        limit: int | None = None,
+                        exclude: Collection[str] = ()) -> WriteReceipt:
+        return await self._amem.reextract(episodes, limit=limit, exclude=exclude,
+                                          **self._kw)
+
     async def remember(self, subject: str, predicate: str, obj: str,
                        **kw: Any) -> WriteReceipt:
         return await self._amem.remember(subject, predicate, obj, **self._kw, **kw)
@@ -510,6 +547,9 @@ class AsyncScopedMemvara:
 
     async def erase(self, claim_id: str, *, sources: bool = False) -> bool:
         return await self._amem.erase(claim_id, sources=sources, **self._kw)
+
+    async def prove_erased(self, claim_id: str) -> "ErasureProof":
+        return await self._amem.prove_erased(claim_id)
 
     async def supersede(self, old_claim_id: str, new_claim: Claim, *,
                         at: datetime | None = None,
@@ -685,6 +725,9 @@ class AsyncScopedMemvara:
 
     async def stats(self) -> dict[str, int]:
         return await self._amem.stats(tenant=self.scope.tenant)
+
+    async def connectivity(self) -> dict[str, int]:
+        return await self._amem.connectivity(tenant=self.scope.tenant)
 
     def __repr__(self) -> str:
         return f"<AsyncScopedMemvara {self.scope.key()} of {self._amem!r}>"

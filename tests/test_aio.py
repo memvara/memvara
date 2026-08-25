@@ -174,6 +174,7 @@ def test_the_write_surface(amem):
         assert (await amem.why(claim.id)) is not None
         assert (await amem.count()) == 1
         assert (await amem.stats())["claims"] == 1
+        assert await amem.connectivity() == {"live_claims": 1, "joinable_claims": 0}
         assert [c.object for c in await amem.history("user", "lives_in")] == ["Berlin"]
 
         await amem.supersede(claim.id, Claim(subject="user", predicate="lives_in",
@@ -278,6 +279,21 @@ def test_maintenance_is_awaitable(amem):
         await amem.add("I live in Berlin")
         assert await amem.reembed(HashingEmbedder(dim=96)) == 1
         assert (await amem.consolidate())["decayed"] >= 0
+
+    run(main())
+
+
+def test_proving_an_erasure_is_awaitable_on_both_views(amem):
+    """It re-queries the disk, so it is exactly the kind of call that must not run on
+    the loop thread — and it is on the scoped view too, taking no scope, because a
+    scoped view has no narrower version of a row count."""
+    async def main():
+        receipt = await amem.remember("user", "lives_in", "Berlin")
+        claim_id = receipt.added[0].id
+        assert not (await amem.prove_erased(claim_id)).proven
+        assert await amem.erase(claim_id)
+        assert (await amem.prove_erased(claim_id)).proven
+        assert (await amem.scope(user="alice").prove_erased(claim_id)).proven
 
     run(main())
 
@@ -400,6 +416,8 @@ def test_the_scoped_write_and_read_surface(amem):
         assert (await view.stats())["claims"] == 1
 
         await view.remember("Berlin", "in_country", "Germany")
+        # The path below is exactly what a join rate above zero is a count of.
+        assert await view.connectivity() == {"live_claims": 2, "joinable_claims": 1}
         assert [p.render() for p in await view.paths_between("user", "Germany")] \
             == ["user -lives_in-> Berlin -in_country-> Germany"]
         assert await view.neighborhood("user") != []

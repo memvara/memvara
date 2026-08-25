@@ -113,8 +113,14 @@ defences, all in `memvara/core.py`, all worth attacking:
 
 - **`_safe_line`** collapses each claim to a single line and strips leading list and
   heading markers, so stored text cannot open its own bullet list or repeat the header and
-  forge a block indistinguishable from the real one. Episodes are additionally truncated,
-  so a pasted stack trace cannot become the whole prompt.
+  forge a block indistinguishable from the real one. It also maps `[` and `]` to their
+  fullwidth forms, because flattening only settles what a claim can do *between* lines: a
+  surface that writes its own metadata as `[id=… relevance=…]` can be impersonated by a
+  claim that spells one of those out and appends it to the row it is already on, with no
+  newline needed. Every renderer here — `recall()`, and each line the MCP server emits —
+  goes through this one function, so that is the one place the character set lives.
+  Episodes are additionally truncated, so a pasted stack trace cannot become the whole
+  prompt.
 - **`RECALL_HEADER` and `RECALL_EPISODE_HEADER`** frame the block as retrieved data rather
   than instructions, and the episode header says "said", not "true".
 - **The signature is explicit rather than `**kwargs`**, so `states`, `include_invalidated`
@@ -139,6 +145,14 @@ A way to break out of that block, forge a header, or reach a retired claim throu
 `recall()` is in scope. A model choosing to follow instructions that are correctly framed
 as data is a model behaviour, not a memvara vulnerability — but a case where the framing
 itself can be removed or spoofed is ours.
+
+**Stored claims are not the only untrusted text that reaches a model here.** A tool that
+fails returns the exception's message as a tool result, and that message is not this
+process's to trust: a store error can quote a value somebody wrote, and against a hosted
+backend it can carry an upstream body verbatim. It goes through the same neutralisation a
+claim does, plus a length cap — `safe_detail` in `memvara/server/tools.py`. Text that
+reaches a model through a *failure* path without that treatment is the same finding as
+text that reaches it through a result, and is in scope on the same terms.
 
 ### The redaction seam
 
@@ -187,10 +201,19 @@ on the list above.
   page-level boundary, and a plaintext vector beside encrypted text is a confirmation
   oracle you can hill-climb. Encrypting one and not the other would be theatre. Full-disk
   encryption is the honest answer today.
-- **On-disk residue after erasure.** Erasure deletes rows and index entries and zeroes the
-  vector slots; it does not scrub the SQLite pages they occupied, and the `-wal` may still
-  hold them. `VACUUM` and `PRAGMA secure_delete` are the deployment's levers, and
-  `docs/DEPLOY.md` says so.
+- **`-wal` residue after erasure.** Erasure removes the rows, the index entries and the
+  vectors, and overwrites the pages they occupied — `PRAGMA secure_delete=ON` and FTS5's
+  own `secure-delete` are both set by the store, so the text is gone from the main
+  database file without a `VACUUM`. What is *not* scrubbed is the write-ahead log: an
+  erased claim's bytes can remain in `-wal` until it checkpoints. A checkpoint or a clean
+  close clears it.
+
+  **This bullet used to say the opposite of what the code did.** It claimed the index
+  entries were deleted and named `VACUUM` as the lever for what was left. Neither was
+  true of the text index: `DELETE FROM claims_fts` writes a delete marker and keeps the
+  document's terms as *live rows* in a shadow table, where no `VACUUM` reaches them. Fixed
+  in schema 7; `tests/test_erasure_residue.py` greps the file rather than asking the
+  store, because asking the store always answered correctly.
 - **An attacker who already has the database file, the `.vecs` sidecar, or the process's
   memory.** The store is a file with the filesystem's permissions and nothing more. It
   makes no attempt to defend against someone who can read it.

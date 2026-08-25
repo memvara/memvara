@@ -18,6 +18,8 @@ from .base import (
     EXTRACT_SYSTEM,
     PREDICATE_SCHEMA,
     PREDICATE_SYSTEM,
+    COMPOSE_SCHEMA,
+    COMPOSE_SYSTEM,
     RESOLVE_SCHEMA,
     RESOLVE_SYSTEM,
     Usage,
@@ -146,6 +148,19 @@ class AnthropicLLM:
             usage)
         return _shape.shape_resolution(
             _shape.parse_json_object(_first_text(response)), offered)
+
+    def compose_relations(self, predicates: Sequence[str]) -> dict[str, int]:
+        """Relation terms that are a composition of two or more of these predicates.
+
+        Asked once per vocabulary and never per query — `retrieve/compose` explains why,
+        and `retrieve/intent.py` promises to be model-free. What comes back is a term to
+        arity map; the caller filters it against the store's own predicate names.
+        """
+        offered = _shape.bounded(predicates, _shape.MAX_KNOWN_PREDICATES)
+        response = self._call(
+            COMPOSE_SYSTEM, _shape.compose_prompt(offered), COMPOSE_SCHEMA, None)
+        return _shape.shape_composition(
+            _shape.parse_json_object(_first_text(response)))
 
     def classify_predicate(self, predicate: str, example: str,
                            *, usage: Usage | None = None) -> dict[str, str]:

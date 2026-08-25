@@ -178,7 +178,14 @@ jobs:
         run: python -m twine check dist/*
 
       - name: Install the dev extra, so the packaging tests can run
-        run: python -m pip install -e ".[dev]"
+        # `[dev,cloud]`, matching `ci.yml`. `httpx` is in the `cloud` extra and
+        # `tests/test_store_remote.py` imports it at module scope, so `[dev]` alone
+        # cannot collect the suite — two errors, before a single test runs. This job
+        # restated its own install instead of sharing one, which is the drift the `ci`
+        # job avoids by *calling* the matrix rather than repeating it. Caught on the
+        # first real run of this workflow: 0.2.0 was published by hand before the file
+        # existed, so nothing had ever executed this step.
+        run: python -m pip install -e ".[dev,cloud]"
 
       - name: The whole suite again, now that dist/ exists
         # The `ci` job already ran this suite six ways — and every dist-gated test skipped

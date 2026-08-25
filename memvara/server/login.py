@@ -60,6 +60,13 @@ _CREDENTIALS_PATH = Path.home() / ".memvara" / "credentials.json"
 #: or a network stall would otherwise spin forever.
 _MAX_WAIT_SECONDS = 900
 
+#: The hosted console refuses unauthenticated POSTs that lack this header. Presence is
+#: the whole check when there is no session cookie, because a cross-site HTML form
+#: cannot set one; this process has no session and never will, so any value works.
+#: Without it, `POST /api/auth/device/authorize` answers 403 `csrf_failed` and login
+#: never starts.
+_CSRF_HEADERS = {"X-Memvara-CSRF": "cli"}
+
 LOGIN_USAGE = f"""\
 memvara-mcp login — sign in to a memvara-cloud deployment and store an API key.
 
@@ -153,7 +160,10 @@ def _authorize(client: Any, server_url: str, project: str,
     if redirect_uri is not None:
         body["redirect_uri"] = redirect_uri
     response = client.post(f"{server_url}/api/auth/device/authorize", json=body)
-    if response.status_code != 200:
+    # 201 is what the hosted console actually returns (`DeviceAuthorized` is a
+    # created grant). Tests historically faked 200; both are success, anything
+    # else is the server refusing to start.
+    if response.status_code not in (200, 201):
         raise _LoginFailed(_server_error(response, "start a device login"))
     data = response.json()
     return _Authorization(
@@ -163,11 +173,27 @@ def _authorize(client: Any, server_url: str, project: str,
         expires_in=int(data["expires_in"]), interval=int(data["interval"]))
 
 
+#: Longest upstream body this command will echo. The same cap the Supermemory importer
+#: uses on the same kind of text, for the same reason.
+_BODY = 200
+
+
 def _server_error(response: Any, doing: str) -> str:
+    """The message a failed step prints, with the upstream body bounded.
+
+    Unlike the tool surface, this ends up on a terminal rather than in a model's context,
+    so the risk is volume rather than forged structure: a gateway that answers with an
+    HTML error page, or a JSON envelope carrying an infrastructure dump, otherwise lands
+    whole in whatever is reading stderr — which for a login run in CI is a build log, and
+    on a public repository that log is public. Two hundred characters keeps the part that
+    says what went wrong, which is what the operator ran this for.
+    """
     try:
-        detail = response.json()
+        detail = str(response.json())
     except ValueError:
-        detail = response.text
+        detail = str(response.text)
+    if len(detail) > _BODY:
+        detail = detail[:_BODY - 1] + "…"
     return f"the server refused to {doing} ({response.status_code}): {detail}"
 
 
@@ -239,7 +265,7 @@ def login(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
         redirect_uri = f"http://127.0.0.1:{port}/callback"
 
     try:
-        with httpx.Client(timeout=10.0) as client:
+        with httpx.Client(timeout=10.0, headers=_CSRF_HEADERS) as client:
             try:
                 authorization = _authorize(client, server_url, project, redirect_uri)
             except httpx.HTTPError as exc:

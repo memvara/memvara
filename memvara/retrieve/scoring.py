@@ -195,6 +195,8 @@ def relevance(
     lexical: float | None,
     w_vector: float,
     w_lexical: float,
+    graph: float | None = None,
+    w_graph: float = 0.0,
 ) -> float:
     """Blend the legs' absolute signals into one [0, 1] relevance.
 
@@ -209,16 +211,43 @@ def relevance(
     the difference the parameter encodes, and it is what makes corroboration visible:
     two legs agreeing at 0.5 beat one leg alone at 0.5.
 
+    `graph` is a path score from `GraphTraverser`, already an absolute [0, 1] relevance
+    by construction (see `retrieve/spread.py`), and it abstains far more often than the
+    other two: it does not run at all on a query the intent classifier routes away from
+    it, on a store with no `adjacent`, or when the seeds reached nothing. Its default is
+    the abstaining one, so a caller that predates the leg gets exactly the two-leg average
+    it got before.
+
     >>> relevance(vector=0.5, lexical=0.5, w_vector=1.0, w_lexical=1.0)
     0.5
     >>> relevance(vector=0.6, lexical=None, w_vector=1.0, w_lexical=1.0)
     0.6
     >>> relevance(vector=0.6, lexical=0.0, w_vector=1.0, w_lexical=1.0)
     0.3
+
+    The graph leg, in each of the three states it can be in. Ran and ranked this claim;
+    ran and did not; did not run:
+
+    >>> relevance(vector=0.6, lexical=0.6, graph=0.6,
+    ...           w_vector=1.0, w_lexical=1.0, w_graph=1.0)
+    0.6
+    >>> round(relevance(vector=0.6, lexical=0.6, graph=0.0,
+    ...                 w_vector=1.0, w_lexical=1.0, w_graph=1.0), 3)
+    0.4
+    >>> relevance(vector=0.6, lexical=0.6, graph=None,
+    ...           w_vector=1.0, w_lexical=1.0, w_graph=1.0)
+    0.6
+
+    A weight of zero is the same as abstaining, and has to be: a leg nobody is counting
+    must not divide the ones that are.
+
+    >>> relevance(vector=0.6, lexical=0.6, graph=0.0,
+    ...           w_vector=1.0, w_lexical=1.0, w_graph=0.0)
+    0.6
     """
     total = 0.0
     weight = 0.0
-    for signal, w in ((vector, w_vector), (lexical, w_lexical)):
+    for signal, w in ((vector, w_vector), (lexical, w_lexical), (graph, w_graph)):
         if signal is None or w <= 0.0:
             continue
         total += w * signal

@@ -6,6 +6,7 @@ importable from the foundation modules:
 
 - `memvara/types.py` — `Claim`, `Episode`, `Scope`, `Result`, `Explanation`, `WriteReceipt`,
   `MemoryType`, `Derivation`, `utcnow()`, `content_hash()`
+- `memvara/compat/supermemory_import.py` — `import_supermemory`, `SupermemoryReceipt`
 - `memvara/schema.py` — `PredicateRegistry`, `PredicateSpec`, `Cardinality`, `Volatility`
 - `memvara/store/` — `Store` and `SQLStore` protocols, `SQLiteStore`, `STATES`,
   `ClaimState`, `resolve_states()`, `state_predicate()`, `stored_state_predicate()`,
@@ -16,11 +17,71 @@ importable from the foundation modules:
 
 ## Design invariants (do not violate)
 
-1. **Deterministic paths never call an LLM.** Deduplication, contradiction resolution,
-   ranking, decay, and time travel are all pure functions of stored state. Only
-   `extract()` and `resolve_predicate()` may touch a model.
+Each one is stated as **Claim / Scope / Sketch / Measured**, borrowed from the Verified
+Design Invariant format in SuperLocalMemory V4. The format earns its place through the
+last two lines rather than the first: *Sketch* names the code that makes the claim true,
+so a reader can check it, and *Measured* is either a number this repository produced or an
+explicit statement that no measurement exists and only a test stands behind it. **Where
+nothing was measured the line says so.** An invariant with an invented number beside it is
+worse than one with none, and the temptation to supply one is exactly what the format is
+for.
+
+*Scope* is the line that is easiest to leave off and does the most work. Every claim here
+holds somewhere and not everywhere, and the eighth invariant exists because one of them
+was being read as holding further than it does.
+
+1. **Deterministic paths never call an LLM.**
+
+   > **Claim.** Deduplication, contradiction resolution, ranking, decay and time travel
+   > are pure functions of stored state.
+   > **Scope.** The library. Only `extract()` and `resolve_predicate()` may touch a model,
+   > and both are on the write path. Nothing on the read path calls one at all — a
+   > reranker is a cross-encoder rather than a generative model, and it is off by default.
+   > **Sketch.** `NullLLM` is the default `llm=`, so the shipped configuration has no
+   > model to call; `HybridRetriever`, `Reconciler` and `Consolidator` take no `llm`
+   > parameter at all.
+   > **Measured.** `bench/mem0_real.py`: 2 write-path LLM calls against mem0's 105 on the
+   > same 105-turn transcript, and **identical final state on every run** where mem0's
+   > differs. `tests/test_packaging.py::test_nothing_but_numpy_is_imported_while_the_
+   > package_is_being_imported` holds the import side.
+
 2. **Unknown predicates default to `Cardinality.MANY`.** Wrongly retiring a true fact is
-   worse than keeping two competing ones.
+   worse than keeping two competing ones. The default is deliberate and stays; what
+   `MEMVARA_PREDICATES` adds is a way to *revise* it, since before it a server-backed
+   store had none. A declared spec outranks a persisted learned one — rehydration skips
+   any learned spec whose name a declaration already holds, so a pack corrects a store
+   that guessed rather than only describing a fresh one. Forward-only: it changes what
+   supersedes on the next write and retires nothing already stored.
+
+   A vocabulary is TOML, one `[[predicate]]` table each, `name`, `cardinality` and
+   `volatility` required, `memory_type`, `aliases` and `supersedes` optional:
+
+   ```toml
+   [[predicate]]
+   name = "git_state"
+   cardinality = "one"     # "one" supersedes, "many" accumulates
+   volatility = "fast"     # static | slow | fast -> 36500 | 730 | 7 day half-life
+   aliases = ["git_status"]
+   ```
+
+   Needs Python 3.11 or later, which is where `tomllib` arrives; the reader is
+   imported lazily so 3.10 keeps working for everything else.
+
+   Malformed entries raise rather than being skipped: a vocabulary that half-loads leaves
+   some predicates superseding and others accumulating with nothing recording which.
+
+   > **Claim.** A predicate nobody declared accumulates rather than superseding.
+   > **Scope.** Detection only. It makes a missed contradiction the failure mode instead
+   > of a wrongly retired fact; it does not make either one visible, because accumulating
+   > is what `MANY` is *for* and nothing can tell an intended `MANY` from a forgotten
+   > declaration.
+   > **Sketch.** `PredicateRegistry.spec` returns a `MANY` default for an unknown name;
+   > `Reconciler` only supersedes on `ONE`.
+   > **Measured.** Not measured, and the cost of the default is instead recorded from the
+   > other side: `tests/test_demo.py::test_a_predicate_left_at_the_default_cardinality_
+   > stops_superseding_silently` removes one declaration from a working configuration and
+   > watches the slot come back with two answers.
+
 3. **Nothing is ever hard-deleted by the engine, and end-of-life moves exactly one
    clock.** Closing valid time (`valid_to`) says *the world changed*; closing transaction
    time (`invalidated_at`) says *the record was wrong*. They are different events and no
@@ -32,8 +93,30 @@ importable from the foundation modules:
    supersession closed both clocks. The correcting reading is reachable, never guessed:
    `close="retired"` on `remember`, `supersede`, `forget` and `delete`, defaulting to
    `"ended"` everywhere except `forget`/`delete`, which are belief operations by name.
-4. **Every claim carries provenance.** `sources` must be populated with the episode ids
-   the claim came from, and `derivation` must reflect how it was produced.
+
+   > **Claim.** No engine write deletes a row, and no write closes both clocks.
+   > **Scope.** The *engine*. `erase()`, `purge()` and `reset()` delete, on purpose and by
+   > name, and they are the caller's decision rather than the engine's — see invariant 8's
+   > neighbour below and `Memvara.prove_erased`.
+   > **Sketch.** `close_out` is the single place any claim ends and takes one `Closure`;
+   > `Claim.state` derives `live`/`ended`/`retired` from which column is set.
+   > **Measured.** `bench/compare.py`: **0 stale values left live** against 7 for a
+   > mem0-style baseline, on a transcript where 10 facts are revised. `tests/
+   > test_bitemporal.py` holds the two-clock reads.
+
+4. **Every claim carries provenance.**
+
+   > **Claim.** `sources` holds the episode ids the claim came from, and `derivation`
+   > reflects how it was produced.
+   > **Scope.** Claims the engine writes. A `Claim` a caller constructs by hand and hands
+   > to `remember()` carries what the caller put in it.
+   > **Sketch.** `FastExtractor._claim` and the LLM tier both stamp `sources=[ep.id]` and
+   > a `Derivation`; `claim_sources` indexes the reverse direction so `why()` is a lookup.
+   > **Measured.** Not measured — there is no number here to produce.
+   > `tests/test_fast.py::test_claims_carry_full_provenance` and
+   > `tests/test_redact.py::test_provenance_still_resolves_after_the_turn_it_points_at_
+   > was_redacted` are the enforcement.
+
 5. **The library must run with no API key and no network.** `NullLLM` + `HashingEmbedder`
    is the default configuration and the one the tests use, and this invariant is about
    `import memvara` and the modules under it — every file this document is a contract
@@ -42,12 +125,39 @@ importable from the foundation modules:
    console (`memvara-mcp login`), a decision made one layer up, in `memvara/server/`,
    and reversible per-invocation with `--mode local`. Nothing below `memvara/server/`
    knows that mode exists.
+   > **Claim.** `import memvara` and everything under it works with no key and no
+   > outbound connection.
+   > **Scope.** The library. **Not** `memvara-mcp init`, which with the optional `cloud`
+   > extra defaults to authenticating against a hosted console — a decision one layer up,
+   > in `memvara/server/`, reversible with `--mode local`, and invisible below it.
+   > **Sketch.** One hard dependency (`numpy`); every optional backend is imported lazily
+   > inside the function that needs it.
+   > **Measured.** `tests/test_packaging.py::test_every_module_imports_cleanly_in_a_
+   > process_that_has_only_numpy`, and `..._the_only_sdks_the_package_names_anywhere_
+   > are_the_ones_an_extra_installs`. The install-size figure that follows from it is 2
+   > packages against mem0's 33 (`docs/BENCHMARKS.md`).
+
 6. **A multi-hop answer is evaluated at one clock pair.** Every edge on a returned path
    must be checked against the same `(valid_at, known_at)`, pinned once before the walk.
    A path stitched from edges believed at different times is a connection that never
    simultaneously held, and reporting it as a fact is the worst thing traversal can do —
    it is invisible in any result that does not carry its timestamps. Two axes widened
    what has to be pinned; they did not weaken the rule.
+
+   > **Claim.** Every edge on a returned path held at the same instant on both clocks.
+   > **Scope.** One call. It says nothing about two calls: a caller who searches, reads an
+   > entity out of the result and searches again has two clock reads and no affordance
+   > anywhere reminding them, which is the difference the invariant exists to name.
+   > **Sketch.** `GraphTraverser._pin` fills both defaults from **one** `utcnow()` before
+   > the first hop and passes the pair to every `Store.adjacent` call; no axis is ever
+   > forwarded as `None`.
+   > **Measured.** `bench/multihop.py`'s interleaving section constructs the failure it
+   > prevents: a write placed between two steps of a search-then-search loop retires the
+   > fact step one returned and creates the fact step two returns, so the loop reports a
+   > chain that held at **no instant**, with full provenance on both hops. The pinned walk
+   > returns nothing for the same question. `tests/test_traverse.py::test_a_path_is_never_
+   > stitched_from_edges_that_were_never_believed_together` is the assertion.
+
 7. **A filter and a limit may not live in different layers.** Whatever narrows rows has to
    run where the truncation runs, or the top-k is wrong: `Store.adjacent` shipped without
    a `scopes` argument and with the caller filtering afterwards, and on a shared tenant a
@@ -57,6 +167,39 @@ importable from the foundation modules:
    ranks those, so a state filter applied afterwards finds a retired claim only when it
    happens to land inside that window — twelve live rows against `k=1` is a window of
    five, and the audit comes back empty with nothing saying it was truncated.
+
+   > **Claim.** Whatever narrows rows runs where the truncation runs.
+   > **Scope.** Store methods that cap rows the caller is expected to authorize or filter.
+   > Not a general rule about filtering: `HybridRetriever` applies `memory_types` after
+   > fusion on purpose, and pays for it with a bounded retry when the pool came back full.
+   > **Sketch.** `Store.adjacent` takes `scopes`; `state_predicate` is a store parameter
+   > rather than a comprehension in the facade.
+   > **Measured.** With one user holding 20 readable claims about a hub, a Python-side
+   > filter over a store-side page returned **19** of them against 15,000 competing claims
+   > and **8** against 40,000, with nothing in the result to say it was partial. The
+   > `states=` half is measured too: twelve live rows against `k=1` is a window of five.
+   > `tests/test_traverse.py::test_the_scope_reaches_the_store_rather_than_being_applied_
+   > after_it` is the assertion.
+
+8. **No MCP client can backdate the transaction clock.**
+
+   > **Claim.** Nothing reachable from the MCP tool surface can make the store record that
+   > a fact was believed earlier than it was.
+   > **Scope.** **The MCP tool surface only.** `Memvara.remember(recorded_at=...)` is a
+   > public Python parameter that writes the record clock directly, and
+   > `Reconciler.apply` clamps forward-dating only — backdating is permitted deliberately,
+   > because replaying an archived history and importing from another store both need it.
+   > A deployment that needs this end to end must not expose the Python API to untrusted
+   > callers. This is the invariant most likely to be read as holding further than it
+   > does, which is why it is written down.
+   > **Sketch.** `_remember` in `memvara/server/tools.py` passes only `valid_from` and
+   > `valid_to` through to the library, and no schema in `TOOLS` accepts a transaction-time
+   > argument at all — so there is nothing for a model to fill in.
+   > **Measured.** Not a number: the falsifiable part is
+   > `tests/test_server.py::test_no_tool_schema_exposes_a_transaction_clock_argument`,
+   > which walks every property of every tool schema and fails if one appears. That test
+   > is what stops the gap reopening silently — a new tool that takes `recorded_at`
+   > because it seemed harmless would otherwise ship green.
 
 ---
 
@@ -91,6 +234,47 @@ both common and unambiguous — "my name is X", "I live in X", "I work at X", "I
 nothing rather than a wrong triple; the LLM tier is the fallback. Set
 `derivation=Derivation.FAST_PATH`, `extractor="fast/v1"`, and `sources=[ep.id]`.
 
+#### Erasure, and the evidence for it
+
+```python
+def residue(self, claim_id: str) -> dict[str, int]           # Store, optional
+def erasure_record(self, claim_id: str) -> dict | None       # Store, optional
+def prove_erased(self, claim_id: str) -> ErasureProof        # Memvara
+```
+
+`erase()` reported success from `erase_claim`'s return code, which proves the code took
+the branch it thought it took — the same statement the return value already made, and one
+that cannot disagree with it. `residue` is a **live query**: four `SELECT COUNT(*)`s over
+the tables a claim's content can survive in (`claims`, `claims_fts`, `embeddings`,
+`claim_sources`). A re-hash of what was returned, or a cached count, would not be evidence.
+
+`prove_erased` fails closed. A store with no `residue`, or one whose `residue` raises —
+`RemoteStore`, which a `getattr` guard cannot see — yields `proven=False` with a reason,
+and `erase()` raises `ErasureIncomplete` rather than returning `True`. Unproven and
+proven-gone are different answers and only one of them is an erasure certificate.
+
+Schema 8 adds `erasures`, one row per `erase_claim`, and three properties matter (schema
+7 is the FTS scrub that makes erasure remove the text from the file, not only from the
+queries):
+
+- **Written before the delete, in the same transaction.** If the audit write raises, the
+  exception leaves `erase_claim` before any delete runs and the claim is still there. The
+  other order lets a delete succeed and its record fail, which is exactly the state
+  nothing downstream can detect.
+- **Compensated if the delete then fails.** The ordering above opens the mirror hole: a
+  record of an erasure that never happened, which reads as proof to precisely the audit
+  that would otherwise notice the claim survived. `erase_claim` removes its own row
+  before re-raising. Not a `SAVEPOINT` — `RELEASE` commits into the enclosing
+  transaction, so an erasure inside an abandoned `batch()` stopped rolling back with it.
+- **It holds no text, subject, predicate or object.** `(claim_id, tenant, scope,
+  erased_at, sources, counts)` and nothing else — an audit trail the erased fact can be
+  read out of is a copy of it wearing a different name. Keyed on `(claim_id, erased_at)`,
+  so erase, restore from backup and erase again is two records rather than one.
+
+**Ordering and durability, not tamper-evidence.** Nothing here is chained or signed, so an
+operator with write access can remove a row. A hash-chained log is a different feature and
+is commercial (`docs/ROADMAP.md`); what this defends against is a delete that no record was
+ever written for.
 ### `write/reconcile.py`
 
 ```python
@@ -155,9 +339,11 @@ so.
 class WritePipeline:
     def __init__(self, store, embedder, registry, llm, *,
                  near_dup_threshold: float = 0.97,
-                 reinforce_bump: float = 0.25) -> None
+                 reinforce_bump: float = 0.25,
+                 reject_ungrounded: bool | str = "auto") -> None
 
     def add(self, episodes: Sequence[Episode]) -> WriteReceipt
+    def reextract(self, episodes: Sequence[Episode]) -> WriteReceipt
     def assert_claim(self, claim: Claim) -> WriteReceipt
 ```
 
@@ -176,6 +362,33 @@ including `llm_calls` (0 whenever the LLM is not consulted) and `latency_ms`:
   `llm.resolve_predicate(...)` per *new surface form*, cached via `registry.learn_alias`
   / `registry.learn` and persisted through `store.put_spec(spec, tenant)` so it is never
   asked again — including after a restart, and including by another process.
+
+  `reject_ungrounded` guards this tier's output, defaulting to `"auto"`: a proposed
+  claim whose object shares not one content word with the episode it cites is a
+  fabrication candidate, and the embedder then gets a veto — kept if the best
+  chunk-cosine against the source reaches `_GROUNDING_RESCUE_COSINE` (0.40, measured;
+  the constant's docstring carries the distributions), refused and counted on
+  `receipt.ungrounded` otherwise. `True` is the lexical check alone; `False` is off.
+  Only model-proposed claims are ever checked — `remember()` and the fast path do not
+  pass through `_claim_from_dict` — and the reason the default is on rather than off is
+  that the destructive direction is storing: a fabricated value in a ONE-cardinality
+  slot supersedes and ends the true fact that was there. It remains a precision filter
+  for wholesale fabrication only — a claim that reuses real vocabulary with an inverted
+  or misattributed meaning passes clean — and an embedder failure during the rescue
+  fails open, keeping the claim and warning once. Under the default `HashingEmbedder`
+  nothing is ever rescued (n-gram cosines on zero-overlap pairs measure 0.0–0.11,
+  far under the floor), so `"auto"` degrades to the strict check there.
+
+`reextract()` is `add()` with tier 0 removed, for turns already in the store: a
+deployment that ran without a model, or a batch a provider failure left `deferred`. Tier 1
+runs and runs first, because the gate is free and the model is not — `add()` commits
+episodes *before* gating them, so chitchat in the store is indistinguishable from an
+unextracted fact from the outside. An episode that already has claims is skipped and
+counted on `receipt.already_extracted`: re-reading stored text is not new evidence, but an
+identical claim reconciles to `reinforce`, so a sweep run twice would silently promote what
+it had already stored. `Memvara.pending_extraction()` is the work list and applies the same
+gate; what it cannot see is a turn a model read and declined, so `reextract()` reports what
+it read on `receipt.episode_ids` and the caller feeds those back as `exclude=`.
 
   Resolution, not classification, is the point. Asking "what cardinality is this?" lets
   `works_at`, `employed_by_company`, `job_employer` and `workplace` become four separate
@@ -226,7 +439,10 @@ class HybridRetriever:
     def __init__(self, store, embedder, registry, *,
                  w_vector: float = 1.0, w_lexical: float = 1.0, rrf_k: int = 60,
                  w_recency: float = 0.25, w_confidence: float = 0.15,
-                 w_salience: float = 0.10, candidate_multiplier: int = 5) -> None
+                 w_salience: float = 0.10, candidate_multiplier: int = 5,
+                 w_graph: float = 0.0, graph_seeds: int = 5, graph_depth: int = 2,
+                 w_temporal: float = 0.0, traverser: GraphTraverser | None = None,
+                 intent_weighting: bool = True) -> None
 
     def search(self, query: str, scope: Scope, *, k: int = 10,
                as_of: datetime | None = None, valid_at: datetime | None = None,
@@ -250,6 +466,93 @@ Search must:
   we last heard something, and that is a question about the belief clock;
 - populate `Explanation` on every `Result` — per-retriever rank and raw score, the fusion
   score, each scoring factor, and the final score. A result with no explanation is a bug.
+
+#### The third leg
+
+At `w_graph > 0` a graph leg runs **after** the first fusion and the whole list is fused
+again, three-way. It cannot run before: its seeds are the folded entity keys of the
+best-scoring claims (`retrieve/spread.seed_keys`), which is Zep's φ_bfs and is the
+decision that keeps the leg cheap — no entity extractor over free-text queries, and no
+second vocabulary to disagree with the store's.
+
+The leg must:
+- **seed on content, not on ids.** The fused order breaks ties on the item id and a claim
+  id is a `uuid4` minted at ingest, so seeding straight off it would make which entities
+  get walked a property of which ingest ran. `seed_keys` re-sorts on `value_key`. The
+  same rule binds the store underneath: **every `ORDER BY` that sits above a `LIMIT`
+  ends in a content key before `id`** — `s, value_key, id` for claims, `s, hash, id` for
+  turns, `ABS(ts - anchor), hash, id` for `episodes_near`. Without it the tie is settled
+  by rowid, and because the cap is in the same statement that decides which rows come
+  back at all, not merely how they are arranged;
+- **bound seeds by key count**, not by claim count: the key list is what reaches
+  `Store.adjacent`, and frontier width is what a hop costs;
+- **pass `valid_at`/`known_at` through unchanged**, so the walk pins the pair `search()`
+  was asked about (invariant 6) rather than reading the clock again;
+- **run only when `live` is among the wanted `states`.** `Store.adjacent` walks the live
+  edges at the pinned instant and cannot be asked for anything else, so every row this
+  leg can produce belongs to the live population. Gated, not post-filtered: a post-filter
+  would have to test `claim.state`, which is the state *now*, and at a historical
+  `known_at` the lookup legs correctly return rows that were live then;
+- **take the best path's score per claim**, never the sum — a path score is a relevance,
+  and summing would rank a hub on nine weak chains above a claim on one strong one;
+- **collect one path per *undirected* identity** (`Path.undirected`), before `k` is
+  spent rather than after. `seed_keys` emits both ends of each top-ranked claim, so the
+  same row read from two ends is the normal case for the head of the list. The dedup is
+  at collection only — the frontier keeps both readings, because they extend to
+  different places;
+- **abstain, not vote zero, when it did not run.** `_Legs.graph_active` is the same
+  distinction the other two legs carry, and it is what keeps a two-leg query from being
+  scored as though a third leg had rejected everything;
+- **degrade rather than raise.** `RemoteStore.adjacent` exists and raises, so a `getattr`
+  guard cannot see it: the `NotImplementedError` is caught, `DegradedRetrievalWarning`
+  fires once per retriever, and the leg stays off for that retriever's life.
+
+#### The fourth leg
+
+At `w_temporal > 0` a fourth leg runs over **raw turns**: `Store.episodes_near` returns
+the `limit` turns closest to the anchor, nearest first, and `retrieve/temporal.py` turns
+their timestamps into an absolute [0, 1] closeness. The anchor is `valid_at`, else
+`known_at`, else now — **given, never parsed**, because a date parser on the read path is
+a second extractor answering a question the caller who wrote `valid_at=` already answered.
+
+Episodes and not claims: a claim carries a predicate-keyed half-life, which knows what raw
+proximity cannot — whether a fact from 2019 is stale. A `born_in` from 2019 is as current
+as it will ever be.
+
+Two properties are load-bearing.
+
+- **The sort and the cap are one SQL statement.** Design invariant 7. Listing a scope's
+  turns and dropping the ones after `valid_at` in Python filters a page the store already
+  truncated, so a time-travel query comes back short with nothing saying it was partial.
+- **The leg abstains when nothing is within a half-life of the anchor.** Measured: without
+  it, a query with no instant anchors on *now*, an archival corpus scores every turn at
+  ~0.005 proximity, and fusion — which reads positions — still takes rank 0, rank 1, rank
+  2 from it. That cost 2.4 points of LongMemEval temporal-reasoning R@12. The vector and
+  lexical legs have had the same guard from the start.
+
+#### `retrieve/intent.py`
+
+```python
+def classify(query: str) -> Intent          # lookup | temporal | relational | open
+def weights(intent, *, vector, lexical, graph) -> tuple[float, float, float]
+```
+
+Deterministic, model-free, and read off the *raw* tokens rather than `analyze()`'s terms —
+`when`, `whose`, `between` are all stopwords, and they are exactly the words that say what
+kind of question this is. The classes are checked in priority order, not as a taxonomy:
+time first, because a wrong instant is wrong in a way extra recall does not repair.
+
+`MULTIPLIERS` scales the *configured* weights rather than replacing them, so a deployment
+that tuned `w_vector` keeps its tuning. Every entry is 1.0 except the graph column, where
+`lookup` and `temporal` are 0.0 — and that zero is a **gate**, checked before the traverser
+is called, so those queries pay nothing rather than paying for a walk that is then
+multiplied away. `intent_weighting=False` runs every query at the configured weights and
+leaves `Explanation.intent` unset, which is how a ranking difference is attributed to this
+stage rather than argued about.
+
+Any multiplier that is not 1.0 must come from a per-category sweep recorded in
+`docs/BENCHMARKS.md`. A number picked because it sounds right is a ranking change with no
+evidence behind it.
 
 ### `retrieve/traverse.py`
 
@@ -319,10 +622,15 @@ class Memvara:
   can influence a parameter. `states=["retired"]` is the sharper form: a prompt built from
   nothing but the records we stopped believing. Time travel and audit reads stay on
   `search()`;
-- flatten every rendered line through `_safe_line`, which collapses whitespace and strips
-  leading list and heading markers, so stored text cannot open its own bullet list or
-  repeat a header and forge a block indistinguishable from the real one. Episodes are
-  additionally truncated to `RECALL_EPISODE_CHARS`;
+- flatten every rendered line through `_safe_line`, which collapses whitespace, strips
+  leading list and heading markers, and maps `[`/`]` to their fullwidth forms
+  (`_FORGEABLE`), so stored text cannot open its own bullet list, repeat a header, or
+  finish a line with something that parses as the next result row. The first two defend
+  the gaps *between* lines; the third defends the rest of the line a claim is already on,
+  which ordering metadata-first cannot reach. `memvara/server/tools.py:safe_line` calls
+  this method rather than reimplementing it — it was a copy once, the two sets drifted,
+  and the same stored value was then neutralised differently depending on which surface
+  replayed it. Episodes are additionally truncated to `RECALL_EPISODE_CHARS`;
 - keep the three blocks in order — claims, then history, then episodes — each under its own
   header, and emit a header only when its block is non-empty;
 - under `budget=`, **drop whole notes and never part of one**, filling downward from the
@@ -515,6 +823,30 @@ of `_live_clause` and is held to the same wording clause for clause. Three copie
 predicate is three chances to disagree; `tests/test_bitemporal.py` checks the Python one
 against the SQL one row for row.
 
+### Erasure removes the bytes, not just the rows
+
+Two settings, covering two different halves, and neither is SQLite's default.
+
+`PRAGMA secure_delete=ON` (in `SCHEMA`, so it applies to every writer connection) covers
+ordinary tables: without it a deleted row's bytes sit in a free page, readable in the file.
+
+FTS5's own `secure-delete` option (set once in `_migrate_to_v7`, persistent in the table's
+config) covers the text indexes, and this is the half that is easy to miss.
+`DELETE FROM claims_fts` does **not** remove the document's terms — FTS5 writes a delete
+marker and keeps the terms as *live rows* in the `claims_fts_data` shadow table. They are
+not residue in freed space, so `VACUUM` never reclaimed them, and an erased claim's words
+stayed in the file indefinitely while `erase_claim` reported per-table counts as evidence.
+
+The option is not retroactive, which is why the migration also runs one `optimize`: only a
+merge discards what the existing markers hide.
+
+Anything testing this must **read the file**, not query the store. Every query already
+answered correctly — that is precisely why it went unnoticed. See
+`tests/test_erasure_residue.py`.
+
+The remaining residue is the write-ahead log, which a checkpoint or a clean `close()`
+clears. `SECURITY.md` states that as the boundary.
+
 ### `stats()`
 
 ```python
@@ -549,6 +881,96 @@ one-column test is still valid SQL and still valid Python, it used to be right, 
 now over-counts with nothing to raise. [`docs/UPGRADING.md`](UPGRADING.md) carries the
 grep list for finding copies of it.
 
+### The store-level graph gate
+
+`HybridRetriever` closes the graph leg — after the intent weighting, so it can undo what
+`classify` opened — when `connectivity()` says nothing in the tenant chains. The condition
+is `joinable_claims == 0`, not a threshold: a store with literally no joins provably has
+nowhere for a walk to go, whereas any percentage picked from the two corpora that exist
+would be a constant fitted to two points.
+
+**Why the leg hurts on such a store**, given that `joinable_claims == 0` does not stop the
+walk returning rows. It stops it returning *paths*. At depth 1 it still fans out from
+whichever hub the seeds share and returns other claims about it, ranked by a path score
+that is near-uniform when every path is one hop — and fusion reads positions. Measured on
+LongMemEval: 1.6 points of single-session-user R@12, and `graph_depth=1` and `2` cost
+exactly the same, so all of it is the fan-out and none of it is the second hop.
+
+**Placement is the design.** The second-chance rule in `_gather` can only widen: its guard
+is `weights.graph <= 0.0 < self.w_graph`. A veto wired into it returned False on all 802
+of LongMemEval's gate calls and the run still lost the same 1.6 points, because `classify`
+had already opened the leg. The gate therefore sits after `intent_weights`, not inside it.
+
+`_store_has_joins` caches per tenant and re-measures every `GATE_RECHECK_EVERY` searches,
+on a counter rather than a clock — a retriever that behaved differently at 3am would be
+untestable, and this repository pins `now=` everywhere for that reason. The staleness is
+one-directional: a store that gains joins stays gated for at most that many searches,
+which degrades to `w_graph=0.0`, the shipped default. It cannot fail the other way,
+because claims do not un-join except by retirement and the liveness predicate already
+excludes those.
+
+`{}` keeps the leg. A backend without `connectivity`, or a hosted facade too old to report
+the counts, has not measured anything — and reading that as "no joins" would switch a
+working graph leg off on every third-party store at once.
+
+### `connectivity()`
+
+```python
+{"live_claims", "joinable_claims"}
+```
+
+A separate method, and separate on purpose. `joinable_claims` counts live claims whose
+`object_key` is the `subject_key` of another live claim; the ratio against `live_claims`
+is the **join rate**, which is the number that decides whether `read_w_graph > 0` can
+pay for itself.
+
+It is not in `stats()` because `Memvara.__repr__` calls `stats()`, and the join is a
+semi-join over the whole claim table — about 60 ms on 26,403 claims against that call's
+69 ms, so folding it in would roughly double the cost of printing a store.
+
+**The spelling is load-bearing, and the reason is not the one this section first gave.**
+`IN (SELECT ...)` is chosen over `EXISTS (SELECT ...)` because the method takes
+`tenant: str | None` and only `IN` is fast for both. Median on 26,403 claims:
+
+| form | `tenant='2wiki'` | `tenant=None` |
+|---|---:|---:|
+| `IN`, uncorrelated | 39 ms | 34 ms |
+| `EXISTS`, correlated | **27 ms** | **42,302 ms** |
+
+`EXISTS` is the faster form when it has an index and unusable when it does not. It
+correlates on `c.object_key`, so it runs per outer row, and whether that is cheap depends
+on `cl_subj` — which is `(tenant, subject_key, invalidated_at)`. A composite index is only
+usable from its leading column, so the subquery reaches it only when `tenant` is bound.
+`EXPLAIN QUERY PLAN` shows `SEARCH d USING INDEX cl_subj (tenant=? AND subject_key=?)`
+in one case and a bare `SCAN d` in the other: 26,401 rows visited 26,401 times.
+
+`IN` does not correlate. SQLite evaluates the subquery once into a transient list behind a
+bloom filter, index or no index, so it gives up 12 ms on the tenant path to be immune on
+the other. **The rule is not "correlated subqueries are slow"** — it is that a correlated
+subquery inherits its index's leading column as a requirement, and an optional `tenant`
+cannot always supply one.
+
+Both sides of the join must be edges the traverser would follow: the liveness
+predicate, for `adjacent`'s reason that a path through a retired claim is not a path,
+plus `GraphTraverser._edges`' three rules — no negations, no empty ends, no self-loops.
+`_WALKABLE` in `store/sqlite.py` is those three written once, because a rate built from
+edges the walk refuses is a rate that promises hops which will not happen. The
+denominator stays `live_claims`: a leaf is an answer to "what share of this leads
+somewhere", not a row to exclude.
+
+It is in `OMITTABLE`. A backend that leaves it out costs `memory_stats` its join-rate
+line and nothing else; retrieval is unaffected. `Memvara.connectivity()` returns `{}` in
+that case, which is **not** `{"live_claims": 0, "joinable_claims": 0}` — the first is a
+backend that did not look, the second is a measured star, and only the second is a
+finding.
+
+Why the distinction earns a method at all: every claim is already an edge, so "is this
+store a graph" is always yes and predicts nothing. Connectivity is what varies. Measured
+on the two public corpora with identical retrieval code, 2Wiki joins at 40.6% and the
+graph leg takes chained questions from 28.3% to 42.1%; LongMemEval joins at **0.0%** —
+one subject, 78 leaf objects, no two-hop path in the store at all — and the leg loses 1.6
+points. See [`docs/BENCHMARKS.md`](BENCHMARKS.md).
+
 `invalidate()` and `set_valid_to()` are in `Store` and **no engine path calls either**.
 Closing a claim moves one clock; `invalidate` writes `invalidated_at` and
 `invalidated_by` together, which is the conflation that was removed, and `set_valid_to`
@@ -567,7 +989,8 @@ class Consolidator:
     def decay(self, tenant: str | None = None, now: datetime | None = None) -> int
     def merge_duplicates(self, tenant: str | None = None, threshold: float = 0.97) -> int
     def promote(self, tenant: str | None = None, min_observations: int = 3) -> int
-    def run(self, tenant: str | None = None) -> dict[str, int]
+    def run(self, tenant: str | None = None,
+            now: datetime | None = None) -> dict[str, int]
 ```
 
 - `decay` multiplies `salience` by the predicate's recency factor, floored at `0.05` so
@@ -579,7 +1002,10 @@ class Consolidator:
 - `promote` turns a repeatedly-observed `EPISODIC` claim into a `SEMANTIC` one: seeing
   something happen once is an event, seeing it `min_observations` times is a pattern.
   The promoted claim gets `derivation=Derivation.CONSOLIDATION`.
-- `run` executes all three and returns the per-stage counts.
+- `run` executes all three and returns the per-stage counts. `now` defaults to the wall
+  clock, read once for the whole pass. Pass it to evaluate two passes at the same instant:
+  the decay target depends on that instant, so a claim sitting within a pass-duration of a
+  rounding boundary otherwise changes on the second call.
 
 All counts are "number of claims affected". These run off the write path.
 

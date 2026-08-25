@@ -7,6 +7,12 @@ for `openai`. The loopback HTTP listener is real — it is a plain stdlib `HTTPS
 to `127.0.0.1` on an OS-chosen port, which is not "the network" in the sense the gate cares
 about (no DNS, no remote host, no sleep beyond what the polling loop itself needs) — but
 `webbrowser.open` is always stubbed out so no test ever launches a real browser.
+
+`_CREDENTIALS_PATH` is redirected to tmp_path for every test. A successful
+login writes that file, and leaving it at ~/.memvara/credentials.json used
+to overwrite a real 0600 API key with the fixture `key-123` whenever a test
+forgot to opt in. Isolation of the network, the browser and the loopback
+listener was never the missing piece.
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ import io
 import json
 import sys
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -42,6 +49,7 @@ class FakeClient:
     def __init__(self, responses: dict[str, list[FakeResponse]]) -> None:
         self._responses = responses
         self.calls: list[tuple[str, dict]] = []
+        self.init_kwargs: dict = {}
 
     def post(self, url: str, json: dict) -> FakeResponse:  # noqa: A002 - matches httpx's kw
         self.calls.append((url, json))
@@ -67,7 +75,12 @@ def _install_fake_httpx(monkeypatch, responses: dict[str, list[FakeResponse]]) -
     import httpx
 
     client = FakeClient(responses)
-    monkeypatch.setattr(httpx, "Client", lambda *a, **kw: client)
+
+    def factory(*a, **kw):
+        client.init_kwargs = kw
+        return client
+
+    monkeypatch.setattr(httpx, "Client", factory)
     return client
 
 
@@ -78,6 +91,14 @@ def _no_browser(monkeypatch) -> None:
 def _no_loopback(monkeypatch) -> None:
     """Simulate a sandboxed environment where binding 127.0.0.1 fails."""
     monkeypatch.setattr(login_module, "_bind_loopback_listener", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _credentials_in_tmp(tmp_path, monkeypatch):
+    """Login writes this path on success. Redirecting it used to be opt-in,
+    and every test that forgot overwrote ~/.memvara/credentials.json with
+    the fixture key. Three real files so far."""
+    monkeypatch.setattr(login_module, "_CREDENTIALS_PATH", tmp_path / "credentials.json")
 
 
 AUTH_BODY = {
@@ -132,6 +153,22 @@ def test_equals_form_is_accepted(monkeypatch):
     status = login(["--project=proj"], env={}, stdout=out, stderr=err)
     assert status == 0
     assert client.calls[0][1]["project"] == "proj"
+
+
+def test_the_httpx_client_sends_the_csrf_header_the_hosted_console_requires(monkeypatch):
+    """Unauthenticated POSTs without `X-Memvara-CSRF` are 403 `csrf_failed` on
+    the hosted console. Presence is the whole check when there is no session,
+    which this process never has — login used to omit the header and never
+    started."""
+    _no_browser(monkeypatch)
+    _no_loopback(monkeypatch)
+    client = _install_fake_httpx(monkeypatch, {
+        "device/authorize": [FakeResponse(200, AUTH_BODY)],
+        "device/token": [FakeResponse(200, approved())],
+    })
+    assert login(["--project", "proj"], env={}, stdout=io.StringIO()) == 0
+    headers = client.init_kwargs.get("headers") or {}
+    assert headers.get("X-Memvara-CSRF")
 
 
 # -- server URL resolution --------------------------------------------------------------
@@ -197,6 +234,19 @@ def test_authorize_non_200_is_a_login_failure(monkeypatch):
     assert "unknown_project" in err.getvalue()
 
 
+def test_authorize_201_is_success(monkeypatch):
+    """The hosted console answers 201 Created for a minted grant. The client
+    used to treat anything other than 200 as refusal, so a successful
+    authorize never reached the poll."""
+    _no_browser(monkeypatch)
+    _no_loopback(monkeypatch)
+    _install_fake_httpx(monkeypatch, {
+        "device/authorize": [FakeResponse(201, AUTH_BODY)],
+        "device/token": [FakeResponse(200, approved())],
+    })
+    assert login(["--project", "proj"], env={}, stdout=io.StringIO()) == 0
+
+
 def test_authorize_error_body_that_is_not_json_falls_back_to_text(monkeypatch):
     _no_browser(monkeypatch)
     _no_loopback(monkeypatch)
@@ -207,6 +257,29 @@ def test_authorize_error_body_that_is_not_json_falls_back_to_text(monkeypatch):
     status = login(["--project", "proj"], env={}, stdout=io.StringIO(), stderr=err)
     assert status == 1
     assert "upstream error" in err.getvalue()
+
+
+def test_an_upstream_error_page_does_not_land_whole_in_the_log(monkeypatch):
+    """A gateway answering with HTML is the ordinary shape of this failure.
+
+    Unlike the tool surface this reaches a terminal rather than a model, so the risk is
+    volume: a login run in CI writes stderr into a build log, and on a public repository
+    that log is public. The cut keeps the part that says what went wrong, which is what
+    the operator ran the command for — a short body, like the test above, is untouched.
+    """
+    _no_browser(monkeypatch)
+    _no_loopback(monkeypatch)
+    _install_fake_httpx(monkeypatch, {
+        "device/authorize": [FakeResponse(502, "<html><body>" + "x" * 5000)],
+    })
+    err = io.StringIO()
+    status = login(["--project", "proj"], env={}, stdout=io.StringIO(), stderr=err)
+
+    assert status == 1
+    body = err.getvalue()
+    assert len(body) < 500, f"a 5,000-character error page reached the log: {len(body)}"
+    assert "502" in body and "<html>" in body, "the diagnosis survives the cut"
+    assert "…" in body, "and it says it was cut"
 
 
 # -- browser handling ---------------------------------------------------------------
@@ -242,12 +315,11 @@ def test_browser_launch_raising_is_treated_as_not_opened(monkeypatch):
 
 # -- the polling loop: every RFC 8628 status -----------------------------------------
 
-def _run(monkeypatch, poll_responses, *, tmp_path, no_loopback=True):
+def _run(monkeypatch, poll_responses, *, no_loopback=True):
     if no_loopback:
         _no_loopback(monkeypatch)
     _no_browser(monkeypatch)
     monkeypatch.setattr(login_module.time, "sleep", lambda s: None)
-    monkeypatch.setattr(login_module, "_CREDENTIALS_PATH", tmp_path / "credentials.json")
     client = _install_fake_httpx(monkeypatch, {
         "device/authorize": [FakeResponse(200, AUTH_BODY)],
         "device/token": poll_responses,
@@ -258,8 +330,7 @@ def _run(monkeypatch, poll_responses, *, tmp_path, no_loopback=True):
 
 
 def test_approved_on_the_first_poll_writes_credentials(monkeypatch, tmp_path):
-    status, out, err, client = _run(monkeypatch, [FakeResponse(200, approved())],
-                                    tmp_path=tmp_path)
+    status, out, err, client = _run(monkeypatch, [FakeResponse(200, approved())])
     assert status == 0
     path = tmp_path / "credentials.json"
     assert "Signed in" in out
@@ -276,52 +347,70 @@ def test_approved_on_the_first_poll_writes_credentials(monkeypatch, tmp_path):
         assert oct(path.stat().st_mode)[-3:] == "600"
 
 
-def test_authorization_pending_is_polled_again(monkeypatch, tmp_path):
+def test_a_successful_login_does_not_rewrite_the_home_credentials_file(monkeypatch,
+                                                                      tmp_path):
+    """`~/.memvara/credentials.json` is 0600 and holds a live API key. This
+    file used to write the fixture `key-123` over it whenever a test reached
+    `_write_credentials` without an opt-in redirect — which was most of them.
+    """
+    home_creds = Path.home() / ".memvara" / "credentials.json"
+    before = home_creds.read_bytes() if home_creds.is_file() else None
+    _no_browser(monkeypatch)
+    _no_loopback(monkeypatch)
+    _install_fake_httpx(monkeypatch, {
+        "device/authorize": [FakeResponse(200, AUTH_BODY)],
+        "device/token": [FakeResponse(200, approved())],
+    })
+    assert login(["--project", "proj"], env={}, stdout=io.StringIO()) == 0
+    written = tmp_path / "credentials.json"
+    assert json.loads(written.read_text())["api_key"] == "key-123"
+    after = home_creds.read_bytes() if home_creds.is_file() else None
+    assert after == before
+    assert login_module._CREDENTIALS_PATH == written
+
+
+def test_authorization_pending_is_polled_again(monkeypatch):
     status, out, err, client = _run(monkeypatch, [
         FakeResponse(400, {"error": "authorization_pending"}),
         FakeResponse(200, approved()),
-    ], tmp_path=tmp_path)
+    ])
     assert status == 0
     assert len(client.calls) == 3  # authorize + 2 polls
 
 
-def test_slow_down_increases_the_interval_and_keeps_polling(monkeypatch, tmp_path):
+def test_slow_down_increases_the_interval_and_keeps_polling(monkeypatch):
     status, out, err, client = _run(monkeypatch, [
         FakeResponse(400, {"error": "slow_down"}),
         FakeResponse(200, approved()),
-    ], tmp_path=tmp_path)
+    ])
     assert status == 0
 
 
-def test_access_denied_is_a_terminal_failure(monkeypatch, tmp_path):
+def test_access_denied_is_a_terminal_failure(monkeypatch):
     status, out, err, client = _run(monkeypatch,
-                                    [FakeResponse(400, {"error": "access_denied"})],
-                                    tmp_path=tmp_path)
+                                    [FakeResponse(400, {"error": "access_denied"})])
     assert status == 1
     assert "denied in the browser" in err
 
 
-def test_expired_token_is_a_terminal_failure(monkeypatch, tmp_path):
+def test_expired_token_is_a_terminal_failure(monkeypatch):
     status, out, err, client = _run(monkeypatch,
-                                    [FakeResponse(400, {"error": "expired_token"})],
-                                    tmp_path=tmp_path)
+                                    [FakeResponse(400, {"error": "expired_token"})])
     assert status == 1
     assert "expired" in err
 
 
-def test_an_unexpected_response_shape_is_reported_verbatim(monkeypatch, tmp_path):
+def test_an_unexpected_response_shape_is_reported_verbatim(monkeypatch):
     status, out, err, client = _run(monkeypatch,
-                                    [FakeResponse(200, {"status": "what"})],
-                                    tmp_path=tmp_path)
+                                    [FakeResponse(200, {"status": "what"})])
     assert status == 1
     assert "unexpected response" in err
 
 
-def test_a_poll_response_that_is_not_json_is_a_login_failure(monkeypatch, tmp_path):
+def test_a_poll_response_that_is_not_json_is_a_login_failure(monkeypatch):
     """Regression: `_poll_once` raising `_LoginFailed` used to escape `_poll`'s loop
     uncaught, crashing the process instead of reporting a normal exit-1 failure."""
-    status, out, err, client = _run(monkeypatch, [FakeResponse(200, "not json")],
-                                    tmp_path=tmp_path)
+    status, out, err, client = _run(monkeypatch, [FakeResponse(200, "not json")])
     assert status == 1
     assert "answer a poll" in err
 
@@ -369,7 +458,7 @@ def test_a_real_loopback_redirect_is_caught_as_a_hint(tmp_path):
     listener.server_close()
 
 
-def test_a_redirect_hint_caught_mid_poll_skips_the_sleep(monkeypatch, tmp_path):
+def test_a_redirect_hint_caught_mid_poll_skips_the_sleep(monkeypatch):
     """Drives the real listener through `login()` itself: a background thread hits the
     loopback callback while `_authorize` is in flight, so by the time `_poll`'s first
     `listener.handle_request()` runs, the hit is already queued and `redirect_hint_used`
@@ -378,7 +467,6 @@ def test_a_redirect_hint_caught_mid_poll_skips_the_sleep(monkeypatch, tmp_path):
     import threading
 
     _no_browser(monkeypatch)
-    monkeypatch.setattr(login_module, "_CREDENTIALS_PATH", tmp_path / "credentials.json")
     monkeypatch.setattr(login_module.time, "sleep", lambda s: None)
 
     class RedirectingClient(FakeClient):
@@ -400,11 +488,10 @@ def test_a_redirect_hint_caught_mid_poll_skips_the_sleep(monkeypatch, tmp_path):
     assert status == 0
 
 
-def test_login_completes_with_a_real_loopback_listener_bound(monkeypatch, tmp_path):
+def test_login_completes_with_a_real_loopback_listener_bound(monkeypatch):
     """End to end with the listener genuinely bound (no redirect ever sent to it) — the
     login still finishes from the poll alone, and the listener is closed afterwards."""
     _no_browser(monkeypatch)
-    monkeypatch.setattr(login_module, "_CREDENTIALS_PATH", tmp_path / "credentials.json")
     monkeypatch.setattr(login_module.time, "sleep", lambda s: None)
     _install_fake_httpx(monkeypatch, {
         "device/authorize": [FakeResponse(200, AUTH_BODY)],

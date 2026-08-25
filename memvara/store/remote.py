@@ -79,6 +79,22 @@ class RemoteStore:
     than the key's own, are asserted against it rather than silently ignored.
     """
 
+    #: The methods on this class that actually reach the API. Everything else on the
+    #: `Store` protocol raises, and the split is written down rather than left to be
+    #: discovered at the first write, because callers branch on it: see
+    #: `memvara.server.config.build_memvara`, which refuses to build a server whose engine
+    #: would run against a store this thin.
+    #:
+    #: A literal, and kept honest by a test rather than by care —
+    #: `tests/test_store_remote.py::test_the_wired_list_names_exactly_the_methods_that_do_
+    #: not_raise` calls every protocol method and compares. A name that drifts off this
+    #: list is the failure mode that matters: it would make the guard below think a
+    #: capability exists.
+    WIRED: frozenset[str] = frozenset({
+        "batch", "close", "connectivity", "erase_claim", "get_claim", "get_claims",
+        "purge", "stats",
+    })
+
     def __init__(self, base_url: str, api_key: str, *, timeout: float = 30.0) -> None:
         try:
             import httpx
@@ -303,6 +319,27 @@ class RemoteStore:
             why="No graph-traversal endpoint exists on the data plane today; "
                 "subject_key/object_key are not exposed or queryable over /v1."))
 
+    def episodes_near(self, anchor: datetime, scopes: Sequence[Scope], limit: int, *,
+                      valid_at: datetime | None = None,
+                      known_at: datetime | None = None) -> list[tuple[str, float]]:
+        raise NotImplementedError(_NO_ENDPOINT.format(
+            method="episodes_near",
+            why="No episode listing or search exists on the data plane today; turns are "
+                "server-internal and are not queryable over /v1."))
+
+    def residue(self, claim_id: str) -> dict[str, int]:
+        raise NotImplementedError(_NO_ENDPOINT.format(
+            method="residue",
+            why="Proving an erasure means counting rows on the storage that holds them, "
+                "and this facade holds none. A count relayed over HTTP would be the "
+                "server's word for it, which is the thing a proof is supposed to be "
+                "able to disagree with."))
+
+    def erasure_record(self, claim_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError(_NO_ENDPOINT.format(
+            method="erasure_record",
+            why="No erasure-audit endpoint exists on the data plane today."))
+
     def invalidate(self, claim_id: str, at: datetime, by: str | None) -> None:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="invalidate",
@@ -517,3 +554,30 @@ class RemoteStore:
                 "resolves tenant from the bearer token; there is no way to ask about a "
                 "different one from the same key.")
         return dict(result["tenant_counts"])
+
+    def connectivity(self, tenant: str | None = None) -> dict[str, int]:
+        """The two join-rate counts off `GET /v1/stats`, or `{}` from a facade too old
+        to report them.
+
+        `{}` rather than zeros, and the distinction is the whole point of the method. A
+        hosted store that has not deployed the counts yet is not a store with no joins in
+        it, and `memory_stats` prints a join rate only when it has actually been
+        measured — so an operator is never shown a 0.0% that came from an old facade
+        instead of from their data.
+
+        The tenant check is `stats()`'s, for `stats()`'s reason: the facade resolves
+        tenant from the bearer token, so a mismatched argument is a caller error rather
+        than a question the endpoint could answer.
+        """
+        result = self._request("GET", "/v1/stats")
+        if tenant is not None and tenant != result["scope"]["tenant"]:
+            raise ValueError(
+                f"RemoteStore.connectivity(tenant={tenant!r}) was asked about a tenant "
+                f"other than this API key's own ({result['scope']['tenant']!r}). The "
+                "facade resolves tenant from the bearer token; there is no way to ask "
+                "about a different one from the same key.")
+        counts = result["tenant_counts"]
+        if "joinable_claims" not in counts:
+            return {}
+        return {"live_claims": int(counts["live_claims"]),
+                "joinable_claims": int(counts["joinable_claims"])}
