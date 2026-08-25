@@ -141,7 +141,7 @@ cached forever. The thousandth occurrence costs nothing.
 
 Or say it yourself, and skip the acquisition entirely. `MEMVARA_PREDICATES` names one or
 more declared vocabularies — a shipped pack, a TOML file of your own, or a comma-separated
-mix — and `engineering` ships with the package:
+mix — and `engineering` and `decisions` ship with the package:
 
 ```bash
 MEMVARA_PREDICATES=engineering memvara-mcp          # or: engineering,decisions,./ours.toml
