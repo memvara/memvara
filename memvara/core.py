@@ -355,8 +355,7 @@ def _slot_lines(r: Reading, at: datetime) -> list[str]:
         # The sentence this method exists for. Both readings, and the day the difference
         # arrived — the earliest write this store had not yet seen at `at`, which is the
         # instant the record moved under the question.
-        arrived = min((as_utc(c.recorded_at) for c in r.timeline
-                       if as_utc(c.recorded_at) > at), default=None)
+        arrived = min(_moved_after(r.timeline, at), default=None)
         moved = ("" if arrived is None else
                  f" The difference was recorded {_when(arrived)},"
                  f" {(arrived - at).days} days after the instant you asked about.")
@@ -392,6 +391,32 @@ def _slot_lines(r: Reading, at: datetime) -> list[str]:
         lines.append(f"  Every value ever recorded for it has been retired"
                      f" ({len(r.timeline)} in all); memory_history shows them.")
     return lines
+
+
+def _moved_after(timeline: Sequence[Claim], at: datetime) -> list[datetime]:
+    """Every instant after `at` at which this slot's record changed.
+
+    **Both clocks stamp a change, and reading only one of them dates the wrong event.**
+    A claim arriving is `recorded_at`; a claim being retired is `invalidated_at`, which is
+    itself a belief-clock instant and is the whole of what a retirement records. A
+    supersession needs no third case — it is dated by the successor's `recorded_at`, which
+    the first already covers.
+
+    Missing the second was a wrong answer rather than an omission. Rome recorded in
+    January, retired on 1 March, Oslo written on 1 April: asked about February, the
+    divergence between "what was true" and "what we would have said" is caused by the
+    retirement, and dating it from `recorded_at` alone reported 1 April — a month late,
+    attributed to a write that had nothing to do with it. Saying when the record moved is
+    what `ask()` is for, so that sentence being wrong is the method failing at its one job.
+
+    `valid_to` is deliberately not here. It is the world clock: it dates when a fact
+    stopped being true, not when this store came to believe it had, and the successor's
+    `recorded_at` is already the instant that belief was written.
+    """
+    moved = [as_utc(c.recorded_at) for c in timeline if as_utc(c.recorded_at) > at]
+    moved += [as_utc(c.invalidated_at) for c in timeline
+              if c.invalidated_at is not None and as_utc(c.invalidated_at) > at]
+    return moved
 
 
 def _values(claims: Sequence[Claim]) -> str:

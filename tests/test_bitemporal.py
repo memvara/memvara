@@ -1012,6 +1012,28 @@ def test_the_narrative_names_both_readings_and_the_day_the_record_moved(correcte
     assert "recorded 2026-03-22, 7 days after the instant you asked about" in text
 
 
+def test_the_divergence_is_dated_by_a_retirement_and_not_by_the_next_write(mem):
+    """Both clocks stamp a change and reading only one dates the wrong event.
+
+    Rome recorded in January, retired on 1 March, Oslo written on 1 April. Asked about
+    February, `then` and `stated` disagree *because of the retirement* — and dating that
+    from `recorded_at` alone reported 1 April, a month late, attributed to a write that
+    had nothing to do with it. Saying when the record moved is what this method is for,
+    so that sentence being wrong is the method failing at its one job.
+    """
+    mem.remember("user", "lives_in", "Rome", valid_from=JAN, recorded_at=JAN)
+    mem.forget("user", "lives_in", at=MAR)
+    mem.remember("user", "lives_in", "Oslo",
+                 valid_from=datetime(2026, 4, 1, tzinfo=TZ),
+                 recorded_at=datetime(2026, 4, 1, tzinfo=TZ))
+
+    text = mem.ask("where do they live?", at=datetime(2026, 2, 1, tzinfo=TZ)).text
+
+    assert "would have said Rome" in text
+    assert "recorded 2026-03-01" in text, "the retirement is what moved the record"
+    assert "2026-04-01" not in text, "Oslo's arrival did not cause this divergence"
+
+
 def test_ask_about_now_reports_the_lag_instead_of_a_divergence(corrected):
     """With no past instant to ask about there is no correction to report, and the two
     clocks can still be apart. Berlin was true from 1 March and invisible here until the
