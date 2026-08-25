@@ -133,6 +133,28 @@ MASSED_SHARE = 0.1
 #: A ratio rather than a fixed floor, because the comparison is between two claims and not
 #: against an absolute standard. A 0.30 candidate is a guess against a stated fact and an
 #: even match against a 0.50 one, and only a share can say both.
+#:
+#: **What this does not cover, said plainly because the wording above invites the wrong
+#: inference.** It catches a claim whose extractor marked it a *guess*. It does not stop
+#: the extraction tier displacing a stated fact in general: 0.70 is the documented default
+#: for an extraction whose model gave no figure, and `0.70 >= 0.5 * 1.00`, so a mined
+#: paraphrase still closes a claim a person asserted at 1.00 and still stamps it `ended`.
+#: Measured, not reasoned: on a `Cardinality.ONE` predicate, 0.70 against 1.00 closes it
+#: and 0.49 does not.
+#:
+#: That is deliberate and the alternative is worse. Raising the share far enough to block
+#: 0.70 against 1.00 would stop the store learning from conversation at all — "I moved to
+#: Lisbon" arrives as an extraction and has to be able to end a fact written last year,
+#: which is what `test_an_ordinary_supersession_between_comparable_claims_still_supersedes`
+#: exists to hold. The rule arbitrates *marked* uncertainty, and an extraction that
+#: reports no uncertainty is not marked.
+#:
+#: So the case where a well-founded-looking paraphrase outranks something the user stated
+#: outright is **not** this rule's to solve, and reading it as protection against that is
+#: the mistake this paragraph exists to prevent. On a `MANY` predicate — where standing
+#: preferences live — nothing is displaced either way and both values stay live, so what
+#: goes wrong there is *ranking*, not displacement. That is issue #62: `recall()` renders
+#: no per-row confidence, so a mined guess reads like a stated fact.
 AUTHORITY_SHARE = 0.5
 
 

@@ -35,6 +35,13 @@ caller named, before the reconciler weighs anything, so the rule does not reach 
 it arbitrates an inference the write path drew, and naming the row to close is not one.
 Worth knowing before auditing a store on the strength of this entry.
 
+**It catches a marked guess, not the extraction tier.** 0.70 is the default for an
+extraction whose model gave no figure, and `0.70 >= 0.5 * 1.00` — so a mined paraphrase
+still closes a fact a person stated at 1.00. That is deliberate: blocking it would stop
+the store learning from conversation. If what you are worried about is a paraphrase
+outranking something the user said outright, that is a *ranking* question and lives in
+issue #62, not here.
+
 **What you were losing before is worse than what you lose now.** The displaced claim was
 stamped `ended`, which in this library asserts that the world changed. A guess that
 collided with a known fact recorded a world event that never happened, on the axis whose

@@ -110,6 +110,37 @@ def test_the_readme_walkthrough_holds_end_to_end(mem):
                                                           ("Lisbon", "live")]
 
 
+def test_the_readme_ask_example_prints_what_the_readme_says_it_prints(mem):
+    """The README quotes three lines of `ask()` output, and quoted output is a claim.
+
+    Every other block in that section is illustrative and shows no result, so it carries
+    nothing to falsify. This one does, and the wording it quotes has already moved twice
+    in one afternoon — once to fold the day count into the divergence sentence, once to
+    date it from `invalidated_at` rather than the next write. Both were correct changes
+    and either would have silently falsified the README, because
+    `test_the_readme_walkthrough_holds_end_to_end` is a hand-transcribed copy of the
+    *opening* example and reaches nothing down here.
+
+    Asserted line by line rather than against one blob so a failure names the sentence
+    that moved.
+    """
+    rome = datetime(2026, 1, 4, tzinfo=timezone.utc)
+    berlin_from = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    berlin_recorded = datetime(2026, 3, 22, tzinfo=timezone.utc)
+    mem.remember("user", "lives_in", "Rome", valid_from=rome, recorded_at=rome)
+    mem.remember("user", "lives_in", "Berlin", valid_from=berlin_from,
+                 recorded_at=berlin_recorded)
+
+    text = mem.ask("where do they live?",
+                   at=datetime(2026, 3, 15, tzinfo=timezone.utc)).text
+
+    assert "user lives_in: Berlin." in text
+    assert "On 2026-03-15 this store would have said Rome, and that is what anyone " \
+           "acting on it then acted on." in text
+    assert "The difference was recorded 2026-03-22, 7 days after the instant you asked " \
+           "about." in text
+
+
 def test_multi_valued_predicates_accumulate(mem):
     mem.remember("user", "likes", "coffee")
     mem.remember("user", "likes", "tea")

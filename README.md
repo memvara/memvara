@@ -50,7 +50,25 @@ mem.get_all(as_of=T)      # both clocks at T — what we believed at T, about T
 
 The middle two are the ones a single instant cannot ask. A correction that arrives in
 August about June is invisible to `as_of=June`, because that call rewinds the belief
-clock past the correction; `valid_at=June` is how you see it. Every read that took
+clock past the correction; `valid_at=June` is how you see it.
+
+`ask()` composes that difference into an answer, which is the question the two clocks
+exist for:
+
+```python
+mem.ask("where do they live?", at=datetime(2026, 3, 15, tzinfo=utc)).text
+
+# user lives_in: Berlin.
+#   On 2026-03-15 this store would have said Rome, and that is what anyone acting
+#   on it then acted on. The difference was recorded 2026-03-22, 7 days after the
+#   instant you asked about.
+```
+
+Three readings of every fact it touches — what is true now, what we believe today was
+true then, and what this store *would have answered* then. The last two differing means
+the record was corrected after the moment you asked about, so the answer somebody acted
+on is not the answer they would get today. No model is consulted; every sentence is
+rendered from a stored column. Every read that took
 `as_of` takes all three — `search`, `get_all`, `count`, `history`, `why`, `produced`,
 `neighborhood`, `paths_between` — and `as_of` is exact sugar for
 `valid_at=known_at=T`. Passing it alongside either axis raises rather than quietly
@@ -336,7 +354,7 @@ Memvara is built around the observation that **most of this doesn't need a model
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 3,536 tests, offline, no API key
+python3 -m pytest -q                              # 3,539 tests, offline, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/temporal.py            # the two clocks, six families
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison

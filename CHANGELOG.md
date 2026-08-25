@@ -9,6 +9,23 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The authority rule's documentation invited the wrong inference, and now says what it
+  does not cover.** `AUTHORITY_SHARE` was introduced around "a 0.10-confidence guess
+  replaced a 1.00-confidence statement", which is true and is not the common case. 0.70 is
+  the documented default for an extraction whose model gave no figure, and
+  `0.70 >= 0.5 * 1.00` — so on a single-valued predicate a mined paraphrase still closes a
+  fact a person asserted outright, and still stamps it `ended`. Measured: 0.70 against 1.00
+  closes it, 0.49 does not.
+
+  That stays, because the alternative is worse — raising the share far enough to block it
+  would stop the store learning from conversation, which "I moved to Lisbon" depends on.
+  What changes is that the boundary is now stated, and pinned by a test rather than a
+  sentence. The related case, a paraphrase *outranking* a stated preference on a
+  multi-valued predicate, is not this rule's to solve: nothing is displaced there and both
+  values stay live, so what goes wrong is ranking. That is issue #62.
+
 ### Added
 
 - **`split_entity` — one surface form that has been two different things.** The inverse of

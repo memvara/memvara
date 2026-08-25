@@ -507,6 +507,24 @@ def test_an_ordinary_supersession_between_comparable_claims_still_supersedes(rec
     assert live_objects(store, res.claim) == ["Lisbon"]
 
 
+def test_the_extraction_default_still_displaces_a_stated_fact(rec, store):
+    """The case the rule does **not** cover, pinned so the docstring cannot drift from it.
+
+    0.70 is the documented default for an extraction whose model gave no figure, and
+    `0.70 >= 0.5 * 1.00`, so a mined paraphrase still closes a fact a person asserted at
+    1.00. Reading `AUTHORITY_SHARE` as protection against that is the wrong inference, and
+    it is the one a reader actually draws — so the boundary is a test rather than a
+    sentence. Blocking it would stop the store learning from conversation, which the
+    comparable-claims test above holds.
+    """
+    stated = rec.apply(claim("lives_in", "Lisbon", confidence=1.00)).claim
+    res = rec.apply(claim("lives_in", "Porto", confidence=0.70))
+
+    assert res.action == "supersede"
+    assert res.disputed == []
+    assert store.get_claim(stated.id).state == "ended"
+
+
 @pytest.mark.parametrize("candidate, displaces", [
     (0.50, True),    # exactly the share: an even match closes
     (0.49, False),   # just under it
