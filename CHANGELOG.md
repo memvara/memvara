@@ -11,6 +11,39 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 Nothing yet.
 
+## [0.4.1] — 2026-08-25
+
+### Changed
+
+- **`memvara@0.0.3` on npm — the listing now describes the product, not just its
+  absence.** 0.0.2 spent its whole description saying what the package is not, which
+  is honest and is also the least useful thing a reader can be told. The npm page is
+  rendered from the package's own README, and that README was forty-seven lines while
+  PyPI's is the full project one — so a reader arriving from npm search met a
+  disclaimer and a link, and a reader arriving from PyPI met the product.
+
+  The README now carries what memvara is (two independent clocks, contradiction
+  resolution without a model, hybrid retrieval, the graph), the twelve MCP tools and
+  what each is for, predicate packs, and the honest limitations — with **both** routes
+  a JavaScript reader can actually take: the hosted endpoint at
+  `app.memvara.dev/mcp`, and `memvara-mcp` over stdio needing no account.
+
+  The reservation notice moves to the top and stays blunt, because that is the risk a
+  richer page creates: a reader who skims a product page and concludes that `npm
+  install memvara` gives them something to call. The first line still says it exposes
+  no API, and `implemented` is still `false`.
+
+  `description` is a one-line summary on npm as on PyPI — it is what search results
+  show, not the page body — so it leads with what memvara does and keeps the "not a
+  JS client" caveat inside the length search will display. Keywords gain `mcp`,
+  `model-context-protocol`, `agent-memory`, `ai-memory`, `knowledge-graph` and
+  `temporal`, and keep `placeholder`, which is still true.
+
+  No code changed. `index.js` is the same four keys and the same notice, and the tests
+  pinning that shape are untouched. This release exists because npm serves the
+  description and README of the **published version**: there is no way to edit either
+  in place, and `publish-npm` only runs on a `v*` tag.
+
 ## [0.4.0] — 2026-08-25
 
 ### Added
