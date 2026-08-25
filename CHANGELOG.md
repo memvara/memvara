@@ -9,6 +9,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.5.0] — 2026-08-25
+
 ### Added
 
 - **`memory_standing` — the standing set, with no query and no ranking.** A client that
@@ -92,6 +96,23 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   contains `npm publish`, and was confirmed red against the old value before being kept.
 
 ### Changed
+
+- **The tool count is stated where it can be guarded and dropped where it cannot.**
+  Four surfaces still said "twelve tools" after `memory_standing` landed, and two of
+  them were right: a present-tense claim about the tool surface gets the current
+  number, and a past-tense record of an incident keeps the number that was true when
+  it happened. So `_CLOUD_NOT_WIRED` — a live error message read at the moment a
+  deployment refuses to start — and `build_memvara`'s docstring now say thirteen,
+  while `docs/OPEN-CORE.md` and `tests/test_config_cloud.py`, which narrate the defect
+  that motivated that refusal, keep theirs.
+
+  The hosted pages now state no number at all. `references/hosted-mcp.md` said "the
+  twelve tools appear" directly above a section headed "The thirteen tools", and had
+  said "ten" before that — each edit a guess about somebody else's rollout, because
+  how many tools a hosted deployment serves is a property of that deployment. There is
+  no source of truth in this tree for what a remote server advertises, so a number
+  there guards nothing. The library's own set stays pinned positively, by the test
+  that reads `TOOLS`.
 
 - **The skill says how to choose a memory type, and shows the call beside the wrong one.**
   The packaged skill did not contain the words `memory_type` or `procedural` once, across
