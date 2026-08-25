@@ -155,6 +155,42 @@ while `/plugin update` answered "already at the latest version", and the only ch
 would have caught it was opening a session and reading the status line. Whatever the change
 is *for* is the thing to look at.
 
+## A PR you opened gets a code review before it is merged
+
+Open the pull request, then review it, then fix what the review found. In that order, and
+all of it before anybody merges.
+
+```bash
+/code-review high <PR number>
+```
+
+The window is narrow at both ends. Run it against a working tree you have not pushed and
+you have reviewed something no reviewer will ever see. Skip it and the PR merges
+unreviewed, which is the case this rule exists for — nothing else in the process looks at
+the change with fresh eyes.
+
+**Run it on the latest Sonnet, `claude-sonnet-5` today.** `/code-review` takes an effort
+level, a target, and `--comment` / `--fix`. It takes **no model argument**, so the review
+runs on whatever the session model is: switch it (the app's model picker, or `/model` in a
+terminal session) before the review and back afterwards. In a session where you cannot
+switch, say which model reviewed in the PR body rather than letting a reader assume.
+
+**`high`, not `ultra`.** `ultra` is user-triggered and billed, an agent cannot launch it,
+and attempting it wastes a turn. Reach for `max` instead when the change is large or lands
+on something load-bearing.
+
+**Fix everything it finds, on the same branch, then re-run the gate.** `--fix` applies
+findings to the working tree, so the commit and the push are still yours to make. Where a
+finding is wrong, write the reason in the PR body: a disagreement recorded is a decision,
+and a finding dropped in silence is a defect with a delay on it.
+
+**Nothing the review publishes may carry an AI attribution.** `--comment` posts to the PR
+under the account running it, and the marketplace `code-review` plugin — present under
+`~/.claude/plugins/marketplaces/` and deliberately not enabled — ends every comment it
+writes with a "Generated with Claude Code" line. The rule against that is absolute and
+lives in `~/.claude/CLAUDE.md`. Prefer `--fix` and a summary in your own words; if you do
+post, read what you are posting first.
+
 ## Before proposing new machinery
 
 1. `grep` the constructor or signature for the parameter you want to add.

@@ -75,6 +75,32 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   Wired into `tests/test_bench_eval.py` as a gate rather than left as a script, because
   everything it scores is a promise the library makes in prose, and prose does not go red.
 
+### Documentation
+
+- **The skill explains `memory_ask` and `sources`, which it had been shipping without.**
+  Both arrived with the tool surface and neither reached the agent-facing docs: `ask()`
+  was named once, in the tool list in `references/hosted-mcp.md`, and `sources` on
+  `memory_remember` appeared nowhere at all. The count and the list agreed with each
+  other the whole time, which is why nothing looked wrong.
+
+  `references/time.md` now says when to reach for `memory_ask` rather than a single-clock
+  reading — the case where the *disagreement between two readings* is the question, which
+  `valid_at` alone answers by hiding. `references/write-and-correct.md` carries the part
+  no single tool description can: `memory_add` reports turn ids, `memory_remember` takes
+  them in `sources`, and dropping them between the two fails silently. The write
+  succeeds, the claim looks ordinary, and the cost lands on the one later occasion
+  someone challenges the fact and `memory_why` has nothing to show. Extraction wires it
+  up on its own; a hand-composed triple does not, which is the normal case on a
+  `fast-path-only` deployment.
+
+  Written to the rule `test_the_skill_does_not_restate_a_tool_description` enforces —
+  the first draft transcribed both descriptions and went red, correctly.
+
+- **`plugin-claude.md` carries the code-review rule**, so it reaches the seven plugin
+  repositories that compose their `CLAUDE.md` from it. It was already in `CLAUDE.md`
+  here, in `memvara-cloud` and in `memvara-web`, and in none of the plugin repos — which
+  is where PRs had been merging unreviewed.
+
 ### Fixed
 
 - **A low-confidence guess no longer displaces a high-confidence statement, or records a
