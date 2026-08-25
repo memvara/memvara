@@ -415,6 +415,42 @@ the matmul is already BLAS, so this is the floor, and it is correct and fast to 
 million claims. Beating it trades recall for speed, which belongs behind the `Store`
 protocol as a choice a deployment makes, not in the default path.
 
+**Hook code shared from here rather than owned by one plugin.** `claude-memvara` carries
+about a hundred lines that read a Claude Code transcript and decide what may be attributed
+to whom — speaker blocks, echo suppression against what recall injected, a grounding check
+on values, a gate on which turns are worth extracting. The pull to move them here is real:
+they are not Claude-specific *in nature*. Any client that mines a transcript needs speaker
+attribution, and any client that injects recalled memories needs echo suppression or it
+feeds its own output back into the store, which is a defect that has actually happened and
+was fixed in the plugin's 0.1.6.
+
+They stay there because they are Claude-specific in *fact*. This library's notion of a
+transcript is a concept — `add()` takes "a string, a transcript, or pre-built Episodes" —
+and it holds no opinion about anyone's file format. The hook code parses one editor's
+JSONL: `type: user`/`assistant`, `message.content` blocks, tool names, the `Claude used
+Edit` line the formatter writes. Moving it would make a published Apache-2.0 memory library
+carry an editor's on-disk format, and every `pip install memvara` would ship a module it
+cannot call.
+
+The second cost is the vendoring. `memvara/skills/memvara/` is already vendored into seven
+plugin repositories, each pinning a sha in `skill.lock`, each with CI that checks out that
+commit and diffs the tree, and exactly one sanctioned local edit that the drift test
+compensates for byte by byte. A second vendored tree is a second lock, a second drift test,
+and a sync PR for every hook change — and hook changes are frequent, because they are where
+this product meets a moving client.
+
+**And there is no second consumer.** All six other public surfaces — `codex-`, `cursor-`,
+`vscode-`, `grok-`, `opencode-`, `openclaw-memvara` — install an MCP server and the skill.
+None has a hooks directory, none mines a transcript, and none would import any of this
+today. Meanwhile the genuinely portable half is already here and already shipped:
+`extractor` on `remember()` so a mined fact stops reporting itself as the user's own, and
+`reject_ungrounded` in the write pipeline. Those are store concerns and they live in the
+store.
+
+What would change the answer is a second client growing hooks. At that point there are two
+copies and a real question about which is authoritative, and the abstraction is paid for by
+evidence rather than by anticipation.
+
 ---
 
 ## What is still missing
