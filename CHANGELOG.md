@@ -11,6 +11,33 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`memory_standing` — the standing set, with no query and no ranking.** A client that
+  wanted a user's standing preferences had to invent a sentence to rank them against, and
+  ranking them is a category error: a `procedural` claim applies to every turn by
+  definition, so the set is what is wanted and there is nothing to rank it against.
+
+  It was measured rather than argued. `claude-memvara` asked with
+  `recall("who is this user, how do they want work done, what are they working on",
+  memory_types=["procedural"])`. A rule stored at confidence 1.00 — never put an AI
+  attribution in a commit, a PR or an issue — scored **0.760** against a query about
+  attribution and **did not place in the top eight** against that sentence, so it never
+  reached a session. What did reach sessions was a hook's paraphrase of the same rule at
+  **0.70**, which had turned "Claude name" into "user name" — and it ranked *because* it
+  was wrong: "user name" matches "who is this **user**". Twenty-six of forty-five commits
+  made after the rule was stored still broke it.
+
+  Ordering is confidence, then recency, then claim id — so what the user stated outranks
+  what a model inferred, and two claims written in the same instant cannot swap places
+  between calls. It reuses `_delta_lines`' row format rather than inventing a second one:
+  metadata first, untrusted text last, brackets neutralised by `safe_line`, and one client
+  parser serving both tools. Read-only deployments keep it, because asking how the user
+  works is a read.
+
+  The tool count moves from twelve to thirteen in `README.md`, `docs/DEPLOY.md` and
+  `memvara/server/__init__.py`. Downstream, `memvara-cloud` prices it as `since` — both
+  enumerate the live claims in a scope, and this then filters to the procedural ones, so
+  it does strictly less work than a bitemporal delta across two clocks.
+
 - **`npx memvara` — the npm package is a program now.** `memvara` on npm was a name
   reservation from 2026-08-14 to `0.0.3`: four keys, `implemented: false`, nothing to
   run. `0.1.0` makes it a CLI that bridges a stdio MCP client to the hosted server at
@@ -65,6 +92,24 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   contains `npm publish`, and was confirmed red against the old value before being kept.
 
 ### Changed
+
+- **The skill says how to choose a memory type, and shows the call beside the wrong one.**
+  The packaged skill did not contain the words `memory_type` or `procedural` once, across
+  `SKILL.md` and ten reference files. The only guidance anywhere was a clause in the
+  parameter schema — "for how the user wants work done" — and an agent recording "three
+  traps when redeploying the box" reads that as how work is done and files it as a standing
+  instruction.
+
+  On a live store, **10 of 32 procedural claims were facts about repositories** rather than
+  instructions from the person: 3,606 characters, a quarter of what every session opened
+  with once `memory_standing` existed to return them. Every one of the ten had a container
+  as its subject, so the test that catches all of them is that a claim whose subject is not
+  the person is almost never `procedural`. That rule now lives in the parameter description,
+  where the choice is made; `references/examples.md` gains the same discovery written twice
+  differing only in the type, and one call per tool with the adjacent call to avoid.
+
+  The split is also a cost decision: tool descriptions and schemas are paid on every
+  `tools/list`, and the skill is read on demand.
 
 - **npm releases on `npm-v*`, not on the Python tag.** The coupling cost a real
   release: `0.4.1` was a PyPI version containing no Python changes at all, cut only
