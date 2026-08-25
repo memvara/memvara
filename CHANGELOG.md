@@ -9,6 +9,30 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`bench/temporal.py` — the differentiator has a number.** Every other harness in
+  `bench/` measures retrieval: LOCOMO, LongMemEval, 2WikiMultihop, mem0, the multi-hop
+  walk. That is the commodity half, and it is the half benchmarked against competitors.
+  Two independent clocks, supersession that closes exactly one of them, and source
+  authority were measured by nothing at all.
+
+  Six families over 48 authored scenarios and 160 writes — point-in-time, delayed
+  knowledge, `as_of` audit, contradiction, correction, source authority — scored as exact
+  set matches against golds the generator builds before anything is written. No model, no
+  network, no reader, no judge, and byte-identical on every run because every instant in
+  it is a module constant.
+
+  It earned its place on the first run. Against `origin/main` at `7b91a9a` it scores
+  `source_authority` at **50.0%** and reports 8 `ended` claims that answer at no instant
+  with **0** of them named by the write path — the two defects fixed below, neither of
+  which moved any number in a suite of 3,448 tests. Figures, the `no-clocks` baseline
+  column and the four anti-flattery constraints are in `docs/BENCHMARKS.md` and the
+  file's own docstring.
+
+  Wired into `tests/test_bench_eval.py` as a gate rather than left as a script, because
+  everything it scores is a promise the library makes in prose, and prose does not go red.
+
 ### Fixed
 
 - **A low-confidence guess no longer displaces a high-confidence statement, or records a

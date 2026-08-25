@@ -32,6 +32,7 @@ if str(BENCH) not in sys.path:
 import evalkit as ek  # noqa: E402
 import locomo  # noqa: E402
 import longmemeval as lme  # noqa: E402
+import temporal  # noqa: E402
 
 from memvara import Memvara, NullLLM  # noqa: E402
 
@@ -2001,6 +2002,102 @@ def test_a_longmemeval_run_reports_how_many_questions_no_answer_came_back_for(tm
     text = _run_cli(lme.main, ["--dry-run", "--reader", "file", "--answers",
                                str(answers)])
     assert "2 of 3 questions had no row" in text
+
+
+# --- bench/temporal.py ------------------------------------------------------------
+#
+# The temporal suite is the only harness here that measures the differentiator rather
+# than retrieval, and it is wired into the test suite rather than left as a script for
+# one reason: everything it scores is a promise the library makes in prose, and two
+# defects lived on the write path for months because no number moved when they broke.
+# Anything short of 100% here is a regression, so it is asserted as one.
+
+
+def test_every_temporal_family_answers_correctly():
+    """The suite's own result, as a gate. A family below 100% is a defect in the store
+    or a wrong gold in the harness, and both are worth failing a build over.
+
+    Measured against `origin/main` at `7b91a9a` this run scored `source_authority` at
+    50.0% — a 0.10-confidence guess displaced a 1.00-confidence statement in every one of
+    the eight scenarios — so the numbers below are not vacuous."""
+    mem, scenarios, _ = temporal.build(2)
+    try:
+        wrong = [(s.key, q.says)
+                 for s in scenarios for q in s.questions
+                 if not temporal.correct(q, temporal.observe(mem, s, q.axes))]
+    finally:
+        mem.close()
+
+    assert wrong == []
+
+
+def test_every_collapsed_interval_is_reported_by_the_write_that_made_it():
+    """The half of the suite that is not a question, because it cannot be one: a claim
+    closed at or before its own start answers nothing at any instant on either clock, so
+    no query reaches it and no gold can name it.
+
+    The corpus produces them on purpose — `contradiction` writes the same-instant case an
+    import stamping dates rather than timestamps produces — so a zero here would mean the
+    scenario stopped exercising it, not that the store improved."""
+    mem, scenarios, receipts = temporal.build(2)
+    try:
+        empty = [c
+                 for s in scenarios
+                 for subject, predicate in sorted({(w[0], w[1]) for w in s.writes})
+                 for c in mem.history(subject, predicate, user=s.key)
+                 if c.state == "ended" and c.valid_to is not None
+                 and c.valid_to <= c.valid_from]
+    finally:
+        mem.close()
+
+    assert empty, "the corpus is meant to contain this case"
+    assert len(empty) == sum(len(r.collapsed) for r in receipts)
+
+
+def test_the_baseline_leaves_headroom_in_every_family_that_reads_a_clock():
+    """`no-clocks` is the point of comparison, and a family it answers as well as the
+    store is a family measuring nothing. Four of the six set an axis and must discriminate;
+    `source_authority` is present-tense by construction and deliberately does not, which
+    is why it is asserted here rather than left to be noticed as a gap."""
+    mem, scenarios, _ = temporal.build(2)
+    try:
+        beaten = {s.family for s in scenarios
+                  for q in s.questions
+                  if not temporal.correct(q, temporal.observe(mem, s, {}))}
+    finally:
+        mem.close()
+
+    assert beaten == {"point_in_time", "delayed_knowledge", "as_of_audit",
+                      "contradiction", "correction"}
+
+
+def test_an_unrecognised_question_kind_raises_rather_than_being_scored():
+    """The scoring function is the one place a silent wrong answer is worst, and a string
+    kind with two valid values is one typo from being scored by the other rule.
+
+    Pinned with the near-miss rather than with nonsense: `survive` for `survives` is the
+    mistake somebody actually makes, and before the guard it scored `True` against a live
+    set holding exactly the gold pair — a pass, for the wrong reason, in a harness whose
+    docstring says a benchmark that flatters its author is the one to distrust most."""
+    gold = frozenset({("lives_in", "London")})
+
+    with pytest.raises(ValueError, match="unknown question kind"):
+        temporal.correct(temporal.Question("survive", {}, gold, "typo"), gold)
+
+
+def test_the_run_is_identical_twice():
+    """Determinism, for the reason `evalkit`'s docstring gives about `--score retrieval`:
+    a benchmark whose numbers move between runs cannot be used for a regression or a
+    bisect, and this one is meant for both. Nothing here reads a clock — every instant is
+    a module constant — so a difference of any size is a real change."""
+    answers = []
+    for _ in range(2):
+        mem, scenarios, _ = temporal.build(2)
+        answers.append([sorted(temporal.observe(mem, s, q.axes))
+                        for s in scenarios for q in s.questions])
+        mem.close()
+
+    assert answers[0] == answers[1]
 
 
 # --- helpers --------------------------------------------------------------------

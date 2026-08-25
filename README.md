@@ -172,6 +172,7 @@ also a method-level mem0 shim if you want its call surface on this store.
 
 | | |
 |---|---|
+| The two clocks, six question families | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) |
 | Against the real `mem0ai` package | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) |
 | LOCOMO and LongMemEval, retrieval | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) |
 | Answer quality, end to end | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) |
@@ -334,8 +335,9 @@ Memvara is built around the observation that **most of this doesn't need a model
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 3,495 tests, offline, no API key
+python3 -m pytest -q                              # 3,500 tests, offline, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
+PYTHONPATH=. python3 bench/temporal.py            # the two clocks, six families
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison
 PYTHONPATH=. python3 bench/perf.py                # throughput and scaling
 ```
