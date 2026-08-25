@@ -391,6 +391,45 @@ surface this protocol does not have and should not grow for one feature. Until t
 cost is one call per process, which is the same order as loading an embedding model.
 
 
+**`decision` and `observation` as memory types.** The agent-state brief asks for eight
+memory kinds where this library has three and names these two as the pair missing for agent
+work. They ship as a predicate pack instead — `MEMVARA_PREDICATES=decisions` — and the
+reasoning is worth keeping, because "add an enum member" reads like a smaller change than
+it is.
+
+**`MemoryType` is a one-way door, every time.** It is persisted as its string value and
+hydrated with `MemoryType(value)`, which raises on a name it does not know. So a fourth
+member makes a store that an older build can no longer open, permanently — a
+`SCHEMA_VERSION` bump of the same kind `docs/UPGRADING.md` already records for the FTS5
+option. That cost recurs for the fifth member and the sixth.
+
+**And the one rule a new member would have to enter does not generalise.** Three things
+read `memory_type` to decide something: `consolidate.merge.promote_pass`, the
+`memory_types=` filter on `recall()` and `search()`, and `memory_standing`, which returns
+the live claims whose type is `PROCEDURAL` and nothing else. Everything else that touches
+it renders it or stores it. Decay is `Volatility`, not this. The filter takes any member
+for free and `memory_standing` would go on ignoring a fourth one, so the only *rule* a new
+member has to enter is a hardcoded `EPISODIC -> SEMANTIC` promotion — a pairwise machine
+that a further value cannot join without becoming a policy table nothing currently needs,
+or a documented exemption that reads as an oversight later.
+
+**`observation` is the wrong axis outright.** "An agent noticed this" rather than "a person
+said it" is a statement about where a claim came from, and that axis exists: `Derivation`,
+which every write path sets and `why()` reports. Putting it on `MemoryType` would record
+the same fact in two columns that nothing keeps in step.
+
+What was actually missing was vocabulary, and the evidence for that is in this file: the
+join-rate measurement below found **95% of a production store's claims on predicates
+outside the declared set** — `known_defect`, `deploy_gotcha`, `version`, `rejected` — so
+the store was already writing decisions and observations and getting the unregistered
+default for them. `packs/decisions.toml` declares the two that vocabulary genuinely lacked,
+with the two `engineering` already had left alone so load order cannot decide the answer.
+
+This is the reversible choice, which is the argument that settles it. A pack can be
+corrected, extended or dropped; a schema bump cannot. If `memory_types=["decision"]` turns
+out to be the filter people actually reach for, nothing here forecloses adding the member
+then, with usage behind it rather than a taxonomy.
+
 Each of these was considered and declined for a reason. They are recorded here so they stop
 reading as things that are coming.
 

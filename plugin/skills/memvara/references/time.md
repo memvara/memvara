@@ -33,6 +33,34 @@ approximate it with the two you have.
 `memory_history` is "what the value used to be", not "why it was written".
 `memory_why` is the latter.
 
+## When one reading is not enough, `memory_ask`
+
+Everything above hands you a single view: you pick a clock, you get that
+clock's answer. `memory_ask` refuses to pick. Give it a question and the
+instant to ask about, and it reports the same fact from all three positions at
+once — today's value, today's understanding of that moment, and the reply this
+store itself would have given at that moment.
+
+Only `question` is required. Leave `at` off and there is nothing to compare
+against — the third reading needs an instant that has already passed — so the
+three-way answer is the reason to call this at all, and the reason to name the
+instant.
+
+Reach for it when the *disagreement* is the subject. "You told me something
+different last week" is not a request for a value; it is a request for two
+values and the gap between them. Answering it with `valid_at` alone hides the
+very thing being asked about, because `valid_at` is written from today and a
+later correction is already folded in.
+
+So: `memory_recall` for what is the case, `memory_search` with `valid_at` for
+one past reading, `memory_history` for the versions of a single fact with ids
+to act on, and this when someone is holding an old answer and wants to know why
+it no longer matches.
+
+Its `at` is the world clock, like `valid_at` and unlike `as_of` — the same
+distinction this page opens with. And it does not rescue `known_at`: that gap
+is real and still belongs to the library and REST.
+
 ## Writing time
 
 `memory_remember` / `remember()` take when the fact was true in the world

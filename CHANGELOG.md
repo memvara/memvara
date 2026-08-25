@@ -50,6 +50,32 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   provenance, confidence or predicate. A write-time signal would fire on every long-gap
   supersession, and noise in that position teaches a reader to ignore the notes that mean
   something. What a person knows, this records.
+- **`MEMVARA_PREDICATES=decisions` — a vocabulary for what an agent writes about its own
+  work.** Two predicates, `decided` and `observed`, both multi-valued, both `episodic`,
+  differing on volatility: a decision is `static` because one made in March was made in
+  March for ever, and an observation is `slow` because it is a reading of a world that
+  moves.
+
+  This is the answer to the agent-state brief's ask for `decision` and `observation` as
+  **memory types**, and the answer is that they are vocabulary. `MemoryType` is persisted
+  and hydrated with `MemoryType(value)`, so a fourth member is a `SCHEMA_VERSION` bump and
+  a store older builds cannot open — a cost that recurs for the fifth. The only rule a new
+  member would have to enter is a hardcoded `EPISODIC -> SEMANTIC` promotion, which a
+  further value cannot join without becoming a policy table nothing needs; the two other
+  places that read `memory_type` to decide something, the `memory_types=` filter and
+  `memory_standing`'s procedural-only selection, take a new member or ignore it without
+  changing at all. And `observation` is a statement
+  about *where a claim came from*, which is `Derivation`, already recorded and already
+  reported by `why()`.
+
+  The predicates were chosen from a measurement rather than from the taxonomy:
+  `docs/ROADMAP.md` records a production store with **95% of its claims on undeclared
+  predicates**, and `rejected` and `known_defect` from that list are already in the
+  `engineering` pack — deliberately not redeclared here, because two shipped packs
+  declaring one predicate would let load order decide its `memory_type` silently.
+
+  Reversible, which is the argument that settles it: nothing here forecloses adding the
+  enum member later, with usage behind it.
 
 
 - **`ask()` — the question the two clocks exist for now has a method.** `recall()`
@@ -115,6 +141,32 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
   Wired into `tests/test_bench_eval.py` as a gate rather than left as a script, because
   everything it scores is a promise the library makes in prose, and prose does not go red.
+
+### Documentation
+
+- **The skill explains `memory_ask` and `sources`, which it had been shipping without.**
+  Both arrived with the tool surface and neither reached the agent-facing docs: `ask()`
+  was named once, in the tool list in `references/hosted-mcp.md`, and `sources` on
+  `memory_remember` appeared nowhere at all. The count and the list agreed with each
+  other the whole time, which is why nothing looked wrong.
+
+  `references/time.md` now says when to reach for `memory_ask` rather than a single-clock
+  reading — the case where the *disagreement between two readings* is the question, which
+  `valid_at` alone answers by hiding. `references/write-and-correct.md` carries the part
+  no single tool description can: `memory_add` reports turn ids, `memory_remember` takes
+  them in `sources`, and dropping them between the two fails silently. The write
+  succeeds, the claim looks ordinary, and the cost lands on the one later occasion
+  someone challenges the fact and `memory_why` has nothing to show. Extraction wires it
+  up on its own; a hand-composed triple does not, which is the normal case on a
+  `fast-path-only` deployment.
+
+  Written to the rule `test_the_skill_does_not_restate_a_tool_description` enforces —
+  the first draft transcribed both descriptions and went red, correctly.
+
+- **`plugin-claude.md` carries the code-review rule**, so it reaches the seven plugin
+  repositories that compose their `CLAUDE.md` from it. It was already in `CLAUDE.md`
+  here, in `memvara-cloud` and in `memvara-web`, and in none of the plugin repos — which
+  is where PRs had been merging unreviewed.
 
 ### Fixed
 
