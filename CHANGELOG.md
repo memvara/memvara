@@ -130,6 +130,26 @@ Nothing yet.
 
 ### Fixed
 
+- **`publish-npm` handed npm a git repository instead of a tarball.** `npm publish
+  npm-dist/memvara-0.0.2.tgz` does not publish that file: to npm, a spec containing a
+  slash and no leading `./` is `owner/repo`, so it ran `git ls-remote
+  ssh://git@github.com/npm-dist/memvara-0.0.2.tgz.git` and died on `Permission denied
+  (publickey)` — an authentication error naming a repository nobody meant to reach,
+  for what was punctuation. It cost the first `v0.4.0` tag; nothing reached either
+  index, because the failure is before the upload.
+
+  The step now runs in `npm-dist` and publishes a bare filename, matching the hash
+  check immediately above it, and refuses outright if the spec ever grows a slash.
+
+  What let it through is the more useful half. `release/rehearse_npm.py` exists to be
+  the integration proof for exactly this job, and it passed — because it handed npm
+  `Path` objects, which are absolute, and npm reads an absolute path as a file. The
+  rehearsal and the workflow were never running the same test. The rehearsal now
+  publishes a bare name from the tarball's own directory, and a new test in
+  `tests/test_npm_release.py` follows the workflow's shell variable back to its
+  assignment and fails if what it yields is a slashed spec. Both were confirmed to
+  fail against the old workflow before being kept.
+
 - **`include_episodes` on `memory_recall` had never worked, and the wrong value worked
   better than the right one.** `validate.py` handled `string`, `integer`, `number` and
   `array`, and `tools.py` declared `include_episodes` as `boolean` — a type the validator

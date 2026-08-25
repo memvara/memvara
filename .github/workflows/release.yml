@@ -435,9 +435,25 @@ jobs:
           fi
 
       - name: Publish the tarball
+        # `cd` first, and publish a bare filename. This is not style: to npm, an
+        # argument containing a slash and no leading `./` is a **git shorthand**, so
+        # `npm publish npm-dist/memvara-0.0.2.tgz` resolved to owner `npm-dist`, repo
+        # `memvara-0.0.2.tgz` and died in `git ls-remote ssh://git@github.com/...`
+        # with `Permission denied (publickey)` — an authentication error naming a
+        # repository nobody meant to reach, on a step whose actual problem was
+        # punctuation. It cost the first `v0.4.0` run.
+        #
+        # `./npm-dist/...` would also work. A bare filename is used because the hash
+        # check above already `cd`s into this directory and refers to the tarball by
+        # name, so the two steps now name the same thing the same way, and neither can
+        # grow a slash without the other.
+        working-directory: npm-dist
         run: |
           set -euo pipefail
-          tarball="$(ls npm-dist/memvara-*.tgz)"
+          tarball="$(ls memvara-*.tgz)"
+          case "$tarball" in
+            */*) echo "::error::refusing to publish '$tarball': npm reads a slashed spec without a leading ./ as a git repository, not a file"; exit 1 ;;
+          esac
           npm publish "$tarball" --access public
 
   publish-pypi:
