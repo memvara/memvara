@@ -32,6 +32,27 @@ asserted through `remember()`. On a store built by `add()`, or by a capture hook
 itself in `extractor`, every row is marked. `demo/`'s corpus is the second kind, and its
 prompt grew from 430 to 440 tokens.
 
+### Which surfaces this reaches, and which it does not
+
+Stated as surfaces rather than as a function name, because "`recall()` marks rows" does not
+answer the question a client actually has. A hosted client never calls the method.
+
+| surface | marks? |
+|---|---|
+| `Memvara.recall()` | **yes** |
+| the `memory_recall` MCP tool | **yes** — it returns `recall()`'s output verbatim |
+| `memory_standing` | no |
+| `memory_since` | no |
+| every other MCP surface that renders claims | no |
+
+The rule behind the table: **everything that renders through `recall()` marks, and nothing
+else does.** `memory_recall` is the one that surprises people, since a client reading a
+library-API note reasonably concludes it is not about them — and a per-prompt hook calling
+the tool over the hosted transport gets marked rows either way.
+
+The consequence worth planning around: the **per-turn** block grew, and the standing block
+injected at session start did not.
+
 ### How to find your own instances
 
 ```python
@@ -73,6 +94,18 @@ when the last writer is usually the one who said nothing.
 
 **`derivation` is untouched.** Only the filing moved. Where the fact came from is unchanged,
 so an audit of provenance is unaffected.
+
+### The hazard if your `memory_type` comes from a table
+
+Worth stating because it is invisible at the call site. A writer that derives the type from
+a fixed predicate-to-type map — rather than choosing it per write — turns **any edit to that
+map into a bulk re-filing**, applied one claim at a time as each predicate is next
+mentioned. No write looks like a re-filing; claims simply migrate between populations over
+days. If any of the moved predicates are `procedural`, they enter or leave what
+`memory_standing` returns, and so what every later session is given.
+
+Nothing here prevents that, and it is the right behaviour once the map is the intended
+source of truth. But change such a map deliberately, not incidentally.
 
 ### How to find your own instances
 
