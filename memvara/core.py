@@ -1210,7 +1210,11 @@ class Memvara:
             text=text or "",   # empty means "render the triple"; see `Claim.__post_init__`
             derivation=Derivation.USER, extractor=extractor, meta=meta,
         )
-        return self._write_claim(claim, sources, close=closure(close))
+        # `memory_type` rather than the resolved type on the claim: passing the resolved
+        # one would make every write an assertion, including the ones that only took the
+        # predicate's default, and the default is not an opinion. See `Reconciler._retype`.
+        return self._write_claim(claim, sources, close=closure(close),
+                                 asserted_type=memory_type)
 
     @staticmethod
     def _cite(claim: Claim, sources: Sequence[str | Episode] | None) -> list[Episode]:
@@ -1257,7 +1261,8 @@ class Memvara:
     def _write_claim(self, claim: Claim, sources: Sequence[str | Episode] | None,
                      retire: Claim | None = None,
                      at: datetime | None = None,
-                     close: Closure = "ended") -> WriteReceipt:
+                     close: Closure = "ended",
+                     asserted_type: MemoryType | None = None) -> WriteReceipt:
         """Store new source turns, optionally close out a predecessor, assert the claim.
 
         One transaction over all of it. Separately committed, a crash between the turn
@@ -1312,7 +1317,8 @@ class Memvara:
                 # `close="ended"` that pointer must be recorded while the belief clock
                 # keeps running.
                 self.store.put_claim(retire)
-            receipt = self.writer.assert_claim(claim, close=close)
+            receipt = self.writer.assert_claim(claim, close=close,
+                                               asserted_type=asserted_type)
             # Indexed on the same terms `add()` indexes its turns. Costs one encode per
             # turn, and skipping it would make a turn stored this way findable by text
             # and not by meaning — an asymmetry nothing at the call site could explain.

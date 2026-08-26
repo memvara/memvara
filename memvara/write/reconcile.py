@@ -78,6 +78,8 @@ from ..types import (
     Closure,
     Collapse,
     Dispute,
+    MemoryType,
+    Retype,
     Scope,
     as_utc,
     close_out,
@@ -176,6 +178,10 @@ class ReconcileResult:
     #: Claims this candidate closed at or before the instant they began. Their intervals
     #: are empty, so they answer no query on either clock — see `Collapse`.
     collapsed: list[Collapse] = field(default_factory=list)
+    #: Set when a re-observation carried an asserted `memory_type` that differed from the
+    #: one on record, so the claim was re-filed — see `Retype`. `None` on every other
+    #: action, and on every re-observation that asserted nothing.
+    retyped: "Retype | None" = None
 
 
 class Reconciler:
@@ -205,7 +211,8 @@ class Reconciler:
     # -- public ---------------------------------------------------------------
 
     def apply(self, claim: Claim, *, now: datetime | None = None,
-              close: Closure = "ended") -> ReconcileResult:
+              close: Closure = "ended",
+              asserted_type: MemoryType | None = None) -> ReconcileResult:
         """Reconcile one candidate against the claims already on record.
 
         `close` decides which clock stops on whatever this candidate displaces, and
@@ -244,10 +251,14 @@ class Reconciler:
             live_same = self._live(self.store.find_by_value(tenant, claim.value_key), t, owner)
             if live_same:
                 keep = self._canonical_of(live_same)
+                # Decided before the write, because `reinforce` performs the single
+                # `put_claim` that persists both the reinforcement and the re-filing.
+                # Reporting it afterwards would need a second write for no gain.
+                retyped = self._retype(keep, asserted_type)
                 return ReconcileResult(
                     "reinforce",
                     self.reinforce(keep, claim.sources, self._observed_at(claim, t)),
-                    [])
+                    [], retyped=retyped)
 
         # 2. Retraction: the user is taking something back.
         if claim.polarity < 0:
@@ -280,6 +291,34 @@ class Reconciler:
             return ReconcileResult("supersede", claim, superseded,
                                    disputed=disputed, collapsed=collapsed)
         return ReconcileResult("add", claim, [], accumulated, disputed=disputed)
+
+    @staticmethod
+    def _retype(keep: Claim, asserted: MemoryType | None) -> "Retype | None":
+        """Re-file `keep` under an asserted type, or leave it alone. Mutates, writes not.
+
+        The caller performs the write. This runs immediately before `reinforce`, which
+        does one `put_claim` carrying the whole claim, so the re-filing and the
+        reinforcement land together rather than as two updates something could interleave.
+
+        **`asserted` is `None` unless a caller said what this is.** `remember()` passes
+        the `memory_type` it was given and nothing when it was given none — in which case
+        the candidate's type is the predicate's default, an opinion nobody expressed.
+        Extraction never supplies one. That is what stops an agent writing the same triple
+        back, with no view about its filing, from undoing a correction someone made on
+        purpose. Treating any difference as a correction would make the last writer win,
+        and the last writer is usually the one with no opinion.
+
+        `derivation` is deliberately untouched. Where the fact came from has not changed;
+        only which drawer it is in. `consolidate.promote_pass` does re-derive, and is
+        right to: there consolidation authored the reclassification, rather than re-filing
+        a fact somebody else established.
+        """
+        if asserted is None or asserted is keep.memory_type:
+            return None
+        was = keep.memory_type
+        keep.meta["retyped_from"] = was.value
+        keep.memory_type = asserted
+        return Retype(keep.id, keep.subject, keep.predicate, was, asserted)
 
     def reinforce(self, claim: Claim, sources: Sequence[str],
                   observed_at: datetime | None = None) -> Claim:
@@ -665,6 +704,13 @@ class Reconciler:
             if prior:
                 # We have already processed this exact retraction; re-running it must not
                 # accumulate tombstones. Provenance still merges.
+                #
+                # Deliberately no `_retype` here, unlike the re-observation branch above.
+                # `keep` is a retraction tombstone rather than a fact, and a caller
+                # sending `memory_type` on a retraction is describing the fact they are
+                # taking back, not asking for the tombstone to be re-filed. Moving it
+                # would put the tombstone in a population no reader expects it in --
+                # `procedural`, and so into every session's standing block.
                 keep = self._canonical_of(prior)
                 return ReconcileResult(
                     "noop",

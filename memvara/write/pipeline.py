@@ -458,7 +458,8 @@ class WritePipeline:
         batch = getattr(self.store, "batch", None)
         return batch() if batch is not None else nullcontext()
 
-    def assert_claim(self, claim: Claim, *, close: Closure = "ended") -> WriteReceipt:
+    def assert_claim(self, claim: Claim, *, close: Closure = "ended",
+                     asserted_type: MemoryType | None = None) -> WriteReceipt:
         """Write a caller-supplied claim. Never consults a model, by construction.
 
         `close` is forwarded to `Reconciler.apply` and decides which clock stops on
@@ -482,7 +483,8 @@ class WritePipeline:
             claim.extractor = "api/assert"
 
         to_embed: list[Claim] = []
-        self._absorb(claim, self.reconciler.apply(claim, now=now, close=close),
+        self._absorb(claim, self.reconciler.apply(claim, now=now, close=close,
+                                                  asserted_type=asserted_type),
                      receipt, to_embed)
         self._write_embeddings(to_embed)
         receipt.latency_ms = (perf_counter() - t0) * 1000.0
@@ -994,6 +996,8 @@ class WritePipeline:
             receipt.accumulated.append(res.accumulated)
         receipt.disputed.extend(res.disputed)
         receipt.collapsed.extend(res.collapsed)
+        if res.retyped is not None:
+            receipt.retyped.append(res.retyped)
 
         rec = self.telemetry
         if rec is None:
