@@ -446,6 +446,14 @@ def _delta_lines(mark: str, claims: Sequence[Claim]) -> list[str]:
     impersonate. Ordering alone does not finish the job — a claim can still spell a whole
     convincing row inside its own span — so `safe_line` neutralises the brackets that
     would make one parse.
+
+    **The bracket is an unbounded set of tokens, not a fixed arity.** `_state` already
+    appends an instant for `ended` and `retired`, and `DERIVED_FIELD` adds one more for a
+    derived claim, so the same row shape ranges from three tokens to five. A consumer that
+    pins a count does not fail loudly on a new one -- it fails to match, and a parser that
+    skips what it cannot match loses those rows silently while the block still looks
+    whole. Read it as a set, and add fields here only when the clients that parse it can
+    already survive one.
     """
     return [f"{mark} [id={c.id} {c.memory_type.value} {_state(c)}"
             f"{DERIVED_FIELD if is_derived(c) else ''}] {safe_line(c.text)}"
