@@ -2177,7 +2177,8 @@ class Memvara:
         lines: list[str] = []
         if n:
             lines.append(fact_header)
-            lines += [f"- {self._safe_line(r.text)}" for r in claims[:n]]
+            lines += [f"- {self._safe_line(r.text)}{self._derived_suffix(r.claim)}"
+                      for r in claims[:n]]
         tail = [line for group in past[:n] for line in group]
         if tail:
             lines.append(history_header)
@@ -2190,6 +2191,41 @@ class Memvara:
         if dropped:
             lines.append(self._dropped_line(dropped))
         return "\n".join(lines)
+
+    #: Marks a note nobody stated. Written as a suffix and only on the rows that need it,
+    #: so a store of stated facts pays nothing — recall is on the per-prompt path and this
+    #: block is budgeted in tokens, where a marker on every row would re-price every call.
+    #: A confidence floor was the other candidate and was rejected: this repository's own
+    #: position is that such constants do not survive a change in store size (see
+    #: `calibrate_min_score`, and the `min_score` default being a deliberate refusal), and
+    #: a floor tuned on one store silently marks everything or nothing on another.
+    #: Provenance does not move when the store grows.
+    RECALL_INFERRED = " (inferred)"
+
+    @classmethod
+    def _derived_suffix(cls, claim: Claim) -> str:
+        """Say when a note was derived rather than stated, and by what.
+
+        The block's header calls the whole set reference data and notes that some of it
+        was inferred, which leaves a reader unable to tell *which* — so the qualifier
+        either discounts every row or is ignored for all of them. This is the per-row half.
+
+        Two things count as derived, and the second is the one that bites. A `derivation`
+        other than `USER` is machine extraction and is obvious. But `remember()` stamps
+        `USER` whatever called it, so a capture hook mining an assistant's own prose gets
+        `USER` too — which is exactly the incident this exists for, where a later session
+        read such a claim back to the user as their own note. `extractor` is what
+        separates them: `"api"` is a caller asserting a fact, and anything else is a
+        component naming itself as the deriver, which is what `memory_remember.extractor`
+        was added for.
+
+        The extractor is caller-supplied and lands in a model's context, so it is
+        flattened like any stored text. A name that could carry a newline could forge a
+        note of its own.
+        """
+        if claim.derivation is Derivation.USER and claim.extractor in ("", "api"):
+            return ""
+        return cls.RECALL_INFERRED
 
     def _past_by_claim(self, claims: Sequence[Result], tenant=None, user=None,
                        agent=None, session=None) -> list[list[str]]:

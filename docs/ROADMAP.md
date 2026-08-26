@@ -574,7 +574,7 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
    API. The one run used an agent as the reader, so there is no model id, no seed and no
    temperature to quote, and it cannot be repeated. Two things it did establish are worth
    carrying: **at this corpus size the whole-transcript arm scored 100%**, so the memory
-   layer's argument here is 5.7× fewer tokens rather than a better answer; and the trap
+   layer's argument here is 5.6× fewer tokens rather than a better answer; and the trap
    metric — the column a before/after claim would rest on — produced **no signal at all**,
    because the reader never gave a superseded value. Still missing: a hosted reader, a
    second corpus size to turn the token argument from a slope into a measurement, and any

@@ -802,8 +802,8 @@ With that said, four things in it are worth reading:
 
 - **A careful reader with the whole transcript scored 100%.** At this corpus size the
   memory layer earns nothing on accuracy — it is beaten, and by the simplest possible
-  baseline. What it earns is the size column: **5.7× fewer tokens for 95%**
-  (2,451 → 430; the `memvara` arm is 4.7×). That is a claim about a *slope* — retrieval
+  baseline. What it earns is the size column: **5.6× fewer tokens for 95%**
+  (2,451 → 440; the `memvara` arm is 4.7×). That is a claim about a *slope* — retrieval
   context is flat in corpus length while transcript context is linear — and this run has
   exactly one corpus size, so the slope is argued rather than measured. A second corpus
   ten times longer is what would turn it into evidence.
