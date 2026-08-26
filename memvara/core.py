@@ -392,8 +392,13 @@ def _slot_lines(r: Reading, at: datetime) -> list[str]:
         lag = (f" — {days} day{'' if days == 1 else 's'} later." if days
                else " the same day.")
         dates = f"true since {_when(worst.valid_from)}, recorded {_when(worst.recorded_at)}"
+        # Keyed on `r.then`, which is what the sentence above actually rendered, rather
+        # than on the `r.now` that `worst` came from. They hold the same claims here —
+        # this branch runs only when `not r.moved`, and that is what `moved` compares —
+        # but the condition belongs to the sentence being scoped, so a later change to
+        # these branches cannot quietly decouple the two.
         lines.append(f"  {worst.object!r} is the widest gap here: {dates}{lag}"
-                     if len(r.now) > 1 else
+                     if len(r.then) > 1 else
                      f"  True since {_when(worst.valid_from)},"
                      f" recorded {_when(worst.recorded_at)}{lag}")
     elif not r.now:
