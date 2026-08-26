@@ -35,7 +35,9 @@ prompt grew from 430 to 440 tokens.
 ### How to find your own instances
 
 ```python
-sum(1 for c in mem.iter_claims()
+from memvara import Derivation
+
+sum(1 for c in mem.store.iter_claims(states=("live",))
     if c.derivation is not Derivation.USER or c.extractor not in ("", "api"))
 ```
 
