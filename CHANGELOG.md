@@ -11,6 +11,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`ask()` rendered a single-valued slot holding two live values as a conjunction.**
+  `user lives_in: Berlin, Lisbon.` — commas mean "all of these are true at once", which is
+  right for a multi-valued predicate and false for one the schema says holds exactly one.
+
+  It happens whenever `AUTHORITY_SHARE` refuses a displacement: a candidate worth less
+  than half the incumbent is stored beside it rather than ending it, deliberately, because
+  ending a true claim destroys information where keeping two only degrades ranking. That
+  trade is right; what was missing is that the reader was never told a contest had
+  happened. `ask()` now says which value holds the slot and which did not displace it,
+  named by confidence — the axis the refusal was decided on:
+
+  ```
+  user lives_in: Berlin, Lisbon.
+    Single-valued, so only one of those can be true. 'Berlin' (1.00) holds it;
+    'Lisbon' (0.49) did not displace it.
+  ```
+
+  Multi-valued slots are untouched, where several live values are the design rather than a
+  contest. `Reading` gains `single_valued`, a bool rather than the `Cardinality` it derives
+  from because `schema` imports `types` and the enum cannot travel back the other way.
+
 - **A claim filed under the wrong `memory_type` can now be corrected, and asking no longer
   reinforces the mistake.** Re-asserting a triple this store already holds is a
   re-observation, so it reinforces rather than forking the record — and the `memory_type`

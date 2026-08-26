@@ -1044,6 +1044,46 @@ def test_ask_about_now_reports_the_lag_instead_of_a_divergence(corrected):
     assert "True since 2026-03-01, recorded 2026-03-22 — 21 days later." in text
 
 
+def test_a_single_valued_slot_holding_two_values_says_which_one_holds_it(mem):
+    """Commas mean "all of these are true at once". On a `ONE` predicate that is false.
+
+    `AUTHORITY_SHARE` refuses a displacement when the candidate is worth less than half
+    the incumbent, and keeps both deliberately — ending a true claim destroys information
+    where keeping two only degrades ranking. That is the right trade and this is the half
+    of it the reader was never told: `ask()` rendered `Berlin, Lisbon` for a slot the
+    schema says holds exactly one, with nothing to mark that one of them is a 0.49 guess
+    that lost.
+    """
+    mem.remember("user", "lives_in", "Berlin", confidence=1.00)
+    refused = mem.remember("user", "lives_in", "Lisbon", confidence=0.49)
+    assert len(refused.disputed) == 1, "the premise: the write path kept both"
+
+    text = mem.ask("where do they live?").text
+
+    assert "Single-valued, so only one of those can be true." in text
+    assert "'Berlin' (1.00) holds it" in text
+    assert "'Lisbon' (0.49) did not displace it" in text
+
+
+def test_a_multi_valued_slot_is_left_alone(mem):
+    """`prefers` is MANY, so several live values are the design rather than a contest.
+    A note there would fire on every ordinary store and teach a reader to ignore it."""
+    mem.remember("user", "prefers", "dark mode")
+    mem.remember("user", "prefers", "tabs over spaces")
+
+    text = mem.ask("how do they want work done?").text
+
+    assert "user prefers: dark mode, tabs over spaces." in text
+    assert "Single-valued" not in text
+
+
+def test_one_value_in_a_single_valued_slot_says_nothing_extra(mem):
+    """The overwhelmingly common case, and it must stay silent."""
+    mem.remember("user", "lives_in", "Berlin")
+
+    assert "Single-valued" not in mem.ask("where do they live?").text
+
+
 def test_the_lag_line_names_its_value_when_the_slot_holds_more_than_one(mem):
     """The dates belong to one value. Under a conjunction they read as everyone's.
 
