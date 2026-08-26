@@ -32,10 +32,9 @@ release that published nothing to npm, which was the expected first run.
 and the registry both say `0.1.0`, so `check-npm` logs `SKIP` and `publish-npm` does not
 run. Bumping `npm/memvara/package.json` is the only thing that changes that.
 
-This matters more than a skipped job, because **npm serves the README of the published
-version and there is no way to edit one in place.** A Python release that improves the
-README leaves the npm page exactly as it was. Cutting an npm version is a separate
-decision with its own tag, and 0.4.1 exists because it was once made late.
+That matters here more than a skipped job usually would. Until the file moves, the npm
+page keeps 0.1.0's README, so **a Python release that improves the README does not reach
+an npm reader at all** — 0.7.0 rewrote it and npm will not show a word of it.
 
 ---
 
