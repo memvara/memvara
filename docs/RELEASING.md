@@ -1,6 +1,6 @@
 # Releasing memvara
 
-PyPI has `memvara` 0.4.1 (first upload 2026-08-14, `0.1.0`). npm has `memvara` 0.0.3.
+PyPI has `memvara` 0.6.0 (first upload 2026-08-14, `0.1.0`). npm has `memvara` 0.1.0.
 
 **The two release on separate tags and this document covers both.** `v*` publishes the
 Python package through `release.yml`; `npm-v*` publishes the npm package through
@@ -28,9 +28,13 @@ out of `npm/memvara/package.json`, asks the registry, and skips `publish-npm` if
 already there. A tag pushed while that file still said `0.0.1` would have been a green
 release that published nothing to npm, which was the expected first run.
 
-**That is no longer the state.** The file says `0.0.2`, the registry has only `0.0.1`, so
-the next tag runs the publish for real — and the trusted publisher below has to exist
-before it does, or the job fails at the upload.
+**Check that comparison before assuming a tag ships JavaScript.** As of 0.7.0 the file
+and the registry both say `0.1.0`, so `check-npm` logs `SKIP` and `publish-npm` does not
+run. Bumping `npm/memvara/package.json` is the only thing that changes that.
+
+That matters here more than a skipped job usually would. Until the file moves, the npm
+page keeps 0.1.0's README, so **a Python release that improves the README does not reach
+an npm reader at all** — 0.7.0 rewrote it and npm will not show a word of it.
 
 ---
 

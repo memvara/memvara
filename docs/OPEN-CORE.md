@@ -54,7 +54,7 @@ is or how `search()` ranks it — the same guarantee the table above makes. Sayi
 "planned" for the server side would be the dishonest version. The line is drawn there
 because SQLite is genuinely sufficient for a single node, and needing more than one node
 correlates closely with being able to pay for it. The storage half of that sits behind the
-`Store` protocol in [`memvara/store/base.py`](memvara/store/base.py), which is public,
+`Store` protocol in [`memvara/store/base.py`](../memvara/store/base.py), which is public,
 documented, and implementable by anyone — a third-party Postgres backend is a legitimate
 thing to write, and neither the license nor the design objects to one.
 
@@ -71,7 +71,7 @@ support transcript that turned out to be **all 64 of them**, leaving a store wit
 and no claims. `remember()`, retrieval, contradiction resolution and everything else are
 unaffected and need no model ever, and writing structured facts through `remember()` is
 how an offline integration gets the whole bitemporal machine. See
-[What the fast path does not catch](#what-the-fast-path-does-not-catch-measured).
+[What the fast path does not catch](DESIGN.md#what-the-fast-path-does-not-catch-measured).
 
 ---
 
