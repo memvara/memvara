@@ -378,11 +378,24 @@ def _slot_lines(r: Reading, at: datetime) -> list[str]:
         # about. Skipped when the record diverged, because that sentence has already
         # dated the write and adding a second date to the same paragraph reads as two
         # events.
+        #
+        # **Named, when the slot holds more than one value.** Choosing the widest gap is
+        # deliberate and stays; what was wrong is that the sentence did not say whose gap
+        # it was. On a multi-valued predicate this line sat under a conjunction of every
+        # live value and read as a statement about all of them, so twelve values a reader
+        # never asked about were stamped with a thirteenth's dates — in the one method
+        # whose whole job is saying when something was true and when we learned it. The
+        # dates are right and were always right; the sentence claimed a scope they did
+        # not have.
         worst = max(late, key=lambda c: as_utc(c.recorded_at) - as_utc(c.valid_from))
         days = (as_utc(worst.recorded_at) - as_utc(worst.valid_from)).days
-        lines.append(
-            f"  True since {_when(worst.valid_from)}, recorded {_when(worst.recorded_at)}"
-            + (f" — {days} days later." if days else " the same day."))
+        lag = (f" — {days} day{'' if days == 1 else 's'} later." if days
+               else " the same day.")
+        dates = f"true since {_when(worst.valid_from)}, recorded {_when(worst.recorded_at)}"
+        lines.append(f"  {worst.object!r} is the widest gap here: {dates}{lag}"
+                     if len(r.now) > 1 else
+                     f"  True since {_when(worst.valid_from)},"
+                     f" recorded {_when(worst.recorded_at)}{lag}")
     elif not r.now:
         # Nothing then, nothing now, and no divergence: every version of this slot has
         # been retired. Said outright, because three lines of "nothing" with no reason

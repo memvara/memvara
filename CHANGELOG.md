@@ -9,6 +9,37 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ask()` attached one value's dates to a whole slot, in the method whose job is dating
+  belief.** On a multi-valued predicate every live value is rendered as one sentence, and
+  the provenance line beneath it named no value at all:
+
+  ```
+  user prefers: dark mode, tabs over spaces, no AI attribution.
+    True since 2026-01-05, recorded 2026-01-06 — 1 days later.
+  ```
+
+  Three values, three different date pairs, one line reading as a statement about all
+  three. On a production store it was thirteen values under a date pair roughly three
+  weeks wrong for the one being audited. `why()` returned the right dates for each claim
+  throughout, so the store held them and the renderer discarded them.
+
+  **The selection was never the bug and has not changed.** `ask()` reports the widest gap
+  between the two clocks in a slot, deliberately, because the value that waited longest to
+  be recorded is the one worth surfacing. What was wrong is that the sentence claimed a
+  scope it did not have. It now names the value when the slot holds more than one:
+
+  ```
+    'dark mode' is the widest gap here: true since 2026-01-05, recorded 2026-01-06 — 1 day later.
+  ```
+
+  A slot with a single value keeps the sentence it had, because there is nothing to
+  disambiguate. Rendering only — no stored data was wrong and nothing needs migrating.
+
+- **`— 1 days later`** is now `— 1 day later`. Same expression, and it was in the output
+  of the method that exists to report dates.
+
 ## [0.7.0] — 2026-08-26
 
 ### Added

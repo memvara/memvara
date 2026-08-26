@@ -1044,6 +1044,61 @@ def test_ask_about_now_reports_the_lag_instead_of_a_divergence(corrected):
     assert "True since 2026-03-01, recorded 2026-03-22 — 21 days later." in text
 
 
+def test_the_lag_line_names_its_value_when_the_slot_holds_more_than_one(mem):
+    """The dates belong to one value. Under a conjunction they read as everyone's.
+
+    `prefers` is `Cardinality.MANY`, so every value stays live and `ask()` renders them
+    as one sentence. The lag line beneath it reports the widest gap in the slot, which is
+    the right value to pick — but until it named which value that was, a reader auditing
+    *any* of them was told that value's dates. Here the store learned about tabs the day
+    after they became true and about the attribution rule the same day; without the name,
+    the attribution rule is presented as having been true since January.
+    """
+    for obj, vf, rec in [
+            ("dark mode", datetime(2026, 1, 5, tzinfo=TZ), datetime(2026, 1, 6, tzinfo=TZ)),
+            ("tabs", datetime(2026, 5, 1, tzinfo=TZ), datetime(2026, 5, 2, tzinfo=TZ)),
+            ("no attribution", datetime(2026, 8, 1, tzinfo=TZ), datetime(2026, 8, 1, tzinfo=TZ))]:
+        mem.remember("user", "prefers", obj, valid_from=vf, recorded_at=rec)
+
+    text = mem.ask("how do they want work done?").text
+
+    assert "user prefers: dark mode, tabs, no attribution." in text
+    assert "'dark mode' is the widest gap here:" in text, (
+        "the line has to say whose dates these are")
+    assert "true since 2026-01-05, recorded 2026-01-06" in text
+    # The bug, stated as the thing that must not come back: an unscoped sentence in front
+    # of three values, two of which it is false for.
+    assert "\n  True since 2026-01-05" not in text
+
+
+def test_a_single_value_slot_still_states_the_lag_without_naming_itself(mem):
+    """Naming the value earns its place only where there is something to disambiguate.
+    One value and one date pair is unambiguous, so the sentence stays as it was."""
+    mem.remember("user", "lives_in", "Berlin",
+                 valid_from=datetime(2026, 1, 5, tzinfo=TZ),
+                 recorded_at=datetime(2026, 1, 6, tzinfo=TZ))
+
+    text = mem.ask("where do they live?").text
+
+    assert "True since 2026-01-05, recorded 2026-01-06 — 1 day later." in text
+    assert "widest gap" not in text
+
+
+def test_the_lag_is_pluralised(mem, tmp_path):
+    """It read `— 1 days later`, in the method that exists to report dates."""
+    mem.remember("user", "lives_in", "Berlin",
+                 valid_from=datetime(2026, 1, 5, tzinfo=TZ),
+                 recorded_at=datetime(2026, 1, 6, tzinfo=TZ))
+    assert "— 1 day later." in mem.ask("where do they live?").text
+
+    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64), tenant="acme",
+                 user="alice") as other:
+        other.remember("user", "lives_in", "Oslo",
+                       valid_from=datetime(2026, 1, 5, tzinfo=TZ),
+                       recorded_at=datetime(2026, 1, 7, tzinfo=TZ))
+        assert "— 2 days later." in other.ask("where do they live?").text
+
+
 def test_ask_before_anything_was_true_says_so_and_still_gives_the_present(mem):
     """The empty reading is an answer. Without the second line it reads as a store that
     lost the fact rather than one that had not been told yet."""
