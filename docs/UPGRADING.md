@@ -34,11 +34,24 @@ prompt grew from 430 to 440 tokens.
 
 ### Which surfaces this reaches, and which it does not
 
-**`recall()` only.** `memory_standing`, `memory_since` and every other MCP surface render
-claims through their own path and carry no marker. Said explicitly because "recall() marks
-rows" does not answer the question a client actually has: a plugin that injects a standing
-block at session start parses `memory_standing`, and that block is unchanged by this
-release. The per-turn recall block is the one that grew.
+Stated as surfaces rather than as a function name, because "`recall()` marks rows" does not
+answer the question a client actually has. A hosted client never calls the method.
+
+| surface | marks? |
+|---|---|
+| `Memvara.recall()` | **yes** |
+| the `memory_recall` MCP tool | **yes** — it returns `recall()`'s output verbatim |
+| `memory_standing` | no |
+| `memory_since` | no |
+| every other MCP surface that renders claims | no |
+
+The rule behind the table: **everything that renders through `recall()` marks, and nothing
+else does.** `memory_recall` is the one that surprises people, since a client reading a
+library-API note reasonably concludes it is not about them — and a per-prompt hook calling
+the tool over the hosted transport gets marked rows either way.
+
+The consequence worth planning around: the **per-turn** block grew, and the standing block
+injected at session start did not.
 
 ### How to find your own instances
 
