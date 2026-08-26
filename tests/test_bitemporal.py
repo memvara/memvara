@@ -1084,6 +1084,35 @@ def test_one_value_in_a_single_valued_slot_says_nothing_extra(mem):
     assert "Single-valued" not in mem.ask("where do they live?").text
 
 
+def test_the_lag_agrees_with_the_dates_the_same_sentence_prints(mem):
+    """It read "recorded 2026-01-06 the same day" directly after "True since 2026-01-05".
+
+    `_when` renders whole days, and the lag was counted by truncating the timedelta, so a
+    two-hour gap across midnight gave `.days == 0` — two different dates and a clause
+    denying they differ, in the method whose subject is when things happened. `late` had
+    already accepted the claim as lagging, so the filter and the sentence disagreed too.
+    Counted between the calendar dates now, which is what the reader is shown.
+    """
+    mem.remember("user", "lives_in", "Berlin",
+                 valid_from=datetime(2026, 1, 5, 23, 0, tzinfo=TZ),
+                 recorded_at=datetime(2026, 1, 6, 1, 0, tzinfo=TZ))
+
+    text = mem.ask("where do they live?").text
+
+    assert "True since 2026-01-05, recorded 2026-01-06 — 1 day later." in text
+    assert "the same day" not in text
+
+
+def test_a_lag_inside_one_day_is_still_the_same_day(mem):
+    """The other side of it: both dates equal, so the clause is true and stays."""
+    mem.remember("user", "lives_in", "Oslo",
+                 valid_from=datetime(2026, 1, 5, 9, 0, tzinfo=TZ),
+                 recorded_at=datetime(2026, 1, 5, 15, 0, tzinfo=TZ))
+
+    assert ("True since 2026-01-05, recorded 2026-01-05 the same day."
+            in mem.ask("where do they live?").text)
+
+
 def test_the_lag_line_names_its_value_when_the_slot_holds_more_than_one(mem):
     """The dates belong to one value. Under a conjunction they read as everyone's.
 

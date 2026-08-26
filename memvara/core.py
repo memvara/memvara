@@ -407,7 +407,13 @@ def _slot_lines(r: Reading, at: datetime) -> list[str]:
         # dates are right and were always right; the sentence claimed a scope they did
         # not have.
         worst = max(late, key=lambda c: as_utc(c.recorded_at) - as_utc(c.valid_from))
-        days = (as_utc(worst.recorded_at) - as_utc(worst.valid_from)).days
+        # Counted between the calendar dates this sentence prints, not by truncating
+        # the delta. `_when` renders whole days, so a two-hour lag across midnight
+        # gave `.days == 0` and rendered "True since 2026-01-05, recorded 2026-01-06
+        # the same day." — two dates and a clause denying they differ, in the method
+        # whose subject is when things happened. `late` had already accepted the claim
+        # as lagging, so the filter and the sentence disagreed as well.
+        days = (as_utc(worst.recorded_at).date() - as_utc(worst.valid_from).date()).days
         lag = (f" — {days} day{'' if days == 1 else 's'} later." if days
                else " the same day.")
         dates = f"true since {_when(worst.valid_from)}, recorded {_when(worst.recorded_at)}"

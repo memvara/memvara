@@ -9,6 +9,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ask()` said "the same day" between two different dates.** The lag was counted by
+  truncating the timedelta while `_when` renders whole days, so a two-hour gap across
+  midnight produced `True since 2026-01-05, recorded 2026-01-06 the same day.` — two dates
+  and a clause denying they differ, in the method whose subject is when things happened.
+  `late` had already accepted the claim as lagging, so the filter and the sentence
+  disagreed as well. Counted between the calendar dates the sentence prints.
+
 ## [0.8.0] — 2026-08-26
 
 ### Fixed
