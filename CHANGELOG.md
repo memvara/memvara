@@ -9,6 +9,24 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [npm 0.1.1] — 2026-08-26
+
+The npm package versions independently of the Python one and ships on `npm-v*`. It is
+recorded here because 0.0.2 and 0.1.0 are, and a history readable up to the point it
+stopped being kept is worse than none.
+
+### Fixed
+
+- **The bridge's tool table was two short.** It listed the twelve tools of the deployment
+  it was written against and had not gained `memory_ask` or `memory_standing`. The heading
+  no longer states a count at all: what a hosted deployment serves is a property of that
+  deployment, `tools/list` is the authority for a given day, and a number here is a second
+  copy of a fact this package cannot check.
+
+## [0.8.0] — 2026-08-26
+
 ### Fixed
 
 - **`ask()` said "the same day" between two different dates.** The lag was counted by
@@ -17,10 +35,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   and a clause denying they differ, in the method whose subject is when things happened.
   `late` had already accepted the claim as lagging, so the filter and the sentence
   disagreed as well. Counted between the calendar dates the sentence prints.
-
-## [0.8.0] — 2026-08-26
-
-### Fixed
 
 - **`recall()` marks a note nobody stated.** Every row rendered as the same shape of line,
   so a fact the user stated outright and one a capture hook mined from an assistant's own
