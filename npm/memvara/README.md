@@ -99,7 +99,9 @@ authority for a given day; the table below is what `app.memvara.dev` serves now.
 | `memory_remember` | Write an exact subject/predicate/object triple, skipping extraction. |
 | `memory_neighborhood` | What is connected to an entity, walked through facts rather than matched as text. |
 | `memory_paths` | Chains between two entities, each hop a fact you can check. |
+| `memory_ask` | What is true now, what was true then, and what this store *would have told you* then. |
 | `memory_since` | What changed after an instant. |
+| `memory_standing` | Standing instructions, ordered so a stated rule outranks an inferred one. |
 | `memory_history` | Every value a fact has held, including closed ones. |
 | `memory_why` | The turns a claim came from, and what it replaced. |
 | `memory_end` | Close a fact that *was* true and has stopped being true. |

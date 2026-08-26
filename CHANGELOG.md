@@ -9,6 +9,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-26
+
 ### Fixed
 
 - **`recall()` marks a note nobody stated.** Every row rendered as the same shape of line,

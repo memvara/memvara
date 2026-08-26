@@ -1,6 +1,6 @@
 {
   "name": "memvara",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "npx memvara — connect a stdio MCP client to memvara, bitemporal memory for AI agents. Zero config: no URL to paste, and no browser at all when you already have a key.",
   "keywords": [
     "memvara",

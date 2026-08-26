@@ -7,6 +7,98 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Every recalled note that nobody stated now ends " (inferred)"
+
+### What changed
+
+`recall()` marks a note it did not get from the caller asserting it. A row is marked when
+its `derivation` is anything other than `USER`, or when its `extractor` is anything other
+than `api`. The marker is the literal string in `Memvara.RECALL_INFERRED`.
+
+### Who this changes, and in which direction
+
+**Anything that parses or asserts on `recall()` output.** The text of a marked row is no
+longer the claim's text. If you compare a rendered line against a known string, strip the
+suffix first — `line.removesuffix(Memvara.RECALL_INFERRED)` — rather than matching on
+`endswith`.
+
+**Anything budgeting the block.** A marked row costs about three more tokens. `budget=` is
+still honoured exactly, because the fit loop measures the assembled block and the marker is
+inside it — but a budget that used to hold eight notes may now hold seven. Two tests in
+this repository had to raise their budgets for that reason.
+
+**Stores built by extraction, most of all.** Nothing is marked on a store of facts a caller
+asserted through `remember()`. On a store built by `add()`, or by a capture hook naming
+itself in `extractor`, every row is marked. `demo/`'s corpus is the second kind, and its
+prompt grew from 430 to 440 tokens.
+
+### How to find your own instances
+
+```python
+sum(1 for c in mem.iter_claims()
+    if c.derivation is not Derivation.USER or c.extractor not in ("", "api"))
+```
+
+That count is how many of your rows will gain the suffix. If it is zero, this entry does
+not reach you.
+
+---
+
+## `remember(memory_type=...)` re-files a fact this store already holds
+
+### What changed
+
+Re-asserting a triple that already exists is a re-observation and reinforces the record,
+which has not changed. What has changed is that an **asserted** `memory_type` now moves the
+stored claim to that type, stamps `meta["retyped_from"]`, and reports a `Retype` on
+`WriteReceipt.retyped`. It used to be dropped, so the claim kept its old type and gained
+confidence — correcting a filing made the wrong filing more strongly believed.
+
+### Who this changes, and in which direction
+
+**Callers that pass `memory_type` when re-asserting known facts.** Their claims will move,
+where before nothing happened. That is the point of the change, and it is worth knowing
+before it surprises you: the type decides which population a claim is in, and
+`memory_standing` returns the `procedural` one, which most clients inject at the top of
+every session. A claim entering or leaving `procedural` changes what every later
+conversation opens with.
+
+**Nobody who omits it.** `remember()` with no `memory_type` takes the predicate's declared
+default, which is nobody's opinion, and re-files nothing. Extraction never reaches this
+path. That asymmetry is deliberate: agents re-assert known facts constantly without a view
+about filing, and treating any difference as a correction would let the last writer win
+when the last writer is usually the one who said nothing.
+
+**`derivation` is untouched.** Only the filing moved. Where the fact came from is unchanged,
+so an audit of provenance is unaffected.
+
+### How to find your own instances
+
+Search your own code for `remember(` calls that pass `memory_type` and are not creating a
+new fact. Those are the writes whose behaviour changed. Afterwards,
+`memory_why` on any moved claim shows `retyped_from` in its meta.
+
+---
+
+## `ask()` says more about a slot it cannot render as a simple list
+
+### What changed
+
+Two rendering corrections, both to `Answer.text`. A slot holding more than one value no
+longer prints an unscoped provenance line — the dates now name the value they belong to.
+And a **single-valued** slot holding two live values, which is what `AUTHORITY_SHARE`
+leaves behind when it refuses a displacement, now says which value holds the slot instead
+of joining both with a comma as though they were simultaneously true.
+
+### Who this changes, and in which direction
+
+**Anything asserting on `ask().text`.** The strings changed. `ask()` shipped in `0.7.0`, so
+this reaches only code written against that one release.
+
+Nothing about the stored data changed, and `why()` and `history()` were correct throughout.
+
+---
+
 ## A write worth less than half of what it would replace no longer replaces it
 
 ### What changed
