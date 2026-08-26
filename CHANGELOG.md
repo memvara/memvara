@@ -9,7 +9,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.8.0] — 2026-08-26
+
 ### Fixed
+
+- **`memvara@0.1.1` on npm — the bridge's tool table was two short.** It listed the
+  twelve tools of the deployment it was written against and had not gained `memory_ask`
+  or `memory_standing`. The heading no longer states a count at all: what a hosted
+  deployment serves is a property of that deployment, `tools/list` is the authority for a
+  given day, and a number here is a second copy of a fact this package cannot check.
+  Ships on `npm-v0.1.1`, independent of this tag.
 
 - **`ask()` said "the same day" between two different dates.** The lag was counted by
   truncating the timedelta while `_when` renders whole days, so a two-hour gap across
@@ -17,10 +28,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   and a clause denying they differ, in the method whose subject is when things happened.
   `late` had already accepted the claim as lagging, so the filter and the sentence
   disagreed as well. Counted between the calendar dates the sentence prints.
-
-## [0.8.0] — 2026-08-26
-
-### Fixed
 
 - **`recall()` marks a note nobody stated.** Every row rendered as the same shape of line,
   so a fact the user stated outright and one a capture hook mined from an assistant's own
