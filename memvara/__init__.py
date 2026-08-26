@@ -97,7 +97,7 @@ from .write import (
 )
 from .write.reconcile import SplitReport, backfill_entities, split_entity
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "Memvara", "ScopedMemvara", "AsyncMemvara", "AsyncScopedMemvara",

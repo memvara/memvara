@@ -9,22 +9,7 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
-### Fixed
-
-- **The authority rule's documentation invited the wrong inference, and now says what it
-  does not cover.** `AUTHORITY_SHARE` was introduced around "a 0.10-confidence guess
-  replaced a 1.00-confidence statement", which is true and is not the common case. 0.70 is
-  the documented default for an extraction whose model gave no figure, and
-  `0.70 >= 0.5 * 1.00` — so on a single-valued predicate a mined paraphrase still closes a
-  fact a person asserted outright, and still stamps it `ended`. Measured: 0.70 against 1.00
-  closes it, 0.49 does not.
-
-  That stays, because the alternative is worse — raising the share far enough to block it
-  would stop the store learning from conversation, which "I moved to Lisbon" depends on.
-  What changes is that the boundary is now stated, and pinned by a test rather than a
-  sentence. The related case, a paraphrase *outranking* a stated preference on a
-  multi-valued predicate, is not this rule's to solve: nothing is displaced there and both
-  values stay live, so what goes wrong is ranking. That is issue #62.
+## [0.7.0] — 2026-08-26
 
 ### Added
 
@@ -185,7 +170,54 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   here, in `memvara-cloud` and in `memvara-web`, and in none of the plugin repos — which
   is where PRs had been merging unreviewed.
 
+- **The README works as a PyPI page, and ten documentation links that pointed at nothing
+  were repaired.** `README.md` is the body of the PyPI project page, so its nineteen
+  relative links — `](docs/API.md)` and the rest — resolved against pypi.org and returned
+  404 for exactly the reader `pip install memvara` produces. They are absolute GitHub URLs
+  now, checked with `twine check --strict` against a built sdist and wheel.
+
+  Ten more resolved to nothing anywhere, on GitHub as much as on PyPI, in two kinds.
+  Anchors outlived their heading: `README.md` pointed three times at sections that had
+  moved out to `docs/OPEN-CORE.md` and `docs/DESIGN.md`, and `docs/API.md`,
+  `docs/BENCHMARKS.md` and `docs/DESIGN.md` each carried a cross-file anchor written as a
+  same-page one. And six links in `docs/` were spelled from the repository root inside a
+  file one level down, so `bench/baseline.py` meant `docs/bench/baseline.py` — including
+  the one `docs/BENCHMARKS.md` tells you to read *before quoting any of this*.
+
+  `tests/test_doc_links.py` pins it: every relative link in `README.md`, `CHANGELOG.md`,
+  `CONTRIBUTING.md`, `SECURITY.md` and `docs/*.md` must resolve to a file that exists, and
+  every anchor to a heading that exists, checked across files because a heading can be
+  renamed out from under a link in either direction. Absolute URLs are not checked — a
+  network call would trade a real guarantee for a flaky one. Nothing in the suite had ever
+  looked at a link, which is how ten of them accumulated in the files read first.
+
+- **The honesty sections said things the code had stopped supporting.** `docs/ROADMAP.md`
+  opened *"Status as of `v0.1.0`. 2,734 tests"* six releases later, and repeated 2,734
+  inside *"N tests prove the code does what we said it does"* — an honesty claim resting on
+  a number wrong by 838. The README's entity-resolution limitation covered only the
+  spelling axis and now states the confident direction, naming `split_entity()` as the
+  repair and saying why there is deliberately no detector. *"Two benchmarks, and only one
+  of them runs the real thing"* read as a count of the repository's harnesses, contradicting
+  the *Measured* table sixty lines above it, and is scoped to the mem0 pair it describes.
+  *"No REST server in the open core"* was true and could be read as "no HTTP anything": the
+  client half, `memvara/store/remote.py`, ships here and is deliberately partial.
+
 ### Fixed
+
+- **The authority rule's documentation invited the wrong inference, and now says what it
+  does not cover.** `AUTHORITY_SHARE` was introduced around "a 0.10-confidence guess
+  replaced a 1.00-confidence statement", which is true and is not the common case. 0.70 is
+  the documented default for an extraction whose model gave no figure, and
+  `0.70 >= 0.5 * 1.00` — so on a single-valued predicate a mined paraphrase still closes a
+  fact a person asserted outright, and still stamps it `ended`. Measured: 0.70 against 1.00
+  closes it, 0.49 does not.
+
+  That stays, because the alternative is worse — raising the share far enough to block it
+  would stop the store learning from conversation, which "I moved to Lisbon" depends on.
+  What changes is that the boundary is now stated, and pinned by a test rather than a
+  sentence. The related case, a paraphrase *outranking* a stated preference on a
+  multi-valued predicate, is not this rule's to solve: nothing is displaced there and both
+  values stay live, so what goes wrong is ranking. That is issue #62.
 
 - **A low-confidence guess no longer displaces a high-confidence statement, or records a
   world event as the reason.** Contradiction resolution was predicate cardinality plus

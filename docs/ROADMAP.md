@@ -5,7 +5,7 @@ the commercial layer relate. Kept honest about status: an item is `done` only wh
 something in the tree does it, `deferred` when it was considered and declined with a
 reason, and `next` when it is actually queued.
 
-**Status as of `0.6.0`.** 3,539 tests, 100% statement coverage, mypy clean, CI on
+**Status as of `0.7.0`.** 3,539 tests, 100% statement coverage, mypy clean, CI on
 3.10–3.13 across Linux, macOS and Windows. The library does what the README says. Phase 4
 — the evidence phase that gated everything below — is **done**, which changes the shape of
 this document: the organizing risk was credibility, and it is no longer that every
