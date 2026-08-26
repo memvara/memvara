@@ -2204,7 +2204,7 @@ class Memvara:
 
     @classmethod
     def _derived_suffix(cls, claim: Claim) -> str:
-        """Say when a note was derived rather than stated, and by what.
+        """Say when a note was derived rather than stated.
 
         The block's header calls the whole set reference data and notes that some of it
         was inferred, which leaves a reader unable to tell *which* — so the qualifier
@@ -2219,9 +2219,14 @@ class Memvara:
         component naming itself as the deriver, which is what `memory_remember.extractor`
         was added for.
 
-        The extractor is caller-supplied and lands in a model's context, so it is
-        flattened like any stored text. A name that could carry a newline could forge a
-        note of its own.
+        **The extractor decides whether to mark and is never rendered.** Naming it was
+        measured at 24% of the structured arm's prompt on `demo/`'s corpus against 9% for
+        the bare word, which is not worth paying on every recall when `memory_why` reports
+        it on demand for the one claim a reader is actually asking about. Keeping it out
+        has a second effect worth stating, because it is easy to give away by accident:
+        `extractor` is caller-supplied through `memory_remember`, so rendering it would put
+        caller text into a model's context and oblige this function to flatten it forever.
+        There is no such path today. Do not add the name back without restoring one.
         """
         if claim.derivation is Derivation.USER and claim.extractor in ("", "api"):
             return ""
