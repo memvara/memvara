@@ -704,6 +704,13 @@ class Reconciler:
             if prior:
                 # We have already processed this exact retraction; re-running it must not
                 # accumulate tombstones. Provenance still merges.
+                #
+                # Deliberately no `_retype` here, unlike the re-observation branch above.
+                # `keep` is a retraction tombstone rather than a fact, and a caller
+                # sending `memory_type` on a retraction is describing the fact they are
+                # taking back, not asking for the tombstone to be re-filed. Moving it
+                # would put the tombstone in a population no reader expects it in --
+                # `procedural`, and so into every session's standing block.
                 keep = self._canonical_of(prior)
                 return ReconcileResult(
                     "noop",
