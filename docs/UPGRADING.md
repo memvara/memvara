@@ -37,21 +37,63 @@ prompt grew from 430 to 440 tokens.
 Stated as surfaces rather than as a function name, because "`recall()` marks rows" does not
 answer the question a client actually has. A hosted client never calls the method.
 
-| surface | marks? |
+| surface | marks, and how |
 |---|---|
-| `Memvara.recall()` | **yes** |
+| `Memvara.recall()` | **yes** — ` (inferred)` after the claim's text |
 | the `memory_recall` MCP tool | **yes** — it returns `recall()`'s output verbatim |
-| `memory_standing` | no |
-| `memory_since` | no |
+| `memory_standing` | **yes** — ` inferred` INSIDE the bracket |
+| `memory_since` | **yes** — both halves, added and gone |
 | every other MCP surface that renders claims | no |
 
-The rule behind the table: **everything that renders through `recall()` marks, and nothing
-else does.** `memory_recall` is the one that surprises people, since a client reading a
-library-API note reasonably concludes it is not about them — and a per-prompt hook calling
-the tool over the hosted transport gets marked rows either way.
+The last two arrived **after `0.8.0`**, not with it. On `0.8.0` exactly, only the two
+`recall()` rows mark, which is what the first version of this table said and why it is
+worth reading the table against the server you are actually running rather than against
+this file's newest entry.
 
-The consequence worth planning around: the **per-turn** block grew, and the standing block
-injected at session start did not.
+**The two spellings are deliberate and a parser needs both.** `recall()` rows carry no
+metadata, so a suffix cannot be confused with anything; `_delta_lines` rows put metadata
+first and the untrusted span last precisely so nothing trusted follows text a claim could
+impersonate, so its marker is a bracket field. A consumer matching only `" (inferred)"`
+will not see a marked standing row.
+
+`memory_recall` is the one that surprises people, since a client reading a library-API note
+reasonably concludes it is not about them — and a per-prompt hook calling the tool over the
+hosted transport gets marked rows either way.
+
+### If you parse `memory_standing` or `memory_since`, read this before upgrading the server
+
+The bracket gained a field, and it is **not** a fixed-arity structure:
+
+```
++ [id=cl_1 procedural live] user prefers tabs                      three tokens
++ [id=cl_2 procedural live inferred] user prefers spaces           four
+- [id=cl_3 semantic ended 2026-08-26 14:09Z inferred] user …       six
+```
+
+Six, not five: `_stamp` renders `2026-08-26 14:09Z`, so **the instant itself contains a
+space**. Even the metadata is not one token per field, which is the sharpest reason not to
+read this bracket by counting.
+
+`_state` has appended an instant for `ended` and `retired` since `7985c24` (2026-08-09),
+so a consumer pinning a count was already wrong for those rows on any build after that
+date. Read the bracket as a **set of tokens**.
+
+This matters more than most format changes because of how such a parser usually fails. A
+regex that pins three fields does not raise on a fourth — it fails to match, and a reader
+that skips what it cannot match drops those rows **silently** while the block still looks
+whole and its own count line agrees. The rows lost are exactly the derived ones, which are
+the rows the marker exists to point at.
+
+Measured on a real store while this shipped: a client pinning three fields rendered 31 of
+37 standing rows and dropped the 6 machine-derived ones, reporting no error.
+
+So the order is: **upgrade the clients that parse these rows, then the server.** For
+`claude-memvara` that is `0.2.2` or later — and a published tag is not the check, since it
+updates nobody. Read the version off the installed copy:
+
+```bash
+grep '"version"' ~/.claude/plugins/marketplaces/claude-memvara/plugin/.claude-plugin/plugin.json
+```
 
 ### How to find your own instances
 

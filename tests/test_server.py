@@ -1066,6 +1066,84 @@ def _left_yesterday(server, predicate, obj):
     return utcnow() - timedelta(hours=1)
 
 
+def test_since_marks_a_derived_row_in_its_added_half(server):
+    """`_delta_lines` has three call sites and only one was tested.
+
+    `memory_standing` calls it once, `memory_since` twice — once per half. Every test
+    written when the marker landed drove standing, so `memory_since`'s wire format changed
+    with nothing pinning it. Scoping the marker to standing alone would then pass the whole
+    suite, and that is a change someone would plausibly make: the case for marking was
+    argued entirely about the block injected at session start.
+    """
+    mem = server._ctx.memory
+    mem.remember("user", "prefers", "squash before merging",
+                 memory_type=MemoryType.PROCEDURAL, extractor="claude-code-hook")
+    mem.remember("user", "prefers", "rebase before merging",
+                 memory_type=MemoryType.PROCEDURAL)
+    body = text(server, "memory_since", {"since": "1970-01-01"})
+    derived = next(l for l in body.splitlines() if "squash before merging" in l)
+    stated = next(l for l in body.splitlines() if "rebase before merging" in l)
+    assert " inferred]" in derived, derived
+    assert "inferred" not in stated, stated
+
+
+def test_since_marks_a_derived_row_in_its_gone_half(server):
+    """The withdrawn half marks too, and that is the half with no other guard.
+
+    `_delta_lines("-", delta.gone)` is the third call site. A caller triaging a delta has
+    to tell "a machine's guess was withdrawn" from "the user's stated fact was withdrawn" —
+    the same judgment the row's state field already serves, which is why this shares the
+    format rather than inventing one.
+
+    It also carries the widest bracket this format produces: `_state` appends an instant
+    for an ended claim, and the instant contains a space, so the row runs to six tokens.
+    Anything pinning a count is wrong here first.
+    """
+    day = utcnow() - timedelta(days=1)
+    server._ctx.memory.remember("user", "lives_in", "Rome", valid_from=day,
+                                recorded_at=day, extractor="claude-code-hook")
+    away = utcnow() - timedelta(hours=1)
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Lisbon"})
+
+    body = text(server, "memory_since", {"since": away.isoformat()})
+    row = next(l for l in body.splitlines() if l.startswith("- "))
+    assert "Rome" in row, row
+    assert " inferred]" in row, row
+    assert row.rstrip().endswith("Rome"), "the untrusted span still ends the row"
+
+
+def test_the_bracket_is_a_token_set_and_not_a_fixed_arity(server):
+    """Written as the thing a consumer gets wrong, not as the field that was added.
+
+    A regex pinning three fields does not raise on a fourth: it fails to match, and a
+    reader that skips what it cannot match loses those rows silently while the block still
+    looks whole. Measured while this shipped — a client pinning three rendered 31 of 37
+    standing rows and dropped the 6 derived ones, reporting nothing.
+
+    So the load-bearing assertion is that MORE THAN ONE width occurs — variability is what
+    a parser has to survive, and a single width would let a fixed-arity reader look correct.
+    The maximum is pinned exactly rather than loosely: **six**, because `_stamp` renders
+    `2026-08-26 14:09Z` — the instant itself contains a space — so an ended, derived row is
+    `id`, type, state, date, time, marker. Six rather than the five it looks like, and that
+    is precisely why counting tokens is the wrong reading of this bracket: even the
+    metadata is not one-token-per-field.
+    """
+    day = utcnow() - timedelta(days=1)
+    mem = server._ctx.memory
+    mem.remember("user", "prefers", "tabs over spaces", memory_type=MemoryType.PROCEDURAL)
+    mem.remember("user", "prefers", "spaces over tabs", memory_type=MemoryType.PROCEDURAL,
+                 extractor="claude-code-hook")
+    mem.remember("user", "lives_in", "Rome", valid_from=day, recorded_at=day,
+                 extractor="claude-code-hook")
+    away = utcnow() - timedelta(hours=1)
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Lisbon"})
+    body = text(server, "memory_since", {"since": away.isoformat()})
+    widths = {len(l.split("]")[0].split("[", 1)[1].split())
+              for l in body.splitlines() if l[:2] in ("+ ", "- ") and "[id=" in l}
+    assert len(widths) > 1, f"one width only ({widths}) — this no longer proves the point"
+    assert max(widths) == 6, f"{widths} — an ended, derived row is six tokens"
+
+
 def test_since_reports_a_supersession_as_both_halves(server):
     """The delta a resumed session is for, in the shape that carries a correction.
 
