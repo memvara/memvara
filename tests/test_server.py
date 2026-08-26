@@ -1095,9 +1095,9 @@ def test_since_marks_a_derived_row_in_its_gone_half(server):
     the same judgment the row's state field already serves, which is why this shares the
     format rather than inventing one.
 
-    It also pins the widest bracket this format produces: `_state` appends an instant for
-    an ended claim, so the row carries five tokens. Anything pinning a count is wrong here
-    first.
+    It also carries the widest bracket this format produces: `_state` appends an instant
+    for an ended claim, and the instant contains a space, so the row runs to six tokens.
+    Anything pinning a count is wrong here first.
     """
     day = utcnow() - timedelta(days=1)
     server._ctx.memory.remember("user", "lives_in", "Rome", valid_from=day,
@@ -1120,8 +1120,13 @@ def test_the_bracket_is_a_token_set_and_not_a_fixed_arity(server):
     looks whole. Measured while this shipped — a client pinning three rendered 31 of 37
     standing rows and dropped the 6 derived ones, reporting nothing.
 
-    So this asserts the RANGE rather than any one width, which is what a parser has to
-    survive.
+    So the load-bearing assertion is that MORE THAN ONE width occurs — variability is what
+    a parser has to survive, and a single width would let a fixed-arity reader look correct.
+    The maximum is pinned exactly rather than loosely: **six**, because `_stamp` renders
+    `2026-08-26 14:09Z` — the instant itself contains a space — so an ended, derived row is
+    `id`, type, state, date, time, marker. Six rather than the five it looks like, and that
+    is precisely why counting tokens is the wrong reading of this bracket: even the
+    metadata is not one-token-per-field.
     """
     day = utcnow() - timedelta(days=1)
     mem = server._ctx.memory
@@ -1136,7 +1141,7 @@ def test_the_bracket_is_a_token_set_and_not_a_fixed_arity(server):
     widths = {len(l.split("]")[0].split("[", 1)[1].split())
               for l in body.splitlines() if l[:2] in ("+ ", "- ") and "[id=" in l}
     assert len(widths) > 1, f"one width only ({widths}) — this no longer proves the point"
-    assert max(widths) >= 4, widths
+    assert max(widths) == 6, f"{widths} — an ended, derived row is six tokens"
 
 
 def test_since_reports_a_supersession_as_both_halves(server):

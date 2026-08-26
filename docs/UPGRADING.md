@@ -65,14 +65,18 @@ hosted transport gets marked rows either way.
 The bracket gained a field, and it is **not** a fixed-arity structure:
 
 ```
-+ [id=cl_1 procedural live] user prefers tabs                     three tokens
-+ [id=cl_2 procedural live inferred] user prefers spaces          four
-- [id=cl_3 procedural ended 2026-01-01T00:00:00Z inferred] …      five
++ [id=cl_1 procedural live] user prefers tabs                      three tokens
++ [id=cl_2 procedural live inferred] user prefers spaces           four
+- [id=cl_3 semantic ended 2026-08-26 14:09Z inferred] user …       six
 ```
 
-`_state` has appended an instant for `ended` and `retired` since long before this, so a
-consumer pinning a count was already wrong for those rows. Read the bracket as a **set of
-tokens**.
+Six, not five: `_stamp` renders `2026-08-26 14:09Z`, so **the instant itself contains a
+space**. Even the metadata is not one token per field, which is the sharpest reason not to
+read this bracket by counting.
+
+`_state` has appended an instant for `ended` and `retired` since `7985c24` (2026-08-09),
+so a consumer pinning a count was already wrong for those rows on any build after that
+date. Read the bracket as a **set of tokens**.
 
 This matters more than most format changes because of how such a parser usually fails. A
 regex that pins three fields does not raise on a fourth — it fails to match, and a reader
