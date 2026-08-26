@@ -45,7 +45,7 @@ from .embed.fingerprint import (
 from .llm import LLM, NullLLM
 from .redact import Redactor, redact_episode
 from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retrieved
-from .schema import PredicateRegistry
+from .schema import Cardinality, PredicateRegistry
 from .store import SQLiteStore, Store, bulk_claims, resolve_states
 from .telemetry import Recorder
 from dataclasses import replace
@@ -351,6 +351,25 @@ def _slot_lines(r: Reading, at: datetime) -> list[str]:
     head = f"{r.subject} {r.predicate}"
     lines = [f"{head}: {_values(r.then)}." if r.then
              else f"{head}: nothing was true on {_when(at)}."]
+    if r.single_valued and len(r.then) > 1:
+        # A slot declared to hold one value, holding several. `_values` joins them with
+        # commas, which reads as "all of these are true at once" — the correct rendering
+        # for a MANY predicate and a false one here, where the schema says exactly one of
+        # them can be. It happens when `AUTHORITY_SHARE` refuses a displacement: the
+        # write path deliberately keeps both, because ending a true claim destroys
+        # information and keeping two only degrades ranking. That decision is right and
+        # this is the half of it the reader was never told.
+        #
+        # Named by confidence, which is the axis the refusal was decided on, so the line
+        # explains the outcome in the same terms that produced it. Ties break on the
+        # oldest, since `then` is oldest first and an incumbent that has held the slot
+        # longer is the one a reader means by "already there".
+        ranked = sorted(r.then, key=lambda c: -c.confidence)
+        held, beside = ranked[0], ranked[1:]
+        lines.append(
+            f"  Single-valued, so only one of those can be true. "
+            f"{_confident(held)} holds it; "
+            f"{', '.join(_confident(c) for c in beside)} did not displace it.")
     if r.diverged:
         # The sentence this method exists for. Both readings, and the day the difference
         # arrived — the earliest write this store had not yet seen at `at`, which is the
@@ -435,6 +454,11 @@ def _moved_after(timeline: Sequence[Claim], at: datetime) -> list[datetime]:
     moved += [as_utc(c.invalidated_at) for c in timeline
               if c.invalidated_at is not None and as_utc(c.invalidated_at) > at]
     return moved
+
+
+def _confident(claim: Claim) -> str:
+    """A value and how sure its writer was. Only used where the two compete."""
+    return f"{claim.object!r} ({claim.confidence:.2f})"
 
 
 def _values(claims: Sequence[Claim]) -> str:
@@ -2521,6 +2545,7 @@ class Memvara:
             then=tuple(c for c in timeline if c.is_live(valid_at=when)),
             stated=tuple(c for c in timeline if _stated_at(c, when, successors)),
             timeline=tuple(timeline),
+            single_valued=self.registry.spec(predicate).cardinality is Cardinality.ONE,
         )
 
     def why(self, claim_id: str, *, tenant=None, user=None, agent=None,

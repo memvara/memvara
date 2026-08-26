@@ -1105,6 +1105,14 @@ class Reading:
     stated: tuple["Claim", ...] = ()
     #: Every version of this slot, oldest first — including the ones no query returns.
     timeline: tuple["Claim", ...] = ()
+    #: Whether this slot's predicate is declared to hold one value. Needed because a slot
+    #: that *should* hold one and holds two is a different statement from a slot that
+    #: holds many by design, and a renderer joining values with commas says the same thing
+    #: for both. A bool rather than the `Cardinality` it comes from: `schema` imports this
+    #: module, so the enum cannot travel back the other way. False for an undeclared
+    #: predicate, which is the safe reading — undeclared means multi-valued everywhere
+    #: else in the write path.
+    single_valued: bool = False
 
     @property
     def diverged(self) -> bool:
