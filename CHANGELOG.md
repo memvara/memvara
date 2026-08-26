@@ -11,6 +11,30 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`recall()` marks a note nobody stated.** Every row rendered as the same shape of line,
+  so a fact the user stated outright and one a capture hook mined from an assistant's own
+  prose arrived in a model's context indistinguishable. The block header asserts authority
+  over the whole set and notes that some of it was inferred, which leaves a reader unable
+  to tell *which* — so the qualifier either discounts every row or is ignored for all of
+  them. A derived note now ends ` (inferred)`.
+
+  **Keyed on provenance, not on a confidence floor.** This repository's position is that
+  such constants do not survive a change in store size — `min_score` defaults to no floor
+  for exactly that reason — and a threshold tuned on one store marks everything or nothing
+  on another. Two things count as derived: a `derivation` other than `USER`, and an
+  `extractor` other than `api`. The second is the one that bites, because `remember()`
+  stamps `USER` whatever called it, so a hook writing through it looks exactly like the
+  user speaking until you read the extractor.
+
+  **Cost, measured rather than asserted.** Nothing is marked on a store of stated facts.
+  On `demo/`'s corpus, where every fact was extracted from a support transcript, the
+  structured arm's prompt goes from **430 to 440 tokens** — so the demo's size result moves
+  from 5.7× to **5.6×** fewer tokens than the whole-transcript arm, restated in
+  `docs/BENCHMARKS.md`, `demo/README.md` and `docs/ROADMAP.md`. A marker that also named
+  the deriver was measured at 24% inflation and rejected; `memory_why` reports it on
+  demand, and leaving the caller-supplied extractor out of the block removes an injection
+  surface as well as the cost.
+
 - **`ask()` rendered a single-valued slot holding two live values as a conjunction.**
   `user lives_in: Berlin, Lisbon.` — commas mean "all of these are true at once", which is
   right for a multi-valued predicate and false for one the schema says holds exactly one.

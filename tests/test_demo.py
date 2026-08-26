@@ -724,9 +724,15 @@ def claim_lines(context_text: str) -> set[str]:
     construction — this corpus re-surfaces every superseded value late and emphatically.
     An assertion over the whole context would therefore see the trap on every arm and
     prove nothing. The claim block is where the memory layer's answer actually is.
+
+    The provenance marker is stripped. Every fact in this corpus was extracted from the
+    support transcript rather than stated to the agent, so `recall()` marks all of them —
+    and these assertions are about *which* facts reach the prompt, not how they are
+    annotated. Leaving it on would make every one of them a test of the marker's wording.
     """
     block = context_text.split("\n" + Memvara.RECALL_EPISODE_HEADER)[0]
-    return {line[2:] for line in block.splitlines() if line.startswith("- ")}
+    return {line[2:].removesuffix(Memvara.RECALL_INFERRED)
+            for line in block.splitlines() if line.startswith("- ")}
 
 
 def test_the_structured_arm_reads_at_valid_at_only_where_the_scenario_set_about():

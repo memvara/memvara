@@ -738,7 +738,11 @@ def render_recall(results: Sequence[Retrieved]) -> str:
     lines: list[str] = []
     if claims:
         lines.append(Memvara.RECALL_HEADER)
-        lines += [f"- {_flatten(r.text)}" for r in claims]
+        # The suffix comes from the library rather than being spelled again here. This
+        # function exists under protest already; a second copy of a rule about provenance
+        # is exactly what the byte-identity test is policing.
+        lines += [f"- {_flatten(r.text)}{Memvara._derived_suffix(r.claim)}"
+                  for r in claims]
     if episodes:
         lines.append(Memvara.RECALL_EPISODE_HEADER)
         lines += [f"- {_flatten(r.text, Memvara.RECALL_EPISODE_CHARS)}" for r in episodes]

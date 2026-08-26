@@ -441,7 +441,7 @@ What it does show, stated as narrowly as it deserves:
 
 * **The whole-transcript arm scored 100%.** At this corpus size a careful reader given
   everything gets everything, so the memory layer earns nothing on accuracy here. What it
-  earns is the size column: **5.7× fewer tokens for 95%** (2,451 → 430; the `memvara` arm
+  earns is the size column: **5.6× fewer tokens for 95%** (2,451 → 440; the `memvara` arm
   is 4.7×). That is a claim about a *slope* — retrieval context is flat in corpus length
   while transcript context is linear — and this run has exactly one corpus size, so the
   slope is argued and not measured. A corpus ten times longer is what would turn it into
