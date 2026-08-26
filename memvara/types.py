@@ -1191,6 +1191,50 @@ class Accumulation:
 
 
 @dataclass(slots=True)
+class Retype:
+    """A claim that was already known, re-filed under a different `memory_type`.
+
+    An identical triple is the same fact, so re-asserting one reinforces the record
+    rather than forking it — and until this existed, the `memory_type` the caller sent
+    was dropped on that path. A claim filed wrongly could not be moved: writing it again
+    with the corrected type reported `already-known 1`, left the type alone, and raised
+    the confidence, so the attempt to fix it made the wrong filing more strongly believed.
+
+    The type is not decoration. `memory_standing` returns `procedural` and nothing else,
+    and clients inject that set at the top of every session, so a project fact misfiled as
+    `procedural` is carried on every turn of every conversation until it is corrected.
+
+    **Only an asserted type moves a claim.** `remember(memory_type=...)` is a caller
+    saying what this is; `remember()` without one takes the predicate's default and says
+    nothing, and extraction never reaches here at all. That asymmetry is the whole safety
+    property: an agent writing the same triple back without an opinion cannot silently
+    undo a correction somebody made deliberately.
+
+    What does *not* change is `derivation`. The content still came from wherever it came
+    from — only the filing moved, and rewriting the provenance of a fact because its
+    drawer was wrong would lose the more important of the two. `consolidate.promote_pass`
+    does change it, correctly, because there consolidation authored the reclassification
+    rather than re-filing someone else's.
+
+    >>> Retype("cl_1a2b", "agent-memory", "rejected", MemoryType.PROCEDURAL,
+    ...        MemoryType.SEMANTIC)
+    <Retype agent-memory rejected: procedural -> semantic>
+    """
+
+    claim_id: str
+    subject: str
+    predicate: str
+    #: What it was filed as until this write.
+    was: "MemoryType"
+    #: What the caller asserted, and what it is filed as now.
+    now: "MemoryType"
+
+    def __repr__(self) -> str:
+        return (f"<Retype {self.subject} {self.predicate}: "
+                f"{self.was.value} -> {self.now.value}>")
+
+
+@dataclass(slots=True)
 class Dispute:
     """A value that did not displace the one already in its slot, because it is worth less.
 
@@ -1365,6 +1409,11 @@ class WriteReceipt:
     #: same instant does, and `closed 1` looks exactly like an ordinary supersession
     #: without it.
     collapsed: list[Collapse] = field(default_factory=list)
+    #: Claims this write re-filed under a different `memory_type`. See `Retype`. Only an
+    #: asserted type moves one, and the move is otherwise invisible: the receipt reads
+    #: `already-known 1` either way, which is what let a correction look like a no-op
+    #: while it raised the confidence of the filing it was trying to fix.
+    retyped: list[Retype] = field(default_factory=list)
 
     # --- the two halves of `closed` -------------------------------------------
     # Derived rather than stored, so they cannot disagree with the claims themselves.

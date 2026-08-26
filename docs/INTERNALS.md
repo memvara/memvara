@@ -350,7 +350,33 @@ class ReconcileResult:
                                  # to close; they stayed, it was stored beside them
     collapsed: list[Collapse]    # claims closed at or before their own start, so their
                                  # interval is empty and answers nothing on either clock
+    retyped: Retype | None       # an already-known claim re-filed under an asserted
+                                 # memory_type; None unless the caller sent one
 ```
+
+**Re-filing a claim's `memory_type`.** An identical triple is the same fact, so a
+re-assertion reinforces the record rather than forking it — and until `Retype` existed the
+`memory_type` on that write was dropped, so a claim filed wrongly could not be moved.
+Writing it again with the corrected type reported `already-known 1`, left the type alone
+and raised the confidence, which made the wrong filing more strongly believed.
+
+`Reconciler._retype` runs immediately before `reinforce`, mutating the claim so that
+`reinforce`'s single `put_claim` carries the re-filing and the reinforcement together. It
+stamps `meta["retyped_from"]`, mirroring `consolidate.promote_pass`, which has always
+reclassified a live claim in place — the operation is not new, only the caller's route to
+it.
+
+Two things it deliberately does not do. It does not touch `derivation`: where the fact
+came from has not changed, only which drawer it is in, and `promote_pass` re-derives only
+because consolidation authored its reclassification rather than re-filing someone else's
+fact. And it moves nothing unless the caller **asserted** a type — `Memvara.remember`
+forwards the `memory_type` argument it was given and nothing when it was given none, so
+the predicate's default never counts as an opinion. That asymmetry is the safety property:
+agents re-assert known facts constantly without a view about filing, and treating any
+difference as a correction would let the last writer win when the last writer is usually
+the one who said nothing.
+
+`memory_type` stays out of `value_key` and `fact_key`, so none of this forks a record.
 
 `WritePipeline` copies that list onto `WriteReceipt.closed`, where `receipt.ended` and
 `receipt.retired` split it by `Claim.state`. Anything rendering the list as one word is

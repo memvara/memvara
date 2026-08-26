@@ -34,6 +34,7 @@ from memvara import (
     Memvara,
     Episode,
     HashingEmbedder,
+    MemoryType,
     NullLLM,
     Result,
     Scope,
@@ -2816,3 +2817,98 @@ def test_no_write_path_ends_a_claim_through_the_stores_targeted_column_writes():
         assert mem.delete(mem.history("user", "lives_in")[-1].id) is True
         assert mem.forget("user", "works_at") != []                # retires
         assert mem.forget("user", "drinks", close="ended") != []   # ends
+
+
+class TestRetypeAMisfiledClaim:
+    """Correcting the drawer a fact was filed in, without touching the fact.
+
+    Before this, a claim under the wrong `memory_type` could not be moved. Writing the
+    same triple with the corrected type was recognised as the same fact and reinforced —
+    so the attempt to fix it left the type alone and *raised the confidence*, making the
+    wrong filing more strongly believed. The receipt said `already-known 1`, which is
+    also what a successful correction would have said, so nothing distinguished them.
+
+    It is not a cosmetic field. `memory_standing` returns `procedural` and nothing else
+    and clients inject that set at the top of every session, so a project fact misfiled
+    as `procedural` is carried into every later conversation until it is corrected. On
+    one real store, 9 of 32 `procedural` claims had a repository or a service as their
+    subject — a quarter of what every session opened with.
+    """
+
+    def test_an_asserted_type_refiles_a_fact_this_store_already_holds(self, mem):
+        """The issue's own reproduction: a project fact filed as procedural."""
+        first = mem.remember("agent-memory", "rejected", "auto as the embedder default",
+                             confidence=0.95, memory_type=MemoryType.PROCEDURAL)
+        claim_id = first.added[0].id
+
+        again = mem.remember("agent-memory", "rejected", "auto as the embedder default",
+                             memory_type=MemoryType.SEMANTIC)
+
+        assert not again.added, "an identical triple is the same fact, not a second one"
+        assert len(again.reinforced) == 1
+        assert [(r.was, r.now) for r in again.retyped] == [
+            (MemoryType.PROCEDURAL, MemoryType.SEMANTIC)]
+        stored = mem.store.get_claim(claim_id)
+        assert stored.memory_type is MemoryType.SEMANTIC
+        assert stored.meta["retyped_from"] == "procedural", (
+            "the move is stamped, as promote_pass stamps its own")
+
+    def test_the_refiled_claim_leaves_the_standing_population(self, mem):
+        """The consequence that matters, rather than the field in isolation. Until it
+        moves populations, correcting the type has changed nothing a session will notice."""
+        mem.remember("agent-memory", "rejected", "auto as the embedder default",
+                     memory_type=MemoryType.PROCEDURAL)
+        assert mem.search("embedder default", memory_types=[MemoryType.PROCEDURAL])
+
+        mem.remember("agent-memory", "rejected", "auto as the embedder default",
+                     memory_type=MemoryType.SEMANTIC)
+
+        assert not mem.search("embedder default", memory_types=[MemoryType.PROCEDURAL])
+        assert mem.search("embedder default", memory_types=[MemoryType.SEMANTIC])
+
+    def test_a_write_that_asserts_no_type_refiles_nothing(self, mem):
+        """The safety property, and the reason this reads `memory_type` rather than the
+        type resolved onto the candidate.
+
+        `remember()` with no `memory_type` takes the predicate's declared default, which
+        is nobody's opinion. Agents re-assert known facts constantly and mostly without a
+        view about filing, so treating any difference as a correction would make the last
+        writer win — and the last writer is usually the one who said nothing. A deliberate
+        correction would then be undone by the next incidental write, silently.
+        """
+        mem.remember("agent-memory", "rejected", "auto as the embedder default",
+                     memory_type=MemoryType.PROCEDURAL)
+        mem.remember("agent-memory", "rejected", "auto as the embedder default",
+                     memory_type=MemoryType.SEMANTIC)
+
+        blind = mem.remember("agent-memory", "rejected", "auto as the embedder default")
+
+        assert blind.retyped == [], "no type was asserted, so nothing was re-filed"
+        assert len(blind.reinforced) == 1, "it is still a re-observation"
+        assert mem.store.get_claim(
+            blind.reinforced[0].id).memory_type is MemoryType.SEMANTIC
+
+    def test_asserting_the_type_it_already_has_is_not_a_retype(self, mem):
+        """A report for a move that did not happen trains a reader to ignore the note."""
+        mem.remember("user", "prefers", "dark mode", memory_type=MemoryType.PROCEDURAL)
+
+        same = mem.remember("user", "prefers", "dark mode",
+                            memory_type=MemoryType.PROCEDURAL)
+
+        assert same.retyped == []
+        assert len(same.reinforced) == 1
+
+    def test_refiling_does_not_rewrite_where_the_fact_came_from(self, mem):
+        """Only the drawer moved. The content's provenance is the more important of the
+        two and did not change, so `derivation` is left alone — unlike `promote_pass`,
+        where consolidation genuinely authored the reclassification."""
+        first = mem.remember("agent-memory", "rejected", "auto as the embedder default",
+                             memory_type=MemoryType.PROCEDURAL, extractor="import:notion")
+        before = mem.store.get_claim(first.added[0].id)
+
+        mem.remember("agent-memory", "rejected", "auto as the embedder default",
+                     memory_type=MemoryType.SEMANTIC)
+
+        after = mem.store.get_claim(first.added[0].id)
+        assert after.derivation is before.derivation
+        assert after.extractor == before.extractor

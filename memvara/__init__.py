@@ -74,6 +74,7 @@ from .types import (
     Delta,
     Derivation,
     Dispute,
+    Retype,
     Episode,
     ErasureProof,
     Explanation,
@@ -112,7 +113,7 @@ __all__ = [
     # reason above and not a new one: a caller reading either field has to be able to
     # name what is in it, and this package ships `py.typed`, so the caller who cannot is
     # the one whose type checker is doing its job.
-    "Dispute", "Collapse",
+    "Dispute", "Collapse", "Retype",
     # Which clock a write stops when it ends a claim: "ended" (the world changed) or
     # "retired" (the record was wrong). Exported because it is in `Reconciler.apply`'s
     # signature and in four facade methods, so a typed caller needs to be able to name it.

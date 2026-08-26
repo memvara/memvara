@@ -59,8 +59,8 @@ from typing import Any, Callable, Mapping, Sequence, cast
 
 from ..core import Memvara, ScopedMemvara
 from ..schema import Cardinality
-from ..types import (Accumulation, Claim, Collapse, Dispute, MemoryType, WriteReceipt,
-                     utcnow)
+from ..types import (Accumulation, Claim, Collapse, Dispute, MemoryType, Retype,
+                     WriteReceipt, utcnow)
 from .validate import ToolError, validate
 
 __all__ = ["TOOLS", "Tool", "ToolContext", "ToolError", "safe_detail", "safe_line"]
@@ -640,6 +640,8 @@ def _receipt_summary(ctx: ToolContext, receipt: WriteReceipt) -> list[str]:
         lines.append(_disputed_note(receipt.disputed))
     if receipt.collapsed:
         lines.append(_collapsed_note(receipt.collapsed))
+    if receipt.retyped:
+        lines.append(_retyped_note(receipt.retyped))
     return lines
 
 
@@ -712,6 +714,40 @@ def _accumulated_note(items: Sequence[Accumulation]) -> str:
         "would end the value you just wrote. If the fact really does hold several values "
         "at once, this is correct and needs nothing. Either way the operator can settle "
         "it permanently by declaring the predicate's cardinality in the schema."
+    )
+
+
+def _retyped_note(items: Sequence[Retype]) -> str:
+    """Say when a re-observation moved a claim between memory types.
+
+    The same family again, and the quietest member of it. Re-asserting a known fact
+    reports `already-known 1` whether or not the filing moved, so without this a caller
+    who corrected a type cannot tell it worked -- and the failure this replaces was worse
+    than silence, because the write raised the claim's confidence while leaving the wrong
+    type in place. The correction made the mistake more strongly believed.
+
+    Worth saying out loud on this transport in particular: `memory_standing` returns
+    `procedural` and nothing else, and clients inject that set at the top of every
+    session. A claim moving in or out of `procedural` changes what every later
+    conversation opens with, which is a larger consequence than `already-known 1` suggests.
+
+    >>> note = _retyped_note([Retype("cl_1a", "agent-memory", "rejected",
+    ...                              MemoryType.PROCEDURAL, MemoryType.SEMANTIC)])
+    >>> "procedural to semantic" in note
+    True
+    >>> "claim_id cl_1a" in note
+    True
+    """
+    moves = "; ".join(
+        f"{safe_line(r.subject)} {safe_line(r.predicate)}: {r.was.value} to "
+        f"{r.now.value} (claim_id {r.claim_id})" for r in items)
+    return (
+        f"note: {len(items)} already-known fact(s) were re-filed under the memory_type "
+        f"you sent, and nothing else about them changed -- {moves}. The type decides "
+        f"which population a claim belongs to, and memory_standing returns the "
+        f"procedural one, so a claim entering or leaving it changes what later sessions "
+        f"are given. Send memory_type only when you mean to assert it: a write that "
+        f"omits it re-files nothing."
     )
 
 
@@ -1790,7 +1826,14 @@ TOOLS: tuple[Tool, ...] = (
                     "here infers a type from the words. So if you are recording "
                     "something that happened, send 'episodic' yourself: a predicate like "
                     "attended or met_with will otherwise be filed as a standing fact and "
-                    "will decay at the slow rate a standing fact deserves."
+                    "will decay at the slow rate a standing fact deserves. "
+                    "Sending it also CORRECTS a fact already stored: re-asserting a "
+                    "triple this store already holds re-files it under the type you "
+                    "send, and the receipt names the move. That is the only way to fix "
+                    "a wrongly-filed claim — memory_forget would record that the "
+                    "record was wrong, when the content is right and only the filing "
+                    "was. Omit it and nothing is re-filed, so a write with no view "
+                    "about the type cannot undo somebody else's correction."
                 ),
             },
             "confidence": {

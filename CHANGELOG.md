@@ -11,6 +11,31 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A claim filed under the wrong `memory_type` can now be corrected, and asking no longer
+  reinforces the mistake.** Re-asserting a triple this store already holds is a
+  re-observation, so it reinforces rather than forking the record — and the `memory_type`
+  on that write was dropped. Correcting a filing therefore reported `already-known 1`, left
+  the type alone, and *raised the claim's confidence*, making the wrong filing more
+  strongly believed. The only route out was `forget()` and re-create, which records that
+  the record was wrong when the content is right and only the filing was.
+
+  `remember(..., memory_type=...)` now re-files the stored claim and the receipt says so,
+  on `WriteReceipt.retyped` and in the `memory_remember` receipt over MCP. The move is
+  stamped `meta["retyped_from"]`, mirroring `consolidate.promote_pass` — which has always
+  reclassified a live claim in place, so the operation is not new, only the caller's route
+  to it.
+
+  This is not decoration: `memory_standing` returns `procedural` and nothing else, and
+  clients inject that set at the top of every session, so a project fact misfiled as
+  `procedural` is carried into every later conversation until it is corrected.
+
+  **Only an asserted type moves a claim.** `remember()` with no `memory_type` takes the
+  predicate's default, which is nobody's opinion, and extraction never reaches this path at
+  all. Agents re-assert known facts constantly without a view about filing, so treating any
+  difference as a correction would let the last writer win — and the last writer is usually
+  the one who said nothing. `derivation` is left alone for the same reason: only the drawer
+  moved, and where the fact came from is the more important of the two.
+
 - **`ask()` attached one value's dates to a whole slot, in the method whose job is dating
   belief.** On a multi-valued predicate every live value is rendered as one sentence, and
   the provenance line beneath it named no value at all:
