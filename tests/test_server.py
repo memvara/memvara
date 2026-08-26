@@ -3492,6 +3492,83 @@ def standing_server():
     srv.close()
 
 
+def test_standing_marks_the_row_a_machine_derived(standing_server):
+    """`memory_standing` orders stated above inferred; it never said which was which.
+
+    Ordering is not the same information. It tells a reader the list is sorted without
+    telling them where the boundary falls, and in a block of twenty-odd rows the twelfth
+    is unknowable. `recall()` grew a per-row marker for exactly that reason; this is the
+    same argument on the surface a client reads FIRST, since a session-start block is
+    enumerated from here while `recall()` answers a query.
+    """
+    memory = standing_server._memory
+    memory.remember("user", "prefers", "squash every branch before merging",
+                    memory_type=MemoryType.PROCEDURAL, confidence=0.7,
+                    extractor="claude-code-hook")
+    rows = [l for l in text(standing_server, "memory_standing").splitlines()
+            if l.startswith("+ ")]
+    derived = [r for r in rows if "squash every branch" in r]
+    stated = [r for r in rows if "NEVER put Claude's name" in r]
+    assert derived and stated
+    assert " inferred]" in derived[0], derived[0]
+    assert "inferred" not in stated[0], stated[0]
+
+
+def test_standing_marks_inside_the_bracket_and_not_after_the_text(standing_server):
+    """The row format's own rule, and the reason this marker is not a suffix.
+
+    `_delta_lines` puts metadata first and the untrusted span last so that nothing trusted
+    can follow something a claim could impersonate. A marker appended after `safe_line`
+    would end the row with trusted text following caller-controlled text, and a claim
+    ending in the marker's own spelling would be indistinguishable from a marked one.
+    `recall()` can suffix its rows because they carry no metadata at all.
+    """
+    memory = standing_server._memory
+    memory.remember("user", "prefers", "rebase rather than merge",
+                    memory_type=MemoryType.PROCEDURAL, extractor="claude-code-hook")
+    row = next(l for l in text(standing_server, "memory_standing").splitlines()
+               if "rebase rather than merge" in l)
+    assert row.endswith("rebase rather than merge"), row
+    assert row.index("inferred") < row.index("]"), row
+
+
+def test_standing_and_recall_agree_on_which_rows_were_derived(standing_server):
+    """One rule, two renderings, and no way for them to drift apart.
+
+    Both call `core.is_derived`. It was lifted out of `Memvara._derived_suffix` for this:
+    a rule restated in two places is a rule that will disagree with itself, and this one
+    already has -- two agents reimplemented it from prose on the same afternoon and got it
+    wrong in opposite directions, one dropping a third extractor and one dropping the
+    empty string.
+    """
+    memory = standing_server._memory
+    memory.remember("user", "prefers", "always run the linter first",
+                    memory_type=MemoryType.PROCEDURAL, extractor="claude-code-hook")
+    standing = text(standing_server, "memory_standing")
+    recalled = text(standing_server, "memory_recall", {"query": "linter"})
+    marked_in_standing = " inferred]" in next(
+        l for l in standing.splitlines() if "always run the linter" in l)
+    marked_in_recall = any("always run the linter" in l and l.rstrip().endswith("(inferred)")
+                           for l in recalled.splitlines())
+    assert marked_in_standing == marked_in_recall is True
+
+
+def test_an_empty_extractor_is_not_derived(standing_server):
+    """`("", "api")`, not `== "api"`.
+
+    A claim written before `extractor` existed, or by a caller that omits it, carries the
+    empty string and was asserted rather than derived. The natural prose -- "derived
+    unless the extractor is api" -- marks all of them, and that is not a hypothetical
+    misreading: it is one of the two an agent produced from this rule's own docstring.
+    """
+    memory = standing_server._memory
+    memory.remember("user", "prefers", "tabs over spaces",
+                    memory_type=MemoryType.PROCEDURAL, extractor="")
+    row = next(l for l in text(standing_server, "memory_standing").splitlines()
+               if "tabs over spaces" in l)
+    assert "inferred" not in row, row
+
+
 def test_standing_returns_procedural_claims_and_nothing_else(standing_server):
     """A semantic fact is not a standing preference, however true it is."""
     body = text(standing_server, "memory_standing")

@@ -548,6 +548,25 @@ def _tool_prose() -> Iterable[tuple[str, str]]:
             yield f"{tool.name}.{name}", str(schema.get("description", ""))
 
 
+def test_the_skill_says_what_the_inferred_marker_means() -> None:
+    """The tools emit it; a reader has to know what to do about it.
+
+    `recall()` marks derived rows and `_delta_lines` now marks them too, so an agent sees
+    `(inferred)` in the first block of a session. Rendering a signal nobody explained is
+    worse than not rendering it: the reader either discounts every row or ignores the
+    marker on all of them, which is the failure the per-row marker existed to end.
+
+    Asserted on the behaviour file rather than the tool list, because what matters is not
+    that the word appears but that the skill says which row to prefer and forbids quoting
+    a derived one back as the user's own. No tool description can carry that -- it is a
+    rule about comparing two rows, and a description sees one tool.
+    """
+    body = (SKILL_PACKAGE / "references" / "project-instructions.md").read_text(
+        encoding="utf-8")
+    assert "(inferred)" in body, "the marker the tools emit is not explained anywhere"
+    assert "memory_why" in body, "a reader given the marker needs the way to check it"
+
+
 def test_the_skill_does_not_restate_a_tool_description() -> None:
     """The one prohibition the spec is explicit about, enforced the only way prose can be.
 

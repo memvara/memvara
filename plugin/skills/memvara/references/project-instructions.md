@@ -9,6 +9,12 @@ persists between chats.
   now is `memory_remember`. A value that was never right also needs
   `memory_forget`. A value that was right and has stopped is
   `memory_end`. Their wording does not pick the tool.
+- A row ending `(inferred)`, or carrying `inferred` in its bracket, was
+  derived by a machine rather than stated by anyone. Treat it as the
+  weaker of two rows that disagree, and never quote one back as
+  something the user told you. `memory_why` shows what it came from.
+  An unmarked row is not automatically the user's own words either --
+  it means no component named itself as the deriver.
 - Call `memory_stats` once before you write. If the session field is
   not `*`, say the note will not carry over.
 - Store what would be embarrassing to get wrong next week. Do not

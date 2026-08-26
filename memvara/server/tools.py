@@ -57,7 +57,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence, cast
 
-from ..core import Memvara, ScopedMemvara
+from ..core import Memvara, ScopedMemvara, is_derived
 from ..schema import Cardinality
 from ..types import (Accumulation, Claim, Collapse, Dispute, MemoryType, Retype,
                      WriteReceipt, utcnow)
@@ -419,6 +419,20 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
     ) or _no_match(args["query"])
 
 
+#: The bracket field saying a machine derived the row: one more metadata token beside
+#: `memory_type` and state, which is what it is. It goes INSIDE the bracket rather than
+#: after the text, because this row format puts metadata first and the untrusted span last
+#: precisely so nothing trusted can follow something a claim could impersonate.
+#: `recall()` appends its marker after the text instead and is right to -- its rows carry
+#: no metadata at all, so there is no ordering to break.
+#:
+#: The word matches `Memvara.RECALL_INFERRED` so a reader who has seen one surface has
+#: seen both. The extractor's NAME stays unrendered, for the reason given there: it is
+#: caller-supplied through `memory_remember`, so printing it would put caller text into a
+#: model's context and oblige this layer to flatten it forever.
+DERIVED_FIELD = " inferred"
+
+
 def _delta_lines(mark: str, claims: Sequence[Claim]) -> list[str]:
     """One row per changed claim: `_search`'s line with `relevance` replaced by state.
 
@@ -433,7 +447,8 @@ def _delta_lines(mark: str, claims: Sequence[Claim]) -> list[str]:
     convincing row inside its own span — so `safe_line` neutralises the brackets that
     would make one parse.
     """
-    return [f"{mark} [id={c.id} {c.memory_type.value} {_state(c)}] {safe_line(c.text)}"
+    return [f"{mark} [id={c.id} {c.memory_type.value} {_state(c)}"
+            f"{DERIVED_FIELD if is_derived(c) else ''}] {safe_line(c.text)}"
             for c in claims]
 
 

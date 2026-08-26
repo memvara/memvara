@@ -568,6 +568,29 @@ def _approx_tokens(text: str) -> int:
     return -(-len(text) // _CHARS_PER_TOKEN)
 
 
+def is_derived(claim: Claim) -> bool:
+    """Whether a machine derived this claim rather than a caller asserting it.
+
+    Lifted out of `Memvara._derived_suffix` so that the rule has ONE home. It is now read
+    by two renderers -- `recall()`'s per-row suffix and the server's `_delta_lines` -- and
+    a rule restated in two places is a rule that will disagree with itself.
+
+    That is not a hypothetical: two separate agents reimplemented this predicate from
+    prose on the same afternoon and both got it wrong, in different directions. One wrote
+    a substring test over the rendered `Derived by` line, which silently classed a third
+    extractor as user-stated; the other described it as "marked unless the extractor is
+    api", which drops the empty string and would mark every claim written before
+    `extractor` existed. Hence `("", "api")` as a tuple, and hence a function to import
+    rather than a sentence to copy.
+
+    `remember()` stamps `USER` whatever called it, so `derivation` alone cannot separate a
+    person's statement from a capture hook mining an assistant's own prose. `extractor` is
+    what does: `"api"` is a caller asserting a fact, and anything else is a component
+    naming itself as the deriver.
+    """
+    return not (claim.derivation is Derivation.USER and claim.extractor in ("", "api"))
+
+
 class Memvara:
     """Bitemporal memory for agents.
 
@@ -2234,9 +2257,7 @@ class Memvara:
         caller text into a model's context and oblige this function to flatten it forever.
         There is no such path today. Do not add the name back without restoring one.
         """
-        if claim.derivation is Derivation.USER and claim.extractor in ("", "api"):
-            return ""
-        return cls.RECALL_INFERRED
+        return cls.RECALL_INFERRED if is_derived(claim) else ""
 
     def _past_by_claim(self, claims: Sequence[Result], tenant=None, user=None,
                        agent=None, session=None) -> list[list[str]]:

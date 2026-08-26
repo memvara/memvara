@@ -9,6 +9,45 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`memory_standing` and `memory_since` say which rows a machine derived.** 0.8.0 gave
+  `recall()` a per-row `(inferred)` marker; the tools that render through `_delta_lines`
+  carried none, so the marker reached a ranked per-turn excerpt and not the enumerated set
+  a client reads at session start — the surface where "which of these did a machine write"
+  is actually the question. `memory_standing` already ordered stated rules above inferred
+  ones by confidence, but ordering tells a reader the list is sorted without telling them
+  where the boundary falls; in a block of twenty-odd rows the twelfth is unknowable.
+
+  The marker is a bracket field, `[id=… procedural live inferred]`, not a suffix. That row
+  format puts metadata first and the untrusted span last precisely so nothing trusted can
+  follow text a claim could impersonate; `recall()` can suffix its rows because they carry
+  no metadata at all. Note the bracket was already variable-width — `_state` appends an
+  instant for `ended` and `retired` — so a consumer pinning a field count was already
+  wrong for those rows. Read it as a set of tokens.
+
+- **The skill says what the `(inferred)` marker means.** The tools emit it and nothing
+  told a reader what to do about it, which is worse than not marking at all: the reader
+  either discounts every row or ignores the marker on all of them, the exact failure the
+  per-row marker was added to end. `references/project-instructions.md` now says to treat
+  a marked row as the weaker of two that disagree, never to quote one back as something
+  the user stated, and to reach for `memory_why` to check it — plus the half that is easy
+  to miss, that an unmarked row is not thereby the user's own words, only one no component
+  claimed to have derived.
+
+### Changed
+
+- **The stated-versus-derived rule has one home, `core.is_derived`.** Lifted out of
+  `Memvara._derived_suffix`, which now calls it, because two renderers read it and a rule
+  restated in two places is a rule that will disagree with itself. That is not
+  hypothetical: two agents reimplemented this predicate from prose on the same afternoon
+  and both got it wrong in opposite directions — one used a substring test over the
+  rendered `Derived by` line and silently classed a third extractor as user-stated, the
+  other described it as "marked unless the extractor is api", which drops `""` and would
+  mark every claim written before `extractor` existed. The unmarked set is the tuple
+  `("", "api")`. The extractor's name is still never rendered.
+
+
 Nothing yet.
 
 ## [npm 0.1.1] — 2026-08-26
