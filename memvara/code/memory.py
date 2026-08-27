@@ -29,8 +29,6 @@ class ContextRecord:
 ContextBuilder = Callable[[Symbol, CodeSnapshot], str]
 
 class CodeMemory:
-    """Keep code understanding in Memvara, with deterministic invalidation."""
-
     def __init__(self, memory: Memvara) -> None:
         self.memory = memory
         for spec in CODE_PREDICATES:
@@ -55,9 +53,6 @@ class CodeMemory:
             receipts.extend(self._remember_structure(after, commit=commit))
             if change in (SymbolChange.MOVED, SymbolChange.RENAMED):
                 continue
-            # A module hash changes when one of its children changes. The module remains
-            # useful as structural context, but P0 does not ask the LLM to summarize the
-            # whole file on every child edit.
             if after.kind is SymbolKind.MODULE:
                 continue
             context = contexts.get(after.id)
@@ -74,7 +69,7 @@ class CodeMemory:
     def current_context(self, symbol: Symbol | str) -> ContextRecord | None:
         symbol_id = symbol.id if isinstance(symbol, Symbol) else symbol
         claims = self.memory.history(symbol_id, "code_context")
-        live = [claim for claim in claims if claim.is_live]
+        live = [claim for claim in claims if claim.is_live()]
         if not live:
             return None
         claim = live[-1]
