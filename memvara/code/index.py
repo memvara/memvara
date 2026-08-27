@@ -183,11 +183,12 @@ def _symbol_from_node(
     kind: SymbolKind, node: ast.AST, path: str, source: str, qualified: str, parent_id: str | None
 ) -> Symbol:
     segment = ast.get_source_segment(source, node) or ""
+    line_start = getattr(node, "lineno", 1)
     name = node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else qualified.rsplit(".", 1)[-1]
     return Symbol(
-        _symbol_id(kind, qualified), kind, name, qualified, path, _signature(node), segment,
-        _sha(segment), _fingerprint(node), getattr(node, "lineno", 1),
-        getattr(node, "end_lineno", getattr(node, "lineno", 1)), parent_id,
+        _symbol_id(kind, qualified, line_start), kind, name, qualified, path, _signature(node), segment,
+        _sha(segment), _fingerprint(node), line_start,
+        getattr(node, "end_lineno", line_start), parent_id,
     )
 
 
@@ -196,10 +197,11 @@ def _variable_from_node(
 ) -> Symbol:
     qualified = f"{prefix}.{name}"
     segment = ast.get_source_segment(source, node) or ""
+    line_start = getattr(node, "lineno", 1)
     return Symbol(
-        _symbol_id(kind, qualified), kind, name, qualified, path, name, segment,
-        _sha(segment), _fingerprint(node), getattr(node, "lineno", 1),
-        getattr(node, "end_lineno", getattr(node, "lineno", 1)), parent_id,
+        _symbol_id(kind, qualified, line_start), kind, name, qualified, path, name, segment,
+        _sha(segment), _fingerprint(node), line_start,
+        getattr(node, "end_lineno", line_start), parent_id,
     )
 
 
@@ -239,11 +241,14 @@ def _fingerprint(node: ast.AST) -> str:
         for field in ("lineno", "col_offset", "end_lineno", "end_col_offset", "type_comment"):
             if hasattr(item, field):
                 setattr(item, field, None)
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            item.name = "__symbol__"
     return _sha(ast.dump(clone, annotate_fields=True, include_attributes=False))
 
 
-def _symbol_id(kind: SymbolKind, qualified_name: str) -> str:
-    return "code:symbol:" + _sha(f"{kind.value}\0{qualified_name}")[:32]
+def _symbol_id(kind: SymbolKind, qualified_name: str, line_start: int | None = None) -> str:
+    discriminator = "" if line_start is None else f"\0{line_start}"
+    return "code:symbol:" + _sha(f"{kind.value}\0{qualified_name}{discriminator}")[:32]
 
 
 def _sha(value: str) -> str:
@@ -284,8 +289,6 @@ def _carry_forward_moves(previous: CodeSnapshot, current: CodeSnapshot) -> CodeS
     if not replacements:
         return current
 
-    # Map parent IDs after all direct matches have been established so a renamed or
-    # moved parent carries its children along without dangling parent references.
     parent_map = {new_id: old_id for new_id, old_id in replacements.items()}
     merged: dict[str, Symbol] = {}
     for symbol in current.symbols.values():
