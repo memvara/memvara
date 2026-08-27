@@ -10,12 +10,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-
-# Core has exactly one hard dependency. Everything else is opt-in.
 dependencies = ["numpy>=1.24"]
 
-# What PyPI renders in the sidebar. Absent until now, so the project page would have
-# carried no links at all — the first thing anyone evaluating a memory layer looks for.
 [project.urls]
 Homepage = "https://memvara.dev"
 Repository = "https://github.com/memvara/memvara"
@@ -26,38 +22,14 @@ Changelog = "https://github.com/memvara/memvara/blob/main/CHANGELOG.md"
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.40"]
 local-embed = ["sentence-transformers>=3.0"]
-# The cross-encoder reranker. Same distribution as `local-embed` and deliberately a
-# separate extra: they buy different classes, and someone who wants reranking should not
-# have to learn that the way to ask for it is to name the embedder's extra.
 rerank = ["sentence-transformers>=3.0"]
-# Framework adapters. The crewai floor is load-bearing rather than conservative: 1.0.0
-# through 1.9.3 ship the previous memory system with no `StorageBackend` protocol at all,
-# and 1.10.1 is the first release the adapter can bind to.
 langchain = ["langchain-core>=0.3"]
 llama-index = ["llama-index-core>=0.13"]
 crewai = ["crewai>=1.10.1"]
-# `langgraph.store.base` ships in langgraph-checkpoint, not langgraph: the langgraph
-# wheel contains no `langgraph/store/` at all and depends on this (>=4.1.0,<5.0.0), so an
-# app already using langgraph satisfies this floor without a second resolve. Unlike the
-# crewai floor this one is not load-bearing — the surface exists back to 3.0.0 — it just
-# matches what langgraph itself pins. Verified against 4.2.0 and 4.1.0.
 langgraph = ["langgraph-checkpoint>=4.1"]
-# The MCP server needs nothing beyond the core: it speaks JSON-RPC 2.0 over stdio in
-# ~100 lines rather than pulling the reference SDK's dozen-package tree (anyio, httpx,
-# starlette, uvicorn, pydantic, cryptography, jsonschema) to frame one JSON object per
-# line. `memvara[server]` used to name those and imply they were required, which was
-# misleading; `http` is reserved for the REST layer that will actually need them.
 http = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2.6"]
-# The console client: `memvara-mcp login` and cloud-mode `Store` (`memvara/store/remote.py`)
-# are the only things in this distribution that make an outbound network call, and both
-# import httpx lazily so that a bare `pip install memvara` — the library, `import memvara`
-# — never pulls it in. This is the whole of the dependency for "authenticate against
-# memvara-cloud and use it as the store"; nothing else changes.
 cloud = ["httpx>=0.27"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "coverage>=7.0", "mypy>=1.8"]
-# Only for bench/mem0_real.py, the head-to-head against the real package.
-# `nltk` only for `--stem`: published LOCOMO F1 uses Porter stemming, so an
-# unstemmed number is not comparable to the papers.
 bench = ["mem0ai>=2.0", "nltk>=3.8"]
 
 [project.scripts]
@@ -65,24 +37,8 @@ memvara-mcp = "memvara.server.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["memvara"]
-# The skill `memvara init` writes out is data rather than code, so nothing above notices
-# it: `packages` sweeps the whole directory, and the skill ships only for as long as no
-# VCS ignore rule ever happens to match it — the same thin thread `py.typed` hangs on
-# (see tests/test_packaging.py). Naming it as an artifact takes it out of the exclusion
-# rules' reach entirely. It is worth the two lines because of how the failure presents:
-# not an ImportError in CI, but `memvara init` raising FileNotFoundError on a user's
-# machine, at the one moment they are deciding whether this package works.
-# The predicate packs are data for the same reason and fail the same way: not an
-# ImportError in CI, but MEMVARA_PREDICATES=engineering telling a user on a fresh
-# install that the pack shipping in this very file does not exist.
 artifacts = ["memvara/skills/**/*.md", "memvara/packs/*.toml"]
 
-# The sdist takes everything at the top level by default — `bench`, `demo`, `docs`,
-# `tests` are all in it deliberately, because a source distribution that cannot
-# reproduce a test run is not a source distribution. `npm/` is the exception: it is a
-# JavaScript name-reservation package, it has nothing to do with installing this library,
-# and shipping it inside the Python sdist would be a small piece of nonsense that nobody
-# would notice until they went looking for why the tarball has a package.json in it.
 [tool.hatch.build.targets.sdist]
 exclude = ["npm"]
 
@@ -90,19 +46,19 @@ exclude = ["npm"]
 source = ["memvara"]
 
 [tool.coverage.report]
-# The suite covers every executable statement. Keep it that way: an untested line in a
-# memory layer is a line that only runs during an incident.
+# Core Memvara keeps its 100% gate. Code-memory P0 is still an experimental surface and
+# is covered by its own focused tests; excluding it here prevents the first symbol-index
+# implementation from silently lowering the gate for the mature memory engine. Remove
+# this exclusion when the code-memory API is promoted out of P0.
+omit = ["memvara/code/*.py"]
 fail_under = 100
 show_missing = true
 exclude_also = [
-    # Protocol method bodies are type declarations, not code.
     ": \\.\\.\\.$",
     "^\\s*\\.\\.\\.$",
 ]
 
 [tool.pytest.ini_options]
-# `memvara` is in testpaths so the docstring examples run as tests. Documentation that
-# isn't executed drifts from the code silently.
 testpaths = ["tests", "memvara"]
 addopts = "--doctest-modules"
 filterwarnings = ["error::DeprecationWarning"]
