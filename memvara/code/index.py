@@ -73,8 +73,13 @@ class CodeIndex:
         self.snapshot = snapshot
 
     @classmethod
-    def from_directory(cls, root: str | Path, *, previous: CodeSnapshot | None = None,
-                       exclude: Iterable[str] = (".git", ".venv", "venv", "node_modules", "__pycache__")) -> "CodeIndex":
+    def from_directory(
+        cls,
+        root: str | Path,
+        *,
+        previous: CodeSnapshot | None = None,
+        exclude: Iterable[str] = (".git", ".venv", "venv", "node_modules", "__pycache__"),
+    ) -> "CodeIndex":
         root_path = Path(root).resolve()
         excluded = set(exclude)
         symbols: dict[str, Symbol] = {}
@@ -126,41 +131,28 @@ class CodeIndex:
                 changes.append((SymbolChange.CHANGED, before, after))
             else:
                 changes.append((SymbolChange.UNCHANGED, before, after))
-        fingerprints: dict[tuple[SymbolKind, str, str], list[tuple[str, Symbol]]] = {}
-        for symbol_id, symbol in new.items():
-            fingerprints.setdefault((symbol.kind, symbol.name, symbol.fingerprint), []).append((symbol_id, symbol))
-        matched_new: set[str] = set()
-        repaired: list[tuple[SymbolChange, Symbol | None, Symbol | None]] = []
-        for change, before, after in changes:
-            if change is SymbolChange.REMOVED and before is not None:
-                candidates = fingerprints.get((before.kind, before.name, before.fingerprint), [])
-                candidates = [(sid, s) for sid, s in candidates if sid not in old]
-                if len(candidates) == 1:
-                    sid, candidate = candidates[0]
-                    matched_new.add(sid)
-                    repaired.append((SymbolChange.MOVED, before, candidate))
-                    continue
-            if change is SymbolChange.ADDED and after is not None and after.id in matched_new:
-                continue
-            repaired.append((change, before, after))
-        return tuple(repaired)
+        return tuple(changes)
 
 
 def _extract_symbols(path: str, source: str, tree: ast.AST) -> dict[str, Symbol]:
     result: dict[str, Symbol] = {}
     module_name = path[:-3].replace("/", ".") if path.endswith(".py") else path.replace("/", ".")
-    module = Symbol(_symbol_id(SymbolKind.MODULE, module_name), SymbolKind.MODULE, Path(path).stem,
-                    module_name, path, module_name, source, _sha(source), _fingerprint(tree), 1,
-                    max(1, source.count("\n") + 1))
+    module = Symbol(
+        _symbol_id(SymbolKind.MODULE, module_name), SymbolKind.MODULE, Path(path).stem,
+        module_name, path, module_name, source, _sha(source), _fingerprint(tree), 1,
+        max(1, source.count("\n") + 1),
+    )
     result[module.id] = module
 
     def walk(body: list[ast.stmt], prefix: str, parent_id: str | None, in_class: bool = False) -> None:
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                kind = (SymbolKind.ASYNC_METHOD if isinstance(node, ast.AsyncFunctionDef) and in_class
-                        else SymbolKind.METHOD if in_class
-                        else SymbolKind.ASYNC_FUNCTION if isinstance(node, ast.AsyncFunctionDef)
-                        else SymbolKind.FUNCTION)
+                kind = (
+                    SymbolKind.ASYNC_METHOD if isinstance(node, ast.AsyncFunctionDef) and in_class
+                    else SymbolKind.METHOD if in_class
+                    else SymbolKind.ASYNC_FUNCTION if isinstance(node, ast.AsyncFunctionDef)
+                    else SymbolKind.FUNCTION
+                )
                 qualified = f"{prefix}.{node.name}"
                 symbol = _symbol_from_node(kind, node, path, source, qualified, parent_id)
                 result[symbol.id] = symbol
@@ -174,31 +166,41 @@ def _extract_symbols(path: str, source: str, tree: ast.AST) -> dict[str, Symbol]
                         walk([child], qualified, symbol.id, True)
                     elif isinstance(child, (ast.Assign, ast.AnnAssign)):
                         for target in _assignment_names(child):
-                            variable = _variable_from_node(SymbolKind.CLASS_VARIABLE, target, child, path, source, qualified, symbol.id)
+                            variable = _variable_from_node(
+                                SymbolKind.CLASS_VARIABLE, target, child, path, source, qualified, symbol.id
+                            )
                             result[variable.id] = variable
             elif isinstance(node, (ast.Assign, ast.AnnAssign)):
                 for target in _assignment_names(node):
                     variable = _variable_from_node(SymbolKind.VARIABLE, target, node, path, source, prefix, parent_id)
                     result[variable.id] = variable
+
     walk(getattr(tree, "body", []), module_name, module.id)
     return result
 
 
-def _symbol_from_node(kind: SymbolKind, node: ast.AST, path: str, source: str, qualified: str, parent_id: str | None) -> Symbol:
+def _symbol_from_node(
+    kind: SymbolKind, node: ast.AST, path: str, source: str, qualified: str, parent_id: str | None
+) -> Symbol:
     segment = ast.get_source_segment(source, node) or ""
     name = node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else qualified.rsplit(".", 1)[-1]
-    return Symbol(_symbol_id(kind, qualified), kind, name, qualified, path, _signature(node), segment,
-                  _sha(segment), _fingerprint(node), getattr(node, "lineno", 1),
-                  getattr(node, "end_lineno", getattr(node, "lineno", 1)), parent_id)
+    return Symbol(
+        _symbol_id(kind, qualified), kind, name, qualified, path, _signature(node), segment,
+        _sha(segment), _fingerprint(node), getattr(node, "lineno", 1),
+        getattr(node, "end_lineno", getattr(node, "lineno", 1)), parent_id,
+    )
 
 
-def _variable_from_node(kind: SymbolKind, name: str, node: ast.AST, path: str, source: str,
-                        prefix: str, parent_id: str | None) -> Symbol:
+def _variable_from_node(
+    kind: SymbolKind, name: str, node: ast.AST, path: str, source: str, prefix: str, parent_id: str | None
+) -> Symbol:
     qualified = f"{prefix}.{name}"
     segment = ast.get_source_segment(source, node) or ""
-    return Symbol(_symbol_id(kind, qualified), kind, name, qualified, path, name, segment,
-                  _sha(segment), _fingerprint(node), getattr(node, "lineno", 1),
-                  getattr(node, "end_lineno", getattr(node, "lineno", 1)), parent_id)
+    return Symbol(
+        _symbol_id(kind, qualified), kind, name, qualified, path, name, segment,
+        _sha(segment), _fingerprint(node), getattr(node, "lineno", 1),
+        getattr(node, "end_lineno", getattr(node, "lineno", 1)), parent_id,
+    )
 
 
 def _assignment_names(node: ast.AST) -> tuple[str, ...]:
@@ -209,12 +211,14 @@ def _assignment_names(node: ast.AST) -> tuple[str, ...]:
     else:
         return ()
     names: list[str] = []
+
     def collect(target: ast.AST) -> None:
         if isinstance(target, ast.Name):
             names.append(target.id)
         elif isinstance(target, (ast.Tuple, ast.List)):
             for item in target.elts:
                 collect(item)
+
     for target in targets:
         collect(target)
     return tuple(names)
@@ -254,32 +258,44 @@ def _relative(path: str | Path, root: Path) -> str:
 
 
 def _carry_forward_moves(previous: CodeSnapshot, current: CodeSnapshot) -> CodeSnapshot:
-    old_by_key: dict[tuple[SymbolKind, str, str], list[Symbol]] = {}
+    """Preserve identity only for globally unambiguous symbol matches.
+
+    A symbol's qualified name is its fast-path identity. When that identity changes,
+    we may carry the old ID forward, but only when exactly one old symbol and exactly
+    one new symbol share the same kind and implementation fingerprint. This makes
+    moves/renames cheap while refusing to guess in duplicate/ambiguous cases.
+    """
+    old_by_key: dict[tuple[SymbolKind, str], list[Symbol]] = {}
+    new_by_key: dict[tuple[SymbolKind, str], list[Symbol]] = {}
     for symbol in previous.symbols.values():
-        old_by_key.setdefault((symbol.kind, symbol.name, symbol.fingerprint), []).append(symbol)
-    replacements: dict[str, Symbol] = {}
-    used: set[str] = set()
-    for new_id, symbol in current.symbols.items():
-        if new_id in previous.symbols:
-            continue
-        candidates = [s for s in old_by_key.get((symbol.kind, symbol.name, symbol.fingerprint), []) if s.id not in used]
-        if len(candidates) == 1:
-            old = candidates[0]
-            used.add(old.id)
-            replacements[new_id] = Symbol(old.id, symbol.kind, symbol.name, symbol.qualified_name,
-                                           symbol.path, symbol.signature, symbol.source, symbol.source_hash,
-                                           symbol.fingerprint, symbol.line_start, symbol.line_end, symbol.parent_id)
+        old_by_key.setdefault((symbol.kind, symbol.fingerprint), []).append(symbol)
+    for symbol in current.symbols.values():
+        new_by_key.setdefault((symbol.kind, symbol.fingerprint), []).append(symbol)
+
+    replacements: dict[str, str] = {}
+    for key, old_candidates in old_by_key.items():
+        new_candidates = new_by_key.get(key, [])
+        if len(old_candidates) == 1 and len(new_candidates) == 1:
+            old = old_candidates[0]
+            new = new_candidates[0]
+            if old.id != new.id:
+                replacements[new.id] = old.id
+
     if not replacements:
         return current
-    parent_map = {new_id: replacement.id for new_id, replacement in replacements.items()}
-    merged = dict(current.symbols)
-    for new_id, replacement in replacements.items():
-        del merged[new_id]
-        parent_id = replacement.parent_id
+
+    # Map parent IDs after all direct matches have been established so a renamed or
+    # moved parent carries its children along without dangling parent references.
+    parent_map = {new_id: old_id for new_id, old_id in replacements.items()}
+    merged: dict[str, Symbol] = {}
+    for symbol in current.symbols.values():
+        symbol_id = replacements.get(symbol.id, symbol.id)
+        parent_id = symbol.parent_id
         if parent_id is not None:
             parent_id = parent_map.get(parent_id, parent_id)
-        merged[replacement.id] = Symbol(replacement.id, replacement.kind, replacement.name,
-                                         replacement.qualified_name, replacement.path, replacement.signature,
-                                         replacement.source, replacement.source_hash, replacement.fingerprint,
-                                         replacement.line_start, replacement.line_end, parent_id)
+        merged[symbol_id] = Symbol(
+            symbol_id, symbol.kind, symbol.name, symbol.qualified_name, symbol.path,
+            symbol.signature, symbol.source, symbol.source_hash, symbol.fingerprint,
+            symbol.line_start, symbol.line_end, parent_id,
+        )
     return CodeSnapshot(current.root, merged, current.files)
