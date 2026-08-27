@@ -8,7 +8,7 @@ from typing import Callable, Mapping
 from ..core import Memvara
 from ..schema import Cardinality, PredicateSpec, Volatility
 from ..types import Claim, MemoryType, WriteReceipt
-from .index import CodeIndex, CodeSnapshot, Symbol, SymbolChange
+from .index import CodeIndex, CodeSnapshot, Symbol, SymbolChange, SymbolKind
 
 CODE_PREDICATES = (
     PredicateSpec("code_context", Cardinality.ONE, Volatility.FAST, MemoryType.SEMANTIC),
@@ -72,21 +72,17 @@ class CodeMemory:
             target = after or before
             if target is None:
                 continue
-            subject = target.id
 
             if change is SymbolChange.REMOVED:
-                self._forget_symbol(subject)
+                self._forget_symbol(target.id)
                 continue
-
             if after is None:
                 continue
 
-            # Structural facts are deterministic and cheap. They also give retrieval a
-            # lexical foothold even when no semantic model has been configured.
             receipts.extend(self._remember_structure(after, commit=commit))
 
-            # Moving a symbol is not a semantic change. Do not throw away a useful LLM
-            # context just because its filesystem address changed.
+            # A move or rename with an identical implementation does not invalidate
+            # semantic understanding. Only its structural address needs to change.
             if change in (SymbolChange.MOVED, SymbolChange.RENAMED):
                 continue
 
@@ -138,12 +134,16 @@ class CodeMemory:
             values += (("code_parent", symbol.parent_id),)
         receipts: list[WriteReceipt] = []
         for predicate, value in values:
-            text = f"{symbol.qualified_name} {predicate}: {value}"
+            meta = {"code_symbol": symbol.id}
+            if commit is not None:
+                meta["commit"] = commit
             receipts.append(self.memory.remember(
-                symbol.id, predicate, value, text=text, extractor="code-indexer",
-                meta_commit=commit,
-            ) if commit is not None else self.memory.remember(
-                symbol.id, predicate, value, text=text, extractor="code-indexer",
+                symbol.id,
+                predicate,
+                value,
+                text=f"{symbol.qualified_name} {predicate}: {value}",
+                extractor="code-indexer",
+                **meta,
             ))
         return receipts
 
@@ -179,10 +179,14 @@ class CodeMemory:
         path_claims = self.memory.history(claim.subject, "code_path")
         path = path_claims[-1].object if path_claims else ""
         kind_claims = self.memory.history(claim.subject, "code_kind")
-        kind = kind_claims[-1].object if kind_claims else "symbol"
+        raw_kind = kind_claims[-1].object if kind_claims else SymbolKind.FUNCTION.value
+        try:
+            kind = SymbolKind(raw_kind)
+        except ValueError:
+            kind = SymbolKind.FUNCTION
         return Symbol(
             id=claim.subject,
-            kind=kind,  # type: ignore[arg-type]
+            kind=kind,
             name=claim.subject.rsplit(":", 1)[-1],
             qualified_name=claim.subject,
             path=path,
