@@ -179,9 +179,10 @@ def _extract_symbols(path: str, source: str, tree: ast.AST) -> dict[str, Symbol]
 
 def _symbol_from_node(kind: SymbolKind, node: ast.AST, path: str, source: str, qualified: str, parent_id: str | None) -> Symbol:
     segment = ast.get_source_segment(source, node) or ""
-    return Symbol(_symbol_id(kind, qualified), kind, getattr(node, "name", qualified.rsplit(".", 1)[-1]),
-                  qualified, path, _signature(node), segment, _sha(segment), _fingerprint(node),
-                  getattr(node, "lineno", 1), getattr(node, "end_lineno", getattr(node, "lineno", 1)), parent_id)
+    name = node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else qualified.rsplit(".", 1)[-1]
+    return Symbol(_symbol_id(kind, qualified), kind, name, qualified, path, _signature(node), segment,
+                  _sha(segment), _fingerprint(node), getattr(node, "lineno", 1),
+                  getattr(node, "end_lineno", getattr(node, "lineno", 1)), parent_id)
 
 def _variable_from_node(kind: SymbolKind, name: str, node: ast.AST, path: str, source: str,
                         prefix: str, parent_id: str | None) -> Symbol:
@@ -192,7 +193,12 @@ def _variable_from_node(kind: SymbolKind, name: str, node: ast.AST, path: str, s
                   getattr(node, "end_lineno", getattr(node, "lineno", 1)), parent_id)
 
 def _assignment_names(node: ast.AST) -> tuple[str, ...]:
-    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, ast.AnnAssign):
+        targets = [node.target]
+    else:
+        return ()
     names: list[str] = []
     def collect(target: ast.AST) -> None:
         if isinstance(target, ast.Name):
