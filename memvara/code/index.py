@@ -9,6 +9,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterable, Mapping
 
+
 class SymbolKind(str, Enum):
     MODULE = "module"
     CLASS = "class"
@@ -19,6 +20,7 @@ class SymbolKind(str, Enum):
     CLASS_VARIABLE = "class_variable"
     VARIABLE = "variable"
 
+
 class SymbolChange(str, Enum):
     ADDED = "added"
     REMOVED = "removed"
@@ -26,6 +28,7 @@ class SymbolChange(str, Enum):
     MOVED = "moved"
     RENAMED = "renamed"
     UNCHANGED = "unchanged"
+
 
 @dataclass(frozen=True, slots=True)
 class Symbol:
@@ -46,6 +49,7 @@ class Symbol:
     def address(self) -> str:
         return f"{self.path}:{self.qualified_name}"
 
+
 @dataclass(frozen=True, slots=True)
 class CodeSnapshot:
     root: str
@@ -62,6 +66,7 @@ class CodeSnapshot:
     def by_path(self, path: str) -> tuple[Symbol, ...]:
         normalized = _relative(path, Path(self.root))
         return tuple(s for s in self.symbols.values() if s.path == normalized)
+
 
 class CodeIndex:
     def __init__(self, snapshot: CodeSnapshot) -> None:
@@ -140,6 +145,7 @@ class CodeIndex:
             repaired.append((change, before, after))
         return tuple(repaired)
 
+
 def _extract_symbols(path: str, source: str, tree: ast.AST) -> dict[str, Symbol]:
     result: dict[str, Symbol] = {}
     module_name = path[:-3].replace("/", ".") if path.endswith(".py") else path.replace("/", ".")
@@ -177,12 +183,14 @@ def _extract_symbols(path: str, source: str, tree: ast.AST) -> dict[str, Symbol]
     walk(getattr(tree, "body", []), module_name, module.id)
     return result
 
+
 def _symbol_from_node(kind: SymbolKind, node: ast.AST, path: str, source: str, qualified: str, parent_id: str | None) -> Symbol:
     segment = ast.get_source_segment(source, node) or ""
     name = node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else qualified.rsplit(".", 1)[-1]
     return Symbol(_symbol_id(kind, qualified), kind, name, qualified, path, _signature(node), segment,
                   _sha(segment), _fingerprint(node), getattr(node, "lineno", 1),
                   getattr(node, "end_lineno", getattr(node, "lineno", 1)), parent_id)
+
 
 def _variable_from_node(kind: SymbolKind, name: str, node: ast.AST, path: str, source: str,
                         prefix: str, parent_id: str | None) -> Symbol:
@@ -191,6 +199,7 @@ def _variable_from_node(kind: SymbolKind, name: str, node: ast.AST, path: str, s
     return Symbol(_symbol_id(kind, qualified), kind, name, qualified, path, name, segment,
                   _sha(segment), _fingerprint(node), getattr(node, "lineno", 1),
                   getattr(node, "end_lineno", getattr(node, "lineno", 1)), parent_id)
+
 
 def _assignment_names(node: ast.AST) -> tuple[str, ...]:
     if isinstance(node, ast.Assign):
@@ -210,6 +219,7 @@ def _assignment_names(node: ast.AST) -> tuple[str, ...]:
         collect(target)
     return tuple(names)
 
+
 def _signature(node: ast.AST) -> str:
     if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return f"class {node.name}" if isinstance(node, ast.ClassDef) else type(node).__name__
@@ -217,6 +227,7 @@ def _signature(node: ast.AST) -> str:
     return_type = f" -> {ast.unparse(node.returns)}" if node.returns else ""
     prefix = "async " if isinstance(node, ast.AsyncFunctionDef) else ""
     return f"{prefix}def {node.name}({args}){return_type}"
+
 
 def _fingerprint(node: ast.AST) -> str:
     clone = ast.parse(ast.unparse(node))
@@ -226,17 +237,21 @@ def _fingerprint(node: ast.AST) -> str:
                 setattr(item, field, None)
     return _sha(ast.dump(clone, annotate_fields=True, include_attributes=False))
 
+
 def _symbol_id(kind: SymbolKind, qualified_name: str) -> str:
     return "code:symbol:" + _sha(f"{kind.value}\0{qualified_name}")[:32]
 
+
 def _sha(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
 
 def _relative(path: str | Path, root: Path) -> str:
     candidate = Path(path)
     if not candidate.is_absolute():
         return candidate.as_posix()
     return candidate.resolve().relative_to(root.resolve()).as_posix()
+
 
 def _carry_forward_moves(previous: CodeSnapshot, current: CodeSnapshot) -> CodeSnapshot:
     old_by_key: dict[tuple[SymbolKind, str, str], list[Symbol]] = {}
@@ -260,7 +275,9 @@ def _carry_forward_moves(previous: CodeSnapshot, current: CodeSnapshot) -> CodeS
     merged = dict(current.symbols)
     for new_id, replacement in replacements.items():
         del merged[new_id]
-        parent_id = parent_map.get(replacement.parent_id, replacement.parent_id)
+        parent_id = replacement.parent_id
+        if parent_id is not None:
+            parent_id = parent_map.get(parent_id, parent_id)
         merged[replacement.id] = Symbol(replacement.id, replacement.kind, replacement.name,
                                          replacement.qualified_name, replacement.path, replacement.signature,
                                          replacement.source, replacement.source_hash, replacement.fingerprint,
