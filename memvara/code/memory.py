@@ -87,9 +87,11 @@ class CodeMemory:
         return self.memory.search(query, **kwargs)
 
     def _remember_structure(self, symbol: Symbol, *, commit: str | None) -> list[WriteReceipt]:
-        values = (("code_path", symbol.path), ("code_signature", symbol.signature),
-                  ("code_kind", symbol.kind.value), ("code_source_hash", symbol.source_hash),
-                  ("code_fingerprint", symbol.fingerprint))
+        values: tuple[tuple[str, str], ...] = (
+            ("code_path", symbol.path), ("code_signature", symbol.signature),
+            ("code_kind", symbol.kind.value), ("code_source_hash", symbol.source_hash),
+            ("code_fingerprint", symbol.fingerprint),
+        )
         if symbol.parent_id:
             values += (("code_parent", symbol.parent_id),)
         receipts: list[WriteReceipt] = []
@@ -117,7 +119,8 @@ class CodeMemory:
     def _forget_symbol(self, symbol_id: str) -> None:
         for predicate in ("code_context", "code_path", "code_signature", "code_kind",
                           "code_source_hash", "code_fingerprint", "code_parent"):
-            self.memory.forget(symbol_id, predicate)
+            while any(claim.is_live() for claim in self.memory.history(symbol_id, predicate)):
+                self.memory.forget(symbol_id, predicate)
 
     def _symbol_from_claim(self, claim: Claim) -> Symbol:
         path_claims = self.memory.history(claim.subject, "code_path")
