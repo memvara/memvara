@@ -9,6 +9,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-08-27
+
 ### Added
 
 - **`memory_standing` and `memory_since` say which rows a machine derived.** 0.8.0 gave
