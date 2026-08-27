@@ -53,7 +53,7 @@ def test_removed_symbol_retires_all_code_claims(tmp_path):
 
     assert code.current_context(refund.id) is None
     for predicate in ("code_context", "code_path", "code_signature", "code_kind"):
-        assert all(not claim.is_live for claim in memory.history(refund.id, predicate, user="code"))
+        assert all(not claim.is_live() for claim in memory.history(refund.id, predicate, user="code"))
 
 
 def test_move_does_not_call_context_builder(tmp_path):
