@@ -2100,6 +2100,52 @@ git commit -m "docs(skill): name the Python client as a surface"
 
 ---
 
+### Task 14: The public API reference on the website
+
+**Repository:** `memvara-web` at `/Applications/workstation/memvara-web`. **Not this one.**
+
+- Modify: `src/content/api.ts`
+
+Missed when this plan was first written, and confirmed by inspection afterwards.
+`memvara-web` documents this library's public API in `src/content/api.ts`, rendered by
+`src/routes/ApiReference.tsx`. It enumerates the library's own methods — `Memvara(...)`,
+`mem.add`, `mem.remember`, `mem.supersede`, `AsyncMemvara`, `scope()` — grouped as *Open a
+store* / *Write* / *Read*. A new public entry point belongs there.
+
+Also confirmed: `memvara-web` needs **nothing** for the `memvara-cloud` half of this work.
+The site documents the library, not the REST surface; the only `/v1` routes it names are
+three GET routes in `Guide.tsx`, for time-travel parameters. A `CloudApi.tsx` exists but only
+inside a feature worktree, not on `main`.
+
+- [ ] **Step 1: Work in a fresh worktree of `memvara-web`**
+
+That repository's `main` had uncommitted changes to `worker/generated/searchIndex.ts` when
+this was checked — somebody else's work. Branch in a worktree; do not touch `main`.
+
+- [ ] **Step 2: Add the two entry points under *Open a store***
+
+`Memvara(api_key=...)` and `Memvara.connect()`, in the shape the existing `api-memvara`
+entry uses. Say plainly that dispatch keys on the explicit argument and never on the
+environment, because that is the property a reader most needs and least expects.
+
+- [ ] **Step 3: Record the divergences where the affected methods are described**
+
+`reembed`, `pending_extraction`, `reextract` and `reset` do not exist on a remote client;
+`consolidate()` returns a job handle; there is no `prove_erased()`. Put each note against the
+method it concerns rather than in one list, matching how that file already attaches notes.
+
+- [ ] **Step 4: Run the examples**
+
+That page asserts its examples produced the output shown. Run each new one against a real
+deployment and paste what it actually printed. A plausible-looking transcript on a page whose
+whole claim is that the outputs are real is worse than no example.
+
+- [ ] **Step 5: Commit and open a PR in that repository**
+
+Files by name. No AI attribution.
+
+---
+
 ## Final gate
 
 - [ ] **Full suite, with a private coverage file, as two commands**
@@ -2150,5 +2196,5 @@ The PR body must state that `end()` and write retries depend on `POST /v1/end` a
 | §4 un-refusing cloud mode | 11, 12 |
 | §5 memvara-cloud changes | **not in this plan** — separate repo, separate plan; `local/END-ENDPOINT-SPEC.md` |
 | §6 verification | every task's test steps, plus the final gate |
-| §7 documentation | folded into 3, 8, 9, 12, 13 |
+| §7 documentation | folded into 3, 8, 9, 12, 13; plus Task 14 (`memvara-web`) |
 | §8 deliberately not in scope | no tasks, by design |
