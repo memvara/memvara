@@ -135,6 +135,10 @@ class AsyncRemoteMemvara:
         body = await self._http.request("GET", "/v1/stats", params=self._params())
         return dict(body["tenant_counts"])
 
+    async def service(self) -> dict[str, Any]:
+        """The whole `/v1/stats` envelope. See `RemoteMemvara.service`."""
+        return dict(await self._http.request("GET", "/v1/stats", params=self._params()))
+
     async def connectivity(self) -> dict[str, int]:
         body = await self.stats()
         if "joinable_claims" not in body or "live_claims" not in body:

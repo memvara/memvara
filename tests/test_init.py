@@ -960,27 +960,30 @@ def test_the_environment_asking_for_cloud_without_httpx_is_refused_the_same_way(
     assert not (tmp_path / ".mcp.json").exists()
 
 
-def test_an_importable_httpx_defaults_to_cloud_again(tmp_path, monkeypatch) -> None:
-    """The other half of `test_no_mode_and_no_httpx_defaults_to_local`, restored.
+def test_an_importable_httpx_does_not_change_the_default(tmp_path, monkeypatch) -> None:
+    """The default is local whether or not the cloud extra is installed.
 
-    This heuristic was overridden while cloud mode could not start at all: every
-    environment with `httpx` — which is a great many that never installed the cloud extra
-    — would have been handed a client that refused to come up, so the default fell back to
-    `local` whatever `httpx` said. Cloud mode starts now, so the signal means again what
-    it was written to mean, and a machine that has the transport gets the mode it can run.
+    This line once read "cloud when httpx is importable", on the reasoning that an
+    importable `httpx` means `pip install memvara[cloud]` happened. After the cloud client
+    landed that reasoning became *more* true and the behaviour became worse: it is now
+    true of everyone who installed the extra, and installing an extra is not a request for
+    your local store to stop being the default. `init` writes the file a client launches
+    from, so a flipped default is a config somebody has to notice and undo.
 
-    A cloud entry with no credential is not the old failure returning. `init` prints the
-    reminder to run `memvara-mcp login`, and the server names the same command if it is
-    launched first — the reason reaches the user in both places.
+    The pair with `test_no_mode_and_no_httpx_defaults_to_local` is deliberate: both halves
+    now assert the same answer, which is the point — `_httpx_importable` no longer decides
+    the mode. It decides whether a cloud config this command writes could start, which is
+    asserted separately.
     """
     monkeypatch.setattr("memvara.server.init._httpx_importable", lambda: True)
     status = init(["--agent", "claude", "--dir", str(tmp_path)],
-                  env={"MEMVARA_API_KEY": "mv_live_x"},
+                  env={"MEMVARA_DB": str(tmp_path / "store" / "memory.db"),
+                       "MEMVARA_API_KEY": "mv_live_x"},
                   stdout=io.StringIO(), stderr=io.StringIO())
     assert status == 0
     entry_env = _entry(tmp_path)["env"]
-    assert entry_env.get("MEMVARA_MODE") == "cloud", entry_env
-    assert "MEMVARA_DB" not in entry_env
+    assert "MEMVARA_DB" in entry_env, entry_env
+    assert entry_env.get("MEMVARA_MODE") != "cloud"
 
 
 def test_cloud_mode_is_written_rather_than_refused(cloud_wired, tmp_path) -> None:

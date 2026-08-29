@@ -69,11 +69,21 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   extracted has been told something false by a program that stayed silent. The error names
   the variable. `memory_stats` reports the deployment's own answer.
 
-  **`memory_stats` reports `extractor: unknown` against a hosted deployment.**
-  `Memvara.extractor` says what *this process* can extract with, and this process extracts
-  nothing. `GET /v1/stats` carries the deployment's own answer; reading it would make
-  server startup depend on the deployment being reachable, which is a worse trade than one
-  honest word.
+  **A read-only API key hides the write tools, and `memory_stats` reports the deployment's
+  own extractor.** The server reads `GET /v1/stats` once at startup, through the new
+  `RemoteMemvara.service()`. Without it a cloud server started with a read-only credential
+  listed every write tool and the deployment refused them mid-conversation as a 403 — to a
+  model that cannot act on it, which is the failure shape the old refusal existed to
+  prevent, one layer along. `MEMVARA_READ_ONLY` and the credential are **OR-ed, never
+  overridden**: a server configured read-only stays read-only whatever the token allows,
+  and the credential can only narrow. Any failure of that one call degrades to the
+  previous behaviour — `extractor` reports `unknown`, `read_only` falls back to the
+  environment — so a deployment that is briefly down does not stop the server starting.
+
+- **`RemoteMemvara.service()` and `AsyncRemoteMemvara.service()`.** The `GET /v1/stats`
+  envelope whole — `{scope, visible, tenant_counts, extractor, read_only}` — beside
+  `stats()`, which keeps returning `tenant_counts` alone so that `stats()["claims"]` is a
+  number against either engine.
 
 - **`memory_standing` is answered server-side against a hosted deployment.** The tool used
   to page every live memory in the scope and filter for procedural ones in Python — across
@@ -86,18 +96,28 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Changed
 
-- **`memvara-mcp init` defaults to cloud mode again when `httpx` is importable.** That
-  heuristic was overridden while cloud mode could not start at all, so every environment
-  with `httpx` — a great many that never installed the cloud extra — would have been handed
-  a client that refused to come up. Cloud mode starts now, so the signal means again what
-  it was written to mean. `--mode local` and `MEMVARA_MODE=local` both still win, and a
-  cloud config written without a credential prints the reminder to run `memvara-mcp login`.
-
 - **`memvara-mcp init --mode cloud` refuses on a missing `httpx` rather than on an unwired
   store.** The reason a cloud server could not start has changed, so the gate did.
   `init` writes a config it never launches, so it and the server have to answer the same
   question the same way or the disagreement is silent — that was the point of
   `cloud_gap()` and it is the point of this.
+
+- **The predicate fold note is read off the claim the store wrote back, not off a
+  registry.** `memory_remember`, `memory_forget` and `memory_end` each say when the
+  predicate acted on is not the one asked for — `uses_tool` held as `prefers_tool`. That
+  answer came from `Memvara.registry`, which a hosted deployment does not have, so all
+  three write tools raised `AttributeError` under `MEMVARA_MODE=cloud`. Every claim these
+  tools already hold carries the canonical predicate, so comparing it against the caller's
+  own spelling is exact on both engines — and is the stronger statement of the two, being
+  what the store did rather than what a registry says it would do.
+
+  **One sentence was dropped and its absence is a decision.** The note used to add, on a
+  write folding onto a single-valued predicate, that the slot now keeps one value where an
+  unseen predicate would have accumulated. Cardinality is a property of the predicate's
+  spec and nothing on the wire carries it. Restoring it needs the deployment to answer for
+  its own vocabulary. `_fold_note`'s docstring and
+  `test_the_fold_note_no_longer_says_what_the_fold_did_to_the_cardinality` both say so, so
+  the loss is visible rather than quiet.
 
 - **`ToolContext.memory` is typed `MemoryAPI` rather than `ScopedMemvara`.** A protocol in
   `memvara/server/memory_api.py` declaring the nineteen members `tools.py` calls, which

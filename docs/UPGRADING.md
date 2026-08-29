@@ -32,12 +32,10 @@ has been told their writes are being extracted by a model that was never loaded.
 non-default value is refused; an unset variable is fine. `memory_stats` reports the
 deployment's own extractor.
 
-**If you run `memvara-mcp init` with no `--mode` and no `MEMVARA_MODE`, and `httpx` is
-importable, you now get a cloud config where you used to get a local one.** That default
-was overridden only for as long as cloud mode could not start. Pass `--mode local`, or
-export `MEMVARA_MODE=local`, to keep writing a `MEMVARA_DB` entry. An accidental cloud
-config is not silent: `init` prints the reminder to run `memvara-mcp login`, and the server
-names the same command if it is launched without a credential.
+**If your hosted API key is read-only, the server now hides its write tools.** That is the
+fix rather than a regression: it used to list them and let the deployment refuse them
+mid-conversation as a 403. `MEMVARA_READ_ONLY` and the credential are OR-ed — a server
+configured read-only stays read-only whatever the token allows.
 
 **If you called `config.cloud_gap()`, `config._ENGINE_NEEDS` or `config._CLOUD_NOT_WIRED`,
 they are gone.** Two were private. `cloud_gap()` was public and its whole purpose was to

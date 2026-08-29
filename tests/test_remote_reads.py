@@ -337,6 +337,25 @@ def test_stats_returns_the_tenant_counts_and_not_the_envelope(recorded):
     assert counts == {"claims": 3, "episodes": 5}
 
 
+def test_service_returns_the_whole_envelope_that_stats_unwraps(recorded):
+    """The twin of the test above, and the reason both methods exist.
+
+    `stats()` unwraps to `tenant_counts` so that `stats()["claims"]` is a number against
+    either engine. That drops `extractor` and `read_only`, which no local engine can
+    answer for a hosted deployment and which a server needs at startup — `read_only` most
+    of all, since a server that ignores it lists write tools the deployment refuses
+    mid-conversation as a 403.
+    """
+    mem = recorded({"scope": _scope(), "visible": 2,
+                    "tenant_counts": {"claims": 3, "episodes": 5},
+                    "extractor": "fast-path-only", "read_only": True})
+    body = mem.service()
+    assert recorded.calls[-1].url.path == "/v1/stats"
+    assert body["read_only"] is True
+    assert body["extractor"] == "fast-path-only"
+    assert body["tenant_counts"] == {"claims": 3, "episodes": 5}
+
+
 def test_connectivity_is_empty_when_the_facade_does_not_report_joins(recorded):
     """`{}` is not a store with nothing in it. An empty store answers two zeros; a
     backend that cannot measure the join says nothing at all, and reading a missing key

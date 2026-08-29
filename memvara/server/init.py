@@ -97,8 +97,9 @@ memvara-mcp init — write the MCP server block, the agent skill and a project n
                 different directory, and a default would silently pick one.
   --dir PATH    project directory to write into. Default: the current directory.
   --mode NAME   'local' or 'cloud'. Default: MEMVARA_MODE if this shell has one,
-                otherwise 'cloud' when httpx is importable (a "pip install
-                memvara[cloud]" happened) and 'local' otherwise. Local writes
+                otherwise 'local' — installing the cloud extra does not change it,
+                because installing a package is not a request to stop using your
+                own store. Say --mode cloud to get one. Local writes
                 MEMVARA_DB/MEMVARA_USER, exactly what this command always wrote before
                 --mode existed. Cloud writes MEMVARA_MODE and, only when it is not the
                 default, MEMVARA_SERVER_URL — and if this machine has no credentials
@@ -424,13 +425,20 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
         if mode is not None and mode not in ("local", "cloud"):
             raise _Usage(f"--mode {mode!r} must be 'local' or 'cloud'.")
         if mode is None:
-            # No explicit flag: an explicit MEMVARA_MODE in this shell wins next, and only
-            # when neither is set does installing the cloud extra change the default —
-            # httpx importable means `pip install memvara[cloud]` happened, which is the
-            # strongest signal available that cloud mode will actually work here.
+            # No explicit flag: an explicit MEMVARA_MODE in this shell wins, and absent
+            # both, local. Not "cloud when httpx is importable", which is what this line
+            # used to say — an importable `httpx` was read as "pip install
+            # memvara[cloud] happened", and after the cloud client landed that is true of
+            # everyone who installed the extra. Installing an extra is not a request for
+            # your local store to stop being the default, and `init` writes the file a
+            # client launches from, so getting this wrong is a config somebody has to
+            # notice and undo. A hosted-first user passes --mode cloud once.
+            #
+            # `_httpx_importable` is still load-bearing below, where it answers the only
+            # question left: whether a cloud server this command writes a config for can
+            # actually start.
             env_mode = (env.get("MEMVARA_MODE") or "").strip()
-            mode = env_mode if env_mode in ("local", "cloud") else (
-                "cloud" if _httpx_importable() else "local")
+            mode = env_mode if env_mode in ("local", "cloud") else "local"
         if mode == "cloud" and not _httpx_importable():
             # Named explicitly, by flag or by environment, and it cannot start. Refusing
             # here is the whole point: writing it exits 0, tells the reader to restart

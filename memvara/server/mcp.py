@@ -83,6 +83,46 @@ def _bind(memory: "Memvara | RemoteMemvara", *, tenant: str | None, user: str | 
     return memory.scope(user=user, agent=agent, session=session)
 
 
+def _service_facts(memory: "Memvara | RemoteMemvara") -> tuple[str, bool]:
+    """`(extractor, read_only)` — what the memory says about itself, asked once.
+
+    A local `Memvara` answers from the object: `extractor` is a property, and read-only is
+    not a thing a SQLite file has an opinion about, so it comes back `False` and the
+    server's own `MEMVARA_READ_ONLY` decides alone.
+
+    A hosted deployment is asked, over one `GET /v1/stats`, and the two answers it gives
+    are ones this process cannot derive. `extractor` names a pipeline that runs on the
+    other side of the wire. `read_only` is what the *credential* authorizes — and without
+    it a server started with a read-only API key lists every write tool, which the
+    deployment then refuses mid-conversation as a 403, to a model that cannot act on it.
+    That is the failure the old cloud-mode refusal existed to prevent, one layer along.
+
+    **This is the one network call in startup, and that is where it belongs.** "No network
+    in a constructor" governs `Memvara(...)`, a library constructor a script builds
+    incidentally. A server's startup is the moment a connection is supposed to open, and
+    it is also the cheapest moment for it to fail: the client shows the launch, and the
+    operator is looking.
+
+    **Every failure degrades to what this server did before the call existed.** `Exception`
+    rather than a narrower class on purpose — a deployment that is down, slow, behind a
+    proxy returning HTML, or running a version whose envelope has different keys must all
+    leave the server *starting*. `Exception` excludes `KeyboardInterrupt` and `SystemExit`,
+    which do mean stop. Degrading loses the two fields and nothing else: `extractor`
+    reports "unknown", which is honest and is the field's own declared default, and
+    `read_only` falls back to the environment, which is what the operator set.
+    """
+    service = getattr(memory, "service", None)
+    if service is None:
+        return getattr(memory, "extractor", "unknown"), False
+    try:
+        body = service()
+    except Exception:                                 # noqa: BLE001 - deliberate
+        return "unknown", False
+    extractor = body.get("extractor")
+    return (extractor if isinstance(extractor, str) and extractor else "unknown",
+            bool(body.get("read_only", False)))
+
+
 class MemvaraMCPServer:
     """An `Memvara` exposed as MCP tools over JSON-RPC.
 
@@ -94,25 +134,25 @@ class MemvaraMCPServer:
                  user: str | None = None, agent: str | None = None,
                  session: str | None = None, read_only: bool = False) -> None:
         self._memory = memory
+        extractor, credential_is_read_only = _service_facts(memory)
+        #: **OR-ed, never overridden.** A server configured read-only stays read-only
+        #: whatever the credential says, because `MEMVARA_READ_ONLY` is a decision somebody
+        #: made about this deployment and a token that happens to allow writes does not
+        #: revoke it. The credential can only narrow.
+        self.read_only = read_only or credential_is_read_only
         self._ctx = ToolContext(
             memory=_bind(memory, tenant=tenant, user=user, agent=agent, session=session),
-            # `Memvara.extractor` says what *this process* can extract with. A hosted
-            # deployment extracts on the other side of the wire and `RemoteMemvara` has no
-            # such property, so the context keeps its declared default, "unknown", rather
-            # than this server asserting a pipeline it does not run. `GET /v1/stats`
-            # carries the deployment's own answer; reading it here would make startup
-            # depend on the deployment being up, which is a worse trade than one honest
-            # word in `memory_stats`.
-            extractor=getattr(memory, "extractor", "unknown"),
-            read_only=read_only,
+            extractor=extractor,
+            read_only=self.read_only,
         )
-        self.read_only = read_only
-        #: Fixed at startup, because that is when the deployment's answer is known. A
-        #: read-only server hides its write tools rather than listing and refusing them:
-        #: a tool a model can see is a tool it will spend a turn calling, and "you may
-        #: not" teaches it nothing it can act on.
+        #: Fixed at startup, because that is when the deployment's answer is known — and
+        #: `self.read_only` rather than the `read_only` argument, so a read-only credential
+        #: hides the write tools as surely as a read-only setting does. A read-only server
+        #: hides its write tools rather than listing and refusing them: a tool a model can
+        #: see is a tool it will spend a turn calling, and "you may not" teaches it nothing
+        #: it can act on. A 403 from the deployment teaches it even less.
         self._tools: dict[str, Tool] = {
-            t.name: t for t in TOOLS if not (read_only and t.writes)
+            t.name: t for t in TOOLS if not (self.read_only and t.writes)
         }
         #: Negotiated at `initialize`. Recorded rather than enforced: rejecting calls
         #: that arrive before the handshake would add a failure mode that fires only for

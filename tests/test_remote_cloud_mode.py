@@ -160,3 +160,182 @@ def test_cloud_mode_without_httpx_fails_where_the_configuration_was_made(monkeyp
                   stdout=io.StringIO(), stderr=err)
     assert status == 2
     assert "memvara[cloud]" in err.getvalue()
+
+
+# -- what the deployment says about itself, asked once at startup ------------------------
+
+
+class _Answering:
+    """A `RemoteMemvara` whose `/v1/stats` answer is supplied rather than fetched.
+
+    Subclassing rather than monkeypatching the transport, because what is under test is
+    `MemvaraMCPServer.__init__` reading `service()` — not how `service()` gets its body,
+    which `tests/test_remote_reads.py` covers.
+    """
+
+    def __init__(self, body, scope):
+        self._body = body
+        self.default_scope = scope
+        self.calls = 0
+
+    def service(self):
+        self.calls += 1
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+    def scope(self, *, user=None, agent=None, session=None):
+        from memvara.remote.api import ScopedRemoteMemvara
+
+        return ScopedRemoteMemvara.__new__(ScopedRemoteMemvara)
+
+    def close(self):
+        pass
+
+
+def _answering(body, **kw):
+    from memvara.types import Scope
+
+    return _Answering(body, Scope("acme", kw.get("user"), None, None))
+
+
+_ENVELOPE = {"scope": {}, "visible": 2, "tenant_counts": {"claims": 3},
+             "extractor": "fast-path+anthropic/claude", "read_only": False}
+
+
+def test_a_read_only_credential_hides_the_write_tools():
+    """The failure this closes: a server started with a read-only API key listed every
+    write tool, and the deployment refused them mid-conversation as a 403 — to a model
+    that cannot act on it and with whoever configured the deployment not in the room.
+    That is the shape of failure the old cloud-mode refusal existed to prevent, one layer
+    along.
+    """
+    from memvara.server.tools import TOOLS
+
+    server = MemvaraMCPServer(_answering({**_ENVELOPE, "read_only": True}), user="alice")
+    assert server.read_only is True
+    assert not any(t.writes for t in TOOLS if t.name in server._tools)
+    assert {t.name for t in TOOLS if not t.writes} == set(server._tools)
+
+
+def test_a_write_credential_does_not_un_set_a_read_only_server():
+    """OR-ed, never overridden. `MEMVARA_READ_ONLY` is a decision somebody made about this
+    deployment; a token that happens to allow writes does not revoke it. The credential
+    can only narrow."""
+    server = MemvaraMCPServer(_answering(_ENVELOPE), user="alice", read_only=True)
+    assert server.read_only is True
+    assert not any(name.startswith("memory_remember") for name in server._tools)
+
+
+def test_the_deployments_own_extractor_reaches_memory_stats():
+    server = MemvaraMCPServer(_answering(_ENVELOPE), user="alice")
+    assert server._ctx.extractor == "fast-path+anthropic/claude"
+
+
+def test_the_envelope_is_asked_for_once_and_not_once_per_call():
+    memory = _answering(_ENVELOPE)
+    MemvaraMCPServer(memory, user="alice")
+    assert memory.calls == 1
+
+
+def test_a_deployment_that_cannot_answer_still_lets_the_server_start():
+    """Every failure degrades to what this server did before the call existed. A
+    deployment that is down, slow, or behind a proxy returning HTML must leave the server
+    starting: `extractor` reports "unknown", which is the field's own declared default and
+    is honest, and `read_only` falls back to what the operator set."""
+    server = MemvaraMCPServer(_answering(RuntimeError("connection refused")), user="alice")
+    assert server._ctx.extractor == "unknown"
+    assert server.read_only is False
+
+
+def test_an_envelope_missing_the_fields_is_treated_as_no_answer():
+    """A deployment on an older version answers 200 with a body this server cannot read.
+    Reading a missing `read_only` as False is right — it is the permissive default the
+    operator's own setting then decides — and reading a missing `extractor` as anything
+    but "unknown" would be this server naming a pipeline nobody reported."""
+    server = MemvaraMCPServer(_answering({"tenant_counts": {}}), user="alice")
+    assert server._ctx.extractor == "unknown"
+    assert server.read_only is False
+
+
+def test_a_local_engine_asks_nothing_and_reports_its_own_extractor(tmp_path):
+    """Local behaviour is unchanged: `Memvara` has no `service`, so the property answers
+    and nothing touches a network."""
+    from memvara.core import Memvara
+    from memvara.embed import HashingEmbedder
+    from memvara.llm import NullLLM
+
+    memory = Memvara(":memory:", user="alice", embedder=HashingEmbedder(dim=512),
+                     llm=NullLLM())
+    server = MemvaraMCPServer(memory, user="alice")
+    try:
+        assert server._ctx.extractor == memory.extractor
+        assert server.read_only is False
+    finally:
+        server.close()
+
+
+# -- the fold note, with no registry anywhere -------------------------------------------
+
+
+def test_the_fold_note_works_without_a_registry():
+    """`_fold_note` used to read `ctx.memory.memvara.registry`, which raised
+    `AttributeError` from all three write tools against a hosted deployment — a
+    `RemoteMemvara` holds no registry, because the vocabulary lives server-side.
+
+    It reads the claim the store wrote back instead. This calls it with an object that has
+    no `memvara` attribute at all, which is stricter than the remote view and is the point:
+    the function cannot reach for a registry because there is nothing to reach through.
+    """
+    from memvara.server.tools import _fold_note
+    from memvara.types import Claim
+
+    folded = Claim(subject="user", predicate="prefers_tool", object="ripgrep")
+    note = _fold_note("uses_tool", [folded])
+    assert "another spelling of 'prefers_tool'" in note
+    assert "held under 'prefers_tool'" in note
+
+
+def test_the_fold_note_stays_quiet_when_the_spelling_survived():
+    from memvara.server.tools import _fold_note
+    from memvara.types import Claim
+
+    kept = Claim(subject="user", predicate="prefers_tool", object="ripgrep")
+    assert _fold_note("prefers_tool", [kept]) == ""
+    assert _fold_note("Prefers Tool", [kept]) == "", "the slug is the comparison, not the raw"
+
+
+def test_the_fold_note_says_nothing_when_nothing_landed():
+    """A write that stored nothing has no slot to report. `_receipt_summary` says what
+    happened; inventing a fold here would describe a place the fact is not."""
+    from memvara.server.tools import _fold_note
+
+    assert _fold_note("uses_tool", []) == ""
+
+
+def test_a_write_tool_reports_the_fold_against_a_scoped_remote_view():
+    """End to end through the tool, on a view with no registry behind it. `remember`
+    returns the receipt the facade would have; everything else is the real handler."""
+    from memvara.remote.api import ScopedRemoteMemvara
+    from memvara.server.tools import TOOLS, ToolContext
+    from memvara.types import Claim, Scope, WriteReceipt
+
+    stored = Claim(subject="user", predicate="prefers_tool", object="ripgrep")
+
+    class _Client:
+        """Stands in for the `RemoteMemvara` the view delegates to. It has no `registry`,
+        which is the whole condition under test — `ScopedRemoteMemvara.memvara` hands this
+        object back, and the old `_fold_note` reached through it for one."""
+
+        def remember(self, *a, **kw):
+            return WriteReceipt(added=[stored])
+
+    view = ScopedRemoteMemvara.__new__(ScopedRemoteMemvara)
+    object.__setattr__(view, "_scope", Scope("acme", "alice", None, None))
+    object.__setattr__(view, "_mem", _Client())
+    assert not hasattr(view.memvara, "registry")
+
+    tool = next(t for t in TOOLS if t.name == "memory_remember")
+    body = tool.run(ToolContext(memory=view),
+                    {"subject": "user", "predicate": "uses_tool", "object": "ripgrep"})
+    assert "another spelling of 'prefers_tool'" in body

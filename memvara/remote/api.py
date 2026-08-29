@@ -254,6 +254,25 @@ class RemoteMemvara:
         body = self._http.request("GET", "/v1/stats", params=self._params())
         return dict(body["tenant_counts"])
 
+    def service(self) -> dict[str, Any]:
+        """The whole `/v1/stats` envelope: what the deployment is, not just what it holds.
+
+        `{scope, visible, tenant_counts, extractor, read_only}` — the same request
+        `stats()` makes, returned whole instead of unwrapped. Both exist on purpose.
+        `stats()` returns `tenant_counts` alone because that is what `Memvara.stats()`
+        returns and what every caller of it reads, so unwrapping keeps
+        `stats()["claims"]` a number against either engine. This one is for the caller
+        that needs the three fields unwrapping drops, and there is exactly one: a server
+        deciding at startup what it can say about itself.
+
+        `read_only` is the field worth naming. It is what the presented *credential*
+        authorizes, not a setting, so a server that lists its write tools without
+        consulting it advertises tools the deployment will refuse — mid-conversation, as a
+        403, to a model that cannot act on it. `whoami()` reports it too, from the token
+        alone; this route answers it beside the counts, so one request settles both.
+        """
+        return dict(self._http.request("GET", "/v1/stats", params=self._params()))
+
     def connectivity(self) -> dict[str, int]:
         """`live_claims` and `joinable_claims`, or `{}` when the deployment does not
         report them.
