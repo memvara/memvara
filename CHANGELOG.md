@@ -147,6 +147,32 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   against a hosted deployment and `list[Result]` locally, so code reading `.claim` off a
   row type-checked against one engine and not the other. No runtime behaviour changes.
 
+- **`RemoteStore` raises on a null `valid_from` or `recorded_at` instead of substituting
+  the current time.** Both are declared required and non-nullable on the wire model, so a
+  null in either is the server disagreeing with its own schema. The old fallback was
+  `datetime.now()`, which is *naive*: the `Claim` came back carrying one naive instant
+  among aware ones, looked well-formed, and made `Claim.is_live()` raise
+  `TypeError: can't compare offset-naive and offset-aware datetimes` — a call nowhere near
+  the response that caused it. `RemoteMemvara` already raises here
+  (`remote/hydrate.py:_required_dt`); the two decode one wire model and must not disagree
+  about a malformed response. No working deployment reaches this: it needs a response that
+  violates the schema `/v1` publishes.
+
+### Fixed
+
+- **`RemoteStore.get_claim()` and `get_claims()` no longer raise on Python 3.10.** They
+  parsed the facade's instants with a bare `datetime.fromisoformat`, which did not accept
+  a trailing `Z` before 3.11 — and `/v1` renders every instant in exactly that form. So
+  every memory read through a `RemoteStore` raised `ValueError` on the oldest interpreter
+  `requires-python` claims to support, while working on 3.11 and later. A trailing `Z` is
+  now rewritten to `+00:00` before parsing, matching `remote/hydrate.py`,
+  `server/tools.py` and both importers in `compat/`.
+
+  The tests could not see it: their fixtures spelled instants `+00:00`, which is what
+  `datetime.isoformat()` produces and not what the server sends. They now carry the `Z`,
+  and one test patches in a parser that rejects `Z` so the guard fails on every
+  interpreter rather than only on the one leg of the matrix where the bug was real.
+
 ## [0.8.1] — 2026-08-27
 
 ### Added

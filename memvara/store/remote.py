@@ -66,6 +66,53 @@ def _install_hint() -> str:
             '"memvara[cloud]"`.')
 
 
+def _instant(value: str | None) -> datetime | None:
+    """One wire instant as a `datetime`, or `None` where the wire says null.
+
+    **The trailing `Z` is rewritten before parsing, and that is not cosmetic.**
+    `datetime.fromisoformat` did not accept a `Z` suffix before Python 3.11, and this
+    package supports 3.10 — `requires-python` says so and CI runs the version. The facade
+    renders every instant in that form (`render.memory()` emits
+    `'2026-08-29T13:39:41.953878Z'`), so a bare `fromisoformat` here raised `ValueError`
+    on 3.10 for every memory `get_claim` and `get_claims` read, while passing on 3.13.
+
+    The same rewrite is in `remote/hydrate.py:_dt`, `server/tools.py:_timestamp` and both
+    importers in `compat/`. This is that rule where the facade's JSON meets a `Claim`.
+    """
+    if value is None:
+        return None
+    if value.endswith(("Z", "z")):
+        value = value[:-1] + "+00:00"
+    return datetime.fromisoformat(value)
+
+
+def _required_instant(field: str, value: str | None) -> datetime:
+    """A wire instant the facade always sends, as a plain `datetime`.
+
+    Raises on a null rather than substituting one. `valid_from` and `recorded_at` are
+    declared required and non-nullable on `models.Memory`, so a null in either is the
+    server disagreeing with its own schema, and `Claim` types both as plain `datetime`
+    because each records something that did happen at some instant.
+
+    **Failing here is the point, and the alternative was worse than a bare `None`.** This
+    used to fall back to `datetime.now()`, which is *naive*: the resulting `Claim` carried
+    one naive instant among aware ones, and `Claim.is_live()` — an ordinary call, nowhere
+    near the response that caused it — raised `TypeError: can't compare offset-naive and
+    offset-aware datetimes`. A plausible-looking timestamp that poisons every comparison
+    is harder to trace than an exception naming the field.
+
+    `remote/hydrate.py:_required_dt` makes the same decision for the same fields, and
+    `RemoteStore` and `RemoteMemvara` decode one wire model; the two disagreeing about a
+    malformed response is its own defect.
+    """
+    parsed = _instant(value)
+    if parsed is None:
+        raise ValueError(
+            f"{field} came back null. /v1 declares it required and non-null, so this "
+            "response disagrees with its own schema; the field it fills cannot be None.")
+    return parsed
+
+
 class RemoteStore:
     """A `Store` backed by one memvara-cloud project's `/v1` REST API.
 
@@ -158,22 +205,19 @@ class RemoteStore:
         Everything else the wire carries (id, the two clocks, provenance, salience)
         round-trips exactly.
         """
-        from datetime import datetime as _dt
-
         scope = Scope(tenant=body["scope"]["tenant"], user=body["scope"].get("user"),
                       agent=body["scope"].get("agent"), session=body["scope"].get("session"))
         vt, tt = body["valid_time"], body["transaction_time"]
-
-        def _parse(value: str | None) -> _dt | None:
-            return None if value is None else _dt.fromisoformat(value)
 
         claim = Claim(
             subject=body["subject"], predicate=body["predicate"], object=body["object"],
             scope=scope, text=body["text"], polarity=body["polarity"],
             memory_type=MemoryType(body["memory_type"]),
-            valid_from=_parse(vt["valid_from"]) or _dt.now(), valid_to=_parse(vt["valid_to"]),
-            recorded_at=_parse(tt["recorded_at"]) or _dt.now(),
-            invalidated_at=_parse(tt["invalidated_at"]), invalidated_by=tt["invalidated_by"],
+            valid_from=_required_instant("valid_from", vt["valid_from"]),
+            valid_to=_instant(vt["valid_to"]),
+            recorded_at=_required_instant("recorded_at", tt["recorded_at"]),
+            invalidated_at=_instant(tt["invalidated_at"]),
+            invalidated_by=tt["invalidated_by"],
             confidence=body["confidence"], salience=body["salience"],
             observation_count=body["observation_count"],
             sources=list(body["source_ids"]),

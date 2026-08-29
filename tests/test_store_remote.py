@@ -29,7 +29,14 @@ T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
 def memory_body(**overrides) -> dict:
     """The wire shape `GET /v1/memories/{id}` (and friends) hand back, matching what
-    `RemoteStore._claim_from_memory` reads."""
+    `RemoteStore._claim_from_memory` reads.
+
+    **Instants carry the `Z` the facade actually sends**, not the `+00:00` that
+    `datetime.isoformat()` produces. `render.memory()` renders
+    `'2026-08-29T13:39:41.953878Z'`, and spelling it the other way here is what hid a
+    `fromisoformat` that could not parse a `Z` on Python 3.10 — every test in this file
+    read a body no server sends, and passed.
+    """
     body = {
         "id": "clm_1",
         "subject": "user",
@@ -39,8 +46,8 @@ def memory_body(**overrides) -> dict:
         "text": "user lives_in Lisbon",
         "polarity": 1,
         "memory_type": "semantic",
-        "valid_time": {"valid_from": "2024-01-01T00:00:00+00:00", "valid_to": None},
-        "transaction_time": {"recorded_at": "2024-01-01T00:00:00+00:00",
+        "valid_time": {"valid_from": "2024-01-01T00:00:00Z", "valid_to": None},
+        "transaction_time": {"recorded_at": "2024-01-01T00:00:00Z",
                              "invalidated_at": None, "invalidated_by": None},
         "confidence": 0.9,
         "salience": 1.0,
@@ -158,17 +165,41 @@ def test_get_claims_fetches_each_id_and_drops_missing_ones():
     store.close()
 
 
-def test_get_claim_round_trips_a_fully_populated_body():
+def full_memory_body(**overrides) -> dict:
+    """`memory_body` with every optional field filled, both clocks closed.
+
+    Module-level rather than inline in one test because two tests need a body whose four
+    instants are all present: the round trip below, and the `Z`-suffix guard. One
+    fixture means `instants_in()` pins all four in one place.
+    """
     body = memory_body(
         polarity=-1, confidence=0.4, salience=0.2, observation_count=3,
         source_ids=["ep_1", "ep_2"], derivation="consolidation", extractor=None,
         metadata={"k": "v"},
-        valid_time={"valid_from": "2024-01-01T00:00:00+00:00",
-                   "valid_to": "2024-06-01T00:00:00+00:00"},
-        transaction_time={"recorded_at": "2024-01-01T00:00:00+00:00",
-                          "invalidated_at": "2024-06-01T00:00:00+00:00",
+        valid_time={"valid_from": "2024-01-01T00:00:00Z",
+                    "valid_to": "2024-06-01T00:00:00Z"},
+        transaction_time={"recorded_at": "2024-01-01T00:00:00Z",
+                          "invalidated_at": "2024-06-01T00:00:00Z",
                           "invalidated_by": "clm_2"},
     )
+    body.update(overrides)
+    return body
+
+
+def instants_in(body: dict) -> list[str]:
+    """Every instant a wire body carries, both clocks, nulls dropped.
+
+    `invalidated_by` is a claim id rather than a time, and is the only non-instant value
+    living in either clock object.
+    """
+    return [value
+            for clock in ("valid_time", "transaction_time")
+            for key, value in body[clock].items()
+            if key != "invalidated_by" and value is not None]
+
+
+def test_get_claim_round_trips_a_fully_populated_body():
+    body = full_memory_body()
     transport = FakeTransport().on("GET", "/v1/memories/clm_1", json_response(200, body))
     store = make_store(transport)
     claim = store.get_claim("clm_1")
@@ -183,6 +214,90 @@ def test_get_claim_round_trips_a_fully_populated_body():
     assert claim.valid_to is not None
     assert claim.invalidated_at is not None
     assert claim.invalidated_by == "clm_2"
+    store.close()
+
+
+class _StrictFromIsoformat(datetime):
+    """`datetime` with Python 3.10's `fromisoformat`, which rejects a trailing `Z`."""
+
+    @classmethod
+    def fromisoformat(cls, value: str) -> datetime:  # type: ignore[override]
+        if value.endswith(("Z", "z")):
+            raise ValueError(f"Invalid isoformat string: {value!r}")
+        return datetime.fromisoformat(value)
+
+
+def test_get_claim_decodes_on_a_python_that_cannot_parse_a_z_suffix(monkeypatch):
+    """The oldest supported interpreter must decode what the newest one does.
+
+    `RemoteStore` parsed the facade's instants with a bare `fromisoformat`, which did not
+    accept a trailing `Z` before Python 3.11 while `requires-python` says 3.10. Every
+    memory `get_claim` and `get_claims` read therefore raised `ValueError` on the oldest
+    leg of the matrix, and nothing here saw it: the fixtures spelled instants `+00:00`.
+
+    Patching a stricter parser in makes this fail on 3.13 too. A guard against a
+    version-specific bug that is itself version-specific lets a regression sit green in
+    every local run until CI reaches the 3.10 leg — which is how long this one lasted.
+    `tests/test_remote_reads.py` pins the same rule for `remote/hydrate.py` the same way.
+
+    The fully-populated body is deliberate: it puts all four instants — both clocks, open
+    and closed — through the parser, so a fix that reached `valid_from` and missed
+    `invalidated_at` still fails.
+    """
+    import memvara.store.remote as remote
+
+    # Both fixtures have to keep the `Z`, on every instant they carry: they are what every
+    # other test in this file reads, and spelling them `+00:00` is what let the bug live
+    # through all of them. Pinning `valid_from` alone leaves the same hole one field over.
+    for fixture in (memory_body(), full_memory_body()):
+        assert all(value.endswith("Z") for value in instants_in(fixture)), fixture
+
+    monkeypatch.setattr(remote, "datetime", _StrictFromIsoformat)
+    body = full_memory_body()
+    transport = FakeTransport().on("GET", "/v1/memories/clm_1", json_response(200, body))
+    store = make_store(transport)
+
+    claim = store.get_claim("clm_1")
+
+    assert claim is not None
+    assert claim.valid_from.tzinfo is not None
+    assert claim.valid_to is not None and claim.valid_to.tzinfo is not None
+    assert claim.recorded_at.tzinfo is not None
+    assert claim.invalidated_at is not None and claim.invalidated_at.tzinfo is not None
+    store.close()
+
+
+def test_a_null_where_the_schema_says_an_instant_raises_rather_than_substituting_now():
+    """`valid_from` and `recorded_at` are required and non-nullable on `models.Memory`, so
+    a null in either is the server disagreeing with its own schema.
+
+    This used to fall back to `datetime.now()`, which is naive. The `Claim` came back
+    carrying one naive instant among aware ones and looked fine, and the failure surfaced
+    later as `TypeError: can't compare offset-naive and offset-aware datetimes` out of
+    `Claim.is_live()` — a call nowhere near the response that caused it. Raising here,
+    naming the field, is `remote/hydrate.py:_required_dt`'s decision for the same fields;
+    the two decode one wire model and must not disagree about a malformed response.
+    """
+    body = memory_body(valid_time={"valid_from": None, "valid_to": None})
+    transport = FakeTransport().on("GET", "/v1/memories/clm_1", json_response(200, body))
+    store = make_store(transport)
+
+    with pytest.raises(ValueError, match="valid_from"):
+        store.get_claim("clm_1")
+    store.close()
+
+
+def test_a_null_recorded_at_raises_naming_the_transaction_clock_field():
+    """The other required instant, on the other clock. Two tests rather than one because a
+    fix that reached `valid_from` and left `recorded_at` substituting is exactly the shape
+    of half-fix this pair exists to catch."""
+    body = memory_body(transaction_time={"recorded_at": None, "invalidated_at": None,
+                                         "invalidated_by": None})
+    transport = FakeTransport().on("GET", "/v1/memories/clm_1", json_response(200, body))
+    store = make_store(transport)
+
+    with pytest.raises(ValueError, match="recorded_at"):
+        store.get_claim("clm_1")
     store.close()
 
 
