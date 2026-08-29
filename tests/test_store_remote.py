@@ -165,17 +165,41 @@ def test_get_claims_fetches_each_id_and_drops_missing_ones():
     store.close()
 
 
-def test_get_claim_round_trips_a_fully_populated_body():
+def full_memory_body(**overrides) -> dict:
+    """`memory_body` with every optional field filled, both clocks closed.
+
+    Module-level rather than inline in one test because two tests need a body whose four
+    instants are all present: the round trip below, and the `Z`-suffix guard. One
+    fixture means `instants_in()` pins all four in one place.
+    """
     body = memory_body(
         polarity=-1, confidence=0.4, salience=0.2, observation_count=3,
         source_ids=["ep_1", "ep_2"], derivation="consolidation", extractor=None,
         metadata={"k": "v"},
         valid_time={"valid_from": "2024-01-01T00:00:00Z",
-                   "valid_to": "2024-06-01T00:00:00Z"},
+                    "valid_to": "2024-06-01T00:00:00Z"},
         transaction_time={"recorded_at": "2024-01-01T00:00:00Z",
                           "invalidated_at": "2024-06-01T00:00:00Z",
                           "invalidated_by": "clm_2"},
     )
+    body.update(overrides)
+    return body
+
+
+def instants_in(body: dict) -> list[str]:
+    """Every instant a wire body carries, both clocks, nulls dropped.
+
+    `invalidated_by` is a claim id rather than a time, and is the only non-instant value
+    living in either clock object.
+    """
+    return [value
+            for clock in ("valid_time", "transaction_time")
+            for key, value in body[clock].items()
+            if key != "invalidated_by" and value is not None]
+
+
+def test_get_claim_round_trips_a_fully_populated_body():
+    body = full_memory_body()
     transport = FakeTransport().on("GET", "/v1/memories/clm_1", json_response(200, body))
     store = make_store(transport)
     claim = store.get_claim("clm_1")
@@ -222,17 +246,14 @@ def test_get_claim_decodes_on_a_python_that_cannot_parse_a_z_suffix(monkeypatch)
     """
     import memvara.store.remote as remote
 
-    # The shared fixture has to keep the `Z` too: it is what every other test in this
-    # file reads, and spelling it `+00:00` is what let the bug live through all of them.
-    assert memory_body()["valid_time"]["valid_from"].endswith("Z")
+    # Both fixtures have to keep the `Z`, on every instant they carry: they are what every
+    # other test in this file reads, and spelling them `+00:00` is what let the bug live
+    # through all of them. Pinning `valid_from` alone leaves the same hole one field over.
+    for fixture in (memory_body(), full_memory_body()):
+        assert all(value.endswith("Z") for value in instants_in(fixture)), fixture
 
     monkeypatch.setattr(remote, "datetime", _StrictFromIsoformat)
-    body = memory_body(
-        valid_time={"valid_from": "2024-01-01T00:00:00Z",
-                    "valid_to": "2024-06-01T00:00:00Z"},
-        transaction_time={"recorded_at": "2024-01-01T00:00:00Z",
-                          "invalidated_at": "2024-06-01T00:00:00Z",
-                          "invalidated_by": "clm_2"})
+    body = full_memory_body()
     transport = FakeTransport().on("GET", "/v1/memories/clm_1", json_response(200, body))
     store = make_store(transport)
 
@@ -243,6 +264,40 @@ def test_get_claim_decodes_on_a_python_that_cannot_parse_a_z_suffix(monkeypatch)
     assert claim.valid_to is not None and claim.valid_to.tzinfo is not None
     assert claim.recorded_at.tzinfo is not None
     assert claim.invalidated_at is not None and claim.invalidated_at.tzinfo is not None
+    store.close()
+
+
+def test_a_null_where_the_schema_says_an_instant_raises_rather_than_substituting_now():
+    """`valid_from` and `recorded_at` are required and non-nullable on `models.Memory`, so
+    a null in either is the server disagreeing with its own schema.
+
+    This used to fall back to `datetime.now()`, which is naive. The `Claim` came back
+    carrying one naive instant among aware ones and looked fine, and the failure surfaced
+    later as `TypeError: can't compare offset-naive and offset-aware datetimes` out of
+    `Claim.is_live()` — a call nowhere near the response that caused it. Raising here,
+    naming the field, is `remote/hydrate.py:_required_dt`'s decision for the same fields;
+    the two decode one wire model and must not disagree about a malformed response.
+    """
+    body = memory_body(valid_time={"valid_from": None, "valid_to": None})
+    transport = FakeTransport().on("GET", "/v1/memories/clm_1", json_response(200, body))
+    store = make_store(transport)
+
+    with pytest.raises(ValueError, match="valid_from"):
+        store.get_claim("clm_1")
+    store.close()
+
+
+def test_a_null_recorded_at_raises_naming_the_transaction_clock_field():
+    """The other required instant, on the other clock. Two tests rather than one because a
+    fix that reached `valid_from` and left `recorded_at` substituting is exactly the shape
+    of half-fix this pair exists to catch."""
+    body = memory_body(transaction_time={"recorded_at": None, "invalidated_at": None,
+                                         "invalidated_by": None})
+    transport = FakeTransport().on("GET", "/v1/memories/clm_1", json_response(200, body))
+    store = make_store(transport)
+
+    with pytest.raises(ValueError, match="recorded_at"):
+        store.get_claim("clm_1")
     store.close()
 
 

@@ -147,6 +147,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   against a hosted deployment and `list[Result]` locally, so code reading `.claim` off a
   row type-checked against one engine and not the other. No runtime behaviour changes.
 
+- **`RemoteStore` raises on a null `valid_from` or `recorded_at` instead of substituting
+  the current time.** Both are declared required and non-nullable on the wire model, so a
+  null in either is the server disagreeing with its own schema. The old fallback was
+  `datetime.now()`, which is *naive*: the `Claim` came back carrying one naive instant
+  among aware ones, looked well-formed, and made `Claim.is_live()` raise
+  `TypeError: can't compare offset-naive and offset-aware datetimes` — a call nowhere near
+  the response that caused it. `RemoteMemvara` already raises here
+  (`remote/hydrate.py:_required_dt`); the two decode one wire model and must not disagree
+  about a malformed response. No working deployment reaches this: it needs a response that
+  violates the schema `/v1` publishes.
+
 ### Fixed
 
 - **`RemoteStore.get_claim()` and `get_claims()` no longer raise on Python 3.10.** They
