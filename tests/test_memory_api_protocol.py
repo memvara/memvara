@@ -8,6 +8,16 @@ The regex sees `ctx.memory.<name>` and nothing else, which is not the whole trut
 `_stats` hands `ctx.memory` to `_join_rate`, which calls `connectivity()` on it as a
 parameter. That one is named below and pinned by its own test, because a protocol missing
 it would type-check and then fail at the one tool that reports the store's health.
+
+**It also cannot tell a call site from prose**, and that has cost something once already:
+a `memvara` member stayed in `MemoryAPI` after its last real caller went away, because
+`_fold_note`'s docstring still spelled `ctx.memory.memvara.registry` while explaining that
+it no longer reads it. The member was not harmless — it handed every handler an attribute
+taking `tenant`, which is what `ToolContext`'s docstring says a handler does not have. So
+prose in `tools.py` naming one of these members writes it as prose, and the fix for a
+false positive here is to reword the sentence rather than to narrow the regex: a regex that
+skipped docstrings would also skip nothing useful and start missing real calls in
+commented-out code.
 """
 from __future__ import annotations
 

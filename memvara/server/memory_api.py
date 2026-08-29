@@ -23,11 +23,14 @@ would stop `ScopedMemvara` satisfying the protocol its own server is typed again
 `_standing` asks for it with `getattr` and keeps the paging path when it is missing, so
 the local engine behaves exactly as it did.
 
-**`memvara` is typed `Any`, and that is a known hole.** `_fold_note` reads
-`ctx.memory.memvara.registry`, which exists on `Memvara` and not on `RemoteMemvara` — the
-predicate registry lives server-side for a hosted deployment. Typing it `Any` is what lets
-both views satisfy one protocol; it also means no checker will catch that read. See the
-comment on the member below.
+**There is no `memvara` member, and its absence is what makes `ToolContext`'s
+security claim checkable.** One existed, typed `Any`, because `_fold_note` reached through
+it for the engine's predicate registry — which `RemoteMemvara` does not have, so that read
+raised `AttributeError` against a hosted deployment. `_fold_note` now reads the canonical
+predicate off the claim the store wrote back, so nothing needs the unscoped client, and
+declaring it would hand every handler `.scope(tenant=...)`: precisely the attribute
+`ToolContext` says a handler does not have. A protocol that omits it makes that a type
+error rather than a promise.
 """
 
 from __future__ import annotations
@@ -64,19 +67,6 @@ class MemoryAPI(Protocol):
         agent or a session, so a handler holding one of these cannot address another one.
         Read-only here on purpose — `ScopedMemvara` holds it as a plain attribute and
         `ScopedRemoteMemvara` as a property, and only the read is common to both.
-        """
-
-    @property
-    def memvara(self) -> Any:
-        """The unscoped client underneath: a `Memvara`, or a `RemoteMemvara`.
-
-        **Typed `Any` because the two have no useful common supertype**, and the one
-        caller reaches past it for something only the local engine has:
-        `_fold_note` reads `.registry` to say when a predicate was folded onto a
-        canonical spelling. A hosted deployment resolves predicates server-side and this
-        client holds no registry, so that read raises `AttributeError` against
-        `RemoteMemvara` and no checker will tell you first. Narrowing this type is the fix
-        and it needs the fold reported from somewhere both views have.
         """
 
     # -- reading -------------------------------------------------------------

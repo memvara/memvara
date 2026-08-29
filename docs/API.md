@@ -239,6 +239,17 @@ Two divergences are real and worth knowing before you write against them:
   `erase()` returns whether anything was erased, and `purge()` returns the per-table rows
   removed as the deployment's own count.
 
+**One method exists here and has no local twin: `service()`.** It returns the whole
+`GET /v1/stats` envelope — `scope`, `visible`, `tenant_counts`, `extractor`, `read_only` —
+where `stats()` returns `tenant_counts` alone so that `stats()["claims"]` is a number
+against either engine. Two of those fields have no local answer at all: `extractor` names a
+pipeline running on the far side of the wire, and `read_only` is what the presented
+*credential* authorizes rather than a setting. Anything deciding what it may offer a user
+needs the second one before it offers anything — `memvara-mcp` in cloud mode calls this
+once at startup and hides its write tools when it comes back true. `attempts=` and
+`timeout=` override the client's own for that one call, because a probe whose value is
+that it is cheap should not inherit three attempts at a thirty-second timeout.
+
 `scope()` returns a `ScopedRemoteMemvara`, the twin of `ScopedMemvara`, and the credential
 binds the tenant a second time from the other side: the facade resolves it from the bearer
 token, and no `/v1` request parameter names one, so a narrowing cannot widen. Errors arrive

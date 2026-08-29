@@ -83,6 +83,12 @@ def _bind(memory: "Memvara | RemoteMemvara", *, tenant: str | None, user: str | 
     return memory.scope(user=user, agent=agent, session=session)
 
 
+#: Seconds a startup probe may spend before this server gives up and says "unknown".
+#: Long enough for a deployment that is merely far away, short enough that a client
+#: launching this process does not sit in front of a blank terminal wondering.
+_PROBE_TIMEOUT = 2.0
+
+
 def _service_facts(memory: "Memvara | RemoteMemvara") -> tuple[str, bool]:
     """`(extractor, read_only)` — what the memory says about itself, asked once.
 
@@ -110,12 +116,19 @@ def _service_facts(memory: "Memvara | RemoteMemvara") -> tuple[str, bool]:
     which do mean stop. Degrading loses the two fields and nothing else: `extractor`
     reports "unknown", which is honest and is the field's own declared default, and
     `read_only` falls back to the environment, which is what the operator set.
+
+    **Degrading only helps if it is quick, so the probe is built to be cheap.** One
+    attempt, `_PROBE_TIMEOUT` seconds, against the client's own three attempts at thirty
+    seconds plus backoff — which is about ninety seconds of silent stdio before a
+    deployment that hangs rather than refuses reaches the safe answer. A client waiting on
+    a server that has printed nothing cannot tell that from a crash, so a slow degrade is
+    worse than the failure it is degrading from.
     """
     service = getattr(memory, "service", None)
     if service is None:
         return getattr(memory, "extractor", "unknown"), False
     try:
-        body = service()
+        body = service(attempts=1, timeout=_PROBE_TIMEOUT)
     except Exception:                                 # noqa: BLE001 - deliberate
         return "unknown", False
     extractor = body.get("extractor")

@@ -135,9 +135,11 @@ class AsyncRemoteMemvara:
         body = await self._http.request("GET", "/v1/stats", params=self._params())
         return dict(body["tenant_counts"])
 
-    async def service(self) -> dict[str, Any]:
+    async def service(self, *, attempts: int | None = None,
+                      timeout: float | None = None) -> dict[str, Any]:
         """The whole `/v1/stats` envelope. See `RemoteMemvara.service`."""
-        return dict(await self._http.request("GET", "/v1/stats", params=self._params()))
+        return dict(await self._http.request("GET", "/v1/stats", params=self._params(),
+                                             attempts=attempts, timeout=timeout))
 
     async def connectivity(self) -> dict[str, int]:
         body = await self.stats()

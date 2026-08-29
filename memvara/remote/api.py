@@ -254,7 +254,8 @@ class RemoteMemvara:
         body = self._http.request("GET", "/v1/stats", params=self._params())
         return dict(body["tenant_counts"])
 
-    def service(self) -> dict[str, Any]:
+    def service(self, *, attempts: int | None = None,
+                timeout: float | None = None) -> dict[str, Any]:
         """The whole `/v1/stats` envelope: what the deployment is, not just what it holds.
 
         `{scope, visible, tenant_counts, extractor, read_only}` — the same request
@@ -270,8 +271,16 @@ class RemoteMemvara:
         consulting it advertises tools the deployment will refuse — mid-conversation, as a
         403, to a model that cannot act on it. `whoami()` reports it too, from the token
         alone; this route answers it beside the counts, so one request settles both.
+
+        `attempts` and `timeout` override the client's for this one call, because the
+        caller that needs this is a server deciding what to say about itself before it
+        answers anything, and it wants a cheap answer or none. The client's own three
+        attempts at a 30-second timeout, plus backoff, is a minute and a half of silent
+        startup before a hanging deployment degrades to the safe default — which is the
+        opposite of what degrading gracefully is for.
         """
-        return dict(self._http.request("GET", "/v1/stats", params=self._params()))
+        return dict(self._http.request("GET", "/v1/stats", params=self._params(),
+                                       attempts=attempts, timeout=timeout))
 
     def connectivity(self) -> dict[str, int]:
         """`live_claims` and `joinable_claims`, or `{}` when the deployment does not

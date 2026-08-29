@@ -1003,16 +1003,41 @@ def test_cloud_mode_is_written_rather_than_refused(cloud_wired, tmp_path) -> Non
     assert _entry(tmp_path)["env"]["MEMVARA_MODE"] == "cloud"
 
 
-def test_init_and_the_server_still_gate_cloud_mode_on_the_same_thing() -> None:
+def test_init_and_the_server_refuse_cloud_mode_on_the_same_condition(tmp_path,
+                                                                    monkeypatch) -> None:
     """Two commands answering one question, which is the failure this pair exists for.
 
-    `init` writes the config and never starts what it configured, so a disagreement
-    between them is silent by construction. The shared answer used to be
-    `config.cloud_gap()`. It is now `httpx`: `init` refuses without it, and the server's
-    transport raises `ImportError` carrying the same install hint.
+    `init` writes the config and never starts what it configured, so a disagreement between
+    them is silent by construction — that is what `config.cloud_gap()` was for, and it is
+    why deleting it needed a replacement rather than nothing. The shared answer is now
+    `httpx`. Both are run here, against the same absent transport, and both must refuse
+    and both must name the package: an earlier version of this test asserted only that
+    `install_hint()` contained a string and that `httpx` imported in the test environment,
+    which would have passed with `init` gating on nothing at all.
     """
-    from memvara.remote.client import install_hint
-    from memvara.server.init import _httpx_importable
+    import builtins
 
-    assert "memvara[cloud]" in install_hint()
-    assert _httpx_importable() is True
+    from memvara.server.cli import main
+
+    real_import = builtins.__import__
+
+    def no_httpx(name, *a, **kw):
+        if name == "httpx":
+            raise ImportError("no module named httpx")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_httpx)
+
+    init_err = io.StringIO()
+    init_status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "cloud"],
+                       env={"MEMVARA_API_KEY": "mv_live_x"},
+                       stdout=io.StringIO(), stderr=init_err)
+
+    server_err = io.StringIO()
+    server_status = main([], env={"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "mv_live_x"},
+                         stdout=io.StringIO(), stderr=server_err)
+
+    assert (init_status, server_status) == (2, 2), "one of the two would have started"
+    assert "memvara[cloud]" in init_err.getvalue()
+    assert "memvara[cloud]" in server_err.getvalue()
+    assert not (tmp_path / ".mcp.json").exists(), "refused, and still wrote the file"

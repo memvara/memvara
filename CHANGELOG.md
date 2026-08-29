@@ -83,7 +83,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 - **`RemoteMemvara.service()` and `AsyncRemoteMemvara.service()`.** The `GET /v1/stats`
   envelope whole — `{scope, visible, tenant_counts, extractor, read_only}` — beside
   `stats()`, which keeps returning `tenant_counts` alone so that `stats()["claims"]` is a
-  number against either engine.
+  number against either engine. Both take `attempts=` and `timeout=`, which override the
+  client's own for one call: a startup probe wants an answer in seconds or not at all, and
+  the client's three attempts at a thirty-second timeout plus backoff is about ninety
+  seconds of silent startup before a hanging deployment reaches the safe default. The two
+  overrides are on `HttpClient.request` and `AsyncHttpClient.request` for any caller with
+  the same need; every other call leaves them unset and keeps the client's.
 
 - **`memory_standing` is answered server-side against a hosted deployment.** The tool used
   to page every live memory in the scope and filter for procedural ones in Python — across

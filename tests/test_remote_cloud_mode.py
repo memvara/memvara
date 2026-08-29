@@ -6,8 +6,15 @@ and is not being overturned: the engine is still never run against a remote stor
 server is now a client of the facade instead, which is what `docs/OPEN-CORE.md` said the
 answer was.
 
-Offline throughout. `RemoteMemvara.__init__` resolves a credential and builds a connection
-pool; it makes no request, so nothing here needs a transport.
+Offline throughout, and that now takes doing. `RemoteMemvara.__init__` still resolves a
+credential and builds a connection pool without making a request, so a test that only
+*builds* a client needs no transport. But `MemvaraMCPServer.__init__` probes
+`GET /v1/stats` to learn the deployment's extractor and whether the credential is
+read-only, so every test that constructs a server supplies that answer — through the
+`deployment` fixture, or through `_answering` where the server is built from a fake
+outright. Left alone it is not merely slow: a DNS attempt against `example.test` took a
+reviewer 0.7 seconds per test, and one test passed *because* the probe failed, which is
+the worst way for a test to be green.
 """
 
 from __future__ import annotations
@@ -22,6 +29,33 @@ from memvara.server.mcp import MemvaraMCPServer
 def _cloud(**kw):
     return ServerConfig(mode="cloud", api_key="k",
                         server_url="https://example.test", **kw)
+
+
+#: What a deployment answers `GET /v1/stats` with. `read_only` false and a named extractor,
+#: so a test asserting either is asserting something this default does not already give it.
+_ENVELOPE = {"scope": {}, "visible": 2, "tenant_counts": {"claims": 3},
+             "extractor": "fast-path+anthropic/claude", "read_only": False}
+
+
+@pytest.fixture()
+def deployment(monkeypatch):
+    """Answer the startup probe, for tests that build a real client through `build_memvara`.
+
+    Patched on the class rather than the instance so the real construction path stays in
+    the test — `build_memvara` returns the client, and `MemvaraMCPServer` binds and probes
+    it, exactly as `cli.main` does. Returns a setter, so a test can say what the deployment
+    answers, or make it fail.
+    """
+    def answer(body=_ENVELOPE):
+        def service(self, **kw):
+            if isinstance(body, Exception):
+                raise body
+            return body
+
+        monkeypatch.setattr(RemoteMemvara, "service", service)
+
+    answer()
+    return answer
 
 
 def test_cloud_mode_builds_a_remote_client():
@@ -88,7 +122,7 @@ def test_the_tenant_reaches_the_client():
         client.close()
 
 
-def test_the_server_binds_a_scoped_view_of_the_remote_client():
+def test_the_server_binds_a_scoped_view_of_the_remote_client(deployment):
     """The reason cloud mode can start at all: `MemvaraMCPServer` binds a scope once and
     the tool table is typed to a protocol both scoped views satisfy. `RemoteMemvara.scope`
     takes no `tenant` — the deployment resolves it from the bearer token — so the server
@@ -107,20 +141,41 @@ def test_the_server_binds_a_scoped_view_of_the_remote_client():
         server.close()
 
 
-def test_the_server_reports_an_unknown_extractor_against_a_hosted_deployment():
-    """`Memvara.extractor` says what *this process* can extract with. A hosted deployment
-    extracts server-side and `RemoteMemvara` has no such property, so the context keeps
-    its declared default rather than asserting a pipeline this process does not run.
-    `/v1/stats` carries the deployment's own answer; reading it would cost a request at
-    startup and is not done here."""
+def test_the_deployments_extractor_reaches_the_server_through_the_real_build(deployment):
+    """`Memvara.extractor` says what *this process* can extract with, and a cloud server
+    extracts nothing: the pipeline runs on the other side of the wire. So the answer comes
+    from the deployment, over the one `GET /v1/stats` the server makes at startup.
+
+    This was the test that asserted `"unknown"` and said reading the extractor "would cost
+    a request at startup and is not done here". Both halves stopped being true when the
+    probe landed, and it went on passing — because the request it said was never made was
+    failing. `"unknown"` is now what a *failed* probe reports, which is
+    `test_a_deployment_that_cannot_answer_still_lets_the_server_start`.
+
+    Kept separate from `test_the_deployments_own_extractor_reaches_memory_stats`, which
+    builds the server from a fake: this one goes through `build_memvara`, so it also pins
+    that what that function returns is something the server can probe.
+    """
     server = MemvaraMCPServer(build_memvara(_cloud()), user="alice")
     try:
-        assert server._ctx.extractor == "unknown"
+        assert server._ctx.extractor == "fast-path+anthropic/claude"
     finally:
         server.close()
 
 
-def test_a_cloud_server_lists_the_same_tools_a_local_one_does():
+def test_a_probe_that_fails_on_the_real_build_still_leaves_the_server_starting(deployment):
+    """The degradation, through the same real path. `"unknown"` is the field's own declared
+    default and is honest: this process does not know."""
+    deployment(RuntimeError("connection refused"))
+    server = MemvaraMCPServer(build_memvara(_cloud()), user="alice")
+    try:
+        assert server._ctx.extractor == "unknown"
+        assert server.read_only is False
+    finally:
+        server.close()
+
+
+def test_a_cloud_server_lists_the_same_tools_a_local_one_does(deployment):
     """The old refusal existed because a cloud server would list tools it could not
     serve. It lists them now because the protocol says both engines can."""
     from memvara.server.tools import TOOLS
@@ -162,6 +217,28 @@ def test_cloud_mode_without_httpx_fails_where_the_configuration_was_made(monkeyp
     assert "memvara[cloud]" in err.getvalue()
 
 
+def test_a_local_mode_import_failure_is_not_labelled_as_a_cloud_problem(monkeypatch):
+    """The catch-all above is gated on the mode, and this is why.
+
+    The local branch imports two optional packages of its own, and each already turns its
+    own `ImportError` into a `ConfigError` naming the right extra. One escaping those is a
+    bug — and reporting it as "MEMVARA_MODE=cloud cannot start a server here" would send
+    whoever hits it to a variable they never set. It is re-raised instead, so it arrives
+    as what it is.
+    """
+    import io
+
+    from memvara.server import cli
+    from memvara.server.cli import main
+
+    def boom(_config):
+        raise ImportError("sentence-transformers is not installed")
+
+    monkeypatch.setattr(cli, "build_memvara", boom)
+    with pytest.raises(ImportError, match="sentence-transformers"):
+        main([], env={"MEMVARA_DB": ":memory:"}, stdout=io.StringIO(), stderr=io.StringIO())
+
+
 # -- what the deployment says about itself, asked once at startup ------------------------
 
 
@@ -178,16 +255,30 @@ class _Answering:
         self.default_scope = scope
         self.calls = 0
 
-    def service(self):
+    def service(self, **kw):
         self.calls += 1
+        assert kw == {"attempts": 1, "timeout": 2.0}, (
+            "the startup probe has to be the cheap one: a hanging deployment on the "
+            f"client's own defaults is ~90 seconds of silent stdio, and this got {kw}")
         if isinstance(self._body, Exception):
             raise self._body
         return self._body
 
     def scope(self, *, user=None, agent=None, session=None):
+        """`RemoteMemvara.scope`'s narrowing, so the fake's shape is not a lie — no
+        `tenant` parameter, and the current scope supplies whatever is not named."""
         from memvara.remote.api import ScopedRemoteMemvara
+        from memvara.types import Scope
 
-        return ScopedRemoteMemvara.__new__(ScopedRemoteMemvara)
+        current = self.default_scope
+        view = ScopedRemoteMemvara.__new__(ScopedRemoteMemvara)
+        object.__setattr__(view, "_mem", self)
+        object.__setattr__(view, "_scope", Scope(
+            current.tenant,
+            user if user is not None else current.user,
+            agent if agent is not None else current.agent,
+            session if session is not None else current.session))
+        return view
 
     def close(self):
         pass
@@ -197,10 +288,6 @@ def _answering(body, **kw):
     from memvara.types import Scope
 
     return _Answering(body, Scope("acme", kw.get("user"), None, None))
-
-
-_ENVELOPE = {"scope": {}, "visible": 2, "tenant_counts": {"claims": 3},
-             "extractor": "fast-path+anthropic/claude", "read_only": False}
 
 
 def test_a_read_only_credential_hides_the_write_tools():

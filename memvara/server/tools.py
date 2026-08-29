@@ -191,6 +191,11 @@ class ToolContext:
     and the deployment resolves the tenant from the bearer token rather than from
     anything the request could name, so a narrowing can only narrow inside what the
     credential already authorizes. The argument is unchanged — what satisfies it is wider.
+
+    The protocol is also what makes the sentence above *checkable* rather than merely
+    stated. Both concrete views expose the unscoped client as `.memvara`, and it takes
+    `tenant`; `MemoryAPI` deliberately does not declare it, so a handler reaching for it is
+    a type error here rather than a scope escape found by reading.
     """
 
     memory: MemoryAPI
@@ -988,11 +993,18 @@ def _fold_note(raw: str, claims: Sequence[Claim]) -> str:
     **Read off the claims the store just wrote back, not off a registry.** Every claim
     here carries the canonical predicate the store actually used, so comparing it against
     the caller's own spelling is exact — and it is exact on both engines, which asking a
-    registry is not. `ctx.memory.memvara.registry` is what this used to do, and it raised
-    `AttributeError` against a hosted deployment: a `RemoteMemvara` holds no registry
-    because the vocabulary lives server-side, built from builtins plus declared packs plus
-    whatever specs that store has learned. This is also the stronger statement of the two
-    — what the store did, rather than what a registry says it would do.
+    registry is not. This used to reach through the unscoped engine for its `registry`,
+    and that raised `AttributeError` against a hosted deployment: a `RemoteMemvara` holds
+    no registry, because the vocabulary lives server-side, built from builtins plus
+    declared packs plus whatever specs that store has learned. This is also the stronger
+    statement of the two — what the store did, rather than what a registry says it would
+    do.
+
+    The phrasing above avoids naming that attribute in the `ctx.memory.<name>` form on
+    purpose. `tests/test_memory_api_protocol.py` derives the protocol's membership by
+    regex over this file, so prose is indistinguishable from a call site — and this
+    sentence kept a `memvara` member alive in `MemoryAPI` for a while after its last real
+    caller went away.
 
     **One sentence was dropped in that move, and its absence is a decision.** The old note
     added, on a write folding onto a `Cardinality.ONE` predicate, that the slot now keeps

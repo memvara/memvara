@@ -119,6 +119,9 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
         print(f"memvara-mcp: unexpected argument {args[0]!r}\n\n{USAGE}", file=err)
         return 2
 
+    # Bound before the try so the ImportError branch below can ask which mode raised.
+    # `from_env` imports nothing lazily today, so this stays None only if it starts to.
+    config: ServerConfig | None = None
     try:
         config = ServerConfig.from_env(env)
         memory = build_memvara(config)
@@ -137,6 +140,15 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
         # traceback in a log nobody reads. `memvara-mcp init --mode cloud` refuses on the
         # same question, so the two commands cannot disagree about whether cloud works
         # here, which is the failure `init` writing a config it never launches invites.
+        #
+        # **Only for cloud mode.** The local branch imports two optional packages of its
+        # own — `sentence-transformers` for MEMVARA_EMBEDDER=local and the anthropic SDK
+        # for MEMVARA_LLM=anthropic — and each already catches its own ImportError and
+        # raises a ConfigError naming the right extra. One escaping those is a bug, and
+        # labelling it "MEMVARA_MODE=cloud cannot start" would send whoever hits it to the
+        # wrong variable entirely. Re-raised, so it arrives as what it is.
+        if config is None or config.mode != "cloud":
+            raise
         print(f"memvara-mcp: MEMVARA_MODE=cloud cannot start a server here. {exc}",
               file=err)
         return 2

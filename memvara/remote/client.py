@@ -86,8 +86,16 @@ class HttpClient:
         self._client.close()
 
     def request(self, method: str, path: str, *, params: dict[str, Any] | None = None,
-                json: Any = None, write: bool = False) -> Any:
+                json: Any = None, write: bool = False,
+                attempts: int | None = None, timeout: float | None = None) -> Any:
         """One call, decoded, retried where retrying is safe.
+
+        `attempts` and `timeout` override this client's own for one call, and exist for
+        one caller: a probe whose value is that failing is cheap. A server asking a
+        deployment what it is at startup wants an answer in seconds or not at all — three
+        attempts at a 30-second timeout, plus backoff, is a minute and a half of silent
+        stdio before it gives up and degrades, which is the opposite of what degrading
+        gracefully is for. Every ordinary call leaves both `None` and keeps the client's.
 
         Retries on a server-classified `retryable` error, on 429, and on a connect-phase
         failure (`httpx.ConnectError`, `httpx.ConnectTimeout`) — none of these ever
@@ -100,12 +108,17 @@ class HttpClient:
         import httpx
 
         headers = {"Idempotency-Key": uuid.uuid4().hex} if write else None
+        # Only when given: httpx reads `timeout=None` as "no timeout at all", which is the
+        # opposite of "use the client's", so an unconditional keyword would turn an
+        # override into a hang.
+        extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+        tries = self._attempts if attempts is None else max(1, attempts)
         last: Exception | None = None
-        for attempt in range(self._attempts):
+        for attempt in range(tries):
             try:
                 response = self._client.request(
                     method, path,
-                    params=_drop_none(params), json=json, headers=headers)
+                    params=_drop_none(params), json=json, headers=headers, **extra)
             except httpx.TransportError as exc:
                 last = exc
             else:
@@ -115,7 +128,7 @@ class HttpClient:
                 last = err
                 if not err.retryable:
                     raise err
-            if attempt + 1 < self._attempts:
+            if attempt + 1 < tries:
                 self._sleep(_delay(attempt, last))
         raise last if isinstance(last, RemoteError) else _wrapped(last)
 
@@ -151,17 +164,21 @@ class AsyncHttpClient:
 
     async def request(self, method: str, path: str, *,
                       params: dict[str, Any] | None = None,
-                      json: Any = None, write: bool = False) -> Any:
-        """`HttpClient.request`, awaited. See there for the retry rule itself."""
+                      json: Any = None, write: bool = False,
+                      attempts: int | None = None, timeout: float | None = None) -> Any:
+        """`HttpClient.request`, awaited. See there for the retry rule itself, and for
+        what the two per-call overrides are for."""
         import httpx
 
         headers = {"Idempotency-Key": uuid.uuid4().hex} if write else None
+        extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+        tries = self._attempts if attempts is None else max(1, attempts)
         last: Exception | None = None
-        for attempt in range(self._attempts):
+        for attempt in range(tries):
             try:
                 response = await self._client.request(
                     method, path,
-                    params=_drop_none(params), json=json, headers=headers)
+                    params=_drop_none(params), json=json, headers=headers, **extra)
             except httpx.TransportError as exc:
                 last = exc
             else:
@@ -171,7 +188,7 @@ class AsyncHttpClient:
                 last = err
                 if not err.retryable:
                     raise err
-            if attempt + 1 < self._attempts:
+            if attempt + 1 < tries:
                 await self._sleep(_delay(attempt, last))
         raise last if isinstance(last, RemoteError) else _wrapped(last)
 
