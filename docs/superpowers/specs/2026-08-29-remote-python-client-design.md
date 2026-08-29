@@ -163,6 +163,15 @@ retrying it writes twice; that case raises and names the uncertainty. The client
 on every write regardless, so the safe behaviour arrives with the server change and not with
 a later client release.
 
+**The guarantee is per-worker, and the client must not promise more.** The deployed
+idempotency store lives in the serving process, so a retry that a load balancer routes to a
+second worker finds no record of the first attempt and re-executes. That is not a defect to
+work around here — it is the shape of what the server offers, and a client that documented
+"retries are safe" without qualification would be making a promise the deployment does not
+keep. `RemoteMemvara`'s retry docstring says what is actually true: a retried write is
+deduplicated when it lands on the worker that saw the first attempt, and a single-worker
+deployment is therefore the only one where it always is.
+
 ### Async
 
 `AsyncRemoteMemvara` uses `httpx.AsyncClient` directly and does **not** follow `aio.py`'s
@@ -292,6 +301,17 @@ real deployment. Mitigated by strict hydration and by the round-trip tests, not 
 **Two prerequisites in another repository.** The SDK cannot ship complete until `POST
 /v1/end` and `Idempotency-Key` deploy. If either slips, the honest options are to ship
 without `end()` and say so, or to hold — not to route `end()` through a retirement route.
+
+*Both have now been built and reviewed on `memvara-cloud`'s `feat/v1-end-and-idempotency`,
+and neither is deployed yet. The SDK's write-retry behaviour must stay disabled until they
+are, because a client retrying against a deployment that ignores the header duplicates
+data silently.*
+
+**Idempotency is per-worker.** Found in that branch's final review: the store lives in the
+serving process, so a retry routed to a second worker re-executes. The client cannot detect
+which worker served it and must not claim more than the server delivers — see §3. This is
+the one place where the SDK's central promise is weaker than it first appears, and it is
+worth saying out loud in the client's own documentation rather than only in the server's.
 
 **Scope of the change.** Two repositories, four or five commits, a new public API and a
 server refusal removed. Sequence: the `memvara-cloud` PR first, then the SDK, then cloud

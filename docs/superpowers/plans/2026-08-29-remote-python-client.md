@@ -459,6 +459,8 @@ git commit -m "feat(remote): resolve api key and base url from arg, env, or cred
 
 **Retry rule, from the spec:** retry on a server-classified `retryable`, on 429, and on connect-phase failures. A write that fails after the request was sent is retried only when it carried an `Idempotency-Key`, which this client always sends on writes. `httpx.ConnectError` and `httpx.ConnectTimeout` are connect-phase; `httpx.ReadTimeout` is not.
 
+**Say what the guarantee actually is, in the docstring.** The server's idempotency store lives in the serving process, so a retry a load balancer routes to a second worker finds no record of the first attempt and re-executes. Do not write "retries are safe". Write that a retried write is deduplicated when it reaches the worker that saw the first attempt, and that a single-worker deployment is the only one where that always holds. This was found in the final review of `memvara-cloud`'s `feat/v1-end-and-idempotency`; the server documents it in `deploy/README.md`, and a client that repeated the unqualified claim would be the place the promise broke.
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
