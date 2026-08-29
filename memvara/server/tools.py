@@ -57,10 +57,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence, cast
 
-from ..core import Memvara, ScopedMemvara, is_derived
+from ..core import Memvara, is_derived
 from ..schema import Cardinality
 from ..types import (Accumulation, Claim, Collapse, Dispute, MemoryType, Retype,
                      WriteReceipt, utcnow)
+from .memory_api import MemoryAPI
 from .validate import ToolError, validate
 
 __all__ = ["TOOLS", "Tool", "ToolContext", "ToolError", "safe_detail", "safe_line"]
@@ -173,15 +174,23 @@ def _memory_types(values: Sequence[str] | None) -> list[MemoryType] | None:
 class ToolContext:
     """Everything a handler is allowed to touch.
 
-    `memory` is a `ScopedMemvara`, never an `Memvara`, and that is the whole security model
-    of this server: the scope was bound once at startup from the client's environment, so
-    a handler has no argument, and no attribute, with which to address another tenant.
+    `memory` is scope-bound, never scope-taking, and that is the whole security model of
+    this server: the scope was fixed once at startup from the client's environment, so a
+    handler has no argument, and no attribute, with which to address another tenant.
     Validating a caller-supplied scope string would be the alternative, and validation is
     what the REST layer will have to do until it has real authentication — a capability
     that cannot express the wrong answer is strictly better.
+
+    `MemoryAPI` rather than `ScopedMemvara` because two things hold that property and one
+    tool table serves both. `ScopedMemvara` holds it by construction: it wraps an
+    `Memvara` with the scope filled in and exposes no method that takes one.
+    `ScopedRemoteMemvara` holds it twice over: it sends a bound scope on every request,
+    and the deployment resolves the tenant from the bearer token rather than from
+    anything the request could name, so a narrowing can only narrow inside what the
+    credential already authorizes. The argument is unchanged — what satisfies it is wider.
     """
 
-    memory: ScopedMemvara
+    memory: MemoryAPI
     extractor: str = "unknown"
     read_only: bool = False
 
@@ -492,8 +501,29 @@ def _standing(ctx: ToolContext, args: dict[str, Any]) -> str:
     """
     cap = args.get("k")
     cap = STANDING_K if cap is None else int(cap)
-    claims = [c for c in ctx.memory.get_all(states=["live"])
-              if c.memory_type is MemoryType.PROCEDURAL]
+    # `GET /v1/standing` does this filter server-side. Against a hosted deployment the
+    # fallback below pages every live memory in the scope across the network to keep the
+    # procedural ones — and this is the tool a session calls at startup. Local behaviour
+    # is unchanged: `ScopedMemvara` has no `standing`, so it takes the same path it always
+    # did, and `MemoryAPI` deliberately does not declare the member — a `Protocol` has no
+    # optional ones, and declaring it would stop the local view satisfying the protocol.
+    #
+    # One divergence, and it is in the last line of the reply rather than in the facts:
+    # `GET /v1/standing` caps at `k` and reports no total, so the "(N more not shown)"
+    # hint below cannot fire against a hosted deployment. Locally the page is the whole
+    # scope and the count is exact. Asking for `cap + 1` would restore the hint and make
+    # its number wrong — "1 more" for a scope holding fifty — which is worse than not
+    # printing it, so the honest version is the one that stays silent.
+    server_side = getattr(ctx.memory, "standing", None)
+    if server_side is not None:
+        claims = list(server_side(k=cap))
+    else:
+        claims = [c for c in ctx.memory.get_all(states=["live"])
+                  if c.memory_type is MemoryType.PROCEDURAL]
+    # Applied to both branches. Order is confidence, then recency, then id: the first is
+    # the point — what the user stated outranks what a model inferred — and the last makes
+    # the order total, so two claims written in the same instant cannot swap places
+    # between calls, whichever side did the filtering.
     claims.sort(key=lambda c: (-c.confidence, _descending(c.recorded_at), c.id))
     shown = claims[:cap]
     if not shown:

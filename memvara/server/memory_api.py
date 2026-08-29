@@ -1,0 +1,191 @@
+"""What `server/tools.py` needs from the memory it is handed, and nothing more.
+
+One tool table serves a local engine and a hosted deployment because both scoped views —
+`ScopedMemvara` over a SQLite file, `ScopedRemoteMemvara` over `/v1` — satisfy this
+protocol. A second table would be two descriptions of the same nineteen tools, drifting
+apart at whichever one a change forgets.
+
+**Every member is derived from a call site, not from a wish list.** Eighteen are reached
+as `ctx.memory.<name>`; `connectivity` is reached through a parameter, because `_stats`
+hands `ctx.memory` to `_join_rate`. `tests/test_memory_api_protocol.py` reads
+`tools.py` and fails in both directions — a call this does not declare, and a member no
+call uses.
+
+**Signatures are the intersection of the two views, not the union.** `search` and
+`recall` take `Sequence[MemoryType]` rather than the remote client's wider
+`Sequence[MemoryType | str]`, because a protocol that promised the wider type would be a
+promise `ScopedMemvara` cannot keep. `get_all` declares no `limit`/`offset` even though
+the remote view has them, because the tools do not pass them — and a member declared here
+is a member every implementation is then held to.
+
+**`standing` is deliberately absent.** A `Protocol` has no optional members: declaring it
+would stop `ScopedMemvara` satisfying the protocol its own server is typed against.
+`_standing` asks for it with `getattr` and keeps the paging path when it is missing, so
+the local engine behaves exactly as it did.
+
+**`memvara` is typed `Any`, and that is a known hole.** `_fold_note` reads
+`ctx.memory.memvara.registry`, which exists on `Memvara` and not on `RemoteMemvara` — the
+predicate registry lives server-side for a hosted deployment. Typing it `Any` is what lets
+both views satisfy one protocol; it also means no checker will catch that read. See the
+comment on the member below.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import (TYPE_CHECKING, Any, Collection, Literal, Protocol, Sequence,
+                    runtime_checkable)
+
+from ..retrieve import Path
+from ..types import (Answer, Claim, Delta, MemoryType, Provenance, Result, Scope,
+                     WriteReceipt)
+
+__all__ = ["MemoryAPI"]
+
+
+@runtime_checkable
+class MemoryAPI(Protocol):
+    """A memory already bound to one scope, whatever is serving it.
+
+    `runtime_checkable` so `isinstance` answers the coarse question — does this object
+    have the members — which is what a caller wiring an alternative implementation wants
+    at startup. It checks names and not signatures, so it is a smoke test rather than the
+    guarantee; the guarantee is mypy, over the two assignments at the foot of this file.
+    """
+
+    # -- what the view knows about itself ------------------------------------
+
+    @property
+    def scope(self) -> Scope:
+        """The scope this view is bound to.
+
+        A property rather than an argument, and that is the security model rather than a
+        convenience: there is no parameter anywhere below that names a tenant, a user, an
+        agent or a session, so a handler holding one of these cannot address another one.
+        Read-only here on purpose — `ScopedMemvara` holds it as a plain attribute and
+        `ScopedRemoteMemvara` as a property, and only the read is common to both.
+        """
+
+    @property
+    def memvara(self) -> Any:
+        """The unscoped client underneath: a `Memvara`, or a `RemoteMemvara`.
+
+        **Typed `Any` because the two have no useful common supertype**, and the one
+        caller reaches past it for something only the local engine has:
+        `_fold_note` reads `.registry` to say when a predicate was folded onto a
+        canonical spelling. A hosted deployment resolves predicates server-side and this
+        client holds no registry, so that read raises `AttributeError` against
+        `RemoteMemvara` and no checker will tell you first. Narrowing this type is the fix
+        and it needs the fold reported from somewhere both views have.
+        """
+
+    # -- reading -------------------------------------------------------------
+
+    def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
+               as_of: datetime | None = None, valid_at: datetime | None = None,
+               known_at: datetime | None = None,
+               states: Collection[str] | None = None,
+               include_invalidated: bool | None = None,
+               memory_types: Sequence[MemoryType] | None = None,
+               include_episodes: Literal[False] = False) -> list[Result]:
+        """Hybrid retrieval over claims.
+
+        `include_episodes` is pinned to `False` because that is the only call `tools.py`
+        makes, and it is what makes the return `list[Result]` rather than the wider
+        `list[Retrieved]`: an episode hit has no `.claim`, and `_search` reads `.claim` on
+        every row.
+        """
+
+    def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
+               memory_types: Sequence[MemoryType] | None = None,
+               include_episodes: bool = False,
+               budget: int | None = None) -> str:
+        """Retrieval already rendered for a system prompt.
+
+        `budget` is declared because `_recall` passes it on every call, as `None` unless
+        the model asked for a ceiling. `ScopedRemoteMemvara.recall` accepts the parameter
+        and raises for any value other than `None`: `POST /v1/recall` renders server-side
+        and takes no budget, and a ceiling silently not applied is an oversized prompt
+        with nothing to notice it by.
+        """
+
+    def get(self, claim_id: str) -> Claim | None: ...
+
+    def get_all(self, *, states: Collection[str] | None = None,
+                include_invalidated: bool | None = None,
+                as_of: datetime | None = None, valid_at: datetime | None = None,
+                known_at: datetime | None = None) -> list[Claim]: ...
+
+    def count(self, *, states: Collection[str] | None = None,
+              include_invalidated: bool | None = None,
+              as_of: datetime | None = None, valid_at: datetime | None = None,
+              known_at: datetime | None = None) -> int: ...
+
+    def history(self, subject: str, predicate: str, *,
+                as_of: datetime | None = None, valid_at: datetime | None = None,
+                known_at: datetime | None = None) -> list[Claim]: ...
+
+    def why(self, claim_id: str, *, as_of: datetime | None = None,
+            valid_at: datetime | None = None,
+            known_at: datetime | None = None) -> Provenance | None: ...
+
+    def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
+            min_score: float = 0.0) -> Answer: ...
+
+    def since(self, when: datetime) -> Delta: ...
+
+    def neighborhood(self, entity: str, *, depth: int = 2, k: int = 10,
+                     min_hops: int = 1, predicates: Sequence[str] | None = None,
+                     as_of: datetime | None = None, valid_at: datetime | None = None,
+                     known_at: datetime | None = None,
+                     min_score: float = 0.0) -> list[Path]: ...
+
+    def paths_between(self, source: str, target: str, *, depth: int = 3, k: int = 3,
+                      predicates: Sequence[str] | None = None,
+                      as_of: datetime | None = None, valid_at: datetime | None = None,
+                      known_at: datetime | None = None,
+                      min_score: float = 0.0) -> list[Path]: ...
+
+    # -- writing -------------------------------------------------------------
+
+    def add(self, messages: Any, *, role: str = "user",
+            ts: datetime | None = None) -> WriteReceipt: ...
+
+    def remember(self, subject: str, predicate: str, obj: str,
+                 **kw: Any) -> WriteReceipt:
+        """The exact-fact write.
+
+        `**kw` rather than the eight named arguments both views accept, because the two
+        spell their optional arguments differently below the surface and `tools.py` passes
+        the same six to either. Widening it here would make the protocol assert a
+        keyword-by-keyword agreement neither view has been checked for.
+        """
+
+    def forget(self, subject: str, predicate: str, *, at: datetime | None = None,
+               close: str = "retired") -> list[Claim]: ...
+
+    def delete(self, claim_id: str, *, at: datetime | None = None,
+               close: str = "retired") -> bool: ...
+
+    # -- reporting -----------------------------------------------------------
+
+    def stats(self) -> dict[str, int]:
+        """Row counts for the whole tenant: `claims`, `live_claims`, `episodes`,
+        `embeddings`. Not the scope's own count — `count()` is that one."""
+
+    def connectivity(self) -> dict[str, int]:
+        """`live_claims` and `joinable_claims`, or `{}` when the backend cannot measure
+        the join. `{}` is not a store with nothing in it, and `_join_rate` prints no line
+        rather than a zero nobody measured."""
+
+
+if TYPE_CHECKING:
+    # The real conformance check. `dir()` in the test file compares names; this compares
+    # signatures, which is the half that catches a parameter renamed on one view only.
+    from ..core import ScopedMemvara
+    from ..remote.api import ScopedRemoteMemvara
+
+    def _both_views_satisfy_this(local: ScopedMemvara,
+                                 remote: ScopedRemoteMemvara) -> None:
+        _local: MemoryAPI = local
+        _remote: MemoryAPI = remote

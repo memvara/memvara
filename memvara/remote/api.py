@@ -28,12 +28,13 @@ from __future__ import annotations
 
 from copy import copy
 from datetime import datetime
-from typing import Any, Collection, Mapping, Sequence
+from typing import Any, Collection, Literal, Mapping, Sequence, overload
 
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import EpisodeResult, Path, Retrieved
 from ..types import (
-    Answer, Claim, Delta, Episode, MemoryType, Provenance, Scope, WriteReceipt, closure,
+    Answer, Claim, Delta, Episode, MemoryType, Provenance, Result, Scope, WriteReceipt,
+    closure,
 )
 from . import hydrate
 from .client import DEFAULT_TIMEOUT, HttpClient
@@ -270,13 +271,44 @@ class RemoteMemvara:
 
     # -- reading -------------------------------------------------------------
 
+    # The same three variants as `Memvara.search`, and they are what makes "calling code
+    # cannot tell which it holds" true of the type as well as of the value. Without them
+    # `mem.search(q)` types as `list[Retrieved]` here and `list[Result]` locally, so the
+    # same expression reading `.claim` off a row checks against one engine and not the
+    # other. `include_episodes=False` returns claim hits only -- `_hit` builds an
+    # `EpisodeResult` only for a row the facade marked `kind: "episode"`, and it sends
+    # none when it was not asked for them.
+    @overload
+    def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               as_of: datetime | None = ..., valid_at: datetime | None = ...,
+               known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               include_invalidated: bool | None = ...,
+               memory_types: Sequence[MemoryType | str] | None = ...,
+               include_episodes: Literal[False] = ...) -> list[Result]: ...
+
+    @overload
+    def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               as_of: datetime | None = ..., valid_at: datetime | None = ...,
+               known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               include_invalidated: bool | None = ...,
+               memory_types: Sequence[MemoryType | str] | None = ...,
+               include_episodes: Literal[True]) -> list[Retrieved]: ...
+
+    @overload
+    def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               as_of: datetime | None = ..., valid_at: datetime | None = ...,
+               known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               include_invalidated: bool | None = ...,
+               memory_types: Sequence[MemoryType | str] | None = ...,
+               include_episodes: bool) -> list[Retrieved]: ...
+
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
                include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType | str] | None = None,
-               include_episodes: bool = False) -> list[Retrieved]:
+               include_episodes: bool = False) -> list[Any]:
         """Hybrid retrieval, with the ranking explanation attached.
 
         A POST for a read, as the facade defines it: the query is text somebody wrote,
@@ -790,13 +822,44 @@ class ScopedRemoteMemvara:
 
     # -- reading -------------------------------------------------------------
 
+    # The same three variants as `Memvara.search`, and they are what makes "calling code
+    # cannot tell which it holds" true of the type as well as of the value. Without them
+    # `mem.search(q)` types as `list[Retrieved]` here and `list[Result]` locally, so the
+    # same expression reading `.claim` off a row checks against one engine and not the
+    # other. `include_episodes=False` returns claim hits only -- `_hit` builds an
+    # `EpisodeResult` only for a row the facade marked `kind: "episode"`, and it sends
+    # none when it was not asked for them.
+    @overload
+    def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               as_of: datetime | None = ..., valid_at: datetime | None = ...,
+               known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               include_invalidated: bool | None = ...,
+               memory_types: Sequence[MemoryType | str] | None = ...,
+               include_episodes: Literal[False] = ...) -> list[Result]: ...
+
+    @overload
+    def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               as_of: datetime | None = ..., valid_at: datetime | None = ...,
+               known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               include_invalidated: bool | None = ...,
+               memory_types: Sequence[MemoryType | str] | None = ...,
+               include_episodes: Literal[True]) -> list[Retrieved]: ...
+
+    @overload
+    def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               as_of: datetime | None = ..., valid_at: datetime | None = ...,
+               known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               include_invalidated: bool | None = ...,
+               memory_types: Sequence[MemoryType | str] | None = ...,
+               include_episodes: bool) -> list[Retrieved]: ...
+
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
                include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType | str] | None = None,
-               include_episodes: bool = False) -> list[Retrieved]:
+               include_episodes: bool = False) -> list[Any]:
         return self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
                                 valid_at=valid_at, known_at=known_at, states=states,
                                 include_invalidated=include_invalidated,
