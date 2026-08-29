@@ -28,13 +28,23 @@ guarantee therefore holds unconditionally only for a single-worker deployment; b
 load balancer with more than one worker, a retried write is deduplicated when luck (or
 session affinity) routes it back to the worker that saw the original attempt, and
 duplicates it otherwise. This client does not — cannot, from here — make that stronger.
+
+**`HttpClient` and `AsyncHttpClient` are two transports sharing one set of rules.**
+`_outcome()` and `_delay()` below decide what is retryable and how long to wait before
+trying again, and neither function touches a socket — one reads an already-received
+`httpx.Response`, the other reads jitter and a clock. Both clients call the same two
+functions from their own attempt loop (a blocking `for` with `time.sleep` in one, the
+same `for` with `await asyncio.sleep` in the other), so the retry *rule* cannot drift
+between a sync and an async caller of the same API — only the mechanics of waiting
+differ, which is the one thing that has to.
 """
 from __future__ import annotations
 
+import asyncio
 import random
 import time
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, Coroutine
 
 from .errors import RemoteError, error_from_response
 
@@ -99,27 +109,95 @@ class HttpClient:
             except httpx.TransportError as exc:
                 last = exc
             else:
-                if response.status_code < 400:
-                    return response.json() if response.content else None
-                last = error_from_response(
-                    response.status_code, _body(response),
-                    response.headers.get("Retry-After"))
-                if not last.retryable:
-                    raise last
+                value, err = _outcome(response)
+                if err is None:
+                    return value
+                last = err
+                if not err.retryable:
+                    raise err
             if attempt + 1 < self._attempts:
-                self._sleep(self._delay(attempt, last))
+                self._sleep(_delay(attempt, last))
         raise last if isinstance(last, RemoteError) else _wrapped(last)
 
-    def _delay(self, attempt: int, last: Exception | None) -> float:
-        """Exponential backoff with jitter, or what the server asked for.
 
-        Jitter is not decoration: without it every client that failed against one
-        deployment retries in the same millisecond and reproduces the load that caused it.
-        """
-        stated = getattr(last, "retry_after", None)
-        if stated is not None:
-            return float(stated)
-        return _BACKOFF * (2 ** attempt) * (0.5 + random.random())
+class AsyncHttpClient:
+    """`HttpClient`'s twin on `httpx.AsyncClient`, for a caller already on an event loop.
+
+    Every rule is the same rule — same attempts, same backoff, same idempotency-key
+    handling — because both clients call `_outcome()` and `_delay()` below rather than
+    each keeping its own copy. What differs is only what has to: `await`ing the request
+    and `await asyncio.sleep(...)` instead of a blocking call and `time.sleep(...)`.
+    """
+
+    def __init__(self, api_key: str, base_url: str, *, timeout: float = DEFAULT_TIMEOUT,
+                 attempts: int = DEFAULT_ATTEMPTS,
+                 sleep: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep,
+                 ) -> None:
+        try:
+            import httpx
+        except ImportError as exc:
+            raise ImportError(install_hint()) from exc
+        self._attempts = max(1, attempts)
+        self._sleep = sleep
+        self._client = httpx.AsyncClient(
+            base_url=base_url.rstrip("/"),
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=timeout,
+        )
+
+    async def aclose(self) -> None:
+        """Release the underlying connection pool."""
+        await self._client.aclose()
+
+    async def request(self, method: str, path: str, *,
+                      params: dict[str, Any] | None = None,
+                      json: Any = None, write: bool = False) -> Any:
+        """`HttpClient.request`, awaited. See there for the retry rule itself."""
+        import httpx
+
+        headers = {"Idempotency-Key": uuid.uuid4().hex} if write else None
+        last: Exception | None = None
+        for attempt in range(self._attempts):
+            try:
+                response = await self._client.request(
+                    method, path,
+                    params=_drop_none(params), json=json, headers=headers)
+            except httpx.TransportError as exc:
+                last = exc
+            else:
+                value, err = _outcome(response)
+                if err is None:
+                    return value
+                last = err
+                if not err.retryable:
+                    raise err
+            if attempt + 1 < self._attempts:
+                await self._sleep(_delay(attempt, last))
+        raise last if isinstance(last, RemoteError) else _wrapped(last)
+
+
+def _outcome(response: Any) -> tuple[Any, RemoteError | None]:
+    """One completed response, classified: `(decoded_value, None)` on success, or
+    `(None, error)` on failure, where `error.retryable` says whether trying again could
+    help. Shared by both clients so that classification cannot drift between them —
+    only how each one waits and re-sends differs.
+    """
+    if response.status_code < 400:
+        return (response.json() if response.content else None), None
+    return None, error_from_response(
+        response.status_code, _body(response), response.headers.get("Retry-After"))
+
+
+def _delay(attempt: int, last: Exception | None) -> float:
+    """Exponential backoff with jitter, or what the server asked for.
+
+    Jitter is not decoration: without it every client that failed against one
+    deployment retries in the same millisecond and reproduces the load that caused it.
+    """
+    stated = getattr(last, "retry_after", None)
+    if stated is not None:
+        return float(stated)
+    return _BACKOFF * (2 ** attempt) * (0.5 + random.random())
 
 
 def _drop_none(params: dict[str, Any] | None) -> dict[str, Any] | None:

@@ -25,6 +25,17 @@ thread. That is not true of any of the three — LangChain's `aget_messages` use
 `StorageBackend` is a bare `Protocol`, so an omitted `asave` is an `AttributeError`
 rather than a silent sync call. The argument above stands without it.
 
+**Where this argument stops applying: `memvara.remote.aio`.** The case above rests on
+two facts that are both true of the local engine and both false of a hosted deployment.
+There is no async SQLite, and there is an engine — `Store`, `WritePipeline`,
+`Reconciler`, `HybridRetriever`, `Consolidator` — that coroutine-colouring would have to
+run through. `RemoteMemvara` has neither: `httpx` ships a real `AsyncClient` that speaks
+`/v1` without blocking a thread to do it, and there is nothing underneath the transport
+to colour, because `RemoteMemvara` already does nothing but turn a method call into one
+request. `memvara.remote.aio.AsyncRemoteMemvara` therefore uses `httpx.AsyncClient`
+directly rather than this module's `asyncio.to_thread` pattern — wrapping a blocking
+client in a thread would be strictly worse than the async client httpx already provides.
+
 Two things worth knowing before relying on it:
 
 * **It is safe to call concurrently.** `SQLiteStore` guards its connection with an
