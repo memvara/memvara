@@ -378,6 +378,47 @@ whichever is missing. The last code state has to have a passing `mypy` **and** a
 gate recorded against it — the point of all this is to validate each code state once, not
 to skip validating the one that ships.
 
+
+### How this sits with the rules above
+
+Five rules elsewhere in this file predate this section and one of them can be read against
+it. None is weakened here; each is worth stating precisely, because an ambiguity between
+two instructions is resolved by whichever the reader happens to hit first.
+
+**"Fix everything it finds, then re-run the gate" still means what it says.** Applying
+review fixes edits source, which moves the fingerprint, so the gate is stale and has to
+run — this section agrees and does not soften it. What it rules out is treating *the
+review itself* as the trigger. A review that changed nothing leaves every checkpoint
+standing; a review whose fixes you applied has already invalidated them without anyone
+having to decide.
+
+**"Ensure tests pass before and after" (§4) costs one run, not two,** when the "before"
+state already has a checkpoint. The requirement is evidence at both ends, not two
+executions of the same command against identical bytes.
+
+**Reporting a reuse in the PR body.** `CONTRIBUTING.md` and the review section both expect
+the PR body to say what was run. A reused result still has to appear there, and it is
+written as a reuse rather than dressed up as a fresh run: name the validation, the
+fingerprint it passed against, and when. "gate reused from the checkpoint recorded against
+f0031a8f; mypy re-run, clean" is a complete and honest sentence. What is not acceptable is
+a PR body that implies a run you did not make — the record exists so a reader knows what
+was verified, and a reused pass is a real answer to that.
+
+**"Verify means comparing an output, never that a command exited 0" is the reason this
+works, not an exception to it.** Reuse does not skip the comparison; it moves it. The
+checkpoint exists only because somebody read a number, and the fingerprint is the evidence
+that the number still describes this code. That is also why a checkpoint is never written
+from an exit status, and why a missing entry means run rather than assume.
+
+**The boundary against not running a check at all.** The Karpathy notes below say
+verification means comparing an output, and `~/.claude/CLAUDE.md` forbids making a check
+pass by removing what it was checking. This section is the only sanctioned reason in this
+repository to not run a gate now, so the line matters: reuse is permitted when the code
+state is byte-for-byte the one that already passed, and never otherwise. "The fingerprint
+moved but the change looks harmless" is not reuse — it is the judgement call the
+fingerprint exists to replace. When in doubt, the cost of running is a few minutes and the
+cost of a wrong skip is a merge nobody checked.
+
 ## What you learn here goes in Memvara
 
 Memvara is the memory store for work in this repository, reached through the plugin's MCP
