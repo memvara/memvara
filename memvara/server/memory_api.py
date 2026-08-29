@@ -104,7 +104,21 @@ class MemoryAPI(Protocol):
     def get_all(self, *, states: Collection[str] | None = None,
                 include_invalidated: bool | None = None,
                 as_of: datetime | None = None, valid_at: datetime | None = None,
-                known_at: datetime | None = None) -> list[Claim]: ...
+                known_at: datetime | None = None) -> list[Claim]:
+        """The memories visible at this scope — how many depends on what is serving it.
+
+        `ScopedMemvara` returns the whole scope. `ScopedRemoteMemvara` returns one page,
+        because `GET /v1/memories` materializes server-side and its `limit` defaults to
+        100 — a parameter this protocol does not declare, so no caller reaching it through
+        here can raise it or page past it.
+
+        Harmless today, and named so it stays that way. The one call site is `_standing`'s
+        fallback, and it never runs against a hosted deployment: `ScopedRemoteMemvara` has
+        `standing`, so `_standing` takes `GET /v1/standing` instead. A new caller that
+        needs more than the first hundred memories of a cloud scope has to reach past this
+        protocol for the paging arguments, rather than getting a short answer with nothing
+        saying it was short.
+        """
 
     def count(self, *, states: Collection[str] | None = None,
               include_invalidated: bool | None = None,

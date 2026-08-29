@@ -22,12 +22,13 @@ from __future__ import annotations
 
 from copy import copy
 from datetime import datetime
-from typing import Any, Collection, Mapping, Sequence
+from typing import Any, Collection, Literal, Mapping, Sequence, overload
 
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import Path, Retrieved
 from ..types import (
-    Answer, Claim, Delta, Episode, MemoryType, Provenance, Scope, WriteReceipt, closure,
+    Answer, Claim, Delta, Episode, MemoryType, Provenance, Result, Scope, WriteReceipt,
+    closure,
 )
 from . import hydrate
 from .api import _hit, _iso, _sent, _states, _type, _types
@@ -150,13 +151,46 @@ class AsyncRemoteMemvara:
 
     # -- reading -------------------------------------------------------------
 
+    # The same three variants as `RemoteMemvara.search`, and they carry the same weight:
+    # they are what makes "calling code cannot tell which it holds" true of the *type* as
+    # well as of the value. Without them `await mem.search(q)` types as `list[Retrieved]`
+    # here and `list[Result]` on `AsyncMemvara`, so the same expression reading `.claim`
+    # off a row checks against one engine and not the other -- and this class's own
+    # docstring promises it is `RemoteMemvara`'s twin down to the arguments.
+    @overload
+    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
+                     known_at: datetime | None = ...,
+                     states: Collection[str] | None = ...,
+                     include_invalidated: bool | None = ...,
+                     memory_types: Sequence[MemoryType | str] | None = ...,
+                     include_episodes: Literal[False] = ...) -> list[Result]: ...
+
+    @overload
+    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
+                     known_at: datetime | None = ...,
+                     states: Collection[str] | None = ...,
+                     include_invalidated: bool | None = ...,
+                     memory_types: Sequence[MemoryType | str] | None = ...,
+                     include_episodes: Literal[True]) -> list[Retrieved]: ...
+
+    @overload
+    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
+                     known_at: datetime | None = ...,
+                     states: Collection[str] | None = ...,
+                     include_invalidated: bool | None = ...,
+                     memory_types: Sequence[MemoryType | str] | None = ...,
+                     include_episodes: bool) -> list[Retrieved]: ...
+
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
                      states: Collection[str] | None = None,
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType | str] | None = None,
-                     include_episodes: bool = False) -> list[Retrieved]:
+                     include_episodes: bool = False) -> list[Any]:
         body = await self._http.request(
             "POST", "/v1/search", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,
@@ -460,13 +494,47 @@ class AsyncScopedRemoteMemvara:
 
     # -- reading -------------------------------------------------------------
 
+    # The same three variants as `ScopedRemoteMemvara.search`, and they carry the same
+    # weight:
+    # they are what makes "calling code cannot tell which it holds" true of the *type* as
+    # well as of the value. Without them `await mem.search(q)` types as `list[Retrieved]`
+    # here and `list[Result]` on `AsyncMemvara`, so the same expression reading `.claim`
+    # off a row checks against one engine and not the other -- and this class's own
+    # docstring promises it is `RemoteMemvara`'s twin down to the arguments.
+    @overload
+    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
+                     known_at: datetime | None = ...,
+                     states: Collection[str] | None = ...,
+                     include_invalidated: bool | None = ...,
+                     memory_types: Sequence[MemoryType | str] | None = ...,
+                     include_episodes: Literal[False] = ...) -> list[Result]: ...
+
+    @overload
+    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
+                     known_at: datetime | None = ...,
+                     states: Collection[str] | None = ...,
+                     include_invalidated: bool | None = ...,
+                     memory_types: Sequence[MemoryType | str] | None = ...,
+                     include_episodes: Literal[True]) -> list[Retrieved]: ...
+
+    @overload
+    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
+                     known_at: datetime | None = ...,
+                     states: Collection[str] | None = ...,
+                     include_invalidated: bool | None = ...,
+                     memory_types: Sequence[MemoryType | str] | None = ...,
+                     include_episodes: bool) -> list[Retrieved]: ...
+
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
                      states: Collection[str] | None = None,
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType | str] | None = None,
-                     include_episodes: bool = False) -> list[Retrieved]:
+                     include_episodes: bool = False) -> list[Any]:
         return await self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
                                       valid_at=valid_at, known_at=known_at,
                                       states=states,
