@@ -701,8 +701,16 @@ class Memvara:
         # what a wrapper forwarding an optional key writes, would otherwise be a
         # TypeError. Anything other than `None` here means `__new__` let a remote request
         # fall through to the local engine.
-        assert api_key is None and base_url is None, (
-            "api_key= and base_url= are dispatched in __new__ and never reach __init__")
+        #
+        # `raise`, not `assert`: `python -O` strips an assert, and under it this would
+        # open a local store for a caller who asked for a hosted one and say nothing.
+        # The check is on an unreachable path, so it costs nothing to keep in the build
+        # where it would matter most.
+        if api_key is not None or base_url is not None:
+            raise TypeError(
+                "api_key= and base_url= are dispatched in Memvara.__new__ and must never "
+                "reach __init__. Reaching it means a request for a hosted deployment "
+                "fell through to the local engine.")
         if path is not None and store is not None:
             raise TypeError(
                 f"path={path!r} and store= are mutually exclusive: the store decides "

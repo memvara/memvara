@@ -14,6 +14,23 @@ from memvara import HashingEmbedder, Memvara, NullLLM
 from memvara.remote.api import RemoteMemvara
 
 
+def test_remote_memvara_is_not_a_subclass_of_memvara():
+    """The mechanic every other test here rests on, and the only one they cannot see.
+
+    Python calls `__init__` when `__new__` returns an instance of `cls` and skips it
+    otherwise, so returning a non-subclass is what stops `Memvara.__init__` from running a
+    second construction over the top — opening a store and loading an embedding model for
+    an object that will never use either.
+
+    Making `RemoteMemvara` a subclass breaks that silently. Every `isinstance` check below
+    still passes, the bare-constructor test still passes, and the `__init__` guard never
+    fires, because Python would call `RemoteMemvara.__init__` rather than
+    `Memvara.__init__`. This assertion is the only thing standing between that change and
+    a green suite.
+    """
+    assert not issubclass(RemoteMemvara, Memvara)
+
+
 def test_an_api_key_returns_a_remote_client():
     with Memvara(api_key="k", base_url="https://example.test") as mem:
         assert isinstance(mem, RemoteMemvara)

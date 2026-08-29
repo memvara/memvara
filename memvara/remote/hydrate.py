@@ -11,6 +11,11 @@ it comes from (present, even when its value may be `null`) — `.get()` is used 
 wire model genuinely has no such field at all, so a default is the honest answer rather than
 a guess about a key that could be missing.
 
+**Instants are parsed by two functions, and which one a field gets is read off the wire
+model.** `_dt` is for fields that may legitimately be null; `_required_dt` is for the ones
+`/v1` declares non-nullable, and it raises on a null rather than passing `None` into a
+dataclass field whose type says it cannot be one.
+
 Three asymmetries the renderer introduces and this must undo:
 
 * `extractor` is `""` in the library and `null` on the wire.
@@ -38,7 +43,36 @@ __all__ = ["claim", "episode", "result", "explanation", "receipt", "provenance",
 
 
 def _dt(value: Any) -> datetime | None:
+    """A wire instant that is allowed to be null, as `datetime | None`.
+
+    `null` is a value on these fields rather than a defect: `valid_to` is null on a claim
+    the world has not moved past, `invalidated_at` on one nothing has retired,
+    `last_observed` on one nothing has re-observed.
+    """
     return None if value is None else datetime.fromisoformat(str(value))
+
+
+def _required_dt(field: str, value: Any) -> datetime:
+    """A wire instant the API always sends, as a plain `datetime`.
+
+    Raises on a null rather than widening the dataclass field it fills. `Claim.valid_from`,
+    `Claim.recorded_at`, `Episode.ts`, `Answer.at` and `Delta.since` are non-optional in
+    the library because every one of them records something that did happen at some
+    instant, and the models they come from declare them required and non-nullable — see
+    `valid_from`, `recorded_at`, `EpisodeModel.ts`, `AskResponse.at` and
+    `DeltaResponse.since` in `memvara_cloud/rest/models.py`. A null there is the server
+    disagreeing with its own schema.
+
+    Failing here is the point. Making the fields optional instead would hand a wire-format
+    defect to every caller to rediscover as a `None` where the type says there cannot be
+    one, arbitrarily far from the response that carried it.
+    """
+    parsed = _dt(value)
+    if parsed is None:
+        raise ValueError(
+            f"{field} came back null. /v1 declares it required and non-null, so this "
+            "response disagrees with its own schema; the field it fills cannot be None.")
+    return parsed
 
 
 def scope(body: dict[str, Any]) -> Scope:
@@ -56,10 +90,11 @@ def claim(body: dict[str, Any]) -> Claim:
     # itself is never absent.
     if body["salience_base"] is not None:
         meta[SALIENCE_BASE] = body["salience_base"]
-    if body["last_observed"] is not None:
-        # `Claim.last_observed` stores epoch seconds in `meta`; the wire carries the
-        # datetime it converts to (`Memory.last_observed`), not the float underneath.
-        meta[LAST_OBSERVED] = _dt(body["last_observed"]).timestamp()
+    # `Claim.last_observed` stores epoch seconds in `meta`; the wire carries the datetime
+    # it converts to (`Memory.last_observed`), not the float underneath.
+    last_observed = _dt(body["last_observed"])
+    if last_observed is not None:
+        meta[LAST_OBSERVED] = last_observed.timestamp()
     out = Claim(
         subject=body["subject"],
         predicate=body["predicate"],
@@ -78,16 +113,17 @@ def claim(body: dict[str, Any]) -> Claim:
         id=body["id"],
         meta=meta,
     )
-    out.valid_from = _dt(valid["valid_from"])
+    out.valid_from = _required_dt("valid_from", valid["valid_from"])
     out.valid_to = _dt(valid["valid_to"])
-    out.recorded_at = _dt(txn["recorded_at"])
+    out.recorded_at = _required_dt("recorded_at", txn["recorded_at"])
     out.invalidated_at = _dt(txn["invalidated_at"])
     out.invalidated_by = txn["invalidated_by"]
     return out
 
 
 def episode(body: dict[str, Any]) -> Episode:
-    return Episode(content=body["content"], role=body["role"], ts=_dt(body["ts"]),
+    return Episode(content=body["content"], role=body["role"],
+                   ts=_required_dt("ts", body["ts"]),
                    id=body["id"], scope=scope(body["scope"]),
                    meta=dict(body["metadata"]))
 
@@ -175,13 +211,13 @@ def reading(body: dict[str, Any]) -> Reading:
 
 
 def answer(body: dict[str, Any]) -> Answer:
-    return Answer(question=body["question"], at=_dt(body["at"]),
+    return Answer(question=body["question"], at=_required_dt("at", body["at"]),
                   readings=tuple(reading(r) for r in body["readings"]),
                   text=body["text"])
 
 
 def delta(body: dict[str, Any]) -> Delta:
-    return Delta(since=_dt(body["since"]),
+    return Delta(since=_required_dt("since", body["since"]),
                  added=tuple(claim(c) for c in body["added"]),
                  gone=tuple(claim(c) for c in body["gone"]))
 

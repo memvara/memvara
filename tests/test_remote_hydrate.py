@@ -231,3 +231,32 @@ def test_path_survives_render_then_hydrate_unchanged():
     assert restored.edges[0].strength == edge_val.strength
     assert restored.hops == 1
     assert restored.labels == ("Alice", "Acme")
+
+
+@pytest.mark.parametrize("section, field", [
+    ("valid_time", "valid_from"),
+    ("transaction_time", "recorded_at"),
+])
+def test_a_null_in_a_non_nullable_instant_raises_here_rather_than_downstream(section, field):
+    """`valid_from` and `recorded_at` are declared required and non-null on the wire, and
+    are non-optional on `Claim`. A server that sent null for one is disagreeing with its
+    own schema, and hydration is the last place that can say so with the response still in
+    hand.
+
+    The alternative — widening the dataclass field — moves the failure to whichever caller
+    first does arithmetic on a timestamp, with nothing left to say where the `None` came
+    from. The message names the field for the same reason.
+    """
+    wire = _wire(Claim(subject="user", predicate="likes", object="tea"))
+    wire[section][field] = None
+    with pytest.raises(ValueError, match=field):
+        hydrate.claim(wire)
+
+
+def test_the_nullable_instants_beside_them_still_come_back_as_none():
+    """The other half, and the reason the two parsers are separate: `valid_to` and
+    `invalidated_at` are null on every live claim, so a check that refused a null
+    everywhere would reject the ordinary case."""
+    restored = hydrate.claim(_wire(Claim(subject="user", predicate="likes", object="tea")))
+    assert restored.valid_to is None
+    assert restored.invalidated_at is None

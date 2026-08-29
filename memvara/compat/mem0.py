@@ -173,6 +173,17 @@ class Memory:
     Wrap an `Memvara` you built (the usual case — that is where the store path, the
     embedder and the extraction model are chosen), or pass `Memvara` keywords straight
     through for a throwaway one.
+
+    Those keywords include `api_key=`, so `Memory(api_key=...)` wraps a `RemoteMemvara`
+    against a hosted deployment. `self.memvara` is annotated `Memvara` because that is
+    what it holds in every other case, and the two classes are deliberately unrelated by
+    inheritance — so read the annotation as naming the surface, not the class. Most of
+    this shim runs unchanged over either, and two calls do not: `reset()` and
+    `search(rerank=True)` reach for `Memvara.reset` and `Memvara.reader`, neither of which
+    a hosted deployment exposes, and both raise `AttributeError` naming what is missing.
+    That is `RemoteMemvara`'s own rule — what is absent is absent rather than a method
+    that returns a plausible nothing — and it is stated here because the shim is where a
+    caller meets it.
     """
 
     def __init__(self, memory: Memvara | None = None, *, on_delete: str = "warn",
