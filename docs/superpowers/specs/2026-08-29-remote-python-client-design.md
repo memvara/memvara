@@ -184,9 +184,23 @@ docstring states the library-wide position and gains a sentence saying where it 
 
 `client.py` holds the lazy `httpx` import with the `memvara[cloud]` hint, the bearer
 header, a 30-second default timeout, `raise_for_status()` before `.json()`, and the error
-translation. `store/remote.py` uses it too, rather than leaving two HTTP layers with
-different retry and error behaviour pointed at one API. That edit is confined to its
-`__init__` and `_request`.
+translation.
+
+**`store/remote.py` shares the pool construction only, and that is a correction to this
+paragraph's first draft.** It said the point was to stop two HTTP layers having "different
+retry and error behaviour pointed at one API". That ambition contradicts a decision
+`store/remote.py`'s own docstring already argues: errors there are *"not swallowed and not
+translated into a `Store`-specific exception type: the protocol declares none, `SQLiteStore`
+lets `sqlite3` errors propagate the same way"*. Delegating fully would raise `RemoteError`
+where two pinned tests expect `httpx.HTTPStatusError`, and would require rewriting
+`get_claim`.
+
+So the shared piece is the bearer header, the base URL and the lazy import. `RemoteStore`
+keeps its own `raise_for_status()` surface and gets **no retries and no typed errors**. That
+leaves a real asymmetry between the two clients — a transient failure retried through
+`RemoteMemvara` is not retried through `RemoteStore` — and it is now deliberate rather than
+accidental. Unifying it is a separate decision, and it would mean overturning a documented
+one.
 
 ## 4. Un-refusing cloud mode
 
