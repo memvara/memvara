@@ -26,6 +26,7 @@ its per-table counts as evidence inside the erasure response itself.
 """
 from __future__ import annotations
 
+from copy import copy
 from datetime import datetime
 from typing import Any, Collection, Mapping, Sequence
 
@@ -127,6 +128,35 @@ class RemoteMemvara:
 
     def __repr__(self) -> str:
         return f"<RemoteMemvara {self.default_scope.key()}>"
+
+    def scope(self, *, user: str | None = None, agent: str | None = None,
+              session: str | None = None) -> "ScopedRemoteMemvara":
+        """A view bound to a narrower scope, with no way back out.
+
+        The narrowing is against this client's own scope, and the facade enforces the
+        same rule again from the credential — naming an agent or a session requires
+        naming a user, because an agent under *every* user is a read across users dressed
+        up as a narrowing.
+        """
+        current = self.default_scope
+        narrowed = Scope(
+            current.tenant,
+            user if user is not None else current.user,
+            agent if agent is not None else current.agent,
+            session if session is not None else current.session,
+        )
+        return ScopedRemoteMemvara(self, narrowed)
+
+    def _at(self, scope: Scope) -> "RemoteMemvara":
+        """A twin bound to a different scope, sharing this client's transport.
+
+        Sharing rather than dialling a second pool, because the two are the same
+        deployment on the same credential. Closing either closes both, which is the
+        honest reading of one pool with two handles on it.
+        """
+        twin = copy(self)
+        twin.default_scope = scope
+        return twin
 
     def _params(self, **extra: Any) -> dict[str, Any]:
         """Scope on every call, plus whatever this call adds. `None` values are dropped
@@ -693,3 +723,194 @@ class RemoteMemvara:
         """
         return self._http.request("POST", "/v1/maintenance/consolidate",
                                   params=self._params(), write=True)
+
+
+class ScopedRemoteMemvara:
+    """A `RemoteMemvara` with its scope already filled in.
+
+    The twin of `ScopedMemvara`, and it holds the same security property: **a handler
+    holding one of these has no argument with which to address another tenant, another
+    user, another agent or another session.** The scope is bound once, at construction,
+    and no method here takes `tenant`, `user`, `agent` or `session`. That is what makes
+    forgetting to check a scope impossible to exploit from a handler, rather than
+    something every handler has to remember.
+
+    Against a hosted deployment the credential binds the tenant a second time, from the
+    other side: the facade resolves it from the bearer token and there is no request
+    parameter anywhere on `/v1` that names one. So the scope here can only narrow inside
+    what the token already authorizes, and a narrowing that tried to widen is refused by
+    the facade rather than merely absent from this class.
+    """
+
+    __slots__ = ("_mem", "_scope")
+
+    def __init__(self, mem: RemoteMemvara, scope: Scope) -> None:
+        #: The client every call goes through: a twin of `mem` sharing its transport and
+        #: bound to `scope`, so the scope arrives on the wire without any method here
+        #: having to pass it.
+        self._mem = mem._at(scope)
+        self._scope = scope
+
+    @property
+    def memvara(self) -> RemoteMemvara:
+        """The client underneath.
+
+        Public for `ScopedMemvara.memvara`'s reason: a server layer holds one of these
+        per request, needs something off the real object, finds no accessor and reaches
+        for the private attribute instead — which is an undocumented API with a
+        misleading name rather than encapsulation.
+
+        Not a way around the scope. The credential binds the tenant, so what comes back
+        cannot address another one either.
+        """
+        return self._mem
+
+    @property
+    def scope(self) -> Scope:
+        """The scope this view is bound to. An attribute rather than an argument, which
+        is the whole point — `server/tools.py` reads it to report where it is."""
+        return self._scope
+
+    def __repr__(self) -> str:
+        return f"<ScopedRemoteMemvara {self._scope.key()}>"
+
+    # -- service -------------------------------------------------------------
+
+    def health(self) -> dict[str, Any]:
+        return self._mem.health()
+
+    def whoami(self) -> dict[str, Any]:
+        return self._mem.whoami()
+
+    def stats(self) -> dict[str, int]:
+        return self._mem.stats()
+
+    def connectivity(self) -> dict[str, int]:
+        return self._mem.connectivity()
+
+    # -- reading -------------------------------------------------------------
+
+    def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
+               as_of: datetime | None = None, valid_at: datetime | None = None,
+               known_at: datetime | None = None,
+               states: Collection[str] | None = None,
+               include_invalidated: bool | None = None,
+               memory_types: Sequence[MemoryType | str] | None = None,
+               include_episodes: bool = False) -> list[Retrieved]:
+        return self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
+                                valid_at=valid_at, known_at=known_at, states=states,
+                                include_invalidated=include_invalidated,
+                                memory_types=memory_types,
+                                include_episodes=include_episodes)
+
+    def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
+               memory_types: Sequence[MemoryType | str] | None = None,
+               include_episodes: bool = False, budget: int | None = None) -> str:
+        return self._mem.recall(query, k=k, min_score=min_score,
+                                memory_types=memory_types,
+                                include_episodes=include_episodes, budget=budget)
+
+    def get(self, claim_id: str) -> Claim | None:
+        return self._mem.get(claim_id)
+
+    def get_all(self, *, states: Collection[str] | None = None,
+                include_invalidated: bool | None = None,
+                limit: int = 100, offset: int = 0,
+                as_of: datetime | None = None, valid_at: datetime | None = None,
+                known_at: datetime | None = None) -> list[Claim]:
+        return self._mem.get_all(states=states,
+                                 include_invalidated=include_invalidated, limit=limit,
+                                 offset=offset, as_of=as_of, valid_at=valid_at,
+                                 known_at=known_at)
+
+    def count(self, *, states: Collection[str] | None = None,
+              include_invalidated: bool | None = None,
+              as_of: datetime | None = None, valid_at: datetime | None = None,
+              known_at: datetime | None = None) -> int:
+        return self._mem.count(states=states,
+                               include_invalidated=include_invalidated, as_of=as_of,
+                               valid_at=valid_at, known_at=known_at)
+
+    def history(self, subject: str, predicate: str, *,
+                as_of: datetime | None = None, valid_at: datetime | None = None,
+                known_at: datetime | None = None) -> list[Claim]:
+        return self._mem.history(subject, predicate, as_of=as_of, valid_at=valid_at,
+                                 known_at=known_at)
+
+    def why(self, claim_id: str, *, as_of: datetime | None = None,
+            valid_at: datetime | None = None,
+            known_at: datetime | None = None) -> Provenance | None:
+        return self._mem.why(claim_id, as_of=as_of, valid_at=valid_at,
+                             known_at=known_at)
+
+    def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
+            min_score: float = 0.0) -> Answer:
+        return self._mem.ask(question, at=at, k=k, min_score=min_score)
+
+    def since(self, when: datetime) -> Delta:
+        return self._mem.since(when)
+
+    def produced(self, episode_id: str, *, as_of: datetime | None = None,
+                 valid_at: datetime | None = None,
+                 known_at: datetime | None = None) -> list[Claim]:
+        return self._mem.produced(episode_id, as_of=as_of, valid_at=valid_at,
+                                  known_at=known_at)
+
+    def neighborhood(self, entity: str, *, depth: int = 2, k: int = 10,
+                     min_hops: int = 1, predicates: Sequence[str] | None = None,
+                     as_of: datetime | None = None, valid_at: datetime | None = None,
+                     known_at: datetime | None = None,
+                     min_score: float = 0.0) -> list[Path]:
+        return self._mem.neighborhood(entity, depth=depth, k=k, min_hops=min_hops,
+                                      predicates=predicates, as_of=as_of,
+                                      valid_at=valid_at, known_at=known_at,
+                                      min_score=min_score)
+
+    def paths_between(self, source: str, target: str, *, depth: int = 3, k: int = 3,
+                      predicates: Sequence[str] | None = None,
+                      as_of: datetime | None = None, valid_at: datetime | None = None,
+                      known_at: datetime | None = None,
+                      min_score: float = 0.0) -> list[Path]:
+        return self._mem.paths_between(source, target, depth=depth, k=k,
+                                       predicates=predicates, as_of=as_of,
+                                       valid_at=valid_at, known_at=known_at,
+                                       min_score=min_score)
+
+    def standing(self, *, k: int | None = None) -> list[Claim]:
+        return self._mem.standing(k=k)
+
+    # -- writing -------------------------------------------------------------
+
+    def add(self, messages: Any, *, role: str = "user",
+            ts: datetime | None = None) -> WriteReceipt:
+        return self._mem.add(messages, role=role, ts=ts)
+
+    def remember(self, subject: str, predicate: str, obj: str,
+                 **kw: Any) -> WriteReceipt:
+        return self._mem.remember(subject, predicate, obj, **kw)
+
+    def supersede(self, old_claim_id: str, subject: str, predicate: str, obj: str,
+                  **kw: Any) -> WriteReceipt:
+        return self._mem.supersede(old_claim_id, subject, predicate, obj, **kw)
+
+    def forget(self, subject: str, predicate: str, *, at: datetime | None = None,
+               close: str = "retired") -> list[Claim]:
+        return self._mem.forget(subject, predicate, at=at, close=close)
+
+    def delete(self, claim_id: str, *, at: datetime | None = None,
+               close: str = "retired") -> bool:
+        return self._mem.delete(claim_id, at=at, close=close)
+
+    def end(self, *, claim_id: str | None = None, subject: str | None = None,
+            predicate: str | None = None, at: datetime | None = None) -> bool:
+        return self._mem.end(claim_id=claim_id, subject=subject, predicate=predicate,
+                             at=at)
+
+    def erase(self, claim_id: str, *, sources: bool = False) -> bool:
+        return self._mem.erase(claim_id, sources=sources)
+
+    def purge(self, *, confirm_tenant: str | None = None) -> dict[str, int]:
+        return self._mem.purge(confirm_tenant=confirm_tenant)
+
+    def consolidate(self) -> dict[str, Any]:
+        return self._mem.consolidate()
