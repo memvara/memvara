@@ -199,6 +199,144 @@ writes with a "Generated with Claude Code" line. The rule against that is absolu
 lives in `~/.claude/CLAUDE.md`. Prefer `--fix` and a summary in your own words; if you do
 post, read what you are posting first.
 
+## A validation result belongs to a code state, not to a commit or a conversation
+
+`mypy` and the coverage suite read file contents. They do not read commit messages, branch
+names or your place in a workflow. So a passing result stays valid until the contents they
+read change, and these are **not** reasons to run either of them again:
+
+- a code review finished, and changed nothing;
+- the session resumed, or you are picking work back up;
+- a commit was made, amended or squashed;
+- the branch was rebased;
+- the same command already ran in an earlier phase of this task.
+
+The suite here is the expensive one — it runs under coverage gated at 100%, and
+`--doctest-modules` puts every docstring in the package through it as well. Running it
+twice on the same bytes buys nothing.
+
+### The fingerprint is the working tree, hashed
+
+Paste this once per session. It hashes the *contents* of every tracked and every
+untracked-but-not-ignored file under the paths you give it:
+
+```bash
+fp() { git ls-files -co --exclude-standard -z -- "$@" | LC_ALL=C sort -z \
+       | xargs -0 git hash-object | git hash-object --stdin; }
+```
+
+No commit SHA enters that pipeline, which is the whole point: `git hash-object <file>`
+hashes the file on disk, not the blob in the index. Rebase, amend and squash rewrite
+history without touching the working tree, so they cannot move the number. A `git add`
+cannot move it either — the file is hashed whether or not it is staged, so an uncommitted
+edit is caught. Verified against all four: a working-tree edit moves it, a new untracked
+file moves it, restoring the file returns it to the original digest, and committing does
+not change it.
+
+### The two input sets
+
+| validation | command | `fp` arguments |
+| --- | --- | --- |
+| `mypy` | `python3 -m mypy -p memvara` | `memvara pyproject.toml` |
+| `gate` | `python3 -m coverage run -m pytest && python3 -m coverage report` | `. ':!CLAUDE.md'` |
+
+**The gate's input set is the whole repository, and that is a measurement rather than
+laziness.** The tests here read far more than `tests/` and `memvara/`:
+`tests/test_doc_links.py` globs `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`,
+`SECURITY.md` and all of `docs/*.md`; `tests/test_plugin.py` reads
+`memvara/skills/memvara/SKILL.md`, `plugin-claude.md`, `plugin-repos.txt` and the plugin
+`README.md`; `tests/test_packaging.py` pins a version string in `README.md`; and the
+doc-link tests stat `bench/`, `demo/` and `scripts/` to check that link targets exist. A
+shorter list is one I cannot prove, and a wrong narrowing produces a *false pass* — the
+gate skipped on the strength of a fingerprint that did not cover what changed. Under-hitting
+costs a suite run. Over-hitting ships the broken link that `test_doc_links.py` exists to
+catch.
+
+So **a documentation change does invalidate the gate here.** That is the opposite of the
+usual rule, and it is a property of this repository's tests rather than a general truth.
+
+`CLAUDE.md` is the single exclusion, because no test reads it — checked across `tests/`,
+where every `CLAUDE.md` hit is either prose in a docstring or a `tmp_path` fixture written
+by `tests/test_init.py`. **If you ever add a test that reads the root `CLAUDE.md`, delete
+the `':!CLAUDE.md'` from the table in the same commit**, or every edit to this file will
+silently authorise skipping the gate.
+
+### Recording a checkpoint
+
+State lives in `local/validation-checkpoints`, which is outside the commit — `/local/` is
+ignored whole — and outside the build, so nothing here reaches an sdist. One line per
+passing run, appended:
+
+```
+<validation> <fingerprint> pass <timestamp> <tool versions>
+```
+
+Check before running:
+
+```bash
+grep -q "^mypy $(fp memvara pyproject.toml) pass " local/validation-checkpoints 2>/dev/null \
+  && echo "reuse: mypy already passed for this code state"
+```
+
+Record only after you have watched it pass:
+
+```bash
+mkdir -p local && printf '%s %s pass %s %s\n' mypy "$(fp memvara pyproject.toml)" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(python3 -m mypy --version)" >> local/validation-checkpoints
+```
+
+```bash
+mkdir -p local && printf '%s %s pass %s %s\n' gate "$(fp . ':!CLAUDE.md')" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  "$(python3 -m coverage --version | head -1) / $(python3 -V)" >> local/validation-checkpoints
+```
+
+Both are written out because the second is easy to improvise wrongly. `coverage --version`
+prints `Coverage.py, version 7.15.4 with C extension`, so the version is the third field,
+not the second.
+
+Four rules hold the thing up.
+
+**Only a pass is ever recorded.** A failure needs a fix, and the fix moves the fingerprint,
+so there is nothing to cache. That makes a missing entry unambiguous: it means *run it*.
+
+**Never write a checkpoint for a run whose output you did not read.** A checkpoint is a
+claim that you saw a number, so the exit status is not enough: an earlier session recorded a
+local gate run here exiting 139 after the tests had passed but before `coverage report`
+printed anything, which is why `CONTRIBUTING.md` spells the gate as two commands rather than
+one. A checkpoint written from that would record a coverage gate that never reached a
+verdict. Read the percentage, then write the line.
+
+**The tool versions are part of the state.** `pyproject.toml` pins `mypy>=1.8`, not an
+exact version, so a machine that upgraded mypy can produce new errors on unchanged code.
+The recorded version is what tells you a reused result came from the same checker.
+
+**In a worktree, pin `PYTHONPATH` before you run anything you intend to record.** The
+editable install on this machine points at the main checkout, so a bare `pytest` in a
+worktree can import `memvara` from there instead — passing against code you did not write
+and did not fingerprint. That is the one way to get a false pass that the fingerprint cannot
+catch, because the fingerprint measured this worktree while the suite measured another. Run
+`export PYTHONPATH="$PWD"` first, and confirm it took:
+
+```bash
+python3 -c "import memvara; print(memvara.__file__)"
+```
+
+### Rebase, review, and the final check
+
+After a rebase, compute the fingerprint and compare it — do not reflexively rerun. A rebase
+that only replayed commits leaves the number alone and every checkpoint stands. If conflict
+resolution edited source, that is an ordinary code change and the number moves on its own;
+you do not need to reason about which files git touched.
+
+After a review, the same. A review that changed nothing invalidates nothing. A review whose
+fixes you applied has already changed the fingerprint.
+
+Before you say the work is done, check both entries against the current fingerprint and run
+whichever is missing. The last code state has to have a passing `mypy` **and** a passing
+gate recorded against it — the point of all this is to validate each code state once, not
+to skip validating the one that ships.
+
 ## What you learn here goes in Memvara
 
 Memvara is the memory store for work in this repository, reached through the plugin's MCP
