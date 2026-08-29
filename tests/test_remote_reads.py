@@ -12,12 +12,15 @@ and is the right fixture for a round trip, but it is an optional dependency: it 
 here, so those tests skip. A skipped test for every row of the mapping table is not
 coverage of the mapping table.
 """
+import json
+from datetime import datetime, timezone
+
 import httpx
 import pytest
 
 from memvara.remote.api import RemoteMemvara
 from memvara.retrieve import EpisodeResult, Path
-from memvara.types import Answer, Claim, Delta, Provenance, Result
+from memvara.types import Answer, Claim, Delta, MemoryType, Provenance, Result
 
 
 def _scope():
@@ -388,3 +391,70 @@ def test_health_reaches_the_health_endpoint_and_returns_the_body(recorded):
     body = mem.health()
     assert recorded.calls[-1].url.path == "/v1/health"
     assert body["status"] == "ok"
+
+
+# --- what the wire spells, and what comes back off it -------------------------
+
+
+def test_both_the_client_and_its_view_say_which_scope_they_are_bound_to_when_printed():
+    """`repr` is what a traceback and a debugger show. A client whose scope is invisible
+    there is one whose scope gets assumed — and the view is the half that matters, since
+    it is what a handler holds."""
+    mem = RemoteMemvara(api_key="k", base_url="https://example.test", user="alice",
+                        agent="a1")
+    assert "alice" in repr(mem) and "a1" in repr(mem)
+    view = repr(mem.scope(session="s1"))
+    assert "alice" in view and "s1" in view
+
+
+def test_memory_types_go_out_as_the_strings_the_facade_spells(recorded):
+    """`MemoryType` is a Python enum and the wire carries its `value`. Sending the member
+    itself is a 422 from a request model that lists the strings, and sending `str(member)`
+    is `MemoryType.SEMANTIC` — neither of which the facade accepts. Both spellings are
+    checked because both are documented: a caller may pass the enum or the string."""
+    mem = recorded({"as_of": None, "valid_at": None, "known_at": None,
+                    "states": ["live"], "count": 0, "results": []})
+    mem.search("q", memory_types=[MemoryType.SEMANTIC, "episodic"])
+    body = json.loads(recorded.calls[-1].read())
+    assert body["memory_types"] == ["semantic", "episodic"]
+
+
+def test_a_measured_salience_and_a_last_observation_come_back_on_the_claim(recorded):
+    """Both are `Memory` fields that are nullable but never absent, and both land in
+    `Claim.meta` rather than on the dataclass: `salience_base` is what salience decays
+    from, and `last_observed` is stored as epoch seconds even though the wire carries the
+    datetime. Dropping either turns a decayed claim back into a fresh one."""
+    body = _memory()
+    body["salience_base"] = 0.6
+    body["last_observed"] = "2026-02-01T00:00:00+00:00"
+    mem = recorded(body)
+    claim = mem.get("cl_1")
+    assert claim.salience_base == 0.6
+    assert claim.last_observed == datetime(2026, 2, 1, tzinfo=timezone.utc)
+
+
+def test_a_hit_with_no_ranking_decodes_to_the_default_explanation(recorded):
+    """`ranking` is `{}` for a hit the deployment did not explain — a reranked-only path,
+    or a route that returns rows without scoring them. The dataclass's own defaults are
+    the honest answer there; indexing into the empty dict would be a `KeyError` on a
+    response that is not wrong."""
+    mem = recorded({"as_of": None, "valid_at": None, "known_at": None,
+                    "states": ["live"], "count": 1,
+                    "results": [{"kind": "claim", "score": 0.7, "ranking": {},
+                                 "memory": _memory()}]})
+    hits = mem.search("q")
+    assert hits[0].explain.vector_rank is None
+    assert hits[0].explain.final_score == 0.0
+
+
+def test_a_null_where_the_schema_says_an_instant_raises_here(recorded):
+    """`valid_from` and `recorded_at` are declared required and non-nullable, so a null in
+    one is the server disagreeing with its own schema. Raising at the decode is the point:
+    making the field optional instead would hand the defect to every caller to rediscover
+    as a `None` where the type says there cannot be one, arbitrarily far from the response
+    that carried it."""
+    body = _memory()
+    body["valid_time"] = {"valid_from": None, "valid_to": None}
+    mem = recorded(body)
+    with pytest.raises(ValueError, match="valid_from"):
+        mem.get("cl_1")

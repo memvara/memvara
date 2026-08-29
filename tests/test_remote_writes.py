@@ -11,12 +11,14 @@ Every test asserts the method and the path as well as the value, for the reason
 decode a fixture that happens to fit.
 """
 import json
+from datetime import datetime, timezone
 
 import httpx
 import pytest
 
+from memvara.redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE
 from memvara.remote.api import RemoteMemvara
-from memvara.types import Claim, WriteReceipt
+from memvara.types import Claim, Episode, MemoryType, WriteReceipt
 
 from test_remote_reads import _memory
 
@@ -272,3 +274,75 @@ def test_every_write_carries_an_idempotency_key(recorded, call):
                                "counts": {}, "id": "cl_1", "status": "queued"}))
     call(mem)
     assert recorded.calls[-1].headers.get("idempotency-key")
+
+
+# --- what a write sends, beyond where it sends it ------------------------------
+
+
+@pytest.mark.parametrize("messages, expected", [
+    (Episode(role="user", content="hi",
+             ts=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+     [{"role": "user", "content": "hi", "ts": "2026-01-01T00:00:00+00:00",
+       "metadata": {}}]),
+    ({"role": "user", "content": "hi"}, [{"role": "user", "content": "hi",
+                                          "metadata": {}}]),
+    (["hi"], [{"content": "hi"}]),
+    ("hi", "hi"),
+], ids=["episode", "one-mapping", "string-in-a-list", "bare-string"])
+def test_add_sends_each_message_shape_the_way_the_facade_spells_it(recorded, messages,
+                                                                   expected):
+    """A single turn and a sequence of them are different arguments and one wire format.
+
+    The last two rows are one character apart and take different branches: a bare string
+    is the whole conversation and goes out as `messages: "hi"`, while a string inside a
+    sequence is one turn among others and goes out as a message object. A single `Episode`
+    or mapping is wrapped rather than iterated — iterating a mapping yields its keys, so
+    getting that wrong sends the field names as the conversation.
+    """
+    mem = recorded(_receipt())
+    mem.add(messages)
+    assert _sent(recorded.calls[-1])["messages"] == expected
+
+
+def test_a_memory_type_goes_out_as_the_string_the_facade_spells(recorded):
+    """`MemoryType` is a Python enum and the wire carries its `value`. A request model
+    that lists the strings rejects the member itself, and `str(member)` is
+    `MemoryType.PROCEDURAL` — neither is what the facade reads."""
+    mem = recorded(_receipt())
+    mem.remember("user", "prefers", "pytest", memory_type=MemoryType.PROCEDURAL)
+    assert _sent(recorded.calls[-1])["memory_type"] == "procedural"
+
+
+def test_an_unset_memory_type_is_omitted_so_the_predicate_decides(recorded):
+    """Omitted rather than sent as null, and the difference is not cosmetic: the facade
+    reads an absent `memory_type` as "use the type registered for this predicate", which
+    is the whole point of registering one."""
+    mem = recorded(_receipt())
+    mem.remember("user", "prefers", "pytest")
+    assert "memory_type" not in _sent(recorded.calls[-1])
+
+
+def test_text_is_redacted_on_its_way_out_and_not_after_it_has_left(recorded):
+    """Every field the policy is offered, checked on the wire.
+
+    Redacting server-side would be the alternative and it is not redaction: the raw text
+    has already crossed the network by then. The policy is handed the field name so a
+    deployment can be aggressive on raw turns and conservative on claim objects, which is
+    why this asserts per field rather than "something was replaced".
+    """
+    class Loud:
+        def redact(self, text, *, field, scope):
+            return f"[{field}:{scope.user}]"
+
+    mem = recorded(_receipt(), user="alice", redactor=Loud())
+    mem.add(Episode(role="user", content="I live at 12 Acacia Avenue"))
+    mem.remember("user", "lives_in", "12 Acacia Avenue",
+                 text="user lives at 12 Acacia Avenue")
+
+    turn = _sent(recorded.calls[0])["messages"][0]
+    assert turn["content"] == f"[{EPISODE}:alice]"
+    fact = _sent(recorded.calls[-1])
+    assert fact["subject"] == f"[{CLAIM_SUBJECT}:alice]"
+    assert fact["object"] == f"[{CLAIM_OBJECT}:alice]"
+    assert fact["text"] == f"[{CLAIM_TEXT}:alice]"
+    assert fact["predicate"] == "lives_in", "a predicate is a schema term, not free text"

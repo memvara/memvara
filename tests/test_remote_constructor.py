@@ -8,9 +8,12 @@ Every construction here that reaches a credential passes `api_key=` or sets
 `MEMVARA_API_KEY`, and none of them reads `~/.memvara/credentials.json`: a machine with a
 real key would otherwise pass these tests for a reason the CI runner does not have.
 """
+import warnings
+
 import pytest
 
-from memvara import HashingEmbedder, Memvara, NullLLM
+import memvara.core
+from memvara import DegradedExtractionWarning, HashingEmbedder, Memvara, NullLLM
 from memvara.remote.api import RemoteMemvara
 
 
@@ -47,6 +50,33 @@ def test_a_bare_constructor_stays_local_even_when_the_environment_holds_a_key(mo
     monkeypatch.setenv("MEMVARA_SERVER_URL", "https://example.test")
     mem = Memvara(":memory:", llm=NullLLM(), embedder=HashingEmbedder(dim=512))
     assert not isinstance(mem, RemoteMemvara)
+    mem.close()
+
+
+def test_the_literal_zero_argument_constructor_stays_local_too(monkeypatch):
+    """`Memvara()` with nothing at all, which is the expression the property is about.
+
+    The test above passes `path`, `llm` and `embedder`, and `__new__` reads `path` — so
+    it proves the dispatch for a call that named a local store, not for the bare one a
+    script actually writes. This is that call, spelled out.
+
+    `memvara.core.default_embedder` is pinned rather than `embedder=` passed, because
+    passing one would make this the same test again. The pin is what `tests/conftest.py`
+    demands of every construction site — a fixed embedding space instead of whatever is
+    installed — reached through the only lever a zero-argument constructor leaves.
+    """
+    monkeypatch.setenv("MEMVARA_API_KEY", "from-env")
+    monkeypatch.setenv("MEMVARA_SERVER_URL", "https://example.test")
+    monkeypatch.setattr(memvara.core, "default_embedder",
+                        lambda dim=512: HashingEmbedder(dim=512))
+    with warnings.catch_warnings():
+        # Zero arguments means no `llm=` either, so the constructor says so. That warning
+        # is `DegradedExtractionWarning`'s subject and not this test's, and it fires once
+        # per process — asserting on it here would pass or fail on test order.
+        warnings.simplefilter("ignore", DegradedExtractionWarning)
+        mem = Memvara()
+    assert not isinstance(mem, RemoteMemvara)
+    assert isinstance(mem, Memvara)
     mem.close()
 
 
@@ -110,3 +140,22 @@ def test_the_constructor_makes_no_network_call(monkeypatch):
     with Memvara(api_key="k", base_url="https://example.test") as mem:
         with pytest.raises(AssertionError, match="a request was sent"):
             mem.get_all()
+
+
+def test_reaching_init_with_a_credential_refuses_rather_than_opening_a_local_store():
+    """The guard behind the dispatch, on the path that is supposed to be unreachable.
+
+    `__new__` returns a `RemoteMemvara` for a credentialed call, and Python then skips
+    `__init__` because that object is not an instance of `Memvara` — so nothing in normal
+    use reaches this. If that ever stops holding, the failure is silent in the worst
+    direction: a caller who asked for a hosted deployment gets a local SQLite store,
+    writes to it, and is told nothing.
+
+    It is a `raise` rather than an `assert` for the same reason it is tested here: `python
+    -O` strips an assert, and this is precisely the build where the check would matter.
+    """
+    orphan = object.__new__(Memvara)
+    with pytest.raises(TypeError, match="__new__"):
+        Memvara.__init__(orphan, api_key="k")
+    with pytest.raises(TypeError, match="__new__"):
+        Memvara.__init__(orphan, base_url="https://example.test")

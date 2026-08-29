@@ -11,6 +11,7 @@ pass for a class that also accepted `user=`.
 """
 import inspect
 import json
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -147,18 +148,23 @@ def test_the_bound_scope_is_what_actually_reaches_the_wire():
 
 
 def test_the_scoped_view_exposes_the_client_underneath():
-    """Required rather than a leak. `ScopedMemvara` has this property, `server/tools.py`
-    calls `ctx.memory.memvara`, and the protocol in a later task declares it. Against a
-    hosted deployment the credential binds the tenant, so what comes back cannot address
-    another one either."""
+    """Parity with `ScopedMemvara`, which exposes the client it wraps the same way.
+
+    Not something `server/tools.py` reaches for: no handler calls `ctx.memory.memvara`,
+    and `MemoryAPI` deliberately does not declare the member, so reaching for it there is
+    a type error rather than a scope escape somebody has to notice by reading — see
+    `memvara/server/memory_api.py`. It is here because the two scoped views are meant to
+    be interchangeable, and against a hosted deployment it gives nothing away: the
+    credential binds the tenant, so what comes back cannot address another one either.
+    """
     view = _client(user="alice").scope(agent="a1")
     assert isinstance(view.memvara, RemoteMemvara)
     assert view.memvara.default_scope == Scope("default", "alice", "a1", None)
 
 
 def test_the_scope_is_readable_as_an_attribute():
-    """`server/tools.py` reads `ctx.memory.scope` to report where it is, and the protocol
-    in a later task declares it as a member both implementations have."""
+    """`server/tools.py` reads `ctx.memory.scope` to report where it is, and `MemoryAPI`
+    declares it as a member both implementations have."""
     view = _client(user="alice").scope()
     assert isinstance(view.scope, Scope)
     assert view.scope.user == "alice"
@@ -169,3 +175,173 @@ def test_the_view_shares_one_connection_pool_with_the_client_it_came_from():
     idempotency stores as well, which is the thing the transport's retry depends on."""
     mem = _client()
     assert mem.scope(user="alice").memvara._http is mem._http
+
+
+# --- every method on the view, driven ----------------------------------------
+#
+# The checks above are structural: they read signatures and prove a handler has no
+# parameter with which to name another scope. That says nothing about what the methods do.
+# Every one of them is a single line forwarding to the client underneath, and a single
+# forwarding line is exactly where a wrong keyword or a dropped argument hides — it type
+# checks, it reads correctly, and it reaches a different endpoint or runs at a different
+# scope. So each is called, and both halves are asserted: the path says the delegation
+# landed where the unscoped method lands, and the query string says it ran at the scope
+# the view was bound to rather than the wider one it came from.
+
+from test_remote_reads import _episode, _memory, _ranking, _scope  # noqa: E402
+
+#: The one route that carries no scope, because it carries no credential either.
+UNSCOPED = {"health"}
+
+_PATHS_BODY = {"as_of": None, "valid_at": None, "known_at": None, "count": 1,
+               "paths": [{"nodes": ["alice", "berlin"], "labels": ["lives_in"],
+                          "hops": 1, "score": 0.5,
+                          "edges": [{"memory": _memory(), "backward": False,
+                                     "strength": 0.5}]}]}
+_LISTING_BODY = {"count": 1, "total": 1, "limit": 100, "offset": 0, "as_of": None,
+                 "valid_at": None, "known_at": None, "states": ["live"],
+                 "memories": [_memory()]}
+
+
+def _answer(request):
+    """One envelope per route, picked by path.
+
+    A single handler rather than a payload beside every row, because these tests are about
+    where a call goes and at what scope — the decoding is `tests/test_remote_reads.py`'s
+    subject, and repeating twenty fixtures here to re-check it would make this file's
+    failures ambiguous between the two.
+    """
+    path, method = request.url.path, request.method
+    if path == "/v1/health":
+        return httpx.Response(200, json={"status": "ok", "memvara_version": "0.2.0"})
+    if path == "/v1/whoami":
+        return httpx.Response(200, json={"token_id": "tok_1", "scope": _scope(),
+                                         "granted_privilege": "write",
+                                         "effective_privilege": "write",
+                                         "expires_at": None, "read_only": False})
+    if path == "/v1/stats":
+        return httpx.Response(200, json={
+            "scope": _scope(), "visible": 1,
+            "tenant_counts": {"claims": 3, "live_claims": 3, "joinable_claims": 1},
+            "extractor": "fast-path-only", "read_only": False})
+    if path == "/v1/search":
+        return httpx.Response(200, json={
+            "as_of": None, "valid_at": None, "known_at": None, "states": ["live"],
+            "count": 1, "results": [{"kind": "claim", "score": 0.7,
+                                     "ranking": _ranking(), "memory": _memory()}]})
+    if path == "/v1/recall":
+        return httpx.Response(200, json={"text": "user lives in Berlin", "empty": False})
+    if path == "/v1/history":
+        return httpx.Response(200, json={"subject": "user", "predicate": "lives_in",
+                                         "scope": _scope(), "as_of": None,
+                                         "valid_at": None, "known_at": None, "count": 1,
+                                         "timeline": [_memory()]})
+    if path.endswith("/why"):
+        return httpx.Response(200, json={"memory": _memory("cl_1"), "derivation": "user",
+                                         "extractor": "api", "sources": [_episode()],
+                                         "superseded": []})
+    if path == "/v1/ask":
+        return httpx.Response(200, json={
+            "question": "q", "at": "2026-01-01T00:00:00+00:00", "count": 1,
+            "text": "Then and now agree.",
+            "readings": [{"subject": "user", "predicate": "lives_in",
+                          "now": [_memory()], "then": [_memory()],
+                          "stated": [_memory()], "diverged": False, "moved": False}]})
+    if path == "/v1/since":
+        return httpx.Response(200, json={"since": "2026-01-01T00:00:00+00:00",
+                                         "added": [_memory()], "gone": []})
+    if path.endswith("/produced") or path == "/v1/standing":
+        return httpx.Response(200, json={"episode_id": "ep_1", "as_of": None,
+                                         "valid_at": None, "known_at": None, "count": 1,
+                                         "limit": 5, "truncated": False,
+                                         "memories": [_memory()]})
+    if path in ("/v1/neighborhood", "/v1/paths"):
+        return httpx.Response(200, json=_PATHS_BODY)
+    if path == "/v1/forget":
+        return httpx.Response(200, json={"subject": "user", "predicate": "likes",
+                                         "count": 0, "retired": [], "erased": False})
+    if path == "/v1/end":
+        return httpx.Response(200, json={"memory_id": "cl_1", "subject": None,
+                                         "predicate": None, "count": 1,
+                                         "ended": [_memory()], "erased": False})
+    if path == "/v1/erasures":
+        return httpx.Response(200, json={"target": "memory", "memory_id": "cl_1",
+                                         "scope": None, "erased": True, "counts": {},
+                                         "sources_erased": False,
+                                         "audit_subject_linkable": None})
+    if path == "/v1/maintenance/consolidate":
+        return httpx.Response(200, json={"id": "job_1", "status": "queued"})
+    if path == "/v1/facts" or path.endswith("/supersede"):
+        return httpx.Response(200, json=_receipt())
+    if path == "/v1/memories":
+        if method == "POST":
+            return httpx.Response(200, json=_receipt())
+        return httpx.Response(200, json=_LISTING_BODY)
+    if method == "DELETE":
+        return httpx.Response(200, json={"id": "cl_1", "retired": True, "erased": False})
+    return httpx.Response(200, json=_memory("cl_1"))
+
+
+DELEGATIONS = [
+    ("health", lambda v: v.health(), "/v1/health"),
+    ("whoami", lambda v: v.whoami(), "/v1/whoami"),
+    ("stats", lambda v: v.stats(), "/v1/stats"),
+    ("connectivity", lambda v: v.connectivity(), "/v1/stats"),
+    ("search", lambda v: v.search("q"), "/v1/search"),
+    ("recall", lambda v: v.recall("q"), "/v1/recall"),
+    ("get", lambda v: v.get("cl_1"), "/v1/memories/cl_1"),
+    ("get_all", lambda v: v.get_all(), "/v1/memories"),
+    ("count", lambda v: v.count(), "/v1/memories"),
+    ("history", lambda v: v.history("user", "lives_in"), "/v1/history"),
+    ("why", lambda v: v.why("cl_1"), "/v1/memories/cl_1/why"),
+    ("ask", lambda v: v.ask("q"), "/v1/ask"),
+    ("since", lambda v: v.since(datetime(2026, 1, 1, tzinfo=timezone.utc)), "/v1/since"),
+    ("produced", lambda v: v.produced("ep_1"), "/v1/episodes/ep_1/produced"),
+    ("neighborhood", lambda v: v.neighborhood("alice"), "/v1/neighborhood"),
+    ("paths_between", lambda v: v.paths_between("alice", "berlin"), "/v1/paths"),
+    ("standing", lambda v: v.standing(k=5), "/v1/standing"),
+    ("add", lambda v: v.add("hi"), "/v1/memories"),
+    ("remember", lambda v: v.remember("user", "likes", "tea"), "/v1/facts"),
+    ("supersede", lambda v: v.supersede("cl_1", "user", "likes", "tea"),
+     "/v1/memories/cl_1/supersede"),
+    ("forget", lambda v: v.forget("user", "likes"), "/v1/forget"),
+    ("delete", lambda v: v.delete("cl_1"), "/v1/memories/cl_1"),
+    ("end", lambda v: v.end(claim_id="cl_1"), "/v1/end"),
+    ("erase", lambda v: v.erase("cl_1"), "/v1/erasures"),
+    ("purge", lambda v: v.purge(), "/v1/erasures"),
+    ("consolidate", lambda v: v.consolidate(), "/v1/maintenance/consolidate"),
+]
+
+
+@pytest.mark.parametrize("name, call, path", DELEGATIONS,
+                         ids=[row[0] for row in DELEGATIONS])
+def test_each_scoped_method_reaches_the_same_endpoint_at_the_bound_scope(name, call,
+                                                                        path):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return _answer(request)
+
+    mem = _client(user="alice")
+    mem._http._client._transport = httpx.MockTransport(handler)
+    call(mem.scope(agent="a1"))
+
+    params = dict(calls[-1].url.params)
+    assert calls[-1].url.path == path
+    if name in UNSCOPED:
+        assert "user" not in params
+        return
+    assert params["user"] == "alice" and params["agent"] == "a1"
+    assert "session" not in params
+
+
+def test_every_public_method_on_the_view_is_covered_by_that_table():
+    """The table is a list somebody maintains, so this is the check that it stays complete.
+
+    A method added to `ScopedRemoteMemvara` without a row is a forwarding line nothing
+    calls — which is how `search` came to return a different type here than on the client
+    it forwards to, with every structural test in this file still green.
+    """
+    listed = {name for name, _, _ in DELEGATIONS} | {"memvara", "scope"}
+    assert {name for name, _ in _public_methods()} - listed == set()

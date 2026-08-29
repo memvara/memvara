@@ -426,3 +426,49 @@ def test_a_write_tool_reports_the_fold_against_a_scoped_remote_view():
     body = tool.run(ToolContext(memory=view),
                     {"subject": "user", "predicate": "uses_tool", "object": "ripgrep"})
     assert "another spelling of 'prefers_tool'" in body
+
+
+def test_memory_standing_asks_the_deployment_rather_than_paging_the_whole_scope():
+    """`GET /v1/standing` does the filter server-side, and taking it matters twice over.
+
+    The fallback pages every live memory in the scope and keeps the procedural ones. Over
+    a network that is the whole scope pulled across it — for the tool a session calls at
+    startup — and it would be truncated on arrival, because `MemoryAPI.get_all` declares
+    no `limit` and `ScopedRemoteMemvara.get_all` defaults it to 100. So the assertion that
+    `get_all` was never reached is the load-bearing one: a view that answered this tool
+    from `get_all` would look right on a small store and quietly drop preferences on a
+    large one.
+    """
+    from memvara.remote.api import ScopedRemoteMemvara
+    from memvara.server.tools import TOOLS, ToolContext
+    from memvara.types import Claim, MemoryType, Scope
+
+    stored = Claim(subject="user", predicate="prefers", object="tabs",
+                   memory_type=MemoryType.PROCEDURAL, confidence=1.0)
+
+    class _Client:
+        """The `RemoteMemvara` the view forwards to, with `standing` answered and
+        `get_all` armed: reaching it is the failure this test is about."""
+
+        def __init__(self):
+            self.asked = None
+
+        def standing(self, *, k=None):
+            self.asked = k
+            return [stored]
+
+        def get_all(self, **kw):
+            raise AssertionError("paged the whole scope instead of asking /v1/standing")
+
+    client = _Client()
+    view = ScopedRemoteMemvara.__new__(ScopedRemoteMemvara)
+    object.__setattr__(view, "_scope", Scope("acme", "alice", None, None))
+    object.__setattr__(view, "_mem", client)
+
+    tool = next(t for t in TOOLS if t.name == "memory_standing")
+    body = tool.run(ToolContext(memory=view), {"k": 7})
+    assert client.asked == 7, "the model's k has to reach the endpoint that caps on it"
+    assert "tabs" in body
+    assert "more not shown" not in body, (
+        "`GET /v1/standing` reports no total, so the hint has no number to print and "
+        "printing one would make it wrong")
