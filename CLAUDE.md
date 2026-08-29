@@ -221,8 +221,18 @@ Paste this once per session. It hashes the *contents* of every tracked and every
 untracked-but-not-ignored file under the paths you give it:
 
 ```bash
-fp() { git ls-files -co --exclude-standard -z -- "$@" | LC_ALL=C sort -z \
-       | xargs -0 git hash-object | git hash-object --stdin; }
+fp() {
+  local root out
+  root=$(git rev-parse --show-toplevel) || return 1
+  out=$(cd "$root" && git ls-files -co --exclude-standard -z -- "$@" \
+        | LC_ALL=C sort -z | xargs -0 git hash-object) || {
+    echo "fp: hashing failed (is a tracked file deleted from the working tree?)" >&2
+    return 1; }
+  [ -n "$out" ] || { echo "fp: no files matched: $*" >&2; return 1; }
+  printf '%s\n' "$out" | git hash-object --stdin
+}
+
+td() { printf '%s' "$*" | git hash-object --stdin | cut -c1-12; }
 ```
 
 No commit SHA enters that pipeline, which is the whole point: `git hash-object <file>`
@@ -232,6 +242,29 @@ cannot move it either — the file is hashed whether or not it is staged, so an 
 edit is caught. Verified against all four: a working-tree edit moves it, a new untracked
 file moves it, restoring the file returns it to the original digest, and committing does
 not change it.
+
+**The three guards are not decoration — each closes a silent false pass**, and each was
+reproduced before being written down.
+
+*It refuses to return a digest for nothing.* The naive one-liner pipes an empty file list
+into `git hash-object --stdin`, which happily hashes empty input and returns
+`e69de29bb2d1d6434b8b29ae775ad8c2e48c5391` with exit status 0. Two different typos in the
+path arguments produce that same digest, so one mistyped input set records a checkpoint that
+every later mistyped check matches — the validation then never runs again.
+
+*It fails when a tracked file is missing from the working tree.* `git ls-files -c` still
+lists a file you deleted without `git rm`, and `git hash-object` aborts the entire `xargs`
+batch at the first unreadable path — so every file sorted after it is silently dropped from
+the digest. Reproduced on a scratch repository: with `b.txt` deleted, editing `d.txt` left
+the digest identical. Every edit to those files would have been invisible.
+
+*It hashes from the repository root.* Both `.` and `':!CLAUDE.md'` resolve against the
+current directory, so the same command run from `tests/` covers 51 files instead of 221 and
+returns a different, entirely valid-looking digest. `cd "$root"` makes the input sets below
+mean the same thing wherever you run them.
+
+`td` exists because the fingerprint is only half the state; see the checkpoint rules.
+
 
 ### The two input sets
 
@@ -268,32 +301,36 @@ ignored whole — and outside the build, so nothing here reaches an sdist. One l
 passing run, appended:
 
 ```
-<validation> <fingerprint> pass <timestamp> <tool versions>
+<validation> <fingerprint> <tool-digest> pass <timestamp> <tool versions>
 ```
 
-Check before running:
+The first three fields are the key, and all three have to match before a result is reused.
+Compute them into shell variables first, so that a failing `fp` aborts the line instead of
+letting an empty digest reach `grep`:
 
 ```bash
-grep -q "^mypy $(fp memvara pyproject.toml) pass " local/validation-checkpoints 2>/dev/null \
-  && echo "reuse: mypy already passed for this code state"
-```
-
-Record only after you have watched it pass:
-
-```bash
-mkdir -p local && printf '%s %s pass %s %s\n' mypy "$(fp memvara pyproject.toml)" \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(python3 -m mypy --version)" >> local/validation-checkpoints
+V=mypy; T="$(python3 -m mypy --version)"
+FP=$(fp memvara pyproject.toml) && TD=$(td "$T")
 ```
 
 ```bash
-mkdir -p local && printf '%s %s pass %s %s\n' gate "$(fp . ':!CLAUDE.md')" \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  "$(python3 -m coverage --version | head -1) / $(python3 -V)" >> local/validation-checkpoints
+V=gate; T="$(python3 -m coverage --version | head -1) / $(python3 -V)"
+FP=$(fp . ':!CLAUDE.md') && TD=$(td "$T")
 ```
 
-Both are written out because the second is easy to improvise wrongly. `coverage --version`
-prints `Coverage.py, version 7.15.4 with C extension`, so the version is the third field,
-not the second.
+Both are written out because the second is easy to improvise wrongly: `coverage --version`
+prints `Coverage.py, version 7.15.4 with C extension`, so the version is the third field and
+not the second. Then the check and the record are the same two commands either way:
+
+```bash
+grep -q "^$V $FP $TD pass " local/validation-checkpoints 2>/dev/null \
+  && echo "reuse: $V already passed for this code state, with this toolchain"
+```
+
+```bash
+mkdir -p local && printf '%s %s %s pass %s %s\n' "$V" "$FP" "$TD" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$T" >> local/validation-checkpoints
+```
 
 Four rules hold the thing up.
 
@@ -307,9 +344,13 @@ printed anything, which is why `CONTRIBUTING.md` spells the gate as two commands
 one. A checkpoint written from that would record a coverage gate that never reached a
 verdict. Read the percentage, then write the line.
 
-**The tool versions are part of the state.** `pyproject.toml` pins `mypy>=1.8`, not an
-exact version, so a machine that upgraded mypy can produce new errors on unchanged code.
-The recorded version is what tells you a reused result came from the same checker.
+**The toolchain is part of the key, not just the record.** `pyproject.toml` pins
+`mypy>=1.8` rather than an exact version, so upgrading the checker can produce new errors on
+unchanged code — the installed one here is already 2.3.0. Recording the version is not
+enough to prevent that: a check keyed on the fingerprint alone still hits after an upgrade,
+which was measured by rewriting a recorded version and watching the reuse check succeed.
+That is what `td` closes. The digest of the version string sits in the key, so upgrading
+mypy misses and the checker runs again.
 
 **In a worktree, pin `PYTHONPATH` before you run anything you intend to record.** The
 editable install on this machine points at the main checkout, so a bare `pytest` in a
