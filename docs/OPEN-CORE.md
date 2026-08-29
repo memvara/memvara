@@ -77,7 +77,7 @@ how an offline integration gets the whole bitemporal machine. See
 
 ## The remote/local seam: a decision, not a gap
 
-`MEMVARA_MODE=cloud` built a `Memvara` over a `RemoteStore` and started a server. That
+`MEMVARA_MODE=cloud` once built a `Memvara` over a `RemoteStore` and started a server. That
 server listed twelve tools and raised `NotImplementedError` on the first one a model
 reached for, because `RemoteStore` wires seven `Store` methods and the engine calls a
 different set on every turn — `put_claim`, `add_episode`, `candidate_ids`,
@@ -107,21 +107,39 @@ and a Python process two places where the same guarantee has to hold.
 | `memvara/core.py` — the engine over that protocol | **open** | It *is* the library. Nothing about running it changes when the rows live elsewhere. |
 | `memvara/store/remote.py` — the HTTP client | **open**, and thin on purpose | A caller of someone else's server. It maps what the facade actually exposes and raises for the rest; a `put_claim` that quietly wrote through `POST /v1/facts` would reinterpret every field the caller set, and a `competing_claims` returning `[]` would make every write believe a slot was empty. Both are worse than an exception. |
 | the `/v1` facade itself | **commercial** | Auth, multi-tenancy, quotas. Naming it "planned" here would be the dishonest version. |
-| running the engine *against* a remote store | **neither, for now** | Refused at construction. |
+| running the engine *against* a remote store | **neither, for now** | Never constructed. `MEMVARA_MODE=cloud` builds a client of the facade instead, and a test reads `config.py` to keep a `RemoteStore` from coming back. |
+| `memvara/remote/api.py` — a client of the facade | **open** | `RemoteMemvara` is the library's own API served over `/v1`. It calls the facade the way any customer would, holds no engine, and is what `MEMVARA_MODE=cloud` now builds. |
 
-**What that refusal does.** `build_memvara` compares the engine's needs against
-`RemoteStore.WIRED` and raises a `ConfigError` naming exactly which methods are missing
-and what to run instead. The failure lands where the configuration was made rather than
-mid-conversation as a tool error, which is the one place it cannot be acted on.
+**What happened to the refusal.** It is gone, and not because the gap closed — the row
+above still says what it said. `build_memvara` used to compare `_ENGINE_NEEDS` against
+`RemoteStore.WIRED` and refuse when anything was missing, which was correct for as long as
+cloud mode meant *running the engine over a remote store*. It no longer means that.
+`MEMVARA_MODE=cloud` builds a `RemoteMemvara`, a client of the facade, and the MCP tool
+table is typed to `MemoryAPI` — a protocol that `ScopedMemvara` and `ScopedRemoteMemvara`
+both satisfy. One tool table, two engines, and the engine is still never pointed at a
+store that cannot serve it.
 
-It also **un-refuses itself**: the check is a set difference, so the day those endpoints
-exist and `WIRED` grows, the branch stops firing without anybody remembering this file.
-`tests/test_config_cloud.py::test_the_cloud_guard_is_derived_from_the_store_rather_than_
-hardcoded` fails when that day comes, and says what to delete.
+That set difference was built to empty out on its own when `RemoteStore.WIRED` grew, so
+that nobody had to remember to lift a flag. Under this design that day does not arrive:
+the `Store` seam is bypassed rather than completed. Leaving a dead gate in place would
+tell the next reader it was still live, so it was deleted deliberately — and the test that
+guarded it was **replaced rather than removed**, by
+`tests/test_config_cloud.py::test_no_cloud_path_anywhere_constructs_an_engine_over_a_remote_store`,
+which reads `config.py`'s syntax and fails if a `RemoteStore` import or a `store=` argument
+comes back.
 
-A hosted deployment is reached by pointing an MCP client at its own URL. It is not
-proxied through a local server, and that is the divergence: two clients of one facade,
-rather than one engine straddling both.
+One refusal survives, for the one reason that still stops a cloud server starting: a
+deployment is reached over HTTP, so `memvara-mcp init --mode cloud` refuses when `httpx`
+is not importable and names `pip install "memvara[cloud]"`. `init` writes a config it
+never launches, so the two commands have to gate on the same thing or the disagreement is
+silent — that was true of `cloud_gap()` and it is true of this.
+
+A hosted deployment can be reached two ways, and they are different products rather than
+two spellings of one. Point an MCP client at the deployment's own URL and the client talks
+to it directly. Or run `memvara-mcp` with `MEMVARA_MODE=cloud`, which gives a client that
+speaks stdio one local process holding a credential — the same tool table, served over
+`/v1`. Both are clients of the facade; neither is an engine straddling both sides, which
+is the divergence this section exists to record.
 
 ---
 

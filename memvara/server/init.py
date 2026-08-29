@@ -41,7 +41,6 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Sequence, TextIO
 
-from .config import _CLOUD_NOT_WIRED, cloud_gap
 
 __all__ = ["AGENTS", "INIT_USAGE", "MARKER", "client_entry", "cloud_client_entry", "init",
            "skill_text"]
@@ -105,12 +104,10 @@ memvara-mcp init — write the MCP server block, the agent skill and a project n
                 default, MEMVARA_SERVER_URL — and if this machine has no credentials
                 yet, prints a reminder to run `memvara-mcp login` rather than running it.
 
-                Cloud is refused, by flag or by MEMVARA_MODE, for as long as the REST
-                facade has no endpoint for the surface the engine calls on every turn:
-                the server would not start, and writing the config anyway hands you a
-                broken client and a success message. The default never picks it while
-                that is true, whatever httpx says. This lifts itself when the endpoints
-                land — both this command and the server ask `config.cloud_gap()`.
+                Cloud is refused, by flag or by MEMVARA_MODE, when httpx is not
+                importable: the server talks to the deployment over HTTP and would not
+                start, and writing the config anyway hands you a broken client and a
+                success message.
   --db PATH     where the store lives, local mode only. Default: MEMVARA_DB if this
                 shell has one, otherwise ~/.memvara/memory.db. Written absolute either
                 way — that is the requirement no client enforces and everyone meets on
@@ -433,17 +430,23 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
             # strongest signal available that cloud mode will actually work here.
             env_mode = (env.get("MEMVARA_MODE") or "").strip()
             mode = env_mode if env_mode in ("local", "cloud") else (
-                # ...and "will actually work here" is a question `config` can answer, so
-                # the heuristic asks rather than assuming. httpx is importable in plenty
-                # of environments nobody installed the cloud extra into.
-                "cloud" if _httpx_importable() and not cloud_gap() else "local")
-        if mode == "cloud" and (gap := cloud_gap()):
+                "cloud" if _httpx_importable() else "local")
+        if mode == "cloud" and not _httpx_importable():
             # Named explicitly, by flag or by environment, and it cannot start. Refusing
             # here is the whole point: writing it exits 0, tells the reader to restart
             # their client, and leaves them with a server that will not come up and no
-            # line of output connecting the two. Same text the server would have printed,
-            # so the reason arrives while there is still something to do about it.
-            raise _Usage(_CLOUD_NOT_WIRED.format(missing=", ".join(gap)))
+            # line of output connecting the two. The reason arrives while there is still
+            # something to do about it.
+            #
+            # This replaces the check that compared the engine's needs against
+            # `RemoteStore.WIRED`. That gap is gone as a reason to refuse, because cloud
+            # mode no longer runs the engine over a remote store — it builds a client of
+            # the facade. What is left is the one thing that still stops the server
+            # starting, and `httpx` is exactly it.
+            from ..remote.client import install_hint
+
+            raise _Usage(f"MEMVARA_MODE=cloud cannot start a server here. "
+                         f"{install_hint()} Or use --mode local with --db.")
         raw_db = ""
         if mode == "local" and not skill_only:
             raw_db = options.get("--db") or _default_db(env)

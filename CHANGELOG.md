@@ -45,6 +45,74 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   would only be worse. See `memvara/aio.py`'s module docstring for where that module's
   own async argument stops applying.
 
+- **`MEMVARA_MODE=cloud` starts a server instead of refusing to.** `memvara-mcp` in cloud
+  mode now builds a `RemoteMemvara` — a client of the `/v1` facade — and serves the same
+  fourteen tools from a hosted deployment. It reads `MEMVARA_API_KEY`, or the credential
+  `memvara-mcp login` wrote, exactly as `ServerConfig.from_env` already did. Needs `httpx`:
+  `pip install "memvara[cloud]"`.
+
+  **The engine is still never run against a remote store**, which is what the old refusal
+  protected and is not being overturned. `docs/OPEN-CORE.md` records why, and the guard
+  that enforced it — `config.cloud_gap()`, a set difference over `RemoteStore.WIRED` — has
+  been **deleted**, along with `_ENGINE_NEEDS` and `_CLOUD_NOT_WIRED`. It was built to
+  empty out on its own the day the facade grew the low-level endpoints; that day does not
+  arrive under this design, because cloud mode bypasses the `Store` seam rather than
+  completing it, and a dead gate left in place reads as a live one. The test that guarded
+  it was replaced rather than removed: `test_no_cloud_path_anywhere_constructs_an_engine_
+  over_a_remote_store` reads `config.py`'s syntax and fails if a `RemoteStore` import or a
+  `store=` argument returns.
+
+  **`MEMVARA_LLM` and `MEMVARA_EMBEDDER` are now refused under cloud mode** when set to
+  anything but their defaults. Extraction and embedding run inside the deployment, so this
+  process would read the setting and never use it — and an operator who set
+  `MEMVARA_LLM=anthropic`, saw a server start and believed their writes were being
+  extracted has been told something false by a program that stayed silent. The error names
+  the variable. `memory_stats` reports the deployment's own answer.
+
+  **`memory_stats` reports `extractor: unknown` against a hosted deployment.**
+  `Memvara.extractor` says what *this process* can extract with, and this process extracts
+  nothing. `GET /v1/stats` carries the deployment's own answer; reading it would make
+  server startup depend on the deployment being reachable, which is a worse trade than one
+  honest word.
+
+- **`memory_standing` is answered server-side against a hosted deployment.** The tool used
+  to page every live memory in the scope and filter for procedural ones in Python — across
+  the network, for a handful of rows, in the tool a session calls at startup.
+  `GET /v1/standing` does the filter at the source. Local behaviour is unchanged: the local
+  scoped view has no `standing()`, so it takes the same path it always did. One divergence,
+  in the last line of the reply rather than in the facts — the endpoint caps at `k` and
+  reports no total, so the "(N more not shown)" hint does not appear against a hosted
+  deployment.
+
+### Changed
+
+- **`memvara-mcp init` defaults to cloud mode again when `httpx` is importable.** That
+  heuristic was overridden while cloud mode could not start at all, so every environment
+  with `httpx` — a great many that never installed the cloud extra — would have been handed
+  a client that refused to come up. Cloud mode starts now, so the signal means again what
+  it was written to mean. `--mode local` and `MEMVARA_MODE=local` both still win, and a
+  cloud config written without a credential prints the reminder to run `memvara-mcp login`.
+
+- **`memvara-mcp init --mode cloud` refuses on a missing `httpx` rather than on an unwired
+  store.** The reason a cloud server could not start has changed, so the gate did.
+  `init` writes a config it never launches, so it and the server have to answer the same
+  question the same way or the disagreement is silent — that was the point of
+  `cloud_gap()` and it is the point of this.
+
+- **`ToolContext.memory` is typed `MemoryAPI` rather than `ScopedMemvara`.** A protocol in
+  `memvara/server/memory_api.py` declaring the nineteen members `tools.py` calls, which
+  both `ScopedMemvara` and `ScopedRemoteMemvara` satisfy — this is what lets one tool table
+  serve either engine. The security property is unchanged and now stated as a property
+  rather than a class: scope is bound once at construction, so a handler has no argument
+  and no attribute with which to address another tenant. The remote view holds it twice
+  over, since the deployment resolves the tenant from the bearer token rather than from
+  anything a request can name.
+
+- **`RemoteMemvara.search` and `ScopedRemoteMemvara.search` carry the same three overloads
+  `Memvara.search` has.** Without them the identical expression typed as `list[Retrieved]`
+  against a hosted deployment and `list[Result]` locally, so code reading `.claim` off a
+  row type-checked against one engine and not the other. No runtime behaviour changes.
+
 ## [0.8.1] — 2026-08-27
 
 ### Added

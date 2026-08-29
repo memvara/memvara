@@ -1,10 +1,15 @@
-"""`MEMVARA_MODE=cloud`: `ServerConfig.from_env`'s branch, `build_memvara`'s `RemoteStore`
-branch, and `memvara-mcp login`'s dispatch from `cli.main`.
+"""`MEMVARA_MODE=cloud`: `ServerConfig.from_env`'s branch, and `memvara-mcp login`'s
+dispatch from `cli.main`.
 
-Offline throughout. `build_memvara(mode="cloud")` constructs a real `RemoteStore`, which
-constructs a real `httpx.Client` — no request is ever made, so no transport needs
-mocking here; the network-touching parts of the cloud path (the HTTP calls themselves)
-belong to `tests/test_store_remote.py` and `tests/test_login.py`.
+What `build_memvara` does with a cloud config is pinned in
+`tests/test_remote_cloud_mode.py`. The one property asserted here is the one this file
+used to assert from the other side: cloud mode builds a client of the REST facade and
+never an engine over a `RemoteStore`.
+
+Offline throughout. `build_memvara(mode="cloud")` constructs a real `RemoteMemvara`, which
+builds a real `httpx.Client` — no request is ever made, so no transport needs mocking
+here; the network-touching parts of the cloud path (the HTTP calls themselves) belong to
+`tests/test_remote_client.py` and `tests/test_login.py`.
 """
 
 from __future__ import annotations
@@ -15,9 +20,10 @@ import json
 import pytest
 
 from memvara.server.cli import main
+from memvara.core import Memvara
+from memvara.remote.api import RemoteMemvara
 from memvara.server.config import (CREDENTIALS_PATH, ConfigError, ServerConfig,
-                                   _ENGINE_NEEDS, build_memvara)
-from memvara.store.remote import RemoteStore
+                                   build_memvara)
 
 
 # -- mode resolution --------------------------------------------------------------------
@@ -114,43 +120,69 @@ def test_credentials_path_constant_matches_logins_own(monkeypatch):
 
 # -- build_memvara(mode="cloud") ---------------------------------------------------------
 
-def test_build_memvara_refuses_cloud_mode_rather_than_starting_a_server_that_cannot_work():
-    """It used to construct one, and that was the defect.
+def test_build_memvara_cloud_mode_builds_a_client_of_the_facade_and_not_an_engine():
+    """The guarantee that replaced the refusal, and it is the same guarantee.
 
-    `Memvara(store=RemoteStore(...))` builds fine: `RemoteStore.__init__` only needs a
-    URL and a key. The engine then calls `put_claim`, `lexical_search` and
-    `competing_claims` on every turn and the REST facade has an endpoint for none of
-    them, so the server started, advertised twelve tools, and raised
-    `NotImplementedError` on the first one a model reached for. A failure that arrives
-    mid-conversation as a tool error is the worst place for it: the model cannot act on
-    it, and whoever configured the deployment is not in the room.
+    `MEMVARA_MODE=cloud` used to build `Memvara(store=RemoteStore(...))`. That constructs
+    fine — `RemoteStore.__init__` only needs a URL and a key — and then the engine calls
+    `put_claim`, `lexical_search` and `competing_claims` on every turn, for which the REST
+    facade has no endpoint. The server started, advertised twelve tools, and raised
+    `NotImplementedError` on the first one a model reached for: a failure arriving
+    mid-conversation, where the model cannot act on it and whoever configured the
+    deployment is not in the room.
 
-    Refusing here puts the failure where the configuration was made, with the flag that
-    fixes it. It is a **decision** rather than a stopgap — `docs/OPEN-CORE.md` records
-    which side of the line each seam is on — and it un-refuses itself: the check is
-    `_ENGINE_NEEDS - RemoteStore.WIRED`, so the day those endpoints exist and `WIRED`
-    grows, this branch stops firing on its own.
+    Refusing to start was the right answer to that, and this is a better one. The engine
+    is still never run against a remote store — what changed is that the server is now a
+    client of the facade, which is what `docs/OPEN-CORE.md` said the answer was. So the
+    thing to keep asserting is not the refusal but what makes the refusal unnecessary:
+    what comes back is a `RemoteMemvara`, and it is not an `Memvara` at all.
     """
     config = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
                                     "MEMVARA_TENANT": "acme", "MEMVARA_USER": "alice"})
-    with pytest.raises(ConfigError) as exc:
-        build_memvara(config)
-    message = str(exc.value)
-    assert "put_claim" in message and "lexical_search" in message, (
-        "the message has to name what is missing, or it is untraceable"
-    )
-    assert "MEMVARA_MODE=local" in message, "and what to do instead"
+    client = build_memvara(config)
+    try:
+        assert isinstance(client, RemoteMemvara)
+        assert not isinstance(client, Memvara), (
+            "a subclass would put the engine back over the wire by the side door"
+        )
+        assert client.default_scope.tenant == "acme"
+        assert client.default_scope.user == "alice"
+    finally:
+        client.close()
 
 
-def test_the_cloud_guard_is_derived_from_the_store_rather_than_hardcoded():
-    """The guard must not outlive the gap it names.
+def test_no_cloud_path_anywhere_constructs_an_engine_over_a_remote_store():
+    """`cloud_gap()` was a set difference built to empty out when `RemoteStore.WIRED`
+    grew, and that day does not arrive under this design: the `Store` seam is bypassed
+    rather than completed. Deleting the guard is therefore deliberate, and this is what
+    has to stay true in its place.
 
-    A literal `raise` here would keep refusing after the endpoints landed, and the person
-    who added them would have no reason to look in this file.
+    Read off `config.py`'s syntax rather than its behaviour, because a reintroduced
+    `Memvara(store=RemoteStore(...))` would construct, start, and fail exactly as it did
+    before — there is no call that returns the wrong answer for a test to catch. Two
+    things are checked: nothing here imports `RemoteStore`, and no call here passes a
+    `store=`, which is the only door the engine has onto one.
     """
-    assert _ENGINE_NEEDS - RemoteStore.WIRED, (
-        "RemoteStore now wires everything the engine needs — delete the guard in "
-        "build_memvara and restore the cloud-mode construction tests above it"
+    import ast
+    from pathlib import Path
+
+    import memvara.server.config as config_module
+
+    tree = ast.parse(Path(config_module.__file__).read_text())
+    imported = {alias.name for node in ast.walk(tree)
+                if isinstance(node, (ast.Import, ast.ImportFrom))
+                for alias in node.names}
+    assert "RemoteStore" not in imported, (
+        "cloud mode builds a client of the facade; importing RemoteStore here means the "
+        "engine is being pointed at a store that cannot serve it"
+    )
+    assert "RemoteMemvara" in imported
+
+    passes_a_store = [call for call in ast.walk(tree) if isinstance(call, ast.Call)
+                      for kw in call.keywords if kw.arg == "store"]
+    assert not passes_a_store, (
+        "`store=` is how an engine is handed a backend, and the remote one cannot serve "
+        "put_claim, lexical_search or competing_claims"
     )
 
 
@@ -164,19 +196,25 @@ def test_build_memvara_rejects_a_hand_built_cloud_config_with_no_api_key():
         build_memvara(config)
 
 
-def test_build_memvara_cloud_mode_respects_the_llm_backend(monkeypatch):
+def test_cloud_mode_refuses_a_named_llm_instead_of_loading_one(monkeypatch):
+    """Extraction runs inside the deployment, so `MEMVARA_LLM=anthropic` under cloud mode
+    names a subsystem this process would never use. Accepting it silently is the failure:
+    the operator sets it, sees a server start, and believes their writes are being
+    extracted by a model that was never loaded. The local path still builds one, which is
+    the same `_anthropic()` call on the same line of code."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     import sys
     import types as pytypes
 
     monkeypatch.setitem(sys.modules, "anthropic",
                         pytypes.SimpleNamespace(Anthropic=lambda: object()))
-    config = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
-                                    "MEMVARA_LLM": "anthropic"})
-    # Cloud mode refuses before it reaches the LLM branch, so the backend choice is
-    # asserted on the local path instead — same `_anthropic()` call, same line of code.
+    cloud = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
+                                   "MEMVARA_LLM": "anthropic"})
+    assert cloud.llm == "anthropic"
+    with pytest.raises(ConfigError, match="MEMVARA_LLM"):
+        build_memvara(cloud)
+
     local = ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "anthropic"})
-    assert config.llm == "anthropic"
     memory = build_memvara(local)
     try:
         assert memory.extractor.startswith("fast-path+anthropic/")

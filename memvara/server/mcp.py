@@ -12,7 +12,7 @@ load-bearing rather than merely tidy.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, TextIO
+from typing import TYPE_CHECKING, Any, Mapping, TextIO
 
 from .. import __version__
 from ..core import Memvara
@@ -27,7 +27,14 @@ from .protocol import (
     serve_stdio,
     success,
 )
+from .memory_api import MemoryAPI
 from .tools import TOOLS, Tool, ToolContext, ToolError, safe_detail
+
+if TYPE_CHECKING:
+    # For the annotation alone. `memvara.remote.api` reaches back into
+    # `memvara.server.config` through `remote/creds.py`, so importing it at module
+    # level here would be a cycle through this package's own `__init__`.
+    from ..remote.api import RemoteMemvara
 
 #: What we implement. A client that asks for one of these gets its own version echoed
 #: back; anything else is answered with ours, and the client decides whether to proceed.
@@ -59,6 +66,23 @@ INSTRUCTIONS = (
 )
 
 
+def _bind(memory: "Memvara | RemoteMemvara", *, tenant: str | None, user: str | None,
+          agent: str | None, session: str | None) -> MemoryAPI:
+    """Bind the scope once, from configuration the client supplied at launch.
+
+    Two engines, one binding, and the difference is where the tenant comes from. A local
+    `Memvara` is told which tenant to serve, because a SQLite file holds all of them. A
+    `RemoteMemvara` is not asked: `scope()` has no `tenant` parameter, since the
+    deployment resolves it from the bearer token and a request parameter naming one would
+    be a request to be trusted about identity. `build_memvara` has already put
+    `MEMVARA_TENANT` on the client for `memory_stats` to report; the credential decides
+    what is actually read.
+    """
+    if isinstance(memory, Memvara):
+        return memory.scope(tenant=tenant, user=user, agent=agent, session=session)
+    return memory.scope(user=user, agent=agent, session=session)
+
+
 class MemvaraMCPServer:
     """An `Memvara` exposed as MCP tools over JSON-RPC.
 
@@ -66,13 +90,20 @@ class MemvaraMCPServer:
     the `Memvara` does not have to keep a second reference alive to shut it down.
     """
 
-    def __init__(self, memory: Memvara, *, tenant: str | None = None,
+    def __init__(self, memory: "Memvara | RemoteMemvara", *, tenant: str | None = None,
                  user: str | None = None, agent: str | None = None,
                  session: str | None = None, read_only: bool = False) -> None:
         self._memory = memory
         self._ctx = ToolContext(
-            memory=memory.scope(tenant=tenant, user=user, agent=agent, session=session),
-            extractor=memory.extractor,
+            memory=_bind(memory, tenant=tenant, user=user, agent=agent, session=session),
+            # `Memvara.extractor` says what *this process* can extract with. A hosted
+            # deployment extracts on the other side of the wire and `RemoteMemvara` has no
+            # such property, so the context keeps its declared default, "unknown", rather
+            # than this server asserting a pipeline it does not run. `GET /v1/stats`
+            # carries the deployment's own answer; reading it here would make startup
+            # depend on the deployment being up, which is a worse trade than one honest
+            # word in `memory_stats`.
+            extractor=getattr(memory, "extractor", "unknown"),
             read_only=read_only,
         )
         self.read_only = read_only

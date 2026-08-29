@@ -780,19 +780,18 @@ def test_explicit_local_mode_matches_todays_behaviour_byte_for_byte(tmp_path) ->
 
 @pytest.fixture()
 def cloud_wired(monkeypatch):
-    """A world where the REST facade has grown the endpoints the engine needs.
+    """A machine where cloud mode can start: `httpx` is importable.
 
-    Everything `init` writes *for* cloud mode is unreachable while `config.cloud_gap()`
-    is non-empty, because the command now refuses before it writes — the server it would
-    configure cannot start, and exiting 0 with "restart your client" is how that used to
-    reach the user.
+    It usually is here, and CONTRIBUTING.md's "no extras" job is the run where it is not.
+    Pinning it keeps these tests about the *shape* of a cloud entry in both runs, rather
+    than about which packages the test environment happens to have.
 
-    The cloud-writing code is not wrong, it is early, so these tests keep covering it
-    with the gap patched shut. Which is also what keeps them honest about what they are:
-    assertions about the *shape* of a cloud entry, not evidence that a cloud server runs.
-    The refusal itself is asserted below, without this fixture.
+    The name is kept from when the fixture stood in for a REST facade that had grown the
+    endpoints the engine needed. That gap is no longer what gates cloud mode — the server
+    is a client of the facade and does not run the engine over a remote store — so the
+    only thing left to stand in for is the transport.
     """
-    monkeypatch.setattr("memvara.server.init.cloud_gap", lambda: [])
+    monkeypatch.setattr("memvara.server.init._httpx_importable", lambda: True)
 
 
 def test_cloud_mode_writes_mode_and_server_url_instead_of_db(cloud_wired, tmp_path) -> None:
@@ -920,62 +919,79 @@ def test_cloud_client_entry_omits_server_url_at_the_default() -> None:
 # --- the config that could not start the server it configured -----------------
 
 
-def test_asking_for_cloud_is_refused_with_the_reason_the_server_would_have_given(
-        tmp_path) -> None:
+def test_asking_for_cloud_without_httpx_is_refused_with_the_reason_the_server_would_give(
+        tmp_path, monkeypatch) -> None:
     """`init` wrote `MEMVARA_MODE: cloud`, said "restart your client", and exited 0.
 
-    The server then refused to start, because the REST facade has no endpoint for the
-    surface the engine calls on every turn. Two commands answering the same question
+    The server then refused to start. Two commands answering the same question
     differently, and the gap between them was silent by construction: the one that writes
     the config never starts the thing it configured, so nothing in the successful run
     could notice. What reached the user was a client with no memvara tools in it and no
     line of output anywhere connecting that to anything they had done.
 
-    The text is the server's own, so the reason arrives while there is still something to
-    be done about it.
+    The reason the server would refuse has changed. It used to be that the REST facade had
+    no endpoint for the surface the engine calls on every turn; cloud mode no longer runs
+    the engine, so what is left is the transport — a cloud server talks HTTP, and without
+    `httpx` it cannot start. The refusal here is the same refusal for the one reason that
+    survives, and it still names what to install rather than exiting 0.
     """
+    monkeypatch.setattr("memvara.server.init._httpx_importable", lambda: False)
     out, err = io.StringIO(), io.StringIO()
     status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "cloud"],
                   env={"MEMVARA_API_KEY": "mv_live_x"}, stdout=out, stderr=err)
 
     assert status != 0
-    assert "cannot start a server yet" in err.getvalue()
+    assert "cannot start a server here" in err.getvalue()
+    assert "memvara[cloud]" in err.getvalue(), "and what to install"
     assert not (tmp_path / ".mcp.json").exists(), "refused, and still wrote the file"
 
 
-def test_the_environment_asking_for_cloud_is_refused_the_same_way(tmp_path) -> None:
-    """`MEMVARA_MODE=cloud` exported months ago is the same broken config arriving by a
-    quieter route, so it gets the same answer rather than a silent downgrade to local."""
+def test_the_environment_asking_for_cloud_without_httpx_is_refused_the_same_way(
+        tmp_path, monkeypatch) -> None:
+    """`MEMVARA_MODE=cloud` exported months ago is the same unstartable config arriving by
+    a quieter route, so it gets the same answer rather than a silent downgrade to local."""
+    monkeypatch.setattr("memvara.server.init._httpx_importable", lambda: False)
     err = io.StringIO()
     status = init(["--agent", "claude", "--dir", str(tmp_path)],
                   env={"MEMVARA_MODE": "cloud"}, stdout=io.StringIO(), stderr=err)
 
     assert status != 0
-    assert "cannot start a server yet" in err.getvalue()
+    assert "cannot start a server here" in err.getvalue()
+    assert not (tmp_path / ".mcp.json").exists()
 
 
-def test_an_importable_httpx_no_longer_defaults_a_working_install_to_a_broken_one(
-        tmp_path) -> None:
-    """The default was `cloud` whenever `httpx` imported, which is a great many
-    environments that never installed the cloud extra — and every one of them got a
-    client that could not start. The heuristic now asks whether cloud works before
-    preferring it, so the fallback is the mode that does.
+def test_an_importable_httpx_defaults_to_cloud_again(tmp_path, monkeypatch) -> None:
+    """The other half of `test_no_mode_and_no_httpx_defaults_to_local`, restored.
+
+    This heuristic was overridden while cloud mode could not start at all: every
+    environment with `httpx` — which is a great many that never installed the cloud extra
+    — would have been handed a client that refused to come up, so the default fell back to
+    `local` whatever `httpx` said. Cloud mode starts now, so the signal means again what
+    it was written to mean, and a machine that has the transport gets the mode it can run.
+
+    A cloud entry with no credential is not the old failure returning. `init` prints the
+    reminder to run `memvara-mcp login`, and the server names the same command if it is
+    launched first — the reason reaches the user in both places.
     """
+    monkeypatch.setattr("memvara.server.init._httpx_importable", lambda: True)
     status = init(["--agent", "claude", "--dir", str(tmp_path)],
-                  env={}, stdout=io.StringIO(), stderr=io.StringIO())
+                  env={"MEMVARA_API_KEY": "mv_live_x"},
+                  stdout=io.StringIO(), stderr=io.StringIO())
     assert status == 0
     entry_env = _entry(tmp_path)["env"]
-    assert "MEMVARA_DB" in entry_env, entry_env
-    assert entry_env.get("MEMVARA_MODE") != "cloud"
+    assert entry_env.get("MEMVARA_MODE") == "cloud", entry_env
+    assert "MEMVARA_DB" not in entry_env
 
 
-def test_the_refusal_lifts_itself_when_the_facade_grows_the_endpoints(
-        cloud_wired, tmp_path) -> None:
-    """Nothing has to remember to flip a flag.
+def test_cloud_mode_is_written_rather_than_refused(cloud_wired, tmp_path) -> None:
+    """The refusal is gone, and this is what stands in its place.
 
-    Both `init` and `build_memvara` derive the answer from `RemoteStore.WIRED`, so the
-    day the endpoints exist this command starts writing cloud configs again — which is
-    the only version of this guard that does not become a second thing to maintain.
+    `cloud_gap()` was a set difference over `RemoteStore.WIRED`, built so that the day the
+    facade grew the low-level endpoints both this command and `build_memvara` would start
+    working without anybody lifting a flag. That day does not arrive: cloud mode bypasses
+    the `Store` seam rather than completing it, so the set difference was deleted rather
+    than left as a gate nothing will ever open. What has to stay true is that naming cloud
+    mode on a machine that can run it writes the config instead of refusing.
     """
     status = init(["--agent", "claude", "--dir", str(tmp_path), "--mode", "cloud"],
                   env={"MEMVARA_API_KEY": "mv_live_x"},
@@ -984,18 +1000,16 @@ def test_the_refusal_lifts_itself_when_the_facade_grows_the_endpoints(
     assert _entry(tmp_path)["env"]["MEMVARA_MODE"] == "cloud"
 
 
-def test_the_gap_is_derived_from_the_store_rather_than_hardcoded() -> None:
-    """`cloud_gap()` names the calls the engine makes that `RemoteStore` cannot serve.
+def test_init_and_the_server_still_gate_cloud_mode_on_the_same_thing() -> None:
+    """Two commands answering one question, which is the failure this pair exists for.
 
-    Asserted as a set relationship rather than a literal list, so adding an endpoint
-    shortens it without editing a test, and adding an engine call that the facade does
-    not serve lengthens it without anyone having to notice.
+    `init` writes the config and never starts what it configured, so a disagreement
+    between them is silent by construction. The shared answer used to be
+    `config.cloud_gap()`. It is now `httpx`: `init` refuses without it, and the server's
+    transport raises `ImportError` carrying the same install hint.
     """
-    from memvara.server.config import _ENGINE_NEEDS, cloud_gap
-    from memvara.store.remote import RemoteStore
+    from memvara.remote.client import install_hint
+    from memvara.server.init import _httpx_importable
 
-    assert set(cloud_gap()) == _ENGINE_NEEDS - RemoteStore.WIRED
-    assert cloud_gap(), (
-        "the facade has grown the low-level endpoints — that is good news, and it means "
-        "the refusal above is now dead code that should be removed rather than tested"
-    )
+    assert "memvara[cloud]" in install_hint()
+    assert _httpx_importable() is True
