@@ -48,11 +48,12 @@ langgraph = ["langgraph-checkpoint>=4.1"]
 # line. `memvara[server]` used to name those and imply they were required, which was
 # misleading; `http` is reserved for the REST layer that will actually need them.
 http = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2.6"]
-# The console client: `memvara-mcp login` and cloud-mode `Store` (`memvara/store/remote.py`)
-# are the only things in this distribution that make an outbound network call, and both
-# import httpx lazily so that a bare `pip install memvara` — the library, `import memvara`
-# — never pulls it in. This is the whole of the dependency for "authenticate against
-# memvara-cloud and use it as the store"; nothing else changes.
+# The console client (`memvara-mcp login`), cloud-mode `Store` (`memvara/store/remote.py`),
+# and the `/v1` transport (`memvara/remote/client.py`) are the things in this distribution
+# that make an outbound network call, and all three import httpx lazily so that a bare
+# `pip install memvara` — the library, `import memvara` — never pulls it in. This is the
+# whole of the dependency for "authenticate against memvara-cloud and use it as the store";
+# nothing else changes.
 cloud = ["httpx>=0.27"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "coverage>=7.0", "mypy>=1.8"]
 # Only for bench/mem0_real.py, the head-to-head against the real package.
