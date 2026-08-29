@@ -41,6 +41,11 @@ _MODES = ("local", "cloud")
 #: login command (built separately) has to write exactly this path for this file to find it.
 CREDENTIALS_PATH = Path.home() / ".memvara" / "credentials.json"
 
+#: Where a client goes absent MEMVARA_SERVER_URL. `login.py` declares its own copy as
+#: `_DEFAULT_SERVER_URL`; leaving that alone is deliberate, since collapsing them is a
+#: change to a module this work has no other reason to touch.
+DEFAULT_SERVER_URL = "https://app.memvara.dev"
+
 #: Backends selectable from the environment. Anything needing constructor arguments —
 #: a custom model, an injected client — is a reason to import `MemvaraMCPServer` and wire
 #: it in Python rather than to grow a configuration language here.
@@ -104,7 +109,7 @@ class ServerConfig:
     #: "cloud" opens no local file at all; it resolves an API key (MEMVARA_API_KEY, or
     #: the credentials file `memvara-mcp login` writes) and talks to `server_url` instead.
     mode: str = "local"
-    server_url: str = "https://app.memvara.dev"
+    server_url: str = DEFAULT_SERVER_URL
     api_key: str | None = None
     #: Which vector space this server's store is opened in. Named rather than discovered,
     #: for the same reason `llm` is: a store outlives the environment it was created in,
@@ -131,8 +136,8 @@ class ServerConfig:
 
         path = (env.get("MEMVARA_DB") or "").strip()
         api_key: str | None = None
-        server_url = (env.get("MEMVARA_SERVER_URL") or "https://app.memvara.dev").strip() \
-            or "https://app.memvara.dev"
+        server_url = (env.get("MEMVARA_SERVER_URL") or DEFAULT_SERVER_URL).strip() \
+            or DEFAULT_SERVER_URL
 
         if mode == "local":
             if not path:
