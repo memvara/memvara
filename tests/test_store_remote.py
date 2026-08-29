@@ -29,7 +29,14 @@ T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
 def memory_body(**overrides) -> dict:
     """The wire shape `GET /v1/memories/{id}` (and friends) hand back, matching what
-    `RemoteStore._claim_from_memory` reads."""
+    `RemoteStore._claim_from_memory` reads.
+
+    **Instants carry the `Z` the facade actually sends**, not the `+00:00` that
+    `datetime.isoformat()` produces. `render.memory()` renders
+    `'2026-08-29T13:39:41.953878Z'`, and spelling it the other way here is what hid a
+    `fromisoformat` that could not parse a `Z` on Python 3.10 — every test in this file
+    read a body no server sends, and passed.
+    """
     body = {
         "id": "clm_1",
         "subject": "user",
@@ -39,8 +46,8 @@ def memory_body(**overrides) -> dict:
         "text": "user lives_in Lisbon",
         "polarity": 1,
         "memory_type": "semantic",
-        "valid_time": {"valid_from": "2024-01-01T00:00:00+00:00", "valid_to": None},
-        "transaction_time": {"recorded_at": "2024-01-01T00:00:00+00:00",
+        "valid_time": {"valid_from": "2024-01-01T00:00:00Z", "valid_to": None},
+        "transaction_time": {"recorded_at": "2024-01-01T00:00:00Z",
                              "invalidated_at": None, "invalidated_by": None},
         "confidence": 0.9,
         "salience": 1.0,
@@ -163,10 +170,10 @@ def test_get_claim_round_trips_a_fully_populated_body():
         polarity=-1, confidence=0.4, salience=0.2, observation_count=3,
         source_ids=["ep_1", "ep_2"], derivation="consolidation", extractor=None,
         metadata={"k": "v"},
-        valid_time={"valid_from": "2024-01-01T00:00:00+00:00",
-                   "valid_to": "2024-06-01T00:00:00+00:00"},
-        transaction_time={"recorded_at": "2024-01-01T00:00:00+00:00",
-                          "invalidated_at": "2024-06-01T00:00:00+00:00",
+        valid_time={"valid_from": "2024-01-01T00:00:00Z",
+                   "valid_to": "2024-06-01T00:00:00Z"},
+        transaction_time={"recorded_at": "2024-01-01T00:00:00Z",
+                          "invalidated_at": "2024-06-01T00:00:00Z",
                           "invalidated_by": "clm_2"},
     )
     transport = FakeTransport().on("GET", "/v1/memories/clm_1", json_response(200, body))
@@ -183,6 +190,59 @@ def test_get_claim_round_trips_a_fully_populated_body():
     assert claim.valid_to is not None
     assert claim.invalidated_at is not None
     assert claim.invalidated_by == "clm_2"
+    store.close()
+
+
+class _StrictFromIsoformat(datetime):
+    """`datetime` with Python 3.10's `fromisoformat`, which rejects a trailing `Z`."""
+
+    @classmethod
+    def fromisoformat(cls, value: str) -> datetime:  # type: ignore[override]
+        if value.endswith(("Z", "z")):
+            raise ValueError(f"Invalid isoformat string: {value!r}")
+        return datetime.fromisoformat(value)
+
+
+def test_get_claim_decodes_on_a_python_that_cannot_parse_a_z_suffix(monkeypatch):
+    """The oldest supported interpreter must decode what the newest one does.
+
+    `RemoteStore` parsed the facade's instants with a bare `fromisoformat`, which did not
+    accept a trailing `Z` before Python 3.11 while `requires-python` says 3.10. Every
+    memory `get_claim` and `get_claims` read therefore raised `ValueError` on the oldest
+    leg of the matrix, and nothing here saw it: the fixtures spelled instants `+00:00`.
+
+    Patching a stricter parser in makes this fail on 3.13 too. A guard against a
+    version-specific bug that is itself version-specific lets a regression sit green in
+    every local run until CI reaches the 3.10 leg — which is how long this one lasted.
+    `tests/test_remote_reads.py` pins the same rule for `remote/hydrate.py` the same way.
+
+    The fully-populated body is deliberate: it puts all four instants — both clocks, open
+    and closed — through the parser, so a fix that reached `valid_from` and missed
+    `invalidated_at` still fails.
+    """
+    import memvara.store.remote as remote
+
+    # The shared fixture has to keep the `Z` too: it is what every other test in this
+    # file reads, and spelling it `+00:00` is what let the bug live through all of them.
+    assert memory_body()["valid_time"]["valid_from"].endswith("Z")
+
+    monkeypatch.setattr(remote, "datetime", _StrictFromIsoformat)
+    body = memory_body(
+        valid_time={"valid_from": "2024-01-01T00:00:00Z",
+                    "valid_to": "2024-06-01T00:00:00Z"},
+        transaction_time={"recorded_at": "2024-01-01T00:00:00Z",
+                          "invalidated_at": "2024-06-01T00:00:00Z",
+                          "invalidated_by": "clm_2"})
+    transport = FakeTransport().on("GET", "/v1/memories/clm_1", json_response(200, body))
+    store = make_store(transport)
+
+    claim = store.get_claim("clm_1")
+
+    assert claim is not None
+    assert claim.valid_from.tzinfo is not None
+    assert claim.valid_to is not None and claim.valid_to.tzinfo is not None
+    assert claim.recorded_at.tzinfo is not None
+    assert claim.invalidated_at is not None and claim.invalidated_at.tzinfo is not None
     store.close()
 
 
