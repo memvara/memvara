@@ -11,6 +11,7 @@ omitted below for readability.
 ```python
 mem = Memvara(path=":memory:", *, store=, embedder=, llm=, registry=, telemetry=,
              redactor=, tenant=, user=, agent=, session=, reembed=False, **tuning)
+# api_key= or base_url= instead returns a RemoteMemvara — see "A hosted deployment" below
 
 # write
 mem.add(messages, *, role="user", ts=None)        -> WriteReceipt
@@ -184,6 +185,67 @@ install stays a two-package install (`memvara` and `numpy`, verified in CI). Eac
 is transport and response-shape only — every rule about what counts as a valid claim is
 shared in `memvara/llm/_shape.py`, so the same turn produces the same claim regardless of
 which model wrote it.
+
+### A hosted deployment
+
+`Memvara(api_key=...)` returns a `RemoteMemvara`: the same methods, served by the `/v1`
+API of a hosted deployment instead of by a store on this machine. Every response is
+hydrated back into the `Claim`, `Episode`, `Result` and `WriteReceipt` dataclasses above,
+so a function that takes a `Memvara` and calls `search()` cannot tell which it was handed.
+
+```python
+from memvara import Memvara                        # pip install 'memvara[cloud]'
+
+mem = Memvara(api_key="mv_…", user="alice")        # or Memvara.connect()
+mem.remember("Alice", "lives_in", "Lisbon")
+[r.text for r in mem.search("where do they live?")]
+```
+
+`Memvara.connect()` is the same client using whatever credentials are around:
+`MEMVARA_API_KEY`, then the file `memvara-mcp login` writes. `base_url=` (or
+`MEMVARA_SERVER_URL`) points at a deployment other than the default one.
+
+**A bare `Memvara()` never becomes remote.** The dispatch reads the explicit `api_key=` or
+`base_url=` argument and nothing else — never the environment — because a script that has
+always written to a local file must not start posting to a hosted store on the day
+somebody runs `memvara-mcp login` on that machine. The environment supplies the *value*,
+once the caller has asked for remote. Constructing performs no network call: it resolves a
+credential, builds a connection pool, and stops. The first request is the first method
+call, and `close()` (or a `with` block) releases the pool.
+
+Naming a local subsystem alongside a credential is a `TypeError` rather than a silent
+no-op — `path=`, `store=`, `embedder=`, `llm=`, `registry=` and `reembed=True` all
+describe an engine that runs server-side. `reembed=False` is accepted and does nothing,
+because it asks for nothing.
+
+**What is absent is absent, not raising.** `reembed()`, `pending_extraction()`,
+`reextract()` and `reset()` have no endpoint, so they are not methods: reaching for one is
+an `AttributeError` at the call site and a mypy error before that, where a method that
+raised would compile, ship and fail in production. The same rule decides which *arguments*
+exist. `recall()` takes no `with_ids`, because `POST /v1/recall` returns a rendered string
+and carries no ids at all; `get_all()` takes no `memory_types`, because the endpoint has no
+such filter and would answer with an unfiltered page. `budget` is the one refusal rather
+than omission: it stays in `recall()`'s signature so that `None` works, and a value raises
+`ValueError`, because a budget silently ignored is an oversized prompt with no signal.
+
+Two divergences are real and worth knowing before you write against them:
+
+- **`consolidate()` returns a job handle, not counts.** The endpoint answers 202 before
+  the pass starts, because a real store takes seconds to walk. Poll the job's `status` for
+  `succeeded` and its `result` for the per-operation counts. A 202 is not a promise the
+  work succeeded.
+- **There is no `prove_erased()`.** The local one re-queries the tables a claim's content
+  can survive in, which is a physical check this side of the wire cannot perform.
+  `erase()` returns whether anything was erased, and `purge()` returns the per-table rows
+  removed as the deployment's own count.
+
+`scope()` returns a `ScopedRemoteMemvara`, the twin of `ScopedMemvara`, and the credential
+binds the tenant a second time from the other side: the facade resolves it from the bearer
+token, and no `/v1` request parameter names one, so a narrowing cannot widen. Errors arrive
+as the exception types in `memvara.remote.errors` — `AuthError`, `ScopeError`, `NotFound`,
+`Conflict`, `QuotaExhausted`, `RateLimited`, `LegalHold`, `ReadOnly`, `InvalidRequest` and
+`ServerError`, all `RemoteError` — and writes carry an `Idempotency-Key` that is held
+constant across their own retries.
 
 ### Concurrency
 

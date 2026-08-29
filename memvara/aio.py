@@ -53,6 +53,7 @@ startup, not hidden inside the first `await`.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import datetime
 from typing import Any, Callable, Collection, Literal, Sequence, overload
 
@@ -755,9 +756,19 @@ class AsyncScopedMemvara:
 # derive the surface from the classes themselves.
 
 def _public(obj: type) -> set[str]:
-    """The public callables of a class: its method surface, as names."""
+    """The public callables of a class: its method surface, as names.
+
+    Classmethods are not part of it. Both checks below ask what you can do with an
+    instance you already hold — `AsyncMemvara` wraps one, `AsyncScopedMemvara` narrows
+    one — and a classmethod is reached on the class whether or not you hold anything.
+    `Memvara.connect()` is the live case: it is a second spelling of
+    `Memvara(api_key=...)`, so a scoped view that offered it would hand out a fresh
+    unscoped client, and an async facade that offered it would return the synchronous
+    remote client it wraps nothing of.
+    """
     return {n for n in dir(obj)
-            if not n.startswith("_") and callable(getattr(obj, n, None))}
+            if not n.startswith("_") and callable(getattr(obj, n, None))
+            and not isinstance(inspect.getattr_static(obj, n, None), classmethod)}
 
 
 def _scoped_omissions() -> set[str]:

@@ -552,9 +552,19 @@ invariants in `INTERNALS.md` identically, and getting one wrong is not hypotheti
 paper below conflates the two clocks on supersession and measures its own time-travel
 retrieval scoring *worse* than plain search as a result.
 
-**Declined: a REST client library.** MCP already covers the agent case, which is the case
-that exists. A library would serve calling memvara from ordinary application code, and
-nobody has asked for that.
+**Reversed on 2026-08-29, and built: a Python client for a hosted deployment.** This was
+declined — *"MCP already covers the agent case… A library would serve calling memvara from
+ordinary application code, and nobody has asked for that"* — and absence of demand was the
+only reason given. This project's maintainer then asked, naming two callers: application
+code in Python, which none of the three hosted surfaces serves, and `memvara-mcp --mode
+cloud`, which refuses to start for want of exactly this client. What shipped is
+`Memvara(api_key=...)`, the library's own API served by a deployment's `/v1` facade with
+the engine still running server-side, plus `Memvara.connect()` for the credentials
+`memvara-mcp login` leaves behind. It is not `RemoteStore` completed and does not bring
+that closer: the `Store` protocol and the REST facade stay diverged for `OPEN-CORE.md`'s
+reasons, and this takes the other seam that document had already named. The shape worth
+noticing is the one this entry shares with the JS client above it — a decision resting on a
+demand signal nobody was collecting stays decided until somebody asks out loud.
 
 **Built: `npx memvara`**, a stdio-to-HTTP MCP bridge to the hosted server, zero runtime
 dependencies. Its value is narrower than it looks and the narrowness is worth stating:

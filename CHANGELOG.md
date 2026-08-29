@@ -9,6 +9,32 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`Memvara(api_key=...)` returns a client for a hosted deployment.** `RemoteMemvara`
+  serves the library's own read and write surface out of the `/v1` API instead of a local
+  store, and hydrates every response into the same `Claim`, `Episode` and `WriteReceipt`
+  dataclasses, so calling code cannot tell which it holds. `Memvara.connect()` is the same
+  client using whatever credentials are around — `MEMVARA_API_KEY`, then the file
+  `memvara-mcp login` writes. Install `httpx` with it: `pip install "memvara[cloud]"`.
+
+  **A bare `Memvara()` never becomes remote.** Dispatch keys on the explicit `api_key=` or
+  `base_url=` argument and never on the environment, so a script that has always written
+  to a local file cannot start posting to a hosted store because somebody ran
+  `memvara-mcp login` on that machine. The environment supplies the *value*, once the
+  caller has asked for remote.
+
+  Two behaviour differences from the local engine, both deliberate and both documented in
+  `docs/API.md`: `consolidate()` returns a job handle rather than per-operation counts,
+  because the endpoint answers 202 before the pass starts, and there is no
+  `prove_erased()`, because `erase()` returns its per-table evidence itself. Arguments the
+  API cannot honour are absent rather than ignored — `recall()` has no `with_ids`, and
+  raises on a `budget` it cannot enforce.
+
+  Naming a local subsystem alongside a credential is a `TypeError`, not a silent no-op:
+  `path=`, `store=`, `embedder=`, `llm=`, `registry=` and `reembed=True` all describe an
+  engine that runs server-side.
+
 ## [0.8.1] — 2026-08-27
 
 ### Added

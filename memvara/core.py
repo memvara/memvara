@@ -617,10 +617,71 @@ class Memvara:
     #: end up passing both and meaning different things.
     _SCOPE_ALIASES = {"user_id": "user", "agent_id": "agent", "run_id": "session"}
 
+    #: Constructor arguments that name a local engine's subsystems, every one of them
+    #: defaulting to `None` so that "given" and "not given" can be told apart. They are
+    #: meaningless against a hosted deployment, where extraction, embedding and the
+    #: predicate vocabulary all run server-side — so they are refused rather than accepted
+    #: and ignored, which is the same trade the `path=`/`store=` guard below makes.
+    #: `reembed` belongs to the same family and is not in this tuple: its default is
+    #: `False`, so it is read by truth a few lines further down.
+    _LOCAL_ONLY = ("path", "store", "embedder", "llm", "registry")
+
+    def __new__(cls, path: str | None = None, *, api_key: str | None = None,
+                base_url: str | None = None, **kwargs: Any) -> "Memvara":
+        """Return a local engine, or a client for a hosted deployment.
+
+        **Dispatch keys on the explicit argument and never on the environment.** If a bare
+        `Memvara()` could turn remote because `MEMVARA_API_KEY` happens to be exported,
+        then a script that has always written to a local file would start posting to a
+        hosted store on any machine where somebody ran `memvara-mcp login`. The
+        environment supplies the *value*, once the caller has asked for remote; see
+        `Memvara.connect` for the ambient-credential door.
+
+        Returning an object that is not an instance of `cls` means Python does not call
+        `__init__`, which is what keeps a half-built local engine from existing here.
+        """
+        if api_key is None and base_url is None:
+            return super().__new__(cls)
+        named = [n for n in cls._LOCAL_ONLY
+                 if kwargs.get(n) is not None or (n == "path" and path is not None)]
+        # Read by truth, and dropped when false. `reembed=False` is the default every
+        # caller who never mentions it already passes, so refusing it would make
+        # `Memvara(api_key=..., reembed=False)` an error that asked for nothing.
+        if kwargs.pop("reembed", False):
+            named.append("reembed")
+        if named:
+            raise TypeError(
+                f"{', '.join(named)} cannot be combined with api_key= or base_url=: a "
+                "hosted deployment runs extraction, embedding and the predicate "
+                "vocabulary itself, so these would be accepted and never used. Pass "
+                "either Memvara(path) or Memvara(api_key=...).")
+        from .remote.api import RemoteMemvara
+        # Typed `Any` on the way out, because `RemoteMemvara` is deliberately not a
+        # subclass of `Memvara` and this annotation stays `Memvara` deliberately too: a
+        # union return type would turn every existing `Memvara(path)` call site into a
+        # union the caller then has to narrow.
+        client: Any = RemoteMemvara(api_key=api_key, base_url=base_url, **kwargs)
+        return client
+
+    @classmethod
+    def connect(cls, *, api_key: str | None = None, base_url: str | None = None,
+                **kwargs: Any) -> Any:
+        """A client for a hosted deployment, using whatever credentials are available.
+
+        The door for the case `memvara-mcp login` sets up: it reads `MEMVARA_API_KEY` and
+        then `~/.memvara/credentials.json`. `Memvara(api_key=...)` is the same thing with
+        the key named explicitly; this exists so that the post-login path has a supported
+        spelling rather than sending people to the private resolver.
+        """
+        from .remote.api import RemoteMemvara
+        return RemoteMemvara(api_key=api_key, base_url=base_url, **kwargs)
+
     def __init__(
         self,
         path: str | None = None,
         *,
+        api_key: str | None = None,
+        base_url: str | None = None,
         store: Store | None = None,
         embedder: Embedder | None = None,
         llm: LLM | None = None,
@@ -634,6 +695,14 @@ class Memvara:
         reembed: bool = False,
         **tuning: Any,
     ) -> None:
+        # Present so that a local construction that named them still binds. `__new__`
+        # returned an instance of this class, so Python calls `__init__` with the
+        # caller's original arguments — and `Memvara(":memory:", api_key=None)`, which is
+        # what a wrapper forwarding an optional key writes, would otherwise be a
+        # TypeError. Anything other than `None` here means `__new__` let a remote request
+        # fall through to the local engine.
+        assert api_key is None and base_url is None, (
+            "api_key= and base_url= are dispatched in __new__ and never reach __init__")
         if path is not None and store is not None:
             raise TypeError(
                 f"path={path!r} and store= are mutually exclusive: the store decides "

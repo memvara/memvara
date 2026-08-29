@@ -152,6 +152,29 @@ dependency, so the "numpy and nothing else" claim survives the server too.
 
 </td>
 </tr>
+<tr>
+<td colspan="2" valign="top">
+
+### ☁️ I want the hosted store from my own code
+
+```python
+from memvara import Memvara                  # pip install 'memvara[cloud]'
+
+mem = Memvara(api_key="mv_…", user="alice")  # or Memvara.connect(), after memvara-mcp login
+mem.remember("Alice", "lives_in", "Lisbon")
+```
+
+The same methods, served by the hosted `/v1` API instead of a local store, with every
+response hydrated back into the same dataclasses — a function that takes a `Memvara` and
+calls `search()` cannot tell which it was handed. A bare `Memvara()` never becomes remote:
+the dispatch reads the explicit `api_key=` or `base_url=` argument and never the
+environment, so a script that has always written to a local file cannot start posting to a
+hosted store because somebody ran `memvara-mcp login` on that machine.
+[`docs/API.md`](https://github.com/memvara/memvara/blob/main/docs/API.md#a-hosted-deployment)
+has the surface, including the two places it diverges from the local engine on purpose.
+
+</td>
+</tr>
 </table>
 
 ## Teach it your vocabulary
@@ -327,12 +350,14 @@ Memvara is built around the observation that **most of this doesn't need a model
   the shipped remote surface here. The REST API is a component of the commercial product
   rather than a gap in this one — see
   [Open core](https://github.com/memvara/memvara/blob/main/docs/OPEN-CORE.md), which says where that line is and
-  why it does not move. What this repository does ship is the *client* half,
-  `memvara/store/remote.py`, and it is partial on purpose: it implements what the REST
-  facade actually exposes and raises `NotImplementedError`, with a docstring, everywhere it
-  does not. A `put_claim` that quietly wrote through `POST /v1/facts` would reinterpret
-  every field the caller set, and a `competing_claims` returning `[]` for want of an
-  endpoint would tell every write path a slot was empty. Both are worse than an exception.
+  why it does not move. What this repository does ship is the *client* half, twice over.
+  `memvara/remote/` is the one an application calls: `Memvara(api_key=...)`, the library's
+  own API served by a deployment. `memvara/store/remote.py` is the low-level `Store` the
+  local engine calls, and it is partial on purpose: it implements what the REST facade
+  actually exposes and raises `NotImplementedError`, with a docstring, everywhere it does
+  not. A `put_claim` that quietly wrote through `POST /v1/facts` would reinterpret every
+  field the caller set, and a `competing_claims` returning `[]` for want of an endpoint
+  would tell every write path a slot was empty. Both are worse than an exception.
 - **The framework adapters do not all preserve what makes memvara different.** LangChain
   and LlamaIndex *retrievers* keep everything, including `as_of=`, because "query in,
   documents out" is what `search()` already is. A LangChain `ChatMessageHistory` keeps
