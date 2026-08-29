@@ -242,7 +242,7 @@ def test_consolidate_reaches_the_maintenance_endpoint_and_returns_a_job(recorded
     """A job rather than counts: the endpoint answers 202 before the pass starts, so the
     outcome is on the job and in no status code."""
     mem = recorded({"id": "job_1", "kind": "consolidate", "tenant": "t",
-                    "status": "queued", "created_at": "2026-01-01T00:00:00+00:00",
+                    "status": "queued", "created_at": "2026-01-01T00:00:00Z",
                     "started_at": None, "finished_at": None, "result": None,
                     "error": None, "links": {"self": "/v1/jobs/job_1"}})
     job = mem.consolidate()

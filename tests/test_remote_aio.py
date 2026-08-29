@@ -300,7 +300,7 @@ _READS = [
              "sources": [_episode()], "superseded": []},
      lambda m: m.why("cl_2"), "GET", "/v1/memories/cl_2/why",
      lambda prov: isinstance(prov, Provenance) and prov.claim.id == "cl_2"),
-    ("ask", {"question": "where did I live", "at": "2026-01-01T00:00:00+00:00",
+    ("ask", {"question": "where did I live", "at": "2026-01-01T00:00:00Z",
              "count": 1, "text": "Then and now agree.",
              "readings": [{"subject": "user", "predicate": "lives_in",
                            "now": [_memory()], "then": [_memory()],
@@ -308,7 +308,7 @@ _READS = [
      lambda m: m.ask("where did I live"), "POST", "/v1/ask",
      lambda answer: isinstance(answer, Answer)
      and answer.readings[0].predicate == "lives_in"),
-    ("since", {"since": "2026-01-01T00:00:00+00:00", "added": [_memory()], "gone": []},
+    ("since", {"since": "2026-01-01T00:00:00Z", "added": [_memory()], "gone": []},
      lambda m: m.since(datetime(2026, 1, 1, tzinfo=timezone.utc)), "GET", "/v1/since",
      lambda delta: isinstance(delta, Delta) and len(delta.added) == 1),
     ("produced", {"episode_id": "ep_1", "as_of": None, "valid_at": None,
@@ -679,7 +679,7 @@ def test_consolidate_reaches_the_maintenance_endpoint_and_returns_a_job(recorded
     """A job rather than counts: the endpoint answers 202 before the pass starts, so the
     outcome is on the job and in no status code."""
     mem = recorded({"id": "job_1", "kind": "consolidate", "tenant": "t",
-                    "status": "queued", "created_at": "2026-01-01T00:00:00+00:00",
+                    "status": "queued", "created_at": "2026-01-01T00:00:00Z",
                     "started_at": None, "finished_at": None, "result": None,
                     "error": None, "links": {"self": "/v1/jobs/job_1"}})
 

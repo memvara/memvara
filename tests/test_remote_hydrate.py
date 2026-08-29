@@ -260,3 +260,51 @@ def test_the_nullable_instants_beside_them_still_come_back_as_none():
     restored = hydrate.claim(_wire(Claim(subject="user", predicate="likes", object="tea")))
     assert restored.valid_to is None
     assert restored.invalidated_at is None
+
+
+class _StrictFromIsoformat(datetime):
+    """`datetime` with Python 3.10's `fromisoformat`, which rejects a trailing `Z`.
+
+    Standing in for the interpreter rather than for the wire, because the wire is already
+    real here — `render.memory()` genuinely emits `...Z`. What a 3.13 test run cannot
+    reproduce is the *parser* three versions back, and that is the half where the bug was.
+    """
+
+    @classmethod
+    def fromisoformat(cls, value: str) -> datetime:  # type: ignore[override]
+        if value.endswith(("Z", "z")):
+            raise ValueError(f"Invalid isoformat string: {value!r}")
+        return datetime.fromisoformat(value)
+
+
+def test_the_wire_still_hydrates_on_a_python_that_cannot_parse_a_z_suffix(monkeypatch):
+    """The `Z` the facade sends must not depend on the interpreter's version.
+
+    `datetime.fromisoformat` learned the `Z` suffix in 3.11, and `pyproject.toml` declares
+    `requires-python = ">=3.10"` while CI runs the matrix. Every instant `/v1` renders ends
+    in `Z`, so a client that hands the string straight to `fromisoformat` hydrates nothing
+    at all on 3.10 and everything on 3.13 — passing the suite on the version it was written
+    on and failing the one it claims to support.
+
+    Patching in a stricter parser is what gives this test teeth on any interpreter: without
+    the rewrite in `_dt`, it fails here on 3.13 too.
+    """
+    monkeypatch.setattr(hydrate, "datetime", _StrictFromIsoformat)
+    body = _wire(Claim(subject="user", predicate="lives_in", object="Berlin"))
+    assert body["transaction_time"]["recorded_at"].endswith("Z"), "the wire changed shape"
+
+    restored = hydrate.claim(body)
+
+    assert restored.recorded_at.tzinfo is not None
+    assert restored.valid_from.tzinfo is not None
+    assert restored.subject == "user"
+
+
+def test_a_z_suffix_and_an_explicit_offset_parse_to_the_same_instant():
+    """`Z` and `+00:00` are two spellings of one instant, and the rewrite must not shift
+    it. A conversion that dropped the zone instead would leave a naive datetime, which
+    compares against the store's aware ones by raising `TypeError` deep in retrieval."""
+    assert (hydrate._dt("2024-06-01T10:00:00Z")
+            == datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc))
+    assert hydrate._dt("2024-06-01T10:00:00Z") == hydrate._dt("2024-06-01T10:00:00+00:00")
+    assert hydrate._dt(None) is None

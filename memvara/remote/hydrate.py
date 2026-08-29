@@ -48,8 +48,24 @@ def _dt(value: Any) -> datetime | None:
     `null` is a value on these fields rather than a defect: `valid_to` is null on a claim
     the world has not moved past, `invalidated_at` on one nothing has retired,
     `last_observed` on one nothing has re-observed.
+
+    **The trailing `Z` is rewritten before parsing, and that is not cosmetic.**
+    `datetime.fromisoformat` did not accept a `Z` suffix before Python 3.11, and this
+    package supports 3.10 — `requires-python` says so and CI runs the version. The facade
+    sends the `Z` form for every instant it renders, so without this every claim, episode,
+    answer and delta would fail to hydrate on 3.10 while passing on 3.13, which is the
+    shape of bug a test run on one version cannot see.
+
+    `server/tools.py:_timestamp` makes the same conversion for the same reason, as do the
+    two importers in `compat/`. This is that rule applied where the wire meets the
+    dataclasses.
     """
-    return None if value is None else datetime.fromisoformat(str(value))
+    if value is None:
+        return None
+    text = str(value)
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    return datetime.fromisoformat(text)
 
 
 def _required_dt(field: str, value: Any) -> datetime:

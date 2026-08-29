@@ -11,6 +11,15 @@ which `tests/test_remote_hydrate.py` uses. That module is the authority on the w
 and is the right fixture for a round trip, but it is an optional dependency: it is absent
 here, so those tests skip. A skipped test for every row of the mapping table is not
 coverage of the mapping table.
+
+**Instants are spelled the way the facade spells them, with a trailing `Z`.** Writing a
+payload by hand means choosing its shape, and `+00:00` is the choice that hides a bug: the
+renderer emits `Z`, `datetime.fromisoformat` rejected `Z` before Python 3.11, and this
+package supports 3.10. A fixture in the friendlier spelling passes on every version while
+the client fails on the oldest one it claims — and the file that would have caught it, the
+round trip above, is exactly the file that skips here. Outbound expectations stay
+`+00:00`, because that is what `datetime.isoformat()` produces and what this client
+therefore sends.
 """
 import json
 from datetime import datetime, timezone
@@ -34,8 +43,8 @@ def _memory(id="cl_1", predicate="lives_in", obj="Berlin"):
         "id": id, "text": f"user {predicate} {obj}", "subject": "user",
         "predicate": predicate, "object": obj, "polarity": 1,
         "memory_type": "semantic", "scope": _scope(), "state": "live",
-        "valid_time": {"valid_from": "2026-01-01T00:00:00+00:00", "valid_to": None},
-        "transaction_time": {"recorded_at": "2026-01-01T00:00:00+00:00",
+        "valid_time": {"valid_from": "2026-01-01T00:00:00Z", "valid_to": None},
+        "transaction_time": {"recorded_at": "2026-01-01T00:00:00Z",
                              "invalidated_at": None, "invalidated_by": None},
         "confidence": 0.9, "salience": 1.0, "salience_base": None,
         "observation_count": 1, "last_observed": None, "derivation": "user",
@@ -46,7 +55,7 @@ def _memory(id="cl_1", predicate="lives_in", obj="Berlin"):
 
 
 def _episode(id="ep_1"):
-    return {"id": id, "role": "user", "ts": "2026-01-01T00:00:00+00:00",
+    return {"id": id, "role": "user", "ts": "2026-01-01T00:00:00Z",
             "content": "I live in Berlin", "scope": _scope(), "metadata": {}}
 
 
@@ -257,7 +266,7 @@ def test_why_returns_none_for_a_memory_that_is_not_visible_here(recorded):
 
 
 def test_ask_reaches_the_ask_endpoint_and_returns_an_answer(recorded):
-    mem = recorded({"question": "where did I live", "at": "2026-01-01T00:00:00+00:00",
+    mem = recorded({"question": "where did I live", "at": "2026-01-01T00:00:00Z",
                     "count": 1, "text": "Then and now agree.",
                     "readings": [{"subject": "user", "predicate": "lives_in",
                                   "now": [_memory()], "then": [_memory()],
@@ -271,7 +280,7 @@ def test_ask_reaches_the_ask_endpoint_and_returns_an_answer(recorded):
 def test_since_reaches_the_since_endpoint_and_returns_a_delta(recorded):
     from datetime import datetime, timezone
 
-    mem = recorded({"since": "2026-01-01T00:00:00+00:00", "added": [_memory()],
+    mem = recorded({"since": "2026-01-01T00:00:00Z", "added": [_memory()],
                     "gone": []})
     delta = mem.since(datetime(2026, 1, 1, tzinfo=timezone.utc))
     assert recorded.calls[-1].url.path == "/v1/since"
@@ -426,7 +435,7 @@ def test_a_measured_salience_and_a_last_observation_come_back_on_the_claim(recor
     datetime. Dropping either turns a decayed claim back into a fresh one."""
     body = _memory()
     body["salience_base"] = 0.6
-    body["last_observed"] = "2026-02-01T00:00:00+00:00"
+    body["last_observed"] = "2026-02-01T00:00:00Z"
     mem = recorded(body)
     claim = mem.get("cl_1")
     assert claim.salience_base == 0.6
@@ -458,3 +467,34 @@ def test_a_null_where_the_schema_says_an_instant_raises_here(recorded):
     mem = recorded(body)
     with pytest.raises(ValueError, match="valid_from"):
         mem.get("cl_1")
+
+
+class _StrictFromIsoformat(datetime):
+    """`datetime` with Python 3.10's `fromisoformat`, which rejects a trailing `Z`."""
+
+    @classmethod
+    def fromisoformat(cls, value: str) -> datetime:  # type: ignore[override]
+        if value.endswith(("Z", "z")):
+            raise ValueError(f"Invalid isoformat string: {value!r}")
+        return datetime.fromisoformat(value)
+
+
+def test_a_read_decodes_on_a_python_that_cannot_parse_a_z_suffix(recorded, monkeypatch):
+    """The oldest supported interpreter must decode what the newest one does.
+
+    The fixtures above already carry the `Z` the facade sends, so on Python 3.10 this test
+    would fail without the rewrite in `hydrate._dt`. Patching a stricter parser in makes it
+    fail on 3.13 too — otherwise the guard against a version-specific bug would itself be
+    version-specific, and a regression would sit green in every local run until CI reached
+    the 3.10 leg of the matrix.
+    """
+    from memvara.remote import hydrate
+
+    monkeypatch.setattr(hydrate, "datetime", _StrictFromIsoformat)
+    mem = recorded(_memory())
+
+    claim = mem.get("cl_1")
+
+    assert claim is not None
+    assert claim.recorded_at.tzinfo is not None
+    assert claim.valid_from.tzinfo is not None
