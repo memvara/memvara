@@ -118,3 +118,36 @@ def test_a_retry_after_that_is_not_a_number_is_dropped_rather_than_guessed():
                               "Wed, 21 Oct 2026 07:28:00 GMT")
     assert isinstance(err, RateLimited)
     assert err.retry_after is None
+
+
+@pytest.mark.parametrize("status", [502, 504])
+def test_a_gateway_failure_with_no_envelope_is_retryable(status):
+    """A gateway saying it could not reach the application is the same class of failure as
+    a connect error, which the transport already retries.
+
+    Neither carries an envelope, so before this the absent `retryable` read as `False` and
+    the call was raised on its first attempt — while the identical outage arriving as a
+    dropped connection was retried.
+    """
+    err = error_from_response(status, {}, None)
+    assert err.retryable is True
+    assert err.status_code == status
+
+
+def test_a_service_unavailable_is_not_guessed_at():
+    """503 is the one an application sends about itself, for a maintenance window and for
+    an exhausted quota alike — and retrying the second makes it worse. A deployment that
+    means it is retryable can say so in the envelope."""
+    assert error_from_response(503, {}, None).retryable is False
+
+
+def test_an_envelope_that_says_not_retryable_wins_over_the_status():
+    """The status is a fallback for silence, never an override. A server that says a 502
+    is not worth retrying is answering about itself, and knows."""
+    body = {"error": {"code": "internal", "message": "no", "retryable": False}}
+    assert error_from_response(502, body, None).retryable is False
+
+
+def test_an_envelope_that_says_retryable_wins_for_a_status_not_in_the_table():
+    body = {"error": {"code": "internal", "message": "deadlock", "retryable": True}}
+    assert error_from_response(503, body, None).retryable is True

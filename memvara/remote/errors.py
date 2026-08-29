@@ -92,6 +92,26 @@ _BY_STATUS: dict[int, str] = {
     429: "rate_limited",
 }
 
+#: Statuses that are retryable when the envelope does not say. A separate table from
+#: `_BY_STATUS` because these are two different questions: that one asks *what went
+#: wrong*, this one asks *whether trying again could help*, and a status can be
+#: unambiguous about the second while saying little about the first.
+#:
+#: A gateway answering 502 or 504 is reporting that it could not get an answer from the
+#: application — the request either never arrived or produced nothing, which puts it in
+#: the same class as the connect-phase failures the transport already retries. Both carry
+#: no envelope, so without this they fall to `retryable` absent, read as `False`, and are
+#: raised on the first attempt.
+#:
+#: **503 is deliberately absent.** It is the one an application sends about itself, and it
+#: is used for a maintenance window and for an exhausted quota alike — the second of which
+#: retrying makes worse. A facade that means it is retryable can say so in the envelope,
+#: and this module does not guess where the status genuinely carries more than one meaning.
+#:
+#: An explicit `retryable` in the envelope always wins, in either direction: a server that
+#: says a 502 is not worth retrying is answering about itself, and knows.
+_RETRYABLE_WHEN_UNSTATED: frozenset[int] = frozenset({502, 504})
+
 #: code -> class. Codes absent here raise `RemoteError`, deliberately.
 _BY_CODE: dict[str, type[RemoteError]] = {
     "unauthorized": AuthError,
@@ -152,4 +172,6 @@ def error_from_response(status_code: int, body: Any,
         return RateLimited(status_code, code, message,
                            bool(stated) if stated is not None else True,
                            _retry_after(retry_after))
-    return cls(status_code, code, message, bool(stated))
+    retryable = (bool(stated) if stated is not None
+                 else status_code in _RETRYABLE_WHEN_UNSTATED)
+    return cls(status_code, code, message, retryable)

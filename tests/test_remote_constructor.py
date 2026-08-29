@@ -13,7 +13,9 @@ import warnings
 import pytest
 
 import memvara.core
-from memvara import DegradedExtractionWarning, HashingEmbedder, Memvara, NullLLM
+from memvara import (
+    DegradedExtractionWarning, HashingEmbedder, Memvara, NullLLM, PatternRedactor,
+)
 from memvara.remote.api import RemoteMemvara
 
 
@@ -159,3 +161,32 @@ def test_reaching_init_with_a_credential_refuses_rather_than_opening_a_local_sto
         Memvara.__init__(orphan, api_key="k")
     with pytest.raises(TypeError, match="__new__"):
         Memvara.__init__(orphan, base_url="https://example.test")
+
+
+@pytest.mark.parametrize("name, value", [
+    ("telemetry", object()),
+    ("write_batch", 8),
+    ("read_k", 5),
+    ("graph_depth", 2),
+])
+def test_options_for_a_server_side_subsystem_are_named_in_the_refusal(name, value):
+    """The guard's whole job is the sentence, not the exception type.
+
+    These reached `RemoteMemvara.__init__` and died there with `unexpected keyword
+    argument` — an error naming a class the caller never mentioned, which says the
+    argument is unknown when what is true is that it configures extraction, retrieval or
+    traversal, every one of which runs on the other side of the wire.
+    """
+    with pytest.raises(TypeError) as caught:
+        Memvara(api_key="k", base_url="https://example.test", **{name: value})
+    assert name in str(caught.value)
+    assert "hosted deployment" in str(caught.value)
+
+
+def test_a_redactor_is_still_accepted_alongside_credentials():
+    """`redactor` is not a server-side subsystem and must not be swept up with them. It
+    rewrites text before anything leaves this process, which is the one privacy control
+    that matters more against a hosted deployment than against a local file."""
+    mem = Memvara(api_key="k", base_url="https://example.test",
+                  redactor=PatternRedactor())
+    assert mem.redactor is not None

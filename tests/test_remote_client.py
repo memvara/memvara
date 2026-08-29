@@ -527,3 +527,36 @@ def test_async_the_client_says_which_extra_installs_httpx(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", no_httpx)
     with pytest.raises(ImportError, match=r"memvara\[cloud\]"):
         AsyncHttpClient("k", "https://example.test")
+
+
+def test_a_bare_gateway_error_is_retried_and_then_succeeds():
+    """The classification in `errors.py` only matters if the loop acts on it.
+
+    A gateway restarting a worker answers 502 with an HTML page and no envelope. That
+    request never reached the application, so the next attempt lands on a healthy worker —
+    the same reasoning that already retries a dropped connection.
+    """
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) < 3:
+            return httpx.Response(502, text="<html>bad gateway</html>")
+        return httpx.Response(200, json={"ok": True})
+
+    assert _client(handler).request("GET", "/v1/stats") == {"ok": True}
+    assert len(calls) == 3
+
+
+def test_a_service_unavailable_is_not_retried_without_the_server_saying_so():
+    """503 carries more than one meaning — a maintenance window and an exhausted quota
+    read the same on the wire, and retrying the second makes it worse."""
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(503, text="<html>unavailable</html>")
+
+    with pytest.raises(ServerError):
+        _client(handler).request("GET", "/v1/stats")
+    assert len(calls) == 1

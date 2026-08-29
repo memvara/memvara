@@ -624,7 +624,18 @@ class Memvara:
     #: and ignored, which is the same trade the `path=`/`store=` guard below makes.
     #: `reembed` belongs to the same family and is not in this tuple: its default is
     #: `False`, so it is read by truth a few lines further down.
-    _LOCAL_ONLY = ("path", "store", "embedder", "llm", "registry")
+    #:
+    #: `redactor` is deliberately absent and stays accepted. It rewrites text on the way
+    #: out, before anything leaves this process, which is the one privacy control that
+    #: matters *more* against a hosted deployment than against a local file.
+    _LOCAL_ONLY = ("path", "store", "embedder", "llm", "registry", "telemetry")
+
+    #: The prefixes `_split_tuning` routes to the write, read and graph subsystems. Every
+    #: one of those subsystems runs server-side against a hosted deployment, so the
+    #: options that configure them have nothing here to configure. Matched by prefix
+    #: because the set is open — `write_nearduplicate`, `read_k`, `graph_depth` and every
+    #: option those three constructors grow later.
+    _TUNING_PREFIXES = ("write_", "read_", "graph_")
 
     def __new__(cls, path: str | None = None, *, api_key: str | None = None,
                 base_url: str | None = None, **kwargs: Any) -> "Memvara":
@@ -649,6 +660,12 @@ class Memvara:
         # `Memvara(api_key=..., reembed=False)` an error that asked for nothing.
         if kwargs.pop("reembed", False):
             named.append("reembed")
+        # Prefix rather than name, and sorted so two of them read the same way twice.
+        # Without this the caller still gets a `TypeError`, but from
+        # `RemoteMemvara.__init__` naming a class they never mentioned — which says the
+        # argument is unknown when what is true is that it configures a subsystem running
+        # on the other side of the wire.
+        named += sorted(n for n in kwargs if n.startswith(cls._TUNING_PREFIXES))
         if named:
             raise TypeError(
                 f"{', '.join(named)} cannot be combined with api_key= or base_url=: a "
