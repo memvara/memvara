@@ -9,6 +9,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-08-30
+
 ### Added
 
 - **`Memvara(api_key=...)` returns a client for a hosted deployment.** `RemoteMemvara`
