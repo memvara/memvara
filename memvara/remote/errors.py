@@ -4,6 +4,12 @@ The envelope already carries the classification — a `code` naming what went wr
 where the server can tell, whether retrying could help. This module turns that into types
 a caller can branch on and adds nothing of its own.
 
+**A response with no envelope is classified from its status, for the two statuses that
+say enough on their own.** Not every failure comes from the facade: an edge proxy answers
+429 with an HTML page, and a gateway answers 401 the same way. `_BY_STATUS` below is
+deliberately two entries long, because a status that could mean several codes is one this
+module must not guess at.
+
 **An unrecognised code raises `RemoteError` itself.** Coercing it into the nearest known
 class would have a caller handle a failure they have never seen as one they have, and the
 whole reason for a code is that the server is the thing that knows.
@@ -71,6 +77,21 @@ class ServerError(RemoteError):
     """The deployment failed. Retryable only when it says so."""
 
 
+#: status -> the code the facade would have sent, for a response that carried no envelope.
+#: Only statuses whose meaning the status line already fixes are here, because a guess is
+#: worse than the generic fallback: a 403 could be `forbidden_scope`, `forbidden_privilege`,
+#: `legal_hold` or `read_only`, and a 404 read as `not_found` would turn a misdirected
+#: `base_url` into `get()` quietly returning None instead of raising.
+#:
+#: 429 is the one that had to be here. An edge proxy rate-limits before the request ever
+#: reaches the facade, so its response carries an HTML page and no envelope — and without
+#: this the generic fallback made it an `InvalidRequest(retryable=False)`, which the
+#: transport does not retry and which discards `Retry-After`.
+_BY_STATUS: dict[int, str] = {
+    401: "unauthorized",
+    429: "rate_limited",
+}
+
 #: code -> class. Codes absent here raise `RemoteError`, deliberately.
 _BY_CODE: dict[str, type[RemoteError]] = {
     "unauthorized": AuthError,
@@ -108,10 +129,22 @@ def error_from_response(status_code: int, body: Any,
     `body` is whatever decoded, including `{}` for a response that carried no envelope —
     a proxy 502, say. That case must still produce an error rather than a KeyError, which
     is why nothing here indexes into the payload.
+
+    **With no envelope the status decides the code, where the status is unambiguous.** The
+    envelope is still preferred whenever there is one; `_BY_STATUS` above says which
+    statuses stand on their own and why the list is short. Falling straight through to
+    `bad_request` classified an edge proxy's 429 as a non-retryable `InvalidRequest` and
+    dropped its `Retry-After` — the failure the client's retry rule exists for.
+
+    >>> err = error_from_response(429, {}, "12")
+    >>> type(err).__name__, err.retryable, err.retry_after
+    ('RateLimited', True, 12.0)
     """
     envelope = body.get("error") if isinstance(body, dict) else None
     envelope = envelope if isinstance(envelope, dict) else {}
-    code = str(envelope.get("code") or ("internal" if status_code >= 500 else "bad_request"))
+    default = _BY_STATUS.get(status_code,
+                             "internal" if status_code >= 500 else "bad_request")
+    code = str(envelope.get("code") or default)
     message = str(envelope.get("message") or "no message")
     stated = envelope.get("retryable")
     cls = _BY_CODE.get(code, RemoteError)

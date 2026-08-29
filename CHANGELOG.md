@@ -35,6 +35,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `path=`, `store=`, `embedder=`, `llm=`, `registry=` and `reembed=True` all describe an
   engine that runs server-side.
 
+  **Three attempts per call, and the wait between them is bounded.** A call is retried on
+  an error the deployment marked retryable, on a 429 — including one an edge proxy returned
+  with no envelope, which is classified from the status rather than falling through to
+  `InvalidRequest` — and on a connect-phase failure that never reached the server. A
+  `Retry-After` is waited for as asked up to thirty seconds; a longer one raises
+  `RateLimited` immediately, carrying the server's own number on `retry_after`, instead of
+  blocking the call — or, on `AsyncRemoteMemvara`, the event loop — for as long as the
+  header says. Whether an hour is an acceptable wait is the caller's decision to make.
+
 - **`AsyncRemoteMemvara`: the hosted client, awaited, on a real async transport.**
   Importable as `from memvara import AsyncRemoteMemvara`, same as `RemoteMemvara`. Every
   method on `RemoteMemvara` has an `async def` twin of the same name taking the same

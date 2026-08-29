@@ -23,7 +23,7 @@ import httpx
 import pytest
 
 from memvara.remote.client import AsyncHttpClient, HttpClient
-from memvara.remote.errors import AuthError, RateLimited, ServerError
+from memvara.remote.errors import AuthError, RateLimited, RemoteError, ServerError
 
 
 def _client(handler, **kw):
@@ -179,6 +179,96 @@ def test_an_empty_response_body_is_none_rather_than_a_decode_error():
         return httpx.Response(204)
 
     assert _client(handler).request("DELETE", "/v1/facts/1") is None
+
+
+# -- what the server asks us to wait, and the ceiling on it --------------------------
+#
+# `Retry-After` is a number the server chooses and this client has no say in. Obeying it
+# without a ceiling made `_delay` return whatever arrived: `Retry-After: 3600` blocked the
+# calling thread for an hour, twice, inside a client that abandons any single request after
+# thirty seconds — and on `AsyncHttpClient` it blocked an event loop for the same two hours.
+
+
+def _recording_client(handler, **kw):
+    """`_client`, but the sleeps are kept instead of discarded.
+
+    Every test above passes `sleep=lambda _: None` and asserts on request counts, which
+    says nothing about how long the client would have waited. These four are about exactly
+    that number, so it has to be observable.
+    """
+    slept = []
+    c = HttpClient("k", "https://example.test", sleep=slept.append, **kw)
+    c._client._transport = httpx.MockTransport(handler)
+    return c, slept
+
+
+def test_a_stated_retry_after_is_waited_rather_than_the_backoff():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) < 2:
+            return httpx.Response(429, json={"error": {"code": "rate_limited",
+                                                       "message": "slow down"}},
+                                  headers={"Retry-After": "5"})
+        return httpx.Response(200, json={"ok": True})
+
+    client, slept = _recording_client(handler)
+    assert client.request("GET", "/v1/stats") == {"ok": True}
+    assert slept == [5.0]
+
+
+def test_a_retry_after_beyond_the_ceiling_raises_instead_of_waiting_it_out():
+    """An hour is a legitimate thing for a rate limiter to say and an illegitimate thing
+    for this client to do. The instruction is not lost — it comes back on the exception,
+    where a caller who can afford to wait an hour is the one who decides to."""
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(429, json={"error": {"code": "rate_limited",
+                                                   "message": "slow down"}},
+                              headers={"Retry-After": "3600"})
+
+    client, slept = _recording_client(handler)
+    with pytest.raises(RateLimited) as caught:
+        client.request("GET", "/v1/stats")
+    assert caught.value.retry_after == 3600.0
+    assert slept == []
+    assert len(calls) == 1
+
+
+def test_a_proxy_429_carrying_no_envelope_is_still_retried():
+    """The rate limit that never reached the facade: an edge proxy answers with an HTML
+    page, so there is no `code` to read and the status is the only classification there
+    is. Without it this response decoded as a non-retryable `InvalidRequest`, and the
+    retry the docstring promises on 429 did not happen."""
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) < 2:
+            return httpx.Response(429, text="<html>too many requests</html>",
+                                  headers={"Retry-After": "0"})
+        return httpx.Response(200, json={"ok": True})
+
+    client, _ = _recording_client(handler)
+    assert client.request("GET", "/v1/stats") == {"ok": True}
+    assert len(calls) == 2
+
+
+def test_a_transport_failure_that_outlives_every_attempt_is_named_as_one():
+    """`httpx.ConnectError` is not a `RemoteError`, and letting it out would make the
+    deployment being unreachable a different exception type from every other failure this
+    client raises."""
+    def handler(request):
+        raise httpx.ConnectError("refused", request=request)
+
+    client, _ = _recording_client(handler, attempts=2)
+    with pytest.raises(RemoteError) as caught:
+        client.request("GET", "/v1/stats")
+    assert caught.value.code == "transport"
+    assert "refused" in caught.value.message
 
 
 # -- the same rules, on AsyncHttpClient --------------------------------------------
@@ -350,3 +440,90 @@ def test_async_an_empty_response_body_is_none_rather_than_a_decode_error():
         return httpx.Response(204)
 
     assert run(_aclient(handler).request("DELETE", "/v1/facts/1")) is None
+
+
+def _recording_aclient(handler, **kw):
+    slept = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+
+    c = AsyncHttpClient("k", "https://example.test", sleep=sleep, **kw)
+    c._client._transport = httpx.MockTransport(handler)
+    return c, slept
+
+
+def test_async_a_stated_retry_after_is_waited_rather_than_the_backoff():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) < 2:
+            return httpx.Response(429, json={"error": {"code": "rate_limited",
+                                                       "message": "slow down"}},
+                                  headers={"Retry-After": "5"})
+        return httpx.Response(200, json={"ok": True})
+
+    client, slept = _recording_aclient(handler)
+    assert run(client.request("GET", "/v1/stats")) == {"ok": True}
+    assert slept == [5.0]
+
+
+def test_async_a_retry_after_beyond_the_ceiling_raises_instead_of_waiting_it_out():
+    """The same ceiling, and the reason is sharper on this side: `await asyncio.sleep(3600)`
+    does not block a thread, it holds this call open for an hour while whatever awaits it
+    waits too."""
+    def handler(request):
+        return httpx.Response(429, json={"error": {"code": "rate_limited",
+                                                   "message": "slow down"}},
+                              headers={"Retry-After": "3600"})
+
+    client, slept = _recording_aclient(handler)
+    with pytest.raises(RateLimited) as caught:
+        run(client.request("GET", "/v1/stats"))
+    assert caught.value.retry_after == 3600.0
+    assert slept == []
+
+
+def test_async_a_proxy_429_carrying_no_envelope_is_still_retried():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) < 2:
+            return httpx.Response(429, text="<html>too many requests</html>",
+                                  headers={"Retry-After": "0"})
+        return httpx.Response(200, json={"ok": True})
+
+    client, _ = _recording_aclient(handler)
+    assert run(client.request("GET", "/v1/stats")) == {"ok": True}
+    assert len(calls) == 2
+
+
+def test_async_a_transport_failure_that_outlives_every_attempt_is_named_as_one():
+    def handler(request):
+        raise httpx.ConnectError("refused", request=request)
+
+    client, _ = _recording_aclient(handler, attempts=2)
+    with pytest.raises(RemoteError) as caught:
+        run(client.request("GET", "/v1/stats"))
+    assert caught.value.code == "transport"
+
+
+def test_async_the_client_says_which_extra_installs_httpx(monkeypatch):
+    """`HttpClient`'s twin of this is reached through `memvara-mcp` starting in cloud mode
+    (`tests/test_remote_cloud_mode.py`). Nothing starts an async client that way, so the
+    import guard on this side has no such path and needs its own proof — an `AsyncClient`
+    built without one would raise `NameError: httpx` from the middle of `__init__`."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_httpx(name, *a, **kw):
+        if name == "httpx":
+            raise ImportError("no module named httpx")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_httpx)
+    with pytest.raises(ImportError, match=r"memvara\[cloud\]"):
+        AsyncHttpClient("k", "https://example.test")

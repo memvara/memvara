@@ -55,6 +55,14 @@ DEFAULT_ATTEMPTS = 3
 DEFAULT_TIMEOUT = 30.0
 #: Base for exponential backoff, in seconds, before jitter.
 _BACKOFF = 0.25
+#: Seconds. The longest this client will wait on a server-supplied `Retry-After` before it
+#: stops waiting and raises instead. Set to the default timeout, because a client that will
+#: abandon a whole request after 30 seconds has no business blocking for an hour between
+#: two of them: a rate limiter is entitled to say "come back in an hour", and the honest
+#: way to pass that on is the `RateLimited` exception carrying `retry_after`, which the
+#: caller can act on. Sleeping it would be a two-hour hang on a 30-second client, and on
+#: `AsyncHttpClient` it would be that hang inside an event loop.
+MAX_RETRY_AFTER = DEFAULT_TIMEOUT
 
 
 def install_hint() -> str:
@@ -104,6 +112,13 @@ class HttpClient:
         `write=True` attaches an `Idempotency-Key` that is held constant across this
         call's own retries; callers pass `write=True` for every route that mutates.
         A non-retryable error, or the last error once attempts are exhausted, is raised.
+
+        The 429 case holds for a rate limit the facade classified *and* for one an edge
+        proxy returned with no envelope at all — `errors._BY_STATUS` is what makes the
+        second one a `RateLimited` rather than an `InvalidRequest`. What the server asked
+        to wait is waited, up to `MAX_RETRY_AFTER`; a longer `Retry-After` raises the
+        `RateLimited` immediately rather than blocking on it, with the server's own number
+        on the exception.
         """
         import httpx
 
@@ -206,14 +221,28 @@ def _outcome(response: Any) -> tuple[Any, RemoteError | None]:
 
 
 def _delay(attempt: int, last: Exception | None) -> float:
-    """Exponential backoff with jitter, or what the server asked for.
+    """Exponential backoff with jitter, or what the server asked for, up to a ceiling.
 
     Jitter is not decoration: without it every client that failed against one
     deployment retries in the same millisecond and reproduces the load that caused it.
+
+    **A `Retry-After` above `MAX_RETRY_AFTER` raises `last` instead of being slept on.**
+    The header is a number the server chose and this client has no say in — `Retry-After:
+    3600` is a legitimate answer from a rate limiter, and obeying it here would block the
+    calling thread for an hour, twice, inside a client documented to give up on any one
+    request after thirty seconds. Raising hands the caller the same instruction in a form
+    they can act on: `RateLimited.retry_after` still carries the server's number, so a
+    caller who genuinely wants to wait an hour can, deliberately, at a level that knows
+    whether an hour is acceptable. Both clients call this from inside their attempt loop,
+    so the raise leaves `request()` with the server's own error rather than a timeout.
     """
-    stated = getattr(last, "retry_after", None)
-    if stated is not None:
-        return float(stated)
+    if last is not None:
+        stated = getattr(last, "retry_after", None)
+        if stated is not None:
+            wait = float(stated)
+            if wait > MAX_RETRY_AFTER:
+                raise last
+            return wait
     return _BACKOFF * (2 ** attempt) * (0.5 + random.random())
 
 

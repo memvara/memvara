@@ -58,3 +58,63 @@ def test_a_body_that_is_not_an_envelope_still_produces_an_error():
     err = error_from_response(502, {}, None)
     assert isinstance(err, ServerError)
     assert err.status_code == 502
+
+
+# --- no envelope at all: what the status alone is allowed to say --------------
+#
+# Not every failure comes from the facade. An edge proxy rate-limits before the request
+# reaches it and answers with an HTML page; a gateway does the same for an expired
+# credential. Classifying those from the body alone made every one of them a
+# `bad_request`, so a 429 arrived as a non-retryable `InvalidRequest` with its
+# `Retry-After` discarded — while `HttpClient.request` documented itself as retrying on
+# 429. The three tests below pin the two statuses that now decide their own code, and the
+# fourth pins the fact that the list stops there.
+
+
+def test_a_proxy_429_with_no_envelope_is_a_retryable_rate_limit():
+    """The case that made this necessary: nothing in the body, everything in the status.
+
+    All three assertions matter and each fails on its own. The class is what a caller
+    branches on, `retryable` is what the transport's loop reads, and `retry_after` is the
+    number that decides how long it waits — dropping any one of them turns a rate limit
+    into a hard failure somewhere further down.
+    """
+    err = error_from_response(429, {}, "3600")
+    assert isinstance(err, RateLimited)
+    assert err.retryable is True
+    assert err.retry_after == 3600.0
+
+
+def test_a_gateway_401_with_no_envelope_is_an_auth_error():
+    err = error_from_response(401, {}, None)
+    assert isinstance(err, AuthError)
+    assert err.retryable is False
+
+
+def test_an_envelope_still_outranks_the_status_it_arrived_with():
+    """The status is a fallback, not an override. A facade that answers 429 with
+    `quota_exhausted` is saying waiting will not help, and that is the answer to keep."""
+    err = error_from_response(429, _envelope("quota_exhausted"), "3600")
+    assert isinstance(err, QuotaExhausted)
+    assert err.retryable is False
+
+
+@pytest.mark.parametrize("status", [403, 404, 409])
+def test_an_ambiguous_status_is_not_guessed_at(status):
+    """Deliberately short. A 403 is `forbidden_scope`, `forbidden_privilege`, `legal_hold`
+    or `read_only` depending on what the facade meant, and a 404 read as `not_found` would
+    make `get()` return None for a base url pointing at the wrong host — an empty answer
+    where the caller needed an error. Unless the status settles the code, it does not
+    supply one.
+    """
+    assert type(error_from_response(status, {}, None)) is InvalidRequest
+
+
+def test_a_retry_after_that_is_not_a_number_is_dropped_rather_than_guessed():
+    """`Retry-After` also has a date form, which this does not parse: the facade sends the
+    delta form, and reading `Wed, 21 Oct 2026 07:28:00 GMT` as anything numeric would
+    produce a wrong sleep instead of no sleep."""
+    err = error_from_response(429, _envelope("rate_limited"),
+                              "Wed, 21 Oct 2026 07:28:00 GMT")
+    assert isinstance(err, RateLimited)
+    assert err.retry_after is None

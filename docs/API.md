@@ -258,6 +258,14 @@ as the exception types in `memvara.remote.errors` — `AuthError`, `ScopeError`,
 `ServerError`, all `RemoteError` — and writes carry an `Idempotency-Key` that is held
 constant across their own retries.
 
+Three attempts per call. A call is retried on an error the deployment marked retryable, on
+a 429 — including one an edge proxy returned with no envelope, which is classified from the
+status — and on a connect-phase failure that never reached the server. A `Retry-After` is
+waited for as asked, up to thirty seconds; a longer one raises `RateLimited` straight away
+with the server's own number on `retry_after`, rather than blocking the call (or the event
+loop) for as long as the header says. Waiting an hour is a decision for the caller, who
+knows whether an hour is acceptable.
+
 **`memvara.remote.aio.AsyncRemoteMemvara` is the same client, awaited.**
 
 ```python
