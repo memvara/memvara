@@ -110,17 +110,34 @@ def test_the_tenant_is_never_sent_because_the_token_decides_it(recorded):
     assert "tenant" not in dict(recorded.calls[-1].url.params)
 
 
-def test_the_constructor_makes_no_request():
+def test_the_constructor_makes_no_request(monkeypatch):
     """Building a client resolves a credential and opens a pool. Nothing else.
 
     Same rule `Memvara.__init__` follows for `llm=`: a constructor that dialled out would
     spend money, or fail, as a side effect of naming a deployment.
+
+    The observation is armed **before** the constructor runs, which is the only ordering
+    that can catch anything. An earlier version of this test installed a recording
+    transport onto the client the constructor had already returned, so the list it
+    asserted on was empty whatever the constructor did — a constructor that issued a
+    request would have failed only incidentally, on DNS for `example.test`, and would
+    have passed green behind a wildcard resolver or a corporate proxy.
+
+    `httpx.Client.send` is the chokepoint every request goes through whatever transport
+    is installed, so patching it catches a request the constructor made through a client
+    this test never gets a handle on.
     """
-    calls = []
-    mem = RemoteMemvara(api_key="k", base_url="https://example.test")
-    mem._http._client._transport = httpx.MockTransport(
-        lambda r: calls.append(r) or httpx.Response(200, json={}))
-    assert calls == []
+    attempts = []
+
+    def refuse(self, request, **kw):
+        attempts.append(request)
+        raise AssertionError(
+            f"the constructor issued {request.method} {request.url}; it must open a "
+            "pool and stop")
+
+    monkeypatch.setattr(httpx.Client, "send", refuse)
+    RemoteMemvara(api_key="k", base_url="https://example.test")
+    assert attempts == []
 
 
 # --- one per mapping-table row ------------------------------------------------
@@ -190,8 +207,10 @@ def test_get_all_reaches_the_listing_endpoint_and_returns_claims(recorded):
     mem = recorded({"count": 1, "total": 1, "limit": 100, "offset": 0, "as_of": None,
                     "valid_at": None, "known_at": None, "states": ["live"],
                     "memories": [_memory()]})
-    claims = mem.get_all()
+    claims = mem.get_all(limit=25, offset=50)
+    params = dict(recorded.calls[-1].url.params)
     assert recorded.calls[-1].url.path == "/v1/memories"
+    assert params["limit"] == "25" and params["offset"] == "50"
     assert isinstance(claims[0], Claim)
 
 
@@ -287,7 +306,9 @@ def test_paths_between_reaches_the_paths_endpoint_and_returns_paths(recorded):
                                "edges": [{"memory": _memory(), "backward": False,
                                           "strength": 0.5}]}]})
     paths = mem.paths_between("alice", "berlin")
+    params = dict(recorded.calls[-1].url.params)
     assert recorded.calls[-1].url.path == "/v1/paths"
+    assert params["source"] == "alice" and params["target"] == "berlin"
     assert isinstance(paths[0], Path)
 
 

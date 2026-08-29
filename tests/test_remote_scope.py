@@ -10,12 +10,15 @@ to name one. A test that merely checked the right scope came out of the right ca
 pass for a class that also accepted `user=`.
 """
 import inspect
+import json
 
 import httpx
 import pytest
 
 from memvara.remote.api import RemoteMemvara, ScopedRemoteMemvara
 from memvara.types import Scope
+
+from test_remote_writes import _receipt
 
 SCOPE_ARGUMENTS = {"tenant", "user", "agent", "session"}
 
@@ -51,21 +54,76 @@ def test_no_scoped_method_accepts_a_scope_argument(name):
     assert not SCOPE_ARGUMENTS & set(params)
 
 
-def test_no_public_member_at_all_accepts_a_scope_argument():
-    """The parametrized list above is a list somebody maintains. This is the same check
-    derived from the class, so a method added later cannot slip past by not being on it.
-    """
-    offenders = {}
+def _public_methods():
+    """Every public callable on the class, so these checks are derived from what is
+    there rather than from a list somebody maintains."""
     for name in dir(ScopedRemoteMemvara):
         if name.startswith("_"):
             continue
         member = inspect.getattr_static(ScopedRemoteMemvara, name)
-        if not callable(member):
-            continue
-        found = SCOPE_ARGUMENTS & set(inspect.signature(member).parameters)
-        if found:
-            offenders[name] = sorted(found)
+        if callable(member):
+            yield name, inspect.signature(member)
+
+
+def test_no_public_member_at_all_declares_a_scope_parameter():
+    """The parametrized list above is a list somebody maintains. This is the same check
+    derived from the class, so a method added later cannot slip past by not being on it.
+
+    It reads parameter *names*, so it says nothing about a method that declares
+    `**kwargs`: a scope name passed through one is invisible here. The two methods that
+    do are pinned and then checked by calling, below.
+    """
+    offenders = {name: sorted(SCOPE_ARGUMENTS & set(sig.parameters))
+                 for name, sig in _public_methods()
+                 if SCOPE_ARGUMENTS & set(sig.parameters)}
     assert offenders == {}
+
+
+def test_only_the_two_metadata_writers_take_kwargs_at_all():
+    """`remember` and `supersede` forward `**kw`, as `ScopedMemvara` does, because a
+    fact's metadata is caller-defined and cannot be enumerated. Every other method spells
+    its parameters out.
+
+    Pinned rather than merely allowed. A third forwarder appearing here fails this test
+    and has to be justified, which is the point: the name-based guard above is blind to
+    exactly this construct, so the set of methods it is blind to must not grow quietly.
+    """
+    with_kwargs = {name for name, sig in _public_methods()
+                   if any(p.kind is inspect.Parameter.VAR_KEYWORD
+                          for p in sig.parameters.values())}
+    assert with_kwargs == {"remember", "supersede"}
+
+
+@pytest.mark.parametrize("call", [
+    lambda m: m.remember("user", "likes", "tea",
+                         user="bob", agent="evil", session="s9"),
+    lambda m: m.supersede("cl_1", "user", "likes", "tea",
+                          user="bob", agent="evil", session="s9"),
+])
+def test_a_scope_name_passed_through_kwargs_never_reaches_the_query_string(call):
+    """What the name-based guard cannot see, checked by calling instead.
+
+    The invariant is structural and it is worth stating plainly: scope reaches the wire
+    only through `_params()`, which reads the bound `default_scope` and nothing else.
+    There is no path from a keyword argument to a scope query parameter, so a caller who
+    passes `user=` gets a metadata key called `user` — recorded as data on the fact,
+    which is honest — and the request still runs at the scope this view was bound to.
+    """
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json=_receipt())
+
+    mem = _client(user="alice")
+    mem._http._client._transport = httpx.MockTransport(handler)
+    call(mem.scope(agent="a1"))
+
+    params = dict(calls[-1].url.params)
+    assert params["user"] == "alice" and params["agent"] == "a1"
+    assert "session" not in params
+    body = json.loads(calls[-1].read())
+    assert body["metadata"] == {"user": "bob", "agent": "evil", "session": "s9"}
 
 
 def test_the_bound_scope_is_what_actually_reaches_the_wire():
