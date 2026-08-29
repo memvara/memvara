@@ -18,15 +18,22 @@ silence — the caller would get an unfiltered page with nothing saying the filt
 ignored. `budget` is the one exception and it is a refusal rather than an omission: it is
 in the signature so that `None` (what every current caller passes) works, and a value
 raises, because a budget silently ignored is an oversized prompt with no signal.
+
+Two write divergences that are real and documented rather than hidden. `consolidate()`
+returns a job handle rather than per-operation counts, because the endpoint answers 202
+before the pass starts. There is no `prove_erased()`, because `POST /v1/erasures` returns
+its per-table counts as evidence inside the erasure response itself.
 """
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Collection, Sequence
+from typing import Any, Collection, Mapping, Sequence
 
-from ..redact import Redactor
+from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import EpisodeResult, Path, Retrieved
-from ..types import Answer, Claim, Delta, MemoryType, Provenance, Scope
+from ..types import (
+    Answer, Claim, Delta, Episode, MemoryType, Provenance, Scope, WriteReceipt, closure,
+)
 from . import hydrate
 from .client import DEFAULT_TIMEOUT, HttpClient
 from .creds import resolve
@@ -43,6 +50,14 @@ def _types(memory_types: Sequence[MemoryType | str] | None) -> list[str] | None:
     if memory_types is None:
         return None
     return [t.value if isinstance(t, MemoryType) else str(t) for t in memory_types]
+
+
+def _type(memory_type: MemoryType | str | None) -> str | None:
+    """One memory type as the wire spells it, or `None` to let the predicate's registered
+    type stand."""
+    if memory_type is None:
+        return None
+    return memory_type.value if isinstance(memory_type, MemoryType) else str(memory_type)
 
 
 def _states(states: Collection[str] | None) -> list[str] | None:
@@ -119,6 +134,68 @@ class RemoteMemvara:
         scope = self.default_scope
         return {"user": scope.user, "agent": scope.agent, "session": scope.session,
                 **extra}
+
+    def _redact(self, text: str | None, field: str) -> str | None:
+        """Apply the policy to one string on its way out, or pass it through.
+
+        The `Redactor` protocol is `redact(text, *, field=..., scope=...)`. `field` says
+        which of `redact.FIELDS` is being offered, so a deployment can be aggressive on
+        raw turns and conservative on claim objects; `scope` is what makes "redact for EU
+        tenants" expressible at all. Calling the policy with the text alone would apply
+        one branch of it to everything.
+
+        Here rather than server-side, and that is the point of the seam: redaction that
+        happens after the text has left the process is not redaction.
+        """
+        if self.redactor is None or text is None:
+            return text
+        return self.redactor.redact(text, field=field, scope=self.default_scope)
+
+    def _turn(self, message: Episode | Mapping[str, Any] | str) -> dict[str, Any]:
+        """One conversation turn as `Message` spells it, with its content redacted.
+
+        Keys the model does not declare go into `metadata` rather than beside it: the
+        facade's request models are `extra="forbid"`, so a stray key is a 422 and not a
+        field somebody quietly loses. `Memvara.add` does the same fold locally.
+        """
+        if isinstance(message, str):
+            return _sent({"content": self._redact(message, EPISODE)})
+        if isinstance(message, Episode):
+            return _sent({"role": message.role,
+                          "content": self._redact(message.content, EPISODE),
+                          "ts": _iso(message.ts), "metadata": dict(message.meta)})
+        known = {"role", "content", "ts", "metadata"}
+        meta = dict(message.get("metadata") or {})
+        meta.update({k: v for k, v in message.items() if k not in known})
+        return _sent({"role": message.get("role"),
+                      "content": self._redact(message["content"], EPISODE),
+                      "ts": _iso(message.get("ts")), "metadata": meta})
+
+    def _cite(self, sources: Sequence[Episode | Mapping[str, Any] | str] | None,
+              ) -> tuple[list[str], list[dict[str, Any]]]:
+        """Split what a caller cited into ids already stored and turns to store now.
+
+        `Memvara.remember` takes one mixed sequence; the facade takes two fields, because
+        over HTTP the two are different acts — `source_ids` cites rows the store already
+        holds, `sources` writes new turns in the same transaction as the fact. A string
+        is an id and anything else is a turn, which is the same rule `Memvara._cite`
+        applies.
+        """
+        ids = [s for s in sources or [] if isinstance(s, str)]
+        turns = [self._turn(s) for s in sources or [] if not isinstance(s, str)]
+        return ids, turns
+
+    def _end(self, body: dict[str, Any]) -> list[Claim]:
+        """`POST /v1/end`: close what this addresses on the world clock.
+
+        One helper for the three callers, because they differ in what they address and
+        not in what they record. `end` addresses either mode, `delete(close="ended")`
+        addresses one memory, and `forget(close="ended")` addresses a slot; all three
+        state that the value was true and the world moved.
+        """
+        out = self._http.request("POST", "/v1/end", params=self._params(),
+                                 json=_sent(body), write=True)
+        return [hydrate.claim(c) for c in out["ended"]]
 
     # -- service -------------------------------------------------------------
 
@@ -376,3 +453,243 @@ class RemoteMemvara:
         """
         body = self._http.request("GET", "/v1/standing", params=self._params(limit=k))
         return [hydrate.claim(c) for c in body["memories"]]
+
+    # -- writing -------------------------------------------------------------
+
+    def add(self, messages: Any, *, role: str = "user",
+            ts: datetime | None = None) -> WriteReceipt:
+        """Ingest conversation turns and extract whatever in them is durable.
+
+        **Read the receipt. A 200 is not a promise that anything was remembered.** A
+        non-zero `unextracted` beside an empty `added` is a successful-looking write that
+        stored nothing, and the usual cause is a deployment with no extraction model —
+        `stats()` reports `extractor` as `fast-path-only` there. `remember()` is the
+        route to use when your application already knows the answer.
+        """
+        payload: Any
+        if isinstance(messages, str):
+            payload = self._redact(messages, EPISODE)
+        elif isinstance(messages, (Episode, Mapping)):
+            payload = [self._turn(messages)]
+        else:
+            payload = [self._turn(m) for m in messages]
+        body = self._http.request(
+            "POST", "/v1/memories", params=self._params(),
+            json=_sent({"messages": payload, "role": role, "ts": _iso(ts)}),
+            write=True)
+        return hydrate.receipt(body)
+
+    def remember(self, subject: str, predicate: str, obj: str, *,
+                 confidence: float = 1.0,
+                 memory_type: MemoryType | str | None = None, polarity: int = 1,
+                 valid_from: datetime | None = None, valid_to: datetime | None = None,
+                 recorded_at: datetime | None = None,
+                 sources: Sequence[Episode | Mapping[str, Any] | str] | None = None,
+                 text: str | None = None, extractor: str = "api",
+                 **meta: Any) -> WriteReceipt:
+        """State one exact fact, skipping extraction entirely.
+
+        Asserting into an occupied slot is the correction, and it is not an update: the
+        old value is closed out and comes back under the receipt's `closed`, the new one
+        under `added`, and both keep their ids forever. Reuse a predicate the store
+        already knows — contradiction handling is an exact match on the slot, so a
+        synonym opens a second one instead of correcting the first.
+        """
+        ids, turns = self._cite(sources)
+        body = {
+            "subject": self._redact(subject, CLAIM_SUBJECT),
+            "predicate": predicate,
+            "object": self._redact(obj, CLAIM_OBJECT),
+            "text": self._redact(text, CLAIM_TEXT),
+            "confidence": confidence, "polarity": polarity, "extractor": extractor,
+            "memory_type": _type(memory_type),
+            "valid_from": _iso(valid_from), "valid_to": _iso(valid_to),
+            "recorded_at": _iso(recorded_at),
+            "source_ids": ids, "sources": turns, "metadata": meta,
+        }
+        return hydrate.receipt(self._http.request(
+            "POST", "/v1/facts", params=self._params(), json=_sent(body), write=True))
+
+    def supersede(self, old_claim_id: str, subject: str, predicate: str, obj: str, *,
+                  at: datetime | None = None, close: str = "ended",
+                  confidence: float = 1.0,
+                  memory_type: MemoryType | str | None = None, polarity: int = 1,
+                  valid_from: datetime | None = None, valid_to: datetime | None = None,
+                  recorded_at: datetime | None = None,
+                  sources: Sequence[Episode | Mapping[str, Any] | str] | None = None,
+                  text: str | None = None, extractor: str = "api",
+                  **meta: Any) -> WriteReceipt:
+        """Replace a named memory with a new value, recording that that is what happened.
+
+        `remember()` first: asserting into an occupied slot already closes the old value
+        out and already records what it replaced. Two things bring you here. Naming the
+        replaced memory explicitly, which is what importing somebody else's mutation log
+        needs. And saying **which clock stops**, which only the caller can know: `ended`
+        means the old value was true until `at` and is not any more, `retired` means the
+        record was wrong and belief in it stops there with its valid interval left
+        exactly as written.
+
+        `close` is validated and forwarded, never defaulted on the caller's behalf. A
+        mutation log records that a value changed and not which of the two it was, so
+        restating `"ended"` here would file every correction as a world event.
+
+        The new value is given as a triple rather than as a `Claim`, which is where this
+        diverges from `Memvara.supersede`. The endpoint takes a fact body, and building a
+        `Claim` here to take it apart again would put this layer in the business of
+        inventing ids and timestamps the server is about to overwrite.
+        """
+        ids, turns = self._cite(sources)
+        body = {
+            "subject": self._redact(subject, CLAIM_SUBJECT),
+            "predicate": predicate,
+            "object": self._redact(obj, CLAIM_OBJECT),
+            "text": self._redact(text, CLAIM_TEXT),
+            "at": _iso(at), "close": closure(close),
+            "confidence": confidence, "polarity": polarity, "extractor": extractor,
+            "memory_type": _type(memory_type),
+            "valid_from": _iso(valid_from), "valid_to": _iso(valid_to),
+            "recorded_at": _iso(recorded_at),
+            "source_ids": ids, "sources": turns, "metadata": meta,
+        }
+        return hydrate.receipt(self._http.request(
+            "POST", f"/v1/memories/{old_claim_id}/supersede", params=self._params(),
+            json=_sent(body), write=True))
+
+    def forget(self, subject: str, predicate: str, *, at: datetime | None = None,
+               close: str = "retired") -> list[Claim]:
+        """Close every value one fact slot currently answers with.
+
+        **Routes on `close`, for `delete`'s reason and with `delete`'s consequences.**
+        `"retired"` says we stopped believing those values and goes to `POST /v1/forget`.
+        `"ended"` says they were true and the world moved on, and goes to the slot form of
+        `POST /v1/end`. The facade has no `close` field on `/v1/forget`, so a client that
+        accepted the argument and posted there anyway would file every ending as a
+        retirement — and `server/tools.py` calls exactly that: `forget(..., close="ended")`
+        is how the `memory_end` tool closes a slot.
+
+        Nothing is removed either way. Every closed value stays readable through
+        `history()`, through `states=["retired"]`, and through any `known_at` query that
+        predates the call. Real removal is `erase()`.
+
+        It reaches **downward**, and a search with the same credential does not: a
+        user-scoped call also closes values written inside that user's agents and
+        sessions. The returned list is what it actually reached.
+        """
+        if closure(close) == "ended":
+            return self._end({"subject": subject, "predicate": predicate, "at": _iso(at)})
+        body = self._http.request(
+            "POST", "/v1/forget", params=self._params(),
+            json=_sent({"subject": subject, "predicate": predicate, "at": _iso(at)}),
+            write=True)
+        return [hydrate.claim(c) for c in body["retired"]]
+
+    def delete(self, claim_id: str, *, at: datetime | None = None,
+               close: str = "retired") -> bool:
+        """Close one memory by id.
+
+        **Routes on `close`, and the two destinations are not interchangeable.**
+        `"retired"` says the record was wrong and goes to `DELETE /v1/memories/{id}`.
+        `"ended"` says the world moved on from something true and goes to
+        `POST /v1/end`. Sending one to the other's route records a false reason for the
+        change, and nothing downstream can detect it: both leave a closed memory, and the
+        row that says which happened is the one being written. `memvara/types.py` calls
+        this the one mistake in this library that cannot be found by reading the data
+        afterwards.
+
+        `close` is validated through `types.closure()` so a typo raises with both
+        readings spelled out, rather than falling through to the default and recording
+        the wrong one in silence.
+
+        `False` means nothing moved. It is the answer for an id that never existed and
+        for one belonging to another tenant alike, so this cannot be used to test whether
+        an id exists elsewhere.
+        """
+        if closure(close) == "ended":
+            return self.end(claim_id=claim_id, at=at)
+        body = self._http.request("DELETE", f"/v1/memories/{claim_id}",
+                                  params=self._params(), write=True)
+        return bool(body["retired"])
+
+    def end(self, *, claim_id: str | None = None, subject: str | None = None,
+            predicate: str | None = None, at: datetime | None = None) -> bool:
+        """Close a fact that stopped being true, with nothing replacing it.
+
+        Exactly one addressing mode: `claim_id` for one memory, or `predicate` (with
+        `subject`, default `"user"`) for every current value in that slot. Both or
+        neither is a `TypeError`, deliberately — the two have different blast radii and a
+        silent default on that choice is not a convenience.
+
+        `at` is when the fact stopped being true, and it defaults to now, which is right
+        only when it stopped just now. An instant before the fact began is clamped to its
+        start rather than inverting the interval.
+        """
+        if (claim_id is None) == (predicate is None):
+            raise TypeError(
+                "end() needs exactly one of: claim_id, to end one memory, or predicate "
+                "(with optional subject), to end every current value of that fact.")
+        body: dict[str, Any] = {"at": _iso(at)}
+        if claim_id is not None:
+            body["memory_id"] = claim_id
+        else:
+            body["subject"] = subject or "user"
+            body["predicate"] = predicate
+        return bool(self._end(body))
+
+    # -- erasure -------------------------------------------------------------
+
+    def erase(self, claim_id: str, *, sources: bool = False) -> bool:
+        """Remove one memory for real. Irreversible, and the only thing here that is.
+
+        Everything under `delete`, `forget` and `end` closes a value out and leaves the
+        text readable through `history()` and `known_at`. This takes the claim, its
+        embeddings and its index entries with it. `sources=True` also erases the turns it
+        came from that no surviving memory still cites — right for a memory that *is* its
+        source text, wrong for a fact extracted from a turn that held much else besides.
+
+        `False` means no such memory was visible here, which is a 200 rather than a 404
+        for the reason every id-addressed route refuses to distinguish gone from not
+        yours. Needs an `admin` credential.
+        """
+        body = self._http.request(
+            "POST", "/v1/erasures", params=self._params(),
+            json={"memory_id": claim_id, "sources": sources}, write=True)
+        return bool(body["erased"])
+
+    def purge(self, *, confirm_tenant: str | None = None) -> dict[str, int]:
+        """Erase everything at this client's scope and beneath it, and report what went.
+
+        The counts are per-table rows removed, measured by the store rather than
+        assembled by the facade, which is what a deletion request has to be answered
+        with. Erasing a user takes their agents and sessions with them.
+
+        A client bound to no user is asking for the whole tenant, and the facade refuses
+        that without `confirm_tenant` equal to the tenant's own name — an empty scope
+        object is too easy to send by accident. `confirm_tenant` cannot widen anything:
+        the credential decides the tenant, and any other value is refused.
+        """
+        scope = self.default_scope
+        body = self._http.request(
+            "POST", "/v1/erasures", params=self._params(),
+            json=_sent({"scope": _sent({"user": scope.user, "agent": scope.agent,
+                                        "session": scope.session}),
+                        "confirm_tenant": confirm_tenant}),
+            write=True)
+        return dict(body["counts"] or {})
+
+    # -- maintenance ---------------------------------------------------------
+
+    def consolidate(self) -> dict[str, Any]:
+        """Start a maintenance pass over the whole tenant: decay, merge, promote.
+
+        Returns a **job**, not counts, and that is the divergence from
+        `Memvara.consolidate()`. The endpoint answers 202 before the work starts, because
+        a real store takes seconds to walk and holding the request open would have every
+        client time out and retry into the same write lock. Poll the job's `status`: it
+        becomes `succeeded` with per-operation counts in `result`, or `failed` with the
+        exception in `error`. A 202 is not a promise the work succeeded.
+
+        Needs an `admin` credential, and the pass covers the whole tenant whatever scope
+        this client narrows to.
+        """
+        return self._http.request("POST", "/v1/maintenance/consolidate",
+                                  params=self._params(), write=True)
