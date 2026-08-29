@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any, Collection, Iterable, Iterator, Sequence
 
 import numpy as np
 
+from ..remote.client import HttpClient
 from ..types import Claim, Derivation, Episode, MemoryType, Scope
 
 if TYPE_CHECKING:
@@ -102,11 +103,14 @@ class RemoteStore:
             raise ImportError(_install_hint()) from exc
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
-        self._client: httpx.Client = httpx.Client(
-            base_url=self._base_url,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=timeout,
-        )
+        #: `HttpClient` builds the pool itself — bearer header, base url, lazy `httpx`
+        #: import — so this class stops keeping its own copy of that construction.
+        #: `self._client` is still the plain `httpx.Client` underneath, held as its own
+        #: attribute rather than reached through `self._http`, because `_request` below
+        #: talks to it directly and a test replaces it with one wired to a mock
+        #: transport (see `tests/test_store_remote.py::make_store`).
+        self._http = HttpClient(api_key, self._base_url, timeout=timeout)
+        self._client: httpx.Client = self._http._client
 
     # --- request plumbing --------------------------------------------------
 
@@ -121,6 +125,15 @@ class RemoteStore:
         `httpx.HTTPStatusError` with the body still readable off `exc.response`, rather
         than a `KeyError` two lines further down guessing at a schema the failure never
         produced.
+
+        Deliberately not `HttpClient.request()`, despite `self._http` sitting right
+        there: that method retries and raises `remote.errors.RemoteError` subclasses,
+        which is right for `RemoteMemvara` and wrong here — `get_claim` below catches
+        `httpx.HTTPStatusError` by status code, and retyping that into `NotFound` would
+        be a change to this class's public exception surface that the callers of
+        `Store.get_claim` were never asked to absorb. What is shared is the one thing
+        that was actually duplicated: building the pool (bearer header, base url,
+        timeout, the lazy `httpx` import) now happens once, in `HttpClient.__init__`.
         """
         response = self._client.request(method, path, **kwargs)
         response.raise_for_status()

@@ -7,6 +7,55 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `MEMVARA_MODE=cloud` now starts a server, and refuses two variables it used to accept
+
+### What changed
+
+A cloud-mode `memvara-mcp` used to exit 2 at startup with "cannot start a server yet". It
+starts. It builds a `RemoteMemvara` — a client of the `/v1` facade — and serves the same
+fourteen tools from a hosted deployment. Nothing about how the credential is found has
+changed: `MEMVARA_API_KEY`, then the file `memvara-mcp login` writes.
+
+The engine is still never run against a remote store, which is what the refusal protected.
+`docs/OPEN-CORE.md` records why that is a decision rather than a gap.
+
+### Who this changes, and in which direction
+
+**If you configured cloud mode and were refused, delete nothing and try again.** The same
+environment block now works, provided `httpx` is installed: `pip install "memvara[cloud]"`.
+
+**If your cloud environment also sets `MEMVARA_LLM` or `MEMVARA_EMBEDDER`, the server now
+refuses to start.** Unset them. Extraction and embedding run inside the deployment, so this
+process would read the value and never use it — and the refusal is deliberately louder than
+ignoring it, because an operator who sets `MEMVARA_LLM=anthropic` and sees a server start
+has been told their writes are being extracted by a model that was never loaded. Only a
+non-default value is refused; an unset variable is fine. `memory_stats` reports the
+deployment's own extractor.
+
+**If your hosted API key is read-only, the server now hides its write tools.** That is the
+fix rather than a regression: it used to list them and let the deployment refuse them
+mid-conversation as a 403. `MEMVARA_READ_ONLY` and the credential are OR-ed — a server
+configured read-only stays read-only whatever the token allows.
+
+**If you called `config.cloud_gap()`, `config._ENGINE_NEEDS` or `config._CLOUD_NOT_WIRED`,
+they are gone.** Two were private. `cloud_gap()` was public and its whole purpose was to
+answer "can cloud mode start", which is now "is `httpx` importable" — `memvara-mcp init`
+asks exactly that, and `memvara.remote.client.install_hint()` is the message.
+
+**If you type-annotated against `ToolContext.memory`, it is now `MemoryAPI`.** A protocol in
+`memvara/server/memory_api.py`, satisfied by `ScopedMemvara` and `ScopedRemoteMemvara`
+both. A parameter annotated `ScopedMemvara` still accepts what it always did; one that
+*returns* `ToolContext.memory` as a `ScopedMemvara` no longer type-checks.
+
+### How to find your own instances
+
+```bash
+grep -rn "MEMVARA_LLM\|MEMVARA_EMBEDDER" --include="*.json" ~/.claude .  # cloud env blocks
+grep -rn "cloud_gap\|_CLOUD_NOT_WIRED\|_ENGINE_NEEDS" .
+```
+
+---
+
 ## Every recalled note that nobody stated now ends " (inferred)"
 
 ### What changed

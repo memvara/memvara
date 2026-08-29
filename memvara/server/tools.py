@@ -57,10 +57,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence, cast
 
-from ..core import Memvara, ScopedMemvara, is_derived
-from ..schema import Cardinality
+from ..core import Memvara, is_derived
+# `_slugify` is private and imported anyway, for `Memvara._safe_line`'s reason a few
+# lines below: it is the store's own spelling rule, and a copy of it here would be a
+# second implementation that can disagree about whether a fold happened.
+from ..schema import _slugify
 from ..types import (Accumulation, Claim, Collapse, Dispute, MemoryType, Retype,
                      WriteReceipt, utcnow)
+from .memory_api import MemoryAPI
 from .validate import ToolError, validate
 
 __all__ = ["TOOLS", "Tool", "ToolContext", "ToolError", "safe_detail", "safe_line"]
@@ -173,15 +177,28 @@ def _memory_types(values: Sequence[str] | None) -> list[MemoryType] | None:
 class ToolContext:
     """Everything a handler is allowed to touch.
 
-    `memory` is a `ScopedMemvara`, never an `Memvara`, and that is the whole security model
-    of this server: the scope was bound once at startup from the client's environment, so
-    a handler has no argument, and no attribute, with which to address another tenant.
+    `memory` is scope-bound, never scope-taking, and that is the whole security model of
+    this server: the scope was fixed once at startup from the client's environment, so a
+    handler has no argument, and no attribute, with which to address another tenant.
     Validating a caller-supplied scope string would be the alternative, and validation is
     what the REST layer will have to do until it has real authentication — a capability
     that cannot express the wrong answer is strictly better.
+
+    `MemoryAPI` rather than `ScopedMemvara` because two things hold that property and one
+    tool table serves both. `ScopedMemvara` holds it by construction: it wraps an
+    `Memvara` with the scope filled in and exposes no method that takes one.
+    `ScopedRemoteMemvara` holds it twice over: it sends a bound scope on every request,
+    and the deployment resolves the tenant from the bearer token rather than from
+    anything the request could name, so a narrowing can only narrow inside what the
+    credential already authorizes. The argument is unchanged — what satisfies it is wider.
+
+    The protocol is also what makes the sentence above *checkable* rather than merely
+    stated. Both concrete views expose the unscoped client as `.memvara`, and it takes
+    `tenant`; `MemoryAPI` deliberately does not declare it, so a handler reaching for it is
+    a type error here rather than a scope escape found by reading.
     """
 
-    memory: ScopedMemvara
+    memory: MemoryAPI
     extractor: str = "unknown"
     read_only: bool = False
 
@@ -492,8 +509,29 @@ def _standing(ctx: ToolContext, args: dict[str, Any]) -> str:
     """
     cap = args.get("k")
     cap = STANDING_K if cap is None else int(cap)
-    claims = [c for c in ctx.memory.get_all(states=["live"])
-              if c.memory_type is MemoryType.PROCEDURAL]
+    # `GET /v1/standing` does this filter server-side. Against a hosted deployment the
+    # fallback below pages every live memory in the scope across the network to keep the
+    # procedural ones — and this is the tool a session calls at startup. Local behaviour
+    # is unchanged: `ScopedMemvara` has no `standing`, so it takes the same path it always
+    # did, and `MemoryAPI` deliberately does not declare the member — a `Protocol` has no
+    # optional ones, and declaring it would stop the local view satisfying the protocol.
+    #
+    # One divergence, and it is in the last line of the reply rather than in the facts:
+    # `GET /v1/standing` caps at `k` and reports no total, so the "(N more not shown)"
+    # hint below cannot fire against a hosted deployment. Locally the page is the whole
+    # scope and the count is exact. Asking for `cap + 1` would restore the hint and make
+    # its number wrong — "1 more" for a scope holding fifty — which is worse than not
+    # printing it, so the honest version is the one that stays silent.
+    server_side = getattr(ctx.memory, "standing", None)
+    if server_side is not None:
+        claims = list(server_side(k=cap))
+    else:
+        claims = [c for c in ctx.memory.get_all(states=["live"])
+                  if c.memory_type is MemoryType.PROCEDURAL]
+    # Applied to both branches. Order is confidence, then recency, then id: the first is
+    # the point — what the user stated outranks what a model inferred — and the last makes
+    # the order total, so two claims written in the same instant cannot swap places
+    # between calls, whichever side did the filtering.
     claims.sort(key=lambda c: (-c.confidence, _descending(c.recorded_at), c.id))
     shown = claims[:cap]
     if not shown:
@@ -935,44 +973,61 @@ def _interval_note(claims: Sequence[Claim]) -> str:
     return "\n".join(lines)
 
 
-def _fold_note(ctx: ToolContext, raw: str, *, writing: bool) -> str:
+def _fold_note(raw: str, claims: Sequence[Claim]) -> str:
     """Say so when the predicate acted on is not the predicate that was asked for.
 
-    The registry folds surface spellings onto canonical ones — `uses_tool` onto
+    The store folds surface spellings onto canonical ones — `uses_tool` onto
     `prefers_tool`, `birthday` onto `born_on` — and the fold is the feature: without it
     two spellings of one fact become two slots that cannot contradict each other, which
     is how free-text memory stores end up holding two answers to one question.
 
     Doing it *silently* is the defect, and the reason is not the one it first looks like.
     Addressing is safe: `memory_history`, `memory_forget` and `memory_end` all resolve
-    their predicate through this same registry, so either spelling reaches the fact. What
-    the caller cannot see is that the *slot* it landed in is not the one the name implies.
-
-    On a write that matters, because the fold decides how many values the slot holds. A
-    predicate this store has never seen is MANY and accumulates; a canonical one may be
-    ONE, where the next write ends this value instead of joining it. `uses_tool` unresolved
-    would accumulate; folded onto `prefers_tool` it supersedes. The write receipt reports
-    `ended 1` and is telling the truth, but nothing connects that to a rename the caller
-    never asked for — and the tool schema offers `uses_tool` as an example spelling, so
-    this is reached by following the description rather than by getting it wrong.
+    their predicate the same way, so either spelling reaches the fact. What the caller
+    cannot see is that the *slot* it landed in is not the one the name implies.
 
     Reported for the same reason `_accumulated_note` reports the mirror case, and in the
     same voice: not a warning, because the fold is correct, but a change of slot semantics
     nothing in the result would otherwise reveal.
+
+    **Read off the claims the store just wrote back, not off a registry.** Every claim
+    here carries the canonical predicate the store actually used, so comparing it against
+    the caller's own spelling is exact — and it is exact on both engines, which asking a
+    registry is not. This used to reach through the unscoped engine for its `registry`,
+    and that raised `AttributeError` against a hosted deployment: a `RemoteMemvara` holds
+    no registry, because the vocabulary lives server-side, built from builtins plus
+    declared packs plus whatever specs that store has learned. This is also the stronger
+    statement of the two — what the store did, rather than what a registry says it would
+    do.
+
+    The phrasing above avoids naming that attribute in the `ctx.memory.<name>` form on
+    purpose. `tests/test_memory_api_protocol.py` derives the protocol's membership by
+    regex over this file, so prose is indistinguishable from a call site — and this
+    sentence kept a `memvara` member alive in `MemoryAPI` for a while after its last real
+    caller went away.
+
+    **One sentence was dropped in that move, and its absence is a decision.** The old note
+    added, on a write folding onto a `Cardinality.ONE` predicate, that the slot now keeps
+    one value at a time where an unseen predicate would have accumulated — so the next
+    write replaces this value instead of joining it. That cannot be derived from a claim:
+    cardinality is a property of the predicate's spec, and nothing on the wire carries it.
+    Restoring it needs the deployment to answer for its own vocabulary — a
+    `GET /v1/predicates/resolve` returning name, method and cardinality — at which point
+    it belongs here again for both engines rather than for one. Until then the caller is
+    told where the fact landed and not how many values that slot will keep;
+    `_accumulated_note` still reports the mirror case after the fact.
     """
-    registry = ctx.memory.memvara.registry
-    resolution = registry.resolve(raw)
-    if resolution.method not in ("alias", "morphological", "derivational"):
+    if not claims:
+        # Nothing landed, so there is no slot to report. A write that stored nothing gets
+        # its own note from `_receipt_summary`; inventing a fold for it would describe a
+        # place the fact is not.
         return ""
-    name = resolution.name
-    note = (f"note: '{raw}' is another spelling of '{name}' in this store, and the fact is "
+    name = claims[0].predicate
+    if name == _slugify(raw):
+        return ""
+    return (f"note: '{raw}' is another spelling of '{name}' in this store, and the fact is "
             f"held under '{name}' — the name memory_search and memory_history will show "
             f"back. Either spelling finds it; every tool here folds the same way.")
-    if writing and registry.spec(name).cardinality is Cardinality.ONE:
-        note += (f" The fold also sets how many values the slot keeps: '{name}' keeps one "
-                 "at a time, where a predicate this store has not seen before keeps many, "
-                 "so the next value replaces this one instead of joining it.")
-    return note
 
 
 def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -1010,7 +1065,12 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
         sources=args.get("sources") or None,
     )
     return "\n".join(filter(None, _receipt_summary(ctx, receipt)
-                            + [_fold_note(ctx, args["predicate"], writing=True),
+                            + [_fold_note(args["predicate"],
+                                           # `added` first: it is where the fact landed.
+                                           # `closed` is the fallback for a write that
+                                           # only displaced a value, which still names the
+                                           # canonical slot.
+                                           list(receipt.added) + list(receipt.closed)),
                                _interval_note(receipt.added), _pending(receipt.closed)]))
 
 
@@ -1044,7 +1104,7 @@ def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
     lines = [f"Retired {len(retired)} value(s) of {args['subject']}/{predicate}. They no "
              "longer answer questions; memory_history still shows them."]
     return "\n".join(filter(None, lines + _claim_lines("-", retired)
-                            + [_fold_note(ctx, predicate, writing=False)]))  # type: ignore[arg-type]
+                            + [_fold_note(predicate, retired)]))  # type: ignore[arg-type]
 
 
 def _pending(claims: Sequence[Claim]) -> str:
@@ -1137,8 +1197,8 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
              "period before it; memory_history keeps them, marked ended rather than "
              "retired."]
     lines += [f"- [{c.id} {_state(c)}] {safe_line(c.text)}" for c in ended]
-    return "\n".join(filter(None, lines + [_fold_note(ctx, predicate,  # type: ignore[arg-type]
-                                                     writing=False),
+    return "\n".join(filter(None, lines + [_fold_note(predicate,  # type: ignore[arg-type]
+                                                      ended),
                                            _pending(ended)]))
 
 

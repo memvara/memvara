@@ -25,6 +25,35 @@ https://memvara.dev/docs/guide#frameworks before you wrap.
 Do not stand up Postgres, REST, or the hosted product for a single laptop.
 The library is complete for one machine.
 
+### Same class, against a hosted deployment
+
+```python
+from memvara import Memvara
+
+mem = Memvara(api_key="mv_live_...")   # or Memvara.connect() for ambient credentials
+alice = mem.scope(user="alice")
+alice.add("I live in Lisbon")
+```
+
+`Memvara(api_key=...)` and `Memvara(path)` are the same constructor; which one
+you get back is decided by the argument you pass, never by the environment —
+a bare `Memvara()` does not turn remote just because `MEMVARA_API_KEY` is
+set. `Memvara.connect()` is the named door for the case `memvara-mcp login`
+already set up: no key given, resolved from `MEMVARA_API_KEY` and then
+`~/.memvara/credentials.json`.
+
+The engine runs server-side, so `path=`, `store=`, `embedder=`, `llm=`,
+`registry=` and `reembed=` are refused rather than silently ignored —
+combine one with `api_key=` and you get a `TypeError` naming the argument,
+not a warning.
+
+Two calls diverge from the local engine. `consolidate()` answers with a job
+to poll (`status`, then `result` or `error` once it finishes) instead of
+counts, because the endpoint returns before the maintenance pass starts.
+There is no `prove_erased()`: the server proves an erasure before it answers
+and returns that evidence in the same response, so a second round trip to
+check would be asking it to repeat itself.
+
 ## Editor — you are not writing a loop
 
 Install the plugin (skill + hosted MCP in one step). See `hosted-mcp.md`.
@@ -51,8 +80,12 @@ server.
 
 ## Hosted vs local vs library, in one line
 
-- Several people, several agents, one project → hosted MCP (plugin or URL).
-- You are writing the agent loop in Python → library.
+- Several people, several agents, one project, and you are not writing the
+  loop → hosted MCP (plugin or URL).
+- You are writing the agent loop in Python, one machine owns the store →
+  library, `Memvara(path)`.
+- You are writing the agent loop in Python, against a shared or hosted store
+  → library still, `Memvara(api_key=...)`.
 - Legal will not let the turns leave the building → library or local MCP,
   `llm=NullLLM()` / `MEMVARA_LLM=none`.
 - Not Python and not an MCP client → REST.

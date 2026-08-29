@@ -32,15 +32,23 @@ memvara-mcp {__version__} — Memvara memory as an MCP server over stdio.
 This program speaks JSON-RPC on stdin/stdout and is meant to be launched by an MCP
 client, not run interactively. Configured entirely by environment:
 
-  MEMVARA_DB          required. Path to the SQLite file; created on first use.
-                     ':memory:' for a throwaway store that dies with the process.
+  MEMVARA_MODE        'local' (default) or 'cloud'. Local opens MEMVARA_DB on this
+                     machine. Cloud opens no file at all: it serves the same tools
+                     from a hosted deployment over its /v1 API, using MEMVARA_API_KEY
+                     or the credential "memvara-mcp login" wrote. Cloud needs
+                     pip install "memvara[cloud]", ignores MEMVARA_DB, and refuses
+                     MEMVARA_LLM and MEMVARA_EMBEDDER — extraction and embedding run
+                     inside the deployment, so a value set here would never be used.
+  MEMVARA_DB          required in local mode. Path to the SQLite file; created on
+                     first use. ':memory:' for a throwaway store that dies with the
+                     process.
   MEMVARA_USER        who this server remembers for. Unset means the whole tenant.
   MEMVARA_TENANT      isolation boundary above the user. Default 'default'.
   MEMVARA_AGENT       narrows further; unset is usually right.
   MEMVARA_SESSION     narrows further still. Memory written here is not visible to
                      other sessions, so leave it unset for durable facts.
   MEMVARA_LLM         'none' (default, offline, extracts only recognised sentence
-                     forms) or 'anthropic' (needs ANTHROPIC_API_KEY).
+                     forms) or 'anthropic' (needs ANTHROPIC_API_KEY). Local mode only.
   MEMVARA_EMBEDDER    'hashing' (default, offline, 512-dimensional), 'hashing:<dim>',
                      'local' or 'local:<model>' (needs memvara[local-embed]), or
                      'auto' for whichever of those happens to be installed. A store
@@ -111,6 +119,9 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
         print(f"memvara-mcp: unexpected argument {args[0]!r}\n\n{USAGE}", file=err)
         return 2
 
+    # Bound before the try so the ImportError branch below can ask which mode raised.
+    # `from_env` imports nothing lazily today, so this stays None only if it starts to.
+    config: ServerConfig | None = None
     try:
         config = ServerConfig.from_env(env)
         memory = build_memvara(config)
@@ -119,6 +130,27 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
         # which is the only moment they are looking. Exit 2, as for a usage error: the
         # invocation was wrong, not the program.
         print(f"memvara-mcp: {exc}", file=err)
+        return 2
+    except ImportError as exc:
+        # `MEMVARA_MODE=cloud` on a machine without `httpx`. The library raised it about a
+        # missing package rather than about the configuration, but from here it is a
+        # configuration error like any other: this environment names a mode this
+        # interpreter cannot run, and the remedy is a pip install. Reported the same way
+        # for the same reason as the two below — under stdio the alternative is a
+        # traceback in a log nobody reads. `memvara-mcp init --mode cloud` refuses on the
+        # same question, so the two commands cannot disagree about whether cloud works
+        # here, which is the failure `init` writing a config it never launches invites.
+        #
+        # **Only for cloud mode.** The local branch imports two optional packages of its
+        # own — `sentence-transformers` for MEMVARA_EMBEDDER=local and the anthropic SDK
+        # for MEMVARA_LLM=anthropic — and each already catches its own ImportError and
+        # raises a ConfigError naming the right extra. One escaping those is a bug, and
+        # labelling it "MEMVARA_MODE=cloud cannot start" would send whoever hits it to the
+        # wrong variable entirely. Re-raised, so it arrives as what it is.
+        if config is None or config.mode != "cloud":
+            raise
+        print(f"memvara-mcp: MEMVARA_MODE=cloud cannot start a server here. {exc}",
+              file=err)
         return 2
     except EmbedderMismatchError as exc:
         # Not a ConfigError — the library raised it about the store — but from here it is

@@ -25,6 +25,17 @@ thread. That is not true of any of the three — LangChain's `aget_messages` use
 `StorageBackend` is a bare `Protocol`, so an omitted `asave` is an `AttributeError`
 rather than a silent sync call. The argument above stands without it.
 
+**Where this argument stops applying: `memvara.remote.aio`.** The case above rests on
+two facts that are both true of the local engine and both false of a hosted deployment.
+There is no async SQLite, and there is an engine — `Store`, `WritePipeline`,
+`Reconciler`, `HybridRetriever`, `Consolidator` — that coroutine-colouring would have to
+run through. `RemoteMemvara` has neither: `httpx` ships a real `AsyncClient` that speaks
+`/v1` without blocking a thread to do it, and there is nothing underneath the transport
+to colour, because `RemoteMemvara` already does nothing but turn a method call into one
+request. `memvara.remote.aio.AsyncRemoteMemvara` therefore uses `httpx.AsyncClient`
+directly rather than this module's `asyncio.to_thread` pattern — wrapping a blocking
+client in a thread would be strictly worse than the async client httpx already provides.
+
 Two things worth knowing before relying on it:
 
 * **It is safe to call concurrently.** `SQLiteStore` guards its connection with an
@@ -53,6 +64,7 @@ startup, not hidden inside the first `await`.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import datetime
 from typing import Any, Callable, Collection, Literal, Sequence, overload
 
@@ -755,9 +767,19 @@ class AsyncScopedMemvara:
 # derive the surface from the classes themselves.
 
 def _public(obj: type) -> set[str]:
-    """The public callables of a class: its method surface, as names."""
+    """The public callables of a class: its method surface, as names.
+
+    Classmethods are not part of it. Both checks below ask what you can do with an
+    instance you already hold — `AsyncMemvara` wraps one, `AsyncScopedMemvara` narrows
+    one — and a classmethod is reached on the class whether or not you hold anything.
+    `Memvara.connect()` is the live case: it is a second spelling of
+    `Memvara(api_key=...)`, so a scoped view that offered it would hand out a fresh
+    unscoped client, and an async facade that offered it would return the synchronous
+    remote client it wraps nothing of.
+    """
     return {n for n in dir(obj)
-            if not n.startswith("_") and callable(getattr(obj, n, None))}
+            if not n.startswith("_") and callable(getattr(obj, n, None))
+            and not isinstance(inspect.getattr_static(obj, n, None), classmethod)}
 
 
 def _scoped_omissions() -> set[str]:

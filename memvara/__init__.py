@@ -155,12 +155,19 @@ __all__ = [
     "Redactor", "PatternRedactor", "Consolidator",
     # relevance floors are measured per deployment, never assumed
     "calibrate_min_score", "FloorReport",
+    # The hosted client and the errors its calls raise. Reached lazily below, so
+    # `import memvara` still works without httpx installed.
+    "RemoteMemvara", "AsyncRemoteMemvara",
+    "RemoteError", "AuthError", "ScopeError", "NotFound", "Conflict", "QuotaExhausted",
+    "RateLimited", "LegalHold", "ReadOnly", "InvalidRequest", "ServerError",
     "__version__",
 ]
 
 
 def __getattr__(name: str):
-    # Kept out of the eager imports so `import memvara` works with neither hosted SDK.
+    # Kept out of the eager imports so `import memvara` works with neither hosted SDK,
+    # and with no httpx: the remote client reaches a hosted deployment over HTTP, and
+    # `import memvara` must still be a two-package install.
     if name == "AnthropicLLM":
         from .llm.anthropic import AnthropicLLM
 
@@ -169,4 +176,15 @@ def __getattr__(name: str):
         from .llm.openai import OpenAILLM
 
         return OpenAILLM
+    if name == "RemoteMemvara":
+        from .remote.api import RemoteMemvara
+        return RemoteMemvara
+    if name == "AsyncRemoteMemvara":
+        from .remote.aio import AsyncRemoteMemvara
+        return AsyncRemoteMemvara
+    if name in ("RemoteError", "AuthError", "ScopeError", "NotFound", "Conflict",
+                "QuotaExhausted", "RateLimited", "LegalHold", "ReadOnly",
+                "InvalidRequest", "ServerError"):
+        from . import remote
+        return getattr(remote, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

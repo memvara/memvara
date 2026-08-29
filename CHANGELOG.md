@@ -9,6 +9,144 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`Memvara(api_key=...)` returns a client for a hosted deployment.** `RemoteMemvara`
+  serves the library's own read and write surface out of the `/v1` API instead of a local
+  store, and hydrates every response into the same `Claim`, `Episode` and `WriteReceipt`
+  dataclasses, so calling code cannot tell which it holds. `Memvara.connect()` is the same
+  client using whatever credentials are around — `MEMVARA_API_KEY`, then the file
+  `memvara-mcp login` writes. Install `httpx` with it: `pip install "memvara[cloud]"`.
+
+  **A bare `Memvara()` never becomes remote.** Dispatch keys on the explicit `api_key=` or
+  `base_url=` argument and never on the environment, so a script that has always written
+  to a local file cannot start posting to a hosted store because somebody ran
+  `memvara-mcp login` on that machine. The environment supplies the *value*, once the
+  caller has asked for remote.
+
+  Two behaviour differences from the local engine, both deliberate and both documented in
+  `docs/API.md`: `consolidate()` returns a job handle rather than per-operation counts,
+  because the endpoint answers 202 before the pass starts, and there is no
+  `prove_erased()`, because `erase()` returns its per-table evidence itself. Arguments the
+  API cannot honour are absent rather than ignored — `recall()` has no `with_ids`, and
+  raises on a `budget` it cannot enforce.
+
+  Naming a local subsystem alongside a credential is a `TypeError`, not a silent no-op:
+  `path=`, `store=`, `embedder=`, `llm=`, `registry=` and `reembed=True` all describe an
+  engine that runs server-side.
+
+  **Three attempts per call, and the wait between them is bounded.** A call is retried on
+  an error the deployment marked retryable, on a 429 — including one an edge proxy returned
+  with no envelope, which is classified from the status rather than falling through to
+  `InvalidRequest` — and on a connect-phase failure that never reached the server. A
+  `Retry-After` is waited for as asked up to thirty seconds; a longer one raises
+  `RateLimited` immediately, carrying the server's own number on `retry_after`, instead of
+  blocking the call — or, on `AsyncRemoteMemvara`, the event loop — for as long as the
+  header says. Whether an hour is an acceptable wait is the caller's decision to make.
+
+- **`AsyncRemoteMemvara`: the hosted client, awaited, on a real async transport.**
+  Importable as `from memvara import AsyncRemoteMemvara`, same as `RemoteMemvara`. Every
+  method on `RemoteMemvara` has an `async def` twin of the same name taking the same
+  arguments, plus `aclose()`, `__aenter__` and `__aexit__`. It does not use
+  `memvara.aio`'s `asyncio.to_thread` wrapper — `httpx.AsyncClient` already speaks `/v1`
+  without blocking a thread to do it, and there is no engine underneath the transport for
+  coroutine-colouring to propagate through, so wrapping the blocking client in a thread
+  would only be worse. See `memvara/aio.py`'s module docstring for where that module's
+  own async argument stops applying.
+
+- **`MEMVARA_MODE=cloud` starts a server instead of refusing to.** `memvara-mcp` in cloud
+  mode now builds a `RemoteMemvara` — a client of the `/v1` facade — and serves the same
+  fourteen tools from a hosted deployment. It reads `MEMVARA_API_KEY`, or the credential
+  `memvara-mcp login` wrote, exactly as `ServerConfig.from_env` already did. Needs `httpx`:
+  `pip install "memvara[cloud]"`.
+
+  **The engine is still never run against a remote store**, which is what the old refusal
+  protected and is not being overturned. `docs/OPEN-CORE.md` records why, and the guard
+  that enforced it — `config.cloud_gap()`, a set difference over `RemoteStore.WIRED` — has
+  been **deleted**, along with `_ENGINE_NEEDS` and `_CLOUD_NOT_WIRED`. It was built to
+  empty out on its own the day the facade grew the low-level endpoints; that day does not
+  arrive under this design, because cloud mode bypasses the `Store` seam rather than
+  completing it, and a dead gate left in place reads as a live one. The test that guarded
+  it was replaced rather than removed: `test_no_cloud_path_anywhere_constructs_an_engine_
+  over_a_remote_store` reads `config.py`'s syntax and fails if a `RemoteStore` import or a
+  `store=` argument returns.
+
+  **`MEMVARA_LLM` and `MEMVARA_EMBEDDER` are now refused under cloud mode** when set to
+  anything but their defaults. Extraction and embedding run inside the deployment, so this
+  process would read the setting and never use it — and an operator who set
+  `MEMVARA_LLM=anthropic`, saw a server start and believed their writes were being
+  extracted has been told something false by a program that stayed silent. The error names
+  the variable. `memory_stats` reports the deployment's own answer.
+
+  **A read-only API key hides the write tools, and `memory_stats` reports the deployment's
+  own extractor.** The server reads `GET /v1/stats` once at startup, through the new
+  `RemoteMemvara.service()`. Without it a cloud server started with a read-only credential
+  listed every write tool and the deployment refused them mid-conversation as a 403 — to a
+  model that cannot act on it, which is the failure shape the old refusal existed to
+  prevent, one layer along. `MEMVARA_READ_ONLY` and the credential are **OR-ed, never
+  overridden**: a server configured read-only stays read-only whatever the token allows,
+  and the credential can only narrow. Any failure of that one call degrades to the
+  previous behaviour — `extractor` reports `unknown`, `read_only` falls back to the
+  environment — so a deployment that is briefly down does not stop the server starting.
+
+- **`RemoteMemvara.service()` and `AsyncRemoteMemvara.service()`.** The `GET /v1/stats`
+  envelope whole — `{scope, visible, tenant_counts, extractor, read_only}` — beside
+  `stats()`, which keeps returning `tenant_counts` alone so that `stats()["claims"]` is a
+  number against either engine. Both take `attempts=` and `timeout=`, which override the
+  client's own for one call: a startup probe wants an answer in seconds or not at all, and
+  the client's three attempts at a thirty-second timeout plus backoff is about ninety
+  seconds of silent startup before a hanging deployment reaches the safe default. The two
+  overrides are on `HttpClient.request` and `AsyncHttpClient.request` for any caller with
+  the same need; every other call leaves them unset and keeps the client's.
+
+- **`memory_standing` is answered server-side against a hosted deployment.** The tool used
+  to page every live memory in the scope and filter for procedural ones in Python — across
+  the network, for a handful of rows, in the tool a session calls at startup.
+  `GET /v1/standing` does the filter at the source. Local behaviour is unchanged: the local
+  scoped view has no `standing()`, so it takes the same path it always did. One divergence,
+  in the last line of the reply rather than in the facts — the endpoint caps at `k` and
+  reports no total, so the "(N more not shown)" hint does not appear against a hosted
+  deployment.
+
+### Changed
+
+- **`memvara-mcp init --mode cloud` refuses on a missing `httpx` rather than on an unwired
+  store.** The reason a cloud server could not start has changed, so the gate did.
+  `init` writes a config it never launches, so it and the server have to answer the same
+  question the same way or the disagreement is silent — that was the point of
+  `cloud_gap()` and it is the point of this.
+
+- **The predicate fold note is read off the claim the store wrote back, not off a
+  registry.** `memory_remember`, `memory_forget` and `memory_end` each say when the
+  predicate acted on is not the one asked for — `uses_tool` held as `prefers_tool`. That
+  answer came from `Memvara.registry`, which a hosted deployment does not have, so all
+  three write tools raised `AttributeError` under `MEMVARA_MODE=cloud`. Every claim these
+  tools already hold carries the canonical predicate, so comparing it against the caller's
+  own spelling is exact on both engines — and is the stronger statement of the two, being
+  what the store did rather than what a registry says it would do.
+
+  **One sentence was dropped and its absence is a decision.** The note used to add, on a
+  write folding onto a single-valued predicate, that the slot now keeps one value where an
+  unseen predicate would have accumulated. Cardinality is a property of the predicate's
+  spec and nothing on the wire carries it. Restoring it needs the deployment to answer for
+  its own vocabulary. `_fold_note`'s docstring and
+  `test_the_fold_note_no_longer_says_what_the_fold_did_to_the_cardinality` both say so, so
+  the loss is visible rather than quiet.
+
+- **`ToolContext.memory` is typed `MemoryAPI` rather than `ScopedMemvara`.** A protocol in
+  `memvara/server/memory_api.py` declaring the nineteen members `tools.py` calls, which
+  both `ScopedMemvara` and `ScopedRemoteMemvara` satisfy — this is what lets one tool table
+  serve either engine. The security property is unchanged and now stated as a property
+  rather than a class: scope is bound once at construction, so a handler has no argument
+  and no attribute with which to address another tenant. The remote view holds it twice
+  over, since the deployment resolves the tenant from the bearer token rather than from
+  anything a request can name.
+
+- **`RemoteMemvara.search` and `ScopedRemoteMemvara.search` carry the same three overloads
+  `Memvara.search` has.** Without them the identical expression typed as `list[Retrieved]`
+  against a hosted deployment and `list[Result]` locally, so code reading `.claim` off a
+  row type-checked against one engine and not the other. No runtime behaviour changes.
+
 ## [0.8.1] — 2026-08-27
 
 ### Added

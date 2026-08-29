@@ -20,8 +20,15 @@ Read `references/integrate.md` before you write code or config.
 
 - **Editor / coding agent** (Claude Code, Grok, Cursor, Copilot): install the
   plugin, or paste the hosted MCP URL. Details in `references/hosted-mcp.md`.
-- **A loop you are writing in Python**: `pip install memvara`, then
-  `from memvara import Memvara`. The plugin does not install into LangChain.
+- **A loop you are writing in Python, against your own store**: `pip install
+  memvara`, then `from memvara import Memvara` and `Memvara(path)`. The
+  plugin does not install into LangChain.
+- **A loop you are writing in Python, against a hosted deployment**:
+  `Memvara(api_key=...)`, or `Memvara.connect()` for whatever
+  `memvara-mcp login` already wrote to `~/.memvara/credentials.json`. Same
+  class, same calls; the engine runs server-side. `consolidate()` returns a
+  job to poll instead of counts, and there is no `prove_erased()` — the
+  erasure response already carries the proof.
 - **A loop in any other language**: hosted MCP as a client, or the commercial
   REST API. The npm package named `memvara` is a name reservation and does
   nothing.

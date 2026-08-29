@@ -17,13 +17,19 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from ..core import Memvara
 from ..embed import CachedEmbedder, HashingEmbedder
 from ..llm import NullLLM
 from ..schema import (BUILTIN_PREDICATES, PredicatePackError,
                       PredicateRegistry, load_all_specs)
+
+if TYPE_CHECKING:
+    # Imported for the annotation alone. At runtime `memvara.remote.api` reaches back
+    # into this module through `remote/creds.py`, so a module-level import here would
+    # be a cycle; `build_memvara` imports it inside the branch that needs it.
+    from ..remote.api import RemoteMemvara
 
 __all__ = ["ConfigError", "ServerConfig", "build_memvara"]
 
@@ -33,13 +39,20 @@ _FALSE = {"0", "false", "no", "off", ""}
 #: Modes selectable from the environment. "local" is unchanged, decades-old behaviour:
 #: a file on disk named by MEMVARA_DB. "cloud" is the device-code auth contract: no
 #: MEMVARA_DB, an API key from either the environment or the credentials file written
-#: by `memvara-mcp login`, and a RemoteStore talking to a memvara-cloud deployment.
+#: by `memvara-mcp login`, and a `RemoteMemvara` — a client of the `/v1` facade, not
+#: an engine over a remote store. `build_memvara` says why that distinction is the
+#: whole design.
 _MODES = ("local", "cloud")
 
 #: Where `memvara-mcp login` writes what it obtained, and where `from_env` reads it back
 #: from when MEMVARA_API_KEY is not set directly. Kept as a module constant because the
 #: login command (built separately) has to write exactly this path for this file to find it.
 CREDENTIALS_PATH = Path.home() / ".memvara" / "credentials.json"
+
+#: Where a client goes absent MEMVARA_SERVER_URL. `login.py` declares its own copy as
+#: `_DEFAULT_SERVER_URL`; leaving that alone is deliberate, since collapsing them is a
+#: change to a module this work has no other reason to touch.
+DEFAULT_SERVER_URL = "https://app.memvara.dev"
 
 #: Backends selectable from the environment. Anything needing constructor arguments —
 #: a custom model, an injected client — is a reason to import `MemvaraMCPServer` and wire
@@ -104,7 +117,7 @@ class ServerConfig:
     #: "cloud" opens no local file at all; it resolves an API key (MEMVARA_API_KEY, or
     #: the credentials file `memvara-mcp login` writes) and talks to `server_url` instead.
     mode: str = "local"
-    server_url: str = "https://app.memvara.dev"
+    server_url: str = DEFAULT_SERVER_URL
     api_key: str | None = None
     #: Which vector space this server's store is opened in. Named rather than discovered,
     #: for the same reason `llm` is: a store outlives the environment it was created in,
@@ -131,8 +144,8 @@ class ServerConfig:
 
         path = (env.get("MEMVARA_DB") or "").strip()
         api_key: str | None = None
-        server_url = (env.get("MEMVARA_SERVER_URL") or "https://app.memvara.dev").strip() \
-            or "https://app.memvara.dev"
+        server_url = (env.get("MEMVARA_SERVER_URL") or DEFAULT_SERVER_URL).strip() \
+            or DEFAULT_SERVER_URL
 
         if mode == "local":
             if not path:
@@ -328,64 +341,38 @@ def _registry(config: ServerConfig) -> PredicateRegistry | None:
     return PredicateRegistry(
         specs=BUILTIN_PREDICATES + load_all_specs(config.predicates))
 
-#: The `Store` methods the engine calls on an ordinary turn. Not the whole protocol —
-#: this is the subset whose absence makes a *server* useless rather than a feature narrow.
-#: `put_claim` and `add_episode` are every write; the three searches are every read;
-#: `competing_claims` is contradiction resolution, which is the product.
-_ENGINE_NEEDS = frozenset({
-    "put_claim", "add_episode", "candidate_ids", "lexical_search", "vector_search",
-    "competing_claims",
-})
 
-def cloud_gap() -> list[str]:
-    """The engine calls a `RemoteStore` cannot serve yet. Empty means cloud mode works.
-
-    The one place that question is answered, because two places were answering it
-    differently: `build_memvara` refused to start a cloud server, and `memvara-mcp init`
-    wrote a cloud config anyway — exit 0, "restart your client", and a server that then
-    refuses to come up. The gap between those two was silent by construction, since the
-    command that writes the config never starts the thing it configured.
-
-    Derived from `RemoteStore.WIRED` rather than hardcoded, so when the REST facade grows
-    the endpoints this empties out on its own and both callers start working. Nothing has
-    to remember to lift a flag.
-    """
-    from ..store.remote import RemoteStore
-
-    return sorted(_ENGINE_NEEDS - RemoteStore.WIRED)
-
-
-_CLOUD_NOT_WIRED = (
-    "MEMVARA_MODE=cloud cannot start a server yet. RemoteStore is faithful to what the "
-    "REST facade actually exposes — reading one memory by id, erasing one, erasing a "
-    "scope, tenant stats — and the facade has no endpoint for the low-level surface the "
-    "engine calls on every turn: {missing}.\n\n"
-    "Building it anyway would start a server that lists fourteen tools and fails on the "
-    "first one a model reaches for, which is worse than not starting: the failure would "
-    "arrive mid-conversation, as a tool error, to a model with no way to act on it.\n\n"
-    "Use MEMVARA_MODE=local (or --mode local) with MEMVARA_DB pointing at a file. To use "
-    "a hosted deployment, point an MCP client at its own URL rather than proxying it "
-    "through this server; see docs/OPEN-CORE.md."
+#: Set under cloud mode, these name a subsystem that does not run in this process.
+#: Extraction and embedding happen inside the deployment, so the value would be read,
+#: accepted and ignored — and an operator who set `MEMVARA_LLM=anthropic`, saw a server
+#: start and believed their writes were being extracted by a model has been told something
+#: false by a program that stayed silent. Refused, with the variable named.
+_SERVER_SIDE_UNDER_CLOUD = (
+    ("llm", "none", "MEMVARA_LLM"),
+    ("embedder", _DEFAULT_EMBEDDER, "MEMVARA_EMBEDDER"),
 )
 
 
-def build_memvara(config: ServerConfig) -> Memvara:
-    """Open the store this server speaks for.
+def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
+    """Open the memory this server speaks for: a local store, or a hosted deployment.
 
-    The scope goes to the constructor as well as to `Memvara.scope()` later, because the
-    tenant decides which learned predicate vocabulary is rehydrated at open — a server
-    that scoped only its calls would classify every predicate again on every launch.
+    In "local" mode the scope goes to the constructor as well as to `Memvara.scope()`
+    later, because the tenant decides which learned predicate vocabulary is rehydrated at
+    open — a server that scoped only its calls would classify every predicate again on
+    every launch.
 
-    In "cloud" mode there is no local file at all: the store would be a `RemoteStore`
-    talking to `config.server_url` with `config.api_key`, and `Memvara.__init__` accepts
-    `store=` as an alternative to `path=` for exactly this case. **It is refused instead,
-    at construction**, and `_CLOUD_NOT_WIRED` says why: the REST facade has no endpoint
-    for the low-level surface the engine calls on every turn, so a server built this way
-    starts, lists fourteen tools, and fails on the first one a model reaches for. See
-    `docs/OPEN-CORE.md` for the decision and which side of the line each seam is on.
+    In "cloud" mode there is no local file and no local engine. This returns a
+    `RemoteMemvara`: a client of the `/v1` facade that turns each library call into one
+    request and hydrates the reply into the same dataclasses, which is why one MCP tool
+    table can serve either. It is **not** a `Memvara` over a `RemoteStore`, and that
+    distinction is the whole decision — the engine calls `put_claim`, `lexical_search`
+    and `competing_claims` on every turn and the facade has an endpoint for none of them,
+    so a server built that way would start, list fourteen tools and fail on the first one
+    a model reached for. See `docs/OPEN-CORE.md` for which side of the line each seam is
+    on.
     """
     if config.mode == "cloud":
-        from ..store.remote import RemoteStore
+        from ..remote.api import RemoteMemvara
 
         if config.api_key is None:
             # Reachable only by constructing a ServerConfig directly in Python, bypassing
@@ -398,14 +385,19 @@ def build_memvara(config: ServerConfig) -> Memvara:
                 "api_key. ServerConfig.from_env() never produces this combination; "
                 "a caller constructing ServerConfig directly must set api_key too.")
 
-        missing = cloud_gap()
-        if missing:
-            raise ConfigError(_CLOUD_NOT_WIRED.format(missing=", ".join(missing)))
-        return Memvara(   # pragma: no cover - unreachable until the endpoints exist
-            store=RemoteStore(base_url=config.server_url, api_key=config.api_key),
-            llm=NullLLM() if config.llm == "none" else _anthropic(),
-            embedder=_embedder(config.embedder),
-            registry=_registry(config),
+        for field, default, variable in _SERVER_SIDE_UNDER_CLOUD:
+            chosen = getattr(config, field)
+            if chosen != default:
+                raise ConfigError(
+                    f"{variable}={chosen!r} does not apply under MEMVARA_MODE=cloud. "
+                    f"The {field} runs inside the deployment, so this process would "
+                    "read the setting and never use it. Unset it, or use "
+                    "MEMVARA_MODE=local with MEMVARA_DB if you want this machine to do "
+                    f"the work. \"memory_stats\" reports the deployment's own {field}.")
+
+        return RemoteMemvara(
+            api_key=config.api_key,
+            base_url=config.server_url,
             **config.scope_kwargs,
         )
     return Memvara(

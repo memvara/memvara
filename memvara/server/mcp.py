@@ -12,7 +12,7 @@ load-bearing rather than merely tidy.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, TextIO
+from typing import TYPE_CHECKING, Any, Mapping, TextIO
 
 from .. import __version__
 from ..core import Memvara
@@ -27,7 +27,14 @@ from .protocol import (
     serve_stdio,
     success,
 )
+from .memory_api import MemoryAPI
 from .tools import TOOLS, Tool, ToolContext, ToolError, safe_detail
+
+if TYPE_CHECKING:
+    # For the annotation alone. `memvara.remote.api` reaches back into
+    # `memvara.server.config` through `remote/creds.py`, so importing it at module
+    # level here would be a cycle through this package's own `__init__`.
+    from ..remote.api import RemoteMemvara
 
 #: What we implement. A client that asks for one of these gets its own version echoed
 #: back; anything else is answered with ours, and the client decides whether to proceed.
@@ -59,6 +66,76 @@ INSTRUCTIONS = (
 )
 
 
+def _bind(memory: "Memvara | RemoteMemvara", *, tenant: str | None, user: str | None,
+          agent: str | None, session: str | None) -> MemoryAPI:
+    """Bind the scope once, from configuration the client supplied at launch.
+
+    Two engines, one binding, and the difference is where the tenant comes from. A local
+    `Memvara` is told which tenant to serve, because a SQLite file holds all of them. A
+    `RemoteMemvara` is not asked: `scope()` has no `tenant` parameter, since the
+    deployment resolves it from the bearer token and a request parameter naming one would
+    be a request to be trusted about identity. `build_memvara` has already put
+    `MEMVARA_TENANT` on the client for `memory_stats` to report; the credential decides
+    what is actually read.
+    """
+    if isinstance(memory, Memvara):
+        return memory.scope(tenant=tenant, user=user, agent=agent, session=session)
+    return memory.scope(user=user, agent=agent, session=session)
+
+
+#: Seconds a startup probe may spend before this server gives up and says "unknown".
+#: Long enough for a deployment that is merely far away, short enough that a client
+#: launching this process does not sit in front of a blank terminal wondering.
+_PROBE_TIMEOUT = 2.0
+
+
+def _service_facts(memory: "Memvara | RemoteMemvara") -> tuple[str, bool]:
+    """`(extractor, read_only)` — what the memory says about itself, asked once.
+
+    A local `Memvara` answers from the object: `extractor` is a property, and read-only is
+    not a thing a SQLite file has an opinion about, so it comes back `False` and the
+    server's own `MEMVARA_READ_ONLY` decides alone.
+
+    A hosted deployment is asked, over one `GET /v1/stats`, and the two answers it gives
+    are ones this process cannot derive. `extractor` names a pipeline that runs on the
+    other side of the wire. `read_only` is what the *credential* authorizes — and without
+    it a server started with a read-only API key lists every write tool, which the
+    deployment then refuses mid-conversation as a 403, to a model that cannot act on it.
+    That is the failure the old cloud-mode refusal existed to prevent, one layer along.
+
+    **This is the one network call in startup, and that is where it belongs.** "No network
+    in a constructor" governs `Memvara(...)`, a library constructor a script builds
+    incidentally. A server's startup is the moment a connection is supposed to open, and
+    it is also the cheapest moment for it to fail: the client shows the launch, and the
+    operator is looking.
+
+    **Every failure degrades to what this server did before the call existed.** `Exception`
+    rather than a narrower class on purpose — a deployment that is down, slow, behind a
+    proxy returning HTML, or running a version whose envelope has different keys must all
+    leave the server *starting*. `Exception` excludes `KeyboardInterrupt` and `SystemExit`,
+    which do mean stop. Degrading loses the two fields and nothing else: `extractor`
+    reports "unknown", which is honest and is the field's own declared default, and
+    `read_only` falls back to the environment, which is what the operator set.
+
+    **Degrading only helps if it is quick, so the probe is built to be cheap.** One
+    attempt, `_PROBE_TIMEOUT` seconds, against the client's own three attempts at thirty
+    seconds plus backoff — which is about ninety seconds of silent stdio before a
+    deployment that hangs rather than refuses reaches the safe answer. A client waiting on
+    a server that has printed nothing cannot tell that from a crash, so a slow degrade is
+    worse than the failure it is degrading from.
+    """
+    service = getattr(memory, "service", None)
+    if service is None:
+        return getattr(memory, "extractor", "unknown"), False
+    try:
+        body = service(attempts=1, timeout=_PROBE_TIMEOUT)
+    except Exception:                                 # noqa: BLE001 - deliberate
+        return "unknown", False
+    extractor = body.get("extractor")
+    return (extractor if isinstance(extractor, str) and extractor else "unknown",
+            bool(body.get("read_only", False)))
+
+
 class MemvaraMCPServer:
     """An `Memvara` exposed as MCP tools over JSON-RPC.
 
@@ -66,22 +143,29 @@ class MemvaraMCPServer:
     the `Memvara` does not have to keep a second reference alive to shut it down.
     """
 
-    def __init__(self, memory: Memvara, *, tenant: str | None = None,
+    def __init__(self, memory: "Memvara | RemoteMemvara", *, tenant: str | None = None,
                  user: str | None = None, agent: str | None = None,
                  session: str | None = None, read_only: bool = False) -> None:
         self._memory = memory
+        extractor, credential_is_read_only = _service_facts(memory)
+        #: **OR-ed, never overridden.** A server configured read-only stays read-only
+        #: whatever the credential says, because `MEMVARA_READ_ONLY` is a decision somebody
+        #: made about this deployment and a token that happens to allow writes does not
+        #: revoke it. The credential can only narrow.
+        self.read_only = read_only or credential_is_read_only
         self._ctx = ToolContext(
-            memory=memory.scope(tenant=tenant, user=user, agent=agent, session=session),
-            extractor=memory.extractor,
-            read_only=read_only,
+            memory=_bind(memory, tenant=tenant, user=user, agent=agent, session=session),
+            extractor=extractor,
+            read_only=self.read_only,
         )
-        self.read_only = read_only
-        #: Fixed at startup, because that is when the deployment's answer is known. A
-        #: read-only server hides its write tools rather than listing and refusing them:
-        #: a tool a model can see is a tool it will spend a turn calling, and "you may
-        #: not" teaches it nothing it can act on.
+        #: Fixed at startup, because that is when the deployment's answer is known — and
+        #: `self.read_only` rather than the `read_only` argument, so a read-only credential
+        #: hides the write tools as surely as a read-only setting does. A read-only server
+        #: hides its write tools rather than listing and refusing them: a tool a model can
+        #: see is a tool it will spend a turn calling, and "you may not" teaches it nothing
+        #: it can act on. A 403 from the deployment teaches it even less.
         self._tools: dict[str, Tool] = {
-            t.name: t for t in TOOLS if not (read_only and t.writes)
+            t.name: t for t in TOOLS if not (self.read_only and t.writes)
         }
         #: Negotiated at `initialize`. Recorded rather than enforced: rejecting calls
         #: that arrive before the handshake would add a failure mode that fires only for

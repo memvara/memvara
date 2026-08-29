@@ -502,12 +502,18 @@ def _lazy_exports() -> set[str]:
     Read rather than listed because a fourth backend added to that function and forgotten
     here would make the test below vacuous, which is the failure mode of every hardcoded
     inventory.
+
+    Both spellings the hook uses are read: `name == "X"` and `name in ("X", "Y")`. The
+    remote errors arrive eleven at a time and are written as the second, and a parser that
+    only understood the first would have gone quiet about all eleven while still passing.
     """
     tree = ast.parse((PACKAGE / "__init__.py").read_text(encoding="utf-8"))
     getattr_fn = next(n for n in tree.body
                       if isinstance(n, ast.FunctionDef) and n.name == "__getattr__")
-    return {c.value for node in ast.walk(getattr_fn) if isinstance(node, ast.Compare)
-            for c in node.comparators if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+    compared = [c for node in ast.walk(getattr_fn) if isinstance(node, ast.Compare)
+                for c in node.comparators]
+    return {n.value for c in compared for n in ast.walk(c)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
 
 
 def test_every_name_in_dunder_all_can_actually_be_imported() -> None:
