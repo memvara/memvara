@@ -52,6 +52,26 @@ wording. A value that was accurate then and is different now is
 A value that was right and has stopped is `memory_end`. Full sequence:
 `references/write-and-correct.md`.
 
+**A note your own work just disproved is yours to close.** The paragraph above is
+for when *they* raise it. More often nobody does: a note comes back in recall and
+the work you do this turn is what makes it false. Nothing else notices — the
+person cannot see the store, and the next session reads the same note and
+believes it.
+
+Close it in the turn that falsified it. The bar is evidence, not suspicion:
+something you did or read this turn, not a note that merely looks old. Recall
+does not carry claim ids, so you pay one `memory_search` for the handle, then
+choose the same three ways — a value overtaken is `memory_remember`, one that
+has stopped being true is `memory_end` at the instant it stopped, one that was
+never right is `memory_forget`.
+
+Check the claim against the thing it describes, not against another note in the
+store. Two records agreeing with each other is what let the stale one stand this
+long, and a stored sentence saying a defect is fixed is not the fix.
+
+Then say what you closed, in the same message as the work. A correction nobody
+is told about is one they cannot argue with.
+
 Call `memory_stats` once before you write. If the session field is not `*`, the
 server was launched with `MEMVARA_SESSION` set and the note will not carry over
 — say so. If stats say `fast-path-only`, write triples with `memory_remember`;

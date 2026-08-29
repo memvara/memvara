@@ -9,6 +9,24 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Changed
+
+- **The skill now tells an agent to close a note its own work disproved.** The
+  correction sequence opened "when they say a memory is wrong", so every path through it
+  was gated on the person raising it — and the commoner case is that nobody does: a note
+  comes back in recall, the turn's own work makes it false, and nothing notices. The
+  person cannot see the store and the next session reads the same note and believes it.
+  Measured on a live store on 2026-08-30: six claims closed by hand in one sitting, five
+  stale by mechanism rather than by anyone's mistake, one stale for four days *with its
+  own closing instruction stored beside it* — naming the claim id and the right verb, at
+  confidence 1.0. Knowing how to close a claim was never the gap.
+
+  Prose only, and deliberately not a tool or a poller. `recall(with_ids=True)` already
+  exists and `server/tools.py` deliberately does not pass it, because an agent that needs
+  a handle is sent to `memory_search`; the missing piece was the instruction to go and get
+  one, plus the reminder to check a claim against the thing it describes rather than
+  against another note in the same store.
+
 ## [0.9.0] — 2026-08-30
 
 ### Added
