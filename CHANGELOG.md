@@ -35,14 +35,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `path=`, `store=`, `embedder=`, `llm=`, `registry=` and `reembed=True` all describe an
   engine that runs server-side.
 
-- **`memvara.remote.aio.AsyncRemoteMemvara`: the hosted client, awaited, on a real async
-  transport.** Every method on `RemoteMemvara` has an `async def` twin of the same name
-  taking the same arguments, plus `aclose()`, `__aenter__` and `__aexit__`. It does not
-  use `memvara.aio`'s `asyncio.to_thread` wrapper — `httpx.AsyncClient` already speaks
-  `/v1` without blocking a thread to do it, and there is no engine underneath the
-  transport for coroutine-colouring to propagate through, so wrapping the blocking client
-  in a thread would only be worse. See `memvara/aio.py`'s module docstring for where that
-  module's own async argument stops applying.
+- **`AsyncRemoteMemvara`: the hosted client, awaited, on a real async transport.**
+  Importable as `from memvara import AsyncRemoteMemvara`, same as `RemoteMemvara`. Every
+  method on `RemoteMemvara` has an `async def` twin of the same name taking the same
+  arguments, plus `aclose()`, `__aenter__` and `__aexit__`. It does not use
+  `memvara.aio`'s `asyncio.to_thread` wrapper — `httpx.AsyncClient` already speaks `/v1`
+  without blocking a thread to do it, and there is no engine underneath the transport for
+  coroutine-colouring to propagate through, so wrapping the blocking client in a thread
+  would only be worse. See `memvara/aio.py`'s module docstring for where that module's
+  own async argument stops applying.
 
 ## [0.8.1] — 2026-08-27
 

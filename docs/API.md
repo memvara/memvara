@@ -247,6 +247,29 @@ as the exception types in `memvara.remote.errors` — `AuthError`, `ScopeError`,
 `ServerError`, all `RemoteError` — and writes carry an `Idempotency-Key` that is held
 constant across their own retries.
 
+**`memvara.remote.aio.AsyncRemoteMemvara` is the same client, awaited.**
+
+```python
+from memvara import AsyncRemoteMemvara               # pip install 'memvara[cloud]'
+
+async def main():
+    async with AsyncRemoteMemvara(api_key="mv_…", user="alice") as mem:
+        await mem.remember("Alice", "lives_in", "Lisbon")
+        return [r.text for r in await mem.search("where do they live?")]
+```
+
+Every method on `RemoteMemvara` has an `async def` twin of the same name taking the same
+arguments — `scope()` returns an `AsyncScopedRemoteMemvara` rather than binding four
+strings, so it stays synchronous, exactly as `AsyncMemvara.scope()` does below. `aclose()`
+replaces `close()`; `__aenter__`/`__aexit__` replace the plain context manager.
+
+This one is **not** built on `AsyncMemvara`'s pattern below — it does not run
+`RemoteMemvara` inside `asyncio.to_thread`. It talks to `/v1` through `httpx.AsyncClient`
+directly, because that transport already has a real async implementation and there is no
+local engine underneath this class for coroutine-colouring to propagate through. See
+`memvara/aio.py`'s module docstring for the fuller argument and exactly where it stops
+applying.
+
 ### Concurrency
 
 The library is synchronous, and reads no longer queue behind writes. Read statements use a
@@ -286,8 +309,11 @@ setup and for the calls that have no async form.
 no store — and it is the shape a server wants: one handle per request, with the four
 scope keywords written once instead of on every call.
 
-It is a thread-pool wrapper, not an async rewrite, and says so: SQLite has no async
-driver worth the name, and the work here is CPU and disk rather than network.
+`AsyncMemvara` is a thread-pool wrapper around the *local* engine, not an async
+rewrite, and says so: SQLite has no async driver worth the name, and the work it hands to
+a thread is CPU and disk rather than network. That reasoning is specific to the local
+engine — `AsyncRemoteMemvara` above talks to a hosted deployment over a transport that is
+already async, and uses it directly instead.
 
 ---
 

@@ -157,7 +157,7 @@ __all__ = [
     "calibrate_min_score", "FloorReport",
     # The hosted client and the errors its calls raise. Reached lazily below, so
     # `import memvara` still works without httpx installed.
-    "RemoteMemvara",
+    "RemoteMemvara", "AsyncRemoteMemvara",
     "RemoteError", "AuthError", "ScopeError", "NotFound", "Conflict", "QuotaExhausted",
     "RateLimited", "LegalHold", "ReadOnly", "InvalidRequest", "ServerError",
     "__version__",
@@ -179,6 +179,9 @@ def __getattr__(name: str):
     if name == "RemoteMemvara":
         from .remote.api import RemoteMemvara
         return RemoteMemvara
+    if name == "AsyncRemoteMemvara":
+        from .remote.aio import AsyncRemoteMemvara
+        return AsyncRemoteMemvara
     if name in ("RemoteError", "AuthError", "ScopeError", "NotFound", "Conflict",
                 "QuotaExhausted", "RateLimited", "LegalHold", "ReadOnly",
                 "InvalidRequest", "ServerError"):
