@@ -12,20 +12,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 ### Changed
 
 - **`memory_add`'s `role` now says what it decides, and the skill stops calling the tool
-  inert.** The skill told agents that "prose handed to `memory_add` is often accepted and
-  not stored", which is true of the model tier and false of the write. The fast path runs
-  on every `role="user"` turn whatever `MEMVARA_LLM` is, searches rather than anchors, and
-  strips quotation marks before matching — so a first-person sentence quoted inside a log,
-  a docstring or a pasted document is indistinguishable from one the person said, and
-  lands at 0.95, enough to supersede a value they stated outright. On 2026-08-26 a pasted
-  log quoting `write/fast.py`'s own docstring wrote four claims and replaced a real stored
-  name; nothing raised, because a matched write is an ordinary successful write. The
-  mechanism now lives in the `role` parameter description, which every caller loads, and
-  `system` is documented as the value for a transcript, a log or a paste. The skill keeps
-  only what no single description can carry: judging whose voice the text is before you
-  write, and that a note invented this way held at no instant, so `memory_forget` takes it
-  back and `memory_end` would record a change that never happened. No behaviour change —
-  `role` has accepted these three values since the rename.
+  inert.** The skill said prose handed to `memory_add` was often accepted and not stored.
+  True of the model tier, false of the write, and a reader who concludes the tool is inert
+  stops thinking about what they hand it. The deterministic matcher runs on every
+  `role="user"` turn whatever `MEMVARA_LLM` is, searches rather than anchors, and removes
+  quotation marks before matching, so a first-person statement quoted inside a log, a
+  docstring or a pasted document cannot be told from one the person wrote — and it lands at
+  0.95, above `AUTHORITY_SHARE` against a value they stated outright. On 2026-08-26 a
+  pasted log quoting `write/fast.py`'s own docstring wrote four claims and replaced a real
+  stored name; nothing raised, because a matched write is an ordinary successful write.
+  The mechanism now lives in the `role` description, which every MCP caller loads, and in
+  `Memvara.add`'s docstring and `docs/API.md` for the library and REST surfaces, which the
+  first draft of this change left out. It says three things it did not before: that a
+  configured model reads the same `user` turn for anything else in the vocabulary; that
+  `system` stops extraction but not near-duplicate reinforcement, which runs at every role
+  and can still attach a pasted turn to an existing claim as a source; and that `assistant`
+  is declined by the gate exactly as `system` is, so the old "stored but trusted less" was
+  describing a mechanism that does not exist. The skill keeps only what no description can
+  reach: whose voice the text is, that one call carries one role so a mixed turn takes two,
+  and that a note invented this way held at no instant — `memory_forget` takes it back,
+  `memory_end` would record a change that never happened. No behaviour change: `role` has
+  accepted these three values since the rename.
 
 - **The skill now tells an agent to close a note its own work disproved.** The
   correction sequence opened "when they say a memory is wrong", so every path through it

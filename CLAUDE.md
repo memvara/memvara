@@ -211,8 +211,17 @@ Two mechanics decide whether a write survives, and both fail quietly.
 
 **Write triples, not prose.** This deployment runs with no extraction model, which
 `memory_stats` reports as `fast-path-only`. A paragraph handed to `memory_add` that matches
-none of the fixed sentence forms is accepted and stored as nothing. `memory_remember` with an
-explicit subject, predicate and object needs no model and cannot mis-parse.
+none of the fixed sentence forms yields no fact. `memory_remember` with an explicit subject,
+predicate and object needs no model and cannot mis-parse.
+
+**That is not the same as `memory_add` being inert, and reading it that way cost a real
+stored name here.** The deterministic matcher runs on every `role="user"` turn whatever
+`MEMVARA_LLM` says, searches rather than anchors, and strips quotation marks before it
+looks — so a first-person sentence quoted inside a log or a docstring is written down as a
+fact about whoever pasted it, at a confidence that supersedes what they stated themselves.
+On 2026-08-26 a pasted log quoting `write/fast.py`'s own docstring did exactly that. Pass
+`role="system"` for a transcript, a log or a paste; see the `role` description for the
+whole of it.
 
 **Set `true_since` when the fact became true before now.** Backfilling a finding from last
 week without it records a claim that was never true across its own interval, and the store
