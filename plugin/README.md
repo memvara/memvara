@@ -51,6 +51,35 @@ plugin.
 The skill files in this directory are a copy of `memvara/skills/memvara/`
 in the Python package. A test fails if they drift.
 
+## Hooks
+
+`hooks/` is the canonical hook tree. It is what makes memory automatic —
+recall on every prompt, capture when a turn ends — and every plugin
+repository vendors it from here, byte for byte, at the commit its own
+`hooks.lock` names. Two tests over there compare the copy: one against that
+sha, one against this branch's tip, because a lock and a copy frozen
+together agree with each other forever.
+
+It sits at the top level rather than inside the `memvara` package on
+purpose. `pyproject.toml` says `packages = ["memvara"]`, so `memvara/hooks/`
+would ship an importable `memvara.hooks.lib` to everyone who runs
+`pip install memvara`. Here it stays in the sdist, out of the wheel, and the
+canonical path is the same string as the vendored one — so the sync is a
+copy with no rewriting in it to get wrong.
+
+`hooks/core/` is host-neutral; `hooks/hosts/<id>.py` is one client's
+protocol written down as data — its event names, stdin keys, reply keys,
+timeouts. The registration file a client actually reads is generated from
+that record, not vendored:
+
+```
+python3 plugin/hooks/tools/generate.py claude
+```
+
+Seven repositories vendor this one tree and each registers a different
+client, so a `hooks.json` committed here would be one of them shipped to all
+of them. This repository ignores that path for exactly that reason.
+
 ## Your own agent
 
 A plugin does not install into LangChain, CrewAI, or a loop you wrote.
