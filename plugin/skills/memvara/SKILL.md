@@ -74,8 +74,19 @@ is told about is one they cannot argue with.
 
 Call `memory_stats` once before you write. If the session field is not `*`, the
 server was launched with `MEMVARA_SESSION` set and the note will not carry over
-— say so. If stats say `fast-path-only`, write triples with `memory_remember`;
-prose handed to `memory_add` is often accepted and not stored.
+— say so. If stats say `fast-path-only`, write triples with `memory_remember`: a
+paragraph nothing recognises yields no fact. Do not read that as the tool being
+harmless. What it does recognise it writes, and the deciding argument is `role`.
+
+So work out whose voice you are storing before you store it. What you hand over is
+rarely one: their sentence, and under it a file, an error, a page they dropped in.
+A call carries a single role, so a turn holding both voices takes two — theirs as
+they wrote it, the pasted part by itself. Nothing downstream can see which half
+they typed, which is why this one is yours.
+
+Getting it wrong writes a note that was never true of them, so `memory_forget`
+takes it back and `memory_end` does not. You do not have to go looking: the
+receipt names every claim the call just created, and reading it is the check.
 
 Store what would be **embarrassing** to get wrong next week. Do not restate the
 transcript. See `references/scopes.md`.

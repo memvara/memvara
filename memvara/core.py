@@ -1055,6 +1055,14 @@ class Memvara:
 
         Returns a receipt describing exactly what happened, including how many LLM calls
         it cost — usually zero.
+
+        `role` decides what is extracted and not merely who the turn is attributed to.
+        Only `"user"` is read: `FastExtractor` matches first-person statements anywhere
+        in the text, quotation marks removed first, so one quoted inside a document
+        cannot be told from one the person wrote. Pass `role="system"` for a document,
+        a log or a transcript — the turn is still stored and still cited, and no fact is
+        taken out of it. Near-duplicate detection runs at every role, so an existing
+        claim can still be reinforced by a turn nothing was extracted from.
         """
         scope = self._scope(tenant, user, agent, session)
         episodes = self._to_episodes(messages, scope, role, ts)

@@ -15,6 +15,9 @@ mem = Memvara(path=":memory:", *, store=, embedder=, llm=, registry=, telemetry=
 
 # write
 mem.add(messages, *, role="user", ts=None)        -> WriteReceipt
+    # role decides what is EXTRACTED, not just attribution: only "user" is read.
+    # Pass role="system" for a document, a log or a paste -- stored and cited, nothing
+    # extracted. See Memvara.add's docstring for why quoting is not a defence.
 mem.remember(subject, predicate, obj, *, valid_from=, valid_to=, recorded_at=, sources=,
              text=, confidence=, memory_type=, polarity=, extractor=, **meta)
                                                   -> WriteReceipt

@@ -19,8 +19,15 @@ persists between chats.
   not `*`, say the note will not carry over.
 - Store what would be embarrassing to get wrong next week. Do not
   restate the transcript.
-- If stats say `fast-path-only`, write triples with `memory_remember`.
-  Prose handed to `memory_add` is often accepted and not stored.
+- If stats say `fast-path-only`, write triples with `memory_remember`:
+  a paragraph nothing recognises yields no fact. That is not the same
+  as the tool being harmless -- what it recognises, it writes.
+- Before `memory_add`, work out whose voice the text is, and set
+  `role` to match; its own description says what hangs on that. One
+  call carries one role, so a turn holding both voices takes two.
+- Read the receipt afterwards. It names every claim the call created,
+  which is how you catch a fact invented out of a paste. That note was
+  never true, so `memory_forget` takes it back, `memory_end` does not.
 - `memory_forget` is not erasure. Real deletion goes through the
   console or the REST API. Never say you deleted data if you only
   retired a claim.
