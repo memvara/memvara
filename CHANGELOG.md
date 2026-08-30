@@ -11,6 +11,22 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Changed
 
+- **`memory_add`'s `role` now says what it decides, and the skill stops calling the tool
+  inert.** The skill told agents that "prose handed to `memory_add` is often accepted and
+  not stored", which is true of the model tier and false of the write. The fast path runs
+  on every `role="user"` turn whatever `MEMVARA_LLM` is, searches rather than anchors, and
+  strips quotation marks before matching — so a first-person sentence quoted inside a log,
+  a docstring or a pasted document is indistinguishable from one the person said, and
+  lands at 0.95, enough to supersede a value they stated outright. On 2026-08-26 a pasted
+  log quoting `write/fast.py`'s own docstring wrote four claims and replaced a real stored
+  name; nothing raised, because a matched write is an ordinary successful write. The
+  mechanism now lives in the `role` parameter description, which every caller loads, and
+  `system` is documented as the value for a transcript, a log or a paste. The skill keeps
+  only what no single description can carry: judging whose voice the text is before you
+  write, and that a note invented this way held at no instant, so `memory_forget` takes it
+  back and `memory_end` would record a change that never happened. No behaviour change —
+  `role` has accepted these three values since the rename.
+
 - **The skill now tells an agent to close a note its own work disproved.** The
   correction sequence opened "when they say a memory is wrong", so every path through it
   was gated on the person raising it — and the commoner case is that nobody does: a note

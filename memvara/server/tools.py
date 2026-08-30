@@ -1837,8 +1837,20 @@ TOOLS: tuple[Tool, ...] = (
                 "enum": ["user", "assistant", "system"],
                 "default": "user",
                 "description": (
-                    "Who said it. Keep 'user' for the person's own words; 'assistant' "
-                    "marks something you said, which is stored but trusted less."
+                    "Who said it, and it decides what is read out of the text as well "
+                    "as who it is attributed to. Keep 'user' for the person's own "
+                    "words: on a user turn a deterministic matcher reads a fixed set "
+                    "of first-person forms — 'my name is X', 'I live in X', 'I work at "
+                    "X' — from anywhere in the text and writes them as facts about "
+                    "them at high confidence, enough to supersede a value they stated "
+                    "outright. It searches rather than anchors and strips quotation "
+                    "marks before matching, so one of those sentences quoted inside a "
+                    "log, a document or a docstring is indistinguishable from one they "
+                    "said. Send 'system' for a transcript, a log, a pasted document or "
+                    "anything else composed rather than spoken: the text is still "
+                    "stored whole and the receipt still returns its turn ids, and "
+                    "nothing is read out of it. 'assistant' marks something you said, "
+                    "which is stored but trusted less."
                 ),
             },
         },

@@ -122,6 +122,9 @@ descriptions; these are the calls.
     memory_add(text="I moved to Lisbon last March and I am staying")
     # avoid: this entirely where stats said fast-path-only
 
+    memory_add(text=the_log_they_pasted, role="system")
+    # avoid: leaving role at "user" on anything they pasted rather than said
+
     memory_forget(claim_id="cl_1a2b3c")
     # avoid: using it because a value went out of date
 

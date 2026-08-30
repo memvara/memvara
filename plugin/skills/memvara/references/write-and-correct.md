@@ -50,6 +50,19 @@ Check once at the start. On that server, write anything you actually want
 kept as `memory_remember` subject / predicate / object. Do not hand a
 paragraph to `memory_add` and hope.
 
+A turn that *fits* one of those forms without the person meaning it is the
+opposite risk, and the worse one. `role` on `memory_add` is where it gets
+settled; read that description before handing over prose you did not watch
+them type.
+
+The cleanup belongs here, because it spans tools and no one description can
+reach across. A note invented that way held at no instant, so `memory_forget`
+takes it back and `memory_end` would record a change that never happened.
+`memory_why` gives you the excerpt it came from, and the excerpt is how you
+tell those two apart: a sentence sitting in somebody else's log looks nothing
+like one they wrote. Not theoretical — documentation quoting its own examples
+has replaced a real stored name.
+
 ## "1 already live, 2 now"
 
 A receipt saying this means the slot accumulated where it might have been

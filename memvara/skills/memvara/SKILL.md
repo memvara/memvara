@@ -77,6 +77,15 @@ server was launched with `MEMVARA_SESSION` set and the note will not carry over
 — say so. If stats say `fast-path-only`, write triples with `memory_remember`;
 prose handed to `memory_add` is often accepted and not stored.
 
+Work out whose voice you are storing before you store it. What you hand over is
+rarely one: their sentence, and under it a file, an error, a page they dropped in.
+`role` settles that, and reading its description is the whole of the job — but the
+call is yours, because nothing downstream can see which half they typed.
+
+Getting it wrong writes a note that was never true of them, so `memory_forget`
+takes it back and `memory_end` does not. Look at `memory_recall` after storing
+anything you did not watch them write.
+
 Store what would be **embarrassing** to get wrong next week. Do not restate the
 transcript. See `references/scopes.md`.
 

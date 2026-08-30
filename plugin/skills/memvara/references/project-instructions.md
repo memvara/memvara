@@ -21,6 +21,11 @@ persists between chats.
   restate the transcript.
 - If stats say `fast-path-only`, write triples with `memory_remember`.
   Prose handed to `memory_add` is often accepted and not stored.
+- Before `memory_add`, work out whose voice the text is. If any of
+  it arrived by paste rather than by typing, set `role` to match --
+  its own description says what hangs on that. A note invented from
+  a paste was never true, so `memory_forget` takes it back and
+  `memory_end` does not.
 - `memory_forget` is not erasure. Real deletion goes through the
   console or the REST API. Never say you deleted data if you only
   retired a claim.
