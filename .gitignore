@@ -33,3 +33,11 @@ __pycache__/
 # matching at every depth is a pattern that can quietly drop files out of a release. See
 # `pyproject.toml`'s note on `artifacts` for the same thread, pulled the other way.
 /local/
+
+# `plugin/hooks/tools/generate.py` writes this beside the tree it lives in, which is the
+# right place when a plugin repository runs it and a scratch file when this one does. It
+# is ignored here so it can never become canonical: the seven plugin repositories vendor
+# `plugin/hooks/` whole, so a `hooks.json` committed here would be one client's
+# registration file shipped to all of them, and each of those repositories generates its
+# own from the host it names. Leading slash: this is the one path, not any hooks.json.
+/plugin/hooks/hooks.json

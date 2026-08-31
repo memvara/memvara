@@ -58,6 +58,29 @@ There is exactly one sanctioned local transform, in `claude-memvara`: the frontm
 `/memvara:memvara`. It is applied during sync, and the drift test compensates for that one
 line and no other — every remaining byte still has to match.
 
+## So is `plugin/hooks/`, and that one has no transform at all
+
+Same relationship, second tree: the source of truth is `plugin/hooks/` in `memvara/memvara`,
+`hooks.lock` pins the commit, `hooks-sync.yml` copies it across and CI diffs it. Do not edit
+it here either. It differs from the skill in three ways worth knowing before you touch it.
+
+**No sanctioned transform.** Not one line. The canonical path and the vendored path are the
+same string, so the sync is a plain copy and the gate is a plain subtree byte compare.
+
+**`hooks/hooks.json` is the exception, and it is generated rather than vendored.** Every repo
+registers a different client, so a canonical copy would be one repo's manifest shipped to all
+of them. It is built from the host record `hooks.lock` names:
+
+```
+python3 plugin/hooks/tools/generate.py <host>
+```
+
+Edit `hooks/hosts/<id>.py` and regenerate; a hand edit to the manifest fails the gate.
+
+**`hooks.lock`'s `host=` line is yours.** It says which record this repository registers, sync
+reads it back out of the file it is replacing, and nothing upstream may set it. A literal host
+in the sync workflow would turn every sibling install surface into a copy of one of them.
+
 **Documentation ships in the same commit as the code.** Inherited from the core repo's own
 CLAUDE.md, and it means the README here too: a README that oversells the install is how
 someone finds a background process they were told would not exist.
