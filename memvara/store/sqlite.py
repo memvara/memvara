@@ -1901,8 +1901,11 @@ class SQLiteStore:
             # changed. `text` is here for the same reason and is load-bearing in the
             # same way: `_CLAIM_UPSERT` sets every column but `id`, so a comparison made
             # after it has run finds the stored text equal to the incoming text every
-            # time, and the FTS skip below would never fire. It costs nothing extra —
-            # the rowid this fetches was already being fetched.
+            # time, and the FTS skip below would never fire. `sources` rides along for
+            # free, since the rowid was being fetched anyway; `text` does not, quite —
+            # a value large enough to overflow its page costs a read on every write.
+            # That read is far cheaper than the rewrite it saves, which is the trade
+            # being made here rather than a free one.
             prior = self._db.execute(
                 "SELECT rowid, sources, text FROM claims WHERE id=?",
                 (claim.id,)).fetchone()

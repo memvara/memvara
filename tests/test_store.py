@@ -1593,6 +1593,26 @@ def test_re_putting_a_claim_with_unchanged_text_does_not_rewrite_its_fts_row(sto
     assert store.lexical_search("Berlin", [SCOPE], limit=10)[0][0] == c.id
 
 
+def test_the_skip_holds_inside_an_open_batch(store):
+    """The shape the fault actually takes: thousands of writes inside one uncommitted
+    transaction, none of them visible to any other connection yet.
+
+    `prior` is read through the writer connection, which is the only one that can see
+    that transaction's own rows. Routing it through `_read()`'s snapshot connection
+    instead would compare against stale committed text, and every case above would still
+    pass -- outside a batch the two connections agree."""
+    with store.batch():
+        c = put(store, object="Berlin")
+        assert fts_statements(store, lambda: store.put_claim(c)) == []
+
+        moved = claim(id=c.id, object="Lisbon")
+        ran = fts_statements(store, lambda: store.put_claim(moved))
+        assert [x.split()[0] for x in ran] == ["DELETE", "INSERT"]
+
+    assert store.lexical_search("Lisbon", [SCOPE], limit=10)[0][0] == c.id
+    assert store.lexical_search("Berlin", [SCOPE], limit=10) == []
+
+
 def test_changing_a_claims_text_still_replaces_what_search_finds(store):
     """The guard the skip needs, and the case the measurement never exercised: every
     write in that window was a reinforcement of identical text, so nothing there would

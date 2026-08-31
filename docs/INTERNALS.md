@@ -941,8 +941,9 @@ stored `text` in the same SELECT that fetches `rowid` and `sources`, before the 
 overwrites it. Without that guard every reinforcement rewrote a doclist to reproduce what
 was already there, and enough of those inside one uncommitted transaction made FTS5 raise
 `SQLITE_CORRUPT_VTAB`, reported as `database disk image is malformed` on a file that was
-sound and that a `rollback()` restored to working order. On one measured store every
-write in the failing transaction — 19,420 of 19,420 — was of unchanged text.
+sound and that a `rollback()` restored to working order. On one measured store the
+transaction that used to die at its 3,520th write instead ran to 19,420 and committed —
+and every one of those 19,420 writes was of unchanged text.
 
 Anything testing this must **read the file**, not query the store. Every query already
 answered correctly — that is precisely why it went unnoticed. See
