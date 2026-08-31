@@ -70,12 +70,15 @@ def render(host, reply: "Reply") -> str:
     Empty rather than `{}`: an empty object is a reply, and a reply with no fields still
     reads as one to anyone tailing the transcript.
     """
-    if host.envelope != "nested":
+    if host.envelope not in ("nested", "flat"):
         # Every other envelope arrives with the host that needs it. Refusing loudly here
-        # rather than falling back to this one is the point: a port that reaches this line
-        # has declared a shape nobody has written, and rendering Claude's shape at it
+        # rather than falling back to one of these is the point: a port that reaches this
+        # line has declared a shape nobody has written, and rendering Claude's shape at it
         # would produce a reply the client reads as valid and ignores.
         raise ValueError(f"no renderer for envelope {host.envelope!r}")
+
+    if host.envelope == "flat":
+        return _render_flat(host, reply)
 
     body: dict = {}
     if reply.status and host.status_key:
@@ -92,6 +95,34 @@ def render(host, reply: "Reply") -> str:
         event_name = host.events.get(reply.hook, "")
         body["hookSpecificOutput"] = {"hookEventName": event_name, **specific}
 
+    return json.dumps(body) + "\n" if body else ""
+
+
+def _render_flat(host, reply: "Reply") -> str:
+    """The same reply with every key at the top level and no `hookSpecificOutput` wrapper.
+
+    Two hosts need this and they need it for opposite reasons, which is why it is one
+    renderer rather than two. GitHub Copilot CLI reads a flat object off a hook's stdout
+    and ignores a nested one -- measured on 1.0.82 by emitting each shape alone, where the
+    nested form returned `NO CANARY` and the flat form delivered. OpenCode never reads our
+    stdout at all: its hooks are in-process JavaScript, so `js/shim.mjs` parses this and
+    mutates the host's own objects. A shim we own could have read any shape; it reads this
+    one so that there is a single wire format between `run.py` and whatever consumes it,
+    and so a Copilot port later is a record rather than a third branch here.
+
+    `hookEventName` is deliberately absent. It exists in the nested shape because Claude
+    Code requires the reply to name the event it answers; nothing that reads the flat
+    shape asks for it, and emitting a key no reader wants is how a format grows a field
+    that later has to be kept correct forever.
+    """
+    body: dict = {}
+    if reply.status and host.status_key:
+        body[host.status_key] = reply.status
+    if reply.context and host.context_key:
+        body[host.context_key] = reply.context
+    if reply.decision and host.approve is not None:
+        body[host.approve.decision_key] = reply.decision
+        body[host.approve.reason_key] = reply.reason
     return json.dumps(body) + "\n" if body else ""
 
 
