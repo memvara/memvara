@@ -11,6 +11,39 @@ requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 
+# What somebody scanning PyPI search results reads, and what the search itself matches on.
+# Absent until now, so the project matched only its own name and its description line —
+# on an index where the terms people type are "agent memory" and "temporal knowledge
+# graph" rather than "memvara". These are the words the library's own documentation uses
+# for the things it actually does, which is the bar: a keyword naming something this
+# package does not do costs a reader a click and costs the project the next one.
+keywords = [
+    "agent-memory", "ai-agents", "bitemporal", "temporal-database", "provenance",
+    "llm-memory", "long-term-memory", "knowledge-graph", "mcp", "rag", "audit-trail",
+]
+
+# The trove classifiers, which are a closed vocabulary — an unlisted string is a build
+# error, so these are the nearest true ones rather than the ones we would have written.
+# `Topic :: Database` earns its place: the two time axes, the supersession and the
+# interval queries are database work, and a reader who understands that is the reader
+# this package is for.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
 # Core has exactly one hard dependency. Everything else is opt-in.
 dependencies = ["numpy>=1.24"]
 
@@ -18,6 +51,7 @@ dependencies = ["numpy>=1.24"]
 # carried no links at all — the first thing anyone evaluating a memory layer looks for.
 [project.urls]
 Homepage = "https://memvara.dev"
+Documentation = "https://github.com/memvara/memvara/blob/main/docs/README.md"
 Repository = "https://github.com/memvara/memvara"
 Issues = "https://github.com/memvara/memvara/issues"
 Changelog = "https://github.com/memvara/memvara/blob/main/CHANGELOG.md"

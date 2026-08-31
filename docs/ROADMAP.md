@@ -154,7 +154,7 @@ list.
   claim that quietly means four different things. LangGraph turned out to be the best fit
   of the four: `BaseStore` hands over the query text natively *and* `put(namespace, key,
   value)` supplies all three parts of a triple, so an item is stored as one claim per field
-  and changing `city` retires exactly `city` — contradiction resolution surviving a foreign
+  and changing `city` ends exactly `city` — contradiction resolution surviving a foreign
   interface intact.
 - **Multi-hop traversal** — `neighborhood()`, `paths_between()`, `Store.adjacent()`, and
   SQLite schema v6 with `subject_key`/`object_key` indexes. Not on the original roadmap at
@@ -824,3 +824,7 @@ alternative is to chase developer adoption first — adapters, hosting, distribu
 accept competing head-on with better-funded incumbents. That is a real trade, and it is a
 business decision rather than a technical one: it belongs to whoever is funding the runway,
 not to the architecture.
+
+---
+
+Previous: [Internals](INTERNALS.md) · Next: [Open core](OPEN-CORE.md) · [Contributing](../CONTRIBUTING.md)

@@ -311,8 +311,8 @@ def _block_class(base: type) -> type:
 
         name: str = "memvara"
         description: Any = (
-            "Long-term memory: reconciled facts about the user, contradictions already "
-            "retired."
+            "Long-term memory: reconciled facts about the user, contradictions "
+            "already resolved."
         )
         memory: Any = None
         tenant: Any = None

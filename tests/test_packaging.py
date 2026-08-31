@@ -47,25 +47,64 @@ def _toml_table(table: str) -> dict[str, str | list[str]]:
     `requires-python` promises 3.10. A packaging test that skips on one of the four
     interpreters the package claims to support is exactly the kind of half-enforcement
     the CI matrix exists to end. It understands only the shapes `pyproject.toml` actually
-    uses — one scalar or one single-line array per key — and
+    uses — one scalar per key, and an array written on one line or across several — and
     `test_the_hand_parse_of_pyproject_agrees_with_tomllib` pins it against the real parser
     everywhere the real parser exists.
+
+    The multi-line array arrived with `keywords` and `classifiers`, which are fifteen
+    entries each and unreadable on one line. Handled by accumulating until the closing
+    bracket rather than by a second code path, so the two spellings cannot diverge.
     """
     found: dict[str, str | list[str]] = {}
     inside = False
+    key_open: str | None = None
+    buffer = ""
+
+    def items(body: str) -> list[str]:
+        return [item.strip().strip("\"'") for item in body.split(",") if item.strip()]
+
+    def uncommented(text: str) -> str:
+        """`text` with a trailing `# ...` removed, unless the `#` is inside a string.
+
+        Needed once arrays could span lines. Two ways the naive version was wrong, and
+        both produce a silently *wrong* table rather than an error: a comment line whose
+        prose happens to end in `]` closed the array early, and an inline comment after an
+        entry became an entry of its own. Quote-aware because a `#` inside a value is
+        data — no entry here contains one today, and a parser that depends on that is a
+        parser that breaks on the day one does.
+        """
+        quote = ""
+        for i, ch in enumerate(text):
+            if quote:
+                if ch == quote:
+                    quote = ""
+            elif ch in "\"'":
+                quote = ch
+            elif ch == "#":
+                return text[:i]
+        return text
+
     for raw in PYPROJECT.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
+        line = uncommented(raw).strip()
+        if key_open is not None:
+            # Inside a multi-line array. Whatever survives comment-stripping is entries;
+            # a line that was only a comment leaves nothing, and cannot close the array.
+            buffer += line
+            if line.endswith("]"):
+                found[key_open] = items(buffer.rstrip("]"))
+                key_open, buffer = None, ""
+            continue
         if line.startswith("["):
             inside = line == f"[{table}]"
             continue
-        if not inside or line.startswith("#") or "=" not in line:
+        if not inside or not line or "=" not in line:
             continue
         key, _, value = line.partition("=")
         value = value.strip()
-        if value.startswith("[") and value.endswith("]"):
-            found[key.strip()] = [
-                item.strip().strip("\"'") for item in value[1:-1].split(",") if item.strip()
-            ]
+        if value == "[":
+            key_open, buffer = key.strip(), ""
+        elif value.startswith("[") and value.endswith("]"):
+            found[key.strip()] = items(value[1:-1])
         elif value.startswith(('"', "'")):
             found[key.strip()] = value.strip("\"'")
     return found
@@ -572,6 +611,44 @@ def test_every_lazily_exported_backend_is_listed_in_dunder_all() -> None:
 
 
 # -- the parser this file leans on -----------------------------------------------------
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib arrived in 3.11")
+def test_the_hand_parse_agrees_with_tomllib_on_comment_shapes_this_file_lacks(
+        tmp_path: pathlib.Path) -> None:
+    """The agreement test above reads `pyproject.toml`, which contains none of these.
+
+    So the quote-aware comment stripping the multi-line array reader depends on was
+    never exercised by it, and is skipped entirely on 3.10 — the one interpreter the hand
+    parser exists to serve. Three shapes, each of which the first version got wrong and
+    each of which produces a silently *wrong* table rather than an error: a comment line
+    whose prose ends in a bracket, an inline comment after an entry, and a `#` inside a
+    string, which must survive.
+    """
+    import tomllib
+
+    probe = tmp_path / "pyproject.toml"
+    probe.write_text(
+        '[project]\n'
+        'name = "probe"\n'
+        'keywords = [\n'
+        '    # a comment whose prose ends in a bracket [like this]\n'
+        '    "alpha",\n'
+        '    "beta",   # an inline note\n'
+        '    "gam#ma",\n'
+        ']\n'
+        'description = "has a # inside a string"\n', encoding="utf-8")
+
+    global PYPROJECT
+    original, PYPROJECT = PYPROJECT, probe
+    try:
+        got = _toml_table("project")
+    finally:
+        PYPROJECT = original
+
+    want = {k: v for k, v in tomllib.loads(probe.read_text(encoding="utf-8"))["project"].items()
+            if isinstance(v, (str, list))}
+    assert got == want
 
 
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib arrived in 3.11")

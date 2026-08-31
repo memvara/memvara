@@ -10,7 +10,7 @@ know before wiring either one up.
 ``MemvaraRetriever`` — a clean fit
     `BaseRetriever` asks for "given a query, return documents". That is exactly what
     `Memvara.search` is, and everything memvara knows survives the crossing: hybrid
-    retrieval and its ranking, scope inheritance, the retirement of contradicted values
+    retrieval and its ranking, scope inheritance, the ending of contradicted values
     (they simply stop being returned), the per-leg `Explanation`, the source turn ids,
     and `as_of` — a LangChain retriever that can answer *what did we believe in March*
     is not something the interface anticipated, and it works, because time travel is a

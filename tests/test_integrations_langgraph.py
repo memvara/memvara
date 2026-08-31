@@ -371,13 +371,20 @@ def test_one_item_becomes_one_claim_per_field_not_one_claim_per_item(store, mem)
 def test_a_changed_field_supersedes_only_itself_and_leaves_the_others_alone(store, mem):
     """What CrewAI cannot do, and the reason this adapter exists. Its unit of memory is
     an opaque sentence, so "moved to Lisbon" lands on a second slot and both stay live.
-    Here the city is a slot of its own, so the move retires exactly the city."""
+    Here the city is a slot of its own, so the move ends exactly the city."""
     store.put(NS, "m1", {"city": "Berlin", "food": "pizza"})
     store.put(NS, "m1", {"city": "Lisbon", "food": "pizza"})
     assert store.get(NS, "m1").value == {"city": "Lisbon", "food": "pizza"}
     timeline = store.history(NS, "m1", "city")
     assert [c.object for c in timeline] == ["Berlin", "Lisbon"]
     assert timeline[0].invalidated_by == timeline[1].id
+    # `ended`, not `retired`, and the difference is the whole point of the distinction:
+    # the world moved, the record was not wrong. Asserted rather than described because
+    # the description was the part that went astray — five documents, this docstring
+    # among them, said a changed field is "retired". Only the companion test below,
+    # where a field is *dropped*, is a retirement.
+    assert timeline[0].state == "ended"
+    assert timeline[0].invalidated_at is None
     assert len(store.history(NS, "m1", "food")) == 1     # untouched, not rewritten
 
 
@@ -441,7 +448,7 @@ def test_a_deleted_and_recreated_key_starts_its_life_again(store):
 
 
 def test_two_writes_can_never_share_a_transaction_instant(mem, monkeypatch):
-    """A supersession whose predecessor was retired at exactly the moment its replacement
+    """A supersession whose predecessor was ended at exactly the moment its replacement
     began is a zero-length interval that `as_of` cannot resolve to either value. A coarse
     clock — or a test one — hands out the same instant twice, so the store steps."""
     install(monkeypatch)

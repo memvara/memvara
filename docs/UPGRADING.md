@@ -1343,3 +1343,7 @@ Moving a turn is not just an `UPDATE`: `episodes_fts` and `episode_embeddings` a
 by `episode_id` and carry no tenant of their own, so re-filing a row leaves its index
 entries reachable from the tenant they were written under. Deleting the affected episodes
 and re-attaching provenance is the safer repair.
+
+---
+
+Previous: [Documentation index](README.md) · Next: [Roadmap](ROADMAP.md) · [Changelog](../CHANGELOG.md)
