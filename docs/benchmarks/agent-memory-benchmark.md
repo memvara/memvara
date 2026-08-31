@@ -182,13 +182,13 @@ By category:
 
 Cost and latency from the same runs:
 
-| System | LLM calls | embedding calls | rows stored | write, per event | query, mean | query p95 |
+| System | LLM calls | texts embedded | rows stored | write, per event | query, mean | query p95 |
 |---|---:|---:|---:|---:|---:|---:|
 | memvara | 0 | 520 | 241 | 0.8 – 2.9 ms | 0.9 – 2.6 ms | 2 – 15 ms |
 | vector-rag | 0 | 279 | 262 | 0.02 – 0.25 ms | 0.09 – 0.51 ms | 0.3 – 1.5 ms |
 | naive | 0 | 0 | **193** | 0.007 – 0.016 ms | 0.02 – 0.03 ms | 0.1 – 0.2 ms |
 
-**memvara embeds 520 texts against `vector-rag`'s 279**, and the split is exact: 241
+**memvara embeds 520 texts against `vector-rag`'s 279** — texts submitted, not requests made, which is the same quantity for both only because neither batches. The split is exact: 241
 claims plus 262 source episodes on the way in, then one per unprobed question. It embeds
 the claim *and* the turn the claim came from, which is what makes `why()` able to answer
 later and is the second cost the row above is the first half of. Until this was measured
@@ -308,7 +308,7 @@ environment block is assembled from a fixed list of fields.
 
 ## Add your own system
 
-One file, four methods, and no changes to the benchmark:
+One file, five methods, and no changes to the benchmark:
 
 ```bash
 python -m benchmarks.agent_memory --system mypackage.adapters:build
@@ -381,12 +381,22 @@ reading the code. One JSON object per run:
 | `metrics.by_scenario` | the same, keyed by scenario |
 | `metrics.failure_reasons` | reason to count, most common first |
 | `latency` | `write_total_ms`, `write_mean_ms`, `query_mean_ms`, `query_p50_ms`, `query_p95_ms`, `query_max_ms` |
-| `usage` | `llm_calls`, `embedding_calls`, `rows_stored` (rows the store holds after ingestion, not write calls), `db_reads`, `extra`. **`null` means not measured** and must not be rendered as zero |
+| `usage` | `llm_calls`, `texts_embedded` (texts submitted for embedding, not requests made), `rows_stored` (rows the store holds after ingestion, not write calls), `db_reads`, `extra`. **`null` means not measured** and must not be rendered as zero |
 | `questions[]` | per question: `id`, `category`, `scenario`, `correct`, `given`, `expected`, `reason`, `latency_s`, `support` |
 
 `accuracy` is `null` for an empty group, which a renderer must show as `-` rather than 0%.
 
-Adding a field is safe. Renaming or repurposing one is a version change.
+Adding a field is safe. Renaming or repurposing one breaks any consumer reading it, so
+it needs a deprecation window once results are being consumed — but it is **not** what
+`benchmark_version` tracks. That number is about whether two *scores* are comparable, and
+it moves when the questions, the scoring or the dataset move. A field rename changes no
+score.
+
+One rename has happened, and it is recorded here rather than left for a reader to
+discover: `embedding_calls` became `texts_embedded`, because memvara reported texts
+through it and `vector-rag` reported requests, and the two agreed only because neither
+batches yet. It was renamed within hours of the schema first being published and before
+anything consumed it. A later one would not get that treatment.
 
 The full methodology, the layout and the fairness rules are in
 [the benchmark's own README](https://github.com/memvara/memvara/blob/main/benchmarks/agent_memory/README.md).

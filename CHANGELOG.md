@@ -36,6 +36,24 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   later. The wrapper delegates `name` and `dim` so `memvara.embed.fingerprint` derives the
   same identity as the bare embedder and a file-backed store still reopens.
 
+  A review of that work found two more, fixed with it. `Usage.embedding_calls` was the
+  one cost field still without a docstring — the same undefined-field condition that had
+  just cost a published number one commit earlier — and it immediately grew the same
+  split: memvara counting texts, `vector-rag` counting requests, agreeing only because
+  neither batches. It is now `texts_embedded`, defined as texts, because batching is an
+  implementation detail of an embedding API and counting requests would report identical
+  work as orders of magnitude apart. The rename is disclosed in the result-schema section
+  rather than left to be discovered; it happened before anything consumed the schema, and
+  `benchmark_version` is unchanged because no score moved.
+
+  And the adapter interface is **five** methods, not four. `registry.build` has always
+  required `reset`, `remember`, `query`, `usage` and `close`; `adapters/base.py`'s
+  docstring named four and omitted `usage`, and four other documents copied the count —
+  so a contributor following the prose would learn about `usage` from a `TypeError`.
+  Wrong in every copy from the start, which is why nothing could disagree with it. A test
+  now scans every document that states a count against the list the registry enforces,
+  and fails naming the file and line.
+
   No score changed: 92.0 / 89.0 / 50.0, and `datasets/v1` is untouched.
 
 - **`tests/test_docs.py` refuses a wording this project has already corrected.** Two

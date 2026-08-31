@@ -120,7 +120,7 @@ nothing until it finishes. Slice it with `--shuffle SEED --limit N`, or use the
 Everything else in Phase 4 measures memvara against something we wrote or something we
 chose. `benchmarks/agent_memory/` is the first measurement here that a *different* memory
 system can run on the same dataset, by the same rules, without forking this repository:
-262 events, 100 questions, 16 scenarios, a four-method adapter interface, a versioned
+262 events, 100 questions, 16 scenarios, a five-method adapter interface, a versioned
 dataset, a published result schema, and `--system` accepting a dotted import path. Offline
 and deterministic — `--repeat-check` runs a system twice and fails on a single differing
 verdict.

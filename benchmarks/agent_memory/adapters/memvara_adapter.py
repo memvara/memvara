@@ -61,7 +61,7 @@ class _CountingEmbedder:
     """`HashingEmbedder`, plus a tally of how many texts it was asked to encode.
 
     memvara embeds on write and again on every unprobed read, and reports neither: the
-    library has no cost counter for it, so the benchmark's `embedding_calls` column read
+    library has no cost counter for it, so the benchmark's `texts_embedded` column read
     `-` for memvara while both baselines reported a number. `-` means *not measured* and
     was honest, but it left the one system doing the most embedding as the one with no
     figure.
@@ -274,8 +274,8 @@ class MemvaraMemory:
         stats = self.mem.stats()
         return Usage(
             llm_calls=0,
-            embedding_calls=(self._embedder.texts_embedded
-                             if self._embedder is not None else None),
+            texts_embedded=(self._embedder.texts_embedded
+                            if self._embedder is not None else None),
             rows_stored=int(stats.get("claims", 0)),
             db_reads=self._reads,
             extra={"episodes": int(stats.get("episodes", 0))},

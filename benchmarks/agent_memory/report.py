@@ -106,7 +106,7 @@ def _cost_block(result: RunResult) -> list[str]:
     lines = [
         "  Cost, as counted by the system itself",
         f"    LLM calls                    {show(usage.llm_calls):>8}",
-        f"    embedding calls              {show(usage.embedding_calls):>8}",
+        f"    texts embedded               {show(usage.texts_embedded):>8}",
         f"    rows stored                  {show(usage.rows_stored):>8}",
         f"    read calls                   {show(usage.db_reads):>8}",
     ]
