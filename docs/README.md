@@ -50,6 +50,7 @@ using it. They are independent — read either first. Ninety seconds of it runni
 | [Internals](INTERNALS.md) | Module-by-module contracts and the invariants |
 | [Deploying](DEPLOY.md) | As a library, as an MCP server, in Docker — plus configuration and operations |
 | [Benchmarks](BENCHMARKS.md) | Every measured claim, with its method and its caveats |
+| [Agent Memory Benchmark](benchmarks/agent-memory-benchmark.md) | A system-neutral benchmark for memory over changing facts, with results for memvara and two baselines |
 | [Upgrading](UPGRADING.md) | The changes that do not announce themselves |
 | [Roadmap](ROADMAP.md) | Done, deliberately deferred, and still missing |
 | [Open core](OPEN-CORE.md) | What is Apache-2.0 and what is not |
