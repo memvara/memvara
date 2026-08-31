@@ -934,6 +934,17 @@ stayed in the file indefinitely while `erase_claim` reported per-table counts as
 The option is not retroactive, which is why the migration also runs one `optimize`: only a
 merge discards what the existing markers hide.
 
+The in-place rewrite has a second consequence, on the write path rather than the erasure
+one. A delete under `secure-delete` is not the cheap append a delete marker would be, so
+`put_claim` rewrites a claim's FTS row **only when its text has changed** — it reads the
+stored `text` in the same SELECT that fetches `rowid` and `sources`, before the upsert
+overwrites it. Without that guard every reinforcement rewrote a doclist to reproduce what
+was already there, and enough of those inside one uncommitted transaction made FTS5 raise
+`SQLITE_CORRUPT_VTAB`, reported as `database disk image is malformed` on a file that was
+sound and that a `rollback()` restored to working order. On one measured store the
+transaction that used to die at its 3,520th write instead ran to 19,420 and committed —
+and every one of those 19,420 writes was of unchanged text.
+
 Anything testing this must **read the file**, not query the store. Every query already
 answered correctly — that is precisely why it went unnoticed. See
 `tests/test_erasure_residue.py`.

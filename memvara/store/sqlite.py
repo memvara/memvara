@@ -1894,13 +1894,21 @@ class SQLiteStore:
     def put_claim(self, claim: Claim) -> None:
         with self._lock:
             cited = json.dumps(claim.sources)
-            # Read *before* the upsert overwrites it. The stored array is this claim's
-            # provenance as the store currently holds it, so it is also the answer to
-            # "which edges are already there" — and having it here is what lets the sync
-            # below skip both the write and the read when nothing has changed. It costs
-            # nothing extra: the rowid this fetches was already being fetched.
+            # Read *before* the upsert overwrites them. The stored array is this
+            # claim's provenance as the store currently holds it, so it is also the
+            # answer to "which edges are already there" — and having it here is what
+            # lets the sync below skip both the write and the read when nothing has
+            # changed. `text` is here for the same reason and is load-bearing in the
+            # same way: `_CLAIM_UPSERT` sets every column but `id`, so a comparison made
+            # after it has run finds the stored text equal to the incoming text every
+            # time, and the FTS skip below would never fire. `sources` rides along for
+            # free, since the rowid was being fetched anyway; `text` does not, quite —
+            # a value large enough to overflow its page costs a read on every write.
+            # That read is far cheaper than the rewrite it saves, which is the trade
+            # being made here rather than a free one.
             prior = self._db.execute(
-                "SELECT rowid, sources FROM claims WHERE id=?", (claim.id,)).fetchone()
+                "SELECT rowid, sources, text FROM claims WHERE id=?",
+                (claim.id,)).fetchone()
             self._db.execute(
                 _CLAIM_UPSERT,
                 (
@@ -1926,13 +1934,29 @@ class SQLiteStore:
             #
             # The upsert preserves the rowid, which is the whole reason it is an upsert,
             # so an existing claim's was already read a few lines up.
+            #
+            # Rewritten only when the text actually moved, which on the hottest path
+            # here means almost never: every reinforcement re-puts a claim whose text is
+            # unchanged, and the delete-then-insert reproduces byte for byte what is
+            # already indexed. That is not merely wasted work. `_migrate_to_v7` turns on
+            # FTS5's `secure-delete` for this table, so a delete rewrites the doclist
+            # inside existing segment pages rather than appending a marker; accumulate
+            # enough of those inside one uncommitted transaction and FTS5 raises
+            # SQLITE_CORRUPT_VTAB, which surfaces as `database disk image is malformed`
+            # from a write that is changing nothing, on a file that is not damaged and
+            # that a fresh connection writes happily.
+            #
+            # Measured against a store that reproduces that failure: 19,420 of 19,420
+            # rewrites in the first transaction were of unchanged text, and skipping
+            # them carried the run 5.5× past the write it otherwise dies on.
             rowid = prior["rowid"] if prior is not None else self._db.execute(
                 "SELECT rowid FROM claims WHERE id=?", (claim.id,)).fetchone()["rowid"]
-            self._db.execute("DELETE FROM claims_fts WHERE rowid=?", (rowid,))
-            self._db.execute(
-                "INSERT INTO claims_fts (rowid, claim_id, text) VALUES (?,?,?)",
-                (rowid, claim.id, claim.text),
-            )
+            if prior is None or prior["text"] != claim.text:
+                self._db.execute("DELETE FROM claims_fts WHERE rowid=?", (rowid,))
+                self._db.execute(
+                    "INSERT INTO claims_fts (rowid, claim_id, text) VALUES (?,?,?)",
+                    (rowid, claim.id, claim.text),
+                )
             stored = prior["sources"] if prior is not None else "[]"
             if stored != cited:
                 self._sync_sources(claim.id, claim.sources, json.loads(stored))
