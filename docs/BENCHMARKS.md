@@ -4,6 +4,15 @@ Every number here is reproducible from this repository; the harnesses are in
 `bench/` and `demo/`. Where a result is synthetic or self-authored it says so in
 its own heading, because that is the part a reader is entitled to discount.
 
+**The Agent Memory Benchmark is on its own page.** It is the one measurement here that is
+not about memvara: a system-neutral dataset and adapter interface that any memory system
+can implement, with baselines that beat memvara in one category.
+See [the report](benchmarks/agent-memory-benchmark.md), or run it:
+
+```bash
+python -m benchmarks.agent_memory --system memvara --system naive --system vector-rag --compare
+```
+
 ## Measured against the real mem0 package
 
 `pip install mem0ai && PYTHONPATH=. python3 bench/mem0_real.py` — mem0 **2.0.17**, not a

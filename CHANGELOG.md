@@ -41,6 +41,92 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   the API, and the time to add an entry is after correcting a claim that turned out to
   have copies.
 
+- **The Agent Memory Benchmark** — a public, reproducible benchmark for memory systems in
+  general, in `benchmarks/agent_memory/`. It measures what happens to a fact that
+  changes: current state, historical state, contradiction resolution, provenance,
+  knowledge time, retrieval among distractors, cost and latency. 262 events, 100
+  questions, 16 scenarios, no API key, no network, about a second per system.
+
+  ```bash
+  python -m benchmarks.agent_memory --system memvara --system naive --system vector-rag --compare
+  ```
+
+  **It is not a memvara benchmark, and it is deliberately possible to lose it.** The
+  dataset, the questions and the scorer never mention a system; everything system-specific
+  is behind a four-method adapter interface, and `--system` accepts a dotted import path so
+  a memory system in another repository is scored without forking this one. Two baselines
+  ship beside the memvara adapter: `naive`, a dictionary of current values, and
+  `vector-rag`, retrieval over the whole write log with one clock. Neither is a strawman —
+  `vector-rag` is completely correct on current state, provenance, change time and
+  knowledge time.
+
+  **Measured, at the commit this landed in:** memvara 92.0% overall, `vector-rag` 89.0%,
+  `naive` 50.0%. The three points separating memvara from a numpy baseline are entirely
+  the `temporal` dimension (100.0% against 91.5%), and the four questions that separate
+  them are the four delayed-knowledge and correction scenarios — where news arrived after
+  the fact, so "what was true then" and "what had we heard by then" are different answers
+  and one clock has to give the same one to both. **memvara loses the `retrieval`
+  dimension** (64.3% against 71.4%) and is the worst of the three on `multi_hop`, at 1 of
+  6; `irrelevance` is a three-way tie that discriminates nothing. All of that is in the
+  report rather than in a footnote.
+
+  A second review of the branch found three more, all fixed here: `Usage.db_writes` was
+  undefined, so memvara reported rows stored while the baselines reported write calls and
+  the published table compared them under one heading — it is now `rows_stored`, means
+  rows for all three, and reads in the right direction (naive 193, memvara 241,
+  vector-rag 262, so the dictionary holds *fewer* rows and memvara's 48 extra are what
+  buys the temporal result); `_is_correction` ignored cardinality and told `remember()`
+  that 30 multi-valued writes were corrections, which memvara's own MANY handling
+  absorbed rather than the adapter getting right; and the leaderboard sliced dimension
+  names to 13 characters, printing `knowledge_tim`.
+
+  Line endings are pinned on both sides. `datasets/build_v1.py` wrote its two `.jsonl`
+  files with `newline="\n"` and `metadata.json` without it, so on Windows the generator
+  emitted CRLF for one file of the three — one call out of three, in a file nobody
+  rereads once it works. All three now go through one writer. `RunResult.write` had the
+  same latent bug and is fixed with it: nothing compares a result file's bytes today,
+  which is exactly why it would have gone unnoticed until two runs from different
+  platforms were diffed.
+
+  `.gitattributes` pins `benchmarks/agent_memory/datasets/` to `eol=lf`. The dataset is
+  a byte-exact artefact — the suite regenerates it and compares bytes, and CI diffs the
+  regenerated copy against the committed one — and nothing declared its line endings, so
+  Git for Windows checked it out as CRLF and the comparison failed on the windows-latest
+  job and nowhere else. It is the repository's first `.gitattributes`, deliberately
+  scoped to these three files rather than declared repository-wide.
+
+  Those figures replace an earlier set (90.0 / 88.0 / 49.0) that this branch briefly
+  carried. Investigating memvara's `retrieval` loss found two defects in the harness
+  rather than in any memory system: the memvara adapter searched ended and retired claims
+  for present-tense questions, so a value nobody held any more outranked the right one;
+  and the three adapters fed their retrievers three different strings, which made
+  `retrieval` a comparison of adapters rather than of retrievers. Both are fixed, the
+  index text now comes from one shared function, and both fixes raised **every** system's
+  `retrieval` score. No question, gold answer or scoring rule changed.
+
+  Gold answers are authored by hand in `datasets/build_v1.py` and derived independently in
+  `timeline.py` from four published supersession rules; the suite asserts the two agree on
+  every question. Two derivations that must match is the only defence against a scoring bug
+  that every system fails identically, which nobody questions because the numbers look
+  plausible.
+
+  Scoring is deterministic — normalized matching, published aliases, exact set equality,
+  ISO-8601 dates, and no LLM judge in any mode — so `--repeat-check` runs a system twice
+  and asserts the verdicts are identical. `--show-failures` prints each wrong answer beside
+  the fact's real timeline with a named reason, which is more use to a developer than the
+  score.
+
+  Two spellings reach it: `python -m benchmarks.agent_memory` is canonical and
+  `python -m benchmarks.agent_memory.run` is an alias for people who reach for the
+  longer name first. Both call `cli.main`, so there is no second implementation to
+  drift, and `run.py` guards on `__name__` because — unlike `__main__.py` — it has an
+  importable dotted name and would otherwise run the whole benchmark on import.
+
+  Distinct from `bench/temporal.py`, which stays what it was: this repository's own
+  regression suite for the two clocks, memvara-only, probing `get_all()` directly. The new
+  benchmark is system-neutral, has a committed versioned dataset, an adapter interface, a
+  published result schema and a public report at
+  `docs/benchmarks/agent-memory-benchmark.md`.
 - **`docs/LIMITATIONS.md`, holding what was *Honest limitations* in the README.** Every
   bullet moved unchanged; only the links were respelled relative, which is the convention
   inside `docs/` and the reason they were absolute in the README (that file is the PyPI

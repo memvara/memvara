@@ -1,0 +1,100 @@
+{
+  "benchmark": "agent-memory",
+  "version": "v1",
+  "description": "Agent Memory Benchmark v1. Fourteen authored scenarios over one shared memory, covering progressive change, reversion, delayed knowledge, same-instant contradiction, repeated observation, multi-valued predicates, multi-hop retrieval and hard negatives, plus unrelated filler that is never asked about.",
+  "evaluated_at": "2026-08-01T00:00:00+00:00",
+  "predicates": {
+    "lives_in": {
+      "cardinality": "one",
+      "volatility": "slow"
+    },
+    "job_title": {
+      "cardinality": "one",
+      "volatility": "slow"
+    },
+    "works_at": {
+      "cardinality": "one",
+      "volatility": "slow"
+    },
+    "works_on": {
+      "cardinality": "one",
+      "volatility": "slow"
+    },
+    "plan": {
+      "cardinality": "one",
+      "volatility": "slow"
+    },
+    "datastore": {
+      "cardinality": "one",
+      "volatility": "slow"
+    },
+    "auth_strategy": {
+      "cardinality": "one",
+      "volatility": "slow"
+    },
+    "deploy_region": {
+      "cardinality": "one",
+      "volatility": "slow"
+    },
+    "owned_by": {
+      "cardinality": "one",
+      "volatility": "slow"
+    },
+    "team_lead": {
+      "cardinality": "one",
+      "volatility": "slow"
+    },
+    "hq_city": {
+      "cardinality": "one",
+      "volatility": "static"
+    },
+    "born_in": {
+      "cardinality": "one",
+      "volatility": "static"
+    },
+    "favourite_editor": {
+      "cardinality": "one",
+      "volatility": "fast"
+    },
+    "status": {
+      "cardinality": "one",
+      "volatility": "fast"
+    },
+    "speaks": {
+      "cardinality": "many",
+      "volatility": "static"
+    }
+  },
+  "dimensions": {
+    "current_state": [
+      "current_state"
+    ],
+    "temporal": [
+      "historical_state",
+      "change_time",
+      "change_detection"
+    ],
+    "knowledge_time": [
+      "knowledge_time"
+    ],
+    "contradiction": [
+      "contradiction"
+    ],
+    "provenance": [
+      "provenance"
+    ],
+    "retrieval": [
+      "multi_hop",
+      "distractor"
+    ],
+    "irrelevance": [
+      "negative"
+    ]
+  },
+  "counts": {
+    "events": 262,
+    "questions": 100,
+    "scenarios": 16,
+    "entities": 66
+  }
+}

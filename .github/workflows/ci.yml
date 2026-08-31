@@ -130,6 +130,12 @@ jobs:
           # is an `import-not-found` error regardless of whether the code is correct.
           python -m pip install -e ".[dev,cloud]"
       - run: python -m mypy -p memvara
+      # The benchmark's adapter interface is a `Protocol`, and a Protocol nothing checks
+      # is decorative — an adapter can drift out of conformance with no runtime symptom
+      # until the run loop reaches it. `--ignore-missing-imports` because `benchmarks/`
+      # is not an installed package and a third-party adapter's dependencies are not
+      # installed here; what is being checked is this repository's own code.
+      - run: python -m mypy benchmarks/agent_memory --ignore-missing-imports
 
   offline:
     # The headline claim is "numpy and nothing else, runs offline with no API key". That
@@ -162,6 +168,48 @@ jobs:
           assert not failed, failed
           print('all modules import with numpy alone')
           "
+
+  benchmark:
+    # A 40-question smoke run of the Agent Memory Benchmark, not the full one. The full
+    # run is a second per system and would fit here easily; the reason not to put it here
+    # is that a benchmark in CI stops being a benchmark and becomes a gate, and a gate
+    # that reports a *score* teaches everyone to make the score go up. What this job
+    # protects is that the harness still runs and still reproduces — the numbers are
+    # published from a deliberate local run, and `tests/test_agent_memory_bench.py`
+    # already covers the scoring rules on every commit.
+    #
+    # `--repeat-check` is the part worth having in CI. It runs each system twice and
+    # fails if a single per-question verdict differs, which is how nondeterminism gets
+    # caught on the interpreter and platform this repository actually supports rather
+    # than on whichever laptop last ran it.
+    #
+    # The one difference it reported during development was spurious, and it is the
+    # reason the check is scoped the way it is: memvara mints claim ids as `uuid4`, so
+    # the `support` column differed on every run while every answer stayed identical.
+    # `results.comparable` now excludes `support` and the timings, and compares the
+    # accuracy figures and every per-question verdict — the things a published number
+    # depends on.
+    name: benchmark smoke run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+      # The bare package: the benchmark's headline is that it needs no key, no network
+      # and no extras, and installing `dev` here would stop this job from checking that.
+      - run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+      - name: The dataset is still the generator's output
+        run: |
+          python benchmarks/agent_memory/datasets/build_v1.py --out /tmp/regen
+          diff -r /tmp/regen benchmarks/agent_memory/datasets/v1
+      - name: Every system answers, twice, identically
+        run: |
+          python -m benchmarks.agent_memory --quick --repeat-check --quiet \
+            --system memvara --system naive --system vector-rag
 
   npm-bridge:
     # `npx memvara` is JavaScript, and until 0.1.0 no JavaScript ran in this workflow at

@@ -617,10 +617,34 @@ Memvara is built around the observation that **most of this doesn't need a model
 
 ---
 
+## Agent Memory Benchmark
+
+A public, reproducible benchmark for **memory systems in general**, not for memvara. It
+measures what happens to a fact that changes: current state, historical state,
+contradiction resolution, provenance, knowledge time, retrieval among distractors, cost
+and latency. 262 events, 100 questions, 16 scenarios, no API key, about a second a system.
+
+```bash
+python -m benchmarks.agent_memory --system memvara --system naive --system vector-rag --compare
+```
+
+Any memory system can implement the adapter interface and be scored on the same dataset by
+the same rules — including from another repository, without forking this one. Memvara does
+not win every category, and the table reports the ones it loses.
+
+| | |
+|---|---|
+| Run it, and the methodology | [`benchmarks/agent_memory/README.md`](https://github.com/memvara/memvara/blob/main/benchmarks/agent_memory/README.md) |
+| The report, with results and limitations | [`docs/benchmarks/agent-memory-benchmark.md`](https://github.com/memvara/memvara/blob/main/docs/benchmarks/agent-memory-benchmark.md) |
+| Add your memory system | [`benchmarks/agent_memory/CONTRIBUTING.md`](https://github.com/memvara/memvara/blob/main/benchmarks/agent_memory/CONTRIBUTING.md) |
+
+---
+
 ## Measured
 
 | | |
 |---|---|
+| Agent Memory Benchmark: changing facts, across systems | [`docs/benchmarks/agent-memory-benchmark.md`](https://github.com/memvara/memvara/blob/main/docs/benchmarks/agent-memory-benchmark.md#results) |
 | Against the real `mem0ai` package | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md#measured-against-the-real-mem0-package) |
 | The two clocks, six question families | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md#the-two-clocks-measured-synthetic-self-authored) |
 | LOCOMO and LongMemEval, retrieval | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md) |
@@ -640,8 +664,9 @@ wrongly.
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 4,064 passing, 7 skipped, no API key
+python3 -m pytest -q                              # 4,151 passing, 9 skipped, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
+python3 -m benchmarks.agent_memory --system memvara --compare   # the agent memory benchmark
 PYTHONPATH=. python3 bench/temporal.py            # the two clocks, six families
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison
 PYTHONPATH=. python3 bench/perf.py                # throughput and scaling
