@@ -24,8 +24,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import pathlib
+import subprocess
+import sys
+
 import pytest
 
+from memvara.remote import creds as creds_module
+from memvara.server import config as config_module
 from memvara.server import login as login_module
 from memvara.server.login import LOGIN_USAGE, login
 
@@ -91,14 +97,6 @@ def _no_browser(monkeypatch) -> None:
 def _no_loopback(monkeypatch) -> None:
     """Simulate a sandboxed environment where binding 127.0.0.1 fails."""
     monkeypatch.setattr(login_module, "_bind_loopback_listener", lambda: None)
-
-
-@pytest.fixture(autouse=True)
-def _credentials_in_tmp(tmp_path, monkeypatch):
-    """Login writes this path on success. Redirecting it used to be opt-in,
-    and every test that forgot overwrote ~/.memvara/credentials.json with
-    the fixture key. Three real files so far."""
-    monkeypatch.setattr(login_module, "_CREDENTIALS_PATH", tmp_path / "credentials.json")
 
 
 AUTH_BODY = {
@@ -508,3 +506,65 @@ def test_bind_loopback_listener_returns_none_when_binding_fails(monkeypatch):
 
     monkeypatch.setattr(login_module, "HTTPServer", raise_oserror)
     assert login_module._bind_loopback_listener() is None
+
+
+def test_no_test_in_this_repository_can_reach_the_real_credentials_file():
+    """The redirect is on by default for every test, not opt-in per file.
+
+    This is the guard on the fixture rather than on any one caller. `login.py` writes
+    `_CREDENTIALS_PATH` on success, and for a long time only this file redirected it --
+    so the hole was never a test that forgot, it was the next file that never knew. That
+    happened three times, and each time a real 0600 key was replaced by `key-123`. The
+    API returns a key exactly once; there was nothing to restore from.
+
+    Asserted from inside an ordinary test, with no fixture requested by name, because
+    that is the state every future test starts in.
+    """
+    # From `conftest`, captured before anything was redirected. Computing
+    # `pathlib.Path.home()` here would read the *patched* HOME, so `real` would be the
+    # tmp path and every assertion below would compare two disposable paths and pass
+    # whatever the fixture did. That is exactly what happened when this was first
+    # written: removing the redirect left it green.
+    from conftest import REAL_CONFIG_CREDENTIALS_PATH as real
+
+    for name, value in (("login._CREDENTIALS_PATH", login_module._CREDENTIALS_PATH),
+                        ("config.CREDENTIALS_PATH", config_module.CREDENTIALS_PATH)):
+        assert value != real, (
+            f"{name} still points at the developer's own credentials ({real}); a test "
+            "that writes it destroys a key that cannot be recovered")
+        assert real.parent not in value.parents and value.parent != real.parent, (
+            f"{name} is beside the developer's own credentials ({value}); a different "
+            "name in the same directory is not isolation")
+
+
+def test_the_read_side_is_redirected_too_not_only_the_write():
+    """`remote/creds.py` from-imports the constant, so patching `config` misses it.
+
+    A from-import binds the value at the importing module's import time. Redirecting
+    `config.CREDENTIALS_PATH` therefore leaves `creds.CREDENTIALS_PATH` pointing at the
+    developer's own file, and `creds._from_file()` reads it. Nothing is destroyed -- it is
+    a read -- and that is what makes it worth a test: the failure is a suite that passes
+    because whoever ran it happened to be logged in, and fails on a machine that is not.
+    """
+    from conftest import REAL_CONFIG_CREDENTIALS_PATH as real
+
+    assert creds_module.CREDENTIALS_PATH != real, (
+        f"creds.CREDENTIALS_PATH still reads {real}; a from-import binds the value at "
+        "its own import time, so patching config does not reach it")
+
+
+def test_a_child_process_inherits_the_redirect_through_HOME():
+    """The monkeypatch is in-process; a subprocess re-imports and computes `Path.home()`.
+
+    Six test files here spawn subprocesses. `Path.home()` reads HOME on POSIX, so setting
+    it is what makes the redirect survive the fork -- without it a child that reaches
+    `_write_credentials` writes the real file exactly as before, and only the session-end
+    snapshot notices, after the key is gone.
+    """
+    written = subprocess.run(
+        [sys.executable, "-c",
+         "import pathlib; print(pathlib.Path.home())"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    assert "pytest-of" in written, (
+        f"a child process resolved home to {written}; HOME is not redirected, so anything "
+        "it writes lands in the developer's real home")

@@ -54,8 +54,24 @@ import pathlib
 import traceback
 from typing import Any
 
+import pytest
+
 import memvara.core
 from memvara.embed import default_embedder as _real_default_embedder
+# Imported here so `_credentials_never_touch_home` can redirect both names for every
+# test. Neither module pulls `httpx` at import time -- `login` imports it inside
+# `login()` -- so this does not make the cloud extra a test dependency.
+from memvara.remote import creds as creds_module
+from memvara.server import config as config_module
+from memvara.server import login as login_module
+
+#: The two constants as the source defines them, read once before any fixture has
+#: redirected them. `test_credentials_path_constant_matches_logins_own` asserts the
+#: invariant that they are equal by construction, and it has to see the real values to
+#: mean anything -- comparing two names the autouse fixture has just pointed at one
+#: tmp_path would pass no matter what the source said.
+REAL_LOGIN_CREDENTIALS_PATH = login_module._CREDENTIALS_PATH
+REAL_CONFIG_CREDENTIALS_PATH = config_module.CREDENTIALS_PATH
 
 _TESTS = str(pathlib.Path(__file__).resolve().parent) + os.sep
 
@@ -103,10 +119,66 @@ memvara.core.default_embedder = _guarded_default_embedder
 # three times, and each time the hooks that read the file treated the
 # resulting 401 as an empty store.
 #
-# Isolation in one file remains opt-in the moment someone adds another, so
-# the real file is snapshotted at session start and compared at session
-# end. A test that needs to write credentials redirects
-# `login._CREDENTIALS_PATH` (and `config.CREDENTIALS_PATH`) to tmp_path.
+# That sentence used to end here, with the snapshot below as the whole
+# answer. The snapshot is a detector, not a guard: it fails the session
+# *after* the write, so it tells you a real 0600 key was destroyed rather
+# than stopping it. The key it replaced is returned exactly once by the
+# API and cannot be recovered from anywhere.
+#
+# So the redirect is now suite-wide and automatic -- `_credentials_never_
+# touch_home` below runs for every test in this repository, whether or not
+# the file it lives in remembered to ask. `tests/test_login.py` carried an
+# autouse fixture doing this for its own 28 tests; the hole was the next
+# file, and "the next file" is what happened three times.
+#
+# The snapshot stays. Two mechanisms for one property is right here: the
+# fixture stops the write, and the snapshot catches a write that reached
+# the path some way the fixture does not cover -- a subprocess, a second
+# constant nobody redirected, an `expanduser` computed at call time.
+
+@pytest.fixture(autouse=True)
+def _credentials_never_touch_home(tmp_path, tmp_path_factory, monkeypatch):
+    """Point every credentials path at tmp_path, for every test in this repository.
+
+    Autouse and in `conftest.py` rather than in the one file that writes today.
+    `login._write_credentials` is the only writer now; the cost of it becoming two
+    is a real key, and the redirect is free.
+
+    Both constants, though only `login._CREDENTIALS_PATH` is written today:
+    `config.CREDENTIALS_PATH` is the read side of the same file, and a test that
+    redirects the write while reading the developer's own key is a test that passes
+    for a reason it does not state.
+
+    `raising=False` on neither -- if either name moves, this fixture must fail loudly
+    rather than silently protect nothing.
+    """
+    # `tmp_path / "credentials.json"`, which is where the file-scoped fixture this
+    # replaces put it -- several tests in `test_login.py` read that exact path. Nesting a
+    # fake `~/.memvara/` under it would be more lifelike and would buy nothing: what makes
+    # this isolation is that the path is not the developer's, not its shape.
+    # The fake home comes from `tmp_path_factory`, not from `tmp_path`. Creating a
+    # directory inside `tmp_path` is visible to the test that owns it, and
+    # `test_bench_eval.py::test_a_download_writes_atomically...` asserts its `tmp_path` is
+    # empty -- an isolation fixture that makes another test fail has bought nothing.
+    home = tmp_path_factory.mktemp("home")
+    where = tmp_path / "credentials.json"
+    monkeypatch.setattr(login_module, "_CREDENTIALS_PATH", where)
+    monkeypatch.setattr(config_module, "CREDENTIALS_PATH", where)
+    # `remote/creds.py` does `from ..server.config import CREDENTIALS_PATH`, which binds
+    # the value at its own import time -- so patching `config` above does not reach it,
+    # and `creds._from_file()` would read the developer's real key. Same shape as the
+    # stale `from ... import` in test_config_cloud.py that this change already had to
+    # correct, one module over. It only reads, so nothing is destroyed; what it does is
+    # let a test pass because whoever ran it happened to be logged in.
+    monkeypatch.setattr(creds_module, "CREDENTIALS_PATH", where)
+    # And for anything that re-imports in its own interpreter. Six test files spawn
+    # subprocesses; a child computes `Path.home()` itself and the monkeypatch above is
+    # invisible to it. `Path.home()` reads HOME on POSIX and USERPROFILE on Windows, so
+    # setting both makes the child land in tmp_path as well.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return where
+
 
 _HOME_CREDENTIALS = pathlib.Path.home() / ".memvara" / "credentials.json"
 _CREDENTIALS_SNAPSHOT: Any = None
