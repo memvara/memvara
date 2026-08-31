@@ -26,9 +26,11 @@ Pick either column and a class of question becomes unanswerable:
 Bitemporal is not a feature on top of temporal. It is the smaller of the two claims made
 honest: with one clock, a late correction and a real change look identical.
 
-## The three reads
+## The three time keywords
 
-Every read in the API takes the same three time keywords.
+Eight reads take the same three time keywords: `search`, `get_all`, `count`,
+`history`, `why`, `produced`, `neighborhood` and `paths_between`. `recall()`, `get()`
+and `since()` take none of them, and `ask()` spells it `at=`.
 
 ```python
 mem.get_all(valid_at=T)   # what we believe TODAY about how the world was at T
