@@ -1,0 +1,140 @@
+# Publish the 90-second demo as a GIF, attached to the GitHub Release for a tag.
+#
+# The README needs an image, and this repository is a bad place to keep one. The whole
+# history is 2.3 MiB packed; the GIF is 1.1 MB, so committing it would make one binary
+# roughly a third of everything anybody clones — and every regeneration adds another
+# copy, permanently, because git keeps what it has seen. A release asset is stored
+# outside the object database, so it costs a clone nothing and a stale one can be
+# replaced rather than accumulated.
+#
+# The stable address is
+# https://github.com/memvara/memvara/releases/latest/download/demo.gif
+# which GitHub resolves to the newest release that is neither a draft nor a prerelease.
+# That is the URL the README embeds, and it keeps pointing at the current demo without
+# the README ever changing.
+#
+# This does not touch PyPI and deliberately does not live in `release.yml`. That file
+# guards an irreversible upload behind a human approval, and a GIF has no business
+# sharing a job graph with it: an asset can be replaced, a version on PyPI cannot.
+#
+# Two traps worth knowing before you read a stale image and conclude the job failed:
+#
+# 1. **A prerelease does not move `latest`.** Tag `v1.0.0rc1` and the README still shows
+#    the GIF from the last full release, which is correct and looks like nothing ran.
+# 2. **GitHub proxies README images through camo, which caches them.** A regenerated
+#    asset at the same URL can take a while to appear on the rendered page. Check the
+#    release's own asset, not the README, when you want to know what was published.
+
+name: Demo GIF
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    # For attaching the GIF to a tag that already shipped, and for republishing after
+    # `demo.py` changes without waiting for the next release.
+    inputs:
+      tag:
+        description: "Existing tag to attach demo.gif to (e.g. v0.9.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: record the demo and attach it to the release
+    runs-on: ubuntu-latest
+    # Raised here and nowhere else, matching how `release.yml` scopes `id-token: write`
+    # to the one job that uploads. This is the only job in the repository that can write
+    # to the repository's own contents.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # `gh release create --verify-tag` asks the API rather than the checkout, but
+          # the recorder runs `demo.py` from the working tree — so the GIF must be of the
+          # tagged source, not of whatever `main` says today.
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install memvara and Pillow
+        # Pillow is the recorder's only dependency beyond the standard library, and it is
+        # deliberately not a dependency of the library itself.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . Pillow
+
+      - name: Record it
+        # No `--live`. The default replays the schedule `demo.py` declares, on a virtual
+        # clock, so the same source always produces the same bytes — which is the only
+        # reason a job like this can tell a regenerated GIF from an unchanged one. A
+        # measured recording differs by milliseconds a frame and so differs in bytes
+        # every run, and would also take ninety seconds of runner time to say the same
+        # thing. The runner's DejaVu Sans Mono is the first entry in FONT_CANDIDATES.
+        run: python3 examples/temporal_memory_demo/record_gif.py demo.gif
+
+      - name: Look at the frames, since nothing upstream can
+        # `record_gif.py` says in its own output that it cannot tell a correct frame from
+        # a blank one. Neither can this, exactly — but the three failures that would
+        # actually happen here are all visible in the file: a font that resolved but drew
+        # nothing (every frame one colour), a demo that died part-way (frames collapse),
+        # and a pacing bug that turned ninety seconds into a flicker (delays collapse).
+        run: |
+          python3 - <<'PY'
+          import sys
+          from PIL import Image
+
+          gif = Image.open("demo.gif")
+          delays = []
+          inked = 0
+          for index in range(gif.n_frames):
+              gif.seek(index)
+              delays.append(gif.info["duration"])
+              if len(gif.convert("RGB").getcolors(maxcolors=1 << 16)) > 1:
+                  inked += 1
+          seconds = sum(delays) / 1000
+
+          print(f"{gif.n_frames} frames, {inked} with ink, {seconds:.1f}s, "
+                f"{gif.size[0]}x{gif.size[1]}")
+
+          problems = []
+          if gif.n_frames < 40:
+              problems.append(f"only {gif.n_frames} frames; the demo prints at ~56 "
+                              "instants, so this one stopped part-way")
+          if inked < gif.n_frames - 1:
+              problems.append(f"{gif.n_frames - inked} frames are a single colour. A "
+                              "font that loaded but drew nothing renders as an empty "
+                              "frame rather than as an error")
+          if not 85 <= seconds <= 105:
+              problems.append(f"the frame delays add up to {seconds:.1f}s, and demo.py's "
+                              "BEATS end at 90s with a 4s tail hold. The pacing did not "
+                              "survive")
+          for problem in problems:
+              print(f"::error::{problem}")
+          sys.exit(1 if problems else 0)
+          PY
+
+      - name: Attach it to the release for this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        # `--verify-tag` so a typo in the dispatch input fails here rather than creating
+        # a release against a tag that does not exist. `--clobber` because republishing
+        # is the normal case: the asset is a build product of `demo.py`, and replacing it
+        # is the whole reason it is not committed.
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" demo.gif --clobber
+          else
+            gh release create "$TAG" demo.gif --verify-tag --title "$TAG" --generate-notes
+          fi
+          gh release view "$TAG" --json assets \
+            --jq '.assets[] | "\(.name)  \(.size) bytes  \(.url)"'
