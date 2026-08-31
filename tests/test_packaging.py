@@ -270,6 +270,26 @@ def test_the_skill_tree_is_data_and_not_a_subpackage() -> None:
         "dependency walk on the understanding that it is data")
 
 
+def test_the_skill_tree_is_not_collected_as_test_modules() -> None:
+    """`--doctest-modules` imports what it collects, and the skill holds a standalone
+    script that no library code imports.
+
+    Left collected, it is imported for doctests, and coverage then measures a file
+    nothing calls: the CI gate read `memvara_auth.py 383 318 17%` and `TOTAL 97%` against
+    `fail_under = 100`. Asserted against `pyproject.toml` rather than by trying to observe
+    pytest's own collection from inside a pytest run, and stated positively in both parts
+    -- the ignore must be there, and the tree it names must still hold the `.py` that
+    makes it necessary, so this fails rather than passing vacuously if the script moves.
+    """
+    config = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    assert "--ignore=memvara/skills" in config, (
+        "pytest would collect the packaged skill again, import its script for doctests, "
+        "and drop the coverage total below the gate")
+    assert sorted(SKILL_DATA.rglob("*.py")), (
+        "the skill tree holds no .py file; the ignore above is now excluding a tree that "
+        "did not need excluding, and somebody should decide whether to drop it")
+
+
 def _module_trees() -> list[ast.Module]:
     return [ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
             for p in _module_paths()]

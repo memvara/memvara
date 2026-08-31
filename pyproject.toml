@@ -138,6 +138,13 @@ exclude_also = [
 [tool.pytest.ini_options]
 # `memvara` is in testpaths so the docstring examples run as tests. Documentation that
 # isn't executed drifts from the code silently.
+#
+# `memvara/skills/` is excluded because it is the packaged skill -- data that
+# `memvara-mcp init` writes to disk and that the plugin repositories vendor, not library
+# source. It holds one `.py`, the standalone auth script a person runs with `python3`,
+# and `--doctest-modules` imports every module it collects: importing that script means
+# coverage measures a file no library code calls, which put it in the report at 17% and
+# the total at 97% against a gate of 100.
 testpaths = ["tests", "memvara"]
-addopts = "--doctest-modules"
+addopts = "--doctest-modules --ignore=memvara/skills"
 filterwarnings = ["error::DeprecationWarning"]
