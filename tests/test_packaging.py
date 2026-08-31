@@ -254,6 +254,12 @@ def test_the_skill_tree_is_data_and_not_a_subpackage() -> None:
     dependency guard exists to see. Stated positively — the tree must be present and must
     contain the script — so deleting it fails here rather than silently satisfying
     "no `__init__.py` in a directory that no longer exists".
+
+    It costs a second thing, measured rather than reasoned about. `[tool.coverage.run]`
+    sets `source = ["memvara"]`, and coverage resolves that to packages, not directories:
+    with no `__init__.py` the script is invisible to it, and with one it is reported at 0%
+    and drags the total below the `fail_under = 100` gate. On a two-file sandbox differing
+    only in that file, the totals were 100% and 25%.
     """
     assert SKILL_DATA.is_dir(), "the packaged skill tree is gone"
     assert (SKILL_DATA / "memvara" / "scripts" / "memvara_auth.py").is_file(), (

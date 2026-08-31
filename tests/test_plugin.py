@@ -75,15 +75,57 @@ def test_the_plugin_does_not_ship_npx_or_a_local_command() -> None:
     assert "args" not in server
 
 
+def _skill_source(root: pathlib.Path) -> dict[pathlib.Path, bytes]:
+    """Every source file in a skill tree, build artifacts excluded.
+
+    `__pycache__` is not part of either tree: it is gitignored, it is specific to one
+    interpreter version and one machine, and it exists only because something imported a
+    file. It could not appear here at all until the skill gained a `.py`, and then it did
+    -- on CI and not locally, so the byte comparison passed on my machine and failed on
+    all six test jobs with `scripts/__pycache__/memvara_auth.cpython-313.pyc` present on
+    one side and absent on the other.
+
+    The exclusion cannot hide real drift, because `test_the_byte_copy_excludes_nothing_
+    that_git_tracks` below requires everything it drops to be a file git ignores.
+    """
+    return {p.relative_to(root): p.read_bytes()
+            for p in root.rglob("*")
+            if p.is_file() and "__pycache__" not in p.parts}
+
+
 def test_plugin_skill_is_a_byte_copy_of_the_packaged_tree() -> None:
-    packaged = {p.relative_to(SKILL): p.read_bytes() for p in SKILL.rglob("*") if p.is_file()}
-    plugin = {
-        p.relative_to(PLUGIN / "skills" / "memvara"): p.read_bytes()
-        for p in (PLUGIN / "skills" / "memvara").rglob("*") if p.is_file()
-    }
+    packaged = _skill_source(SKILL)
+    plugin = _skill_source(PLUGIN / "skills" / "memvara")
     assert packaged.keys() == plugin.keys()
     drifted = sorted(rel for rel, data in packaged.items() if plugin[rel] != data)
     assert not drifted, f"plugin skill drifted from the package: {drifted}"
+
+
+def test_the_byte_copy_excludes_nothing_that_git_tracks() -> None:
+    """The guard on the exclusion in `_skill_source`.
+
+    Filtering paths out of a comparison is how a guard stops covering a file without
+    anybody seeing a failure. So every path dropped has to be one git does not track: a
+    real source file that started being skipped fails here instead of silently ceasing
+    to be compared.
+    """
+    import subprocess
+
+    for root in (SKILL, PLUGIN / "skills" / "memvara"):
+        on_disk = {p for p in root.rglob("*") if p.is_file()}
+        compared = {root / rel for rel in _skill_source(root)}
+        tracked = {
+            REPO / line for line in subprocess.run(
+                ["git", "-C", str(REPO), "ls-files", "-z", str(root.relative_to(REPO))],
+                check=True, capture_output=True, text=True).stdout.split("\0") if line
+        }
+        assert tracked, f"git tracks nothing under {root.relative_to(REPO)}"
+        assert tracked <= compared, (
+            f"the byte comparison is skipping tracked files under "
+            f"{root.relative_to(REPO)}: {sorted(tracked - compared)}")
+        for dropped in on_disk - compared:
+            assert "__pycache__" in dropped.parts, (
+                f"{dropped} was dropped from the comparison and is not a build artifact")
 
 
 @pytest.mark.parametrize("name", [
