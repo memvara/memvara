@@ -9,6 +9,32 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A long run of reinforcements could fail with `database disk image is malformed`, on a
+  store that was never damaged.** `put_claim` deleted and re-inserted the claim's row in
+  `claims_fts` on every write — including the overwhelmingly common one where the text had
+  not changed and the rewrite reproduced exactly what was already indexed. FTS5's
+  `secure-delete`, on for `claims_fts` since the v7 migration and so on for every store
+  this library has written since, makes such a delete rewrite the doclist inside existing
+  segment pages rather than append a marker. Accumulate enough of them inside one
+  uncommitted transaction and FTS5 raises `SQLITE_CORRUPT_VTAB`, which reaches Python
+  under that message.
+
+  Nothing is wrong with the file, and the error names the wrong thing. At the instant of
+  failure `PRAGMA integrity_check` returns `ok` on any other connection, the committed
+  index passes FTS5's own integrity-check, and a `rollback()` clears the state outright:
+  what goes inconsistent is the pending index inside the open transaction, which is also
+  why a page-level check could never have caught it.
+
+  `put_claim` now reads `text` alongside `rowid` and `sources` in the SELECT it was
+  already running, and rewrites the FTS row only when the text has actually moved. The
+  read has to happen before the upsert, which sets every column including `text` — after
+  it, the stored and incoming values are equal every time and the skip would swallow real
+  changes. Measured against a store that reproduces the failure: 19,420 of 19,420 rewrites
+  in the first transaction were of unchanged text, and the run now gets past the write it
+  used to die on.
+
 ### Added
 
 - **The Agent Memory Benchmark is reflected in the documents that describe this

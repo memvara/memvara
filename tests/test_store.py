@@ -1541,6 +1541,94 @@ def test_a_reinforcement_from_a_new_turn_writes_only_the_new_edge(store):
     assert provenance(store) == implied(store)
 
 
+def fts_statements(store, fn) -> list[str]:
+    """Every statement `fn()` runs against `claims_fts` *itself*.
+
+    The same instrument as `edge_statements` and for the same class of question: not
+    "did the index end up right" but "was it touched at all". Only the trace callback
+    can answer the second, because a delete followed by an insert of identical text
+    leaves the table exactly as it found it.
+
+    Unlike `claim_sources`, `claims_fts` is a virtual table, and SQLite traces the
+    statements FTS5 runs against its own shadow tables alongside ours. Those arrive
+    commented out with a leading `--`, and dropping them is what leaves this reporting
+    the two statements `put_claim` writes rather than the nine FTS5 expands them into.
+    """
+    seen: list[str] = []
+    store._db.set_trace_callback(
+        lambda sql: seen.append(sql)
+        if "claims_fts" in sql and not sql.lstrip().startswith("--") else None)
+    try:
+        fn()
+    finally:
+        store._db.set_trace_callback(None)
+    return seen
+
+
+def test_a_new_claim_writes_its_fts_row(store):
+    """The first write has nothing to compare against and must always index. Guarding
+    the rewrite on a text comparison makes the no-prior-row case the one that breaks
+    silently: the claim would be stored, readable, and permanently unsearchable."""
+    ran = fts_statements(store, lambda: put(store, object="Berlin"))
+    assert [x.split()[0] for x in ran] == ["DELETE", "INSERT"]
+    assert store.lexical_search("Berlin", [SCOPE], limit=10), "indexed and findable"
+
+
+def test_re_putting_a_claim_with_unchanged_text_does_not_rewrite_its_fts_row(store):
+    """The hot path, and the reason this matters beyond the wasted work. Every
+    reinforcement re-puts a claim whose text has not moved, and the rewrite it performs
+    reproduces byte for byte what is already there.
+
+    Under FTS5's `secure-delete` -- which `_migrate_to_v7` turns on for `claims_fts`, so
+    it is on for every store this library has written since -- a delete rewrites the
+    doclist inside existing segment pages rather than appending a marker. Enough of
+    those inside one uncommitted transaction and FTS5 raises SQLITE_CORRUPT_VTAB, which
+    surfaces as `database disk image is malformed` from a write that is changing
+    nothing. Measured against a store that reproduces it: 19,420 of 19,420 rewrites in
+    the first transaction were of unchanged text, and skipping them carried the run 5.5x
+    past the write that otherwise fails.
+    """
+    c = put(store, object="Berlin", text="I live in Berlin")
+    assert fts_statements(store, lambda: store.put_claim(c)) == []
+    assert store.lexical_search("Berlin", [SCOPE], limit=10)[0][0] == c.id
+
+
+def test_changing_a_claims_text_still_replaces_what_search_finds(store):
+    """The guard the skip needs, and the case the measurement never exercised: every
+    write in that window was a reinforcement of identical text, so nothing there would
+    have caught a skip that fired too widely.
+
+    It also pins *which* text the comparison reads. `_CLAIM_UPSERT` sets every column
+    including `text`, so a comparison made after it has run finds the stored value equal
+    to the incoming one every time, skips unconditionally, and leaves the index
+    answering with text the claim no longer carries -- with no error anywhere.
+    """
+    c = put(store, object="Berlin", text="I live in Berlin")
+    moved = claim(id=c.id, object="Berlin", text="I live in Lisbon")
+    ran = fts_statements(store, lambda: store.put_claim(moved))
+
+    assert [x.split()[0] for x in ran] == ["DELETE", "INSERT"], "changed text rewrites"
+    assert store.lexical_search("Lisbon", [SCOPE], limit=10)[0][0] == c.id
+    assert store.lexical_search("Berlin", [SCOPE], limit=10) == [], "old text is gone"
+
+
+def test_the_comparison_holds_for_text_the_claim_rendered_itself(store):
+    """Most claims never carry an explicit `text`: `Claim.__post_init__` renders one
+    from the triple when none is given, so the value being compared is derived rather
+    than supplied. Both halves have to keep working for it -- an unchanged triple
+    re-renders identical text and must skip, and a moved triple renders different text
+    and must reach the index."""
+    c = put(store, object="Berlin")
+    assert c.text == "user lives in Berlin", "rendered, not supplied"
+    assert fts_statements(store, lambda: store.put_claim(c)) == []
+
+    moved = claim(id=c.id, object="Lisbon")
+    ran = fts_statements(store, lambda: store.put_claim(moved))
+    assert [x.split()[0] for x in ran] == ["DELETE", "INSERT"]
+    assert store.lexical_search("Lisbon", [SCOPE], limit=10)[0][0] == c.id
+    assert store.lexical_search("Berlin", [SCOPE], limit=10) == []
+
+
 def test_erasing_a_claim_takes_its_provenance_with_it(store, emb):
     """The fourth-table trap. Wave 4 found `entities` surviving a purge that reported
     per-table counts as evidence; this is the same mistake one table over, and it does
