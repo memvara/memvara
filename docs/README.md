@@ -5,7 +5,8 @@ here has one, so you should never finish one and have to guess where to go.
 
 **New here?** [Why Memvara?](concepts/why-memvara.md) is the five-minute version of what
 this is for. [Quickstart](getting-started/quickstart.md) is the five-minute version of
-using it. They are independent — read either first.
+using it. They are independent — read either first. Ninety seconds of it running is the
+[demo](../README.md#the-90-second-demo).
 
 ## Getting started
 

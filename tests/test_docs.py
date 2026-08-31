@@ -18,6 +18,7 @@ tools" and listed ten, having never gained `memory_neighborhood` or `memory_path
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -235,3 +236,37 @@ def test_every_method_the_architecture_diagram_names_exists(relative: str) -> No
     assert not missing, (
         f"{relative} names {missing} on the Memvara facade, which does not have them. "
         "A diagram that invents a method is worse than one that omits it.")
+
+
+#: The README's *Use cases* section opens on a transcript rather than a description, and
+#: the transcript is a quotation. Fenced as `text` and starting with the first question,
+#: which is what makes it findable here without pinning the prose around it.
+TRANSCRIPT = re.compile(r"```text\n(Q\. What is checkout-service.*?)```", re.S)
+
+
+def test_the_readme_quotes_the_coding_agent_example_verbatim() -> None:
+    """A transcript in the README is a claim about what the program prints.
+
+    Three of these lines are already pinned by `tests/test_examples.py`, which asserts on
+    the timeline the example produces. The rest — the questions, and the blank line that
+    separates each from its answer — are not, and a quotation that is right about the
+    values and wrong about their shape is still a quotation nobody can reproduce. So the
+    whole block is matched as a substring of the real output, rather than line by line:
+    the reader copies the file and compares what they see with what is on the page.
+
+    Run in a subprocess with `PYTHONPATH` removed, for the reason `tests/test_examples.py`
+    gives: the examples import the installed package and nothing else.
+    """
+    quoted = TRANSCRIPT.search(README.read_text(encoding="utf-8"))
+    assert quoted is not None, (
+        "README.md no longer quotes the coding-agent transcript. If the section was "
+        "rewritten deliberately, delete this test with it; if not, the quotation is gone.")
+
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    proc = subprocess.run([sys.executable, str(ROOT / "examples" / "coding_agent.py")],
+                          cwd=ROOT, env=env, capture_output=True, text=True,
+                          encoding="utf-8", timeout=300)
+    assert proc.returncode == 0, proc.stderr
+    assert quoted.group(1) in proc.stdout, (
+        "the README quotes output that examples/coding_agent.py does not print:\n"
+        f"--- README ---\n{quoted.group(1)}\n--- actual ---\n{proc.stdout}")

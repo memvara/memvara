@@ -157,6 +157,31 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Changed
 
+- **The top of `README.md` is a landing page, so a reader can decide inside the first
+  screen.** A navigation row under the badges links the demo, the quickstart, the
+  documentation index, PyPI, the site and the issue tracker. A five-row strip under
+  `pip install memvara` names what the library does — bitemporal, deterministic,
+  auditable, historical, LLM-light — one line each. *The problem* lost a third of its
+  prose and gained a picture of the two designs side by side: values ranked by
+  similarity, against values carrying the interval each held. It now closes by pointing
+  at `docs/concepts/why-memvara.md` for the long version rather than telling that story
+  twice, and says in one sentence that Memvara is neither a vector database nor a
+  replacement for RAG, with a link to the section that explains where it does fit.
+
+  *Use cases* moved above *Why Memvara* and opens on the coding-agent case, quoted from
+  `examples/coding_agent.py`. A new test in `tests/test_docs.py` matches that block
+  against what the program actually prints, so the quotation cannot go stale without the
+  suite going red — three of its lines were already pinned by `tests/test_examples.py`,
+  and the questions and spacing around them were not. *At a glance*,
+  under *Architecture*, gives a reader who will not read the whole file the nine
+  implementation facts in a table: the unit of memory, the two axes, how a conflict is
+  decided, what provenance holds, how retrieval scores, the store, the dependency, where
+  a model is and is not involved, and the Python floor.
+
+  No section was removed and no claim was softened. The one thing deleted is a
+  duplication this change created: the *Coding agents* row in the use-case table, which
+  the new lede above it now says at greater length.
+
 - **`README.md` is rewritten for a developer arriving from a search result.** It opens
   with the claim, the three-answer example and `pip install memvara` above the fold, then
   the problem, the demo, the quickstart, and one section each for the three things that
