@@ -287,16 +287,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
-- **Four more copies of "every read takes the same three time keywords".**
-  `docs/concepts/bitemporal-memory.md` and `docs/concepts/temporal-retrieval.md` now name
-  the eight reads that do take them and the three that do not. `docs/API.md` said "every
-  read below takes" over a listing that includes `recall`, `get` and `since`, and
-  annotates each four lines later as taking no `T=` — a page contradicting itself within
-  a screen; it now says that a read shown with `T=` takes them and a read shown without
-  one takes no time keyword at all. `CONTRIBUTING.md` gave the suite as 3,539 tests for
-  the same command the README gives as 4,044: one claim, two files, one of them updated,
-  which is the failure this guard was written to stop.
+- **Two more copies of "every read takes the same three time keywords".**
+  `docs/concepts/bitemporal-memory.md` now names the eight reads that do take them and
+  the three that do not — and its heading, *The three reads*, is now *The three time
+  keywords*, which is what the section is actually about and no longer a number
+  contradicting the sentence under it. `docs/API.md` said "every read below takes" over a
+  listing that includes `recall`, `get` and `since` and annotates each four lines later
+  as taking no `T=`, a page contradicting itself within a screen; it now says that a read
+  shown with `T=` takes them and a read shown without one takes no time keyword at all.
 
+- **`CONTRIBUTING.md` gave the suite as 3,539 tests where the README gives 4,044**, for
+  the identical command. One claim, two files, one of them updated — the failure this
+  guard was written to stop, found inside the commit that added it. Neither pattern in
+  `RETIRED_WORDINGS` catches it, and neither should: a stale number is not a wording, and
+  a guard that pretended to cover it would be the reassurance without the check.
 
 - **`docs/concepts/temporal-retrieval.md` said "Every read takes the same three time
   keywords".** The third copy of a claim corrected twice already: `recall()`, `get()` and

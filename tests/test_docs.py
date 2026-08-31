@@ -28,7 +28,7 @@ import pytest
 
 from memvara.server.tools import TOOLS
 
-from test_doc_links import DOCS, ROOT, anchors
+from test_doc_links import ROOT, anchors
 
 #: A link into this repository, as the README has to spell it for PyPI's renderer.
 GITHUB = re.compile(
