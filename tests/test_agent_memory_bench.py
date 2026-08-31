@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import doctest
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -46,6 +47,20 @@ UTC = timezone.utc
 
 def at(day: str) -> datetime:
     return datetime.fromisoformat(day).replace(tzinfo=UTC)
+
+
+def _child_env() -> dict[str, str]:
+    """The parent environment with `PYTHONPATH` pinned to the repository root.
+
+    Derived from `os.environ` rather than replaced wholesale, which is the convention in
+    `tests/test_examples.py` and `tests/test_docs.py`. A bare `env={"PYTHONPATH": ...}`
+    strips PATH, TEMP and — the one that matters — SYSTEMROOT, without which the child
+    interpreter commonly fails to start on Windows. The CI matrix runs windows-latest, so
+    that failure would have appeared on one job and nowhere else.
+    """
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT)
+    return env
 
 
 @pytest.fixture(scope="module")
@@ -86,7 +101,8 @@ def test_the_dataset_is_regenerated_byte_for_byte(tmp_path):
     proc = subprocess.run(
         [sys.executable, "benchmarks/agent_memory/datasets/build_v1.py",
          "--out", str(tmp_path)],
-        cwd=ROOT, capture_output=True, text=True, env={"PYTHONPATH": str(ROOT)})
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+        env=_child_env(), timeout=300)
     assert proc.returncode == 0, proc.stderr
     committed = ROOT / "benchmarks" / "agent_memory" / "datasets" / "v1"
     for name in ("metadata.json", "events.jsonl", "questions.jsonl"):
@@ -504,7 +520,6 @@ def test_the_adapter_is_never_handed_the_gold_answer(data):
     question = data.questions[0]
     ask = runner.ask_of(question, data.evaluated_at)
     assert not hasattr(ask, "gold")
-    assert "Berlin" not in repr(ask) or question.gold.value != "Berlin" or True
     assert set(vars(type(ask))["__slots__"]) == {
         "id", "category", "question", "probe", "at", "evaluated_at", "known_at", "about"}
 
@@ -733,7 +748,8 @@ def test_both_spellings_of_the_command_run(module, tmp_path):
     proc = subprocess.run(
         [sys.executable, "-m", module, "--system", "naive", "--quick", "--quiet",
          "--output", str(out)],
-        cwd=ROOT, capture_output=True, text=True, env={"PYTHONPATH": str(ROOT)})
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+        env=_child_env(), timeout=300)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(out.read_text())["system"] == "naive"
 
@@ -745,6 +761,22 @@ def test_importing_the_alias_does_not_run_the_benchmark():
     from benchmarks.agent_memory import run as run_module
 
     assert run_module.main is cli.main
+
+
+@pytest.mark.parametrize("system, expected", [
+    ("naive", "r-naive.json"),
+    ("mypackage.adapters:build", "r-mypackage.adapters-build.json"),
+    ("weird//name", "r-weird-name.json"),
+])
+def test_a_per_system_filename_is_safe_on_every_platform(system, expected):
+    """`--system` takes a dotted import path, and CONTRIBUTING.md documents the colon
+    form. Interpolated raw it produced `r-mypackage.adapters:build.json`, which raises
+    OSError on Windows — after every benchmark in the run had already finished."""
+    assert cli._output_path("r.json", system, many=True).name == expected
+
+
+def test_a_single_system_run_uses_the_output_path_verbatim():
+    assert cli._output_path("out/r.json", "naive", many=False) == Path("out/r.json")
 
 
 def test_the_cli_reports_an_empty_selection_rather_than_dividing_by_zero(capsys):
