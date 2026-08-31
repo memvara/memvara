@@ -52,8 +52,14 @@ MEMVARA_PREDICATES=engineering,decisions memvara-mcp
 
 A declaration outranks a guess, so adding a pack **corrects** a store that already
 classified something wrongly rather than only shaping a fresh one. It is forward-only: it
-changes what supersedes on the next write and retires nothing already stored. Packs are
-TOML and need Python 3.11.
+changes what supersedes on the next write and retires nothing already stored.
+
+**Packs are TOML, parsed with `tomllib`, so `load_all_specs` needs Python 3.11** and
+raises with the reason on 3.10. Declaring the same predicates as `PredicateSpec`s in
+Python — which is all a pack file is — works on every interpreter this package supports,
+and is what [`examples/coding_agent.py`](../../examples/coding_agent.py) does. Reach for
+the pack when you are on 3.11 or driving the MCP server, and for the inline form when the
+code has to run anywhere.
 
 ## 2. Store the turn, then the fact, and link them
 

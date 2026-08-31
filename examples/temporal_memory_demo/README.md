@@ -12,6 +12,10 @@ It needs no API key, no network and no database server — `pip install memvara`
 command above is the whole setup. Every value it prints is read back out of a real
 store; nothing is typed into a string for the screen.
 
+The rules are box-drawing characters, so the demo sets its own output encoding to UTF-8
+rather than inheriting the ANSI code page. Without that it dies on Windows four lines in,
+where `sys.stdout` defaults to cp1252 and cp1252 has no `─`.
+
 ## The six beats
 
 | | | |

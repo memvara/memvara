@@ -171,6 +171,12 @@ Two vocabularies ship with the package — `engineering` and `decisions` — and
 a pack corrects a store that already classified something wrongly rather than only
 shaping a fresh one. The MCP server takes the same string as `MEMVARA_PREDICATES`.
 
+Packs are TOML, parsed with `tomllib`, so **loading one needs Python 3.11**; it raises
+with the reason on 3.10, which this package otherwise supports. Declaring the same
+predicates inline as above works everywhere, and is what
+[`examples/coding_agent.py`](../../examples/coding_agent.py) does for exactly that
+reason.
+
 ---
 
 Previous: [Quickstart](quickstart.md) · Next: [Why Memvara?](../concepts/why-memvara.md)

@@ -24,28 +24,44 @@ twice over: multi-valued, so nothing supersedes, and slow-decaying, so this morn
 deploy still ranks as fresh in two years. Declaring it single-valued is what makes the
 OAuth write retire the API-keys claim instead of accumulating beside it.
 
-`decided` and `observed` come from the shipped `decisions` pack, and both are
-*multi-valued* on purpose: a project makes many decisions, and a later one does not make
-an earlier one untrue. It stopped being current, which is what the `auth_strategy` slot
-above records.
+`decided` is *multi-valued*, and that is the other half of the lesson: a project makes
+many decisions, and a later one does not make an earlier one untrue. It stopped being
+*current*, which is what the `auth_strategy` slot above records. A `ONE` cardinality here
+would have every new decision silently end the last.
+
+Both are declared inline below rather than loaded from the shipped `decisions` pack,
+which is the same declaration in TOML. Packs are read with `tomllib` and so need Python
+3.11, and this file runs on every interpreter the package supports — see `build()`.
 """
 
 from datetime import datetime, timezone
 
-from memvara import (Cardinality, Memvara, NullLLM, PredicateRegistry, PredicateSpec,
-                     Volatility)
-from memvara.schema import BUILTIN_PREDICATES, load_all_specs
+from memvara import (Cardinality, MemoryType, Memvara, NullLLM, PredicateRegistry,
+                     PredicateSpec, Volatility)
+from memvara.schema import BUILTIN_PREDICATES
 
 UTC = timezone.utc
 
-#: The team's own vocabulary, on top of the builtins and the shipped `decisions` pack.
-#: One slot per service, single-valued: a service authenticates one way at a time, so a
-#: second value is a contradiction rather than an addition.
+#: The team's own vocabulary, on top of the builtins. One slot per service,
+#: single-valued: a service authenticates one way at a time, so a second value is a
+#: contradiction rather than an addition.
 AUTH_STRATEGY = PredicateSpec(
     name="auth_strategy",
     cardinality=Cardinality.ONE,
     volatility=Volatility.SLOW,
     aliases=("authenticates_with", "auth_via"),
+)
+
+#: `decided`, copied field for field from the shipped `decisions` pack
+#: (`memvara/packs/decisions.toml`). MANY so decisions accumulate; STATIC because a
+#: decision is a commitment and stays true as a record of itself; EPISODIC because it
+#: records something that happened at an instant.
+DECIDED = PredicateSpec(
+    name="decided",
+    cardinality=Cardinality.MANY,
+    volatility=Volatility.STATIC,
+    memory_type=MemoryType.EPISODIC,
+    aliases=("decision", "chose", "settled_on", "agreed_on"),
 )
 
 
@@ -57,12 +73,19 @@ def at(month: int, day: int) -> datetime:
 def build() -> Memvara:
     """A store that knows the engineering vocabulary before the first write.
 
-    `load_all_specs` reads the packs that ship in `memvara/packs/`; the same string is
-    what `MEMVARA_PREDICATES=decisions` hands the MCP server. It needs `tomllib`, so
-    declared vocabularies want Python 3.11 or later — everything else here runs on 3.10.
+    The two specs above are declared in Python rather than loaded from the shipped pack,
+    and the reason is worth one sentence because it is a real constraint rather than a
+    style choice. The equivalent is:
+
+        from memvara.schema import load_all_specs
+        BUILTIN_PREDICATES + load_all_specs("engineering,decisions")
+
+    ...which reads `memvara/packs/*.toml` and is the same string `MEMVARA_PREDICATES`
+    hands the MCP server. It parses TOML with `tomllib`, which arrived in Python 3.11 —
+    so on 3.10, which this package supports, it raises. An example that a supported
+    interpreter cannot run is worse than one that spells out four extra lines.
     """
-    registry = PredicateRegistry(
-        BUILTIN_PREDICATES + load_all_specs("decisions") + (AUTH_STRATEGY,))
+    registry = PredicateRegistry(BUILTIN_PREDICATES + (AUTH_STRATEGY, DECIDED))
     return Memvara(user="platform-team", llm=NullLLM(), registry=registry)
 
 

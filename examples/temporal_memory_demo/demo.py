@@ -208,6 +208,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="remove every pause; the transcript is unchanged")
     args = parser.parse_args(argv)
 
+    # The rules are box-drawing characters and the closing line has an em dash, and on
+    # Windows `sys.stdout` defaults to the ANSI code page — cp1252, which has neither.
+    # Without this the demo dies on its first rule with a UnicodeEncodeError, four lines
+    # in, on the one platform where nobody writing it would notice.
+    #
+    # Inside `main()` rather than at module scope on purpose: importing this module under
+    # a test runner that has replaced `sys.stdout` with a capture object would otherwise
+    # reach for a `reconfigure` that object does not have.
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+
     p = Pacer(fast=args.fast)
     with Memvara(user="alice", llm=NullLLM()) as mem:
         beat_problem(p)

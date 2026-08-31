@@ -12,11 +12,27 @@ that the file works: a missing `if __name__ == "__main__"`, a top-level import t
 resolves from inside the package, or a `SystemExit` are all invisible to an import-and-call
 test and fatal to the person following the README.
 
+**An example has to run on every interpreter and platform CI covers, and this suite is
+what makes that concrete.** The first run of it found two failures, both invisible to
+anyone writing this code on Linux with a current Python, and both fatal to a real reader:
+
+* `coding_agent.py` built its vocabulary with `load_all_specs`, which parses TOML with
+  `tomllib` — and `tomllib` arrives in 3.11, while `requires-python` promises 3.10. The
+  example now declares the same predicates as `PredicateSpec`s, which is all a pack file
+  is.
+* The demo printed a box-drawing rule and died on Windows, where `sys.stdout` defaults to
+  cp1252. It now sets its own output encoding, and `run()` below decodes with the same
+  one rather than with the parent's locale.
+
+Neither would have been caught by reading the files, and neither is a CI artifact: both
+are exactly what a person on that interpreter or that platform would have hit. That is
+the argument for running examples rather than only linting them.
+
 The demo's transcript is asserted against a golden file rather than against strings in
 here, so the demo, its README and this test cannot drift into three different versions of
 one thing. Regenerate it with:
 
-    PYTHONPATH=. python3 examples/temporal_memory_demo/demo.py --fast \\
+    python3 examples/temporal_memory_demo/demo.py --fast \\
       > examples/temporal_memory_demo/expected-output.txt
 """
 
@@ -39,8 +55,11 @@ def run(script: Path, *args: str) -> str:
     they must work against the installed package. An example that only runs with the
     repository on the path is an example that fails for everyone who pip-installed.
     """
+    # `encoding="utf-8"` rather than bare `text=True`: the demo writes box-drawing
+    # characters, and `text=True` decodes with the *parent's* locale — cp1252 on Windows,
+    # which would turn a correct transcript into a mismatch against the golden file.
     proc = subprocess.run([sys.executable, str(script), *args], cwd=ROOT,
-                          capture_output=True, text=True, timeout=300)
+                          capture_output=True, text=True, encoding="utf-8", timeout=300)
     assert proc.returncode == 0, (
         f"{script.relative_to(ROOT)} exited {proc.returncode}\n"
         f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}")
