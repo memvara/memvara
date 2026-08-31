@@ -38,6 +38,50 @@ Read `references/integrate.md` before you write code or config.
 Hosted MCP URL: `https://app.memvara.dev/mcp`. Approve in the browser. It lasts
 90 days.
 
+## When it will not authenticate
+
+The browser grant is the usual path. When it does not finish — the client sits
+on `[authenticating]`, a token expired, `memory_*` answers 401 — this skill
+ships the flow as a script, so the fix does not need `pip install`:
+
+```bash
+python3 <SKILL_DIR>/scripts/memvara_auth.py authenticate
+```
+
+`<SKILL_DIR>` is the directory this `SKILL.md` is in. Substitute the absolute
+path before running. Do not run `scripts/memvara_auth.py` as a bare relative
+path: it resolves against the user's project, not against this file, and fails
+with `No such file or directory` on a machine where the script is sitting
+correctly on disk.
+
+Standard library only, and nothing is left running when it returns.
+
+| They asked | Run |
+|---|---|
+| Get a credential, or report the working one | `authenticate` |
+| Get one for a named project | `authenticate <project-id>` |
+| Replace a credential that already works | `login --confirm` |
+| Forget this machine's credential | `logout` |
+| What this credential can see | `stats` |
+
+Give it a 600-second timeout. It waits for a person to approve in a browser,
+and a shorter one kills the command while they are still reading the page.
+
+It prints a short code and a URL. Both are for the person at the keyboard, so
+pass them on exactly as printed rather than summarising them. Exit 0 is a
+working credential; exit 2 is a project id that is not the dashed UUID form the
+console shows.
+
+`authenticate` stopping because the credential already works **is the
+successful outcome**, not a failure and not something to retry with different
+arguments: minting a second key leaves the first one live on the deployment
+with nothing here pointing at it.
+
+`logout` deletes one file and names every other place a key still is. It does
+not edit the host's own MCP configuration, because that file has an OAuth
+client writing to it already and two writers leave nobody able to say whose
+token is live.
+
 ## If the memory_* tools are already connected
 
 Read before you assert. Anything you say about what is remembered — "you told

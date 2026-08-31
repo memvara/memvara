@@ -36,6 +36,11 @@ the browser still pastes the URL until OpenAI's public directory lists us.
 After install the client opens a browser. That is the product. There is no
 API key in the plugin files.
 
+When that browser grant does not finish, the skill ships the device-code flow
+as `scripts/memvara_auth.py`. See "When it will not authenticate" in
+`SKILL.md`. It mints a key into `~/.memvara/credentials.json`; nothing ships
+one.
+
 ## Paste the URL yourself
 
 Only listed where that client's own docs describe a hosted URL plus browser

@@ -130,6 +130,11 @@ writes into your agent's skill tree. It covers picking a surface, the correction
 and what is worth storing — the judgement a tool description has no room for. It
 deliberately does not repeat what a tool description already says.
 
+It also ships one script, `scripts/memvara_auth.py`: the device-code flow, standard
+library only, for the case where the browser grant will not finish and the agent has no
+`memvara-mcp` to fall back on. The plugin repositories vendor the skill tree whole, so
+that is the one copy every host gets.
+
 ---
 
 Previous: [RAG and memory](../concepts/rag-vs-memory.md) · Next: [Frameworks](frameworks.md)
