@@ -63,6 +63,11 @@ release and this job only decorates it. To attach the GIF to a release that alre
 shipped, or to republish after `demo.py` changes, run it from the Actions tab with the
 tag as its input.
 
+On a dispatch the tag names **where the asset goes**, not what gets recorded: the GIF
+comes from the ref you started the run on. Those are the same thing on a release and
+come apart on a backfill, which is the case dispatch exists for — `v0.9.0` predates the
+demo, so there is no `record_gif.py` at that tag to run.
+
 It runs `record_gif.py` in deterministic mode, then reads the file back: frame count, how
 many frames carry ink, and whether the delays still add up to about ninety seconds. Those
 are the three ways this can fail while exiting 0 — a font that loaded but drew nothing, a

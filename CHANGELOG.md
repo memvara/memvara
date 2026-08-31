@@ -27,6 +27,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   publishes the release and this job only decorates it. `workflow_dispatch` with a tag
   attaches the asset to a release that already shipped.
 
+  **On a dispatch the tag says where the asset goes, not what is recorded**: the GIF
+  comes from the ref the run was started on. Those are the same thing on a release and
+  come apart on a backfill, which is what dispatch is for — `v0.9.0` predates the demo,
+  so there is no `record_gif.py` at that tag to run. The consequence to know is that
+  backfilling an old release puts a recording of newer source on its release page, and
+  at `releases/latest/download/demo.gif`. That is the trade for having one URL the README
+  can embed, and it is the same reason the GIF is a build product rather than something
+  a release carries a copy of.
+
   The job reads the file back before uploading it: frame count, how many frames carry
   ink, and whether the delays still add up to about ninety seconds. Those are the three
   ways this pipeline fails while exiting 0 — a font that resolved but drew nothing, a run
