@@ -38,6 +38,7 @@ one thing. Regenerate it with:
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -221,6 +222,67 @@ def test_the_demo_ends_on_the_positioning_line() -> None:
     output = run(EXAMPLES / "temporal_memory_demo" / "demo.py", "--fast")
     assert "Memvara — bitemporal memory for AI agents." in output
     assert "Know what was true. Know when it was true. Know why you believe it." in output
+
+
+# -- the recorder's determinism, which is the property a staleness check rests on -----
+
+#: Replays the demo's declared schedule and prints the events as JSON. Run as a
+#: subprocess for the same reason every example above is: in-process it would build a
+#: `Memvara` with a `tests/` frame on the stack, which `conftest._guarded_default_embedder`
+#: refuses — correctly, because the embedder would then be whatever happens to be
+#: installed. A subprocess is also what a reader or a CI job actually does.
+_EMIT_EVENTS = """
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("_rg", sys.argv[1])
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+events, end = module.simulate(fast=(sys.argv[2] == "fast"))
+json.dump({"events": events, "end": end}, sys.stdout)
+"""
+
+
+def replay(mode: str) -> dict:
+    """The recorder's event stream for one replay, as data."""
+    recorder = EXAMPLES / "temporal_memory_demo" / "record_gif.py"
+    proc = subprocess.run(
+        [sys.executable, "-c", _EMIT_EVENTS, str(recorder), mode], cwd=ROOT,
+        env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
+        capture_output=True, text=True, encoding="utf-8", timeout=300)
+    assert proc.returncode == 0, f"replay failed:\n{proc.stderr}"
+    return json.loads(proc.stdout)
+
+
+def test_the_recorder_replays_the_same_schedule_every_time() -> None:
+    """The GIF has to be a pure function of `demo.py`, or nothing can tell it is stale.
+
+    The recorder's other mode measures wall-clock timings from a real ninety-second run,
+    and those are *not* reproducible: two runs of the same script differ by a few
+    milliseconds a frame and so differ in bytes, which makes regenerate-and-compare
+    useless as a check. The default replays the schedule the demo declares — `BEATS` and
+    the per-line holds — on a virtual clock, and this is what pins that.
+
+    Asserted on the event stream rather than on the encoded GIF so it holds without
+    Pillow installed — Pillow is not a dependency of memvara or of its `dev` extra, and a
+    guard that skipped in CI would not be one — and so a failure names the instant that
+    moved rather than reporting that two binaries differ.
+    """
+    first, second = replay("paced"), replay("paced")
+    assert first["events"] == second["events"], "two replays disagreed"
+    assert first["end"] == second["end"]
+    assert first["end"] > 0, "the paced schedule advanced no virtual time at all"
+
+
+def test_the_recorder_replays_what_the_demo_actually_prints() -> None:
+    """Determinism is worth nothing if the thing being repeated is not the transcript.
+
+    The virtual clock replaces `time`, not `print`: the demo runs for real against a real
+    store on the way to these events. This pins that the text is the one
+    `expected-output.txt` holds, so a recorder that quietly diverged from the demo — or a
+    demo whose output moved — fails here rather than in a published GIF.
+    """
+    printed = "".join(text for _at, text in replay("fast")["events"])
+    golden = (EXAMPLES / "temporal_memory_demo" / "expected-output.txt").read_text(
+        encoding="utf-8")
+    assert printed == golden
 
 
 # -- every example, in general --------------------------------------------------------

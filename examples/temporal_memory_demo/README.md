@@ -78,8 +78,8 @@ it, which a GIF does not. Upload with `asciinema upload demo.cast`.
 
 ### With no terminal tooling at all
 
-[`record_gif.py`](record_gif.py) runs the demo under a pty and encodes the frames
-itself. Pillow is the only thing it needs beyond the standard library:
+[`record_gif.py`](record_gif.py) runs the demo and encodes the frames itself. Pillow is
+the only thing it needs beyond the standard library:
 
 ```bash
 pip install Pillow
@@ -88,16 +88,28 @@ python3 examples/temporal_memory_demo/record_gif.py demo.gif
 
 This is the route for a container or a CI runner, where the two above do not work: VHS
 wants a Go toolchain, `ttyd` and `ffmpeg`, and asciinema wants a terminal to attach to.
-It is a real recording rather than a reconstruction — the demo runs for ninety seconds
-and every frame boundary is an instant the program actually printed at — and it writes
-one frame per output event rather than at a frame rate, because ninety seconds of still
-text at 10fps is nine hundred frames that are almost all identical.
+It writes one frame per output event rather than at a frame rate, because ninety seconds
+of still text at 10fps is nine hundred frames that are almost all identical.
+
+**It is deterministic, and that is the point.** The demo runs for real — a real store,
+real `memvara` calls — but on a *virtual clock*: `time.sleep` advances a counter instead
+of waiting, so the run takes about two seconds and the frame delays come from the
+schedule `demo.py` already declares (`BEATS`, and the per-line holds). The same source
+therefore always produces the same bytes, which is what lets a check regenerate the GIF
+and tell whether it is stale. A measured recording can never answer that: two ninety-
+second runs of the same script differ by a few milliseconds a frame, so they differ in
+bytes while being equally correct.
+
+`--live` is the measured recording, under a pty, taking the full ninety seconds. Use it
+if you want wall-clock evidence rather than a replay; do not use it for anything a check
+compares. Both modes were confirmed to produce **pixel-identical frames** — the virtual
+clock is a statement about time, not about what the program printed.
 
 It sizes the canvas to the content instead of to a fixed window, so the result is
 tighter than the tape's: about 811×534 and 1.1 MB against the tape's 1000×760, which is
 four-fifths empty for the first half of the run. Pass `--cols 98 --rows 37` if you want
-the two to match. `--fast` records the unpaced run in a couple of seconds, which is for
-checking the pipeline rather than for publishing.
+the two to match. `--fast` replays the unpaced schedule, which is for checking the
+pipeline rather than for publishing.
 
 **Look at the frames before you publish one.** Nothing in the script can tell a correct
 frame from a blank one, and a missing font renders as tofu rather than as an error.

@@ -27,6 +27,24 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   failure modes that would otherwise surface as a blank frame or a screen of tofu — no
   Pillow, no monospace font carrying U+2500 — are refusals that name the fix.
 
+  **It is deterministic, which is the property that makes it worth having.** The demo
+  runs for real — a real store, real `memvara` calls — but on a virtual clock: `time.sleep`
+  advances a counter instead of waiting, so the frame delays come from the schedule
+  `demo.py` already declares (`BEATS`, and the per-line holds) rather than from a
+  stopwatch. The same source therefore always produces the same bytes, which is what
+  would let a check regenerate the GIF and tell whether it is stale. A measured recording
+  cannot answer that: two ninety-second runs of the same script differ by a few
+  milliseconds a frame, so they differ in bytes while being equally correct. The replay
+  also takes about two seconds rather than ninety.
+
+  `--live` keeps the measured recording, under a pty, for anyone who wants wall-clock
+  evidence rather than a replay. The two were checked against each other and produce
+  **pixel-identical frames** — the virtual clock is a statement about time, not about
+  what the program printed. `tests/test_examples.py` pins both halves: that two replays
+  agree, and that what they replay is the transcript `expected-output.txt` holds. Both
+  assert on the event stream rather than on an encoded GIF, so they hold without Pillow,
+  which is not a dependency of memvara or of its `dev` extra.
+
   The section intro said a recording "needs a terminal" and that none had been generated;
   the first half is no longer true and the second never belonged in a file that outlives
   the session that wrote it. It now says what is true: no GIF is checked in because a GIF
