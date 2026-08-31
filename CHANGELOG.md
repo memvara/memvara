@@ -11,6 +11,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`docs/LIMITATIONS.md`, holding what was *Honest limitations* in the README.** Every
+  bullet moved unchanged; only the links were respelled relative, which is the convention
+  inside `docs/` and the reason they were absolute in the README (that file is the PyPI
+  project description, where a relative link resolves against pypi.org).
+
+  Nothing was dropped or softened by the move. The README keeps two ways to reach it — a
+  row in its documentation index, and a sentence under *Measured* saying that what those
+  numbers do not cover is on that page, since the caveat most often quoted wrongly is
+  that the LOCOMO and LongMemEval figures are retrieval rather than answer accuracy.
+  `docs/FAQ.md` and `docs/concepts/why-memvara.md` both pointed at the README section and
+  now point at the page.
+
 - **The README shows the 90-second demo**, embedded from
   `releases/latest/download/demo.gif`. The three questions the demo answers — where does
   Alice live now, where did she live in March, where in January — are the point of the
@@ -150,9 +162,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   the problem, the demo, the quickstart, and one section each for the three things that
   distinguish this library — the two clocks, contradiction resolution without a model, and
   provenance — followed by an architecture diagram, the use cases, the integration table
-  and a RAG comparison. *Honest limitations*, the mem0 comparison and *Development* are
-  kept as they were, because they were the parts already doing their job. Nothing was
-  softened: the qualifiers on every measured number are still attached to it.
+  and a RAG comparison. The mem0 comparison and *Development* are kept as they were,
+  because they were the parts already doing their job. Nothing was softened: the
+  qualifiers on every measured number are still attached to it. *Honest limitations* was
+  kept intact too and has since moved to its own page — see the entry below.
 
 - **`tests/test_doc_links.py` walks `docs/` and `examples/` recursively.** It globbed
   `docs/*.md`, which was correct while every document sat directly in `docs/` and silently
