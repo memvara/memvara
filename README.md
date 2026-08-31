@@ -46,9 +46,9 @@ pip install memvara
 |---|---|
 | **Bitemporal** | Two time axes that move independently: when a fact was true, and when this store was told. |
 | **Deterministic** | A contradiction in a predicate declared single-valued is resolved on write by a keyed lookup, not by a model's judgement. |
-| **Auditable** | Every claim keeps the episodes it came from and the claim it superseded. |
-| **Historical** | Every read takes `as_of=`, `valid_at=` or `known_at=`, so *what was true then* is a query rather than a reconstruction. |
-| **LLM-light** | `remember()` never calls a model. `add()` filters with model-free tiers first and batches whatever survives into one call. |
+| **Auditable** | A claim carries the episodes cited for it and the claim it superseded, and `why()` returns both. |
+| **Historical** | `search`, `get_all`, `history` and five more reads take `as_of=`, `valid_at=` or `known_at=`, so *what was true then* is a query rather than a reconstruction. |
+| **LLM-light** | `remember()` never calls a model. `add()` filters with model-free tiers first and sends whatever survives in one extraction call. |
 
 ---
 
@@ -176,7 +176,7 @@ mem.add("Actually, I moved to Lisbon last month")
 `{"role": ..., "content": ...}` transcripts, so an existing agent loop can pass its
 messages straight through. It runs three model-free tiers first — hash dedupe,
 near-duplicate detection, a salience gate and a rule-based extractor — and batches
-whatever survives into a single model call.
+whatever survives into a single extraction call.
 
 **With no `llm=` configured there is no model tier at all**, so the two sentences above
 work (they are recognised forms) and an employer mentioned in passing does not. Dropped
@@ -464,7 +464,7 @@ hypothetical extension point.
 | Retrieval | vector and BM25 fused by rank, optionally a graph leg, decayed per predicate |
 | Storage | SQLite with FTS5, plus an mmap vector sidecar |
 | Dependencies | numpy. Everything else is an extra |
-| Model dependency | none for `remember()`; `add()` calls one only for prose no rule matches |
+| Model dependency | none for `remember()`; `add()` reaches for one only where no rule matches the prose |
 | Python | 3.10 and later |
 
 ---
@@ -600,7 +600,7 @@ wrongly.
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 4,041 passing, 9 skipped, no API key
+python3 -m pytest -q                              # 4,042 passing, 9 skipped, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/temporal.py            # the two clocks, six families
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison

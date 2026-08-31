@@ -270,3 +270,26 @@ def test_the_readme_quotes_the_coding_agent_example_verbatim() -> None:
     assert quoted.group(1) in proc.stdout, (
         "the README quotes output that examples/coding_agent.py does not print:\n"
         f"--- README ---\n{quoted.group(1)}\n--- actual ---\n{proc.stdout}")
+
+
+#: A link from the README back into its own headings, spelled absolutely because this file
+#: is also the PyPI project description. `test_doc_links` skips it for being absolute, and
+#: the `GITHUB` pattern above does not match it for having no `/blob/main/` path — so it
+#: sat between the two guards, and a fragment 200s whatever the heading is called.
+SELF_ANCHOR = re.compile(r"https://github\.com/memvara/memvara#([\w-]+)")
+
+
+def test_every_readme_link_back_into_the_readme_names_a_heading_it_has() -> None:
+    """The navigation row at the top is three of these, and a renamed heading breaks it.
+
+    Silently, and in the place it costs most: the row is the first thing a reader clicks.
+    GitHub answers a bad fragment with the page and no scroll, so nothing 404s and nobody
+    finds out from the outside.
+    """
+    have = anchors(README)
+    broken = sorted(a for a in SELF_ANCHOR.findall(README.read_text(encoding="utf-8"))
+                    if a not in have)
+    assert not broken, (
+        f"README.md links to its own {broken}, which is not a heading in it. Either the "
+        "heading was renamed or the link was mistyped; the anchors it does have are "
+        f"{sorted(have)}.")

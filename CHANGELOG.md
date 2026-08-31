@@ -182,6 +182,24 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   duplication this change created: the *Coding agents* row in the use-case table, which
   the new lede above it now says at greater length.
 
+  Three rows of the new strip were checked against the code and tightened before they
+  shipped. *Historical* said "every read" takes the three time keywords; `recall()`,
+  `get()` and `since()` take none of them, deliberately — `recall()`'s docstring says why
+  — and `ask()` spells it `at=`, so the row now names the eight reads that do. *Auditable*
+  said every claim keeps the episodes it came from, which is not true of a `remember()`
+  called without `sources=`, as the block at the top of the file is; it now says a claim
+  carries the episodes cited for it. *LLM-light* said `add()` batches what survives into
+  one call, and a surface form the registry has not seen costs a second for predicate
+  acquisition; it now says one *extraction* call, which is the one being counted.
+
+- **`tests/test_docs.py` checks the README's links back into its own headings.** The
+  navigation row is three of them, spelled absolutely because this file is also the PyPI
+  project description — which put them between the two guards that existed:
+  `test_doc_links` skips an absolute URL by design, and `test_docs`'s pattern for a link
+  into this repository requires a `/blob/main/` path these do not have. GitHub answers an
+  unknown fragment with the page and no scroll, so a renamed heading breaks the first
+  thing a reader clicks and nothing anywhere goes red.
+
 - **`README.md` is rewritten for a developer arriving from a search result.** It opens
   with the claim, the three-answer example and `pip install memvara` above the fold, then
   the problem, the demo, the quickstart, and one section each for the three things that
@@ -238,6 +256,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   against another note in the same store.
 
 ### Fixed
+
+- **The README said `add()` batches what survives into "a single model call".** It is a
+  single *extraction* call. A predicate the registry has not seen before costs a second
+  one for acquisition, and `WriteReceipt.llm_calls` counts both — so the sentence
+  understated the cost of the first write to a novel vocabulary, which is exactly the
+  write somebody measures.
 
 - **Eight more places in the library said the same thing, and they are corrected too.**
   `memvara/integrations/__init__.py`, `langgraph.py`, `langchain.py`, `llamaindex.py` and
