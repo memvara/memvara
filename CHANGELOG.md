@@ -60,14 +60,24 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `vector-rag` is completely correct on current state, provenance, change time and
   knowledge time.
 
-  **Measured, at the commit this landed in:** memvara 90.0% overall, `vector-rag` 88.0%,
-  `naive` 49.0%. The two points separating memvara from a numpy baseline are entirely the
-  `temporal` dimension (100.0% against 91.5%), and the four questions that separate them
-  are the four delayed-knowledge and correction scenarios — where news arrived after the
-  fact, so "what was true then" and "what had we heard by then" are different answers and
-  one clock has to give the same one to both. **memvara loses the `retrieval` dimension**
-  (50.0% against 64.3%), and `irrelevance` and `multi_hop` are three-way ties that
-  currently discriminate nothing. All of that is in the report rather than in a footnote.
+  **Measured, at the commit this landed in:** memvara 92.0% overall, `vector-rag` 89.0%,
+  `naive` 50.0%. The three points separating memvara from a numpy baseline are entirely
+  the `temporal` dimension (100.0% against 91.5%), and the four questions that separate
+  them are the four delayed-knowledge and correction scenarios — where news arrived after
+  the fact, so "what was true then" and "what had we heard by then" are different answers
+  and one clock has to give the same one to both. **memvara loses the `retrieval`
+  dimension** (64.3% against 71.4%) and is the worst of the three on `multi_hop`, at 1 of
+  6; `irrelevance` is a three-way tie that discriminates nothing. All of that is in the
+  report rather than in a footnote.
+
+  Those figures replace an earlier set (90.0 / 88.0 / 49.0) that this branch briefly
+  carried. Investigating memvara's `retrieval` loss found two defects in the harness
+  rather than in any memory system: the memvara adapter searched ended and retired claims
+  for present-tense questions, so a value nobody held any more outranked the right one;
+  and the three adapters fed their retrievers three different strings, which made
+  `retrieval` a comparison of adapters rather than of retrievers. Both are fixed, the
+  index text now comes from one shared function, and both fixes raised **every** system's
+  `retrieval` score. No question, gold answer or scoring rule changed.
 
   Gold answers are authored by hand in `datasets/build_v1.py` and derived independently in
   `timeline.py` from four published supersession rules; the suite asserts the two agree on
@@ -80,6 +90,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   and asserts the verdicts are identical. `--show-failures` prints each wrong answer beside
   the fact's real timeline with a named reason, which is more use to a developer than the
   score.
+
+  Two spellings reach it: `python -m benchmarks.agent_memory` is canonical and
+  `python -m benchmarks.agent_memory.run` is an alias for people who reach for the
+  longer name first. Both call `cli.main`, so there is no second implementation to
+  drift, and `run.py` guards on `__name__` because — unlike `__main__.py` — it has an
+  importable dotted name and would otherwise run the whole benchmark on import.
 
   Distinct from `bench/temporal.py`, which stays what it was: this repository's own
   regression suite for the two clocks, memvara-only, probing `get_all()` directly. The new

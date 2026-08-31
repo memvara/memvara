@@ -40,7 +40,7 @@ import numpy as np
 
 from ..dataset import MemoryEvent, PredicateDecl
 from ..normalization import tokens
-from .base import Ask, MemoryAnswer, Usage, wants_a_date
+from .base import Ask, MemoryAnswer, Usage, indexable, wants_a_date
 
 #: Width of the hashed vocabulary. Large enough that collisions between the dataset's few
 #: hundred distinct tokens are rare, small enough that the index is trivial.
@@ -117,7 +117,7 @@ class VectorRAGMemory:
             object=event.object, text=event.text, source=event.source,
             recorded_at=event.recorded_at, valid_from=event.valid_from))
         counts: dict[int, int] = {}
-        for token in tokens(f"{event.subject} {event.predicate} {event.text}"):
+        for token in tokens(indexable(event)):
             counts[_hash(token)] = counts.get(_hash(token), 0) + 1
         self._counts.append(counts)
         for index in counts:
