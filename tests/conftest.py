@@ -61,6 +61,7 @@ from memvara.embed import default_embedder as _real_default_embedder
 # Imported here so `_credentials_never_touch_home` can redirect both names for every
 # test. Neither module pulls `httpx` at import time -- `login` imports it inside
 # `login()` -- so this does not make the cloud extra a test dependency.
+from memvara.remote import creds as creds_module
 from memvara.server import config as config_module
 from memvara.server import login as login_module
 
@@ -136,7 +137,7 @@ memvara.core.default_embedder = _guarded_default_embedder
 # constant nobody redirected, an `expanduser` computed at call time.
 
 @pytest.fixture(autouse=True)
-def _credentials_never_touch_home(tmp_path, monkeypatch):
+def _credentials_never_touch_home(tmp_path, tmp_path_factory, monkeypatch):
     """Point every credentials path at tmp_path, for every test in this repository.
 
     Autouse and in `conftest.py` rather than in the one file that writes today.
@@ -155,9 +156,27 @@ def _credentials_never_touch_home(tmp_path, monkeypatch):
     # replaces put it -- several tests in `test_login.py` read that exact path. Nesting a
     # fake `~/.memvara/` under it would be more lifelike and would buy nothing: what makes
     # this isolation is that the path is not the developer's, not its shape.
+    # The fake home comes from `tmp_path_factory`, not from `tmp_path`. Creating a
+    # directory inside `tmp_path` is visible to the test that owns it, and
+    # `test_bench_eval.py::test_a_download_writes_atomically...` asserts its `tmp_path` is
+    # empty -- an isolation fixture that makes another test fail has bought nothing.
+    home = tmp_path_factory.mktemp("home")
     where = tmp_path / "credentials.json"
     monkeypatch.setattr(login_module, "_CREDENTIALS_PATH", where)
     monkeypatch.setattr(config_module, "CREDENTIALS_PATH", where)
+    # `remote/creds.py` does `from ..server.config import CREDENTIALS_PATH`, which binds
+    # the value at its own import time -- so patching `config` above does not reach it,
+    # and `creds._from_file()` would read the developer's real key. Same shape as the
+    # stale `from ... import` in test_config_cloud.py that this change already had to
+    # correct, one module over. It only reads, so nothing is destroyed; what it does is
+    # let a test pass because whoever ran it happened to be logged in.
+    monkeypatch.setattr(creds_module, "CREDENTIALS_PATH", where)
+    # And for anything that re-imports in its own interpreter. Six test files spawn
+    # subprocesses; a child computes `Path.home()` itself and the monkeypatch above is
+    # invisible to it. `Path.home()` reads HOME on POSIX and USERPROFILE on Windows, so
+    # setting both makes the child land in tmp_path as well.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     return where
 
 
