@@ -64,8 +64,10 @@ Concepts: [provenance](../docs/concepts/provenance.md),
 
 The same story as example 1, paced for a screen recording, with the problem statement in
 front of it and a close at the end. [Its README](temporal_memory_demo/README.md) has the
-six beats, the exact transcript, and the recording procedure — including a
-[VHS tape](temporal_memory_demo/demo.tape) that records a GIF deterministically.
+six beats, the exact transcript, and three recording procedures — a
+[VHS tape](temporal_memory_demo/demo.tape) that records a GIF deterministically, the
+asciinema route, and [`record_gif.py`](temporal_memory_demo/record_gif.py), which needs
+only Pillow and works where there is no terminal to attach to.
 
 ---
 

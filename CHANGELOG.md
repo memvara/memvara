@@ -11,6 +11,29 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`examples/temporal_memory_demo/record_gif.py`, a third way to record the demo.** The
+  two routes the README already gave both want tooling a bare container does not have:
+  VHS needs a Go toolchain, `ttyd` and `ffmpeg`, and asciinema needs a terminal to attach
+  to. This one needs Pillow and nothing else. It runs `demo.py` under a pty — not a pipe,
+  because a program writing to a pipe is block-buffered and would collapse ninety seconds
+  of pacing into one burst at exit — and encodes **one frame per output event** rather
+  than at a frame rate: the demo is ninety seconds of mostly still text, so 10fps would
+  be nine hundred frames that are almost all identical, where sixty-odd reproduce the
+  pacing exactly at about a megabyte.
+
+  It sizes the canvas to the content rather than to a nominal window, which is where it
+  differs from `demo.tape`: 811×534 against the tape's 1000×760, which is four-fifths
+  empty for the first half of the run. `--cols 98 --rows 37` makes the two match. Both
+  failure modes that would otherwise surface as a blank frame or a screen of tofu — no
+  Pillow, no monospace font carrying U+2500 — are refusals that name the fix.
+
+  The section intro said a recording "needs a terminal" and that none had been generated;
+  the first half is no longer true and the second never belonged in a file that outlives
+  the session that wrote it. It now says what is true: no GIF is checked in because a GIF
+  is a build product, and here are three ways to make one.
+
+### Added
+
 - **`examples/`, and a test suite that runs it.** Three programs a developer can run
   straight after `pip install memvara`: `temporal_memory.py` (one person moves twice, and
   the same question gets three different correct answers), `coding_agent.py` (an
