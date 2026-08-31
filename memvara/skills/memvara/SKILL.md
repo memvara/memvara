@@ -45,11 +45,16 @@ on `[authenticating]`, a token expired, `memory_*` answers 401 — this skill
 ships the flow as a script, so the fix does not need `pip install`:
 
 ```bash
-python3 scripts/memvara_auth.py authenticate
+python3 <SKILL_DIR>/scripts/memvara_auth.py authenticate
 ```
 
-`scripts/` is next to this `SKILL.md`, in this skill's own directory. Standard
-library only, and nothing is left running when it returns.
+`<SKILL_DIR>` is the directory this `SKILL.md` is in. Substitute the absolute
+path before running. Do not run `scripts/memvara_auth.py` as a bare relative
+path: it resolves against the user's project, not against this file, and fails
+with `No such file or directory` on a machine where the script is sitting
+correctly on disk.
+
+Standard library only, and nothing is left running when it returns.
 
 | They asked | Run |
 |---|---|

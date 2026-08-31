@@ -211,7 +211,8 @@ def test_sync_script_writes_skill_and_lock(tmp_path) -> None:
 # Copilot and OpenCode each read a sibling file out of a skill's own directory, and each
 # answered "NO PROBE" with the skill unregistered and the files still on disk.
 AUTH_SCRIPT = SKILL / "scripts" / "memvara_auth.py"
-AUTH_INVOCATION = "python3 scripts/memvara_auth.py authenticate"
+AUTH_PLACEHOLDER = "<SKILL_DIR>"
+AUTH_INVOCATION = f"python3 {AUTH_PLACEHOLDER}/scripts/memvara_auth.py authenticate"
 AUTH_HEADING = "## When it will not authenticate"
 AUTH_COMMANDS = ("authenticate", "login", "logout", "stats")
 
@@ -241,26 +242,44 @@ def test_the_skill_names_the_script_at_the_path_it_is_actually_at() -> None:
         "SKILL.md no longer tells the model what to do when authentication fails, so "
         "the script ships unreachable")
     assert AUTH_INVOCATION in skill
+    assert f"`{AUTH_PLACEHOLDER}` is the directory this" in skill, (
+        f"{AUTH_PLACEHOLDER} appears with nothing telling the reader to substitute it")
 
     # The claim resolved, not the spelling matched. A guard that checks the string agrees
     # with an instruction that spells a plausible path into the wrong directory.
-    quoted = AUTH_INVOCATION.split("python3 ", 1)[1].split(" ", 1)[0]
+    quoted = AUTH_INVOCATION.split(f"{AUTH_PLACEHOLDER}/", 1)[1].split(" ", 1)[0]
     assert (SKILL / quoted).is_file(), f"SKILL.md says {quoted}, and nothing is there"
+
+    # Every invocation, not just the one above. A cwd-relative `python3 scripts/...`
+    # resolves against the user's project rather than against this file, so it fails with
+    # `No such file or directory` on a machine where the script is sitting correctly on
+    # disk -- the same shape as ${CLAUDE_PLUGIN_ROOT} expanding to nothing under Grok.
+    # Stated over every line that runs the script, so a second example added later cannot
+    # reintroduce the bare form beside a correct one.
+    runs = [line for line in skill.splitlines()
+            if "python3" in line and "memvara_auth.py" in line]
+    assert runs, "no line in SKILL.md runs the script"
+    for line in runs:
+        assert AUTH_PLACEHOLDER in line, (
+            f"{line.strip()!r} runs the script by a path that is not anchored to the "
+            f"skill directory; it resolves against whatever cwd the agent happens to be "
+            f"in. Anchor it with {AUTH_PLACEHOLDER}.")
 
 
 @pytest.mark.parametrize("command", AUTH_COMMANDS)
 def test_the_skill_names_every_command_the_script_accepts(command: str) -> None:
-    """Both directions: the script's own usage line is the referent, not this list.
+    """The skill names it. That the SCRIPT accepts it is a separate question, answered
+    against the script's own `COMMANDS` by the test below and against its real printed
+    usage by `test_the_script_runs_here_and_says_how_to_use_it`.
 
-    A command added to the script and not to the skill is a capability no model will
-    ever offer; one removed from the script but left in the skill is an instruction that
-    fails when followed.
+    This used to also assert `command in <the whole 872-line source>`, which is close to
+    vacuous: "stats" matches `_stats`, "login" matches `_logout`'s docstring, and deleting
+    a command from the USAGE string a user actually sees would not have failed it. A
+    guard that cannot fail is worse than no guard, because it reads as coverage.
     """
     skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-    usage = AUTH_SCRIPT.read_text(encoding="utf-8")
     assert f"`{command}`" in skill or f"`{command} " in skill, (
         f"the script accepts {command} and the skill never mentions it")
-    assert command in usage
 
 
 def test_the_script_accepts_exactly_the_commands_the_skill_advertises() -> None:

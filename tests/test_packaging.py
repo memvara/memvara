@@ -285,10 +285,22 @@ def test_the_skill_tree_is_not_collected_as_test_modules() -> None:
     -- the ignore must be there, and the tree it names must still hold the `.py` that
     makes it necessary, so this fails rather than passing vacuously if the script moves.
     """
+    # The `addopts` VALUE, not any text in the file. Spelled as a whole-file substring
+    # this passed on a comment mentioning the flag while `addopts` had lost it -- a claim
+    # checked against a copy of itself, and this PR adds exactly such a comment directly
+    # above the setting. `tomllib` is 3.11 and `requires-python` promises 3.10 (see
+    # tests/test_examples.py), so the section is sliced the way test_init.py slices
+    # `[project.scripts]`.
     config = (REPO / "pyproject.toml").read_text(encoding="utf-8")
-    assert "--ignore=memvara/skills" in config, (
-        "pytest would collect the packaged skill again, import its script for doctests, "
-        "and drop the coverage total below the gate")
+    assert "[tool.pytest.ini_options]" in config, "the pytest section is gone"
+    section = config.split("[tool.pytest.ini_options]", 1)[1].split("\n[", 1)[0]
+    addopts = [line for line in section.splitlines()
+               if line.strip().startswith("addopts")]
+    assert len(addopts) == 1, f"expected one addopts line, found {addopts}"
+    assert "--ignore=memvara/skills" in addopts[0], (
+        f"addopts is {addopts[0].strip()!r}; pytest would collect the packaged skill "
+        "again, import its script for doctests, and drop the coverage total below the "
+        "gate")
     assert sorted(SKILL_DATA.rglob("*.py")), (
         "the skill tree holds no .py file; the ignore above is now excluding a tree that "
         "did not need excluding, and somebody should decide whether to drop it")
@@ -422,6 +434,37 @@ def test_the_marker_survives_the_trip_into_the_wheel() -> None:
     the test that notices when it snaps.
     """
     assert "memvara/py.typed" in _wheel_names()
+
+
+@needs_wheel
+def test_the_wheel_carries_the_packaged_skill() -> None:
+    """`memvara-mcp init` writes the skill out of the installed distribution, so every
+    file in that tree has to be in the wheel -- including the auth script `SKILL.md`
+    tells the model to run.
+
+    Excluding the skill from `_module_paths()` was right for the question "what does the
+    library import" and wrong for this one. It silently took the script out of the only
+    assertion that would have noticed it missing: with the exclusion and without this
+    test, a packaging change that dropped `memvara/skills/**` would ship a `SKILL.md`
+    pointing at a `scripts/memvara_auth.py` that is not there, and the whole suite would
+    still pass. The first symptom would be a user whose authentication recovery path does
+    not exist.
+
+    Non-empty as well as contained, so an emptied tree cannot satisfy it.
+    """
+    expected = {
+        f"memvara/{p.relative_to(PACKAGE).as_posix()}"
+        for p in SKILL_DATA.rglob("*")
+        if p.is_file() and "__pycache__" not in p.parts
+    }
+    assert expected, "the packaged skill tree is empty"
+    assert any(name.endswith("scripts/memvara_auth.py") for name in expected), (
+        "the skill tree no longer holds the auth script")
+    missing = sorted(expected - _wheel_names())
+    assert not missing, (
+        f"the wheel does not carry {missing} -- the packaged skill is data the build has "
+        "to include, and `memvara-mcp init` writes it from there. Rebuild with "
+        "`python3 -m build --wheel` before reading this as a packaging bug")
 
 
 @needs_wheel
