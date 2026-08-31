@@ -167,7 +167,10 @@ def _value_reason(question: Question, answer: MemoryAnswer, truth: Truth,
                   evaluated_at: datetime) -> str:
     given = answer.value or ""
     normalized = normalize(given)
-    scenario_values = {normalize(v): v for v in truth.known_values(question.scenario)}
+    # `sorted` because `known_values` is a frozenset and string hashing is randomised
+    # per process: without it, two values normalizing to one key would let the winner
+    # depend on the hash seed, and `reason` is compared by `results.comparable`.
+    scenario_values = {normalize(v): v for v in sorted(truth.known_values(question.scenario))}
     if normalized not in scenario_values:
         return "unknown_value"
 

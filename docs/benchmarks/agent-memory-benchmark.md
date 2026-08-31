@@ -184,16 +184,20 @@ Cost and latency from the same runs:
 
 | System | LLM calls | embedding calls | rows written | write, per event | query, mean | query p95 |
 |---|---:|---:|---:|---:|---:|---:|
-| memvara | 0 | not counted | 241 | 0.8 – 1.5 ms | 0.9 – 1.7 ms | 2 – 12 ms |
-| vector-rag | 0 | 279 | 262 | ~0.02 ms | 0.1 – 0.2 ms | ~0.3 ms |
-| naive | 0 | 0 | 262 | <0.01 ms | 0.2 – 0.8 ms | 1.3 – 1.6 ms |
+| memvara | 0 | not counted | 241 | 0.8 – 2.9 ms | 0.9 – 2.6 ms | 2 – 15 ms |
+| vector-rag | 0 | 279 | 262 | 0.02 – 0.25 ms | 0.09 – 0.51 ms | 0.3 – 1.5 ms |
+| naive | 0 | 0 | 262 | 0.007 – 0.016 ms | 0.02 – 0.03 ms | 0.1 – 0.2 ms |
 
-**Ranges, not points.** These are the highest and lowest of three full runs on one laptop
-that was doing other work, and the spread reaches 5× on memvara's p95. Treat them as
-orders of magnitude. The shape that survives the noise is the write path: the two
-in-memory baselines are tens to hundreds of times faster per event than memvara, which is
-doing SQLite, embedding and reconciliation on every write. Reproduce them on your own
-machine before quoting one.
+**Ranges, not points, and wide ones.** These span every run taken on one laptop that was
+also doing other work, and the same figure moved by about 3× between runs depending on
+that load. Quoting a single number from this table would be false precision.
+
+**What is stable is the ordering**, which holds in every run: `naive` is fastest on both
+axes, then `vector-rag`, then memvara — which is doing SQLite, embedding and
+reconciliation on every write, and hybrid retrieval with a graph leg on every unprobed
+read. memvara is roughly two orders of magnitude slower per write than a dictionary. That
+is the trade the rest of this table is the other half of, and it is a real cost rather
+than a rounding error. Reproduce it on your own machine before quoting anything.
 
 memvara stores **241 claims for 262 events**: the write receipts report 241 added and 21
 reinforced — a restatement of something already believed bumps the existing claim instead

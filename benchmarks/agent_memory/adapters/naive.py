@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import Mapping
 
 from ..dataset import MemoryEvent, PredicateDecl
+from ..normalization import tokens
 from .base import Ask, MemoryAnswer, Usage, indexable, wants_a_date
 
 
@@ -38,13 +39,16 @@ class Entry:
     valid_from: datetime
 
 
-def overlap(question: str, text: str) -> float:
+def overlap(question: set[str], text: set[str]) -> float:
     """Token overlap, normalized by the question's length. The whole of this store's
-    retrieval, and deliberately so: a dictionary has no index."""
-    from ..normalization import tokens
+    retrieval, and deliberately so: a dictionary has no index.
 
-    q, t = set(tokens(question)), set(tokens(text))
-    return len(q & t) / len(q) if q else 0.0
+    Takes token *sets* rather than strings because the caller has 262 texts to compare
+    one question against, and tokenizing the question inside this function meant doing it
+    262 times. That cost nothing in answers and a great deal in the benchmark's own
+    latency table, where it made a dictionary lookup read as slower than a vector search.
+    """
+    return len(question & text) / len(question) if question else 0.0
 
 
 class NaiveMemory:
@@ -55,7 +59,9 @@ class NaiveMemory:
 
     def __init__(self) -> None:
         self._slots: dict[tuple[str, str], list[Entry]] = {}
-        self._texts: list[tuple[str, str, str]] = []   # (text, subject, predicate)
+        #: (tokens of the indexed text, subject, predicate). Tokenized once, on write.
+        #: Not an index — the query still scans all of it — just not re-derived per query.
+        self._texts: list[tuple[set[str], str, str]] = []
         self._single: dict[str, bool] = {}
         self._writes = 0
         self._reads = 0
@@ -76,14 +82,15 @@ class NaiveMemory:
             held.append(entry)
         elif not any(e.object == entry.object for e in held):
             held.append(entry)
-        self._texts.append((indexable(event), event.subject, event.predicate))
+        self._texts.append((set(tokens(indexable(event))), event.subject, event.predicate))
 
     def _resolve(self, question: str) -> tuple[str, str] | None:
         """Find the slot an unprobed question is about, by token overlap. Ties go to the
         first stored text, which makes the choice deterministic rather than arbitrary."""
+        asked = set(tokens(question))
         best, best_score = None, 0.0
         for text, subject, predicate in self._texts:
-            score = overlap(question, text)
+            score = overlap(asked, text)
             if score > best_score:
                 best, best_score = (subject, predicate), score
         return best if best_score > 0.0 else None

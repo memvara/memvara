@@ -13,6 +13,7 @@ alone.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,11 +73,24 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+#: Everything that is not safe in a filename on every platform this runs on. A system
+#: named the documented third-party way — `mypackage.adapters:build` — carries a colon,
+#: which is illegal on Windows and displays as a slash in the macOS Finder.
+_UNSAFE_IN_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
 def _output_path(base: str, system: str, many: bool) -> Path:
+    """Where one system's result goes. With several systems, one file each.
+
+    The system name is sanitised rather than interpolated raw: `--system
+    mypackage.adapters:build` would otherwise produce `results-mypackage.adapters:build.json`
+    and raise OSError on Windows *after* every benchmark had already run.
+    """
     path = Path(base)
     if not many:
         return path
-    return path.with_name(f"{path.stem}-{system}{path.suffix or '.json'}")
+    safe = _UNSAFE_IN_FILENAME.sub("-", system).strip("-.") or "system"
+    return path.with_name(f"{path.stem}-{safe}{path.suffix or '.json'}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
