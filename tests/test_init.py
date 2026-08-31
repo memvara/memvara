@@ -620,6 +620,133 @@ _NUMBER_WORDS = (
 )
 
 
+class HostedEndpointUnreachable(Exception):
+    """The deployment could not be asked. Never a pass -- the guard skips and says so."""
+
+
+def _hosted_tools() -> list[str]:
+    """`tools/list` from `https://app.memvara.dev/mcp`, in the order it returns them.
+
+    Standard library plus `certifi` when importable: python.org's macOS build loads zero
+    roots from the system trust store, and Cloudflare answers the stdlib User-Agent with a
+    1010 at the edge, so both are set explicitly.
+    """
+    import http.client
+    import json as _json
+    import os
+    import ssl
+
+    # `MEMVARA_API_KEY` only, deliberately. The plugin repositories' copy of this helper
+    # also falls back to `~/.memvara/credentials.json`, and here that path is dead: the
+    # suite-wide `_credentials_never_touch_home` fixture redirects HOME for every test, so
+    # the real file is unreachable by design. Reading it anyway would be code that looks
+    # live and never runs, and the skip message would send somebody to `authenticate` --
+    # which writes to a home this suite has already redirected away, leaving the guard
+    # skipping for a reason the message just told them they had fixed.
+    key = (os.environ.get("MEMVARA_API_KEY") or "").strip()
+    if not key:
+        raise HostedEndpointUnreachable(
+            "no credential: set MEMVARA_API_KEY. The credentials file is not read here -- "
+            "tests/conftest.py redirects HOME so the suite can never touch it")
+
+    try:
+        import certifi
+
+        context = ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001 -- certifi is optional; the default context is the fallback
+        context = ssl.create_default_context()
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "User-Agent": "memvara-library-tests/1.0",
+    }
+
+    def call(body, extra=None):
+        conn = http.client.HTTPSConnection("app.memvara.dev", timeout=20, context=context)
+        try:
+            conn.request("POST", "/mcp", _json.dumps(body), {**headers, **(extra or {})})
+            reply = conn.getresponse()
+            return reply.status, dict(reply.getheaders()), reply.read()
+        finally:
+            conn.close()
+
+    try:
+        status, got, raw = call({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                       "clientInfo": {"name": "memvara-library-tests", "version": "1"}},
+        })
+    except OSError as exc:
+        raise HostedEndpointUnreachable(f"{type(exc).__name__}: {exc}") from exc
+    if status != 200:
+        raise HostedEndpointUnreachable(f"initialize answered HTTP {status}: {raw[:120]!r}")
+    session = next((v for k, v in got.items() if k.lower() == "mcp-session-id"), None)
+    if not session:
+        raise HostedEndpointUnreachable("initialize returned no mcp-session-id header")
+
+    call({"jsonrpc": "2.0", "method": "notifications/initialized"},
+         {"mcp-session-id": session})
+    status, _got, raw = call({"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                             {"mcp-session-id": session})
+    if status != 200:
+        raise HostedEndpointUnreachable(f"tools/list answered HTTP {status}: {raw[:120]!r}")
+
+    text = raw.decode("utf-8", "replace")
+    # An SSE body carries one JSON object per `data:` line; a greedy brace match would span
+    # from the first to the last across events and yield invalid JSON, which would surface
+    # as "unreachable" and retire this guard silently.
+    payloads = [line[len("data:"):].strip()
+                for line in text.splitlines() if line.startswith("data:")]
+    for candidate in (payloads[::-1] if payloads else [text.strip()]):
+        try:
+            parsed = _json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and "result" in parsed:
+            served = [t["name"] for t in parsed["result"]["tools"]]
+            if not served:
+                raise HostedEndpointUnreachable("tools/list returned an empty tool set")
+            return served
+    raise HostedEndpointUnreachable(
+        f"tools/list returned nothing parseable as a JSON-RPC result: {text[:120]!r}")
+
+
+def test_the_deployment_serves_the_tools_this_library_declares() -> None:
+    """`TOOLS` against the DEPLOYMENT, which is the one thing no other guard here checks.
+
+    `test_the_skill_states_the_tool_surface_and_names_all_of_it` compares
+    `references/hosted-mcp.md` against `TOOLS`, and its docstring is right that `TOOLS` is
+    the correct referent for that: page and registry are the same tree, so there is no
+    checkout to be stale. What that cannot see is whether the registry still matches what
+    is actually running at the URL the page names.
+
+    The gap is narrow and it is not theoretical. That page ships vendored into seven plugin
+    repositories, and it describes `https://app.memvara.dev/mcp` by name. Let this library's
+    `main` diverge from what is deployed and every check stays green: the page matches
+    `TOOLS`, each plugin repo's drift test matches this library byte for byte, and all
+    eight state a tool surface the hosted endpoint no longer has. One stale sentence, eight
+    repositories, nothing red.
+
+    Names and order, because the page asserts order.
+
+    SKIPS rather than passes when the deployment cannot be asked. `tools/list` requires
+    `Authorization`, so a run without a credential cannot check this and has to say so; a
+    check that silently succeeds when it could not look is the failure it exists to
+    prevent, one level up.
+    """
+    try:
+        served = _hosted_tools()
+    except HostedEndpointUnreachable as exc:
+        pytest.skip(f"deployment not asked, tool surface NOT checked: {exc}")
+
+    assert served == [t.name for t in TOOLS], (
+        "app.memvara.dev serves a different tool surface than this library declares. The "
+        "deployment is the referent for what `references/hosted-mcp.md` promises: either "
+        "the deployment is behind this library, or this library is behind it")
+
+
 def test_the_skill_states_the_tool_surface_and_names_all_of_it() -> None:
     """`references/hosted-mcp.md` enumerates the tools. Nothing checked it, and it rotted.
 
