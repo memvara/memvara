@@ -529,12 +529,20 @@ def test_the_documented_adapter_method_count_is_the_enforced_one():
 
 def test_the_registry_checks_exactly_the_protocol_methods():
     """The list `registry.build` enforces and the protocol's own members must agree, or
-    one of them is documentation that nothing keeps true."""
+    one of them is documentation that nothing keeps true.
+
+    Derived from the class namespace rather than `__protocol_attrs__`, which `typing`
+    only grows in 3.12 — this test's first version used it, passed on the 3.13 it was
+    written on, and failed the 3.10 and 3.11 jobs. `requires-python` is `>=3.10`, so the
+    floor is what a guard has to run on.
+    """
+    import inspect
+
     from benchmarks.agent_memory.adapters.base import MemorySystem
 
-    callables = {m for m in MemorySystem.__protocol_attrs__
-                 if callable(getattr(MemorySystem, m, None))}
-    assert callables == {"reset", "remember", "query", "usage", "close"}
+    declared = {name for name, value in vars(MemorySystem).items()
+                if inspect.isfunction(value) and not name.startswith("_")}
+    assert declared == {"reset", "remember", "query", "usage", "close"}
 
 
 def test_an_adapter_can_be_named_by_import_path():
