@@ -648,7 +648,7 @@ heading says so.
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 4,016 passing, 8 skipped, no API key
+python3 -m pytest -q                              # 4,019 passing, 8 skipped, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/temporal.py            # the two clocks, six families
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison
