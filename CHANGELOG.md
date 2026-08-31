@@ -80,6 +80,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   absorbed rather than the adapter getting right; and the leaderboard sliced dimension
   names to 13 characters, printing `knowledge_tim`.
 
+  `.gitattributes` pins `benchmarks/agent_memory/datasets/` to `eol=lf`. The dataset is
+  a byte-exact artefact — the suite regenerates it and compares bytes, and CI diffs the
+  regenerated copy against the committed one — and nothing declared its line endings, so
+  Git for Windows checked it out as CRLF and the comparison failed on the windows-latest
+  job and nowhere else. It is the repository's first `.gitattributes`, deliberately
+  scoped to these three files rather than declared repository-wide.
+
   Those figures replace an earlier set (90.0 / 88.0 / 49.0) that this branch briefly
   carried. Investigating memvara's `retrieval` loss found two defects in the harness
   rather than in any memory system: the memvara adapter searched ended and retired claims

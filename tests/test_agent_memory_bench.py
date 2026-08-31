@@ -106,7 +106,19 @@ def test_the_dataset_is_regenerated_byte_for_byte(tmp_path):
     assert proc.returncode == 0, proc.stderr
     committed = ROOT / "benchmarks" / "agent_memory" / "datasets" / "v1"
     for name in ("metadata.json", "events.jsonl", "questions.jsonl"):
-        assert (tmp_path / name).read_bytes() == (committed / name).read_bytes(), (
+        fresh, kept = (tmp_path / name).read_bytes(), (committed / name).read_bytes()
+        if fresh != kept and fresh.replace(b"\n", b"\r\n") == kept:
+            # Said outright rather than left to the byte diff, because the generic
+            # message below sends the reader to look for a content change that is not
+            # there. This failed on the windows-latest job alone before `.gitattributes`
+            # declared these files `eol=lf`, and a stale checkout can still produce it.
+            raise AssertionError(
+                f"{name} is checked out with CRLF line endings but the generator writes "
+                "LF, so the bytes differ by one per line and nothing else. The content "
+                "is identical. `.gitattributes` pins this directory to `eol=lf`; a "
+                "checkout made before that line existed needs "
+                "`git rm --cached -r . && git reset --hard` to pick it up.")
+        assert fresh == kept, (
             f"regenerating produced a different {name}; the committed dataset is no "
             "longer the generator's output, so the published scores cannot be traced "
             "to anything")

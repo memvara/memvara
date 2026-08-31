@@ -1,0 +1,15 @@
+# The Agent Memory Benchmark's dataset is a byte-exact published artefact, and this file
+# exists because nothing declared that.
+#
+# `tests/test_agent_memory_bench.py` regenerates the dataset and compares the bytes
+# against the committed copy, and the CI benchmark job runs `diff -r` over the same pair.
+# The generator writes LF explicitly. Git for Windows checks text files out as CRLF by
+# default, so without this line the committed copy and the generator's own output differ
+# by one byte per line — on Windows, and only on Windows. That is how it was found: every
+# other job in the matrix passed.
+#
+# Scoped to the dataset rather than declared repository-wide. A blanket `* text=auto
+# eol=lf` would change what every contributor's working tree looks like, which is a
+# larger decision than this change gets to make. These three files are the ones whose
+# bytes are asserted on.
+benchmarks/agent_memory/datasets/** text eol=lf
