@@ -638,18 +638,60 @@ def test_a_result_carries_everything_needed_to_reproduce_it(naive_run):
     assert set(payload["metrics"]) >= {"overall", "by_category", "by_dimension"}
 
 
+#: What a published result file must never contain, as word-boundary patterns.
+#:
+#: Substrings once, which is how `token` came to match the legitimate `tokens` cost
+#: field; deleting `token` then dropped `refresh_token`, `api_token` and a bare `"token"`
+#: along with the false positive, and nothing noticed until a review compared the two
+#: lists. Both mistakes are the same one — a guard tuned by what it happens to reject
+#: rather than by what it is for.
+CREDENTIAL_PATTERNS = (
+    r"\btoken\b", r"\brefresh_token\b", r"\bapi_token\b", r"\baccess_token\b",
+    r"\bauth_token\b", r"\bapi_key\b", r"\bapikey\b", r"\bpassword\b",
+    r"\bpasswd\b", r"\bsecret\b", r"bearer ", r"\bauthorization\b",
+    r"/users/", r"/home/",
+)
+
+
+@pytest.mark.parametrize("leak", [
+    '"token": "sk-live-abc"', '"refresh_token": "x"', '"api_token": "y"',
+    '"access_token": "z"', '"api_key": "k"', '"password": "p"',
+    "authorization: bearer abc", "/users/somebody/x", "/home/somebody/x",
+])
+def test_the_credential_patterns_catch_what_they_are_for(leak):
+    import re
+
+    assert any(re.search(p, leak) for p in CREDENTIAL_PATTERNS), leak
+
+
+@pytest.mark.parametrize("innocent", [
+    '"tokens": 0', '"llm_calls": 0, "tokens": 520', '"rows_stored": 241',
+    '"texts_embedded": 520', '"db_reads": 100',
+])
+def test_the_credential_patterns_do_not_fire_on_cost_fields(innocent):
+    """The false positive that started this: narrowing the list to silence it cost real
+    coverage, and word boundaries give both."""
+    import re
+
+    assert not any(re.search(p, innocent) for p in CREDENTIAL_PATTERNS), innocent
+
+
 def test_a_result_carries_no_secrets(naive_run, tmp_path):
     """Result files are written to be published. Assembled by name, never swept."""
     path = tmp_path / "r.json"
     naive_run.write(path)
+    import re
+
     blob = path.read_text().lower()
-    # Credential-shaped keys, not bare words. `token` alone was in this list and matched
-    # the legitimate `tokens` cost field the moment one was added — a guard that fails on
-    # correct code teaches people to weaken it, so it names what it is actually looking
-    # for. `home` came out for the same reason: it matches any word containing it.
-    for leak in ("api_key", "apikey", "access_token", "auth_token", "password", "passwd",
-                 "secret", "bearer ", "authorization", "/users/", "/home/"):
-        assert leak not in blob, f"{leak!r} reached a publishable result file"
+    # Word boundaries rather than substrings. `token` was in this list as a substring and
+    # matched the legitimate `tokens` cost field the moment one existed — but deleting it
+    # also dropped `refresh_token`, `api_token` and a bare `"token"`, none of which any
+    # other entry covers. `\btoken\b` matches `"token": "sk-live-…"` and does not match
+    # `"tokens": 0`, so the false positive goes and the coverage stays. A guard that fails
+    # on correct code teaches people to weaken it; one weakened to stop it doing so is the
+    # same mistake finished.
+    for leak in CREDENTIAL_PATTERNS:
+        assert not re.search(leak, blob), f"{leak!r} reached a publishable result file"
 
 
 def test_every_adapter_counts_rows_the_same_way(data):
@@ -726,7 +768,12 @@ def test_the_documented_result_schema_names_exactly_the_usage_fields():
 
     #: Backticked words in that row that are prose rather than field names.
     not_fields = {"usage", "null"}
-    documented = {word for word in re.findall(r"`([a-z_]+)`", row)} - not_fields
+    # `[a-z0-9_]+`, not `[a-z_]+`: a name with a digit in it — `p95_ms`, `tokens_v2` —
+    # would otherwise be captured as the fragments either side of the digit, and this
+    # guard would fail while the documentation was right. The sibling `latency` row
+    # already contains `query_p50_ms` and `query_p95_ms`, so the letter-only pattern
+    # reads that row as four names rather than six.
+    documented = {word for word in re.findall(r"`([a-z0-9_]+)`", row)} - not_fields
     declared = {f.name for f in dataclasses.fields(Usage)}
 
     assert documented == declared, (

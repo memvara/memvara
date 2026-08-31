@@ -36,8 +36,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   hardcoded one line each, so `tokens` was added to `Usage` and simply not printed.
 
   `test_a_result_carries_no_secrets` scanned for the substring `token`, which the new
-  cost field tripped. It now names credential-shaped keys instead. A guard that fails on
-  correct code teaches people to weaken it.
+  cost field tripped. It matches on word boundaries now: `\btoken\b` finds
+  `"token": "sk-live-…"` and does not find `"tokens": 0`. The first attempt deleted
+  `token` outright, which silenced the false positive and quietly dropped
+  `refresh_token`, `api_token` and a bare `"token"` with it — a guard tuned by what it
+  happens to reject rather than by what it is for. The patterns are a named constant now,
+  and fourteen cases pin them: nine credentials that must be caught, five cost fields
+  that must not.
+
+  The schema guard had the same shape of defect in its own regex: `[a-z_]+` cannot match
+  a field name containing a digit, so a correctly documented `p95_ms` would have failed
+  it. The sibling `latency` row already carries `query_p50_ms` and `query_p95_ms`.
 
 - **The Agent Memory Benchmark is reflected in the documents that describe this
   project's evidence, and memvara's adapter now counts what it embeds.** Three gaps found
