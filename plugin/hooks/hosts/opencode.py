@@ -113,6 +113,13 @@ HOST = Host(
     #: a cleaner permission surface than any other host measured, because the verdict is
     #: one field rather than a decision plus a reason. There is nowhere to put a reason,
     #: so `reason_key` addresses a key the shim drops.
+    #:
+    #: **The only mapping here not confirmed by a receipt.** No permission prompt fired
+    #: during the spike, so which input field carries the tool name is read off the type
+    #: definitions rather than measured. `js/opencode.mjs` logs the keys it is handed on
+    #: the first call so the shape becomes known from a real invocation, and if the guess
+    #: is wrong the match simply misses: nothing is auto-approved and the user is asked,
+    #: which is what happens today anyway.
     approve=ApproveSpec(
         matcher="memvara",
         separators=("__", "_"),

@@ -18,10 +18,15 @@
  *    session-start hook that can inject -- every once-per-session hook it offers is void.
  */
 
+import { fileURLToPath } from "node:url"
+
 import { note, runHook, runHookDetached } from "./shim.mjs"
 
 const HOST = "opencode"
-const HOOKS_DIR = new URL("..", import.meta.url).pathname
+//: `fileURLToPath`, not `new URL(...).pathname`. The latter yields `/C:/Users/...` on
+//: Windows -- a string that looks like a path, joins like a path, and resolves to
+//: nothing, so every hook would degrade to "no run.py" on that platform and only there.
+const HOOKS_DIR = fileURLToPath(new URL("..", import.meta.url))
 
 /**
  * Sessions whose `session_start` has already run.
@@ -32,6 +37,9 @@ const HOOKS_DIR = new URL("..", import.meta.url).pathname
  * `session_start` more often, never to running it never.
  */
 const started = new Set()
+
+/** One line, once per process, recording what `permission.ask` actually hands a hook. */
+let askShapeLogged = false
 
 const TIMEOUTS = { session_start: 20000, recall: 10000, capture: 120000, approve: 5000 }
 
@@ -119,6 +127,16 @@ export const MemvaraPlugin = async ({ client, directory, worktree }) => {
     },
 
     "permission.ask": async (input, output) => {
+      // The one hook here whose input shape was NOT measured: a permission prompt never
+      // fired during the spike, so which field carries the tool name is inferred from
+      // the type definitions rather than from a receipt. The keys are logged once so the
+      // first real invocation says what actually arrives, and the failure mode if the
+      // guess is wrong is benign -- the match misses, nothing is auto-approved, and the
+      // user is asked exactly as they are today.
+      if (!askShapeLogged) {
+        askShapeLogged = true
+        note("hooks", `permission.ask keys=${Object.keys(input ?? {}).join(",")}`)
+      }
       const tool = input?.type ?? input?.permission ?? input?.title ?? ""
       const reply = await runHook({
         hooksDir: HOOKS_DIR, hook: "approve", host: HOST,
