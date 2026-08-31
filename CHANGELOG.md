@@ -13,16 +13,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 - **`tests/test_docs.py` refuses a wording this project has already corrected.** Two
   entries, both earned: the sentence about what `add()` costs, and "every read takes all
-  three". Each was fixed in one file and left standing in another, and in the second case
-  in two others — the README's own *Temporal memory* section and
-  `docs/concepts/temporal-retrieval.md`, the latter found by this test on the run that
-  introduced it.
+  three". Between them they had six live copies across five files, none found by the
+  suite and none by the author of either fix — who knew which file they were editing,
+  which is exactly why the copy that survives is never that one.
 
-  It scans every shipped document rather than the pair that happened to disagree, because
-  the third copy is never in the file you are looking at; that is precisely why both
-  earlier fixes missed one. `CHANGELOG.md` is excluded, since it quotes each wrong form
-  inside the entry recording the correction, and scanning it would go red on the evidence
-  that the fix happened.
+  It scans **every shipped markdown file**, which is wider than the reader's path that
+  `tests/test_doc_links.py` walks. That set is `README.md`, `docs/` and `examples/`; the
+  copies off it matter as much — the packaged skill under `memvara/skills/memvara/`, its
+  mirror under `plugin/skills/`, and the `README.md` files in `npm/`, `plugin/`, `demo/`
+  and `release/`. The packaged skill is the sharpest of those: its tool list rotted this
+  same way once, and it is vendored by sha into seven downstream repositories, so a wrong
+  sentence there is a wrong sentence in all of them. `CHANGELOG.md` is the one exclusion,
+  since it quotes each wrong form inside the entry recording the correction, and scanning
+  it would go red on the evidence that the fix happened.
+
+  **The patterns are loose on purpose, and spaces in them match line breaks.** These
+  files are hard-wrapped, so a wording that sits on one line today lands across two the
+  moment a word ahead of it changes. The first version of the second entry also required
+  `read` and `takes` to be adjacent, and so matched neither *"Every read in the API
+  takes"* nor *"every read below takes"* — two live copies, in the commit that added the
+  guard. A pattern that only matches the exact sentence already fixed is a guard that
+  reads as protection and is not.
 
   **What it does not do is worth stating, because the name suggests otherwise.** It
   catches a wording coming *back*. A fresh overstatement in fresh words passes it, and
@@ -275,6 +286,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   against another note in the same store.
 
 ### Fixed
+
+- **Four more copies of "every read takes the same three time keywords".**
+  `docs/concepts/bitemporal-memory.md` and `docs/concepts/temporal-retrieval.md` now name
+  the eight reads that do take them and the three that do not. `docs/API.md` said "every
+  read below takes" over a listing that includes `recall`, `get` and `since`, and
+  annotates each four lines later as taking no `T=` — a page contradicting itself within
+  a screen; it now says that a read shown with `T=` takes them and a read shown without
+  one takes no time keyword at all. `CONTRIBUTING.md` gave the suite as 3,539 tests for
+  the same command the README gives as 4,044: one claim, two files, one of them updated,
+  which is the failure this guard was written to stop.
+
 
 - **`docs/concepts/temporal-retrieval.md` said "Every read takes the same three time
   keywords".** The third copy of a claim corrected twice already: `recall()`, `get()` and
