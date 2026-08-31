@@ -578,9 +578,64 @@ def test_a_result_carries_no_secrets(naive_run, tmp_path):
         assert leak not in blob, f"{leak!r} reached a publishable result file"
 
 
+def test_every_adapter_counts_rows_the_same_way(data):
+    """`rows_stored` means rows held, for all three, or the column compares nothing.
+
+    It used to mean rows for memvara and *write calls* for the baselines, and the
+    published table headed the mixture "rows written" — reporting that the dictionary
+    stored more rows than the bitemporal store, which is the reverse of the truth.
+    """
+    held = {}
+    for name in ("memvara", "naive", "vector-rag"):
+        system = registry.build(name)
+        try:
+            runner.ingest(system, data)
+            held[name] = system.usage().rows_stored
+        finally:
+            system.close()
+    assert held["naive"] < held["memvara"] < held["vector-rag"], held
+    assert held["naive"] < len(data.events), (
+        "naive overwrites single-valued slots, so it must hold fewer rows than it was "
+        f"handed: {held['naive']} against {len(data.events)} events")
+    assert held["vector-rag"] == len(data.events), "this store appends every observation"
+
+
+def test_two_values_starting_on_one_day_are_not_a_correction(data):
+    """A multi-valued relation gains values; it does not contradict itself.
+
+    Every filler person is given two languages with the same `valid_from`, so without a
+    cardinality guard the second write claims the first record was wrong — 30 times.
+    """
+    from benchmarks.agent_memory.adapters.memvara_adapter import MemvaraMemory
+
+    system = registry.build("memvara")
+    try:
+        assert isinstance(system, MemvaraMemory)
+        system.reset(data.predicates)
+        misread = 0
+        for event in base.sort_events(data.events):
+            if not data.predicates[event.predicate].single_valued and system._is_correction(event):
+                misread += 1
+            system.remember(event)
+        assert misread == 0, f"{misread} multi-valued writes were called corrections"
+        spoken = [c.object for c in system.mem.history("alice", "speaks") if c.state != "retired"]
+        assert set(spoken) == {"English", "German", "Portuguese"}
+    finally:
+        system.close()
+
+
+def test_the_leaderboard_prints_dimension_names_in_full(naive_run):
+    """The header was sliced to 13 characters, so the command the README puts first
+    printed `knowledge_tim` while every table in the docs said `knowledge_time`."""
+    text = report.leaderboard([naive_run])
+    for dimension in naive_run.scorecard.by_dimension:
+        assert dimension in text, f"{dimension!r} was truncated out of the header"
+
+
 def test_an_unmeasured_cost_stays_none_rather_than_becoming_zero():
     """`0` is a claim. `null` is the absence of one, and the report prints `-`."""
     assert Usage().to_json()["llm_calls"] is None
+    assert Usage().to_json()["rows_stored"] is None
     assert "-" in "\n".join(report._cost_block(_stub_result()))
 
 

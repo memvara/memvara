@@ -70,6 +70,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   6; `irrelevance` is a three-way tie that discriminates nothing. All of that is in the
   report rather than in a footnote.
 
+  A second review of the branch found three more, all fixed here: `Usage.db_writes` was
+  undefined, so memvara reported rows stored while the baselines reported write calls and
+  the published table compared them under one heading — it is now `rows_stored`, means
+  rows for all three, and reads in the right direction (naive 193, memvara 241,
+  vector-rag 262, so the dictionary holds *fewer* rows and memvara's 48 extra are what
+  buys the temporal result); `_is_correction` ignored cardinality and told `remember()`
+  that 30 multi-valued writes were corrections, which memvara's own MANY handling
+  absorbed rather than the adapter getting right; and the leaderboard sliced dimension
+  names to 13 characters, printing `knowledge_tim`.
+
   Those figures replace an earlier set (90.0 / 88.0 / 49.0) that this branch briefly
   carried. Investigating memvara's `retrieval` loss found two defects in the harness
   rather than in any memory system: the memvara adapter searched ended and retired claims

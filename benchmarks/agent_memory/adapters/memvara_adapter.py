@@ -93,7 +93,20 @@ class MemvaraMemory:
     # -- write --------------------------------------------------------------
 
     def _is_correction(self, event: MemoryEvent) -> bool:
-        """Same fact slot, same `valid_from`, different value: a correction, not a change."""
+        """Same fact slot, same `valid_from`, different value: a correction, not a change.
+
+        **Only on a single-valued predicate.** Two values that begin on the same day are
+        the ordinary case for a multi-valued relation, not a contradiction — somebody
+        speaks two languages and we learned both at once. Without the guard this returned
+        True for 30 writes to `speaks` in the shipped dataset and told `remember()` the
+        earlier record was *wrong*. memvara accumulates on a MANY predicate whatever
+        `close=` says, so nothing was corrupted; that is the library defending against
+        this method rather than this method being right, and `memvara/server/tools.py` is
+        explicit that a false reason for a change cannot be found by reading the data
+        afterwards.
+        """
+        if not self._single.get(event.predicate, True):
+            return False
         held = self.mem.history(event.subject, event.predicate)
         return any(claim.valid_from == event.valid_from and claim.object != event.object
                    and claim.state != "retired"
@@ -229,7 +242,7 @@ class MemvaraMemory:
         return Usage(
             llm_calls=0,
             embedding_calls=None,
-            db_writes=int(stats.get("claims", 0)),
+            rows_stored=int(stats.get("claims", 0)),
             db_reads=self._reads,
             extra={"episodes": int(stats.get("episodes", 0))},
         )

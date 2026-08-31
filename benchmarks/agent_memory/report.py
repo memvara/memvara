@@ -107,8 +107,8 @@ def _cost_block(result: RunResult) -> list[str]:
         "  Cost, as counted by the system itself",
         f"    LLM calls                    {show(usage.llm_calls):>8}",
         f"    embedding calls              {show(usage.embedding_calls):>8}",
-        f"    memory writes                {show(usage.db_writes):>8}",
-        f"    memory reads                 {show(usage.db_reads):>8}",
+        f"    rows stored                  {show(usage.rows_stored):>8}",
+        f"    read calls                   {show(usage.db_reads):>8}",
     ]
     for key, value in sorted(usage.extra.items()):
         lines.append(f"    {key:<28} {value:>8}")
@@ -161,13 +161,18 @@ def leaderboard(results: Sequence[RunResult]) -> str:
     if not results:
         return ""
     dimensions = list(results[0].scorecard.by_dimension)
-    header = f"  {'System':<16} {'Overall':>8}" + "".join(f" {d[:13]:>13}" for d in dimensions)
+    # Width from the data, not a constant: slicing to 13 rendered `knowledge_time` as
+    # `knowledge_tim`, so the primary output disagreed with every table in the docs about
+    # the name of one of the seven things being measured.
+    column = max((len(d) for d in dimensions), default=8)
+    header = (f"  {'System':<16} {'Overall':>8}"
+              + "".join(f" {d:>{column}}" for d in dimensions))
     lines = ["", f"Agent Memory Benchmark v{BENCHMARK_VERSION}", RULE, header, RULE]
     for result in sorted(results, key=lambda r: -(r.scorecard.overall.accuracy or 0.0)):
         row = f"  {result.system:<16} {pct(result.scorecard.overall):>8}"
         for dimension in dimensions:
             tally = result.scorecard.by_dimension.get(dimension)
-            row += f" {(pct(tally) if tally else '-'):>13}"
+            row += f" {(pct(tally) if tally else '-'):>{column}}"
         lines.append(row)
     lines += [RULE, ""]
     return "\n".join(lines)

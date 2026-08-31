@@ -124,7 +124,11 @@ class NaiveMemory:
         return MemoryAnswer(value=held[0].object, support=support)
 
     def usage(self) -> Usage:
-        return Usage(llm_calls=0, embedding_calls=0, db_writes=self._writes,
+        # Rows held, not calls made: this store overwrites, so it ends up holding far
+        # fewer rows than it was handed — which is the whole difference between it and a
+        # store that keeps history, and the number the report is for.
+        rows = sum(len(entries) for entries in self._slots.values())
+        return Usage(llm_calls=0, embedding_calls=0, rows_stored=rows,
                      db_reads=self._reads)
 
     def close(self) -> None:

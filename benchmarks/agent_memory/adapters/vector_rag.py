@@ -231,8 +231,10 @@ class VectorRAGMemory:
                             support=tuple(r.id for r in visible))
 
     def usage(self) -> Usage:
-        return Usage(llm_calls=0, embedding_calls=self._embeds, db_writes=self._writes,
-                     db_reads=self._reads)
+        # Rows held. This store appends every observation, so it equals the event count
+        # — which is itself the finding: it keeps everything, and pays for it.
+        return Usage(llm_calls=0, embedding_calls=self._embeds,
+                     rows_stored=len(self._records), db_reads=self._reads)
 
     def close(self) -> None:
         return None

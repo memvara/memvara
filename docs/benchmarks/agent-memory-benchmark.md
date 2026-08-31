@@ -182,11 +182,11 @@ By category:
 
 Cost and latency from the same runs:
 
-| System | LLM calls | embedding calls | rows written | write, per event | query, mean | query p95 |
+| System | LLM calls | embedding calls | rows stored | write, per event | query, mean | query p95 |
 |---|---:|---:|---:|---:|---:|---:|
 | memvara | 0 | not counted | 241 | 0.8 – 2.9 ms | 0.9 – 2.6 ms | 2 – 15 ms |
 | vector-rag | 0 | 279 | 262 | 0.02 – 0.25 ms | 0.09 – 0.51 ms | 0.3 – 1.5 ms |
-| naive | 0 | 0 | 262 | 0.007 – 0.016 ms | 0.02 – 0.03 ms | 0.1 – 0.2 ms |
+| naive | 0 | 0 | **193** | 0.007 – 0.016 ms | 0.02 – 0.03 ms | 0.1 – 0.2 ms |
 
 **Ranges, not points, and wide ones.** These span every run taken on one laptop that was
 also doing other work, and the same figure moved by about 3× between runs depending on
@@ -199,12 +199,24 @@ read. memvara is roughly two orders of magnitude slower per write than a diction
 is the trade the rest of this table is the other half of, and it is a real cost rather
 than a rounding error. Reproduce it on your own machine before quoting anything.
 
-memvara stores **241 claims for 262 events**: the write receipts report 241 added and 21
-reinforced — a restatement of something already believed bumps the existing claim instead
-of adding a row. Of those 241, forty-six later *ended* (they stopped being true) and two
-were *retired* (the record was wrong: the hearsay about Dana, and the standup note about
-the quotes service). That two-against-forty-six split is the same distinction the
-`contradiction` and `change_detection` categories score.
+**The `rows stored` column is the price of answering about the past, and it reads in the
+right direction only if all three numbers mean the same thing.** They did not until this
+was corrected: memvara reported rows while the baselines reported write *calls*, so the
+table said the dictionary stored more rows than the bitemporal store. It stores fewer.
+
+- **naive holds 193 rows** for 262 events, because it overwrites. Those 193 are exactly
+  the current values and nothing else.
+- **memvara holds 241** — the same 193 live, plus 46 *ended* (they stopped being true) and
+  2 *retired* (the record was wrong: the hearsay about Dana, and the standup note about
+  the quotes service). So **48 extra rows, a 25% overhead, is what the entire `temporal`
+  and `contradiction` result is bought with.** The two-against-forty-six split is itself
+  the distinction those categories score.
+- **vector-rag holds 262**, one per observation: it keeps everything, including the four
+  restatements of the billing service's datastore that say nothing new.
+
+memvara's write receipts report 241 added and 21 reinforced — a restatement of something
+already believed bumps the existing claim rather than adding a row, which is why it holds
+fewer rows than `vector-rag` while remembering strictly more.
 
 ## Interpretation
 
@@ -362,7 +374,7 @@ reading the code. One JSON object per run:
 | `metrics.by_scenario` | the same, keyed by scenario |
 | `metrics.failure_reasons` | reason to count, most common first |
 | `latency` | `write_total_ms`, `write_mean_ms`, `query_mean_ms`, `query_p50_ms`, `query_p95_ms`, `query_max_ms` |
-| `usage` | `llm_calls`, `embedding_calls`, `db_writes`, `db_reads`, `extra`. **`null` means not measured** and must not be rendered as zero |
+| `usage` | `llm_calls`, `embedding_calls`, `rows_stored` (rows the store holds after ingestion, not write calls), `db_reads`, `extra`. **`null` means not measured** and must not be rendered as zero |
 | `questions[]` | per question: `id`, `category`, `scenario`, `correct`, `given`, `expected`, `reason`, `latency_s`, `support` |
 
 `accuracy` is `null` for an empty group, which a renderer must show as `-` rather than 0%.

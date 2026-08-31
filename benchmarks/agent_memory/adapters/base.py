@@ -102,7 +102,18 @@ class Usage:
 
     llm_calls: int | None = None
     embedding_calls: int | None = None
-    db_writes: int | None = None
+    #: Rows the store **holds** once every event has been delivered — not the number of
+    #: write calls, which is always the event count and so says nothing about any system.
+    #:
+    #: Defined here because it was not, and three adapters answered three different
+    #: questions with it: memvara reported rows, the two baselines reported calls, and the
+    #: published table compared them under one heading. `naive` overwrites, so it holds
+    #: fewer rows than it received; memvara holds more than it currently believes, because
+    #: a value that stopped being true is kept. That difference is the point of the column
+    #: and the old field name hid it.
+    rows_stored: int | None = None
+    #: Read calls the benchmark made — one per question, for every system. Kept because a
+    #: system that reads more than once per question would show it here.
     db_reads: int | None = None
     #: Anything a system wants recorded that has no field here. Serialized as-is.
     extra: dict[str, int] = field(default_factory=dict)
@@ -111,7 +122,7 @@ class Usage:
         row: dict[str, object] = {
             "llm_calls": self.llm_calls,
             "embedding_calls": self.embedding_calls,
-            "db_writes": self.db_writes,
+            "rows_stored": self.rows_stored,
             "db_reads": self.db_reads,
         }
         if self.extra:
