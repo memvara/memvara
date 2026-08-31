@@ -47,14 +47,33 @@ def _toml_table(table: str) -> dict[str, str | list[str]]:
     `requires-python` promises 3.10. A packaging test that skips on one of the four
     interpreters the package claims to support is exactly the kind of half-enforcement
     the CI matrix exists to end. It understands only the shapes `pyproject.toml` actually
-    uses — one scalar or one single-line array per key — and
+    uses — one scalar per key, and an array written on one line or across several — and
     `test_the_hand_parse_of_pyproject_agrees_with_tomllib` pins it against the real parser
     everywhere the real parser exists.
+
+    The multi-line array arrived with `keywords` and `classifiers`, which are fifteen
+    entries each and unreadable on one line. Handled by accumulating until the closing
+    bracket rather than by a second code path, so the two spellings cannot diverge.
     """
     found: dict[str, str | list[str]] = {}
     inside = False
+    key_open: str | None = None
+    buffer = ""
+
+    def items(body: str) -> list[str]:
+        return [item.strip().strip("\"'") for item in body.split(",") if item.strip()]
+
     for raw in PYPROJECT.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
+        if key_open is not None:
+            # Inside a multi-line array. A comment line here is a comment about the
+            # entries, not an entry, so it is dropped exactly as it is at top level.
+            if not line.startswith("#"):
+                buffer += line
+            if line.endswith("]"):
+                found[key_open] = items(buffer.rstrip("]"))
+                key_open, buffer = None, ""
+            continue
         if line.startswith("["):
             inside = line == f"[{table}]"
             continue
@@ -62,10 +81,10 @@ def _toml_table(table: str) -> dict[str, str | list[str]]:
             continue
         key, _, value = line.partition("=")
         value = value.strip()
-        if value.startswith("[") and value.endswith("]"):
-            found[key.strip()] = [
-                item.strip().strip("\"'") for item in value[1:-1].split(",") if item.strip()
-            ]
+        if value == "[":
+            key_open, buffer = key.strip(), ""
+        elif value.startswith("[") and value.endswith("]"):
+            found[key.strip()] = items(value[1:-1])
         elif value.startswith(('"', "'")):
             found[key.strip()] = value.strip("\"'")
     return found

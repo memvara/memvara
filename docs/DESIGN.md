@@ -375,8 +375,13 @@ And every result carries an `Explanation`:
 ```python
 r = mem.search("where do they live?")[0]
 print(r.explain.summary())
-# vector#1(0.812) bm25#2(6.44) recency=0.98 conf=0.90 sal=1.25 -> 0.7431
+# vector#0(0.095) bm25#0(0.51) recency=1.00 conf=0.90 sal=1.00 raw=0.0487 intent=lookup -> 0.1729
 ```
+
+`raw` is the pre-normalization product of fusion and the quality multipliers, and it is
+*not* comparable across queries — which is exactly why the arrow points at the normalized
+score instead. `intent` is what the query was classified as, which is what decides how the
+temporal leg weights the result.
 
 #### What a prompt block may carry from the past
 
@@ -590,3 +595,4 @@ inside the launch-to-launch spread rather than merely small.
 
 ---
 
+Previous: [Architecture](reference/architecture.md) · Next: [Internals](INTERNALS.md) · [Benchmarks](BENCHMARKS.md)

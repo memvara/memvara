@@ -442,3 +442,7 @@ That was not always true. Before schema 7 this paragraph offered `VACUUM` as the
 readability too, and for the text index it did not work: a deleted FTS5 row leaves its
 terms as live rows in a shadow table, which a `VACUUM` does not touch. Opening an older
 store with this version scrubs it once, on the spot.
+
+---
+
+Previous: [MCP](integrations/mcp.md) · Next: [Open core](OPEN-CORE.md) · [Documentation index](README.md)

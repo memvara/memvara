@@ -1,0 +1,63 @@
+
+  AI agents don't just forget.
+  They remember the wrong thing.
+
+  You corrected it in March. In August it is still saying the old value,
+  because the store kept both and marked neither one current.
+
+──────────────────────────────────────────────────────────────
+  Alice tells us where she lives. Three times, over five months.
+──────────────────────────────────────────────────────────────
+
+  2026-01-10   mem.remember("Alice", "lives_in", "Berlin")
+  2026-03-15   mem.remember("Alice", "lives_in", "London")
+  2026-06-02   mem.remember("Alice", "lives_in", "New York")
+
+  No model was called. `lives_in` is declared single-valued, so the second
+  value closed the first one's interval by lookup, not by similarity.
+
+──────────────────────────────────────────────────────────────
+  Where does Alice live now?
+──────────────────────────────────────────────────────────────
+
+  >>> [c.object for c in mem.get_all()]
+  ['New York']
+
+──────────────────────────────────────────────────────────────
+  Where did she live on 20 March? And on 20 January?
+──────────────────────────────────────────────────────────────
+
+  >>> [c.object for c in mem.get_all(as_of=datetime(2026, 3, 20, tzinfo=UTC))]
+  ['London']
+  >>> [c.object for c in mem.get_all(as_of=datetime(2026, 1, 20, tzinfo=UTC))]
+  ['Berlin']
+
+  Berlin was not overwritten. It was given an end date.
+
+──────────────────────────────────────────────────────────────
+  The whole record, which is what makes those answers lookups.
+──────────────────────────────────────────────────────────────
+
+  >>> mem.history("Alice", "lives_in")
+  Berlin    2026-01-10 -> 2026-03-15  [ended]
+  London    2026-03-15 -> 2026-06-02  [ended]
+  New York  2026-06-02 -> now         [live]
+
+  "ended" means the world changed. A value that was never true would read
+  "retired" instead, and nothing is deleted either way.
+
+  >>> mem.why(claim_id)
+  it replaced:  London (ended)
+  written by:   api (user)
+
+──────────────────────────────────────────────────────────────
+
+  Memvara — bitemporal memory for AI agents.
+
+  Know what was true. Know when it was true. Know why you believe it.
+
+  github.com/memvara/memvara          pip install memvara
+  memvara.dev
+
+──────────────────────────────────────────────────────────────
+

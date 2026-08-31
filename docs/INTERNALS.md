@@ -1145,3 +1145,7 @@ Hard API requirements — these are current and getting them wrong is a 400:
   concurrent writes, dimension mismatches, claims with no embedding.
 - A fake LLM must assert on *call count*, not just output — the whole design claim is that
   the LLM is called rarely, so a test that does not count calls does not test the design.
+
+---
+
+Previous: [How it works](DESIGN.md) · Next: [Contributing](../CONTRIBUTING.md) · [Roadmap](ROADMAP.md)

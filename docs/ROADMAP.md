@@ -824,3 +824,7 @@ alternative is to chase developer adoption first — adapters, hosting, distribu
 accept competing head-on with better-funded incumbents. That is a real trade, and it is a
 business decision rather than a technical one: it belongs to whoever is funding the runway,
 not to the architecture.
+
+---
+
+Previous: [Internals](INTERNALS.md) · Next: [Open core](OPEN-CORE.md) · [Contributing](../CONTRIBUTING.md)

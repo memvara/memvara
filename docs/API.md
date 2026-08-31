@@ -339,3 +339,4 @@ already async, and uses it directly instead.
 
 ---
 
+Previous: [Quickstart](getting-started/quickstart.md) · Next: [Architecture](reference/architecture.md) · [How it works](DESIGN.md) · [Internals](INTERNALS.md)

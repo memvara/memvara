@@ -36,8 +36,16 @@ ROOT = Path(__file__).resolve().parent.parent
 #: `README.md` first, then every shipped document. `CHANGELOG.md`, `CONTRIBUTING.md` and
 #: `SECURITY.md` are deliberately included: they are linked *from* the README, so a reader
 #: arriving from PyPI lands in them.
-DOCS = [ROOT / name for name in ("README.md", "CHANGELOG.md", "CONTRIBUTING.md",
-                                 "SECURITY.md")] + sorted((ROOT / "docs").glob("*.md"))
+#:
+#: `docs/` and `examples/` are walked recursively rather than one level deep. They used to
+#: be `glob("*.md")`, which was correct while every document sat directly in `docs/` and
+#: silently stopped covering anything the moment `docs/concepts/` existed — a guard that
+#: quietly narrows is worse than one that was never written, because the suite still
+#: reports it as passing. `rglob` has no such failure mode.
+DOCS = ([ROOT / name for name in ("README.md", "CHANGELOG.md", "CONTRIBUTING.md",
+                                  "SECURITY.md")]
+        + sorted((ROOT / "docs").rglob("*.md"))
+        + sorted((ROOT / "examples").rglob("*.md")))
 
 #: `[text](target)` or `[text](target#anchor)`. Bare autolinks and reference-style links
 #: are not used in these files; if one is added this pattern simply does not see it, which
@@ -85,7 +93,7 @@ def links(path: Path) -> list[tuple[str, str | None, int]]:
     return out
 
 
-@pytest.mark.parametrize("doc", DOCS, ids=lambda p: p.name)
+@pytest.mark.parametrize("doc", DOCS, ids=lambda p: p.relative_to(ROOT).as_posix())
 def test_every_relative_link_points_at_a_file_that_exists(doc: Path) -> None:
     """The `docs/BENCHMARKS.md -> bench/baseline.py` failure: correct from the repository
     root, wrong from the directory the file actually sits in."""
@@ -97,7 +105,7 @@ def test_every_relative_link_points_at_a_file_that_exists(doc: Path) -> None:
         for t, line in broken)
 
 
-@pytest.mark.parametrize("doc", DOCS, ids=lambda p: p.name)
+@pytest.mark.parametrize("doc", DOCS, ids=lambda p: p.relative_to(ROOT).as_posix())
 def test_every_anchor_points_at_a_heading_that_exists(doc: Path) -> None:
     """The `#open-core-and-exactly-where-the-line-is` failure: the heading moved to another
     file and three links stayed behind. Covers same-page anchors and the anchor half of a
