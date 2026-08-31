@@ -10,6 +10,11 @@ rather than the world, and the published LOCOMO and LongMemEval numbers are retr
 rather than answer accuracy. The [FAQ](FAQ.md#what-are-the-honest-limitations) is the
 short version if that is all you came for.
 
+Every bullet here was checked against the implementation on **2026-08-31**, and all
+fourteen still hold. A limitations page is one of the few documents that can be made
+wrong by *fixing* something, and nothing in a test suite goes red when it happens — so
+the date is here to be read, and to be old enough to disbelieve eventually.
+
 - **`HashingEmbedder` is a lexical fallback, not a semantic model.** It's the default so
   the library runs offline in milliseconds with no download, and it makes tests
   deterministic. It will not put "physician" near "doctor". Install
