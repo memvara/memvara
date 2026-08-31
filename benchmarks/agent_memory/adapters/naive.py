@@ -128,7 +128,7 @@ class NaiveMemory:
         # fewer rows than it was handed — which is the whole difference between it and a
         # store that keeps history, and the number the report is for.
         rows = sum(len(entries) for entries in self._slots.values())
-        return Usage(llm_calls=0, texts_embedded=0, rows_stored=rows,
+        return Usage(llm_calls=0, tokens=0, texts_embedded=0, rows_stored=rows,
                      db_reads=self._reads)
 
     def close(self) -> None:

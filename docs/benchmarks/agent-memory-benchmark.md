@@ -225,6 +225,25 @@ memvara's write receipts report 241 added and 21 reinforced — a restatement of
 already believed bumps the existing claim rather than adding a row, which is why it holds
 fewer rows than `vector-rag` while remembering strictly more.
 
+### What the cost columns do not measure
+
+Named because an absent metric reads as a zero one, and because two of these were asked
+for and are missing rather than declined:
+
+- **Storage operations** — SQL statements, index writes, page reads. No system reports
+  them and none can be made to through a system-neutral interface: they live below every
+  adapter's public API, and instrumenting one system's internals would produce a column
+  only that system could fill. `db_reads` is a different thing and says so — read calls
+  the *benchmark* made, one per question, identical for every system.
+- **Wall-clock cost of the model** — no shipped system uses one, so `llm_calls` and
+  `tokens` are `0` for all three. Those are measurements rather than blanks: zero calls is
+  zero tokens. The fields exist for adapters that do use a model, which
+  [the contributor guide](https://github.com/memvara/memvara/blob/main/benchmarks/agent_memory/CONTRIBUTING.md)
+  requires to disclose the model, version and temperature.
+- **Memory footprint** — bytes on disk or in RSS. Not measured, and not comparable
+  between an in-process dictionary and a SQLite file without saying which is being
+  counted.
+
 ## Interpretation
 
 **Three points separate memvara from a baseline written in numpy in an afternoon.** That
@@ -381,7 +400,7 @@ reading the code. One JSON object per run:
 | `metrics.by_scenario` | the same, keyed by scenario |
 | `metrics.failure_reasons` | reason to count, most common first |
 | `latency` | `write_total_ms`, `write_mean_ms`, `query_mean_ms`, `query_p50_ms`, `query_p95_ms`, `query_max_ms` |
-| `usage` | `llm_calls`, `texts_embedded` (texts submitted for embedding, not requests made), `rows_stored` (rows the store holds after ingestion, not write calls), `db_reads`, `extra`. **`null` means not measured** and must not be rendered as zero |
+| `usage` | `llm_calls`, `tokens` (prompt and completion together), `texts_embedded` (texts submitted for embedding, not requests made), `rows_stored` (rows the store holds after ingestion, not write calls), `db_reads`, `extra`. **`null` means not measured** and must not be rendered as zero |
 | `questions[]` | per question: `id`, `category`, `scenario`, `correct`, `given`, `expected`, `reason`, `latency_s`, `support` |
 
 `accuracy` is `null` for an empty group, which a renderer must show as `-` rather than 0%.

@@ -309,6 +309,25 @@ there is nothing to extract. It is recorded so that a change introducing a model
 would be visible, not as evidence about extraction. An unmeasured counter prints `-`,
 never `0`.
 
+### What the cost columns do not measure
+
+Named because an absent metric reads as a zero one, and because two of these were asked
+for and are missing rather than declined:
+
+- **Storage operations** — SQL statements, index writes, page reads. No system reports
+  them and none can be made to through a system-neutral interface: they live below every
+  adapter's public API, and instrumenting one system's internals would produce a column
+  only that system could fill. `db_reads` is a different thing and says so — read calls
+  the *benchmark* made, one per question, identical for every system.
+- **Wall-clock cost of the model** — no shipped system uses one, so `llm_calls` and
+  `tokens` are `0` for all three. Those are measurements rather than blanks: zero calls is
+  zero tokens. The fields exist for adapters that do use a model, which
+  [the contributor guide](https://github.com/memvara/memvara/blob/main/benchmarks/agent_memory/CONTRIBUTING.md)
+  requires to disclose the model, version and temperature.
+- **Memory footprint** — bytes on disk or in RSS. Not measured, and not comparable
+  between an in-process dictionary and a SQLite file without saying which is being
+  counted.
+
 ---
 
 ## Running it

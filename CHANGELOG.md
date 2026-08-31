@@ -11,6 +11,34 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **The benchmark's cost columns say what they do not measure**, and `Usage` has a
+  `tokens` field. Both were named in the plan the benchmark was built from and neither
+  had shipped: storage operations and model tokens were absent, and an absent metric
+  reads as a zero one.
+
+  `tokens` counts prompt and completion together. Every system shipped here reports `0` —
+  a measurement, not a blank, since all three report `llm_calls=0` — and the field exists
+  for adapters that do use a model, which would otherwise have to hide the cost that
+  dominates their bill in `extra`, where nothing compares it.
+
+  **Storage operations are not measured and now say so.** They cannot be, through a
+  system-neutral interface: SQL statements and page reads live below every adapter's
+  public API, and instrumenting one system's internals would produce a column only that
+  system could fill. `db_reads` is a different quantity and the docs distinguish them.
+  Memory footprint is disclosed as unmeasured on the same grounds.
+
+  Two guards landed with it, both for the class of defect rather than the case. One
+  asserts the published result-schema table names exactly the fields of `Usage`, in both
+  directions — a field added without a doc entry and a doc entry surviving a rename are
+  the same defect from two sides, and the last two renames (`db_writes` to `rows_stored`,
+  `embedding_calls` to `texts_embedded`) were each caught by a reviewer rather than by
+  the suite. The other asserts the report has a label for every field: the cost block
+  hardcoded one line each, so `tokens` was added to `Usage` and simply not printed.
+
+  `test_a_result_carries_no_secrets` scanned for the substring `token`, which the new
+  cost field tripped. It now names credential-shaped keys instead. A guard that fails on
+  correct code teaches people to weaken it.
+
 - **The Agent Memory Benchmark is reflected in the documents that describe this
   project's evidence, and memvara's adapter now counts what it embeds.** Three gaps found
   by auditing the shipped benchmark against the plan it was built from, rather than by

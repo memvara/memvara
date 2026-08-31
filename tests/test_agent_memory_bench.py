@@ -643,7 +643,12 @@ def test_a_result_carries_no_secrets(naive_run, tmp_path):
     path = tmp_path / "r.json"
     naive_run.write(path)
     blob = path.read_text().lower()
-    for leak in ("api_key", "token", "password", "secret", "/users/", "home"):
+    # Credential-shaped keys, not bare words. `token` alone was in this list and matched
+    # the legitimate `tokens` cost field the moment one was added — a guard that fails on
+    # correct code teaches people to weaken it, so it names what it is actually looking
+    # for. `home` came out for the same reason: it matches any word containing it.
+    for leak in ("api_key", "apikey", "access_token", "auth_token", "password", "passwd",
+                 "secret", "bearer ", "authorization", "/users/", "/home/"):
         assert leak not in blob, f"{leak!r} reached a publishable result file"
 
 
@@ -701,6 +706,55 @@ def test_the_leaderboard_prints_dimension_names_in_full(naive_run):
         assert dimension in text, f"{dimension!r} was truncated out of the header"
 
 
+def test_the_documented_result_schema_names_exactly_the_usage_fields():
+    """The published schema and the dataclass must agree, in both directions.
+
+    This is the guard the last two reviews wanted and neither wrote. `db_writes` was
+    renamed to `rows_stored` and `embedding_calls` to `texts_embedded`, each because the
+    field meant something other than its name; both times the schema table had to be
+    updated by hand, and nothing would have failed if it had not been. A field added
+    without a doc entry and a doc entry left behind after a rename are the same defect
+    seen from two sides, so this checks both.
+    """
+    import dataclasses
+    import re
+
+    report_page = ROOT / "docs" / "benchmarks" / "agent-memory-benchmark.md"
+    row = next((line for line in report_page.read_text(encoding="utf-8").splitlines()
+                if line.startswith("| `usage` |")), None)
+    assert row is not None, "the result-schema table no longer has a `usage` row"
+
+    #: Backticked words in that row that are prose rather than field names.
+    not_fields = {"usage", "null"}
+    documented = {word for word in re.findall(r"`([a-z_]+)`", row)} - not_fields
+    declared = {f.name for f in dataclasses.fields(Usage)}
+
+    assert documented == declared, (
+        f"the schema table and `Usage` disagree.\n"
+        f"  documented but not a field: {sorted(documented - declared)}\n"
+        f"  a field but undocumented:   {sorted(declared - documented)}")
+
+
+def test_every_usage_field_is_rendered_by_the_report():
+    """A field nothing prints is a field nobody reads, however well documented.
+
+    `tokens` was added to `Usage` and, with the cost block hardcoding one line per field,
+    was simply absent from the report until this noticed.
+    """
+    import dataclasses
+
+    declared = {f.name for f in dataclasses.fields(Usage)} - {"extra"}
+    assert set(report.COST_LABELS) == declared, (
+        "report.COST_LABELS and `Usage` disagree; a field with no label is never printed")
+
+    populated = Usage(**{f.name: (7 if f.name != "extra" else {"thing": 9})
+                         for f in dataclasses.fields(Usage)})
+    text = "\n".join(report._cost_block(_stub_result(populated)))
+    for label in report.COST_LABELS.values():
+        assert label in text
+    assert "thing" in text, "`extra` entries are printed too"
+
+
 def test_an_unmeasured_cost_stays_none_rather_than_becoming_zero():
     """`0` is a claim. `null` is the absence of one, and the report prints `-`."""
     assert Usage().to_json()["llm_calls"] is None
@@ -708,11 +762,11 @@ def test_an_unmeasured_cost_stays_none_rather_than_becoming_zero():
     assert "-" in "\n".join(report._cost_block(_stub_result()))
 
 
-def _stub_result():
+def _stub_result(usage: Usage | None = None):
     return results.RunResult(
         system="s", system_version="0", dataset_version="v1", timestamp="t",
         scorecard=scoring.score([], _dataset([], [])),
-        latency=results.latency_of(0.0, 0, []), usage=Usage(), judgements=())
+        latency=results.latency_of(0.0, 0, []), usage=usage or Usage(), judgements=())
 
 
 def test_percentiles_are_nearest_rank_and_never_invent_a_measurement():
