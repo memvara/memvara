@@ -57,7 +57,7 @@ sign-in.
 
 Windsurf and Zed are not on this list. They stay on the local command path.
 
-Per-client clicks: https://memvara.dev/docs/agents
+Per-client clicks: https://memvara.dev/docs/cloud
 
 ## Local process (fallback)
 

@@ -402,6 +402,22 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **Twelve links still pointed at `/docs/agents`, and one of them was a real 404.**
+  `memvara.dev/docs/agents` is retired; it 301s to `/docs/cloud`, so eleven of the twelve
+  were working links costing a reader an extra hop. The twelfth was not: the tool
+  description in `memvara/server/mcp.py` sent an agent to
+  `memvara.dev/docs/agents/skill`, which has no redirect entry and no route, and the
+  Worker's asset binding runs `not_found_handling: "none"` — so it answers 404. That is
+  the one that mattered, because the reader is an agent following a pointer at runtime
+  and it has no second way to find the page. It now names `/docs/cloud`, which is a live
+  page that describes the skill and the plugin that ships it.
+
+  The other eleven are the `homepage` field of all seven plugin manifests — the three
+  root `marketplace.json` files and the four `plugin.json` files under `plugin/` — plus
+  `plugin/README.md`, `npm/memvara/README.md`, and the packaged skill's
+  `references/hosted-mcp.md` with its mirror. `README.md`'s client list was moved to
+  `/docs/cloud` in an earlier entry above; these were the copies that move did not reach.
+
 - **The packaged skill said a hosted OAuth grant lasts 90 days. It lasts ten years.**
   `DEFAULT_OAUTH_REFRESH_TTL` is `timedelta(days=3650)`. The 90-day figure was corrected
   in `docs/integrations/mcp.md` and left standing in five other files:

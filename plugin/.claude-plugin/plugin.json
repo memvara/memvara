@@ -6,7 +6,7 @@
     "name": "Memvara",
     "url": "https://memvara.dev"
   },
-  "homepage": "https://memvara.dev/docs/agents",
+  "homepage": "https://memvara.dev/docs/cloud",
   "repository": "https://github.com/memvara/memvara",
   "license": "Apache-2.0",
   "keywords": ["memory", "mcp", "agents"]

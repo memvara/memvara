@@ -37,7 +37,7 @@ installer.
 
 Claude Desktop, claude.ai, and ChatGPT do not install plugins this way.
 Paste the same URL into that client's connector settings instead:
-https://memvara.dev/docs/agents
+https://memvara.dev/docs/cloud
 
 Windsurf and Zed are local-command clients. Use `memvara-mcp init`, not this
 plugin.
