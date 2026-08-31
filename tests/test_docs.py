@@ -18,6 +18,7 @@ tools" and listed ten, having never gained `memory_neighborhood` or `memory_path
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -235,3 +236,60 @@ def test_every_method_the_architecture_diagram_names_exists(relative: str) -> No
     assert not missing, (
         f"{relative} names {missing} on the Memvara facade, which does not have them. "
         "A diagram that invents a method is worse than one that omits it.")
+
+
+#: The README's *Use cases* section opens on a transcript rather than a description, and
+#: the transcript is a quotation. Fenced as `text` and starting with the first question,
+#: which is what makes it findable here without pinning the prose around it.
+TRANSCRIPT = re.compile(r"```text\n(Q\. What is checkout-service.*?)```", re.S)
+
+
+def test_the_readme_quotes_the_coding_agent_example_verbatim() -> None:
+    """A transcript in the README is a claim about what the program prints.
+
+    Three of these lines are already pinned by `tests/test_examples.py`, which asserts on
+    the timeline the example produces. The rest — the questions, and the blank line that
+    separates each from its answer — are not, and a quotation that is right about the
+    values and wrong about their shape is still a quotation nobody can reproduce. So the
+    whole block is matched as a substring of the real output, rather than line by line:
+    the reader copies the file and compares what they see with what is on the page.
+
+    Run in a subprocess with `PYTHONPATH` removed, for the reason `tests/test_examples.py`
+    gives: the examples import the installed package and nothing else.
+    """
+    quoted = TRANSCRIPT.search(README.read_text(encoding="utf-8"))
+    assert quoted is not None, (
+        "README.md no longer quotes the coding-agent transcript. If the section was "
+        "rewritten deliberately, delete this test with it; if not, the quotation is gone.")
+
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    proc = subprocess.run([sys.executable, str(ROOT / "examples" / "coding_agent.py")],
+                          cwd=ROOT, env=env, capture_output=True, text=True,
+                          encoding="utf-8", timeout=300)
+    assert proc.returncode == 0, proc.stderr
+    assert quoted.group(1) in proc.stdout, (
+        "the README quotes output that examples/coding_agent.py does not print:\n"
+        f"--- README ---\n{quoted.group(1)}\n--- actual ---\n{proc.stdout}")
+
+
+#: A link from the README back into its own headings, spelled absolutely because this file
+#: is also the PyPI project description. `test_doc_links` skips it for being absolute, and
+#: the `GITHUB` pattern above does not match it for having no `/blob/main/` path — so it
+#: sat between the two guards, and a fragment 200s whatever the heading is called.
+SELF_ANCHOR = re.compile(r"https://github\.com/memvara/memvara#([\w-]+)")
+
+
+def test_every_readme_link_back_into_the_readme_names_a_heading_it_has() -> None:
+    """The navigation row at the top is three of these, and a renamed heading breaks it.
+
+    Silently, and in the place it costs most: the row is the first thing a reader clicks.
+    GitHub answers a bad fragment with the page and no scroll, so nothing 404s and nobody
+    finds out from the outside.
+    """
+    have = anchors(README)
+    broken = sorted(a for a in SELF_ANCHOR.findall(README.read_text(encoding="utf-8"))
+                    if a not in have)
+    assert not broken, (
+        f"README.md links to its own {broken}, which is not a heading in it. Either the "
+        "heading was renamed or the link was mistyped; the anchors it does have are "
+        f"{sorted(have)}.")

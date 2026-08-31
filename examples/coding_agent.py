@@ -128,7 +128,7 @@ def main() -> None:
     timeline = mem.history("checkout-service", "auth_strategy")
     for claim in timeline:
         until = claim.valid_to.date().isoformat() if claim.valid_to else "now"
-        print(f"  {claim.object:<27} {claim.valid_from.date().isoformat()} -> "
+        print(f"  {claim.object:<28} {claim.valid_from.date().isoformat()} -> "
               f"{until:<10}  [{claim.state}]")
     ended = [c for c in timeline if c.state == "ended"][0]
     print(f"  changed on {ended.valid_to.date().isoformat()}")

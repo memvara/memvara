@@ -13,6 +13,15 @@
   <a href="https://memvara.dev"><img alt="Site" src="https://img.shields.io/badge/site-memvara.dev-1a202c"></a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/memvara/memvara#the-90-second-demo"><b>90-second demo</b></a> ·
+  <a href="https://github.com/memvara/memvara#quickstart">Quickstart</a> ·
+  <a href="https://github.com/memvara/memvara/blob/main/docs/README.md">Documentation</a> ·
+  <a href="https://pypi.org/project/memvara/">PyPI</a> ·
+  <a href="https://memvara.dev">memvara.dev</a> ·
+  <a href="https://github.com/memvara/memvara/issues">Issues</a>
+</p>
+
 ```python
 mem.remember("Alice", "lives_in", "Berlin",   valid_from=jan)
 mem.remember("Alice", "lives_in", "London",   valid_from=mar)
@@ -33,24 +42,40 @@ pip install memvara
 
 **numpy and nothing else.** Runs offline, no API key, no Docker, no vector database.
 
+| | |
+|---|---|
+| **Bitemporal** | Two time axes that move independently: when a fact was true, and when this store was told. |
+| **Deterministic** | A contradiction in a predicate declared single-valued is resolved on write by a keyed lookup, not by a model's judgement. |
+| **Auditable** | A claim carries the episodes cited for it and the claim it superseded, and `why()` returns both. |
+| **Historical** | `search`, `get_all`, `history` and five more reads take `as_of=`, `valid_at=` or `known_at=`, so *what was true then* is a query rather than a reconstruction. |
+| **LLM-light** | `remember()` never calls a model. `add()` filters with model-free tiers first and sends whatever survives in one extraction call. |
+
 ---
 
 ## The problem
 
 AI agents don't just forget. **They remember the wrong thing.**
 
-A customer emails in March: *"We've moved. Invoices go to Bramble Cottage from now on,
-not Coldharbour Road."* You store it. In August the same customer writes again, annoyed:
-*"An invoice went to Coldharbour Road again."*
-
-Now ask the store where invoices go. It holds two messages, both mentioning the customer
-and an address, and it ranks them by similarity. The August message is more recent and
-says *Coldharbour Road* twice. A reasonable retriever puts it first, the agent reads it,
-and the customer gets a third wrong invoice.
+A customer says in March that invoices go to Bramble Cottage, not Coldharbour Road. In
+August they write again, annoyed, because an invoice went to Coldharbour Road. Ask a
+store that ranks by similarity where invoices go, and the August message wins: it is the
+more recent one and it says the wrong address twice.
 
 **That is not the model hallucinating.** The memory layer held both answers and marked
-neither one current. It had no way to: nothing in "an embedding and an `updated_at`
-column" can represent *this value replaced that one in March*.
+neither one current. Nothing in "an embedding and an `updated_at` column" can represent
+*this value replaced that one in March*.
+
+```text
+Values ranked by similarity          Values with the interval each held
+
+  Berlin                               Berlin    Jan 10 → Mar 15  ended
+  London                               London    Mar 15 → Jun 02  ended
+  New York                             New York  Jun 02 → now     live
+
+  ↓                                    ↓
+  whichever embeds closest             whichever was true at the
+  to the question                      instant you asked about
+```
 
 Retrieval asks one question — *what is relevant?* Memory has to answer five:
 
@@ -61,9 +86,17 @@ Memvara answers all five **structurally**, which means none of them costs a mode
 A contradiction is an indexed lookup. A historical query is a range condition on two
 columns. Provenance is a join.
 
+The long version of that story, question by question, is
+[Why Memvara?](https://github.com/memvara/memvara/blob/main/docs/concepts/why-memvara.md).
+Memvara is neither a vector database nor a replacement for RAG —
+[where it fits](https://github.com/memvara/memvara#rag-vector-stores-and-where-this-fits)
+is further down.
+
 ---
 
 ## The 90-second demo
+
+**Temporal memory, contradiction resolution and provenance, in ninety seconds.**
 
 ![Alice moves from Berlin to London to New York. get_all() answers New York, get_all(as_of=March) answers London, and history() shows every value with the interval it was true for.](https://github.com/memvara/memvara/releases/latest/download/demo.gif)
 
@@ -143,7 +176,7 @@ mem.add("Actually, I moved to Lisbon last month")
 `{"role": ..., "content": ...}` transcripts, so an existing agent loop can pass its
 messages straight through. It runs three model-free tiers first — hash dedupe,
 near-duplicate detection, a salience gate and a rule-based extractor — and batches
-whatever survives into a single model call.
+whatever survives into a single extraction call.
 
 **With no `llm=` configured there is no model tier at all**, so the two sentences above
 work (they are recognised forms) and an employer mentioned in passing does not. Dropped
@@ -202,6 +235,42 @@ hosted store because somebody ran `memvara-mcp login` on that machine.
 
 ---
 
+## Use cases
+
+**Coding agents are the case this repository leans on most.** Two weeks after a
+migration, [`examples/coding_agent.py`](https://github.com/memvara/memvara/blob/main/examples/coding_agent.py)
+answers the question git cannot:
+
+```text
+Q. What is checkout-service's auth strategy?
+  OAuth 2.0 client credentials
+
+Q. What was the old strategy, and when did it change?
+  API keys                     2026-02-03 -> 2026-06-12  [ended]
+  OAuth 2.0 client credentials 2026-06-12 -> now         [live]
+  changed on 2026-06-12
+```
+
+`why()` then returns the June transcript turn the decision came from, and the claim it
+replaced. That is a record rather than a note, and no model composes any of it.
+[Guide: coding agents](https://github.com/memvara/memvara/blob/main/docs/guides/coding-agents.md)
+
+The other four shapes this store is built for:
+
+| | |
+|---|---|
+| **Support agents** | The customer corrected the address in March; the agent must not quote the old one in August. This is the corpus behind [`demo/`](https://github.com/memvara/memvara/blob/main/demo/README.md). |
+| **Personal assistants** | The built-in vocabulary is this one: where somebody lives, works, what they are allergic to, and how they want to be spoken to (`memory_standing`). |
+| **Research agents** | A finding that arrives late about the past is a `valid_from` in the past and a `recorded_at` of today, which is exactly what the two clocks are for. |
+| **Multi-agent systems** | `tenant > user > agent > session`, with inheritance and fail-closed filters: a session sees that user's durable memory but never a sibling session's scratch space. |
+
+```python
+bob = mem.scope(user="bob")     # the whole API, with the scope bound
+bob.add("I live in Oslo")
+```
+
+---
+
 ## Why Memvara
 
 | | |
@@ -235,8 +304,9 @@ past the correction; `valid_at=June` is how you see it. `as_of` is exact sugar f
 `valid_at=known_at=T`, and passing it alongside either axis raises rather than quietly
 picking one.
 
-Every read takes all three — `search`, `get_all`, `count`, `history`, `why`, `produced`,
-`neighborhood`, `paths_between`.
+Eight reads take all three — `search`, `get_all`, `count`, `history`, `why`, `produced`,
+`neighborhood`, `paths_between`. `recall()`, `get()` and `since()` take none of them, and
+`ask()` spells it `at=`.
 
 `ask()` composes the difference into an answer, which is the question the two clocks exist
 for:
@@ -384,22 +454,19 @@ hypothetical extension point.
 [Architecture, in four diagrams](https://github.com/memvara/memvara/blob/main/docs/reference/architecture.md) ·
 [How it works](https://github.com/memvara/memvara/blob/main/docs/DESIGN.md) · [Internals](https://github.com/memvara/memvara/blob/main/docs/INTERNALS.md)
 
----
-
-## Use cases
+### At a glance
 
 | | |
 |---|---|
-| **Coding agents** | *Why are we using OAuth?* — the decision, the day it replaced API keys, and the message it came from. [Guide](https://github.com/memvara/memvara/blob/main/docs/guides/coding-agents.md) · [example](https://github.com/memvara/memvara/blob/main/examples/coding_agent.py) |
-| **Support agents** | The customer corrected the address in March; the agent must not quote the old one in August. This is the corpus behind [`demo/`](https://github.com/memvara/memvara/blob/main/demo/README.md). |
-| **Personal assistants** | The built-in vocabulary is this one: where somebody lives, works, what they are allergic to, and how they want to be spoken to (`memory_standing`). |
-| **Research agents** | A finding that arrives late about the past is a `valid_from` in the past and a `recorded_at` of today, which is exactly what the two clocks are for. |
-| **Multi-agent systems** | `tenant > user > agent > session`, with inheritance and fail-closed filters: a session sees that user's durable memory but never a sibling session's scratch space. |
-
-```python
-bob = mem.scope(user="bob")     # the whole API, with the scope bound
-bob.add("I live in Oslo")
-```
+| Unit of memory | a claim: `(subject, predicate, object)` |
+| Temporal model | valid time and recorded time, queried independently |
+| Conflict handling | predicate-aware and deterministic, decided on write |
+| Provenance | the source episodes, the derivation, and the claim superseded |
+| Retrieval | vector and BM25 fused by rank, optionally a graph leg, decayed per predicate |
+| Storage | SQLite with FTS5, plus an mmap vector sidecar |
+| Dependencies | numpy. Everything else is an extra |
+| Model dependency | none for `remember()`; `add()` reaches for one only where no rule matches the prose |
+| Python | 3.10 and later |
 
 ---
 
@@ -534,7 +601,7 @@ wrongly.
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 4,028 passing, 8 skipped, no API key
+python3 -m pytest -q                              # 4,042 passing, 9 skipped, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/temporal.py            # the two clocks, six families
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison

@@ -157,6 +157,49 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Changed
 
+- **The top of `README.md` is a landing page, so a reader can decide inside the first
+  screen.** A navigation row under the badges links the demo, the quickstart, the
+  documentation index, PyPI, the site and the issue tracker. A five-row strip under
+  `pip install memvara` names what the library does — bitemporal, deterministic,
+  auditable, historical, LLM-light — one line each. *The problem* lost a third of its
+  prose and gained a picture of the two designs side by side: values ranked by
+  similarity, against values carrying the interval each held. It now closes by pointing
+  at `docs/concepts/why-memvara.md` for the long version rather than telling that story
+  twice, and says in one sentence that Memvara is neither a vector database nor a
+  replacement for RAG, with a link to the section that explains where it does fit.
+
+  *Use cases* moved above *Why Memvara* and opens on the coding-agent case, quoted from
+  `examples/coding_agent.py`. A new test in `tests/test_docs.py` matches that block
+  against what the program actually prints, so the quotation cannot go stale without the
+  suite going red — three of its lines were already pinned by `tests/test_examples.py`,
+  and the questions and spacing around them were not. *At a glance*,
+  under *Architecture*, gives a reader who will not read the whole file the nine
+  implementation facts in a table: the unit of memory, the two axes, how a conflict is
+  decided, what provenance holds, how retrieval scores, the store, the dependency, where
+  a model is and is not involved, and the Python floor.
+
+  No section was removed and no claim was softened. The one thing deleted is a
+  duplication this change created: the *Coding agents* row in the use-case table, which
+  the new lede above it now says at greater length.
+
+  Three rows of the new strip were checked against the code and tightened before they
+  shipped. *Historical* said "every read" takes the three time keywords; `recall()`,
+  `get()` and `since()` take none of them, deliberately — `recall()`'s docstring says why
+  — and `ask()` spells it `at=`, so the row now names the eight reads that do. *Auditable*
+  said every claim keeps the episodes it came from, which is not true of a `remember()`
+  called without `sources=`, as the block at the top of the file is; it now says a claim
+  carries the episodes cited for it. *LLM-light* said `add()` batches what survives into
+  one call, and a surface form the registry has not seen costs a second for predicate
+  acquisition; it now says one *extraction* call, which is the one being counted.
+
+- **`tests/test_docs.py` checks the README's links back into its own headings.** The
+  navigation row is three of them, spelled absolutely because this file is also the PyPI
+  project description — which put them between the two guards that existed:
+  `test_doc_links` skips an absolute URL by design, and `test_docs`'s pattern for a link
+  into this repository requires a `/blob/main/` path these do not have. GitHub answers an
+  unknown fragment with the page and no scroll, so a renamed heading breaks the first
+  thing a reader clicks and nothing anywhere goes red.
+
 - **`README.md` is rewritten for a developer arriving from a search result.** It opens
   with the claim, the three-answer example and `pip install memvara` above the fold, then
   the problem, the demo, the quickstart, and one section each for the three things that
@@ -213,6 +256,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   against another note in the same store.
 
 ### Fixed
+
+- **The README and `docs/FAQ.md` said `add()` batches what survives into "a single
+  call".** It is a single *extraction* call. A predicate the registry has not seen before
+  costs a second one for acquisition, and `WriteReceipt.llm_calls` counts both — so the
+  sentence understated the cost of the first write to a novel vocabulary, which is
+  exactly the write somebody measures. The FAQ copy is the one that mattered most: it sat
+  four lines above that page's own promise that "`WriteReceipt.llm_calls` reports the
+  cost, so the claim is checkable", which invites a reader to go and check it and then
+  find two.
+
+- **The README's *Temporal memory* section said "every read takes all three".** The list
+  of eight that follows it was right; the sentence introducing them was not. `recall()`,
+  `get()` and `since()` take none of the time keywords, and `ask()` spells it `at=`, so a
+  reader acting on the general form gets a `TypeError`. It now says eight, and names the
+  three reads that are not among them.
+
+- **`examples/coding_agent.py` printed its timeline one column out of true.** The value
+  field was padded to 27 and `OAuth 2.0 client credentials` is 28 characters, so the
+  longer row's date started a character to the right of the shorter one's. Widened to 28.
+  The output was always correct and never lined up; it is quoted in the README now, which
+  is what made a cosmetic defect worth a commit.
 
 - **Eight more places in the library said the same thing, and they are corrected too.**
   `memvara/integrations/__init__.py`, `langgraph.py`, `langchain.py`, `llamaindex.py` and
