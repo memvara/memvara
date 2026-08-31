@@ -301,7 +301,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   corrected, and this file is where it matters most now: the README's new *Quickstart*
   links here directly.
 
-
 - **The README and `docs/FAQ.md` said `add()` batches what survives into "a single
   call".** It is a single *extraction* call. A predicate the registry has not seen before
   costs a second one for acquisition, and `WriteReceipt.llm_calls` counts both — so the
