@@ -11,6 +11,25 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`tests/test_docs.py` refuses a wording this project has already corrected.** Two
+  entries, both earned: the sentence about what `add()` costs, and "every read takes all
+  three". Each was fixed in one file and left standing in another, and in the second case
+  in two others — the README's own *Temporal memory* section and
+  `docs/concepts/temporal-retrieval.md`, the latter found by this test on the run that
+  introduced it.
+
+  It scans every shipped document rather than the pair that happened to disagree, because
+  the third copy is never in the file you are looking at; that is precisely why both
+  earlier fixes missed one. `CHANGELOG.md` is excluded, since it quotes each wrong form
+  inside the entry recording the correction, and scanning it would go red on the evidence
+  that the fix happened.
+
+  **What it does not do is worth stating, because the name suggests otherwise.** It
+  catches a wording coming *back*. A fresh overstatement in fresh words passes it, and
+  nothing in the suite sees that. The list is a record of mistakes made, not a model of
+  the API, and the time to add an entry is after correcting a claim that turned out to
+  have copies.
+
 - **`docs/LIMITATIONS.md`, holding what was *Honest limitations* in the README.** Every
   bullet moved unchanged; only the links were respelled relative, which is the convention
   inside `docs/` and the reason they were absolute in the README (that file is the PyPI
@@ -256,6 +275,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   against another note in the same store.
 
 ### Fixed
+
+- **`docs/concepts/temporal-retrieval.md` said "Every read takes the same three time
+  keywords".** The third copy of a claim corrected twice already: `recall()`, `get()` and
+  `since()` take none of them and `ask()` spells it `at=`, so a reader following the
+  general form gets a `TypeError`. It now says eight, which is the number that do. The
+  guard added above is what found it.
 
 - **The README and `docs/FAQ.md` said `add()` batches what survives into "a single
   call".** It is a single *extraction* call. A predicate the registry has not seen before

@@ -28,7 +28,7 @@ import pytest
 
 from memvara.server.tools import TOOLS
 
-from test_doc_links import ROOT, anchors
+from test_doc_links import DOCS, ROOT, anchors
 
 #: A link into this repository, as the README has to spell it for PyPI's renderer.
 GITHUB = re.compile(
@@ -293,3 +293,67 @@ def test_every_readme_link_back_into_the_readme_names_a_heading_it_has() -> None
         f"README.md links to its own {broken}, which is not a heading in it. Either the "
         "heading was renamed or the link was mistyped; the anchors it does have are "
         f"{sorted(have)}.")
+
+
+#: `CHANGELOG.md` is not scanned for the wordings below. It quotes each wrong form inside
+#: the entry recording that the form was corrected, so scanning it would go red on the
+#: evidence that the fix happened.
+NOT_SCANNED_FOR_WORDING = {"CHANGELOG.md"}
+
+#: Wordings this project has already paid to correct, as
+#: `(slug, pattern, what is wrong with it, what to write instead)`.
+#:
+#: Both entries are here because the same sentence had to be corrected twice, weeks apart,
+#: in different files — which is the failure this guard exists for and the one a careful
+#: read does not catch. The author of the fix knows which file they were editing.
+#:
+#: **This catches a wording coming back, not a new claim going wrong.** A fresh
+#: overstatement in fresh words passes here, and nothing in the suite will see it. That is
+#: the honest limit: the entries are a record of mistakes made, not a model of the API.
+#: Adding one is what you do *after* correcting a claim that turned out to have copies.
+RETIRED_WORDINGS = [
+    ("add-costs-a-single-call",
+     re.compile(r"into (?:a single|one) (?:model )?call\b"),
+     "`add()` makes one *extraction* call, and a predicate the registry has not seen "
+     "before costs a second for acquisition. `WriteReceipt.llm_calls` counts both, so a "
+     "reader who takes the sentence at its word and then measures finds two.",
+     'write "a single extraction call"'),
+
+    ("every-read-takes",
+     re.compile(r"[Ee]very read takes"),
+     "`recall()`, `get()` and `since()` take none of the three time keywords — "
+     "deliberately, and `recall()`'s docstring says why — and `ask()` spells it `at=`. "
+     "Exactly eight reads take them, so the general form sends a reader into a "
+     "`TypeError`.",
+     'write "eight reads take" and name them, or name the reads you actually mean'),
+]
+
+
+@pytest.mark.parametrize("wording", RETIRED_WORDINGS,
+                         ids=[w[0] for w in RETIRED_WORDINGS])
+def test_no_document_brings_back_a_wording_this_project_has_corrected(
+        wording: tuple[str, re.Pattern[str], str, str]) -> None:
+    """A claim corrected in one file and left standing in another is the whole failure.
+
+    Twice now. The sentence about what `add()` costs was fixed in `README.md` and left in
+    `docs/FAQ.md`, four lines above that page's own promise that `WriteReceipt.llm_calls`
+    reports the cost so the claim is checkable — an invitation to go and check it and find
+    the page wrong. "Every read takes all three" was fixed in the README's feature strip,
+    left in the README's own *Temporal memory* section, and left again in
+    `docs/concepts/temporal-retrieval.md`, where this test found it on the run that
+    introduced the test.
+
+    Every document is scanned, rather than the pair that happened to disagree, because the
+    third copy is never in the file you are looking at. That is the whole reason the first
+    two fixes each missed one.
+    """
+    _slug, pattern, why, instead = wording
+    hits = []
+    for doc in DOCS:
+        if doc.name in NOT_SCANNED_FOR_WORDING:
+            continue
+        text = doc.read_text(encoding="utf-8")
+        hits += [f"  {doc.relative_to(ROOT)}:{text[:m.start()].count(chr(10)) + 1}: "
+                 f"{m.group(0)!r}" for m in pattern.finditer(text)]
+
+    assert not hits, "\n".join([f"{why}\n\nSo {instead}. Found in:", *hits])
