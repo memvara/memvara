@@ -11,6 +11,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **The README shows the 90-second demo**, embedded from
+  `releases/latest/download/demo.gif`. The three questions the demo answers — where does
+  Alice live now, where did she live in March, where in January — are the point of the
+  library, and a reader gets them before deciding whether to install anything.
+
 - **The demo GIF is published as a release asset, at a URL that never changes.**
   `.github/workflows/demo-gif.yml` records the demo and attaches `demo.gif` to a GitHub
   Release when one is published, so `releases/latest/download/demo.gif` always resolves
