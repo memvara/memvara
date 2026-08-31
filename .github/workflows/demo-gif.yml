@@ -64,9 +64,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # The recorder runs `demo.py` out of the working tree, so the GIF must be of the
-          # released source rather than of whatever `main` says today.
-          ref: ${{ inputs.tag || github.event.release.tag_name }}
+          # On a release, the released source: the recorder runs `demo.py` out of the
+          # working tree, so the GIF should show what that release actually shipped.
+          #
+          # On a dispatch, the ref the run was started from, **not** the tag. The tag
+          # names the release to attach to, which is a different question from what to
+          # record — and the two come apart in exactly the case dispatch exists for. The
+          # first version checked out the tag both ways and could not have backfilled
+          # `v0.9.0` at all: `examples/` did not exist at that tag, so there was no
+          # `record_gif.py` to run. Recording an old release's asset from today's source
+          # is the honest trade, and the reason the GIF is a build product rather than
+          # something the release carries a copy of.
+          ref: ${{ github.event.release.tag_name || github.ref }}
 
       - uses: actions/setup-python@v7
         with:
