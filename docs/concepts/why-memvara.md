@@ -151,8 +151,8 @@ Honesty is part of the argument, so:
 - **Entity resolution folds surface forms, not the world.** `Acme Corp` and `acme, inc.`
   collapse. `Big Blue` and `IBM` do not, unless you say so.
 
-The [README's *Honest limitations*](../../README.md#honest-limitations) is the longer
-list, and it is longer than this one.
+[Limitations](../LIMITATIONS.md) is the full list, and it is considerably longer than
+this one.
 
 ---
 

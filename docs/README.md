@@ -58,6 +58,7 @@ using it. They are independent — read either first.
 | | |
 |---|---|
 | [FAQ](FAQ.md) | Eleven questions, answered against the implementation |
+| [Limitations](LIMITATIONS.md) | Every limit this project knows about, in full |
 | [Examples](../examples/README.md) | Three runnable programs, tested on every CI run |
 | [Contributing](../CONTRIBUTING.md) | The bar a patch has to clear |
 | [Security](../SECURITY.md) | Private vulnerability reporting |

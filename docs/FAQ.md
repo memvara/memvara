@@ -130,8 +130,8 @@ it does rather than quietly writing through a facade that would reinterpret ever
 
 ## What are the honest limitations?
 
-The list is longer than most projects publish and it is in the
-[README](../README.md#honest-limitations). The four that catch people first:
+The list is longer than most projects publish and it is on its own page,
+[Limitations](LIMITATIONS.md). The four that catch people first:
 
 1. **The default embedder is lexical, not semantic**, and Latin-only — text in Han, Kana,
    Hangul, Arabic or Hebrew produces an all-zero vector and is never returned by meaning.
