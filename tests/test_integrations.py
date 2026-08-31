@@ -815,9 +815,9 @@ def test_the_retriever_returns_documents_carrying_the_whole_claim(retriever):
     assert isinstance(meta["sources"], list)
 
 
-def test_the_retired_value_is_simply_absent_rather_than_ranked_below(retriever):
+def test_the_ended_value_is_simply_absent_rather_than_ranked_below(retriever):
     """Contradiction resolution survives the adapter because it happened before it: the
-    old value is retired in the store, so there is nothing for a chain to filter."""
+    old value is ended in the store, so there is nothing for a chain to filter."""
     assert [d.page_content for d in retriever.invoke("where do they live?")] == [
         "user lives in Lisbon"]
 
@@ -884,7 +884,7 @@ def test_the_block_is_a_real_basememoryblock_with_a_usable_default_name(block):
 
 def test_the_block_writes_through_memvaras_write_path_so_contradictions_resolve(block, mem):
     """The difference from the CrewAI adapter, in one test. A memory block is handed raw
-    turns, so extraction runs and the keyed lookup fires — Berlin is retired rather than
+    turns, so extraction runs and the keyed lookup fires — Berlin is ended rather than
     accumulating beside Lisbon."""
     run(block.aput([FakeChatMessage("I live in Berlin"),
                     FakeChatMessage("Noted.", role="assistant")]))
@@ -1241,7 +1241,7 @@ def test_a_claim_that_is_not_a_crewai_record_is_never_returned_as_one(storage, m
 
 def test_update_is_a_supersession_so_the_version_it_replaced_survives(storage, mem):
     """Better than CrewAI's own contract, which overwrites the row. Here the old value
-    is retired with a pointer to what replaced it, and the whole timeline is walkable."""
+    is ended with a pointer to what replaced it, and the whole timeline is walkable."""
     original = saved(storage, record("Alice lives in Berlin"))[0]
     storage.update(record("Alice lives in Lisbon", id=original.id,
                           created_at=original.created_at))

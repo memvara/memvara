@@ -27,7 +27,7 @@ on, so it is worth stating exactly. `put(namespace, key, value)` supplies three 
 That is a triple, and LangGraph is the only adapter here whose caller supplies all three
 parts of one. So an item is stored as **one claim per field**, not one claim per item:
 `{"city": "Berlin", "food": "pizza"}` is two claims on two slots, and a later
-`put(..., {"city": "Lisbon", "food": "pizza"})` retires `Berlin` — stamped with
+`put(..., {"city": "Lisbon", "food": "pizza"})` **ends** `Berlin` — stamped with
 `invalidated_by` pointing at Lisbon — while `pizza` is recognised as a re-observation and
 is not rewritten at all. `Memvara.history(subject, "note")` then walks that one field's
 versions and `search(as_of=...)` answers what the item held on a date. CrewAI cannot do
@@ -516,7 +516,7 @@ class _Store:
         """One transaction instant per batch, strictly increasing.
 
         The monotonic step is load-bearing rather than tidy. Two writes to one field at
-        the same instant produce a supersession whose predecessor was retired at exactly
+        the same instant produce a supersession whose predecessor was ended at exactly
         the moment its replacement began, i.e. a zero-length interval that `as_of` cannot
         resolve to either value. `utcnow()` usually separates two calls on its own and on
         a coarse clock does not; an injected test clock never does. A microsecond is

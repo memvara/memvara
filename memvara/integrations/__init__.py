@@ -3,7 +3,7 @@
 Developers meet a memory layer through the framework they already use, not through its
 README, so these exist for distribution. That does not make them decoration: most of
 them model memory as **a list of messages** or **a vector store**, and memvara is
-neither — it stores resolved bitemporal facts, retires contradictions, and can answer
+neither — it stores resolved bitemporal facts, ends contradicted ones, and can answer
 what was believed on a date. Some of that has nowhere to go, and the standard set by
 `memvara.compat.mem0` applies here too: where a call has no honest translation it raises
 and names the alternative, rather than returning something plausible.
@@ -20,7 +20,7 @@ and names the alternative, rather than returning something plausible.
 **LangGraph is the one that loses least, and the reason is instructive.** `BaseStore` is
 the only framework interface that hands over the *query text* natively, and its
 `put(namespace, key, value)` supplies all three parts of a triple — so an item is stored
-as one claim **per field**, and changing `city` retires exactly `city` while an unchanged
+as one claim **per field**, and changing `city` ends exactly `city` while an unchanged
 `food` is recognised as a re-observation. That is per-field contradiction resolution,
 which the CrewAI adapter cannot do for a nameable reason: its unit of memory is a
 sentence, which contains no subject and no predicate to key on.

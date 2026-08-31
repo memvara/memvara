@@ -126,6 +126,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **Eight more places in the library said the same thing, and they are corrected too.**
+  `memvara/integrations/__init__.py`, `langgraph.py`, `langchain.py`, `llamaindex.py` and
+  `tests/test_integrations_langgraph.py` described contradiction resolution as retiring
+  the value it displaces. One of them is a tool description a model reads at runtime
+  (`llamaindex`'s memory-block `description`), which is the category where imprecision
+  costs most; it now uses the phrasing `langchain.py` already had, "contradictions
+  already resolved", which is both accurate and the word a test pins. Three docstrings in
+  `tests/test_integrations.py` said the same thing, one of them contradicting the CrewAI
+  adapter's own "Ended rather than retired" two files away. No behaviour changed; the code was always right and only the prose was
+  wrong. `test_a_changed_field_supersedes_only_itself_and_leaves_the_others_alone` now
+  asserts `state == "ended"` and `invalidated_at is None`, so the distinction is a tested
+  property rather than a described one — it asserted the supersession pointer but never
+  which clock closed, which is exactly the gap the wrong word lived in.
+
 - **Six places said a superseded fact is *retired*. It is *ended*.** That is the
   distinction this repository treats as the product, and the wrong word records a false
   reason for a change that nothing downstream can detect. The README's feature table,

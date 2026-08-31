@@ -23,7 +23,7 @@ half-life — so a vector from somebody else's model is not even a point in its 
 
 **Retrievers.** `BaseRetriever` asks for *given a query, return documents*, which is what
 `search()` already is. Everything survives the crossing: hybrid retrieval and its ranking,
-scope inheritance, the retirement of contradicted values (they simply stop being
+scope inheritance, the ending of contradicted values (they simply stop being
 returned), the per-leg `Explanation`, the source turn ids, and `as_of` — a LangChain
 retriever that can answer *what did we believe in March* is not something the interface
 anticipated, and it works, because time travel is a property of the query rather than of
