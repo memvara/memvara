@@ -42,10 +42,17 @@ ROOT = Path(__file__).resolve().parent.parent
 #: silently stopped covering anything the moment `docs/concepts/` existed — a guard that
 #: quietly narrows is worse than one that was never written, because the suite still
 #: reports it as passing. `rglob` has no such failure mode.
+#:
+#: `benchmarks/` is walked for the same reason `docs/` is: the Agent Memory Benchmark's
+#: README and contributor guide are written to be read by somebody adding their own
+#: memory system, and a dead link there costs exactly what a dead link in `docs/` costs.
+#: They are not on `READER_PAGES` in `test_docs.py` and so carry no navigation footer —
+#: they are entered from a link rather than read in sequence.
 DOCS = ([ROOT / name for name in ("README.md", "CHANGELOG.md", "CONTRIBUTING.md",
                                   "SECURITY.md")]
         + sorted((ROOT / "docs").rglob("*.md"))
-        + sorted((ROOT / "examples").rglob("*.md")))
+        + sorted((ROOT / "examples").rglob("*.md"))
+        + sorted((ROOT / "benchmarks").rglob("*.md")))
 
 #: `[text](target)` or `[text](target#anchor)`. Bare autolinks and reference-style links
 #: are not used in these files; if one is added this pattern simply does not see it, which

@@ -11,6 +11,52 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **The Agent Memory Benchmark** — a public, reproducible benchmark for memory systems in
+  general, in `benchmarks/agent_memory/`. It measures what happens to a fact that
+  changes: current state, historical state, contradiction resolution, provenance,
+  knowledge time, retrieval among distractors, cost and latency. 262 events, 100
+  questions, 16 scenarios, no API key, no network, about a second per system.
+
+  ```bash
+  python -m benchmarks.agent_memory --system memvara --system naive --system vector-rag --compare
+  ```
+
+  **It is not a memvara benchmark, and it is deliberately possible to lose it.** The
+  dataset, the questions and the scorer never mention a system; everything system-specific
+  is behind a four-method adapter interface, and `--system` accepts a dotted import path so
+  a memory system in another repository is scored without forking this one. Two baselines
+  ship beside the memvara adapter: `naive`, a dictionary of current values, and
+  `vector-rag`, retrieval over the whole write log with one clock. Neither is a strawman —
+  `vector-rag` is completely correct on current state, provenance, change time and
+  knowledge time.
+
+  **Measured, at the commit this landed in:** memvara 90.0% overall, `vector-rag` 88.0%,
+  `naive` 49.0%. The two points separating memvara from a numpy baseline are entirely the
+  `temporal` dimension (100.0% against 91.5%), and the four questions that separate them
+  are the four delayed-knowledge and correction scenarios — where news arrived after the
+  fact, so "what was true then" and "what had we heard by then" are different answers and
+  one clock has to give the same one to both. **memvara loses the `retrieval` dimension**
+  (50.0% against 64.3%), and `irrelevance` and `multi_hop` are three-way ties that
+  currently discriminate nothing. All of that is in the report rather than in a footnote.
+
+  Gold answers are authored by hand in `datasets/build_v1.py` and derived independently in
+  `timeline.py` from four published supersession rules; the suite asserts the two agree on
+  every question. Two derivations that must match is the only defence against a scoring bug
+  that every system fails identically, which nobody questions because the numbers look
+  plausible.
+
+  Scoring is deterministic — normalized matching, published aliases, exact set equality,
+  ISO-8601 dates, and no LLM judge in any mode — so `--repeat-check` runs a system twice
+  and asserts the verdicts are identical. `--show-failures` prints each wrong answer beside
+  the fact's real timeline with a named reason, which is more use to a developer than the
+  score.
+
+  Distinct from `bench/temporal.py`, which stays what it was: this repository's own
+  regression suite for the two clocks, memvara-only, probing `get_all()` directly. The new
+  benchmark is system-neutral, has a committed versioned dataset, an adapter interface, a
+  published result schema and a public report at
+  `docs/benchmarks/agent-memory-benchmark.md`.
+
 - **`docs/LIMITATIONS.md`, holding what was *Honest limitations* in the README.** Every
   bullet moved unchanged; only the links were respelled relative, which is the convention
   inside `docs/` and the reason they were absolute in the README (that file is the PyPI
