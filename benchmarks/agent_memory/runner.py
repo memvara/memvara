@@ -42,7 +42,8 @@ def ask_of(question: Question, evaluated_at: datetime) -> Ask:
     """
     return Ask(id=question.id, category=question.category, question=question.question,
                probe=question.probe, at=question.at or evaluated_at,
-               known_at=question.known_at, about=question.about)
+               evaluated_at=evaluated_at, known_at=question.known_at,
+               about=question.about)
 
 
 def ingest(system: MemorySystem, dataset: Dataset,

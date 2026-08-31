@@ -161,9 +161,9 @@ Measured at the commit this document landed in. Python 3.13.14, macOS arm64, `nu
 
 | System | Overall | current_state | temporal | knowledge_time | contradiction | provenance | retrieval | irrelevance |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| memvara 0.9.0 | **90.0%** | 100.0% | **100.0%** | 100.0% | 100.0% | 100.0% | 50.0% | 50.0% |
-| vector-rag 1.0 | 88.0% | 100.0% | 91.5% | 100.0% | 100.0% | 100.0% | **64.3%** | 50.0% |
-| naive 1.0 | 49.0% | 100.0% | 34.0% | 42.9% | 60.0% | 54.5% | 57.1% | 50.0% |
+| memvara 0.9.0 | **92.0%** | 100.0% | **100.0%** | 100.0% | 100.0% | 100.0% | 64.3% | 50.0% |
+| vector-rag 1.0 | 89.0% | 100.0% | 91.5% | 100.0% | 100.0% | 100.0% | **71.4%** | 50.0% |
+| naive 1.0 | 50.0% | 100.0% | 34.0% | 42.9% | 60.0% | 54.5% | 64.3% | 50.0% |
 
 By category:
 
@@ -176,20 +176,20 @@ By category:
 | knowledge_time | 100.0% | 100.0% | 42.9% | 7 |
 | provenance | 100.0% | 100.0% | 54.5% | 11 |
 | contradiction | 100.0% | 100.0% | 60.0% | 5 |
-| multi_hop | 33.3% | 33.3% | 33.3% | 6 |
-| distractor | 62.5% | **87.5%** | 75.0% | 8 |
+| multi_hop | 16.7% | **33.3%** | **33.3%** | 6 |
+| distractor | 100.0% | 100.0% | 87.5% | 8 |
 | negative | 50.0% | 50.0% | 50.0% | 6 |
 
 Cost and latency from the same runs:
 
 | System | LLM calls | embedding calls | rows written | write, per event | query, mean | query p95 |
 |---|---:|---:|---:|---:|---:|---:|
-| memvara | 0 | not counted | 241 | 0.8 – 1.5 ms | ~1.7 ms | 4 – 12 ms |
+| memvara | 0 | not counted | 241 | 0.8 – 1.5 ms | 0.9 – 1.7 ms | 2 – 12 ms |
 | vector-rag | 0 | 279 | 262 | ~0.02 ms | 0.1 – 0.2 ms | ~0.3 ms |
 | naive | 0 | 0 | 262 | <0.01 ms | 0.2 – 0.8 ms | 1.3 – 1.6 ms |
 
-**Ranges, not points.** These are the highest and lowest of two full runs on one laptop
-that was doing other work, and the spread reaches 3× on memvara's p95. Treat them as
+**Ranges, not points.** These are the highest and lowest of three full runs on one laptop
+that was doing other work, and the spread reaches 5× on memvara's p95. Treat them as
 orders of magnitude. The shape that survives the noise is the write path: the two
 in-memory baselines are tens to hundreds of times faster per event than memvara, which is
 doing SQLite, embedding and reconciliation on every write. Reproduce them on your own
@@ -204,9 +204,9 @@ the quotes service). That two-against-forty-six split is the same distinction th
 
 ## Interpretation
 
-**Two points separate memvara from a baseline written in numpy in an afternoon.** That is
-a narrower margin than the case for bitemporal memory would lead you to expect, and it is
-the most useful number on the page. Read the rows rather than the total.
+**Three points separate memvara from a baseline written in numpy in an afternoon.** That
+is a narrower margin than the case for bitemporal memory would lead you to expect, and it
+is the most useful number on the page. Read the rows rather than the total.
 
 **The bitemporal advantage is real and it is narrow.** memvara scores 100.0% on the
 temporal dimension against `vector-rag`'s 91.5%, and the four questions that separate them
@@ -224,19 +224,31 @@ single largest failure mode, twenty questions, is `answered_current_state`: it g
 value to a question about the past, without hesitating. That is the failure this benchmark
 was built to make visible, and it is what most agent memory does today.
 
-**memvara loses on retrieval, and that is reported as measured.** 50.0% against
-`vector-rag`'s 64.3%. Asked *"Where does Frank live?"* against 262 memories, memvara's
-search returns Alice. The adapter uses `search()` with the default `min_score=0.0`, a
-`HashingEmbedder` and no reranker — a weak configuration, deliberately not tuned for the
-benchmark. A stronger one would likely score better; nobody has measured that, so nothing
+**memvara loses on retrieval, and that is reported as measured.** 64.3% against
+`vector-rag`'s 71.4%, and the whole of it is `multi_hop`, where memvara answers 1 of 6 and
+is the **worst of the three systems**. The failure signature is unusually clear: asked
+*"Which region is the project Alice works on deployed to?"* it answers `Project Atlas`,
+and asked who leads the team that owns the checkout service it answers `team-payments`. It
+finds the first hop and stops, because taking the top-ranked slot is all this adapter
+does. memvara ships `neighborhood()` and `paths_between()` and this adapter uses neither.
+A graph-aware adapter would very likely do better — nobody has measured that, so nothing
 here claims it.
 
-**Two dimensions currently discriminate nothing.** All three systems score 50% on
-`irrelevance` and 33.3% on `multi_hop` — the same questions, failed the same way. Every
-system answers an open question about a fact it was never told, from the nearest match. No
-system joins two facts. Those rows describe a shared gap in the field rather than a
-difference between these systems, and until either a system improves or the questions get
-harder they carry no information.
+**One dimension currently discriminates nothing.** All three systems score 50% on
+`irrelevance`, failing the same three questions the same way: asked about a fact they were
+never told, each answers from the nearest match instead of abstaining. That row describes
+a shared gap in the field rather than a difference between these systems, and until either
+a system improves or the questions get harder it carries no information.
+
+**These numbers replace an earlier set, and the reason is worth reading.** An earlier run
+had memvara at 90.0% overall and 50.0% on `retrieval`. Investigating that loss found two
+defects in the harness rather than in any memory system: the memvara adapter searched
+ended and retired claims for present-tense questions, and the three adapters fed their
+retrievers three different strings — so `retrieval` was comparing adapters rather than
+retrievers. Both are fixed, both fixes helped **every** system (`retrieval` rose 7.2
+points for `naive`, 7.1 for `vector-rag` and 14.3 for memvara), and memvara still loses
+the category. No question, gold answer or scoring rule was changed. The benchmark's own
+README records the diagnosis in full.
 
 **memvara's zero LLM calls on the write path is true by construction here, not a finding.**
 The benchmark hands every system a structured fact, so the adapter uses `remember()` and
@@ -300,7 +312,8 @@ The reasons to discount the numbers above, in the order we think they matter.
    authored by an interested party is worth less than one that is not, whatever its
    methodology. This is the reason to run it against your own system rather than to read
    the table.
-3. **Two dimensions do not discriminate.** `irrelevance` and `multi_hop` are ties.
+3. **One dimension does not discriminate.** All three systems tie at 50% on
+   `irrelevance`.
 4. **The vector baseline uses hashed TF-IDF, not a neural embedder.** That buys no API key
    and byte-identical runs, and costs paraphrase robustness. A sentence-transformer baseline
    would likely score higher on `distractor` and `multi_hop`. Unmeasured.

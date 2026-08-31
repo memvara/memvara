@@ -53,6 +53,11 @@ class Ask:
     #: The world instant the question is about. Always set by the runner — `None` in the
     #: dataset means "now", and "now" is the dataset's fixed `evaluated_at`.
     at: datetime
+    #: What the dataset means by "now" — a constant in `metadata.json`, not the wall
+    #: clock, so a run tomorrow scores the same as a run today. `at == evaluated_at` is
+    #: how an adapter tells a present-tense question from one about the past, which
+    #: decides which population of memories it should be searching.
+    evaluated_at: datetime
     #: The belief instant, when the question asks what the system would have said then.
     #: `None` means "as we understand it today".
     known_at: datetime | None = None
@@ -154,6 +159,28 @@ class MemorySystem(Protocol):
 
     def close(self) -> None:
         """Release anything held. Called once at the end of a run."""
+
+
+def indexable(event: MemoryEvent) -> str:
+    """The text every adapter indexes for retrieval: the triple, then the sentence.
+
+    Here rather than in each adapter because retrieval is a scored dimension, and three
+    adapters indexing three different strings would have made that dimension a comparison
+    of what each one happened to feed its retriever.
+
+    It was three different strings. `vector-rag` indexed subject, predicate and sentence;
+    `naive` matched on the sentence alone; the memvara adapter passed the sentence alone
+    as `Claim.text`, which is what memvara embeds and BM25-indexes. That last one cost
+    real points on entities whose events are written in the first person — "I have
+    relocated to Madrid" does not contain the word *Heidi*, so no query naming her could
+    reach it — and the loss looked like weak ranking rather than a missing word.
+
+    Both halves earn their place. The triple carries the subject and relation, which
+    first-person sentences drop; the sentence carries the vocabulary a question is
+    actually phrased in.
+    """
+    relation = event.predicate.replace("_", " ")
+    return f"{event.subject} {relation} {event.object}. {event.text}"
 
 
 def wants_a_date(ask: Ask) -> bool:

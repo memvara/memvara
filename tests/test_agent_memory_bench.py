@@ -506,13 +506,23 @@ def test_the_adapter_is_never_handed_the_gold_answer(data):
     assert not hasattr(ask, "gold")
     assert "Berlin" not in repr(ask) or question.gold.value != "Berlin" or True
     assert set(vars(type(ask))["__slots__"]) == {
-        "id", "category", "question", "probe", "at", "known_at", "about"}
+        "id", "category", "question", "probe", "at", "evaluated_at", "known_at", "about"}
 
 
 def test_now_is_resolved_from_the_dataset_not_the_wall_clock(data):
     """An adapter must never see `at=None`, or its answers would depend on the day."""
     for question in data.questions:
         assert runner.ask_of(question, data.evaluated_at).at is not None
+
+
+def test_every_adapter_indexes_the_same_text(data):
+    """Retrieval is a scored dimension, so the three adapters must not feed their
+    retrievers three different strings. They did: the memvara adapter passed the bare
+    sentence as `Claim.text`, which is what memvara indexes, and "I have relocated to
+    Madrid" does not contain the word Heidi."""
+    event = next(e for e in data.events if e.subject == "heidi")
+    text = base.indexable(event)
+    assert "heidi" in text and event.object in text and event.text in text
 
 
 def test_events_are_delivered_in_recorded_order(data):
@@ -711,6 +721,30 @@ def test_the_cli_writes_one_file_per_system(capsys, tmp_path):
     assert (tmp_path / "r-naive.json").is_file()
     assert (tmp_path / "r-vector-rag.json").is_file()
     assert "System" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("module", ["benchmarks.agent_memory",
+                                   "benchmarks.agent_memory.run"])
+def test_both_spellings_of_the_command_run(module, tmp_path):
+    """`...agent_memory` is canonical and `...agent_memory.run` is the spelling people
+    reach for first. Both are asserted because a documented command that has never been
+    executed is a documented command that does not work."""
+    out = tmp_path / "r.json"
+    proc = subprocess.run(
+        [sys.executable, "-m", module, "--system", "naive", "--quick", "--quiet",
+         "--output", str(out)],
+        cwd=ROOT, capture_output=True, text=True, env={"PYTHONPATH": str(ROOT)})
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(out.read_text())["system"] == "naive"
+
+
+def test_importing_the_alias_does_not_run_the_benchmark():
+    """`run` has an importable dotted name, unlike `__main__`. Without the `__name__`
+    guard, `from benchmarks.agent_memory import run` would run every question and then
+    kill the interpreter with SystemExit."""
+    from benchmarks.agent_memory import run as run_module
+
+    assert run_module.main is cli.main
 
 
 def test_the_cli_reports_an_empty_selection_rather_than_dividing_by_zero(capsys):

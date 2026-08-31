@@ -185,44 +185,89 @@ arm64, `numpy` 2.5.1, memvara 0.9.0. Reproduce with the command at the top of th
 
 | System | Overall | current_state | temporal | knowledge_time | contradiction | provenance | retrieval | irrelevance |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| memvara 0.9.0 | **90.0%** | 100.0% | **100.0%** | 100.0% | 100.0% | 100.0% | 50.0% | 50.0% |
-| vector-rag 1.0 | 88.0% | 100.0% | 91.5% | 100.0% | 100.0% | 100.0% | **64.3%** | 50.0% |
-| naive 1.0 | 49.0% | 100.0% | 34.0% | 42.9% | 60.0% | 54.5% | 57.1% | 50.0% |
+| memvara 0.9.0 | **92.0%** | 100.0% | **100.0%** | 100.0% | 100.0% | 100.0% | 64.3% | 50.0% |
+| vector-rag 1.0 | 89.0% | 100.0% | 91.5% | 100.0% | 100.0% | 100.0% | **71.4%** | 50.0% |
+| naive 1.0 | 50.0% | 100.0% | 34.0% | 42.9% | 60.0% | 54.5% | 64.3% | 50.0% |
 
-**Two points separate memvara from a baseline built out of numpy in an afternoon**, and
-the gap is narrower than the pitch for bitemporal memory would suggest. Read the rows
-rather than the total:
+By category, with the number of questions in each:
 
-- **`temporal` is the whole difference.** memvara 100.0%, `vector-rag` 91.5%. The four
-  questions `vector-rag` misses are the four delayed-knowledge and correction scenarios —
-  where the news arrived after the fact, so "what was true then" and "what had we heard by
-  then" are different answers and one clock has to give the same one to both. Everywhere
-  else in the dataset the two clocks coincide and a single-clock store is exactly right.
-- **memvara loses on retrieval.** 50.0% against `vector-rag`'s 64.3%. Asked *"Where does
-  Frank live?"* against 262 memories, memvara's search returns Alice. This adapter uses
-  `search()` with the default `min_score=0.0` and a `HashingEmbedder`, no reranker and no
-  calibrated threshold — a weak configuration, and the number is what that configuration
-  scores. It is reported as measured.
+| Category | memvara | vector-rag | naive | n |
+|---|---:|---:|---:|---:|
+| current_state | 100.0% | 100.0% | 100.0% | 10 |
+| historical_state | **100.0%** | 85.2% | 33.3% | 27 |
+| change_detection | 100.0% | 100.0% | 27.3% | 11 |
+| change_time | 100.0% | 100.0% | 44.4% | 9 |
+| knowledge_time | 100.0% | 100.0% | 42.9% | 7 |
+| provenance | 100.0% | 100.0% | 54.5% | 11 |
+| contradiction | 100.0% | 100.0% | 60.0% | 5 |
+| multi_hop | 16.7% | **33.3%** | **33.3%** | 6 |
+| distractor | 100.0% | 100.0% | 87.5% | 8 |
+| negative | 50.0% | 50.0% | 50.0% | 6 |
+
+**Three points separate memvara from a baseline built out of numpy in an afternoon**, and
+that is narrower than the pitch for bitemporal memory would suggest. Read the rows rather
+than the total:
+
+- **`temporal` is the whole of memvara's lead.** 100.0% against `vector-rag`'s 91.5%. The
+  four questions `vector-rag` misses are the four delayed-knowledge and correction
+  scenarios — where the news arrived after the fact, so "what was true then" and "what had
+  we heard by then" are different answers and one clock has to give the same one to both.
+  Everywhere else in the dataset the two clocks coincide and a single-clock store is
+  exactly right.
+- **memvara loses on retrieval**, 64.3% against `vector-rag`'s 71.4%, and it is now
+  entirely `multi_hop`: memvara answers 1 of 6, which is the **worst of the three
+  systems**. The failure signature is unusually clear — asked *"Which region is the
+  project Alice works on deployed to?"* it answers `Project Atlas`, and asked who leads
+  the team that owns the checkout service it answers `team-payments`. It finds the first
+  hop and stops, because that is all this adapter does: take the top-ranked slot. memvara
+  ships `neighborhood()` and `paths_between()` and this adapter uses neither. A
+  graph-aware adapter would very likely do better; nobody has measured that, so nothing
+  here claims it.
 - **`irrelevance` is 50% for all three, so it currently discriminates nothing.** Every
   system answers the three open negative questions from the nearest match rather than
   abstaining. That is a real and shared failure — memvara's own `search()` documentation
-  warns about exactly it — and a category where three systems tie is a category that is
-  not yet earning its place. See *Limitations*.
-- **`multi_hop` is 33.3% for all three.** No system tested joins two facts. The category
-  is honest about a gap in all of them rather than a difference between them.
+  warns about exactly it — and a category where three systems tie is not yet earning its
+  place. See *Limitations*.
 - **`naive` scores 100% on current state.** It is not bad at memory. It is bad at *time*,
   and the benchmark's job is to say which.
+
+### The harness had two defects, and they were found by investigating a loss
+
+Worth stating plainly, because it is the kind of thing a benchmark's author is tempted to
+fix quietly. An earlier run had memvara at 90.0% overall and 50.0% on `retrieval`. Asked
+*"Where does Frank live?"*, memvara returned Alice — and the diagnosis was not weak
+ranking. It was two mistakes in this harness:
+
+1. **The memvara adapter searched the wrong population.** It passed
+   `states=["live", "ended", "retired"]` for every question, so a present-tense question
+   competed against values nobody holds any more. The correct claim was BM25 rank 0 and
+   lost the fused ranking to `alice lives_in Berlin`, which Alice stopped holding in
+   March. Present-tense questions now search live claims.
+2. **The three adapters indexed three different strings.** `vector-rag` indexed subject,
+   predicate and sentence; `naive` matched on the sentence alone; the memvara adapter
+   passed the bare sentence as `Claim.text`, which is what memvara embeds and
+   BM25-indexes. Events written in the first person then lost their subject entirely — *"I
+   have relocated to Madrid"* does not contain the word *Heidi*, so no query naming her
+   could reach it. All three now index the same string, built by one shared function
+   (`adapters/base.py::indexable`), because retrieval is a scored dimension and three
+   different inputs made it a comparison of adapters rather than of retrievers.
+
+**Fixing them helped every system**, which is the part that matters for trusting the
+result: `retrieval` went 57.1% → 64.3% for `naive`, 64.3% → 71.4% for `vector-rag`, and
+50.0% → 64.3% for memvara. Overall went 49.0% → 50.0%, 88.0% → 89.0% and 90.0% → 92.0%.
+**memvara still loses the category**, and it moved from tying on `multi_hop` to being last
+on it. No question, gold answer or scoring rule was touched.
 
 Cost and latency, measured in the same runs:
 
 | System | LLM calls | embedding calls | rows written | write, per event | query, mean | query p95 |
 |---|---:|---:|---:|---:|---:|---:|
-| memvara | 0 | not counted | 241 | 0.8 – 1.5 ms | ~1.7 ms | 4 – 12 ms |
+| memvara | 0 | not counted | 241 | 0.8 – 1.5 ms | 0.9 – 1.7 ms | 2 – 12 ms |
 | vector-rag | 0 | 279 | 262 | ~0.02 ms | 0.1 – 0.2 ms | ~0.3 ms |
 | naive | 0 | 0 | 262 | <0.01 ms | 0.2 – 0.8 ms | 1.3 – 1.6 ms |
 
-**Ranges, not points.** These are the highest and lowest of two full runs on one laptop
-that was doing other work, and the spread reaches 3× on memvara's p95. Treat them as
+**Ranges, not points.** These are the highest and lowest of three full runs on one laptop
+that was doing other work, and the spread reaches 5× on memvara's p95. Treat them as
 orders of magnitude. The shape that survives the noise is the write path: the two
 in-memory baselines are tens to hundreds of times faster per event than memvara, which is
 doing SQLite, embedding and reconciliation on every write. Reproduce them on your own
@@ -265,6 +310,9 @@ python -m benchmarks.agent_memory --system memvara --output results.json
 python -m benchmarks.agent_memory --system memvara --repeat-check
 ```
 
+`python -m benchmarks.agent_memory.run` is the same command under a longer name, for
+anyone who reaches for that spelling first. Both call the same entry point.
+
 From a clone, with nothing installed but `numpy` (the two baselines) plus this repository
 (the memvara adapter):
 
@@ -299,8 +347,10 @@ Enforced by the code where the code can:
   others were denied would be the benchmark rigging itself.
 - **Which questions are easier is fixed by the dataset, not chosen by the system.** A
   question either names its fact slot for everyone or for nobody.
-- **Shared discriminators live in `adapters/base.py`**, so three adapters cannot read the
-  same question three subtly different ways.
+- **Shared discriminators and shared index text live in `adapters/base.py`**, so three
+  adapters cannot read the same question three subtly different ways, and cannot feed
+  their retrievers three different strings. Both had happened; see *The harness had two
+  defects*.
 - **Everything runs offline and deterministically.** No model, no judge, no network.
 - **Changing the dataset or the methodology increments the version.** See *Versioning*.
 
@@ -345,11 +395,15 @@ The honest list. Several of these are reasons to discount a number above.
 3. **The `irrelevance` dimension does not discriminate.** All three systems score 50%,
    failing the same three questions. Until either a system abstains or the questions get
    harder, that row carries no information.
-4. **`multi_hop` measures a gap rather than a difference.** All three score 33.3%.
+4. **No adapter tested does multi-hop.** All three take the top-ranked slot and stop, so
+   `multi_hop` scores between 16.7% and 33.3% across the board. That is a limitation of
+   the adapters as written rather than a property of the systems — memvara ships
+   `neighborhood()` and `paths_between()` and this adapter uses neither — and it is the
+   most obvious thing a contributor could improve.
 5. **`vector-rag`'s embedder is hashed TF-IDF, not a neural one.** It buys no API key and
    byte-identical runs; it costs paraphrase robustness. A sentence-transformer baseline
-   would likely score higher on `distractor` and `multi_hop`. The questions are not written
-   to defeat lexical matching, so the gap is probably small, but it is unmeasured.
+   would likely score higher on `multi_hop`. The questions are not written to defeat
+   lexical matching, so the gap is probably small, but it is unmeasured.
 6. **262 events is small.** It is large enough that retrieval is not trivial and small
    enough to run in a second. It says nothing about behaviour at a million memories.
 7. **Answers are values, not prose.** A real agent reads memory and writes a sentence, and
@@ -379,6 +433,7 @@ benchmarks/agent_memory/
 ├── runner.py            the run loop
 ├── registry.py          --system NAME, and dotted import paths
 ├── cli.py               the command line
+├── run.py               `python -m benchmarks.agent_memory.run`, an alias for the above
 ├── adapters/
 │   ├── base.py          the interface, and the rules every adapter shares
 │   ├── naive.py         a dictionary of current values

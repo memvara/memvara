@@ -44,7 +44,7 @@ from memvara import (
 )
 
 from ..dataset import MemoryEvent, PredicateDecl
-from .base import Ask, MemoryAnswer, Usage, wants_a_date
+from .base import Ask, MemoryAnswer, Usage, indexable, wants_a_date
 
 #: Fixed rather than `default_embedder()`, which returns a sentence-transformer whenever
 #: one happens to be installed. A benchmark whose vector leg depends on what is in the
@@ -106,19 +106,28 @@ class MemvaraMemory:
             event.subject, event.predicate, event.object,
             valid_from=event.valid_from, valid_to=event.valid_to,
             recorded_at=event.recorded_at, confidence=event.confidence,
-            text=event.text, sources=[source],
+            text=indexable(event), sources=[source],
             close="retired" if self._is_correction(event) else "ended",
         )
 
     # -- read ---------------------------------------------------------------
 
-    def _resolve(self, question: str) -> tuple[str, str] | None:
+    def _resolve(self, question: str, ask: Ask) -> tuple[str, str] | None:
         """Find the slot an unprobed question is about, using memvara's own retrieval.
 
-        Every state, because a question about the past is often a question about a slot
-        whose values have all finished, and the default population is the live one.
+        **Search the population the question is about.** A present-tense question is
+        answered from live claims; only a question that rewinds a clock needs the values
+        that have finished or been retracted.
+
+        This used to pass all three states unconditionally, and it was the single largest
+        cause of memvara's `retrieval` score. Asked *"Where does Frank live?"*, the right
+        claim was BM25 rank 0 and still lost the fused ranking to `alice lives_in Berlin`
+        — a value Alice has not held since March, competing for a question about now. The
+        symptom read as weak ranking; the cause was asking the wrong population.
         """
-        hits = self.mem.search(question, k=SEARCH_K, states=["live", "ended", "retired"])
+        past = ask.known_at is not None or ask.at < ask.evaluated_at
+        states = ["live", "ended", "retired"] if past else None
+        hits = self.mem.search(question, k=SEARCH_K, states=states)
         return (hits[0].claim.subject, hits[0].claim.predicate) if hits else None
 
     def _first_source(self, claim: Claim) -> str | None:
@@ -137,7 +146,7 @@ class MemvaraMemory:
 
     def query(self, ask: Ask) -> MemoryAnswer:
         self._reads += 1
-        slot = ask.probe or self._resolve(ask.question)
+        slot = ask.probe or self._resolve(ask.question, ask)
         if slot is None:
             return MemoryAnswer()
         versions = self.mem.history(*slot)

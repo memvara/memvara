@@ -25,7 +25,7 @@ from datetime import datetime
 from typing import Mapping
 
 from ..dataset import MemoryEvent, PredicateDecl
-from .base import Ask, MemoryAnswer, Usage, wants_a_date
+from .base import Ask, MemoryAnswer, Usage, indexable, wants_a_date
 
 
 @dataclass
@@ -76,7 +76,7 @@ class NaiveMemory:
             held.append(entry)
         elif not any(e.object == entry.object for e in held):
             held.append(entry)
-        self._texts.append((event.text, event.subject, event.predicate))
+        self._texts.append((indexable(event), event.subject, event.predicate))
 
     def _resolve(self, question: str) -> tuple[str, str] | None:
         """Find the slot an unprobed question is about, by token overlap. Ties go to the
