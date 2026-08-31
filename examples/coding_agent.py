@@ -22,7 +22,7 @@ later:
 where somebody lives, where they work. An undeclared predicate takes the safe default
 twice over: multi-valued, so nothing supersedes, and slow-decaying, so this morning's
 deploy still ranks as fresh in two years. Declaring it single-valued is what makes the
-OAuth write retire the API-keys claim instead of accumulating beside it.
+OAuth write *end* the API-keys claim instead of accumulating beside it.
 
 `decided` is *multi-valued*, and that is the other half of the lesson: a project makes
 many decisions, and a later one does not make an earlier one untrue. It stopped being

@@ -147,7 +147,7 @@ flattened to one line so a stored memory cannot forge prompt structure around it
 
 **In LangGraph.** `MemvaraStore` is a `BaseStore`, and it loses least of the four
 adapters: `put(namespace, key, value)` supplies all three parts of a triple, so changing
-`city` retires exactly `city`. See [frameworks](../integrations/frameworks.md).
+`city` ends exactly `city`. See [frameworks](../integrations/frameworks.md).
 
 ## Three habits worth having
 

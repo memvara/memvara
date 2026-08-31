@@ -170,7 +170,8 @@ RUNNABLE_PAGES = ["docs/getting-started/quickstart.md",
 #: HTML comment so it renders as nothing.
 SKIP_MARKER = "<!-- runnable: no"
 
-PY_BLOCK = re.compile(r"(?:(<!-- runnable: no[^\n]*-->)\n)?```python\n(.*?)```", re.S)
+PY_BLOCK = re.compile(
+    r"(?:(" + re.escape(SKIP_MARKER) + r"[^\n]*-->)\n)?```python\n(.*?)```", re.S)
 
 
 def executable_source(page: Path) -> str:
@@ -203,3 +204,34 @@ def test_the_getting_started_pages_actually_run(relative: str, tmp_path: Path) -
         "Every block on a page in RUNNABLE_PAGES executes in reading order. If a block is "
         "an illustration rather than a step, mark it with "
         "'<!-- runnable: no — <reason> -->' on the line before its fence.")
+
+
+#: The `Memvara` facade methods each architecture diagram lists, read out of the diagrams
+#: rather than restated, so the assertion cannot drift from the picture.
+DIAGRAM_PAGES = ["README.md", "docs/reference/architecture.md"]
+
+FACADE_NODE = re.compile(r"<b>Memvara</b> — memvara/core\.py<br/><i>(.*?)</i>", re.S)
+
+
+@pytest.mark.parametrize("relative", DIAGRAM_PAGES)
+def test_every_method_the_architecture_diagram_names_exists(relative: str) -> None:
+    """A diagram is documentation, and an invented method on one is a fabricated API.
+
+    Both of these listed `end` on the facade. There is no `Memvara.end` — ending a fact is
+    `forget(close="ended")` or `delete(close="ended")` — on a page whose own first line
+    says nothing in it is aspirational. Read out of the diagram text so that adding a
+    method to the picture without adding it to the class fails here.
+    """
+    from memvara import Memvara
+
+    text = (ROOT / relative).read_text(encoding="utf-8")
+    node = FACADE_NODE.search(text)
+    assert node is not None, f"{relative} has no Memvara facade node to check"
+
+    # One diagram labels the node "the facade: add, remember, …"; drop a leading label.
+    body = re.sub(r"^[^:·,]*:\s*", "", node.group(1).strip())
+    names = [n.strip() for n in re.split(r"[·,]|<br/>", body) if n.strip()]
+    missing = [n for n in names if not hasattr(Memvara, n)]
+    assert not missing, (
+        f"{relative} names {missing} on the Memvara facade, which does not have them. "
+        "A diagram that invents a method is worse than one that omits it.")

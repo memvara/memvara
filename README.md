@@ -18,9 +18,9 @@ mem.remember("Alice", "lives_in", "Berlin",   valid_from=jan)
 mem.remember("Alice", "lives_in", "London",   valid_from=mar)
 mem.remember("Alice", "lives_in", "New York", valid_from=jun)
 
-mem.get_all()                    # -> ['New York']    where does she live now?
-mem.get_all(as_of=mar_20)        # -> ['London']      where did she live on 20 March?
-mem.get_all(as_of=jan_20)        # -> ['Berlin']      and on 20 January?
+[c.object for c in mem.get_all()]              # ['New York']   where now?
+[c.object for c in mem.get_all(as_of=mar_20)]  # ['London']     and on 20 March?
+[c.object for c in mem.get_all(as_of=jan_20)]  # ['Berlin']     and on 20 January?
 ```
 
 Three questions, three different correct answers, no model call. A store that keeps one
@@ -206,7 +206,7 @@ hosted store because somebody ran `memvara-mcp login` on that machine.
 |---|---|
 | 🕰️ **Two clocks, not one** | When it was true, and when you learned it — independently. Ask what you believed in March about June and get an answer, not a guess. |
 | ⚖️ **Contradictions resolve without a model** | Cardinality is a schema property, so a conflict is an indexed lookup. Same two facts, same result, every run. |
-| 🧾 **Nothing is silently lost** | Superseded facts are retired, never deleted, and every write returns a receipt saying what it did — including what it could *not* extract. |
+| 🧾 **Nothing is silently lost** | A superseded fact is *ended*, never deleted, and every write returns a receipt saying what it did — including what it could *not* extract. |
 | 🔍 **Retrieval that explains itself** | Vector and BM25 fused by rank, decayed per predicate, and every score inspectable rather than a ranking you have to trust. |
 | 🗣️ **It answers the audit question in words** | `ask()` gives what is true now, what was true then, and what this store *would have told you* then — plus the day the record changed. No model composes it. |
 | 🛡️ **A guess cannot quietly overwrite a statement** | A value worth less than half of what it would replace is kept beside it, and the receipt names both. Overwriting would record that the world changed, when nothing had. |
@@ -625,7 +625,7 @@ heading says so.
   live. **LangGraph loses least of the four**, and instructively: `BaseStore` is the only
   interface that hands over the query text natively, *and* `put(namespace, key, value)`
   supplies all three parts of a triple — so an item is stored as one claim per field and
-  changing `city` retires exactly `city`, which is contradiction resolution surviving a
+  changing `city` ends exactly `city`, which is contradiction resolution surviving a
   foreign interface intact. What it loses is the predicate registry: a stored `home_city`
   does not contradict an extracted `lives_in`. Each adapter says which it is; see
   `memvara/integrations/`.
@@ -690,8 +690,6 @@ Design notes and the module-by-module contract live in [docs/INTERNALS.md](https
 [docs/UPGRADING.md](https://github.com/memvara/memvara/blob/main/docs/UPGRADING.md) is the short list of changes that do not announce
 themselves — read it before upgrading, starting with the one where `invalidated_at is
 None` stopped meaning "live" without breaking anything.
-[CONTRIBUTING.md](https://github.com/memvara/memvara/blob/main/CONTRIBUTING.md) covers the bar a patch has to clear and what will and
-will not be accepted; [SECURITY.md](https://github.com/memvara/memvara/blob/main/SECURITY.md) covers private vulnerability reporting.
 
 ## Contributing
 

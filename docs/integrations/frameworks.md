@@ -46,9 +46,15 @@ a key of `value`   which question           ->  predicate
 its value          the answer               ->  object
 ```
 
-So an item is stored as **one claim per field**, and a later `put` changing `city` retires
+So an item is stored as **one claim per field**, and a later `put` changing `city` ends
 exactly `city` and leaves `food` alone. That is contradiction resolution surviving a
 foreign interface intact.
+
+The two closures stay distinct across the interface, which is the part worth knowing: a
+field whose **value changes** is an ordinary supersession and is stamped `ended` — the
+world moved — while a field that **disappears** from the item is `delete()`d and so is
+`retired`, with no `invalidated_by`, because nothing replaced it. `put` is an update
+rather than a deletion request, and those are two different statements about the world.
 
 What it loses is the **predicate registry**: a stored `home_city` does not contradict an
 extracted `lives_in`, because the field name arrives as a bare string with no declaration

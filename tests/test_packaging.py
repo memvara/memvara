@@ -614,6 +614,44 @@ def test_every_lazily_exported_backend_is_listed_in_dunder_all() -> None:
 
 
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib arrived in 3.11")
+def test_the_hand_parse_agrees_with_tomllib_on_comment_shapes_this_file_lacks(
+        tmp_path: pathlib.Path) -> None:
+    """The agreement test above reads `pyproject.toml`, which contains none of these.
+
+    So the quote-aware comment stripping the multi-line array reader depends on was
+    never exercised by it, and is skipped entirely on 3.10 — the one interpreter the hand
+    parser exists to serve. Three shapes, each of which the first version got wrong and
+    each of which produces a silently *wrong* table rather than an error: a comment line
+    whose prose ends in a bracket, an inline comment after an entry, and a `#` inside a
+    string, which must survive.
+    """
+    import tomllib
+
+    probe = tmp_path / "pyproject.toml"
+    probe.write_text(
+        '[project]\n'
+        'name = "probe"\n'
+        'keywords = [\n'
+        '    # a comment whose prose ends in a bracket [like this]\n'
+        '    "alpha",\n'
+        '    "beta",   # an inline note\n'
+        '    "gam#ma",\n'
+        ']\n'
+        'description = "has a # inside a string"\n', encoding="utf-8")
+
+    global PYPROJECT
+    original, PYPROJECT = PYPROJECT, probe
+    try:
+        got = _toml_table("project")
+    finally:
+        PYPROJECT = original
+
+    want = {k: v for k, v in tomllib.loads(probe.read_text(encoding="utf-8"))["project"].items()
+            if isinstance(v, (str, list))}
+    assert got == want
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib arrived in 3.11")
 def test_the_hand_parse_of_pyproject_agrees_with_tomllib() -> None:
     """The reader above is only trustworthy if something checks it against a real parser.
 

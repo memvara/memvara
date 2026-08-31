@@ -56,7 +56,7 @@ store cannot answer:
 
 It is also the example that shows the one piece of setup a domain other than
 personal-assistant needs: declaring `auth_strategy` single-valued, so the OAuth write
-retires the API-keys claim instead of accumulating beside it.
+*ends* the API-keys claim instead of accumulating beside it.
 Concepts: [provenance](../docs/concepts/provenance.md),
 [guide: coding agents](../docs/guides/coding-agents.md).
 
