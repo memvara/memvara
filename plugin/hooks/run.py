@@ -23,9 +23,25 @@ from core import host as _host  # noqa: E402
 
 
 def _note(text: str) -> None:
-    from lib.ipc import log_line
+    """Write one line to the hook log, and never raise doing it.
 
-    log_line("hooks", text)
+    Called on three paths *outside* the try below, and once inside the handler that
+    exists so a body's failure cannot reach the client. It imports `lib.ipc` at call
+    time, so a tree that is missing or half-copied -- an interrupted vendor, a sync that
+    stopped between files -- made the logging turn a handled failure into an unhandled
+    one. Measured: with `lib/ipc.py` moved aside, `run.py recall --host claude` exited 1
+    with a traceback out of the handler itself, and a non-zero UserPromptSubmit hook
+    blocks the turn.
+
+    Losing the line is the right trade when the alternative is losing the prompt. A tree
+    too broken to write to `~/.memvara/.hooks/hooks.log` is a tree too broken to have run.
+    """
+    try:
+        from lib.ipc import log_line
+
+        log_line("hooks", text)
+    except Exception:  # noqa: BLE001 -- see above; a hook must never fail a prompt
+        pass
 
 
 def main(argv: "list[str]") -> int:
@@ -53,4 +69,13 @@ def main(argv: "list[str]") -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    # The last guard, and deliberately not `raise SystemExit(main(...))` alone. `main`
+    # returns 0 on every path it knows about; this catches the ones it does not -- an
+    # import that fails before the try, an interpreter that cannot resolve `core.host`,
+    # anything a future edit adds above the handler. Zero is the only exit code that
+    # leaves the turn alone.
+    try:
+        _status = main(sys.argv[1:])
+    except BaseException:  # noqa: BLE001 -- nothing may fail the prompt
+        _status = 0
+    raise SystemExit(_status)
