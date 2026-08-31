@@ -638,13 +638,60 @@ def test_a_result_carries_everything_needed_to_reproduce_it(naive_run):
     assert set(payload["metrics"]) >= {"overall", "by_category", "by_dimension"}
 
 
+#: What a published result file must never contain, as word-boundary patterns.
+#:
+#: Substrings once, which is how `token` came to match the legitimate `tokens` cost
+#: field; deleting `token` then dropped `refresh_token`, `api_token` and a bare `"token"`
+#: along with the false positive, and nothing noticed until a review compared the two
+#: lists. Both mistakes are the same one — a guard tuned by what it happens to reject
+#: rather than by what it is for.
+CREDENTIAL_PATTERNS = (
+    r"\btoken\b", r"\brefresh_token\b", r"\bapi_token\b", r"\baccess_token\b",
+    r"\bauth_token\b", r"\bapi_key\b", r"\bapikey\b", r"\bpassword\b",
+    r"\bpasswd\b", r"\bsecret\b", r"bearer ", r"\bauthorization\b",
+    r"/users/", r"/home/",
+)
+
+
+@pytest.mark.parametrize("leak", [
+    '"token": "sk-live-abc"', '"refresh_token": "x"', '"api_token": "y"',
+    '"access_token": "z"', '"api_key": "k"', '"password": "p"',
+    "authorization: bearer abc", "/users/somebody/x", "/home/somebody/x",
+])
+def test_the_credential_patterns_catch_what_they_are_for(leak):
+    import re
+
+    assert any(re.search(p, leak) for p in CREDENTIAL_PATTERNS), leak
+
+
+@pytest.mark.parametrize("innocent", [
+    '"tokens": 0', '"llm_calls": 0, "tokens": 520', '"rows_stored": 241',
+    '"texts_embedded": 520', '"db_reads": 100',
+])
+def test_the_credential_patterns_do_not_fire_on_cost_fields(innocent):
+    """The false positive that started this: narrowing the list to silence it cost real
+    coverage, and word boundaries give both."""
+    import re
+
+    assert not any(re.search(p, innocent) for p in CREDENTIAL_PATTERNS), innocent
+
+
 def test_a_result_carries_no_secrets(naive_run, tmp_path):
     """Result files are written to be published. Assembled by name, never swept."""
     path = tmp_path / "r.json"
     naive_run.write(path)
+    import re
+
     blob = path.read_text().lower()
-    for leak in ("api_key", "token", "password", "secret", "/users/", "home"):
-        assert leak not in blob, f"{leak!r} reached a publishable result file"
+    # Word boundaries rather than substrings. `token` was in this list as a substring and
+    # matched the legitimate `tokens` cost field the moment one existed — but deleting it
+    # also dropped `refresh_token`, `api_token` and a bare `"token"`, none of which any
+    # other entry covers. `\btoken\b` matches `"token": "sk-live-…"` and does not match
+    # `"tokens": 0`, so the false positive goes and the coverage stays. A guard that fails
+    # on correct code teaches people to weaken it; one weakened to stop it doing so is the
+    # same mistake finished.
+    for leak in CREDENTIAL_PATTERNS:
+        assert not re.search(leak, blob), f"{leak!r} reached a publishable result file"
 
 
 def test_every_adapter_counts_rows_the_same_way(data):
@@ -701,6 +748,60 @@ def test_the_leaderboard_prints_dimension_names_in_full(naive_run):
         assert dimension in text, f"{dimension!r} was truncated out of the header"
 
 
+def test_the_documented_result_schema_names_exactly_the_usage_fields():
+    """The published schema and the dataclass must agree, in both directions.
+
+    This is the guard the last two reviews wanted and neither wrote. `db_writes` was
+    renamed to `rows_stored` and `embedding_calls` to `texts_embedded`, each because the
+    field meant something other than its name; both times the schema table had to be
+    updated by hand, and nothing would have failed if it had not been. A field added
+    without a doc entry and a doc entry left behind after a rename are the same defect
+    seen from two sides, so this checks both.
+    """
+    import dataclasses
+    import re
+
+    report_page = ROOT / "docs" / "benchmarks" / "agent-memory-benchmark.md"
+    row = next((line for line in report_page.read_text(encoding="utf-8").splitlines()
+                if line.startswith("| `usage` |")), None)
+    assert row is not None, "the result-schema table no longer has a `usage` row"
+
+    #: Backticked words in that row that are prose rather than field names.
+    not_fields = {"usage", "null"}
+    # `[a-z0-9_]+`, not `[a-z_]+`: a name with a digit in it — `p95_ms`, `tokens_v2` —
+    # would otherwise be captured as the fragments either side of the digit, and this
+    # guard would fail while the documentation was right. The sibling `latency` row
+    # already contains `query_p50_ms` and `query_p95_ms`, so the letter-only pattern
+    # reads that row as four names rather than six.
+    documented = {word for word in re.findall(r"`([a-z0-9_]+)`", row)} - not_fields
+    declared = {f.name for f in dataclasses.fields(Usage)}
+
+    assert documented == declared, (
+        f"the schema table and `Usage` disagree.\n"
+        f"  documented but not a field: {sorted(documented - declared)}\n"
+        f"  a field but undocumented:   {sorted(declared - documented)}")
+
+
+def test_every_usage_field_is_rendered_by_the_report():
+    """A field nothing prints is a field nobody reads, however well documented.
+
+    `tokens` was added to `Usage` and, with the cost block hardcoding one line per field,
+    was simply absent from the report until this noticed.
+    """
+    import dataclasses
+
+    declared = {f.name for f in dataclasses.fields(Usage)} - {"extra"}
+    assert set(report.COST_LABELS) == declared, (
+        "report.COST_LABELS and `Usage` disagree; a field with no label is never printed")
+
+    populated = Usage(**{f.name: (7 if f.name != "extra" else {"thing": 9})
+                         for f in dataclasses.fields(Usage)})
+    text = "\n".join(report._cost_block(_stub_result(populated)))
+    for label in report.COST_LABELS.values():
+        assert label in text
+    assert "thing" in text, "`extra` entries are printed too"
+
+
 def test_an_unmeasured_cost_stays_none_rather_than_becoming_zero():
     """`0` is a claim. `null` is the absence of one, and the report prints `-`."""
     assert Usage().to_json()["llm_calls"] is None
@@ -708,11 +809,11 @@ def test_an_unmeasured_cost_stays_none_rather_than_becoming_zero():
     assert "-" in "\n".join(report._cost_block(_stub_result()))
 
 
-def _stub_result():
+def _stub_result(usage: Usage | None = None):
     return results.RunResult(
         system="s", system_version="0", dataset_version="v1", timestamp="t",
         scorecard=scoring.score([], _dataset([], [])),
-        latency=results.latency_of(0.0, 0, []), usage=Usage(), judgements=())
+        latency=results.latency_of(0.0, 0, []), usage=usage or Usage(), judgements=())
 
 
 def test_percentiles_are_nearest_rank_and_never_invent_a_measurement():

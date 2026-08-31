@@ -274,6 +274,8 @@ class MemvaraMemory:
         stats = self.mem.stats()
         return Usage(
             llm_calls=0,
+            # Zero calls is zero tokens; both are measured, not absent.
+            tokens=0,
             texts_embedded=(self._embedder.texts_embedded
                             if self._embedder is not None else None),
             rows_stored=int(stats.get("claims", 0)),

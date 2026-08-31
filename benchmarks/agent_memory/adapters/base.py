@@ -106,6 +106,15 @@ class Usage:
     """
 
     llm_calls: int | None = None
+    #: Model tokens spent, prompt and completion together. `None` where a system does not
+    #: count them; `0` is a claim, and a true one for any system reporting `llm_calls=0`.
+    #:
+    #: Present although every system shipped here reports zero, because a system that
+    #: *does* use a model has no field for the cost that dominates its bill, and would
+    #: otherwise have to hide it in `extra` where nothing compares it. An adapter with a
+    #: model in the loop must also disclose which one — see
+    #: `benchmarks/agent_memory/CONTRIBUTING.md`.
+    tokens: int | None = None
     #: Texts submitted for embedding, **not** requests made. Batching is an
     #: implementation detail of an embedding API — you send 64 or 100 texts per request
     #: because that is how they are billed — so counting requests would report two
@@ -136,6 +145,7 @@ class Usage:
     def to_json(self) -> dict[str, object]:
         row: dict[str, object] = {
             "llm_calls": self.llm_calls,
+            "tokens": self.tokens,
             "texts_embedded": self.texts_embedded,
             "rows_stored": self.rows_stored,
             "db_reads": self.db_reads,

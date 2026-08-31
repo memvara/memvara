@@ -97,19 +97,29 @@ def _timing_block(result: RunResult) -> list[str]:
     ]
 
 
+#: Every `Usage` field except `extra`, and the name it prints under. A mapping rather
+#: than a list of f-strings because the previous form hardcoded one line per field, so a
+#: field added to `Usage` was simply absent from the report and nothing said so —
+#: `tokens` was added and unprinted exactly that way.
+#: `tests/test_agent_memory_bench.py` asserts this covers the dataclass.
+COST_LABELS: dict[str, str] = {
+    "llm_calls": "LLM calls",
+    "tokens": "model tokens",
+    "texts_embedded": "texts embedded",
+    "rows_stored": "rows stored",
+    "db_reads": "read calls",
+}
+
+
 def _cost_block(result: RunResult) -> list[str]:
     usage = result.usage
 
     def show(value: int | None) -> str:
         return "-" if value is None else f"{value}"
 
-    lines = [
-        "  Cost, as counted by the system itself",
-        f"    LLM calls                    {show(usage.llm_calls):>8}",
-        f"    texts embedded               {show(usage.texts_embedded):>8}",
-        f"    rows stored                  {show(usage.rows_stored):>8}",
-        f"    read calls                   {show(usage.db_reads):>8}",
-    ]
+    lines = ["  Cost, as counted by the system itself"]
+    for field, label in COST_LABELS.items():
+        lines.append(f"    {label:<28} {show(getattr(usage, field)):>8}")
     for key, value in sorted(usage.extra.items()):
         lines.append(f"    {key:<28} {value:>8}")
     lines += ["    '-' means not measured, not zero.", ""]

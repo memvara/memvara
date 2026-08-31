@@ -236,7 +236,7 @@ class VectorRAGMemory:
         # Texts, not requests: this store embeds exactly one text per call, so the two
         # coincide here — but `Usage.texts_embedded` is defined as texts and an adapter
         # that batched would have to divide differently.
-        return Usage(llm_calls=0, texts_embedded=self._embeds,
+        return Usage(llm_calls=0, tokens=0, texts_embedded=self._embeds,
                      rows_stored=len(self._records), db_reads=self._reads)
 
     def close(self) -> None:
