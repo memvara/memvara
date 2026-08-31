@@ -77,6 +77,13 @@ jobs:
           python -m pip install -e ".[dev,cloud]"
 
       - name: Test
+        env:
+          # Lets `test_the_deployment_serves_the_tools_this_library_declares` actually run.
+          # `tools/list` needs Authorization, so without this the one guard that compares
+          # this library against what is DEPLOYED skips on every run -- visibly, with its
+          # reason in the log, and still never executing. A permanent skip is not a guard.
+          # Unset in forks and until the secret exists, where it goes back to skipping.
+          MEMVARA_API_KEY: ${{ secrets.MEMVARA_API_KEY }}
         run: python -m pytest -q
 
   coverage:
