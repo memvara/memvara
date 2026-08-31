@@ -128,7 +128,7 @@ def test_the_coding_agent_example_supersedes_rather_than_accumulating(
     OAuth write lands *beside* the API-keys claim instead of closing it. Both outcomes
     print a plausible-looking timeline, so the assertion is on the state.
     """
-    assert "API keys                    2026-02-03 -> 2026-06-12  [ended]" in coding_output
+    assert "API keys                     2026-02-03 -> 2026-06-12  [ended]" in coding_output
     assert "OAuth 2.0 client credentials 2026-06-12 -> now         [live]" in coding_output
     assert "changed on 2026-06-12" in coding_output
 

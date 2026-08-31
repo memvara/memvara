@@ -246,7 +246,7 @@ Q. What is checkout-service's auth strategy?
   OAuth 2.0 client credentials
 
 Q. What was the old strategy, and when did it change?
-  API keys                    2026-02-03 -> 2026-06-12  [ended]
+  API keys                     2026-02-03 -> 2026-06-12  [ended]
   OAuth 2.0 client credentials 2026-06-12 -> now         [live]
   changed on 2026-06-12
 ```
@@ -304,8 +304,9 @@ past the correction; `valid_at=June` is how you see it. `as_of` is exact sugar f
 `valid_at=known_at=T`, and passing it alongside either axis raises rather than quietly
 picking one.
 
-Every read takes all three — `search`, `get_all`, `count`, `history`, `why`, `produced`,
-`neighborhood`, `paths_between`.
+Eight reads take all three — `search`, `get_all`, `count`, `history`, `why`, `produced`,
+`neighborhood`, `paths_between`. `recall()`, `get()` and `since()` take none of them, and
+`ask()` spells it `at=`.
 
 `ask()` composes the difference into an answer, which is the question the two clocks exist
 for:

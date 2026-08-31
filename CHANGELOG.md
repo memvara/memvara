@@ -257,11 +257,26 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
-- **The README said `add()` batches what survives into "a single model call".** It is a
-  single *extraction* call. A predicate the registry has not seen before costs a second
-  one for acquisition, and `WriteReceipt.llm_calls` counts both — so the sentence
-  understated the cost of the first write to a novel vocabulary, which is exactly the
-  write somebody measures.
+- **The README and `docs/FAQ.md` said `add()` batches what survives into "a single
+  call".** It is a single *extraction* call. A predicate the registry has not seen before
+  costs a second one for acquisition, and `WriteReceipt.llm_calls` counts both — so the
+  sentence understated the cost of the first write to a novel vocabulary, which is
+  exactly the write somebody measures. The FAQ copy is the one that mattered most: it sat
+  four lines above that page's own promise that "`WriteReceipt.llm_calls` reports the
+  cost, so the claim is checkable", which invites a reader to go and check it and then
+  find two.
+
+- **The README's *Temporal memory* section said "every read takes all three".** The list
+  of eight that follows it was right; the sentence introducing them was not. `recall()`,
+  `get()` and `since()` take none of the time keywords, and `ask()` spells it `at=`, so a
+  reader acting on the general form gets a `TypeError`. It now says eight, and names the
+  three reads that are not among them.
+
+- **`examples/coding_agent.py` printed its timeline one column out of true.** The value
+  field was padded to 27 and `OAuth 2.0 client credentials` is 28 characters, so the
+  longer row's date started a character to the right of the shorter one's. Widened to 28.
+  The output was always correct and never lined up; it is quoted in the README now, which
+  is what made a cosmetic defect worth a commit.
 
 - **Eight more places in the library said the same thing, and they are corrected too.**
   `memvara/integrations/__init__.py`, `langgraph.py`, `langchain.py`, `llamaindex.py` and

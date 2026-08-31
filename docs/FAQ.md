@@ -73,7 +73,8 @@ No, and this is the design claim rather than an optimisation.
   needed a model either.
 - **`add()` on prose runs three model-free tiers first** — hash dedupe, near-duplicate
   detection, a salience gate, and a rule-based extractor — and batches whatever survives
-  into a single call.
+  into a single extraction call. A predicate the registry has not seen before costs a
+  second one, for acquisition.
 - **With no `llm=` configured there is no model tier at all.** Turns the rules do not
   recognise are dropped, counted on `WriteReceipt.unextracted`, and the constructor warns
   once. That is the honest limit on the offline claim: the library runs with no API key,
