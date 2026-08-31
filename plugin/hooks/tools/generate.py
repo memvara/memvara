@@ -40,7 +40,14 @@ def registration(host) -> bytes:
     session. A canonical name absent from `host.events` is a hook that client has no
     event for, and it is skipped rather than registered against a guessed event name.
     """
-    root = "${" + host.plugin_root_env[0] + "}"
+    # Every name in the tuple, innermost last: `${A:-${B}}`. A host that sets more than
+    # one -- Codex exports `PLUGIN_ROOT` and `CLAUDE_PLUGIN_ROOT` both -- can then name
+    # them all and get a real fallback. Reading `[0]` and dropping the rest was the one
+    # option that misleads: the field's type invites a second name and the build ignored
+    # it silently.
+    root = "${" + host.plugin_root_env[-1] + "}"
+    for name in reversed(host.plugin_root_env[:-1]):
+        root = "${" + name + ":-" + root + "}"
     events: "dict[str, list]" = {}
     for name in HOOKS:
         event = host.events.get(name)
@@ -59,6 +66,15 @@ def registration(host) -> bytes:
             command["timeout"] = host.timeouts[name]
         entry = {"hooks": [command]}
         if name == "approve":
+            if host.approve is None:
+                # Refused, not crashed, and for the same reason the empty-events case
+                # below is refused: `Host.approve` is independently optional, so a record
+                # can name the event and omit the spec, and `AttributeError: 'NoneType'
+                # object has no attribute 'matcher'` names neither the record nor the
+                # field that is missing from it.
+                raise ValueError(
+                    f"{host.id} registers an approve event but its record has no "
+                    "ApproveSpec, so there is no matcher to build the registration from")
             entry = {"matcher": host.approve.matcher, **entry}
         events.setdefault(event, []).append(entry)
     body = {"description": host.description, "hooks": events}
