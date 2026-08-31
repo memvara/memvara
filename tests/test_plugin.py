@@ -211,7 +211,7 @@ def test_sync_script_writes_skill_and_lock(tmp_path) -> None:
 # Copilot and OpenCode each read a sibling file out of a skill's own directory, and each
 # answered "NO PROBE" with the skill unregistered and the files still on disk.
 AUTH_SCRIPT = SKILL / "scripts" / "memvara_auth.py"
-AUTH_PLACEHOLDER = "<SKILL_DIR>"
+AUTH_PLACEHOLDER = "THIS_SKILL_DIRECTORY"
 AUTH_INVOCATION = f"python3 {AUTH_PLACEHOLDER}/scripts/memvara_auth.py authenticate"
 AUTH_HEADING = "## When it will not authenticate"
 AUTH_COMMANDS = ("authenticate", "login", "logout", "stats")
@@ -256,6 +256,13 @@ def test_the_skill_names_the_script_at_the_path_it_is_actually_at() -> None:
     # disk -- the same shape as ${CLAUDE_PLUGIN_ROOT} expanding to nothing under Grok.
     # Stated over every line that runs the script, so a second example added later cannot
     # reintroduce the bare form beside a correct one.
+    # No spelling that looks like a shell variable. Grok expands a real `${SKILL_DIR}`
+    # in its command files, and a placeholder one keystroke from that invites writing a
+    # variable which becomes nothing where it is not expanded -- the `${CLAUDE_PLUGIN_ROOT}`
+    # failure, reached from the other direction.
+    assert "${" not in skill.split(AUTH_HEADING, 1)[1].split("\n## ", 1)[0], (
+        "the auth section spells a placeholder like a shell variable")
+
     runs = [line for line in skill.splitlines()
             if "python3" in line and "memvara_auth.py" in line]
     assert runs, "no line in SKILL.md runs the script"
