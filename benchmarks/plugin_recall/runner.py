@@ -71,7 +71,13 @@ class Result:
         subset = self.of_kind(kind)
         if not subset:
             return None
-        if kind == "silence" and not self.validated:
+        if not self.validated:
+            # Both rates, not just silence. The guard was written for the silence corpus,
+            # where a dead plugin scores 100% -- but the same run also handed that plugin
+            # a flat 0% hit rate, which is a verdict on retrieval quality published about
+            # software that never answered anything. `cases` argues at length that "no
+            # evidence" and "it missed" must not be collapsed; a plugin that never spoke
+            # has not missed, for exactly the reason a plugin never asked has not failed.
             return None
         return sum(1 for o in subset if o.correct) / len(subset)
 

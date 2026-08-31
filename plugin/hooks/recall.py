@@ -477,23 +477,6 @@ def _sample(prompt: str, memories: "list[str]", *, anaphoric: bool) -> None:
     log_line("recall-sample", "  ".join(parts))
 
 
-#: How often a running session re-checks whether its standing preferences have changed.
-#: `SessionStart` fires ONCE, so a rule written after a session opened never reached it --
-#: measured on a session that started a full day before the rule it needed existed and was
-#: still breaking it eighteen hours later.
-#:
-#: A quarter hour rather than every turn, and the difference is the whole design. Standing
-#: preferences are fetched at the top of a session precisely so they do not compete per
-#: prompt with the facts that prompt is about; re-asserting them every turn would undo
-#: that and undo PR #8 with it. What runs on every prompt is a timestamp comparison
-#: against a small JSON file. What runs four times an hour is one query.
-#:
-#: It was thirty minutes because the query cost 1,345 ms: `memory_standing` was not
-#: deployed, so the block came through `memory_since` from an early instant, which
-#: downloads the whole store -- 160 KB and 371 claims -- to select 32 procedural ones.
-#: `app.memvara.dev` now serves it, the plugin picked it up through `accepts()` with no
-#: change here, and the same block costs **222 ms**. Four of those an hour is less wall
-#: clock than two of the old ones, so the interval halves and the cost still falls.
 #: Retrieval below this score is not injected. `Memvara.recall` has taken `min_score`
 #: since long before this hook existed and this file passed the 0.0 default, so every
 #: prompt got its `k` slots filled whether or not anything in the store was about it --
@@ -521,15 +504,40 @@ def _min_score() -> float:
 
     `0` is a legitimate setting -- it restores the old unfiltered behaviour for anyone who
     wants it -- so it is honoured rather than treated as unset.
+
+    Clamped at both ends, and the upper end is not tidiness. Scores never exceed 1.0, so a
+    value above it filters everything: the local route would return nothing on every prompt
+    for the life of the setting, indistinguishable from an empty store, while the hosted
+    route rejects the same value outright and degrades to no floor at all. One typo would
+    otherwise mean total silence on one route and no filtering on the other -- exactly the
+    divergence between routes that carrying this argument at all is meant to prevent.
     """
     raw = os.environ.get("MEMVARA_RECALL_MIN_SCORE")
     if raw is None:
         return MIN_SCORE
     try:
-        return max(0.0, float(raw))
+        return min(1.0, max(0.0, float(raw)))
     except ValueError:
         return MIN_SCORE
 
+
+#: How often a running session re-checks whether its standing preferences have changed.
+#: `SessionStart` fires ONCE, so a rule written after a session opened never reached it --
+#: measured on a session that started a full day before the rule it needed existed and was
+#: still breaking it eighteen hours later.
+#:
+#: A quarter hour rather than every turn, and the difference is the whole design. Standing
+#: preferences are fetched at the top of a session precisely so they do not compete per
+#: prompt with the facts that prompt is about; re-asserting them every turn would undo
+#: that and undo PR #8 with it. What runs on every prompt is a timestamp comparison
+#: against a small JSON file. What runs four times an hour is one query.
+#:
+#: It was thirty minutes because the query cost 1,345 ms: `memory_standing` was not
+#: deployed, so the block came through `memory_since` from an early instant, which
+#: downloads the whole store -- 160 KB and 371 claims -- to select 32 procedural ones.
+#: `app.memvara.dev` now serves it, the plugin picked it up through `accepts()` with no
+#: change here, and the same block costs **222 ms**. Four of those an hour is less wall
+#: clock than two of the old ones, so the interval halves and the cost still falls.
 STANDING_REFRESH_SECONDS = 15 * 60
 
 

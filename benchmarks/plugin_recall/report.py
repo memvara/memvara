@@ -21,6 +21,15 @@ def _percentile(values: list[float], share: float) -> float:
     return ordered[min(len(ordered) - 1, int(len(ordered) * share))]
 
 
+#: Printed for either rate when the plugin never spoke. Both are withheld together: a run
+#: that cannot show the plugin capable of answering has not measured it in either
+#: direction.
+UNVALIDATED = (
+    "UNVALIDATED -- the plugin injected nothing on any prompt, including the\n"
+    "                 warmup, so a broken hook and a correctly quiet one are\n"
+    "                 indistinguishable. Neither rate is reported as a score.")
+
+
 def _rate(value: float | None, n: int, unavailable: str) -> str:
     return unavailable if value is None else f"{value * 100:5.1f}%  (n={n})"
 
@@ -68,12 +77,9 @@ def render(result: Result, *, verbose: bool = False) -> str:
         "",
         "  hit rate       "
         + _rate(s["hit_rate"], s["hit_cases"],
+                UNVALIDATED if not s["validated"] and s["hit_cases"] else
                 "unavailable -- no hit cases loaded; see cases/build_private.py"),
-        "  silence rate   " + _rate(
-            s["silence_rate"], s["silence_cases"],
-            "UNVALIDATED -- the plugin injected nothing on any prompt, including the\n"
-            "                 warmup. A broken hook scores 100% on a silence corpus, so\n"
-            "                 this is withheld rather than reported as a pass."),
+        "  silence rate   " + _rate(s["silence_rate"], s["silence_cases"], UNVALIDATED),
         "  balanced       "
         + _rate(s["balanced"], s["cases"],
                 "unavailable -- needs both populations, and is the only combined"

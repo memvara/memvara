@@ -117,6 +117,21 @@ class ScoringTests(unittest.TestCase):
         # quiet on.
         self.assertEqual(result.rate("silence"), 0.0)
 
+    def test_a_broken_plugin_is_not_given_a_zero_hit_rate_either(self):
+        """The guard covered silence and not hits, so the same run that withheld the
+        silence score as UNVALIDATED still printed `hit rate 0.0%` -- a verdict on
+        retrieval quality, published about software that never answered anything."""
+        with TemporaryDirectory() as tmp:
+            hits = Path(tmp) / "hits.jsonl"
+            hits.write_text(json.dumps({
+                "id": "h-1", "kind": "hit", "prompt": "who owns billing?",
+                "why": "seeded", "expect": ["Marco"]}) + "\n")
+            root = make_plugin(Path(tmp) / "p", BROKEN)
+            result = run(discover(str(root)), load(hits), cwd=Path(tmp))
+            self.assertFalse(result.validated)
+            self.assertIsNone(result.rate("hit"))
+            self.assertNotIn("0.0%", render(result))
+
     def test_hit_cases_are_unavailable_rather_than_zero_when_none_are_loaded(self):
         """`None`, never `0.0`. A plugin that was never asked a question has not failed
         it, and a report that prints 0% publishes an accusation it did not test."""
