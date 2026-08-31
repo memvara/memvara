@@ -330,10 +330,17 @@ def wrapped(phrase: str) -> re.Pattern[str]:
 #: Wordings this project has already paid to correct, as
 #: `(slug, pattern, what is wrong with it, what to write instead)`.
 #:
-#: Both entries are here because the same sentence had to be corrected more than once, in
+#: Every entry is here because the same sentence had to be corrected more than once, in
 #: different files, after a reviewer found it rather than the suite. The author of a
 #: correction knows which file they were editing, which is why the copy that survives is
 #: never the one they were looking at.
+#:
+#: The third entry is the clearest case of that, and of one more thing. The OAuth grant
+#: was corrected in `docs/integrations/mcp.md` and left at 90 days in five other files
+#: for a week. What made those copies worse than a stale number is that 90 days was the
+#: premise of the advice around it — *"a forgotten connector does not stay authorized
+#: forever"* is true at 90 days and false at ten years. A wrong figure usually drags a
+#: wrong instruction along behind it, so correcting the figure alone is not the fix.
 #:
 #: **The patterns are loose on purpose.** The first version of the second entry required
 #: `read` and `takes` to be adjacent, and so matched neither *"Every read in the API
@@ -363,6 +370,18 @@ RETIRED_WORDINGS = [
      "`TypeError`.",
      'write "eight reads take" and name them: `search`, `get_all`, `count`, `history`, '
      "`why`, `produced`, `neighborhood`, `paths_between`"),
+
+    ("oauth-grant-lasts-90-days",
+     wrapped(r"(?:lasts?|expires?|good for|valid for)\b(?:\s+\S+){0,4}\s+\**90 days"),
+     "The hosted OAuth grant runs for ten years — `DEFAULT_OAUTH_REFRESH_TTL` in "
+     "`memvara_cloud/control/store.py`. 90 days was corrected in "
+     "`docs/integrations/mcp.md` and left standing in five other files, including the "
+     "packaged skill. The number is not the whole of it: 90 days made *\"a forgotten "
+     "connector does not stay authorized forever\"* true, and at ten years the reverse "
+     "is true, so a sentence carrying the old figure usually carries advice that has "
+     "inverted with it.",
+     'write "the grant lasts until you revoke it, or ten years, whichever comes first" '
+     "and say that it does not lapse on its own"),
 ]
 
 

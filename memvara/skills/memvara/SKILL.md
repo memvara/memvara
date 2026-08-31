@@ -35,8 +35,8 @@ Read `references/integrate.md` before you write code or config.
 - **Air-gapped / the file must stay on this machine**: local stdio MCP. Last
   resort, not the default.
 
-Hosted MCP URL: `https://app.memvara.dev/mcp`. Approve in the browser. It lasts
-90 days.
+Hosted MCP URL: `https://app.memvara.dev/mcp`. Approve in the browser. The
+grant lasts until you revoke it, or ten years, whichever comes first.
 
 ## When it will not authenticate
 

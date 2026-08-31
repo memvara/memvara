@@ -402,6 +402,28 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The packaged skill said a hosted OAuth grant lasts 90 days. It lasts ten years.**
+  `DEFAULT_OAUTH_REFRESH_TTL` is `timedelta(days=3650)`. The 90-day figure was corrected
+  in `docs/integrations/mcp.md` and left standing in five other files:
+  `memvara/skills/memvara/SKILL.md`, that skill's `references/hosted-mcp.md`, both of
+  their mirrors under `plugin/skills/`, and `plugin/README.md`. The skill is the
+  expensive one — it is vendored by sha into seven downstream repositories, and it is
+  read by an agent that cannot go and check.
+
+  **The number dragged an inverted instruction behind it**, which is the part worth
+  reading twice. At 90 days, *"a forgotten connector does not stay authorized forever"*
+  is true and "open the approval page and click Allow again" is something a reader will
+  need to do. At ten years both are wrong, and the second sends somebody to re-approve a
+  grant that never lapsed. All three files now say the grant lasts until you revoke it,
+  or ten years, whichever comes first, and that it does not lapse on its own — so a
+  connector you stop using stays authorized until somebody revokes it in the console.
+
+  `tests/test_docs.py` gains a third `RETIRED_WORDINGS` entry so the figure cannot come
+  back. Its pattern tolerates the markup and the line break the live copies actually had
+  — `lasts **90 days**` and `It lasts\n90 days` both match — and it leaves alone the
+  unrelated 90-day spans elsewhere in the repository, such as the decay half-life in
+  `memvara/retrieve/scoring.py`.
+
 - **Two more copies of "every read takes the same three time keywords".**
   `docs/concepts/bitemporal-memory.md` now names the eight reads that do take them and
   the three that do not — and its heading, *The three reads*, is now *The three time
