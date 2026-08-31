@@ -1,0 +1,28 @@
+# Fifteen invented facts, and the question each one answers.
+#
+# Invented people, invented services, invented tickets. Nothing here came from a real user
+# or a real store, which is what makes the hit cases derived from it publishable -- the
+# reason the sibling agent_memory dataset gives for being synthetic applies here word for
+# word.
+#
+# Each fact carries two forms because memory systems take writes differently, and seeding
+# each through its own native path is the fair comparison: `triple` for stores that take
+# subject/predicate/object, `prose` for stores that take text. They state the same fact.
+#
+# `expect` is matched against whatever the plugin injects. The tokens are chosen to be
+# unguessable from the question alone -- a plugin cannot score by echoing the prompt back.
+{"id": "gate-command", "triple": ["hartley_api", "deploy gate command", "make verify, and it refuses to run on a dirty tree"], "prose": "The deploy gate for the Hartley API runs `make verify`, and it refuses to run on a dirty tree.", "question": "what does the deploy gate for Hartley run?", "expect": ["make\\s+verify"]}
+{"id": "review-order", "triple": ["priya", "pull request preference", "reviewed before merge, never after"], "prose": "Priya wants pull requests reviewed before merge, never after.", "question": "how does Priya want pull requests handled?", "expect": ["before\\s+merge"]}
+{"id": "staging-pg", "triple": ["redwood", "staging database", "Postgres 16, not 15"], "prose": "The staging database for Redwood is Postgres 16, not 15.", "question": "which Postgres version is Redwood staging on?", "expect": ["Postgres\\s+16"]}
+{"id": "ticket-dupe", "triple": ["QUAR-88", "rejected because", "it duplicated QUAR-40"], "prose": "Ticket QUAR-88 was rejected because it duplicated QUAR-40.", "question": "why was QUAR-88 rejected?", "expect": ["QUAR-40"]}
+{"id": "deploy-branch", "triple": ["kestrel", "deploys from", "the release branch, never from main"], "prose": "The Kestrel service deploys from the release branch, never from main.", "question": "which branch does Kestrel deploy from?", "expect": ["release\\s+branch"]}
+{"id": "nightly-time", "triple": ["nightly_builds", "run at", "02:30 UTC"], "prose": "Nightly builds run at 02:30 UTC.", "question": "when do the nightly builds run?", "expect": ["02:30"]}
+{"id": "py-drop", "triple": ["team", "dropped Python 3.9 support on", "2026-03-01"], "prose": "The team dropped Python 3.9 support on 2026-03-01.", "question": "when did we drop Python 3.9 support?", "expect": ["2026-03-01"]}
+{"id": "serial-tests", "triple": ["larkspur", "test suite must run with", "-j1, because parallel runs corrupt the fixture database"], "prose": "The Larkspur test suite must be run with -j1; parallel runs corrupt the fixture database.", "question": "how should I run the Larkspur test suite?", "expect": ["-j1", "fixture\\s+database"]}
+{"id": "rate-limit", "triple": ["vellum_endpoint", "rate limit", "240 requests per minute"], "prose": "The rate limit for the Vellum endpoint is 240 requests per minute.", "question": "what is the rate limit on the Vellum endpoint?", "expect": ["240"]}
+{"id": "billing-owner", "triple": ["billing_service", "owned by", "Marco, who takes billing questions"], "prose": "Marco owns the billing service; route billing questions to him.", "question": "who owns the billing service?", "expect": ["Marco"]}
+{"id": "ui-package", "triple": ["design_system", "published as", "@orchard/ui, not @orchard/design"], "prose": "The design system package is published as @orchard/ui, not @orchard/design.", "question": "what is the design system package called?", "expect": ["@orchard/ui"]}
+{"id": "flags-location", "triple": ["feature_flags", "live in", "config/flags.yaml, read at boot and not hot-reloaded"], "prose": "Feature flags live in config/flags.yaml and are read at boot, not hot-reloaded.", "question": "where do the feature flags live?", "expect": ["config/flags\\.yaml"]}
+{"id": "incident-cause", "triple": ["incident_2026_05_14", "caused by", "an expired TLS certificate on the edge proxy"], "prose": "The incident on 2026-05-14 was caused by an expired TLS certificate on the edge proxy.", "question": "what caused the incident on 2026-05-14?", "expect": ["TLS\\s+certificate", "edge\\s+proxy"]}
+{"id": "coverage-floor", "triple": ["coverage_gate", "threshold", "82 percent, below which the gate fails"], "prose": "The coverage threshold is 82 percent; the gate fails below it.", "question": "what is the coverage threshold?", "expect": ["82"]}
+{"id": "package-manager", "triple": ["monorepo", "package manager", "pnpm, because npm install breaks the workspace links"], "prose": "Use pnpm in this monorepo; npm install breaks the workspace links.", "question": "which package manager should I use in the monorepo?", "expect": ["pnpm"]}

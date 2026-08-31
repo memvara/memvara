@@ -494,6 +494,42 @@ def _sample(prompt: str, memories: "list[str]", *, anaphoric: bool) -> None:
 #: `app.memvara.dev` now serves it, the plugin picked it up through `accepts()` with no
 #: change here, and the same block costs **222 ms**. Four of those an hour is less wall
 #: clock than two of the old ones, so the interval halves and the cost still falls.
+#: Retrieval below this score is not injected. `Memvara.recall` has taken `min_score`
+#: since long before this hook existed and this file passed the 0.0 default, so every
+#: prompt got its `k` slots filled whether or not anything in the store was about it --
+#: "where should this helper live" answered with where the user lives, "start Plan B"
+#: answered with the billing plan catalogue.
+#:
+#: Measured, not chosen. `memvara.calibrate_min_score` separates questions a store should
+#: answer from plausible questions it should not, and on the plugin-recall benchmark's
+#: seeded store the two classes were fully separable with the floor at 0.2975 -- 15 of 15
+#: answerable kept, 22 of 22 unanswerable silenced. Rounded down to 0.29, because the
+#: calibrator places the floor midway between the best wrong answer and the weakest right
+#: one and rounding toward recall is the cheaper error: a missed memory costs one prompt,
+#: a wrong one can steer a whole turn.
+#:
+#: **Scores are not comparable between embedders**, so this default is right for the
+#: configuration it was measured on and is a starting point everywhere else. Recalibrate
+#: against your own store and set `MEMVARA_RECALL_MIN_SCORE`:
+#:
+#:     python -m benchmarks.plugin_recall.calibrate --db ~/.memvara/store.db
+MIN_SCORE = 0.29
+
+
+def _min_score() -> float:
+    """The configured floor. A bad value disables filtering rather than the hook.
+
+    `0` is a legitimate setting -- it restores the old unfiltered behaviour for anyone who
+    wants it -- so it is honoured rather than treated as unset.
+    """
+    raw = os.environ.get("MEMVARA_RECALL_MIN_SCORE")
+    if raw is None:
+        return MIN_SCORE
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return MIN_SCORE
+
 STANDING_REFRESH_SECONDS = 15 * 60
 
 
@@ -725,7 +761,8 @@ def main() -> int:
     query = f"{carried} {prompt}".strip() if (anaphoric and carried) else prompt
 
     try:
-        block, ok, why = fast_recall(query, k=K, budget=BUDGET, header=HEADER)
+        block, ok, why = fast_recall(query, k=K, budget=BUDGET, header=HEADER,
+                                     min_score=_min_score())
     except Exception:
         # A retrieval failure must not become a failed prompt.
         block, ok, why = "", False, ""
@@ -766,7 +803,8 @@ def main() -> int:
         if time.monotonic() - start < OVERALL_BUDGET_SEC:
             try:
                 wider, wider_ok, _ = fast_recall(query, k=EPISODE_K, budget=EPISODE_BUDGET,
-                                                 header=HEADER, include_episodes=True)
+                                                 header=HEADER, include_episodes=True,
+                                                 min_score=_min_score())
             except Exception:
                 wider, wider_ok = "", False
             if wider_ok and wider:

@@ -337,16 +337,20 @@ class HostedRecall:
     def recall(self, query: str, *, k: int = 6, budget: int = 700,
                header: "str | None" = None,
                include_episodes: bool = False,
-               memory_types: "list[str] | None" = None) -> str:
+               memory_types: "list[str] | None" = None,
+               min_score: float = 0.0) -> str:
         """Recall text, or raise `HostedError`. An empty string is a real answer.
 
         Empty means this store had nothing relevant, which is information; a failure means
         the question was never asked, which is not. They used to be the same value. See the
         module docstring.
         """
+        self.unfiltered = False
         if not query.strip():
             return ""
         args: dict = {"query": query, "k": k, "budget": budget}
+        if min_score:
+            args["min_score"] = min_score
         if include_episodes:
             args["include_episodes"] = True
         if memory_types:
@@ -358,6 +362,23 @@ class HostedRecall:
         try:
             text = self._call("memory_recall", args)
         except HostedError:
+            if min_score and "min_score" in args:
+                # The floor is enforced by whoever holds the scores, and on this route
+                # that is the server. If its `memory_recall` has no `min_score` branch,
+                # the only alternatives are to ask again without a floor or to return
+                # nothing at all -- and returning nothing would make a plugin that cannot
+                # yet filter look like a plugin with no memories.
+                #
+                # So the floor degrades here rather than the recall, and `unfiltered` is
+                # set so the caller can say so instead of quietly reporting a filtered
+                # answer it did not get. This self-heals the day the server grows the
+                # argument, with no release here.
+                del args["min_score"]
+                self.unfiltered = True
+                text = self._call("memory_recall", args)
+                if not text:
+                    return ""
+                return _reheader(text, header)
             if not include_episodes:
                 raise
             # `include_episodes` is the only boolean argument anywhere in the tool surface,

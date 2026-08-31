@@ -94,6 +94,7 @@ def _reason(exc: "BaseException") -> str:
 
 def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = None,
            include_episodes: bool = False, memory_types: "list[str] | None" = None,
+           min_score: float = 0.0,
            spawn: bool = True) -> "tuple[str, bool | None, str]":
     """Recall text for `query`, by whatever route is available.
 
@@ -132,6 +133,11 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
 
     if path is not None:
         request = {"q": query, "k": k, "budget": budget}
+        if min_score:
+            # Sent whenever it is set, so the daemon and the direct path apply the same
+            # floor. A daemon is an optimisation and never a dependency: the two routes
+            # returning different text for one query is the failure that rule exists for.
+            request["min_score"] = min_score
         if header:
             request["header"] = header
         if include_episodes:
@@ -162,7 +168,7 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
         try:
             text = client.recall(query, k=k, budget=budget, header=header,
                                  include_episodes=include_episodes,
-                                 memory_types=memory_types)
+                                 memory_types=memory_types, min_score=min_score)
         except Exception as exc:
             # Including HostedError. Nothing below this to fall through to -- but the
             # caller still has a banner to print, and "could not ask" is not "nothing
@@ -177,6 +183,8 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
 
     try:
         kwargs = {"k": k, "budget": budget}
+        if min_score:
+            kwargs["min_score"] = min_score
         if header:
             kwargs["header"] = header
         if include_episodes:

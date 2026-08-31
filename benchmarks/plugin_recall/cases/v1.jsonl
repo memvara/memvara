@@ -1,0 +1,33 @@
+# Plugin Recall Benchmark, corpus v1 -- silence cases only.
+#
+# Every prompt here is synthetic. None came from a real user, a real conversation or a real
+# store, and the whole file is safe to publish. The shapes are drawn from how developers
+# actually talk to a coding agent -- terse imperatives, bare acknowledgements, and ordinary
+# English words that collide with the vocabulary a developer's memory store is full of.
+#
+# The claim each case makes is the same: no memory store has an answer to this prompt, so
+# injecting anything is filler. That claim is what makes them store-independent, and it is
+# why a case whose answer might genuinely live in somebody's store does not belong here --
+# see CONTRIBUTING in README.md before adding one.
+{"id": "ack-ok", "kind": "silence", "prompt": "ok", "why": "A bare acknowledgement with no antecedent. There is no topic to retrieve against, so any injection was chosen by something other than relevance."}
+{"id": "ack-go-ahead", "kind": "silence", "prompt": "go ahead", "why": "Same as ack-ok. Anaphora resolution has nothing to resolve to in a session whose only prior turn is a warmup."}
+{"id": "ack-sounds-good", "kind": "silence", "prompt": "sounds good", "why": "Approval with no referent. A plugin that answers is answering the shape of a sentence, not its content."}
+{"id": "ack-thanks", "kind": "silence", "prompt": "thanks, that's all", "why": "A sign-off. The correct amount of context to add to a conversation that is ending is none."}
+{"id": "ack-say-ok", "kind": "silence", "prompt": "say ok", "why": "An instruction whose entire content is the word to emit. Observed to draw an unrelated memory in the field, which is the failure this case pins."}
+{"id": "trap-live", "kind": "silence", "prompt": "where should this helper live once we extract it?", "why": "Lexical trap on 'live'. Stores commonly hold a claim about where a person lives; a question about code placement is not that, and matching it is a same-word-different-sense error."}
+{"id": "trap-plan-b", "kind": "silence", "prompt": "start Plan B", "why": "Lexical trap on 'plan'. A fallback plan is not a billing plan, a project plan, or a plan catalogue, and every one of those is a phrase a developer's store is likely to contain."}
+{"id": "trap-table", "kind": "silence", "prompt": "let's table that for now", "why": "Lexical trap on 'table'. The idiom means to defer; a store's tables are database tables."}
+{"id": "trap-main", "kind": "silence", "prompt": "the main thing is it has to be fast", "why": "Lexical trap on 'main'. Not the default branch."}
+{"id": "trap-order", "kind": "silence", "prompt": "give me a rough order of magnitude", "why": "Lexical trap on 'order'. Not an ordering guarantee, a purchase order, or a sort order."}
+{"id": "trap-state", "kind": "silence", "prompt": "what's the current state of play?", "why": "Lexical trap on 'state'. An idiom for 'how are things', not application state or a state machine."}
+{"id": "trap-park", "kind": "silence", "prompt": "let's park this and come back to it", "why": "Lexical trap on 'park'. Deferral, not a parking lot or a parked domain."}
+{"id": "trap-gate", "kind": "silence", "prompt": "keep the gate open for now", "why": "Lexical trap on 'gate'. Stores belonging to developers are full of CI gates; this sentence is about neither."}
+{"id": "know-mutex", "kind": "silence", "prompt": "explain what a mutex is, briefly", "why": "General knowledge the model already has. Nothing about this person changes the answer, so retrieval can only add tokens."}
+{"id": "know-tcp-udp", "kind": "silence", "prompt": "what's the difference between TCP and UDP?", "why": "General knowledge. A memory store has no privileged view of the answer."}
+{"id": "calc-arith", "kind": "silence", "prompt": "what is 17 * 23", "why": "Pure computation. There is no personal fact that makes 391 more or less correct."}
+{"id": "calc-convert", "kind": "silence", "prompt": "convert 98.6F to celsius", "why": "Pure computation, as calc-arith."}
+{"id": "text-reverse", "kind": "silence", "prompt": "reverse the string 'benchmark' for me", "why": "A self-contained transformation. Every input needed is in the prompt."}
+{"id": "text-haiku", "kind": "silence", "prompt": "write a haiku about rain", "why": "A creative request with no factual dependency. Injecting a developer's project notes here is pure cost."}
+{"id": "fresh-voyager", "kind": "silence", "prompt": "what year did Voyager 1 launch?", "why": "A fact about the world, not about the user. Retrieval has nothing to contribute."}
+{"id": "fresh-sourdough", "kind": "silence", "prompt": "what hydration ratio should I use for a sourdough starter?", "why": "Outside any plausible engineering store. A hit here is evidence the plugin fills its slot regardless of topic."}
+{"id": "fresh-chess", "kind": "silence", "prompt": "is the Sicilian a good opening for a beginner?", "why": "As fresh-sourdough: a domain the store has no claim about."}
