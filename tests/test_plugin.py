@@ -159,3 +159,132 @@ def test_sync_script_writes_skill_and_lock(tmp_path) -> None:
     lock = (dest / "skill.lock").read_text(encoding="utf-8")
     assert "repo=memvara/memvara" in lock
     assert "sha=" in lock
+
+
+# The auth script lives inside the skill rather than beside it, and that is the whole
+# design. `skill.lock` already vendors the skill tree byte-for-byte into all seven plugin
+# repositories, so the script reaches every host through the sync that exists -- no second
+# lock file, no second drift guard. It is addressed the way `SKILL.md` already addresses
+# its own references, which was measured on three hosts before it was relied on: Codex,
+# Copilot and OpenCode each read a sibling file out of a skill's own directory, and each
+# answered "NO PROBE" with the skill unregistered and the files still on disk.
+AUTH_SCRIPT = SKILL / "scripts" / "memvara_auth.py"
+AUTH_INVOCATION = "python3 scripts/memvara_auth.py authenticate"
+AUTH_HEADING = "## When it will not authenticate"
+AUTH_COMMANDS = ("authenticate", "login", "logout", "stats")
+
+
+def test_the_skill_ships_the_auth_script() -> None:
+    """Positive, because a deletion is the failure this exists to catch.
+
+    Spelled "the tree contains no stray script" it would pass on a skill that had stopped
+    shipping the one users need, which is exactly the shape of guard this project has
+    been burned by: a check an absence satisfies has quietly stopped guarding.
+    """
+    assert AUTH_SCRIPT.is_file(), (
+        f"{AUTH_SCRIPT.relative_to(REPO)} is gone; the four auth commands and the "
+        "skill's own instructions both point at it")
+
+
+def test_the_skill_names_the_script_at_the_path_it_is_actually_at() -> None:
+    """The instruction and the file, compared against each other rather than each alone.
+
+    A path is the one thing here that fails silently: the model reads the line, runs it,
+    gets `No such file or directory`, and reports that memvara cannot authenticate. That
+    is how `${CLAUDE_PLUGIN_ROOT}` reached Grok's command files and expanded to nothing,
+    handing the shell an absolute path to a file that has never existed on any machine.
+    """
+    skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    assert AUTH_HEADING in skill, (
+        "SKILL.md no longer tells the model what to do when authentication fails, so "
+        "the script ships unreachable")
+    assert AUTH_INVOCATION in skill
+
+    # The claim resolved, not the spelling matched. A guard that checks the string agrees
+    # with an instruction that spells a plausible path into the wrong directory.
+    quoted = AUTH_INVOCATION.split("python3 ", 1)[1].split(" ", 1)[0]
+    assert (SKILL / quoted).is_file(), f"SKILL.md says {quoted}, and nothing is there"
+
+
+@pytest.mark.parametrize("command", AUTH_COMMANDS)
+def test_the_skill_names_every_command_the_script_accepts(command: str) -> None:
+    """Both directions: the script's own usage line is the referent, not this list.
+
+    A command added to the script and not to the skill is a capability no model will
+    ever offer; one removed from the script but left in the skill is an instruction that
+    fails when followed.
+    """
+    skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    usage = AUTH_SCRIPT.read_text(encoding="utf-8")
+    assert f"`{command}`" in skill or f"`{command} " in skill, (
+        f"the script accepts {command} and the skill never mentions it")
+    assert command in usage
+
+
+def test_the_script_accepts_exactly_the_commands_the_skill_advertises() -> None:
+    """The other direction of the pair above, read out of the script rather than asserted.
+
+    `COMMANDS` in the module is the referent. If it grows a command, this fails until
+    somebody decides whether the skill should say so.
+    """
+    import ast
+
+    tree = ast.parse(AUTH_SCRIPT.read_text(encoding="utf-8"))
+    found = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", "") == "COMMANDS" for t in node.targets):
+            found = set(ast.literal_eval(node.value))
+    assert found is not None, "the script no longer declares COMMANDS"
+    assert found == set(AUTH_COMMANDS), (
+        f"the script accepts {sorted(found)}; the skill documents "
+        f"{sorted(AUTH_COMMANDS)}")
+
+
+def test_the_script_is_standard_library_only() -> None:
+    """It runs on a machine that has never installed anything, which is the point of it.
+
+    A `pip install` in the recovery path is a recovery path that does not work on the
+    machine that needs it.
+    """
+    import ast
+    import sys
+
+    tree = ast.parse(AUTH_SCRIPT.read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module.split(".")[0])
+    outside = sorted(name for name in imported
+                     if name not in sys.stdlib_module_names and name != "certifi")
+    assert not outside, f"the auth script imports {outside}, which is not in the stdlib"
+
+    # `certifi` is the one exception, and only because it is optional. python.org's macOS
+    # build loads zero roots from the system trust store, so the script prefers certifi's
+    # bundle when it is importable and falls back to the default context when it is not.
+    # Promoted to a module-level import it stops being optional, and the script then dies
+    # at startup on exactly the machines it exists to rescue -- ones with no pip step.
+    top_level = {alias.name.split(".")[0]
+                 for node in tree.body if isinstance(node, ast.Import)
+                 for alias in node.names}
+    assert "certifi" not in top_level, (
+        "certifi is imported at module level; it must stay inside the try/except that "
+        "makes it optional, or the script requires a pip install to start")
+
+
+def test_the_script_runs_here_and_says_how_to_use_it() -> None:
+    """Executed, not read. A syntax error in a vendored file is invisible to a byte diff.
+
+    No network: an unknown command is rejected on shape before anything is dialled.
+    """
+    import subprocess
+    import sys
+
+    done = subprocess.run(
+        [sys.executable, str(AUTH_SCRIPT), "not-a-command"],
+        capture_output=True, text=True, timeout=60)
+    assert done.returncode == 2, done.stdout + done.stderr
+    for command in AUTH_COMMANDS:
+        assert command in done.stdout, f"the usage line omits {command}"

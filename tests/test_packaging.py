@@ -226,9 +226,47 @@ DYNAMIC_SDKS = {"langchain_core", "llama_index", "crewai", "langgraph"}
 # -- static import graph ------------------------------------------------------------
 
 
+#: The packaged skill is DATA that lives inside the package, not module source. It is what
+#: `memvara-mcp init` writes to disk and what the plugin repositories vendor, and since it
+#: gained `scripts/memvara_auth.py` it contains a `.py` file that no library code imports
+#: — a standalone script a person runs with `python3`. Walking it as though it were module
+#: source asks "what does the library import" of a file the library never touches, and the
+#: first thing that produced was a failure over the script's optional `certifi`.
+#:
+#: Narrow on purpose, and checked rather than trusted: `test_the_skill_tree_is_data_and_not
+#: _a_subpackage` below asserts nothing importable hides behind this exclusion. A directory
+#: quietly dropped from a guard's scope is how `AgentSetup.tsx` stopped being covered while
+#: every test still passed.
+SKILL_DATA = PACKAGE / "skills"
+
+
+def _module_paths() -> list[pathlib.Path]:
+    """Every importable module in the package — the skill's data tree excluded."""
+    return sorted(p for p in PACKAGE.rglob("*.py")
+                  if SKILL_DATA not in p.parents)
+
+
+def test_the_skill_tree_is_data_and_not_a_subpackage() -> None:
+    """The guard on the exclusion above.
+
+    If the skill tree ever gained an `__init__.py` it would become importable, its imports
+    would become the library's imports, and the exclusion would be hiding exactly what the
+    dependency guard exists to see. Stated positively — the tree must be present and must
+    contain the script — so deleting it fails here rather than silently satisfying
+    "no `__init__.py` in a directory that no longer exists".
+    """
+    assert SKILL_DATA.is_dir(), "the packaged skill tree is gone"
+    assert (SKILL_DATA / "memvara" / "scripts" / "memvara_auth.py").is_file(), (
+        "the skill no longer ships the auth script, and this exclusion is now excluding "
+        "nothing anybody decided to exclude")
+    assert [p for p in SKILL_DATA.rglob("__init__.py")] == [], (
+        "the skill tree has become an importable subpackage; it is excluded from the "
+        "dependency walk on the understanding that it is data")
+
+
 def _module_trees() -> list[ast.Module]:
     return [ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
-            for p in sorted(PACKAGE.rglob("*.py"))]
+            for p in _module_paths()]
 
 
 def _absolute_imports(nodes: Iterable[ast.AST]) -> set[str]:
@@ -363,7 +401,7 @@ def test_the_wheel_carries_every_module_in_the_package() -> None:
     It cannot fail any earlier: the source tree keeps working for everyone who has the
     repository, and only someone installing the wheel ever sees the missing module.
     """
-    expected = {f"memvara/{p.relative_to(PACKAGE).as_posix()}" for p in PACKAGE.rglob("*.py")}
+    expected = {f"memvara/{p.relative_to(PACKAGE).as_posix()}" for p in _module_paths()}
     assert expected <= _wheel_names(), (
         "modules in the tree and not in dist/. Either the build is dropping them or the "
         "wheel predates them — rebuild with `python3 -m build --wheel` and rerun before "
