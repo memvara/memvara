@@ -233,7 +233,10 @@ class VectorRAGMemory:
     def usage(self) -> Usage:
         # Rows held. This store appends every observation, so it equals the event count
         # — which is itself the finding: it keeps everything, and pays for it.
-        return Usage(llm_calls=0, embedding_calls=self._embeds,
+        # Texts, not requests: this store embeds exactly one text per call, so the two
+        # coincide here — but `Usage.texts_embedded` is defined as texts and an adapter
+        # that batched would have to divide differently.
+        return Usage(llm_calls=0, texts_embedded=self._embeds,
                      rows_stored=len(self._records), db_reads=self._reads)
 
     def close(self) -> None:

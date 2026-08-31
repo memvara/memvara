@@ -10,7 +10,7 @@ a numpy baseline beats memvara.
 
 ## The interface
 
-Four methods and two attributes. `benchmarks/agent_memory/adapters/base.py` is the
+Five methods and two attributes. `benchmarks/agent_memory/adapters/base.py` is the
 authority; this is the shape.
 
 ```python

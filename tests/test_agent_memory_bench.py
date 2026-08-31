@@ -490,6 +490,61 @@ def test_every_shipped_adapter_satisfies_the_protocol(name):
         system.close()
 
 
+#: `four` was wrong in five documents at once, propagated out of `adapters/base.py`'s
+#: docstring, so there was no correct copy for anything to disagree with.
+_NUMBER_WORDS = {3: "three", 4: "four", 5: "five", 6: "six", 7: "seven"}
+
+
+def test_the_documented_adapter_method_count_is_the_enforced_one():
+    """Every document stating how many methods an adapter needs must say the real number.
+
+    `registry.build` is the authority: it refuses a system missing any of them. The count
+    was documented as four in five places while five were required, and `usage` — the one
+    omitted from the prose — is exactly the one a contributor would then be told about by
+    a TypeError.
+    """
+    import re
+
+    required = ("reset", "remember", "query", "usage", "close")
+    correct = _NUMBER_WORDS[len(required)]
+    wrong = {w for n, w in _NUMBER_WORDS.items() if n != len(required)}
+
+    sources = [ROOT / "benchmarks" / "agent_memory" / "adapters" / "base.py",
+               ROOT / "docs" / "ROADMAP.md",
+               *(ROOT / "benchmarks").rglob("*.md"),
+               *(ROOT / "docs" / "benchmarks").rglob("*.md")]
+    pattern = re.compile(r"\b(\w+)[ -]methods?\b", re.IGNORECASE)
+    bad = []
+    for path in sources:
+        text = path.read_text(encoding="utf-8")
+        for match in pattern.finditer(text):
+            word = match.group(1).lower()
+            if word in wrong:
+                line = text[:match.start()].count("\n") + 1
+                bad.append(f"{path.relative_to(ROOT)}:{line}: {match.group(0)!r}")
+    assert not bad, (
+        f"an adapter needs {len(required)} methods ({', '.join(required)}), so these "
+        f"should say {correct!r}:\n" + "\n".join(bad))
+
+
+def test_the_registry_checks_exactly_the_protocol_methods():
+    """The list `registry.build` enforces and the protocol's own members must agree, or
+    one of them is documentation that nothing keeps true.
+
+    Derived from the class namespace rather than `__protocol_attrs__`, which `typing`
+    only grows in 3.12 — this test's first version used it, passed on the 3.13 it was
+    written on, and failed the 3.10 and 3.11 jobs. `requires-python` is `>=3.10`, so the
+    floor is what a guard has to run on.
+    """
+    import inspect
+
+    from benchmarks.agent_memory.adapters.base import MemorySystem
+
+    declared = {name for name, value in vars(MemorySystem).items()
+                if inspect.isfunction(value) and not name.startswith("_")}
+    assert declared == {"reset", "remember", "query", "usage", "close"}
+
+
 def test_an_adapter_can_be_named_by_import_path():
     system = registry.build("benchmarks.agent_memory.adapters.naive:build")
     try:
@@ -714,6 +769,36 @@ def test_the_memvara_write_path_makes_no_model_calls(memvara_run):
     """True by construction here — the adapter uses `remember()`, not `add()` — and
     recorded so that a change which introduced one would be visible."""
     assert memvara_run.usage.llm_calls == 0
+
+
+def test_memvara_counts_what_it_embeds(memvara_run, data):
+    """It embeds the claim and the turn the claim came from, and reported neither.
+
+    The column read `-` — *not measured*, which was honest and left the system doing the
+    most embedding as the one with no figure.
+    """
+    counted = memvara_run.usage.texts_embedded
+    assert counted is not None, "texts_embedded is measured now, not `-`"
+    expected = (memvara_run.usage.rows_stored + memvara_run.usage.extra["episodes"]
+                + sum(1 for q in data.questions if q.probe is None))
+    assert counted == expected, (
+        "claims + source episodes on the way in, then one per unprobed question")
+
+
+def test_the_counting_embedder_keeps_the_embedders_identity():
+    """`memvara.embed.fingerprint` derives a store's recorded identity from `name` and
+    `dim`. A wrapper that shadowed either would make a file-backed store refuse to reopen
+    with the very embedder that wrote it."""
+    from memvara.embed import Embedder, HashingEmbedder, fingerprint_of
+
+    from benchmarks.agent_memory.adapters.memvara_adapter import _CountingEmbedder
+
+    inner = HashingEmbedder(dim=512)
+    wrapped = _CountingEmbedder(inner)
+    assert isinstance(wrapped, Embedder)
+    assert fingerprint_of(wrapped) == fingerprint_of(inner)
+    wrapped.encode(["a", "b", "c"])
+    assert wrapped.texts_embedded == 3, "texts, not calls: a batch and a loop are equal work"
 
 
 def test_the_memvara_adapter_uses_the_provenance_api(memvara_run):

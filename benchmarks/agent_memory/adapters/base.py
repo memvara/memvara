@@ -1,9 +1,14 @@
 """The interface a memory system implements to be benchmarked.
 
-Four methods. `reset` clears the memory and hands over the predicate schema, `remember`
-delivers one observation, `query` answers one question, and `close` releases whatever
-was opened. Nothing else is required, and nothing about the benchmark's internals is
-exposed to an implementation.
+Five methods. `reset` clears the memory and hands over the predicate schema, `remember`
+delivers one observation, `query` answers one question, `usage` reports what the run cost,
+and `close` releases whatever was opened. Nothing else is required, and nothing about the
+benchmark's internals is exposed to an implementation.
+
+`usage` is easy to forget — it was missing from this list, and from the count in four other
+documents, until a review noticed that `registry.build` requires it and everything
+describing it said four. A system that measures nothing returns a bare `Usage()`; it still
+has to return one.
 
 ## What the answer has to be
 
@@ -101,7 +106,17 @@ class Usage:
     """
 
     llm_calls: int | None = None
-    embedding_calls: int | None = None
+    #: Texts submitted for embedding, **not** requests made. Batching is an
+    #: implementation detail of an embedding API — you send 64 or 100 texts per request
+    #: because that is how they are billed — so counting requests would report two
+    #: systems doing identical work as orders of magnitude apart.
+    #:
+    #: Defined because the field next to it was not, and that cost a published number
+    #: once already: `rows_stored` used to be `db_writes`, undefined, and three adapters
+    #: reported three different quantities through it. This one was left undefined in the
+    #: same commit that fixed that, and immediately grew the same split — memvara counting
+    #: texts, `vector-rag` counting calls, agreeing only because nothing batches yet.
+    texts_embedded: int | None = None
     #: Rows the store **holds** once every event has been delivered — not the number of
     #: write calls, which is always the event count and so says nothing about any system.
     #:
@@ -121,7 +136,7 @@ class Usage:
     def to_json(self) -> dict[str, object]:
         row: dict[str, object] = {
             "llm_calls": self.llm_calls,
-            "embedding_calls": self.embedding_calls,
+            "texts_embedded": self.texts_embedded,
             "rows_stored": self.rows_stored,
             "db_reads": self.db_reads,
         }

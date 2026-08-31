@@ -28,7 +28,9 @@ ending records a false reason for the change.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Mapping
+from typing import Any, Mapping, Sequence
+
+import numpy as np
 
 from memvara import (
     Cardinality,
@@ -55,6 +57,35 @@ EMBED_DIM = 512
 SEARCH_K = 10
 
 
+class _CountingEmbedder:
+    """`HashingEmbedder`, plus a tally of how many texts it was asked to encode.
+
+    memvara embeds on write and again on every unprobed read, and reports neither: the
+    library has no cost counter for it, so the benchmark's `texts_embedded` column read
+    `-` for memvara while both baselines reported a number. `-` means *not measured* and
+    was honest, but it left the one system doing the most embedding as the one with no
+    figure.
+
+    Counting texts rather than calls, because a batched call and a loop of single ones do
+    the same work and should read the same. `name` and `dim` are delegated so the
+    embedder's identity is unchanged: `memvara.embed.fingerprint` derives a store's
+    recorded identity from exactly those two, and a wrapper that shadowed the name would
+    make a file-backed store refuse to reopen with the embedder that wrote it.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.texts_embedded = 0
+        # Plain attributes rather than properties: `Embedder` declares `dim` as a
+        # settable variable, and a read-only property does not satisfy the protocol.
+        self.dim: int = int(inner.dim)
+        self.name: str = str(getattr(inner, "name", type(inner).__name__))
+
+    def encode(self, texts: Sequence[str]) -> "np.ndarray":
+        self.texts_embedded += len(texts)
+        return self._inner.encode(texts)
+
+
 class MemvaraMemory:
     """memvara, driven the way an application drives it."""
 
@@ -66,6 +97,7 @@ class MemvaraMemory:
         self._user = user
         self._mem: Memvara | None = None
         self._single: dict[str, bool] = {}
+        self._embedder: _CountingEmbedder | None = None
         self._reads = 0
 
     @property
@@ -86,8 +118,9 @@ class MemvaraMemory:
             ))
         # `NullLLM` because this adapter never calls `add()`: there is no text to
         # extract from, only structured facts to record.
+        self._embedder = _CountingEmbedder(HashingEmbedder(dim=EMBED_DIM))
         self._mem = Memvara(self._path, user=self._user, registry=registry,
-                            embedder=HashingEmbedder(dim=EMBED_DIM), llm=NullLLM())
+                            embedder=self._embedder, llm=NullLLM())
         self._reads = 0
 
     # -- write --------------------------------------------------------------
@@ -241,7 +274,8 @@ class MemvaraMemory:
         stats = self.mem.stats()
         return Usage(
             llm_calls=0,
-            embedding_calls=None,
+            texts_embedded=(self._embedder.texts_embedded
+                            if self._embedder is not None else None),
             rows_stored=int(stats.get("claims", 0)),
             db_reads=self._reads,
             extra={"episodes": int(stats.get("episodes", 0))},

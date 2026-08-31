@@ -11,6 +11,51 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **The Agent Memory Benchmark is reflected in the documents that describe this
+  project's evidence, and memvara's adapter now counts what it embeds.** Three gaps found
+  by auditing the shipped benchmark against the plan it was built from, rather than by
+  anything going red.
+
+  `docs/ROADMAP.md` did not mention the benchmark at all — 0 occurrences — which for the
+  document whose organizing theme is credibility was the wrong silence. It now carries it
+  as *4d*, beside the other Phase 4 measurements, with the result stated as measured:
+  three points over a numpy baseline, the whole lead in `temporal`, `retrieval` lost, and
+  `irrelevance` a three-way tie. *What is still missing* gains the two things that are
+  honestly missing — nobody outside this repository has reproduced it, and two of its
+  seven dimensions do not yet discriminate.
+
+  `CONTRIBUTING.md` told contributors the `bench/` conventions and never mentioned
+  `benchmarks/`, so somebody arriving to add an adapter had no route to the guide written
+  for them.
+
+  `Usage.embedding_calls` read `-` for memvara — *not measured*, honest, and it left the
+  system doing the most embedding as the one with no figure. A counting wrapper around
+  `HashingEmbedder` reports **520**, against `vector-rag`'s 279, and the split is exact:
+  241 claims plus 262 source episodes on the way in, then one per unprobed question.
+  memvara embeds the claim *and* the turn it came from, which is what lets `why()` answer
+  later. The wrapper delegates `name` and `dim` so `memvara.embed.fingerprint` derives the
+  same identity as the bare embedder and a file-backed store still reopens.
+
+  A review of that work found two more, fixed with it. `Usage.embedding_calls` was the
+  one cost field still without a docstring — the same undefined-field condition that had
+  just cost a published number one commit earlier — and it immediately grew the same
+  split: memvara counting texts, `vector-rag` counting requests, agreeing only because
+  neither batches. It is now `texts_embedded`, defined as texts, because batching is an
+  implementation detail of an embedding API and counting requests would report identical
+  work as orders of magnitude apart. The rename is disclosed in the result-schema section
+  rather than left to be discovered; it happened before anything consumed the schema, and
+  `benchmark_version` is unchanged because no score moved.
+
+  And the adapter interface is **five** methods, not four. `registry.build` has always
+  required `reset`, `remember`, `query`, `usage` and `close`; `adapters/base.py`'s
+  docstring named four and omitted `usage`, and four other documents copied the count —
+  so a contributor following the prose would learn about `usage` from a `TypeError`.
+  Wrong in every copy from the start, which is why nothing could disagree with it. A test
+  now scans every document that states a count against the list the registry enforces,
+  and fails naming the file and line.
+
+  No score changed: 92.0 / 89.0 / 50.0, and `datasets/v1` is untouched.
+
 - **`tests/test_docs.py` refuses a wording this project has already corrected.** Two
   entries, both earned: the sentence about what `add()` costs, and "every read takes all
   three". Between them they had six live copies across five files, none found by the
