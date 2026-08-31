@@ -44,27 +44,35 @@ python3 examples/temporal_memory_demo/demo.py --fast \
 ## The published GIF
 
 The one the README shows lives at
-<https://github.com/memvara/memvara/releases/latest/download/demo.gif>, attached to the
-GitHub Release for each tag by [`.github/workflows/demo-gif.yml`](../../.github/workflows/demo-gif.yml).
-That address always resolves to the newest release, so the README embeds it once and
-never changes again.
+<https://github.com/memvara/memvara/releases/latest/download/demo.gif>, put there by
+[`.github/workflows/demo-gif.yml`](../../.github/workflows/demo-gif.yml) when a release
+is published. That address always resolves to the newest release that is neither a draft
+nor a prerelease, so the README embeds it once and never changes again.
 
 **Nothing is checked in**, and that is the reason for the release asset rather than an
 omission. The GIF is 1.1 MB against a 2.3 MiB packed history, so committing it would
 make one binary about a third of every clone — and each regeneration would add another
 copy, permanently, because git keeps what it has seen. A release asset sits outside the
-object database and can be replaced instead of accumulated.
+object database and can be replaced instead of accumulated. `demo.gif` is in
+`.gitignore` at every depth, because the command below writes it into whatever directory
+you run it from.
 
-The workflow runs `record_gif.py` in its deterministic mode, then checks the file it
-produced: frame count, how many frames carry ink, and whether the delays still add up to
-about ninety seconds. Those are the three ways this can fail while exiting 0 — a font
-that loaded but drew nothing, a run that stopped part-way, and pacing that collapsed.
+**The workflow attaches to a release; it never creates one.** Publishing is a decision —
+`release.yml` waits on a human for exactly that reason — so a person publishes the
+release and this job only decorates it. To attach the GIF to a release that already
+shipped, or to republish after `demo.py` changes, run it from the Actions tab with the
+tag as its input.
+
+It runs `record_gif.py` in deterministic mode, then reads the file back: frame count, how
+many frames carry ink, and whether the delays still add up to about ninety seconds. Those
+are the three ways this can fail while exiting 0 — a font that loaded but drew nothing, a
+run that stopped part-way, and pacing that collapsed.
 
 Two things that look like the job failing and are not. A **prerelease does not move
-`latest`**, so tagging `v1.0.0rc1` leaves the README showing the previous release's GIF.
-And **GitHub caches README images through its camo proxy**, so a replaced asset can take
-a while to appear on the rendered page — read the release's own asset when you want to
-know what was published.
+`latest`**, so publishing `v1.0.0rc1` attaches the GIF to it and leaves the README
+showing the last full release's. And **GitHub caches README images through its camo
+proxy**, so a replaced asset can take a while to appear on the rendered page — read the
+release's own asset when you want to know what was published.
 
 ## Recording it yourself
 
@@ -127,10 +135,15 @@ flag. The default runs there like anywhere else. Both modes were confirmed to pr
 clock is a statement about time, not about what the program printed.
 
 It sizes the canvas to the content instead of to a fixed window, so the result is
-tighter than the tape's: about 811×534 and 1.1 MB against the tape's 1000×760, which is
+tighter than the tape's: 811×534 and 1.1 MB against the tape's 1000×760, which is
 four-fifths empty for the first half of the run. Pass `--cols 98 --rows 37` if you want
 the two to match. `--fast` replays the unpaced schedule, which is for checking the
 pipeline rather than for publishing.
+
+Nothing wraps, so a `--cols` narrower than the demo's longest line would clip its tail
+off the canvas — and a clipped frame is still full of ink, so no check downstream would
+notice. It refuses instead, naming the line and the width it needs. The longest line
+today is 78 characters against a default of 80.
 
 **Look at the frames before you publish one.** Nothing in the script can tell a correct
 frame from a blank one, and a missing font renders as tofu rather than as an error.

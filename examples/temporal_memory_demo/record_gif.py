@@ -78,6 +78,27 @@ FONT_CANDIDATES = (
 TAIL_HOLD = 4.0
 
 
+#: A codepoint no font has. Private Use Area, so nothing standard assigns it and
+#: nothing is going to: whatever a face draws for this is that face's .notdef, which is
+#: what it also draws for every other character it lacks.
+ABSENT = "\ue000"
+
+
+def has_glyph(font, character: str) -> bool:
+    """Whether `font` really carries `character`, rather than drawing tofu for it.
+
+    Asking Pillow for a mask and checking that it has a width does **not** answer this,
+    which is how the first version of this check passed a font with no box-drawing at
+    all. A missing glyph is not an empty bitmap — it is the .notdef box, a perfectly
+    ordinary 10×14 rectangle of ink. Rendering it into a frame produces a wall of tofu,
+    and every downstream check reads tofu as content, because it is.
+
+    So compare the bitmap against the one the font draws for a codepoint it certainly
+    lacks. Equal bitmaps mean both came out of .notdef.
+    """
+    return bytes(font.getmask(character)) != bytes(font.getmask(ABSENT))
+
+
 def load_font(size: int):
     """Pillow, and a face that can draw a box-drawing rule — or a refusal that says how.
 
@@ -96,10 +117,12 @@ def load_font(size: int):
     for path in FONT_CANDIDATES:
         if Path(path).exists():
             font = ImageFont.truetype(path, size)
-            if font.getmask("\u2500").size[0]:      # the rules are made of these
+            # The rules are made of U+2500 and the closing line uses an em dash. A face
+            # missing either renders that character as tofu, silently.
+            if all(has_glyph(font, character) for character in "\u2500\u2014"):
                 return font
     raise SystemExit(
-        "No monospace font with box-drawing glyphs was found. Install one (on Debian: "
+        "No monospace font carrying U+2500 and U+2014 was found. Install one (on Debian: "
         "apt-get install fonts-dejavu-core) or add its path to FONT_CANDIDATES.")
 
 
@@ -256,9 +279,41 @@ def screens(events, rows: int, duration: float):
     return frames
 
 
-def render(frames, out: Path, font, cols: int, rows: int, pad: int, line_h: int) -> None:
+def refuse_clipped_lines(frames, cols: int) -> None:
+    """Stop if the demo prints a line wider than the viewport.
+
+    The canvas is `cols` characters wide and nothing wraps, so a longer line simply runs
+    off the right edge and its tail is gone from the published GIF. Every check around
+    this one stays green while that happens: the event-stream tests compare what the demo
+    *printed*, and the frames are full of ink either way. The longest line today is 78
+    characters against a default of 80, so this has two characters of headroom and no
+    alarm on it.
+    """
+    longest = max(((len(line), line) for _at, screen in frames for line in screen),
+                  default=(0, ""))
+    if longest[0] > cols:
+        raise SystemExit(
+            f"a line is {longest[0]} characters and the viewport is {cols}, so its tail "
+            f"would be clipped off the canvas with nothing to show for it:\n"
+            f"    {longest[1]}\n"
+            f"Pass --cols {longest[0]} or more, or shorten the line in demo.py — and if "
+            "you shorten it, regenerate expected-output.txt in the same commit.")
+
+
+def render(frames, out: Path, font, cols: int, rows: int) -> None:
+    """Draw one GIF frame per instant, sized to the font rather than to fixed numbers.
+
+    `line_h` and `pad` are derived from the face because `--font-size` is a real option:
+    they used to be the literals 19 and 20, which are correct at the default size of 16
+    and silently wrong above it. At 28 the glyphs are 33 pixels tall on a 19-pixel pitch,
+    so every row overlaps the one below and the GIF is unreadable — with an exit code of
+    0 and a file of the expected size.
+    """
     from PIL import Image, ImageDraw
 
+    ascent, descent = font.getmetrics()
+    line_h = ascent + descent
+    pad = round(font.size * 1.25)
     width = int(cols * font.getlength("M")) + 2 * pad
     height = rows * line_h + 2 * pad
 
@@ -313,11 +368,27 @@ def main(argv: list[str] | None = None) -> int:
         events, duration = simulate(args.fast)
 
     frames = screens(events, args.rows, duration)
+    refuse_clipped_lines(frames, args.cols)
 
-    render(frames, args.out, font, args.cols, args.rows, pad=20, line_h=19)
+    render(frames, args.out, font, args.cols, args.rows)
+
+    # Read the counts back off the file rather than reporting the ones going in. They
+    # differ, and the difference is not a rounding error: Pillow merges frames that
+    # encode identically, and TAIL_HOLD adds a delay the input never had. This line used
+    # to say "63 frames, 90.3s" about a file holding 56 frames and 94.0 seconds, which
+    # is the same class of mistake as documentation that describes an older version of
+    # the code — it reads as fact and is checkable by nobody.
+    from PIL import Image
+    with Image.open(args.out) as gif:
+        count, encoded = gif.n_frames, 0.0
+        for index in range(gif.n_frames):
+            gif.seek(index)
+            encoded += gif.info["duration"] / 1000
+        size = gif.size
     size_mb = args.out.stat().st_size / 1_000_000
     how = "measured" if args.live else "deterministic"
-    print(f"{args.out}: {len(frames)} frames, {duration:.1f}s, {size_mb:.1f} MB ({how})")
+    print(f"{args.out}: {count} frames, {encoded:.1f}s, {size[0]}x{size[1]}, "
+          f"{size_mb:.1f} MB ({how})")
     print("Look at it before publishing it — this script cannot tell a correct frame "
           "from a blank one.")
     return 0

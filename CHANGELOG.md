@@ -11,15 +11,34 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **The demo GIF is published as a release asset, at a URL that never changes.**
+  `.github/workflows/demo-gif.yml` records the demo and attaches `demo.gif` to a GitHub
+  Release when one is published, so `releases/latest/download/demo.gif` always resolves
+  to the current demo and the README can embed it once. Nothing is committed: the GIF is
+  1.1 MB against a 2.3 MiB packed history, so a commit would make one binary about a
+  third of every clone and each regeneration would add another copy permanently. It is
+  also now in `.gitignore`, because the command the demo's README gives writes it into
+  the working directory.
+
+  **It attaches to a release and never creates one.** Firing on a tag push and creating
+  the release would announce a release before the human approval `release.yml`'s `pypi`
+  environment exists to require — one that might never reach PyPI — and, with no
+  `--prerelease` flag, would move `releases/latest` onto a release candidate. So a person
+  publishes the release and this job only decorates it. `workflow_dispatch` with a tag
+  attaches the asset to a release that already shipped.
+
+  The job reads the file back before uploading it: frame count, how many frames carry
+  ink, and whether the delays still add up to about ninety seconds. Those are the three
+  ways this pipeline fails while exiting 0 — a font that resolved but drew nothing, a run
+  that stopped part-way, and pacing that collapsed.
+
 - **`examples/temporal_memory_demo/record_gif.py`, a third way to record the demo.** The
   two routes the README already gave both want tooling a bare container does not have:
   VHS needs a Go toolchain, `ttyd` and `ffmpeg`, and asciinema needs a terminal to attach
-  to. This one needs Pillow and nothing else. It runs `demo.py` under a pty — not a pipe,
-  because a program writing to a pipe is block-buffered and would collapse ninety seconds
-  of pacing into one burst at exit — and encodes **one frame per output event** rather
-  than at a frame rate: the demo is ninety seconds of mostly still text, so 10fps would
-  be nine hundred frames that are almost all identical, where sixty-odd reproduce the
-  pacing exactly at about a megabyte.
+  to. This one needs Pillow and nothing else. It encodes **one frame per output event**
+  rather than at a frame rate: the demo is ninety seconds of mostly still text, so 10fps
+  would be nine hundred frames that are almost all identical, where fifty-six reproduce
+  the pacing exactly at about a megabyte.
 
   It sizes the canvas to the content rather than to a nominal window, which is where it
   differs from `demo.tape`: 811×534 against the tape's 1000×760, which is four-fifths
@@ -37,8 +56,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   milliseconds a frame, so they differ in bytes while being equally correct. The replay
   also takes about two seconds rather than ninety.
 
-  `--live` keeps the measured recording, under a pty, for anyone who wants wall-clock
-  evidence rather than a replay. The two were checked against each other and produce
+  `--live` keeps the measured recording for anyone who wants wall-clock evidence rather
+  than a replay. That one runs under a pty rather than a pipe, because a program writing
+  to a pipe is block-buffered and would collapse ninety seconds of pacing into one burst
+  at exit. It is POSIX-only for the same reason — a pty is — and refuses on Windows
+  naming the flag to drop; the default replay runs everywhere `requires-python` does. The two were checked against each other and produce
   **pixel-identical frames** — the virtual clock is a statement about time, not about
   what the program printed. `tests/test_examples.py` pins both halves: that two replays
   agree, and that what they replay is the transcript `expected-output.txt` holds. Both
@@ -49,8 +71,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   the first half is no longer true and the second never belonged in a file that outlives
   the session that wrote it. It now says what is true: no GIF is checked in because a GIF
   is a build product, and here are three ways to make one.
-
-### Added
 
 - **`examples/`, and a test suite that runs it.** Three programs a developer can run
   straight after `pip install memvara`: `temporal_memory.py` (one person moves twice, and
