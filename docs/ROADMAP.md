@@ -115,6 +115,42 @@ nothing until it finishes. Slice it with `--shuffle SEED --limit N`, or use the
 
 ---
 
+### 4d. A benchmark other systems can run — done, and memvara does not win it outright
+
+Everything else in Phase 4 measures memvara against something we wrote or something we
+chose. `benchmarks/agent_memory/` is the first measurement here that a *different* memory
+system can run on the same dataset, by the same rules, without forking this repository:
+262 events, 100 questions, 16 scenarios, a four-method adapter interface, a versioned
+dataset, a published result schema, and `--system` accepting a dotted import path. Offline
+and deterministic — `--repeat-check` runs a system twice and fails on a single differing
+verdict.
+
+The result is the reason it earns a line here rather than a bullet in the README:
+
+| | memvara | vector-rag | naive |
+|---|---:|---:|---:|
+| overall | **92.0%** | 89.0% | 50.0% |
+| temporal | **100.0%** | 91.5% | 34.0% |
+| retrieval | 64.3% | **71.4%** | 64.3% |
+| irrelevance | 50.0% | 50.0% | 50.0% |
+
+**Three points separate memvara from a baseline built out of numpy**, and the whole of the
+lead is the `temporal` dimension — where the four questions that separate them are the four
+delayed-knowledge and same-instant-correction scenarios. That is the narrow, specific claim
+the two clocks support, and it is narrower than the pitch: everywhere the two clocks
+coincide, a single-clock store is exactly right. memvara **loses** `retrieval`, and
+`irrelevance` is a three-way tie. Both are reported in the tables rather than a footnote,
+and the core weaknesses behind them are tracked in
+[#129](https://github.com/memvara/memvara/issues/129).
+
+`docs/benchmarks/agent-memory-benchmark.md` is the public report and
+`benchmarks/agent_memory/README.md` the methodology. What this does **not** close is
+[4b](#4b-locomo-and-longmemeval-done-for-retrieval-not-for-accuracy)'s open half: every
+system here is handed a structured fact, so extraction is held constant and nothing
+measures answers.
+
+---
+
 ## Phase 5 — Keep the promises the package already makes — **done, one item excepted**
 
 | gap | status |
@@ -597,13 +633,25 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
    the point: a stub reader picks the retrieved line with the most words in common with the
    question, so its accuracy column measures the corpus and the arms and nothing about
    answers.
-2. **No external user has run this in production.** 3,593 tests prove the code does what we
+2. **Nobody outside this repository has reproduced the Agent Memory Benchmark**, and two
+   of its seven dimensions do not yet discriminate. Every number in
+   [4d](#4d-a-benchmark-other-systems-can-run-done-and-memvara-does-not-win-it-outright)
+   was measured by the people who wrote both the benchmark and one of the systems in it —
+   which is the objection the whole design tries to answer and cannot answer alone. The
+   answer is somebody else's adapter, and the contributor guide exists for that.
+
+   `irrelevance` is a three-way tie at 50%, and `multi_hop` is 16.7% / 33.3% / 33.3%: no
+   system tested abstains when it knows nothing, and none joins two facts. A dimension all
+   three systems fail identically measures the field rather than the systems, and until
+   either the questions get harder or a system improves, those two rows carry no
+   information.
+3. **No external user has run this in production.** 3,593 tests prove the code does what we
    said it does. They prove nothing about what happens on someone else's data.
-3. **The English-centrism is measured, not fixed.** The salience gate and the fast extractor
+4. **The English-centrism is measured, not fixed.** The salience gate and the fast extractor
    are English sentence forms; other scripts fall through to the model, which is correct
    behaviour and a real cost. `gate.drop` and `fast.miss` are tagged by script so the gap is
    visible rather than assumed — but visible is not closed.
-4. **Entity resolution folds surface forms, it does not know the world.** `Stark` versus
+5. **Entity resolution folds surface forms, it does not know the world.** `Stark` versus
    `Stark Industries` is genuinely ambiguous and is left that way. So is the other
    direction — one surface form that has been two different things — and it is worse,
    because the fold is confident: two people who share a name are one entity, and on a
@@ -815,9 +863,10 @@ tier rather than leading it.
 
 The compliance market is slow, procurement-heavy, and reference-driven. It rewards a product
 with three named customers and punishes one with none. Phase 4 removed the "compared to
-what?" objection, but it did not produce a customer, and the second item under
-[What is still missing](#what-is-still-missing) is the one that matters commercially: nobody
-outside this repository has run it on real data.
+what?" objection, but it did not produce a customer, and the item under
+[What is still missing](#what-is-still-missing) about no external user having run this in
+production is the one that matters commercially: nobody outside this repository has run it
+on real data.
 
 If a faster route to first revenue matters more than the defensible position, the honest
 alternative is to chase developer adoption first — adapters, hosting, distribution — and

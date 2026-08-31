@@ -184,9 +184,16 @@ Cost and latency from the same runs:
 
 | System | LLM calls | embedding calls | rows stored | write, per event | query, mean | query p95 |
 |---|---:|---:|---:|---:|---:|---:|
-| memvara | 0 | not counted | 241 | 0.8 – 2.9 ms | 0.9 – 2.6 ms | 2 – 15 ms |
+| memvara | 0 | 520 | 241 | 0.8 – 2.9 ms | 0.9 – 2.6 ms | 2 – 15 ms |
 | vector-rag | 0 | 279 | 262 | 0.02 – 0.25 ms | 0.09 – 0.51 ms | 0.3 – 1.5 ms |
 | naive | 0 | 0 | **193** | 0.007 – 0.016 ms | 0.02 – 0.03 ms | 0.1 – 0.2 ms |
+
+**memvara embeds 520 texts against `vector-rag`'s 279**, and the split is exact: 241
+claims plus 262 source episodes on the way in, then one per unprobed question. It embeds
+the claim *and* the turn the claim came from, which is what makes `why()` able to answer
+later and is the second cost the row above is the first half of. Until this was measured
+the column read `-` for memvara, so the system doing the most embedding was the one with
+no figure.
 
 **Ranges, not points, and wide ones.** These span every run taken on one laptop that was
 also doing other work, and the same figure moved by about 3× between runs depending on

@@ -716,6 +716,36 @@ def test_the_memvara_write_path_makes_no_model_calls(memvara_run):
     assert memvara_run.usage.llm_calls == 0
 
 
+def test_memvara_counts_what_it_embeds(memvara_run, data):
+    """It embeds the claim and the turn the claim came from, and reported neither.
+
+    The column read `-` — *not measured*, which was honest and left the system doing the
+    most embedding as the one with no figure.
+    """
+    counted = memvara_run.usage.embedding_calls
+    assert counted is not None, "embedding_calls is measured now, not `-`"
+    expected = (memvara_run.usage.rows_stored + memvara_run.usage.extra["episodes"]
+                + sum(1 for q in data.questions if q.probe is None))
+    assert counted == expected, (
+        "claims + source episodes on the way in, then one per unprobed question")
+
+
+def test_the_counting_embedder_keeps_the_embedders_identity():
+    """`memvara.embed.fingerprint` derives a store's recorded identity from `name` and
+    `dim`. A wrapper that shadowed either would make a file-backed store refuse to reopen
+    with the very embedder that wrote it."""
+    from memvara.embed import Embedder, HashingEmbedder, fingerprint_of
+
+    from benchmarks.agent_memory.adapters.memvara_adapter import _CountingEmbedder
+
+    inner = HashingEmbedder(dim=512)
+    wrapped = _CountingEmbedder(inner)
+    assert isinstance(wrapped, Embedder)
+    assert fingerprint_of(wrapped) == fingerprint_of(inner)
+    wrapped.encode(["a", "b", "c"])
+    assert wrapped.texts_embedded == 3, "texts, not calls: a batch and a loop are equal work"
+
+
 def test_the_memvara_adapter_uses_the_provenance_api(memvara_run):
     """`why()` doing provenance work, rather than a shortcut through the claim's meta."""
     assert _verdict(memvara_run, "q-billing-prov").correct, "the earliest of four sources"

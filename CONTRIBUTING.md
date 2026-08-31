@@ -32,7 +32,18 @@ runtime, a property of what happens to be installed on the machine running it.
 
 `HashingEmbedder(dim=512)` is exactly what `default_embedder()` returns with
 sentence-transformers absent, so pinning it changes nothing about what a test measures.
-Under `bench/`, use `evalkit.build_embedder("hashing")`.
+Under `bench/`, use `evalkit.build_embedder("hashing")`; the Agent Memory Benchmark's
+memvara adapter pins the same embedder for the same reason, and wraps it to count what it
+embeds.
+
+**Adding a memory system to the Agent Memory Benchmark is a different job with its own
+guide.** `benchmarks/agent_memory/` is system-neutral by construction — the dataset, the
+questions and the scorer never name a system — so an adapter is one file implementing four
+methods, and `--system` takes a dotted import path, which means a system in another
+repository needs no change here at all.
+[`benchmarks/agent_memory/CONTRIBUTING.md`](benchmarks/agent_memory/CONTRIBUTING.md) has
+the interface and the rules that keep it fair. Adapters that beat memvara in a category are
+welcome, and there is already one in the published table.
 
 A handful of doctests are exempt, because zero-config `Memvara()` is the thing they
 document; `conftest.py` says which and why. The server tests used to be exempt too — they
