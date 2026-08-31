@@ -139,7 +139,7 @@ Requires Node 20 or newer.
 | Source | [github.com/memvara/memvara](https://github.com/memvara/memvara) |
 | Python package | [pypi.org/project/memvara](https://pypi.org/project/memvara/) |
 | Hosted service | [memvara.dev](https://memvara.dev) |
-| Client setup | [memvara.dev/docs/agents](https://memvara.dev/docs/agents) |
+| Client setup | [memvara.dev/docs/cloud](https://memvara.dev/docs/cloud) |
 | Issues | [github.com/memvara/memvara/issues](https://github.com/memvara/memvara/issues) |
 
 ## License

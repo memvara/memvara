@@ -10,7 +10,7 @@
       "name": "memvara",
       "description": "Hosted MCP plus the skill for using it.",
       "source": "./plugin",
-      "homepage": "https://memvara.dev/docs/agents",
+      "homepage": "https://memvara.dev/docs/cloud",
       "license": "Apache-2.0"
     }
   ]

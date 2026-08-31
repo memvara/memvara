@@ -29,14 +29,15 @@ This `plugin/` directory is the source layout those repos copy. Do not
 - OpenClaw: https://github.com/memvara/openclaw-memvara
 
 The plugin points at `https://app.memvara.dev/mcp`. The first connection
-opens a browser so you can click Allow. That grant lasts 90 days.
+opens a browser so you can click Allow. That grant lasts until you revoke
+it, or ten years, whichever comes first.
 
 It does not start a local Python process and it does not ship a Node
 installer.
 
 Claude Desktop, claude.ai, and ChatGPT do not install plugins this way.
 Paste the same URL into that client's connector settings instead:
-https://memvara.dev/docs/agents
+https://memvara.dev/docs/cloud
 
 Windsurf and Zed are local-command clients. Use `memvara-mcp init`, not this
 plugin.

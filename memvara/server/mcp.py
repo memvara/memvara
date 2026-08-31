@@ -62,7 +62,7 @@ INSTRUCTIONS = (
     "one records a false reason for the change that nothing downstream can detect. Real "
     "erasure is an operator action and is deliberately not exposed as a tool. Sequences "
     "that span these tools — a disputed memory, the bound scope, what is worth storing "
-    "— live in the memvara skill; see https://memvara.dev/docs/agents/skill"
+    "— live in the memvara skill; see https://memvara.dev/docs/cloud"
 )
 
 

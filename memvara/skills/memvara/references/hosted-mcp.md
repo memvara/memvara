@@ -9,8 +9,9 @@ deployment's business — a hosted one can be a release behind this library.
 URL: `https://app.memvara.dev/mcp`
 
 That Allow screen is OAuth. You are granting the client a project, not handing
-it a password. The grant lasts **90 days**. After that, open the approval page
-and click Allow again. A forgotten connector does not stay authorized forever.
+it a password. The grant lasts **until you revoke it, or ten years, whichever
+comes first**. It does not lapse on its own — a connector you stop using stays
+authorized until somebody revokes it in the console.
 
 ## Plugin (skill + this URL together)
 
@@ -56,7 +57,7 @@ sign-in.
 
 Windsurf and Zed are not on this list. They stay on the local command path.
 
-Per-client clicks: https://memvara.dev/docs/agents
+Per-client clicks: https://memvara.dev/docs/cloud
 
 ## Local process (fallback)
 
