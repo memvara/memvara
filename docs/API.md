@@ -35,7 +35,8 @@ mem.reset()                                       -> dict[str, int] # scope + sc
 #   so that `if mem.erase(id):` keeps working — a dict of zeroes is truthy
 
 # read
-# every read below takes the same three time keywords, written `T=` here for width:
+# a read shown with `T=` below takes the same three time keywords, written `T=` for
+# width; a read shown without one takes no time keyword at all:
 #   valid_at=  the world clock   known_at=  the belief clock   as_of=  both at once
 # the first three also take `states=`, any non-empty subset of ("live", "ended",
 # "retired"), defaulting to ["live"]; `include_invalidated=` is its two-valued alias.

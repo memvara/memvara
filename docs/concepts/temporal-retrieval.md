@@ -40,7 +40,9 @@ years. See
 
 ## Searching a past instant
 
-Every read takes the same three time keywords, and `search()` is no exception:
+Eight reads take the same three time keywords — `search`, `get_all`, `count`,
+`history`, `why`, `produced`, `neighborhood` and `paths_between` — and `search()`
+is the one this page is about:
 
 ```python
 mem.search("where do they live?", as_of=datetime(2026, 3, 20, tzinfo=UTC))

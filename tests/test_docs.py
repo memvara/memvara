@@ -293,3 +293,104 @@ def test_every_readme_link_back_into_the_readme_names_a_heading_it_has() -> None
         f"README.md links to its own {broken}, which is not a heading in it. Either the "
         "heading was renamed or the link was mistyped; the anchors it does have are "
         f"{sorted(have)}.")
+
+
+#: Every markdown file this repository ships, which is deliberately wider than
+#: `test_doc_links.DOCS`. That set is `README.md`, `docs/` and `examples/` — the reader's
+#: path — and a wording scan has to cover the copies *off* that path too: the packaged
+#: skill under `memvara/skills/memvara/`, its mirror under `plugin/skills/`, and the
+#: `README.md` files in `npm/`, `plugin/`, `demo/` and `release/`. The packaged skill is
+#: the sharpest of those and this file's own docstring says why — its tool list rotted
+#: exactly this way once, and it is vendored by sha into seven downstream repositories,
+#: so a wrong sentence there is a wrong sentence in all of them.
+#:
+#: Directories that are ignored or generated are skipped by name rather than by asking
+#: git, so this works from an unpacked sdist as well as from a checkout.
+SHIPPED_MARKDOWN = sorted(
+    p for p in ROOT.rglob("*.md")
+    if not {".git", ".pytest_cache", "local", "node_modules", ".venv"} & set(p.parts))
+
+#: `CHANGELOG.md` is not scanned. It quotes each wrong form inside the entry recording
+#: that the form was corrected, so scanning it would go red on the evidence that the fix
+#: happened. It is the one exclusion, and it is a property of what that file is for.
+NOT_SCANNED_FOR_WORDING = {"CHANGELOG.md"}
+
+
+def wrapped(phrase: str) -> re.Pattern[str]:
+    """`phrase`, with every space allowed to be a line break.
+
+    These files are hard-wrapped at about 95 columns, so a wording that sits on one line
+    today lands across two the moment a word ahead of it changes. A pattern that only
+    matches within a line stops working when the paragraph is re-flowed — silently, and
+    in exactly the case it was written for.
+    """
+    return re.compile(phrase.replace(" ", r"\s+"))
+
+
+#: Wordings this project has already paid to correct, as
+#: `(slug, pattern, what is wrong with it, what to write instead)`.
+#:
+#: Both entries are here because the same sentence had to be corrected more than once, in
+#: different files, after a reviewer found it rather than the suite. The author of a
+#: correction knows which file they were editing, which is why the copy that survives is
+#: never the one they were looking at.
+#:
+#: **The patterns are loose on purpose.** The first version of the second entry required
+#: `read` and `takes` to be adjacent, and so matched neither *"Every read in the API
+#: takes"* in `docs/concepts/bitemporal-memory.md` nor *"every read below takes"* in
+#: `docs/API.md` — two live copies, in the commit that added the guard. A pattern that
+#: only matches the exact sentence already fixed is a guard that reads as protection and
+#: is not.
+#:
+#: **What this does not do is worth stating, because the name suggests otherwise.** It
+#: catches a wording coming *back*. A fresh overstatement in fresh words passes it, and
+#: nothing in the suite sees that. The list is a record of mistakes made, not a model of
+#: the API, and the time to add an entry is after correcting a claim that turned out to
+#: have copies — not guessed at in advance.
+RETIRED_WORDINGS = [
+    ("add-costs-a-single-call",
+     wrapped(r"into (?:a single|one) (?:model )?call\b"),
+     "`add()` makes one *extraction* call, and a predicate the registry has not seen "
+     "before costs a second for acquisition. `WriteReceipt.llm_calls` counts both, so a "
+     "reader who takes the sentence at its word and then measures finds two.",
+     'write "a single extraction call"'),
+
+    ("every-read-takes",
+     wrapped(r"[Ee]very read\b(?:\s+\S+){0,3} takes\b"),
+     "`recall()`, `get()` and `since()` take none of the three time keywords — "
+     "deliberately, and `recall()`'s docstring says why — and `ask()` spells it `at=`. "
+     "Exactly eight reads take them, so any form of \"every read\" sends a reader into a "
+     "`TypeError`.",
+     'write "eight reads take" and name them: `search`, `get_all`, `count`, `history`, '
+     "`why`, `produced`, `neighborhood`, `paths_between`"),
+]
+
+
+@pytest.mark.parametrize("wording", RETIRED_WORDINGS,
+                         ids=[w[0] for w in RETIRED_WORDINGS])
+def test_no_document_brings_back_a_wording_this_project_has_corrected(
+        wording: tuple[str, re.Pattern[str], str, str]) -> None:
+    """A claim corrected in one file and left standing in another is the whole failure.
+
+    Four copies, across two claims, none of them found by the suite. The sentence about
+    what `add()` costs was fixed in `README.md` and left in `docs/FAQ.md`, four lines
+    above that page's own promise that `WriteReceipt.llm_calls` reports the cost so the
+    claim is checkable — an invitation to go and check it and find the page wrong. "Every
+    read takes all three" was fixed in the README's feature strip and left in the README's
+    own *Temporal memory* section, in `docs/concepts/temporal-retrieval.md`, in
+    `docs/concepts/bitemporal-memory.md`, and in `docs/API.md`, where it is contradicted
+    four lines later by the listing it introduces.
+
+    Every shipped markdown file is scanned, rather than the pair that happened to
+    disagree, because the copy that survives is never in the file you are looking at.
+    """
+    _slug, pattern, why, instead = wording
+    hits = []
+    for doc in SHIPPED_MARKDOWN:
+        if doc.name in NOT_SCANNED_FOR_WORDING:
+            continue
+        text = doc.read_text(encoding="utf-8")
+        hits += [f"  {doc.relative_to(ROOT)}:{text[:m.start()].count(chr(10)) + 1}: "
+                 f"{' '.join(m.group(0).split())!r}" for m in pattern.finditer(text)]
+
+    assert not hits, "\n".join([f"{why}\n\nSo {instead}. Found in:", *hits])
