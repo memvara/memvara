@@ -286,6 +286,22 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`docs/integrations/mcp.md` said a hosted OAuth grant is "good for 90 days".** It is
+  ten years, or until you revoke it. `memvara-cloud`'s `control/store.py` sets
+  `DEFAULT_OAUTH_REFRESH_TTL = timedelta(days=3650)`, and no 90-day TTL exists anywhere in
+  that service — the session is 14 days, the device grant 15 minutes, the access token an
+  hour, and the only 90-day numbers are job and governance retention, which are not this.
+  The page understated the grant by about 40x, in the direction that costs a reader work:
+  somebody reading it re-approves every quarter for no reason. `memvara.dev` has said ten
+  years all along, so the site and the backend agreed with each other and this file
+  disagreed with both.
+
+- **The same paragraph sent readers to `memvara.dev/docs/agents`**, a retired URL that
+  redirects to `/docs/cloud`, and listed five clients where there are nine. Both are
+  corrected, and this file is where it matters most now: the README's new *Quickstart*
+  links here directly.
+
+
 - **The README and `docs/FAQ.md` said `add()` batches what survives into "a single
   call".** It is a single *extraction* call. A predicate the registry has not seen before
   costs a second one for acquisition, and `WriteReceipt.llm_calls` counts both — so the
