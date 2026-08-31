@@ -24,8 +24,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import pathlib
+
 import pytest
 
+from memvara.server import config as config_module
 from memvara.server import login as login_module
 from memvara.server.login import LOGIN_USAGE, login
 
@@ -91,14 +94,6 @@ def _no_browser(monkeypatch) -> None:
 def _no_loopback(monkeypatch) -> None:
     """Simulate a sandboxed environment where binding 127.0.0.1 fails."""
     monkeypatch.setattr(login_module, "_bind_loopback_listener", lambda: None)
-
-
-@pytest.fixture(autouse=True)
-def _credentials_in_tmp(tmp_path, monkeypatch):
-    """Login writes this path on success. Redirecting it used to be opt-in,
-    and every test that forgot overwrote ~/.memvara/credentials.json with
-    the fixture key. Three real files so far."""
-    monkeypatch.setattr(login_module, "_CREDENTIALS_PATH", tmp_path / "credentials.json")
 
 
 AUTH_BODY = {
@@ -508,3 +503,26 @@ def test_bind_loopback_listener_returns_none_when_binding_fails(monkeypatch):
 
     monkeypatch.setattr(login_module, "HTTPServer", raise_oserror)
     assert login_module._bind_loopback_listener() is None
+
+
+def test_no_test_in_this_repository_can_reach_the_real_credentials_file():
+    """The redirect is on by default for every test, not opt-in per file.
+
+    This is the guard on the fixture rather than on any one caller. `login.py` writes
+    `_CREDENTIALS_PATH` on success, and for a long time only this file redirected it --
+    so the hole was never a test that forgot, it was the next file that never knew. That
+    happened three times, and each time a real 0600 key was replaced by `key-123`. The
+    API returns a key exactly once; there was nothing to restore from.
+
+    Asserted from inside an ordinary test, with no fixture requested by name, because
+    that is the state every future test starts in.
+    """
+    real = pathlib.Path.home() / ".memvara" / "credentials.json"
+    for name, value in (("login._CREDENTIALS_PATH", login_module._CREDENTIALS_PATH),
+                        ("config.CREDENTIALS_PATH", config_module.CREDENTIALS_PATH)):
+        assert value != real, (
+            f"{name} still points at the developer's own credentials; a test that "
+            "writes it destroys a key that cannot be recovered")
+        assert pathlib.Path.home() not in value.parents, (
+            f"{name} is inside the developer's home directory ({value}); redirecting it "
+            "to a different name under the same home is not isolation")

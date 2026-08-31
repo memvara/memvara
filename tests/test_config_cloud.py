@@ -110,12 +110,19 @@ def test_a_missing_credentials_file_is_treated_as_not_logged_in(tmp_path, monkey
         ServerConfig.from_env({"MEMVARA_MODE": "cloud"})
 
 
-def test_credentials_path_constant_matches_logins_own(monkeypatch):
+def test_credentials_path_constant_matches_logins_own():
     """`config.py`'s module docstring says this path is kept equal to `login.py`'s by
-    construction; assert it rather than only asserting it in prose."""
-    from memvara.server.login import _CREDENTIALS_PATH
+    construction; assert it rather than only asserting it in prose.
 
-    assert CREDENTIALS_PATH == _CREDENTIALS_PATH
+    Read from `conftest`, which captured both before the autouse redirect ran. This used
+    to compare a module-level `from ... import` -- bound at collection, so never
+    redirected -- against a call-time read of the other, which is. Once every test runs
+    under the redirect those two are different by construction, and the test failed while
+    the invariant it names was untouched.
+    """
+    from conftest import REAL_CONFIG_CREDENTIALS_PATH, REAL_LOGIN_CREDENTIALS_PATH
+
+    assert REAL_CONFIG_CREDENTIALS_PATH == REAL_LOGIN_CREDENTIALS_PATH
 
 
 # -- build_memvara(mode="cloud") ---------------------------------------------------------
