@@ -776,6 +776,21 @@ def build() -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]
     return meta, list(_events), _interleave(_questions)
 
 
+def _write(path: Path, lines: list[str]) -> None:
+    """Write `lines`, each terminated by a single LF, on every platform.
+
+    `newline="\n"` is the whole point of this function existing. Without it Python
+    translates `\n` to `os.linesep` on write, so the same generator emits LF on Linux and
+    CRLF on Windows — and this dataset is a byte-exact artefact that the suite compares
+    and CI diffs. The two `.jsonl` files were written correctly and `metadata.json` was
+    not, which is exactly the kind of difference that survives review: one call out of
+    three, in a file nobody rereads once it works. All three now go through here.
+    """
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for line in lines:
+            handle.write(line + "\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Write the three files. `--out DIR` sends them somewhere else, which is how the
     test suite regenerates and compares without touching the committed copies."""
@@ -785,12 +800,9 @@ def main(argv: list[str] | None = None) -> int:
 
     meta, events, questions = build()
     out.mkdir(parents=True, exist_ok=True)
-    (out / "metadata.json").write_text(
-        json.dumps(meta, indent=2, sort_keys=False) + "\n", encoding="utf-8")
-    for name, rows in (("events.jsonl", events), ("questions.jsonl", questions)):
-        with (out / name).open("w", encoding="utf-8", newline="\n") as handle:
-            for row in rows:
-                handle.write(json.dumps(row, sort_keys=False) + "\n")
+    _write(out / "metadata.json", [json.dumps(meta, indent=2, sort_keys=False)])
+    _write(out / "events.jsonl", [json.dumps(row, sort_keys=False) for row in events])
+    _write(out / "questions.jsonl", [json.dumps(row, sort_keys=False) for row in questions])
     print(f"{len(events)} events, {len(questions)} questions, "
           f"{meta['counts']['scenarios']} scenarios -> {out}")
     return 0

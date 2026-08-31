@@ -80,6 +80,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   absorbed rather than the adapter getting right; and the leaderboard sliced dimension
   names to 13 characters, printing `knowledge_tim`.
 
+  Line endings are pinned on both sides. `datasets/build_v1.py` wrote its two `.jsonl`
+  files with `newline="\n"` and `metadata.json` without it, so on Windows the generator
+  emitted CRLF for one file of the three — one call out of three, in a file nobody
+  rereads once it works. All three now go through one writer. `RunResult.write` had the
+  same latent bug and is fixed with it: nothing compares a result file's bytes today,
+  which is exactly why it would have gone unnoticed until two runs from different
+  platforms were diffed.
+
   `.gitattributes` pins `benchmarks/agent_memory/datasets/` to `eol=lf`. The dataset is
   a byte-exact artefact — the suite regenerates it and compares bytes, and CI diffs the
   regenerated copy against the committed one — and nothing declared its line endings, so

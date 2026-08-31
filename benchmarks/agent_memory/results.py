@@ -162,9 +162,13 @@ class RunResult:
     def write(self, path: str | Path, *, include_judgements: bool = True) -> None:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
+        # `newline="\n"` for the reason `datasets/build_v1.py::_write` gives: without it
+        # Python translates to `os.linesep` on write, and this file is the interchange
+        # format a leaderboard reads and two runs get diffed in. Nothing compares its
+        # bytes today, which is precisely why it would have gone unnoticed.
         target.write_text(
             json.dumps(self.to_json(include_judgements=include_judgements), indent=2) + "\n",
-            encoding="utf-8")
+            encoding="utf-8", newline="\n")
 
 
 def comparable(payload: Mapping[str, Any]) -> dict[str, Any]:
