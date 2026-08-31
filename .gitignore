@@ -41,3 +41,12 @@ __pycache__/
 # registration file shipped to all of them, and each of those repositories generates its
 # own from the host it names. Leading slash: this is the one path, not any hooks.json.
 /plugin/hooks/hooks.json
+
+# The demo recording. `examples/temporal_memory_demo/record_gif.py` writes it wherever it
+# is told, and the command in that directory's README writes it here. It is a build
+# product of `demo.py` — published as a release asset by `.github/workflows/demo-gif.yml`,
+# never committed — and it is 1.1 MB against a 2.3 MiB packed history, so one accidental
+# commit makes a single binary a third of every clone, permanently. No slash, because the
+# thing to prevent is the file arriving in whichever directory somebody happened to run
+# the recorder from.
+demo.gif
