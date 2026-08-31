@@ -38,6 +38,7 @@ one thing. Regenerate it with:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -51,14 +52,21 @@ EXAMPLES = ROOT / "examples"
 def run(script: Path, *args: str) -> str:
     """Run one example the way a reader would, and return what it printed.
 
-    `cwd=ROOT` and no `PYTHONPATH`: the examples import `memvara` and nothing else, so
-    they must work against the installed package. An example that only runs with the
-    repository on the path is an example that fails for everyone who pip-installed.
+    `cwd=ROOT` and `PYTHONPATH` explicitly removed: the examples import `memvara` and
+    nothing else, so they must work against the *installed* package. An example that only
+    runs with the repository on the path is an example that fails for everyone who
+    pip-installed.
+
+    Removed rather than merely not set, because a subprocess inherits the environment: on
+    a developer machine that exports `PYTHONPATH=.` — which `bench/` and `demo/` both
+    need — the repository would be on the path anyway and this test would quietly stop
+    asking its question.
     """
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     # `encoding="utf-8"` rather than bare `text=True`: the demo writes box-drawing
     # characters, and `text=True` decodes with the *parent's* locale — cp1252 on Windows,
     # which would turn a correct transcript into a mismatch against the golden file.
-    proc = subprocess.run([sys.executable, str(script), *args], cwd=ROOT,
+    proc = subprocess.run([sys.executable, str(script), *args], cwd=ROOT, env=env,
                           capture_output=True, text=True, encoding="utf-8", timeout=300)
     assert proc.returncode == 0, (
         f"{script.relative_to(ROOT)} exited {proc.returncode}\n"
@@ -231,5 +239,18 @@ def test_every_example_is_listed_in_the_examples_index(script: Path) -> None:
     """
     index = (EXAMPLES / "README.md").read_text(encoding="utf-8")
     rel = script.relative_to(EXAMPLES).as_posix()
-    assert rel in index or script.parent.name in index, (
-        f"{rel} is not mentioned in examples/README.md")
+
+    # The path, or the directory that holds it *written as a path* — `temporal_memory_demo/`
+    # is listed as a directory rather than by its `demo.py`. The bare directory *name* is
+    # not enough: `script.parent.name` is "examples" for anything at the top level, the
+    # word "examples" is all over this index, and the assertion passed for every possible
+    # file. A guard that cannot fail is worse than none, because the suite reports it green.
+    parent = script.parent.relative_to(EXAMPLES).as_posix()
+    # `parent` is "." for a file directly under examples/, and "./" occurs inside every
+    # "../docs/..." link in the index — so the directory fallback applies to real
+    # subdirectories only. Getting this wrong is how the first version of this assertion
+    # passed for every conceivable file.
+    listed = rel in index or (parent != "." and f"{parent}/" in index)
+    assert listed, (
+        f"{rel} is not mentioned in examples/README.md. Add it to the index — an example "
+        "nobody links to is an example nobody runs.")

@@ -41,6 +41,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   Every page a reader can arrive at now ends with a navigation footer, and
   `tests/test_docs.py` fails if a new one does not.
 
+- **`tests/test_docs.py` also executes the getting-started pages.** Nothing ran the
+  documentation before this, and one page did not survive being run: `first-memory.md` had
+  an `added[0]` after a write that reinforced rather than added, a history printed in the
+  wrong order because one write in the slot was undated, and two `forget()` variants shown
+  as alternatives but written as a sequence. All three read perfectly and none of them ran.
+  Every python block on a page in `RUNNABLE_PAGES` now executes in reading order, in a
+  subprocess from a temporary directory; a block that is an illustration rather than a step
+  says so in the source with `<!-- runnable: no — <reason> -->`, which renders as nothing.
+
 - **`tests/test_docs.py`,** which checks three things nothing checked before. The README's
   links are absolute — they have to be, because `README.md` is also the PyPI project page,
   where a relative link resolves against `pypi.org` and 404s — so `test_doc_links.py`
@@ -73,14 +82,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `docs/*.md`, which was correct while every document sat directly in `docs/` and silently
   stopped covering anything the moment a subdirectory existed. A guard that quietly narrows
   is worse than one that was never written, because the suite still reports it as passing.
-
-### Fixed
-
-- **`docs/DESIGN.md` printed an `Explanation.summary()` the code no longer produces.** The
-  line was missing `raw=` and `intent=`, both of which the retriever has emitted for some
-  time. Replaced with a real one, reproduced from a store the surrounding example
-  describes, plus a sentence on why the arrow points at the normalised score rather than
-  at `raw`.
 
 
 - **`memory_add`'s `role` now says what it decides, and the skill stops calling the tool
@@ -121,6 +122,57 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   a handle is sent to `memory_search`; the missing piece was the instruction to go and get
   one, plus the reminder to check a claim against the thing it describes rather than
   against another note in the same store.
+
+### Fixed
+
+- **`docs/getting-started/first-memory.md` did not run.** Rewritten so it does, with every
+  printed value taken from a real run: the stores are in-memory so a section that says it
+  starts fresh genuinely does, the three corrections are shown as alternatives from one
+  starting state rather than as a sequence that closes the slot on the first, and the page
+  now says what `at=` earlier than a claim's own `valid_from` does — `valid_to` clamps
+  forward to `valid_from`, giving a zero-length interval that answers at no instant, with
+  nothing raised.
+
+- **Two architecture diagrams named a method that does not exist.** `README.md` and
+  `docs/reference/architecture.md` both listed `end` on the `Memvara` facade. There is no
+  `Memvara.end`; ending a fact is `forget(close="ended")` or `delete(close="ended")`. Both
+  diagrams now name `erase`, and every method either of them lists is asserted to exist.
+
+- **Two new guards did not guard.** `test_the_readme_names_no_repository_path_relatively`
+  inspected raw-HTML `href=` only, so an ordinary relative markdown link — the commoner way
+  to write that mistake — passed it and passed `test_doc_links`, whose "does this resolve"
+  question a relative path answers correctly from the repository root and wrongly from
+  pypi.org. And `test_every_example_is_listed_in_the_examples_index` fell back to
+  `script.parent.name`, which is `examples` for anything at the top level and appears
+  throughout the index, so it passed for every conceivable file. Both now fail on the case
+  they are named for.
+
+- **`test_examples.py`'s `run()` promised an environment it did not build.** Its docstring
+  said "no `PYTHONPATH`" while the subprocess inherited it, so on a machine exporting
+  `PYTHONPATH=.` — which `bench/` and `demo/` both need — the examples would have been
+  tested against the checkout rather than the installed package. It now passes an explicit
+  `env` with `PYTHONPATH` removed.
+
+- **The `pyproject.toml` hand parser mis-read comments.** Once arrays could span lines, a
+  comment line whose prose ended in `]` closed the array early and an inline comment after
+  an entry became an entry — both producing a silently wrong table rather than an error, on
+  3.10, which is the interpreter where the `tomllib` agreement test skips. Comment
+  stripping is now quote-aware, and agrees with `tomllib` on a bracket-ending comment, an
+  inline comment, and a `#` inside a string.
+
+- **`examples/temporal_memory.py` claimed a test that does not exist.** Its docstring said
+  the output matches `examples/README.md` line for line and that the suite asserts it;
+  the index holds no transcript and nothing compared them. It now states what is actually
+  asserted.
+
+- **A `### Fixed` heading was inserted above two pre-existing `Unreleased` entries**,
+  silently reclassifying a behaviour change as a fix. Moved below them.
+
+- **`docs/DESIGN.md` printed an `Explanation.summary()` the code no longer produces.** The
+  line was missing `raw=` and `intent=`, both of which the retriever has emitted for some
+  time. Replaced with a real one, reproduced from a store the surrounding example
+  describes, plus a sentence on why the arrow points at the normalised score rather than
+  at `raw`.
 
 ## [0.9.0] — 2026-08-30
 

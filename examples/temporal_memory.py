@@ -18,8 +18,9 @@ supersession that closes Berlin's interval is an indexed lookup on
 a second value for one subject is a contradiction by definition rather than by
 similarity.
 
-Run it and the printed output matches `examples/README.md` line for line;
-`tests/test_examples.py` asserts that, so this file cannot drift from what it claims.
+`tests/test_examples.py` runs this file and asserts on what it prints — the three
+answers, the timeline with its two `ended` values, and the narrated form — so the claims
+above cannot drift from what the code does.
 """
 
 from datetime import datetime, timezone

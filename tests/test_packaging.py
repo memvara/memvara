@@ -63,13 +63,33 @@ def _toml_table(table: str) -> dict[str, str | list[str]]:
     def items(body: str) -> list[str]:
         return [item.strip().strip("\"'") for item in body.split(",") if item.strip()]
 
+    def uncommented(text: str) -> str:
+        """`text` with a trailing `# ...` removed, unless the `#` is inside a string.
+
+        Needed once arrays could span lines. Two ways the naive version was wrong, and
+        both produce a silently *wrong* table rather than an error: a comment line whose
+        prose happens to end in `]` closed the array early, and an inline comment after an
+        entry became an entry of its own. Quote-aware because a `#` inside a value is
+        data — no entry here contains one today, and a parser that depends on that is a
+        parser that breaks on the day one does.
+        """
+        quote = ""
+        for i, ch in enumerate(text):
+            if quote:
+                if ch == quote:
+                    quote = ""
+            elif ch in "\"'":
+                quote = ch
+            elif ch == "#":
+                return text[:i]
+        return text
+
     for raw in PYPROJECT.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
+        line = uncommented(raw).strip()
         if key_open is not None:
-            # Inside a multi-line array. A comment line here is a comment about the
-            # entries, not an entry, so it is dropped exactly as it is at top level.
-            if not line.startswith("#"):
-                buffer += line
+            # Inside a multi-line array. Whatever survives comment-stripping is entries;
+            # a line that was only a comment leaves nothing, and cannot close the array.
+            buffer += line
             if line.endswith("]"):
                 found[key_open] = items(buffer.rstrip("]"))
                 key_open, buffer = None, ""
@@ -77,7 +97,7 @@ def _toml_table(table: str) -> dict[str, str | list[str]]:
         if line.startswith("["):
             inside = line == f"[{table}]"
             continue
-        if not inside or line.startswith("#") or "=" not in line:
+        if not inside or not line or "=" not in line:
             continue
         key, _, value = line.partition("=")
         value = value.strip()

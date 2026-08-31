@@ -76,6 +76,7 @@ amount of retrieval quality recovers it afterwards.
 `as_of=T` moves both clocks to `T`. There are two more, and they are the reason the axes
 are separate:
 
+<!-- runnable: no — `T` stands for any instant; this block names the three keywords -->
 ```python
 mem.get_all(valid_at=T)   # what we believe TODAY about how the world was at T
 mem.get_all(known_at=T)   # what we believed at T, about the world as it is now

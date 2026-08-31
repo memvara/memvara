@@ -19,6 +19,8 @@ tools" and listed ten, having never gained `memory_neighborhood` or `memory_path
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -35,6 +37,13 @@ GITHUB = re.compile(
 #: Also in HTML attributes: the badge row is raw HTML, so `LICENSE` sitting in an
 #: `href=` is invisible to the markdown pattern above and just as broken on PyPI.
 HTML_HREF = re.compile(r'href="([^"]+)"')
+
+#: Any markdown link target, absolute or not. Needed because the relative-link check
+#: below originally looked at `href=` alone, which meant an ordinary `[text](docs/API.md)`
+#: — the far commoner way to write the mistake — passed it *and* passed `test_doc_links`,
+#: whose "does this resolve" question a relative path answers correctly from the
+#: repository root and wrongly from pypi.org.
+MD_LINK = re.compile(r"\]\(([^)\s]+)\)")
 
 README = ROOT / "README.md"
 
@@ -72,14 +81,21 @@ def test_the_readme_names_no_repository_path_relatively() -> None:
     """A relative link in this one file is a link that works on GitHub and 404s on PyPI.
 
     That is the worst shape a broken link can take, because the person who wrote it sees
-    it working. Checked over raw HTML too: the licence badge sat in an `href="LICENSE"`,
-    where no markdown pattern would ever have looked at it.
+    it working, and `test_doc_links` cannot see it either: a relative target resolves
+    correctly from the repository root, which is the only thing that test asks.
+
+    **Both syntaxes, deliberately.** The first version of this checked `href=` alone,
+    because that is where the failure had actually been found — the licence badge sat in
+    an `href="LICENSE"`. But the ordinary way to write the same mistake is a markdown
+    link, and it went straight through. A guard that covers the rarer half of a failure
+    and not the commoner half is the shape of guard that reads as protection and is not.
     """
     text = README.read_text(encoding="utf-8")
-    offenders = [href for href in HTML_HREF.findall(text)
-                 if not href.startswith(("http://", "https://", "mailto:", "#"))]
+    relative = lambda t: not t.startswith(("http://", "https://", "mailto:", "#"))
+    offenders = ([f'href="{h}"' for h in HTML_HREF.findall(text) if relative(h)]
+                 + [f"]({t})" for t in MD_LINK.findall(text) if relative(t)])
     assert not offenders, (
-        f"relative href(s) in README.md: {offenders}. README.md is the PyPI project "
+        f"relative link(s) in README.md: {offenders}. README.md is the PyPI project "
         "description, where a relative link resolves against pypi.org. Spell it "
         "https://github.com/memvara/memvara/blob/main/<path>.")
 
@@ -140,3 +156,50 @@ def test_every_page_says_where_to_go_next(page: Path) -> None:
     assert tail.startswith(("Next:", "Previous:")), (
         f"{page.relative_to(ROOT)} does not end with a navigation footer. Finish it with "
         "a line starting 'Previous:' or 'Next:' naming where the reader goes.")
+
+
+#: Pages that present a complete, ordered sequence a reader is meant to follow and run,
+#: as opposed to concept pages whose snippets are fragments around a `mem` defined
+#: elsewhere. Only these are executed; widening the list means making the page runnable
+#: first, which is the right order to do it in.
+RUNNABLE_PAGES = ["docs/getting-started/quickstart.md",
+                  "docs/getting-started/first-memory.md"]
+
+#: A block a reader is not meant to run — a signature illustration, a placeholder — must
+#: say so in the source, with a reason, on the line before its fence. The marker is an
+#: HTML comment so it renders as nothing.
+SKIP_MARKER = "<!-- runnable: no"
+
+PY_BLOCK = re.compile(r"(?:(<!-- runnable: no[^\n]*-->)\n)?```python\n(.*?)```", re.S)
+
+
+def executable_source(page: Path) -> str:
+    """Every runnable python block on `page`, concatenated in reading order."""
+    kept = [body for marker, body in PY_BLOCK.findall(page.read_text(encoding="utf-8"))
+            if not marker]
+    return "import warnings; warnings.simplefilter('ignore')\n" + "\n".join(kept)
+
+
+@pytest.mark.parametrize("relative", RUNNABLE_PAGES)
+def test_the_getting_started_pages_actually_run(relative: str, tmp_path: Path) -> None:
+    """A page that walks a reader through a sequence has to survive being walked through.
+
+    Nothing executed the documentation before this, and one page did not survive it: an
+    `added[0]` after a write that reinforced rather than added, a history printed in the
+    wrong order because one write in the slot was undated, and two `forget()` variants
+    shown as alternatives but written as a sequence. All three read perfectly and none of
+    them ran.
+
+    Run in a subprocess from `tmp_path`, so a page that names a database file writes it
+    somewhere disposable rather than into the checkout, and so a page that calls
+    `sys.exit` or leaks state cannot affect the rest of the suite.
+    """
+    script = tmp_path / "page.py"
+    script.write_text(executable_source(ROOT / relative), encoding="utf-8")
+    proc = subprocess.run([sys.executable, str(script)], cwd=tmp_path,
+                          capture_output=True, text=True, encoding="utf-8", timeout=300)
+    assert proc.returncode == 0, (
+        f"{relative} does not run as written:\n{proc.stderr}\n"
+        "Every block on a page in RUNNABLE_PAGES executes in reading order. If a block is "
+        "an illustration rather than a step, mark it with "
+        "'<!-- runnable: no — <reason> -->' on the line before its fence.")

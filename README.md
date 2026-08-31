@@ -355,7 +355,7 @@ and are not the same finding. Only the third deletes anything.
 ```mermaid
 flowchart TD
     A["Your agent<br/><i>Python, MCP client, or a framework adapter</i>"]
-    B["<b>Memvara</b> — memvara/core.py<br/><i>add · remember · search · recall · ask ·<br/>history · why · forget · end</i>"]
+    B["<b>Memvara</b> — memvara/core.py<br/><i>add · remember · search · recall · ask ·<br/>history · why · forget · erase</i>"]
     W["Write path — memvara/write/<br/><i>dedupe → salience gate → rule extractor →<br/>(model, only if needed) → reconcile</i>"]
     R["Read path — memvara/retrieve/<br/><i>vector + BM25 + graph, fused by rank,<br/>decayed per predicate</i>"]
     S["Store — memvara/store/<br/><i>SQLite + FTS5 + an mmap vector sidecar</i>"]
@@ -648,7 +648,7 @@ heading says so.
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 4,020 tests, offline, no API key
+python3 -m pytest -q                              # 4,016 passing, 8 skipped, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/temporal.py            # the two clocks, six families
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison

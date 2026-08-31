@@ -9,7 +9,7 @@ contract behind it.
 ```mermaid
 flowchart TD
     A["Your agent<br/><i>Python, MCP client, or a framework adapter</i>"]
-    B["<b>Memvara</b> — memvara/core.py<br/><i>the facade: add, remember, search, recall,<br/>ask, history, why, forget, end</i>"]
+    B["<b>Memvara</b> — memvara/core.py<br/><i>the facade: add, remember, search, recall,<br/>ask, history, why, forget, erase</i>"]
     W["Write path — memvara/write/<br/><i>dedupe → gate → extract → reconcile</i>"]
     R["Read path — memvara/retrieve/<br/><i>vector + BM25 + graph, time-aware</i>"]
     S["Store — memvara/store/<br/><i>SQLite + FTS5 + an mmap vector sidecar</i>"]
