@@ -187,6 +187,35 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Changed
 
+- **`README.md`'s *Quickstart* is two columns: run it yourself, or use the hosted service
+  at memvara.dev.** The README described the hosted product in one cell of an *Other ways
+  in* table below the fold, which understated it — the hosted path is the one that needs
+  no install, no key and no Python at all.
+
+  The left column is `pip install memvara` and a SQLite file you own, plus `memvara-mcp`
+  as a local server. The right column leads with the MCP address,
+  `https://app.memvara.dev/mcp`, approved once in a browser over OAuth so the client holds
+  a revocable grant rather than a stored secret; then the Claude Code plugin, which wires
+  that same URL and the skill in one step; then `pip install 'memvara[cloud]'` and
+  `Memvara(api_key=…)` for your own code, with `/v1` and a bearer key for anyone not
+  writing Python. It states the free tier — 12,000 memories and one project, held rather
+  than granted monthly, plus 2,000 recalls a month that do refill, and a refusal naming
+  the next plan rather than a surprise bill — read off `memvara.dev/pricing` as rendered,
+  not off the source that generates it.
+
+  *Other ways in* is removed because both columns now say what it said, at greater length
+  and in the right place: its editor cell is the hosted plugin, its `memvara-mcp` cell is
+  self-serve, and its hosted-client cell is hosted. The safety property that cell carried
+  — a bare `Memvara()` never becomes remote, because the dispatch reads the explicit
+  argument and never the environment — is kept, in the hosted column.
+
+  **Two things were wrong and are corrected by the move.** The editor plugin was presented
+  as a local option; it wires `https://app.memvara.dev/mcp`, and its own marketplace entry
+  calls it "Hosted MCP plus the skill for using it". And the client list pointed at
+  `memvara.dev/docs/agents`, a retired URL that redirects to `/docs/cloud` — so a reader
+  after a *local* editor one-liner was sent to the hosted client list. The columns now
+  point at `/docs/self-hosted` and `/docs/cloud` respectively.
+
 - **The top of `README.md` is a landing page, so a reader can decide inside the first
   screen.** A navigation row under the badges links the demo, the quickstart, the
   documentation index, PyPI, the site and the issue tracker. A five-row strip under
@@ -307,6 +336,21 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `since()` take none of them and `ask()` spells it `at=`, so a reader following the
   general form gets a `TypeError`. It now says eight, which is the number that do. The
   guard added above is what found it.
+
+- **`docs/integrations/mcp.md` said a hosted OAuth grant is "good for 90 days".** It is
+  ten years, or until you revoke it. `memvara-cloud`'s `control/store.py` sets
+  `DEFAULT_OAUTH_REFRESH_TTL = timedelta(days=3650)`, and no 90-day TTL exists anywhere in
+  that service — the session is 14 days, the device grant 15 minutes, the access token an
+  hour, and the only 90-day numbers are job and governance retention, which are not this.
+  The page understated the grant by about 40x, in the direction that costs a reader work:
+  somebody reading it re-approves every quarter for no reason. `memvara.dev` has said ten
+  years all along, so the site and the backend agreed with each other and this file
+  disagreed with both.
+
+- **The same paragraph sent readers to `memvara.dev/docs/agents`**, a retired URL that
+  redirects to `/docs/cloud`, and listed five clients where there are nine. Both are
+  corrected, and this file is where it matters most now: the README's new *Quickstart*
+  links here directly.
 
 - **The README and `docs/FAQ.md` said `add()` batches what survives into "a single
   call".** It is a single *extraction* call. A predicate the registry has not seen before

@@ -122,9 +122,96 @@ the deterministic replay that makes the same source produce the same bytes.
 
 ## Quickstart
 
+**Two ways to run it, and the API is the same either way.** `Memvara("memory.db")` and
+`Memvara(api_key="mv_…")` return objects with the same methods, so a function that takes a
+`Memvara` and calls `search()` cannot tell which it was handed.
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### Run it yourself
+
 ```bash
 pip install memvara
 ```
+
+```python
+mem = Memvara("memory.db", user="alice")
+```
+
+A SQLite file you own. No API key, no network on the write path, no Docker, no vector
+database — numpy is the only hard dependency. Apache-2.0, and everything in this
+repository is in it.
+
+As an MCP server on the same machine:
+
+```bash
+MEMVARA_DB=~/memory.db memvara-mcp
+memvara-mcp init --agent claude
+```
+
+JSON-RPC 2.0 over stdio, fourteen tools, no SDK dependency. Claude Code, Claude Desktop,
+Cursor, VS Code, Windsurf and Zed each have their own one-liner at
+[memvara.dev/docs/self-hosted](https://memvara.dev/docs/self-hosted).
+[MCP](https://github.com/memvara/memvara/blob/main/docs/integrations/mcp.md) ·
+[Deploying](https://github.com/memvara/memvara/blob/main/docs/DEPLOY.md)
+
+</td>
+<td width="50%" valign="top">
+
+### Hosted, at memvara.dev
+
+Nothing to install and no key to paste. Give any MCP client this address:
+
+```text
+https://app.memvara.dev/mcp
+```
+
+Approve it once in a browser. That is OAuth, so the client holds a grant you can revoke
+rather than a secret it has to store. In Claude Code the plugin wires the same URL and the
+skill in one step:
+
+```
+/plugin marketplace add memvara/claude-memvara
+/plugin install memvara
+```
+
+Claude, Claude Code, ChatGPT, Codex, Cursor, Grok, VS Code, OpenCode and OpenClaw each
+have their own page at [memvara.dev/docs/cloud](https://memvara.dev/docs/cloud).
+
+From your own code instead — the same client, against the hosted `/v1` API:
+
+```bash
+pip install 'memvara[cloud]'
+```
+
+```python
+mem = Memvara(api_key="mv_…", user="alice")     # or Memvara.connect()
+```
+
+**A bare `Memvara()` never becomes remote.** The dispatch reads the explicit `api_key=` or
+`base_url=` argument and never the environment, so a script that has always written to a
+local file cannot start posting to a hosted store because somebody ran `memvara-mcp login`
+on that machine.
+[A hosted deployment](https://github.com/memvara/memvara/blob/main/docs/API.md#a-hosted-deployment)
+
+Not a Python shop? `/v1` is a REST API and a bearer key.
+[Cloud quickstart](https://memvara.dev/docs/cloud/quickstart) ·
+[REST](https://memvara.dev/docs/cloud/api) ·
+[Python client](https://memvara.dev/docs/cloud/python)
+
+**Free: 12,000 memories and one project**, held rather than granted monthly, plus 2,000
+recalls a month that do refill. Past either, the next call is refused and names the plan
+that carries more — no card, and no way to be billed by surprise.
+[Pricing](https://memvara.dev/pricing)
+
+</td>
+</tr>
+</table>
+
+The walkthrough below runs against either. It is written for the local store because that
+is the one you can start in ten seconds.
 
 ```python
 from datetime import datetime, timezone
@@ -184,54 +271,6 @@ turns are counted on `WriteReceipt.unextracted` and the constructor warns once. 
 qualifier on the offline claim: the library runs with no API key; extraction from arbitrary
 prose does not. `remember()` is the offline way to get the full machine, and it is what a
 real integration does.
-
-### Other ways in
-
-<table>
-<tr><td width="50%" valign="top">
-
-**In your editor** — nothing to install, nothing to run.
-
-```
-/plugin marketplace add memvara/claude-memvara
-/plugin install memvara
-```
-
-Cursor, Codex, Grok, VS Code and OpenCode have their own one-liners at
-[memvara.dev/docs/agents](https://memvara.dev/docs/agents). Claude Desktop and ChatGPT
-paste the same URL.
-
-</td><td width="50%" valign="top">
-
-**On your own machine** — a file you control.
-
-```bash
-MEMVARA_DB=~/memory.db memvara-mcp
-memvara-mcp init --agent claude
-```
-
-JSON-RPC 2.0 over stdio, fourteen tools, no SDK dependency.
-[MCP](https://github.com/memvara/memvara/blob/main/docs/integrations/mcp.md) · [Deploying](https://github.com/memvara/memvara/blob/main/docs/DEPLOY.md)
-
-</td></tr>
-<tr><td colspan="2" valign="top">
-
-**From your own code, against a hosted store** — `pip install 'memvara[cloud]'`
-
-```python
-mem = Memvara(api_key="mv_…", user="alice")     # or Memvara.connect()
-```
-
-The same methods, served by a hosted `/v1` API instead of a local store, with every
-response hydrated back into the same dataclasses — a function that takes a `Memvara` and
-calls `search()` cannot tell which it was handed. A bare `Memvara()` **never** becomes
-remote: the dispatch reads the explicit `api_key=` or `base_url=` argument and never the
-environment, so a script that has always written to a local file cannot start posting to a
-hosted store because somebody ran `memvara-mcp login` on that machine.
-[A hosted deployment](https://github.com/memvara/memvara/blob/main/docs/API.md#a-hosted-deployment)
-
-</td></tr>
-</table>
 
 ---
 
@@ -601,7 +640,7 @@ wrongly.
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 4,044 passing, 9 skipped, no API key
+python3 -m pytest -q                              # 4,064 passing, 7 skipped, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 PYTHONPATH=. python3 bench/temporal.py            # the two clocks, six families
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison

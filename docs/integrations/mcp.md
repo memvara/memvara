@@ -19,10 +19,10 @@ Claude Code:
 /plugin install memvara
 ```
 
-Cursor, Codex, Grok, VS Code and OpenCode have their own one-liners at
-[memvara.dev/docs/agents](https://memvara.dev/docs/agents). Claude Desktop and ChatGPT
-paste the same hosted URL: `https://app.memvara.dev/mcp`, approved in the browser, good
-for 90 days.
+Claude, Claude Code, ChatGPT, Codex, Cursor, Grok, VS Code, OpenCode and OpenClaw each
+have their own page at [memvara.dev/docs/cloud](https://memvara.dev/docs/cloud), and all
+of them paste the same hosted URL: `https://app.memvara.dev/mcp`, approved once in the
+browser. **The grant lasts until you revoke it, or ten years, whichever comes first.**
 
 With no Python at all, `npx memvara` bridges a stdio MCP client to the hosted service and
 signs you in on first run. It is a way *in*, not a second implementation — the engine is
