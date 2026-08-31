@@ -15,7 +15,8 @@ differ on is where the *timings* come from.
 believes it is a terminal and its `flush=True` pacing behaves exactly as it does on
 screen, and every frame boundary is an instant the program actually printed at. That is a
 recording in the strict sense, and its output is **not reproducible** — two runs of the
-same script differ by a few milliseconds a frame, so the bytes differ.
+same script differ by a few milliseconds a frame, so the bytes differ. It is also POSIX
+only, because a pty is; the default below runs everywhere this library does.
 
 The default instead *replays the schedule the demo declares*: `BEATS` and the per-line
 holds, which are already in `demo.py` and already the thing that makes it ninety seconds
@@ -47,14 +48,9 @@ match, pass `--cols 98 --rows 37`.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import os
-import pty
-import select
-import struct
 import subprocess
 import sys
-import termios
 import time
 from pathlib import Path
 
@@ -180,7 +176,25 @@ def record(command: list[str], cols: int, rows: int) -> tuple[list[tuple[float, 
     A pty rather than a pipe, and not only so the child prints in colour it does not use:
     a program writing to a pipe is block-buffered by default, which would collapse ninety
     seconds of pacing into one burst at exit and make every frame boundary meaningless.
+
+    `pty`, `fcntl` and `termios` are imported here rather than at the top of the file
+    because none of them exists on Windows, and importing them there made the *default*
+    mode — which uses none of them — an ImportError on a platform where it works
+    perfectly. CI found that: `record_gif.py` would not import at all under
+    `py3.13 on windows-latest`.
     """
+    try:
+        import fcntl
+        import pty
+        import select
+        import struct
+        import termios
+    except ModuleNotFoundError as exc:                           # pragma: no cover
+        raise SystemExit(
+            f"--live needs a pty, and this platform has no {exc.name!r}: it is POSIX "
+            "only. Drop --live — the default replays the schedule demo.py declares and "
+            "produces the same frames, in about two seconds instead of ninety.")
+
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     env = dict(os.environ, TERM="xterm-256color", COLUMNS=str(cols), LINES=str(rows))
@@ -281,7 +295,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="measure the timings from a real ninety-second run under a "
                              "pty instead of replaying the declared schedule. A "
                              "recording in the strict sense, and not reproducible: two "
-                             "runs differ by milliseconds and so differ in bytes.")
+                             "runs differ by milliseconds and so differ in bytes. POSIX "
+                             "only — a pty is not a thing Windows has.")
     args = parser.parse_args(argv)
 
     font = load_font(args.font_size)

@@ -122,7 +122,8 @@ bytes while being equally correct.
 
 `--live` is the measured recording, under a pty, taking the full ninety seconds. Use it
 if you want wall-clock evidence rather than a replay; do not use it for anything a check
-compares. Both modes were confirmed to produce **pixel-identical frames** — the virtual
+compares. It is POSIX only, because a pty is — on Windows it refuses and says to drop the
+flag. The default runs there like anywhere else. Both modes were confirmed to produce **pixel-identical frames** — the virtual
 clock is a statement about time, not about what the program printed.
 
 It sizes the canvas to the content instead of to a fixed window, so the result is
