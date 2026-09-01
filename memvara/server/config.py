@@ -57,7 +57,7 @@ DEFAULT_SERVER_URL = "https://app.memvara.dev"
 #: Backends selectable from the environment. Anything needing constructor arguments —
 #: a custom model, an injected client — is a reason to import `MemvaraMCPServer` and wire
 #: it in Python rather than to grow a configuration language here.
-_BACKENDS = ("none", "anthropic")
+_BACKENDS = ("none", "anthropic", "openai")
 
 #: Embedders selectable from the environment, as `kind` or `kind:argument`.
 #:
@@ -113,6 +113,12 @@ class ServerConfig:
     session: str | None = None
     read_only: bool = False
     llm: str = "none"
+    #: The model name for the "openai" backend. `OpenAILLM(model=...)` defaults to
+    #: "gpt-4.1", which names nothing on a self-hosted OpenAI-compatible server (vLLM,
+    #: llama.cpp, Ollama's shim) — those need the id the server was started with. The
+    #: endpoint itself is not a memvara setting: `OpenAILLM`'s default client construction
+    #: reads `OPENAI_BASE_URL` from the SDK's own environment handling.
+    llm_model: str | None = None
     #: "local" (default) opens MEMVARA_DB on disk, exactly as before this field existed.
     #: "cloud" opens no local file at all; it resolves an API key (MEMVARA_API_KEY, or
     #: the credentials file `memvara-mcp login` writes) and talks to `server_url` instead.
@@ -198,6 +204,7 @@ class ServerConfig:
             session=_optional(env.get("MEMVARA_SESSION")),
             read_only=_flag(env.get("MEMVARA_READ_ONLY"), "MEMVARA_READ_ONLY"),
             llm=backend,
+            llm_model=_optional(env.get("MEMVARA_LLM_MODEL")),
             embedder=_embedder_spec(env.get("MEMVARA_EMBEDDER")),
             mode=mode,
             server_url=server_url,
@@ -296,9 +303,32 @@ def _anthropic() -> Any:
 
     try:
         return AnthropicLLM()
-    except ImportError as exc:
+    except Exception as exc:
+        # Not just ImportError: `AnthropicLLM` raises ValueError when no key is set,
+        # and the SDK has its own error for a client it cannot construct. All of them
+        # mean the same thing to the operator - this backend cannot start - and all of
+        # them should arrive as the startup ConfigError beside the rest of the
+        # configuration rather than as a raw traceback out of build_memvara.
         raise ConfigError(
             f"MEMVARA_LLM=anthropic needs the anthropic SDK and a key: {exc}") from exc
+
+
+def _openai(model: str | None) -> Any:
+    # Imported here so the default offline configuration never touches the optional SDK.
+    from ..llm.openai import OpenAILLM
+
+    try:
+        return OpenAILLM(model=model) if model else OpenAILLM()
+    except Exception as exc:
+        # Deliberately wider than ImportError. `openai.OpenAI()` refuses to construct
+        # without a key, and that refusal is the SDK's own error rather than an import
+        # failure - so the self-hosted case this backend exists for (OPENAI_BASE_URL at
+        # a local vLLM, which needs no real key) used to crash out of build_memvara with
+        # a traceback naming neither memvara variable.
+        raise ConfigError(
+            f"MEMVARA_LLM=openai needs the openai SDK, and the SDK needs OPENAI_API_KEY "
+            f"set even when OPENAI_BASE_URL points at a server that ignores it: {exc}"
+        ) from exc
 
 
 def _local(model: str) -> Any:
@@ -329,6 +359,28 @@ def _embedder(spec: str) -> Any:
         HashingEmbedder(dim=int(argument) if argument else _DEFAULT_DIM))
 
 
+def _llm(config: ServerConfig) -> Any:
+    """Build the backend `config` names, and refuse to guess at one it does not.
+
+    Every branch is explicit and the fallthrough raises, because the alternative
+    silently routes an unrecognised backend to whichever one happens to be last:
+    a value added to `_BACKENDS` without a branch here would have started a server
+    that extracts through a vendor the operator never named, with no error to see.
+    `from_env` already rejects anything outside `_BACKENDS`, so this is unreachable
+    from the environment and exists to keep the two lists honest with each other.
+    """
+    if config.llm == "none":
+        return NullLLM()
+    if config.llm == "anthropic":
+        return _anthropic()
+    if config.llm == "openai":
+        return _openai(config.llm_model)
+    raise ConfigError(
+        f"MEMVARA_LLM={config.llm!r} is listed in _BACKENDS but _llm() has no branch "
+        "for it, so this server cannot say which model it would extract with. This is "
+        "a wiring bug in memvara, not a mistake in your configuration.")
+
+
 def _registry(config: ServerConfig) -> PredicateRegistry | None:
     """The vocabulary this server declares, or None to take the builtins alone.
 
@@ -347,9 +399,13 @@ def _registry(config: ServerConfig) -> PredicateRegistry | None:
 #: accepted and ignored — and an operator who set `MEMVARA_LLM=anthropic`, saw a server
 #: start and believed their writes were being extracted by a model has been told something
 #: false by a program that stayed silent. Refused, with the variable named.
+#: `(field, default, variable, noun)`. The noun is carried rather than reused from
+#: `field` because `llm_model` does not read as one in a sentence, and the message is
+#: the whole point of the refusal.
 _SERVER_SIDE_UNDER_CLOUD = (
-    ("llm", "none", "MEMVARA_LLM"),
-    ("embedder", _DEFAULT_EMBEDDER, "MEMVARA_EMBEDDER"),
+    ("llm", "none", "MEMVARA_LLM", "llm"),
+    ("embedder", _DEFAULT_EMBEDDER, "MEMVARA_EMBEDDER", "embedder"),
+    ("llm_model", None, "MEMVARA_LLM_MODEL", "extraction model"),
 )
 
 
@@ -385,15 +441,15 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
                 "api_key. ServerConfig.from_env() never produces this combination; "
                 "a caller constructing ServerConfig directly must set api_key too.")
 
-        for field, default, variable in _SERVER_SIDE_UNDER_CLOUD:
+        for field, default, variable, noun in _SERVER_SIDE_UNDER_CLOUD:
             chosen = getattr(config, field)
             if chosen != default:
                 raise ConfigError(
                     f"{variable}={chosen!r} does not apply under MEMVARA_MODE=cloud. "
-                    f"The {field} runs inside the deployment, so this process would "
+                    f"The {noun} runs inside the deployment, so this process would "
                     "read the setting and never use it. Unset it, or use "
                     "MEMVARA_MODE=local with MEMVARA_DB if you want this machine to do "
-                    f"the work. \"memory_stats\" reports the deployment's own {field}.")
+                    f"the work. \"memory_stats\" reports the deployment's own {noun}.")
 
         return RemoteMemvara(
             api_key=config.api_key,
@@ -406,7 +462,7 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         # extraction model, and that warning goes to stderr, which under stdio nobody
         # reads. `memory_stats` and the note on every lossy write say it where the model
         # and the user can actually see it.
-        llm=NullLLM() if config.llm == "none" else _anthropic(),
+        llm=_llm(config),
         # Explicit for a sharper reason than `llm`: the embedder decides whether this
         # store can be opened at all. Left unset, `Memvara()` calls `default_embedder()`,
         # which returns a sentence-transformers model as soon as that package is

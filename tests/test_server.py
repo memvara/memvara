@@ -53,7 +53,7 @@ from memvara.server import (
     serve_stdio,
 )
 from memvara.server import cli as cli_module
-from memvara.server.config import ConfigError
+from memvara.server.config import ConfigError, _llm
 from memvara.server.mcp import PROTOCOL_VERSION, SUPPORTED_PROTOCOLS
 from memvara.server.protocol import (
     INVALID_PARAMS,
@@ -3194,6 +3194,85 @@ def test_a_missing_anthropic_sdk_is_a_startup_error_not_a_crash(monkeypatch):
     with pytest.raises(ConfigError, match="needs the anthropic SDK"):
         build_memvara(ServerConfig.from_env({"MEMVARA_DB": ":memory:",
                                             "MEMVARA_LLM": "anthropic"}))
+
+
+def test_the_openai_backend_is_opt_in(monkeypatch):
+    """Selectable from the environment, and never constructed unless it is asked for."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({"MEMVARA_DB": ":memory:",
+                                                 "MEMVARA_LLM": "openai"}))
+    assert memory.extractor.startswith("fast-path+openai/")
+    memory.close()
+
+
+def test_openai_backend_model_name_is_configurable(monkeypatch):
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+        "MEMVARA_LLM_MODEL": "Qwen/Qwen3.5-4B-Instruct"}))
+    assert memory.extractor == "fast-path+openai/Qwen/Qwen3.5-4B-Instruct"
+    memory.close()
+
+
+def test_a_missing_openai_sdk_is_a_startup_error_not_a_crash(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", None)
+    with pytest.raises(ConfigError, match="needs the openai SDK"):
+        build_memvara(ServerConfig.from_env({"MEMVARA_DB": ":memory:",
+                                            "MEMVARA_LLM": "openai"}))
+
+
+def test_an_unwired_backend_is_refused_rather_than_routed_to_the_last_branch(monkeypatch):
+    """`_BACKENDS` and `_llm` are two lists that have to agree, and nothing else makes
+    them. Before this, `_llm` returned `_openai(...)` for anything it did not recognise,
+    so a backend added to `_BACKENDS` without a branch here would have started a server
+    that extracted through OpenAI under another vendor's name - silently, and with no
+    test that could go red. Unreachable from the environment on purpose; `from_env`
+    rejects the value first, and this pins the wiring rather than the validation."""
+    import sys
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    with pytest.raises(ConfigError, match="wiring bug in memvara"):
+        _llm(ServerConfig(path=":memory:", llm="ollama"))
+
+
+def test_a_missing_openai_key_is_a_startup_error_not_a_traceback(monkeypatch):
+    """The SDK refuses to construct without a key, and that refusal is its own error
+    rather than an ImportError. Wrapping only ImportError left the case this backend
+    exists for - a local vLLM behind OPENAI_BASE_URL, which needs no real key - crashing
+    out of build_memvara with a traceback naming neither memvara variable."""
+    import sys
+    import types as pytypes
+
+    class NoKey(Exception):
+        pass
+
+    def refuse():
+        raise NoKey("The api_key client option must be set")
+
+    monkeypatch.setitem(sys.modules, "openai", pytypes.SimpleNamespace(OpenAI=refuse))
+    with pytest.raises(ConfigError, match="OPENAI_API_KEY"):
+        build_memvara(ServerConfig.from_env({"MEMVARA_DB": ":memory:",
+                                             "MEMVARA_LLM": "openai"}))
+
+
+def test_cloud_mode_refuses_a_named_extraction_model():
+    """Same rule as MEMVARA_LLM and MEMVARA_EMBEDDER, and the same reason: extraction
+    runs inside the deployment, so a model named here would be read and never used. An
+    operator who set it, saw a server start and believed extraction ran against that
+    model has been told something false by a program that stayed silent."""
+    cloud = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
+                                   "MEMVARA_LLM_MODEL": "Qwen/Qwen3.5-4B-Instruct"})
+    assert cloud.llm_model == "Qwen/Qwen3.5-4B-Instruct"
+    with pytest.raises(ConfigError, match="MEMVARA_LLM_MODEL"):
+        build_memvara(cloud)
 
 
 # -- the embedder, and the extra that used to change it ------------------------
