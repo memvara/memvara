@@ -137,6 +137,16 @@ def test_cached_embedder_returns_identical_vectors_on_hit():
     assert np.array_equal(first, cache.encode(["stable text"]))
 
 
+def test_cached_embedder_survives_one_call_exceeding_max_items():
+    # A single encode() whose distinct texts outnumber max_items evicts its own
+    # earlier entries before the final read-back — the return must not depend on
+    # what happened to survive eviction.
+    cache = CachedEmbedder(HashingEmbedder(dim=16), max_items=4)
+    texts = [f"unique text {i}" for i in range(10)]
+    out = cache.encode(texts)
+    assert out.shape == (10, 16)
+
+
 def test_hashing_embedder_is_deterministic_across_instances():
     a = HashingEmbedder(dim=32).encode(["hello world"])
     b = HashingEmbedder(dim=32).encode(["hello world"])

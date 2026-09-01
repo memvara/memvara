@@ -140,12 +140,17 @@ class CachedEmbedder:
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         keys = [hashlib.blake2b(t.encode(), digest_size=16).hexdigest() for t in texts]
         missing = [(i, t) for i, (t, k) in enumerate(zip(texts, keys)) if k not in self._cache]
+        fresh: dict[str, np.ndarray] = {}
         if missing:
             self.misses += len(missing)
             vecs = self.inner.encode([t for _, t in missing])
             for (i, _), v in zip(missing, vecs):
+                fresh[keys[i]] = v
+            for k, v in fresh.items():
                 if len(self._cache) >= self.max_items:
                     self._cache.pop(next(iter(self._cache)))
-                self._cache[keys[i]] = v
+                self._cache[k] = v
         self.hits += len(texts) - len(missing)
-        return np.stack([self._cache[k] for k in keys]).astype(np.float32)
+        # Read from `fresh` first: this call's own entries may already have been
+        # evicted from `_cache` above if the batch exceeded max_items.
+        return np.stack([fresh[k] if k in fresh else self._cache[k] for k in keys]).astype(np.float32)
