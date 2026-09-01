@@ -42,13 +42,13 @@ def seed_supermemory(url: str, container: str) -> int:
     return written
 
 
-def _ollama_llm(model: str, url: str):
-    """memvara's OpenAI backend, pointed at a local Ollama.
+def _openai_compatible_llm(model: str, url: str, key: str = "local"):
+    """memvara's OpenAI backend, pointed at any OpenAI-compatible endpoint.
 
     `MEMVARA_LLM` accepts only `none` and `anthropic`, so this cannot be reached from the
-    environment -- but `memvara.llm.openai.OpenAILLM` takes a client, and Ollama serves an
-    OpenAI-compatible API, so the library supports it even though the server config has no
-    name for it. Constructed here rather than proposed as a new backend: that is a change
+    environment -- but `memvara.llm.openai.OpenAILLM` takes a client, and Ollama and
+    OpenRouter both serve an OpenAI-compatible API, so the library supports them even
+    though the server config has no name for either. Constructed here rather than proposed as a new backend: that is a change
     to the core's configuration surface and belongs in its own review, not smuggled in
     through a benchmark.
     """
@@ -56,10 +56,11 @@ def _ollama_llm(model: str, url: str):
 
     from memvara.llm.openai import OpenAILLM
 
-    # Ollama ignores the key but the client requires one to be present.
-    client = OpenAI(base_url=url, api_key="ollama")
+    # Ollama ignores the key; a hosted router does not. Either way the client requires
+    # one to be present.
+    client = OpenAI(base_url=url, api_key=key)
 
-    # Qwen3.5 reasons by default and the reasoning is not optional through the
+    # Some models reason by default and the reasoning is not optional through the
     # OpenAI-compatible surface: asked to extract one sentence it spent 4,606 tokens and
     # 182 seconds thinking before answering, and with any sane `max_tokens` it returns an
     # empty `content` having spent the whole budget on `reasoning`. `reasoning_effort:
@@ -81,7 +82,8 @@ def _ollama_llm(model: str, url: str):
     return OpenAILLM(model=model, client=client)
 
 
-def seed_memvara(db: Path, *, llm_model: str = "", llm_url: str = "") -> int:
+def seed_memvara(db: Path, *, llm_model: str = "", llm_url: str = "",
+                 llm_key: str = "local") -> int:
     # Built through the *server's* config, not `Memvara(path)`, so the store is created
     # with the same embedder the hook will later open it with. Seeding with the library
     # default instead produced a 384-dimensional store that the hook -- configured for
@@ -112,7 +114,7 @@ def seed_memvara(db: Path, *, llm_model: str = "", llm_url: str = "") -> int:
 
         memory = Memvara(
             config.path,
-            llm=_ollama_llm(llm_model, llm_url),
+            llm=_openai_compatible_llm(llm_model, llm_url, llm_key),
             embedder=_embedder(config.embedder),
             registry=_registry(config),
             **config.scope_kwargs,
@@ -176,6 +178,9 @@ def main(argv: list[str] | None = None) -> int:
                              "system, or the comparison is between two readers.")
     parser.add_argument("--llm-url", default="http://localhost:11434/v1",
                         help="OpenAI-compatible base URL for --llm-model.")
+    parser.add_argument("--llm-key-file", type=Path, default=None,
+                        help="File holding the API key for --llm-url. Read, never "
+                             "printed; a hosted router needs one, a local server does not.")
     parser.add_argument("--emit-cases", type=Path)
     args = parser.parse_args(argv)
 
@@ -188,7 +193,11 @@ def main(argv: list[str] | None = None) -> int:
         if not args.db:
             print("error: --db is required for memvara", file=sys.stderr)
             return 2
-        written = seed_memvara(args.db, llm_model=args.llm_model, llm_url=args.llm_url)
+        key = "local"
+        if args.llm_key_file:
+            key = args.llm_key_file.expanduser().read_text().strip()
+        written = seed_memvara(args.db, llm_model=args.llm_model, llm_url=args.llm_url,
+                               llm_key=key)
         how = f"via {args.llm_model} extraction" if args.llm_model else "as triples"
         print(f"seeded {written} facts into {args.db} ({how})")
     if not args.target and not args.emit_cases:
