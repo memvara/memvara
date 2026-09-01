@@ -533,6 +533,15 @@ def send(path: str, request: dict, timeout: float = CLIENT_TIMEOUT_SEC) -> "str 
     side these are one condition, "this path did not work", and the response to all of
     them is the in-process query.
     """
+    if not hasattr(socket, "AF_UNIX"):
+        # Windows has no unix sockets, and this line is the first thing `send()` touches.
+        # It sat outside the `try` below, so the `AttributeError` was not one of the
+        # failures that "collapse to None" -- it propagated out of `send`, out of
+        # `fast.recall`, and into `recall.py`'s catch-all, which reported it as
+        # `recall failed` on every prompt. The daemon is an optimisation and never a
+        # dependency; a platform that cannot host one takes the in-process route, which is
+        # exactly what `None` means here.
+        return None
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     conn.settimeout(timeout)
     try:
