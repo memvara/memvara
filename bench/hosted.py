@@ -12,7 +12,9 @@ private to a store and never live in this repository; see the spec for why.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import random
 import sys
 import time
 from datetime import datetime, timezone
@@ -243,6 +245,65 @@ def draft_probes(mem: Any, n: int) -> list[dict]:
     return rows
 
 
+#: Internal traffic that reaches the recall hook but was never a user
+#: question. Judged by prefix, because these are this repository's own
+#: prompts and their openings are stable.
+_INTERNAL_PREFIXES = ("Extract durable facts",)
+
+
+def seed_dump(recalled_dir: Path, dump_path: Path, *, sample: int,
+              seed: int = 20260901) -> int:
+    """Phase one of closing the judgment loop: real queries, blinded, dumped.
+
+    Blinding here means order (shuffled by seed) and absence of results — the
+    judge sees only the query text and answers from the store, not from what
+    the hook happened to return that day.
+    """
+    queries: dict[str, str] = {}
+    for f in sorted(recalled_dir.glob("*.json")):
+        try:
+            query = json.loads(f.read_text()).get("query", "")
+        except ValueError:
+            continue
+        query = " ".join(query.split())
+        if not query or any(query.startswith(p) for p in _INTERNAL_PREFIXES):
+            continue
+        digest = hashlib.blake2b(query.encode(), digest_size=8).hexdigest()
+        queries[digest] = query
+    rows = [{"id": d, "query": q} for d, q in sorted(queries.items())]
+    random.Random(seed).shuffle(rows)
+    rows = rows[:sample]
+    with open(dump_path, "w") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+    return len(rows)
+
+
+def seed_answers(dump_path: Path, answers_path: Path, judged: str) -> list[dict]:
+    """Phase two: judgments back, probes out.
+
+    gold=[] is a judgment too — 'the store has nothing for this' — and becomes
+    an abstain probe rather than being dropped; only skip:true drops a row.
+    """
+    dumped = {json.loads(l)["id"]: json.loads(l)["query"]
+              for l in dump_path.read_text().splitlines() if l.strip()}
+    probes: list[dict] = []
+    for raw in answers_path.read_text().splitlines():
+        if not raw.strip():
+            continue
+        row = json.loads(raw)
+        if row.get("skip") or row["id"] not in dumped:
+            continue
+        gold = row.get("gold", [])
+        cls = "abstain" if not gold else "ambiguous"
+        probe = {"id": f"seeded-{row['id']}", "class": cls,
+                 "query": dumped[row["id"]], "gold": gold}
+        if cls == "ambiguous":
+            probe["judged"] = judged
+        probes.append(probe)
+    return probes
+
+
 def _open_store(args: argparse.Namespace) -> Any:
     if args.db:
         from memvara import Memvara
@@ -260,11 +321,40 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
     parser.add_argument("--out", default="", help="write per-probe JSONL here")
     parser.add_argument("--compare", nargs=2, metavar=("A", "B"), default=None)
     parser.add_argument("--draft", type=int, default=0, metavar="N")
+    parser.add_argument("--seed-from-recalled", default="", metavar="DIR")
+    parser.add_argument("--dump", default="", metavar="PATH")
+    parser.add_argument("--answers", default="", metavar="PATH")
+    parser.add_argument("--sample", type=int, default=50)
+    parser.add_argument("--seed", type=int, default=20260901)
+    parser.add_argument("--judged", default="", metavar="YYYY-MM-DD")
     args = parser.parse_args(argv)
 
     # --compare needs no store — two result files, read and diffed.
     if args.compare:
         print(compare_runs(Path(args.compare[0]), Path(args.compare[1])))
+        return 0
+
+    # Seeding needs no store either — it reads/writes recalled-event and
+    # dump/answers files directly.
+    if args.seed_from_recalled:
+        if args.answers:
+            if not args.judged:
+                raise SystemExit("--answers needs --judged YYYY-MM-DD: a judgment "
+                                 "ages as the store changes, and the date is how "
+                                 "a future reader knows how stale it is")
+            for probe in seed_answers(Path(args.dump), Path(args.answers),
+                                      judged=args.judged):
+                print(json.dumps(probe))
+            return 0
+        if not args.dump:
+            raise SystemExit("--seed-from-recalled needs --dump PATH on the "
+                             "first pass, then --answers PATH on the second")
+        n = seed_dump(Path(args.seed_from_recalled), Path(args.dump),
+                      sample=args.sample, seed=args.seed)
+        print(f"wrote {n} blinded queries to {args.dump}; judge them into "
+              f"{{\"id\", \"gold\": [claim ids]}} rows (gold [] = nothing "
+              f"relevant; \"skip\": true = drop), then re-run with "
+              f"--answers PATH --judged YYYY-MM-DD")
         return 0
 
     close = False

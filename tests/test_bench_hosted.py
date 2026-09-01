@@ -268,3 +268,47 @@ def test_main_draft_prints_jsonl_and_runs_nothing(tmp_path, planted, capsys):
     assert rc == 0
     out = capsys.readouterr().out.strip().splitlines()
     assert all(json.loads(l)["draft"] for l in out)
+
+
+def _write_recalled(tmp_path, events):
+    d = tmp_path / "recalled"
+    d.mkdir()
+    for i, e in enumerate(events):
+        (d / f"{i}.json").write_text(json.dumps(e))
+    return d
+
+
+def test_seed_dump_samples_filters_and_shuffles_deterministically(tmp_path):
+    events = [
+        {"seen": [], "query": "how do I run the larkspur suite?"},
+        {"seen": [], "query": "Extract durable facts from the exchange below: ..."},
+        {"seen": [], "query": "what branch does kestrel deploy from"},
+    ]
+    d = _write_recalled(tmp_path, events)
+    dump = tmp_path / "pairs.jsonl"
+    n = hosted.seed_dump(d, dump, sample=10, seed=7)
+    rows = [json.loads(l) for l in dump.read_text().splitlines()]
+    # The extraction prompt is internal traffic, not a user question; it must
+    # not reach a judge (it would waste the judging budget the seeding spends).
+    assert n == 2 and len(rows) == 2
+    assert all("Extract durable facts" not in r["query"] for r in rows)
+    dump2 = tmp_path / "pairs2.jsonl"
+    hosted.seed_dump(d, dump2, sample=10, seed=7)
+    assert dump.read_text() == dump2.read_text(), "same seed, same dump"
+
+
+def test_seed_answers_turns_judgments_into_probes(tmp_path):
+    dump = tmp_path / "pairs.jsonl"
+    dump.write_text(json.dumps({"id": "d1", "query": "larkspur suite?"}) + "\n"
+                    + json.dumps({"id": "d2", "query": "haiku please"}) + "\n"
+                    + json.dumps({"id": "d3", "query": "noise"}) + "\n")
+    answers = tmp_path / "answers.jsonl"
+    answers.write_text(json.dumps({"id": "d1", "gold": ["cl_a"]}) + "\n"
+                       + json.dumps({"id": "d2", "gold": []}) + "\n"
+                       + json.dumps({"id": "d3", "skip": True}) + "\n")
+    probes = hosted.seed_answers(dump, answers, judged="2026-09-01")
+    by_class = {p["class"]: p for p in probes}
+    assert by_class["ambiguous"]["gold"] == ["cl_a"]
+    assert by_class["ambiguous"]["judged"] == "2026-09-01"
+    assert by_class["abstain"]["gold"] == []
+    assert len(probes) == 2, "a skipped row produces no probe"
