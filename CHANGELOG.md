@@ -9,6 +9,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **GitHub Copilot CLI is a supported hook host.** `plugin/hooks/hosts/copilot.py`, with
+  every value measured against Copilot CLI 1.0.82. It registers Claude Code's four event
+  names on purpose: Copilot fires either casing and the casing decides the payload, so
+  PascalCase delivers `session_id`/`tool_name`/`transcript_path` and the field map is
+  Codex's rather than a fifth vocabulary. The reply envelope is flat — the nested
+  `hookSpecificOutput` form delivers nothing there — and capture is declared synchronous
+  because an async hook holds the turn open rather than being deferred.
+
+  `lib/transcript.py` grew a third reader for it. Copilot keeps the typed prompt and the
+  model-facing copy in separate fields; mining the typed one makes this host immune by
+  construction to reading our own injected recall back in as conversation.
+
 ### Fixed
 
 - **A long run of reinforcements could fail with `database disk image is malformed`, on a

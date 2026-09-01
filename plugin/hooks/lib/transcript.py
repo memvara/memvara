@@ -73,6 +73,8 @@ def _injected_lines(text: str) -> list[str]:
 
 def _entry_injected(entry: dict) -> list[str]:
     """Injected memory bullets carried by one transcript entry."""
+    if _HOST.transcript is not None and _HOST.transcript.format == "copilot-events":
+        return _copilot_injected(entry)
     message = entry.get("message")
     if not isinstance(message, dict):
         return []
@@ -290,9 +292,99 @@ def _codex_tool_call(payload: dict) -> list[str]:
     return [f"Claude used {name} {args}".rstrip()]
 
 
+def _format_copilot_entry(entry: dict) -> list[str]:
+    """One line of a Copilot CLI session log, which is a third shape again.
+
+    Copilot writes `{"type": "user.message" | "assistant.message", "data": {...}}` -- no
+    `message` key, no content blocks, and the speaker encoded in the `type` string rather
+    than beside it. Read with the Claude reader every line formatted to `[]`, which is the
+    failure the Codex reader was added for: capture runs on every turn, mines an empty
+    string, and logs `no turn to mine` forever while looking perfectly healthy.
+
+    **`data.content` and not `data.transformedContent`, and that choice is load-bearing.**
+    Copilot keeps two copies of every user message: `content` is what the person typed,
+    and `transformedContent` is what the model was actually shown -- the same text with a
+    `<current_datetime>` header, the host's own `<system_reminder>` blocks, and *this
+    plugin's injected recall* wrapped in one more `<system_reminder>`. Measured: a
+    SessionStart block never appears here at all, and a UserPromptSubmit block appears
+    only inside `transformedContent`. Mining the transformed copy would read our own
+    recall back in as conversation and re-store it under whatever predicate the model
+    picked this time -- the duplicate-manufacturing loop `NOISE` exists to prevent on the
+    hosts that have no such split. Reading `content` makes this host immune to it by
+    construction rather than by marker matching, which is why `Host.noise` is empty for
+    Copilot and is not an omission.
+
+    `tool.execution_start` is deliberately NOT read even though it carries a `toolName`
+    and its arguments: the same call is already on the `assistant.message` that requested
+    it, and reading both put every tool call into the mined turn twice.
+    """
+    kind = entry.get("type")
+    data = entry.get("data")
+    if not isinstance(data, dict):
+        return []
+    if kind == "user.message":
+        cleaned = _clean(str(data.get("content") or ""))
+        return [f"User: {cleaned}"] if cleaned else []
+    if kind != "assistant.message":
+        return []
+    out: list[str] = []
+    cleaned = _clean(str(data.get("content") or ""))
+    if cleaned:
+        out.append(f"Claude: {cleaned}")
+    requests = data.get("toolRequests")
+    if isinstance(requests, list):
+        for request in requests:
+            if not isinstance(request, dict):
+                continue
+            name = str(request.get("name") or "")
+            if not name or _skip_tool(name):
+                continue
+            args = _tool_args(request.get("arguments"))
+            out.append(f"Claude used {name} {args}".rstrip())
+    return out
+
+
+def _copilot_injected(entry: dict) -> list[str]:
+    """Injected memory bullets out of a Copilot entry. TWO sources, and both are needed.
+
+    The mirror of the choice above, and the reason it is a second function rather than a
+    branch in the first. Mining reads `content`, so our own recall is never mined -- but
+    the echo filter still needs to KNOW what was injected, because a memory the model was
+    shown and then restated in its own reply is not a new observation.
+
+    **`hook.end` is the source that matters, because `transformedContent` cannot see the
+    standing block.** Copilot records every hook's own output as
+    `{"type": "hook.end", "data": {"output": {"additionalContext": ...}}}` -- our bytes
+    verbatim, for `SessionStart` as well as `UserPromptSubmit`. The transformed prompt
+    carries only the per-turn half; the SessionStart block never enters the transcript as
+    a message at all. Reading only that half left the standing memories unprotected: the
+    model restates one it was shown at session start, capture mines the reply, the filter
+    has nothing to match it against, and the fact is written again -- every session, with
+    a successful receipt each time and nothing anywhere reporting it.
+
+    `transformedContent` is kept alongside rather than replaced. It is a second,
+    independent record of the per-turn half, so the filter does not go blind on that half
+    if a later client stops logging hook output -- and going blind here is silent.
+    """
+    kind = entry.get("type")
+    data = entry.get("data")
+    if not isinstance(data, dict):
+        return []
+    if kind == "hook.end":
+        output = data.get("output")
+        if not isinstance(output, dict):
+            return []
+        return _injected_lines(str(output.get("additionalContext") or ""))
+    if kind == "user.message":
+        return _injected_lines(str(data.get("transformedContent") or ""))
+    return []
+
+
 def format_entry(entry: dict) -> list[str]:
     if _HOST.transcript is not None and _HOST.transcript.format == "codex-rollout":
         return _format_codex_entry(entry)
+    if _HOST.transcript is not None and _HOST.transcript.format == "copilot-events":
+        return _format_copilot_entry(entry)
     # Asked of the record, not hardcoded. Cursor writes the same `message.content` blocks
     # as Claude Code but names the speaker under `role`, so reading `type` there found no
     # user entry, no boundary, and an empty turn on every capture -- the identical failure
