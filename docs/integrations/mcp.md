@@ -84,6 +84,17 @@ model to be talked into changing.
 in the order the server declares them — so a tool added or renamed fails the suite rather
 than leaving this table quietly wrong.
 
+**On the hosted URL, a release that adds a tool does not reach a session already
+connected.** The tool list is negotiated once, at the handshake, and the server declares
+`listChanged: false` — accurate for a stdio server, which your client starts and stops
+itself, and not something the hosted deployment can honour across a redeploy. So an
+editor or agent session left open across a release keeps the list it was given, and a
+tool added by that release is simply absent rather than erroring.
+
+Reconnecting is the whole fix: restart the client, or remove and re-add the server.
+If a tool documented above is missing, check that first — it reads exactly like a tool
+that has not shipped yet, which is the way this costs an afternoon.
+
 ### The two that get confused, and the one that matters
 
 `memory_forget` and `memory_end` are not synonyms and the difference is not recoverable

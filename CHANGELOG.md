@@ -725,6 +725,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   transport the promise is true of, and names the file to change first if this class
   ever grows a hosted-aware caller.
 
+  `docs/integrations/mcp.md` now says the same thing where the people affected are
+  actually reading — under the tool table, since a missing tool is the symptom — and
+  `docs/RELEASING.md` asks any release that adds or renames a tool to carry one line
+  saying connected sessions keep the old list until they reconnect. The comment fix
+  alone would have reached contributors and nobody else; a hosted user in a long-lived
+  editor session is the case #94 measures, and they do not read source comments.
+
 ## [0.9.0] — 2026-08-30
 
 ### Added
