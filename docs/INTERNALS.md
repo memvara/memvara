@@ -1172,6 +1172,17 @@ reads the same keys flat at the top level and ignores the nested form; Cursor re
 `additional_context`. A port that ships the wrong one installs cleanly, runs, logs
 success, and delivers nothing.
 
+**Three transcript shapes too, and one of them keeps two copies of the prompt.** Claude
+Code and Cursor write `message.content` blocks and differ only in whether the speaker sits
+under `type` or `role`, which `TranscriptSpec.role_key` covers. Codex writes
+`response_item` payloads and Copilot writes `{"type": "user.message", "data": {...}}`;
+each needs a reader, dispatched on `TranscriptSpec.format`. Copilot's is the one with a
+hazard in it: `data.content` is what the person typed and `data.transformedContent` is
+what the model saw — the same text plus the host's own markup *and this plugin's injected
+recall*. The reader mines `content`, so our own output can never be read back in and
+re-stored; the echo filter reads `transformedContent`, because it still has to know what
+was shown. That split is why `Host.noise` is empty for Copilot and is not an omission.
+
 **Capture must not hold a turn open, and how it avoids that is per host.**
 `supports_async` says the client honours `async: true` on the registration.
 `detach_capture` says the hook must fork itself — `run.py` re-execs into a new session and

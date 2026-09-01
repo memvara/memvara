@@ -157,6 +157,46 @@ CURSOR_CLI = ExtractorSpec(
     error_key="is_error",
 )
 
+#: GitHub Copilot CLI's own headless mode, measured on 1.0.82. `copilot --output-format
+#: json -p <prompt>` prints a JSONL event stream, so this needs a `StreamSpec` the way
+#: Codex and OpenCode do: the reply arrives as `{"type": "assistant.message", "data":
+#: {"content": ...}}` and the cost as a single closing `{"type": "result", "usage": ...}`.
+#:
+#: A turn may produce several `assistant.message` lines, one per model call, and every
+#: matching line is concatenated -- which is what we want, because the mined text is one
+#: answer split across calls rather than several answers.
+#:
+#: `-p` is LAST because `lib.extract` appends the prompt as the final argument and `-p`
+#: takes it as its value. An argv that ended anywhere else would hand Copilot a stray
+#: positional and the prompt would never be asked.
+#:
+#: **`--available-tools` is a safety guard, not a preference, and its value is deliberately
+#: a name no tool has.** Measured: `copilot -p` executes tools WITHOUT `--allow-all-tools`
+#: -- a probe told to run a shell command ran it -- so an extractor left at the default
+#: hands arbitrary mined text, including anything the user pasted into their session, to a
+#: model that can act on it. `--available-tools=` with an empty value does not restrict
+#: (the same probe still ran bash), `--excluded-tools=bash` left `read_bash`/`list_bash`
+#: behind, and `--deny-tool=shell` did not stop `bash`. An allowlist naming nothing real
+#: is the one form measured to grant zero tools, and the string says why it is there. If a
+#: later Copilot rejects an unknown tool name outright, extraction fails loudly and is
+#: logged, which is the safe direction for this particular guard to break in.
+#:
+#: `--disable-builtin-mcps` and `--no-custom-instructions` keep the child from paying for
+#: a GitHub MCP connection and from reading a repository's AGENTS.md into a job that is
+#: only meant to read one turn back.
+COPILOT_CLI = ExtractorSpec(
+    argv=("copilot", "--available-tools=memvara-extract-grants-no-tools",
+          "--disable-builtin-mcps", "--no-custom-instructions", "--no-color",
+          "--output-format", "json", "-p"),
+    reply_key="", usage_key="", error_key="",
+    stream=StreamSpec(
+        reply_match=(("type", "assistant.message"),),
+        reply_path="data.content",
+        usage_match=(("type", "result"),),
+        usage_path="usage",
+    ),
+)
+
 #: One consequence of mining with the user's own model, recorded because it is a real
 #: trade and not a free win: extraction latency and quality become theirs. Measured on
 #: 2026-09-01 against a free OpenRouter model configured in OpenCode, one run exceeded
