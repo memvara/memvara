@@ -181,12 +181,21 @@ CURSOR_CLI = ExtractorSpec(
 #: later Copilot rejects an unknown tool name outright, extraction fails loudly and is
 #: logged, which is the safe direction for this particular guard to break in.
 #:
-#: `--disable-builtin-mcps` and `--no-custom-instructions` keep the child from paying for
-#: a GitHub MCP connection and from reading a repository's AGENTS.md into a job that is
-#: only meant to read one turn back.
+#: `--no-custom-instructions` keeps the child from reading a repository's AGENTS.md into a
+#: job that is only meant to read one turn back.
+#:
+#: The two MCP flags are one thought and both are needed. `--disable-builtin-mcps` covers
+#: only GitHub's; a user's own servers still connect, and the one this plugin itself
+#: installs is Memvara's hosted endpoint -- so without the second flag every mined turn
+#: opened an authenticated connection to `app.memvara.dev` that the tool allowlist above
+#: had already made unreachable. Measured on a `copilot -p` run: a server handshake takes
+#: ~2.6s before the first model call, paid on every capture, for tools that cannot be
+#: called. The name is the key this plugin's `.mcp.json` uses; naming one that is not
+#: configured is harmless -- the run reports it `disabled` and answers normally.
 COPILOT_CLI = ExtractorSpec(
     argv=("copilot", "--available-tools=memvara-extract-grants-no-tools",
-          "--disable-builtin-mcps", "--no-custom-instructions", "--no-color",
+          "--disable-builtin-mcps", "--disable-mcp-server", "memvara",
+          "--no-custom-instructions", "--no-color",
           "--output-format", "json", "-p"),
     reply_key="", usage_key="", error_key="",
     stream=StreamSpec(

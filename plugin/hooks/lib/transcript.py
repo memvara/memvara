@@ -345,20 +345,39 @@ def _format_copilot_entry(entry: dict) -> list[str]:
 
 
 def _copilot_injected(entry: dict) -> list[str]:
-    """Injected memory bullets out of a Copilot entry, read from the transformed copy.
+    """Injected memory bullets out of a Copilot entry. TWO sources, and both are needed.
 
     The mirror of the choice above, and the reason it is a second function rather than a
     branch in the first. Mining reads `content`, so our own recall is never mined -- but
     the echo filter still needs to KNOW what was injected, because a memory the model was
-    shown and then restated in its own reply is not a new observation. That text lives
-    only in `transformedContent`, so this reads the copy the other reader refuses.
+    shown and then restated in its own reply is not a new observation.
+
+    **`hook.end` is the source that matters, because `transformedContent` cannot see the
+    standing block.** Copilot records every hook's own output as
+    `{"type": "hook.end", "data": {"output": {"additionalContext": ...}}}` -- our bytes
+    verbatim, for `SessionStart` as well as `UserPromptSubmit`. The transformed prompt
+    carries only the per-turn half; the SessionStart block never enters the transcript as
+    a message at all. Reading only that half left the standing memories unprotected: the
+    model restates one it was shown at session start, capture mines the reply, the filter
+    has nothing to match it against, and the fact is written again -- every session, with
+    a successful receipt each time and nothing anywhere reporting it.
+
+    `transformedContent` is kept alongside rather than replaced. It is a second,
+    independent record of the per-turn half, so the filter does not go blind on that half
+    if a later client stops logging hook output -- and going blind here is silent.
     """
-    if entry.get("type") != "user.message":
-        return []
+    kind = entry.get("type")
     data = entry.get("data")
     if not isinstance(data, dict):
         return []
-    return _injected_lines(str(data.get("transformedContent") or ""))
+    if kind == "hook.end":
+        output = data.get("output")
+        if not isinstance(output, dict):
+            return []
+        return _injected_lines(str(output.get("additionalContext") or ""))
+    if kind == "user.message":
+        return _injected_lines(str(data.get("transformedContent") or ""))
+    return []
 
 
 def format_entry(entry: dict) -> list[str]:
