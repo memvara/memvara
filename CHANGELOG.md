@@ -709,6 +709,22 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   describes, plus a sentence on why the arrow points at the normalised score rather than
   at `raw`.
 
+### Documentation
+
+- **The comment justifying `listChanged: false` claimed something true only of stdio.**
+  `MemvaraMCPServer._initialize` (`memvara/server/mcp.py`) says the tool set "never
+  changes while the process lives," which is honest for a stdio client — it spawns the
+  process and dies with it, so the promise and the client's connection have the same
+  lifetime. A hosted deployment reuses this same class per request behind one long-lived
+  client connection instead, so a client there can outlive many processes across a
+  redeploy that adds a tool, and sits on a stale `tools/list` with no signal that
+  anything changed. Nothing in this repository was wrong — the hosted transport and its
+  own reasoning about the missing notification channel live in `memvara-cloud` — but the
+  comment here read as a blanket guarantee rather than one scoped to stdio, which is
+  exactly the gap `memvara/memvara#94` traces back to it. The comment now says which
+  transport the promise is true of, and names the file to change first if this class
+  ever grows a hosted-aware caller.
+
 ## [0.9.0] — 2026-08-30
 
 ### Added

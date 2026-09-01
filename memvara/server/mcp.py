@@ -258,8 +258,18 @@ class MemvaraMCPServer:
             self.protocol_version = wanted
         return {
             "protocolVersion": self.protocol_version,
-            # `listChanged` is false and honest: the tool set is decided at startup by
-            # the read-only flag and never changes while the process lives.
+            # `listChanged` is false and honest for a stdio server: the tool set is
+            # decided at startup by the read-only flag and never changes while the
+            # process lives, and a stdio client spawns that process, owns it, and dies
+            # with it — so the promise and the client's lifetime coincide exactly.
+            #
+            # That clause ("while the process lives") stops holding the moment a
+            # transport lets the client outlive the process — a hosted deployment that
+            # builds a new MemvaraMCPServer per request behind one long-lived client
+            # connection is exactly that case. There the tool set genuinely does change
+            # underneath a client holding this `false`, on every deploy that adds a
+            # tool, with no channel to say so (see memvara/memvara#94). If this class
+            # grows a hosted-aware caller, `listChanged` is the wrong constant for it.
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": "memvara", "version": __version__},
             "instructions": INSTRUCTIONS,
