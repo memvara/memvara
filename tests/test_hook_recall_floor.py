@@ -159,7 +159,10 @@ def test_both_routes_build_the_same_call_over_one_backend(monkeypatch, tmp_path,
     direct_backend, daemon_backend = Recorder(), Recorder()
     query, args = "who owns billing", {"k": 3, "budget": 200}
 
-    # No daemon listening, so `fast.recall` takes the in-process route to `open_store`.
+    # A real path with nothing listening, on every platform. This is what exposed the
+    # Windows defect fixed alongside: `send()` built an `AF_UNIX` socket before its own
+    # `try`, so on Windows the attribute error escaped `fast.recall` entirely and every
+    # prompt was reported as `recall failed`.
     monkeypatch.setattr(fast, "socket_path", lambda *a, **k: str(tmp_path / "absent.sock"))
     monkeypatch.setattr(opener, "open_store", lambda: direct_backend)
     direct_text, ok, _ = fast.recall(query, min_score=floor, spawn=False, **args)
@@ -174,6 +177,33 @@ def test_both_routes_build_the_same_call_over_one_backend(monkeypatch, tmp_path,
     assert daemon_backend.calls == direct_backend.calls, (
         "the two routes disagree on what they asked the backend: "
         f"daemon={daemon_backend.calls} direct={direct_backend.calls}")
+
+
+def test_recall_survives_a_platform_with_no_unix_sockets(monkeypatch, tmp_path):
+    """Windows has no `AF_UNIX`, and that must cost the daemon, not the recall.
+
+    `send()` built its socket before its own `try`, so the `AttributeError` was not one of
+    the failures that collapse to `None`: it escaped `send`, escaped `fast.recall`, and
+    landed in `recall.py`'s catch-all, which reports `recall failed`. Every prompt on
+    Windows, silently, for as long as the daemon has existed -- the failure was logged
+    honestly and to a channel that made it look like an unreachable store.
+    """
+    import socket as socket_module
+
+    from lib import fast
+    from lib import open as opener
+
+    class Backend:
+        def recall(self, query, **kwargs):
+            return f"- {query}"
+
+    monkeypatch.delattr(socket_module, "AF_UNIX", raising=False)
+    monkeypatch.setattr(fast, "socket_path", lambda *a, **k: str(tmp_path / "absent.sock"))
+    monkeypatch.setattr(opener, "open_store", lambda: Backend())
+
+    text, ok, _ = fast.recall("who owns billing", spawn=False)
+    assert ok is True, "a platform without unix sockets still has an in-process route"
+    assert "who owns billing" in text
 
 
 def test_the_standing_interval_still_has_its_own_documentation():
