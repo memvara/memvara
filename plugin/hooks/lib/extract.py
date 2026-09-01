@@ -591,7 +591,7 @@ def _payload(text: str, prompt: str) -> "tuple[str, dict, str]":
     # turns is what a silent return looks like from outside.
     reason = "no extractor available"
     _fail(f"extraction did not run: {reason}", reason)
-    return "", {}
+    return "", {}, ""
 
 
 def _facts(result: str) -> "list[dict]":
