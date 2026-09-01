@@ -242,3 +242,29 @@ def test_compare_runs_warns_when_the_store_moved(tmp_path):
     text = hosted.compare_runs(a, b)
     assert "10" in text and "25" in text and "moved" in text.lower()
     assert "hit" in text
+
+
+def test_draft_probes_mark_every_row_as_draft(planted):
+    mem, _ = planted
+    rows = hosted.draft_probes(mem, 2)
+    assert rows and all(r["draft"] is True for r in rows)
+    classes = {r["class"] for r in rows}
+    assert classes == {"hit", "verbatim"}
+    assert all(r["gold"] for r in rows)
+
+
+def test_drafted_rows_are_refused_by_the_runner_end_to_end(tmp_path, planted):
+    # The full circle: what --draft emits, load_probes must refuse verbatim.
+    mem, _ = planted
+    path = _write_probes(tmp_path, hosted.draft_probes(mem, 1))
+    with pytest.raises(SystemExit, match="draft"):
+        hosted.load_probes(path)
+
+
+def test_main_draft_prints_jsonl_and_runs_nothing(tmp_path, planted, capsys):
+    mem, _ = planted
+    rc = hosted.main(["--draft", "2", "--probes", str(tmp_path / "absent.jsonl")],
+                     mem=mem)
+    assert rc == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert all(json.loads(l)["draft"] for l in out)

@@ -225,6 +225,24 @@ def compare_runs(a: Path, b: Path) -> str:
     return "\n".join(out)
 
 
+def draft_probes(mem: Any, n: int) -> list[dict]:
+    """Skeleton probes from live claims, every one refusing to run as-is.
+
+    The query IS the claim's text, which is exactly what a probe must not be —
+    so each row carries draft: true and load_probes refuses it until a person
+    rewrites the query into how they would actually ask.
+    """
+    claims = sorted(mem.get_all(), key=lambda c: c.id)[:n]
+    rows: list[dict] = []
+    for i, claim in enumerate(claims, start=1):
+        text = claim.object
+        rows.append({"id": f"draft-hit-{i}", "class": "hit",
+                     "query": text, "gold": [claim.id], "draft": True})
+        rows.append({"id": f"draft-verbatim-{i}", "class": "verbatim",
+                     "query": text, "gold": [claim.id], "draft": True})
+    return rows
+
+
 def _open_store(args: argparse.Namespace) -> Any:
     if args.db:
         from memvara import Memvara
@@ -241,6 +259,7 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
     parser.add_argument("--db", default="", help="local store path; omit for hosted")
     parser.add_argument("--out", default="", help="write per-probe JSONL here")
     parser.add_argument("--compare", nargs=2, metavar=("A", "B"), default=None)
+    parser.add_argument("--draft", type=int, default=0, metavar="N")
     args = parser.parse_args(argv)
 
     # --compare needs no store — two result files, read and diffed.
@@ -255,6 +274,10 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
     try:
         # Opened before load_probes so a --draft branch (Task 5) can use the
         # store handle to generate probes for someone with no probe file yet.
+        if args.draft:
+            for row in draft_probes(mem, args.draft):
+                print(json.dumps(row))
+            return 0
         probes = load_probes(Path(args.probes))
         fingerprint = store_fingerprint(mem)
         rows = run_probes(mem, probes, k=args.k)
