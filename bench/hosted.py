@@ -45,9 +45,15 @@ def score_probe(probe: dict, results: "Sequence[tuple[str, float]]",
     """One probe against one retrieval, as a flat row.
 
     `results` is (claim_id, score) in rank order from search(); `injected_ids`
-    is what recall(with_ids=True) actually rendered — the injection surface.
-    The two differ on purpose: rank and headroom come from the scored surface,
-    the abstain verdict from the surface the hook injects.
+    is the injection surface — what would actually go into the prompt. Where
+    that comes from depends on the engine, and `_injected_ids` is the whole of
+    the difference: the local one reads it off `recall(with_ids=True)`, the
+    hosted one infers it from `search()` because `RemoteMemvara.recall` returns
+    prose that names nothing. This function is told the answer, not how it was
+    obtained, and scores the same either way.
+
+    `results` and `injected_ids` differ on purpose: rank and headroom come from
+    the scored surface, the abstain verdict from the surface the hook injects.
     """
     cls = probe["class"]
     gold = set(probe.get("gold", ()))
@@ -459,7 +465,7 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
         # Opened before load_probes so a --draft branch (Task 5) can use the
         # store handle to generate probes for someone with no probe file yet.
         if args.draft:
-            for row in draft_probes(mem, args.draft):
+            for row in draft_probes(mem, args.draft, seed=args.seed):
                 print(json.dumps(row))
             return 0
         probes = load_probes(Path(args.probes))

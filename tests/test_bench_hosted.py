@@ -623,3 +623,31 @@ def test_main_never_closes_a_store_it_was_handed(tmp_path, planted, monkeypatch)
                       "--min-score", "0"], mem=counting)
     assert rc == 0
     assert counting.closes == 0
+
+
+def test_main_draft_passes_the_seed_through(tmp_path, capsys):
+    """`--seed` must reach `--draft`, not only `--seed-from-recalled`.
+
+    `draft_probes` grew a `seed` parameter and `main` kept calling it
+    positionally, so the flag silently steered one subcommand and did nothing
+    for the other. A flag that quietly does nothing is worse than an absent
+    one, and only a test driven through `main` can see it — `draft_probes`
+    itself was already guarded and stayed green.
+    """
+    with Memvara(":memory:", user="probe",
+                 embedder=HashingEmbedder(dim=64), llm=NullLLM()) as mem:
+        for i in range(8):
+            mem.remember(f"subject{i}", "note", f"the {i}th planted value")
+
+        def draft(seed):
+            rc = hosted.main(["--draft", "3", "--seed", str(seed),
+                              "--probes", str(tmp_path / "absent.jsonl")],
+                             mem=mem)
+            assert rc == 0
+            return capsys.readouterr().out
+
+        base = draft(11)
+        assert draft(11) == base, "same seed through the CLI must draft the same rows"
+        assert any(draft(s) != base for s in range(20) if s != 11), (
+            "no seed changed the draft — main is not passing --seed to "
+            "draft_probes, so the flag steers only --seed-from-recalled")

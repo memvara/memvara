@@ -920,6 +920,17 @@ Probe files are private to a store and never belong in this repository. The
 numbers are per-store and are not memvara scores: nothing measured here is
 comparable between two stores, let alone publishable against another system.
 
+One thing the hosted route cannot see, stated because hosted is the default
+above. `RemoteMemvara.recall` returns prose and names no claim ids, so on that
+route the injected set is inferred from `search()` at the same `k` and
+`min_score` — which is what `recall()` renders from, so the two agree by
+construction on the local engine. What it cannot catch is a server-side
+divergence between what `POST /v1/recall` renders and what `POST /v1/search`
+returns. `recall()` is still called, so a hosted recall failure still fails the
+run; it is only a difference in *which* claims the two endpoints pick that
+would pass unnoticed. Run against `--db` for a number read off the recall call
+itself.
+
 Both read surfaces are queried at `--min-score`, which **defaults to the recall
 hook's own `MIN_SCORE`** so the run measures what that hook actually injects.
 So false-injection is not predetermined: it counts how often the shipped floor
