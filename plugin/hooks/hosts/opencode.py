@@ -34,7 +34,8 @@ Three measurements shaped the mapping and are worth keeping next to it:
 
 from __future__ import annotations
 
-from core.host import CLAUDE_CLI, ApproveSpec, Host, TranscriptSpec
+from core.host import (CODEX_CLI, OPENCODE_CLI, ApproveSpec, Host,
+                       TranscriptSpec)
 
 HOST = Host(
     id="opencode",
@@ -131,11 +132,9 @@ HOST = Host(
         reason_key="reason",
         allow="allow",
     ),
-    #: No OpenCode-native headless extractor is wired here. `lib.extract`'s chain falls
-    #: to its second rung, `claude -p`, when that CLI is on PATH, and logs a reason and
-    #: raises the capture alert when it is not -- which is the documented behaviour for a
-    #: host with no extractor of its own, not a silent no-op.
-    extractor=CLAUDE_CLI,
+    #: OpenCode's own CLI, so a turn is mined by the model this user already configured
+    #: rather than by a different vendor's product. `claude -p` remains the second rung.
+    extractor=OPENCODE_CLI,
     #: Distinct from Claude Code's so `memory_why` can tell a user which client wrote a
     #: claim. Frozen from here on for the same reason the Claude one is: it is stored.
     extractor_label="opencode-hook",

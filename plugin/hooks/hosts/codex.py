@@ -29,7 +29,8 @@ quietly eats memories.
 
 from __future__ import annotations
 
-from core.host import CLAUDE_CLI, ApproveSpec, Host, TranscriptSpec
+from core.host import (CODEX_CLI, OPENCODE_CLI, ApproveSpec, Host,
+                       TranscriptSpec)
 
 HOST = Host(
     id="codex",
@@ -104,10 +105,11 @@ HOST = Host(
         reason_key="permissionDecisionReason",
         allow="allow",
     ),
-    #: No Codex-native headless extractor is wired. `lib.extract`'s chain falls to its
-    #: second rung, `claude -p`, when that CLI is present, and logs a reason and raises the
-    #: capture alert when it is not.
-    extractor=CLAUDE_CLI,
+    #: Codex's own CLI, so a turn on Codex is mined by the model this user already
+    #: chose and pays for -- not by a different vendor's product that has to be installed
+    #: separately. `claude -p` stays as the chain's second rung for anyone who has it, and
+    #: a machine with neither gets a logged reason and an alert rather than silence.
+    extractor=CODEX_CLI,
     extractor_label="codex-hook",
     description=(
         "Memvara for Codex: recall on every prompt, capture when a turn ends. Every "

@@ -404,6 +404,64 @@ def _chain() -> "list[ExtractorSpec]":
     return chain
 
 
+def _dig(node, path: str):
+    """One dotted path into nested dicts, or None. No exceptions for a missing key."""
+    for part in path.split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
+
+
+def _stream(proc: "subprocess.CompletedProcess", spec: "ExtractorSpec",
+            label: str) -> "tuple[str, dict]":
+    """Read a reply out of a JSONL event stream, for a CLI that does not print one object.
+
+    Same order as `_envelope` and for the same reason: usage before any early return, so a
+    run that burned the preamble and failed is still accounted for. A line that is not
+    JSON is skipped rather than fatal -- both of these CLIs interleave human-readable
+    noise with their events depending on flags and terminal.
+
+    An empty reply IS the failure signal here. Neither stream has an error flag that was
+    measured, and inventing one would be a guess in the one place this package refuses
+    them; a run that produced no assistant text produced nothing to store, whatever it
+    printed about why.
+    """
+    reply_parts: "list[str]" = []
+    usage: dict = {}
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if all(_dig(event, key) == value for key, value in spec.stream.reply_match):
+            text = _dig(event, spec.stream.reply_path)
+            if isinstance(text, str) and text:
+                reply_parts.append(text)
+        if all(_dig(event, key) == value for key, value in spec.stream.usage_match):
+            found = _dig(event, spec.stream.usage_path)
+            if isinstance(found, dict):
+                usage = found
+
+    if proc.returncode != 0:
+        reason = f"{label} exited {proc.returncode}"
+        _fail(f"extraction did not run via {label}: {reason}", reason)
+        return "", usage
+    reply = "".join(reply_parts)
+    if not reply:
+        reason = f"{label} produced no assistant text"
+        _fail(f"extraction failed via {label}: {reason}", reason)
+        return "", usage
+    log(f"extraction ran via {label}")
+    clear_capture_alert()
+    return reply, usage
+
+
 def _envelope(proc: "subprocess.CompletedProcess", spec: "ExtractorSpec",
               label: str) -> "tuple[str, dict]":
     """Read one finished run's envelope: its reply and what it cost, or `('', usage)`.
@@ -413,6 +471,9 @@ def _envelope(proc: "subprocess.CompletedProcess", spec: "ExtractorSpec",
     envelope is read in. That order is the 34-hour defect: usage before any early return,
     and the reason parsed out of stdout before the return code is allowed to end things.
     """
+    if spec.stream is not None:
+        return _stream(proc, spec, label)
+
     body = _decode(proc.stdout)
     usage = (body or {}).get(spec.usage_key)
     usage = usage if isinstance(usage, dict) else {}
@@ -443,8 +504,11 @@ def _envelope(proc: "subprocess.CompletedProcess", spec: "ExtractorSpec",
     return str(body.get(spec.reply_key) or ""), usage
 
 
-def _payload(text: str, prompt: str) -> "tuple[str, dict]":
+def _payload(text: str, prompt: str) -> "tuple[str, dict, str]":
     """The model's reply and what it cost, or `('', {})` if no rung of the chain answered.
+
+    The model name is returned alongside for the same reason and it is the third thing,
+    not a lookup: which rung answered decides it, and only this loop knows that.
 
     Cost is returned rather than discarded because here is the only place it exists.
     `--output-format json` puts usage on the envelope beside the reply; reading the reply
@@ -457,7 +521,7 @@ def _payload(text: str, prompt: str) -> "tuple[str, dict]":
     and would cost them a second one for nothing.
     """
     if os.environ.get(SENTINEL):
-        return "", {}
+        return "", {}, ""
 
     env = dict(os.environ)
     env[SENTINEL] = "1"
@@ -482,13 +546,17 @@ def _payload(text: str, prompt: str) -> "tuple[str, dict]":
             # wrong.
             reason = f"no reply within {TIMEOUT_SEC}s"
             _fail(f"extraction did not run via {label}: {reason}", reason)
-            return "", {}
+            return "", {}, ""
         except (OSError, subprocess.SubprocessError) as exc:
             reason = f"{type(exc).__name__}: {exc}"[:REASON_CHARS]
             _fail(f"extraction did not run via {label}: {reason}", reason)
-            return "", {}
+            return "", {}, ""
 
-        return _envelope(proc, spec, label)
+        reply, usage = _envelope(proc, spec, label)
+        # The label follows the rung that ANSWERED. `spec.model` is empty for a CLI
+        # that mines with the user's configured model, and the program name is then
+        # what goes in the ledger -- true, and checkable against the argv.
+        return reply, usage, spec.model or spec.argv[0]
 
     # Every rung was absent. This is a legitimate state on a host whose users have never
     # installed Claude Code, and it still goes through `_fail`: a capture that cannot run
@@ -738,11 +806,11 @@ def triples(text: str, cwd: "str | None" = None,
     ignoring it look identical from the store, and only one of them is fixed here.
     """
     prompt = build_prompt(cwd)
-    result, usage = _payload(text, prompt)
+    result, usage, model = _payload(text, prompt)
     if usage:
         # Recorded before the reply is even parsed: the tokens were spent whether or not
         # the model returned anything usable.
-        record_extraction(usage, model=MODEL)
+        record_extraction(usage, model=model or MODEL)
 
     out: "list[Fact]" = []
     dropped: "list[str]" = []
