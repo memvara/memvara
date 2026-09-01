@@ -9,7 +9,10 @@ on the first call rather than hand back a claim carrying a plausible zero, which
 downstream can tell from a real one. Every field indexed here is required on the wire model
 it comes from (present, even when its value may be `null`) — `.get()` is used only where the
 wire model genuinely has no such field at all, so a default is the honest answer rather than
-a guess about a key that could be missing.
+a guess about a key that could be missing. One exception, and it is named at the call:
+`anchor` on a ranking is `.get()` because the client has to read results from a server
+that predates the field, and for that field alone a missing key means the server did not
+say, which is what `None` on `Explanation.anchor` is documented to mean on a hosted result.
 
 **Instants are parsed by two functions, and which one a field gets is read off the wire
 model.** `_dt` is for fields that may legitimately be null; `_required_dt` is for the ones

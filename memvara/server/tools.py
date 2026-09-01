@@ -280,6 +280,23 @@ _ANCHORED = {
     ),
 }
 
+#: The same switch on `memory_ask`, described for a tool that returns readings about
+#: fact slots rather than a list of memories, and that has no `min_score` to combine with.
+_ANCHORED_ASK = {
+    "type": "boolean",
+    "default": False,
+    "description": (
+        "Answer only from fact slots the question is demonstrably about: a slot whose "
+        "subject or object the question names, or one reached by walking the graph out "
+        "of such a slot. Default false. Set it when a wrong entity is worse than no "
+        "answer — a question about a specific person, service or ticket — because "
+        "without it a question about an entity this store has never heard of is still "
+        "narrated, confidently, from the nearest slot it has. With it that question "
+        "answers that nothing matches. It also skips a slot the question names only by a "
+        "paraphrase of its subject, so leave it off for a topic-style question."
+    ),
+}
+
 #: Caps for the two arguments that name a *slot* rather than carry a value. Generous
 #: against every real spelling — the longest built-in predicate is 21 characters and a
 #: person's name is far inside 128 — and they exist because neither had any bound at all:
@@ -1771,7 +1788,7 @@ TOOLS: tuple[Tool, ...] = (
                     "topic rather than a value."
                 ),
             },
-            "anchored": _ANCHORED,
+            "anchored": _ANCHORED_ASK,
         },
         required=("question",),
         handler=_ask,

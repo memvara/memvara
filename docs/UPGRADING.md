@@ -47,6 +47,15 @@ asks exactly that, and `memvara.remote.client.install_hint()` is the message.
 both. A parameter annotated `ScopedMemvara` still accepts what it always did; one that
 *returns* `ToolContext.memory` as a `ScopedMemvara` no longer type-checks.
 
+**If you implemented `MemoryAPI` yourself, `search`, `recall` and `ask` now take
+`anchored: bool = False`.** The `memory_search`, `memory_recall` and `memory_ask` handlers
+pass it on every call, so an implementation written against the previous protocol still
+satisfies `isinstance` (a protocol checks names) and then raises `TypeError: unexpected
+keyword argument 'anchored'` on the first call from any of the three tools. Accept the
+keyword; honouring it means returning only results the query names an entity of, which
+`memvara/retrieve/anchor.py` defines, and ignoring it is a documented lie to the model
+that set it, so raise if you cannot honour it.
+
 ### How to find your own instances
 
 ```bash
