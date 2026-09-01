@@ -872,6 +872,110 @@ counts and the way out are in
 That is why there are two memvara arms and why neither may be deleted: the first is what
 an evaluator meets on a weekend, and the second is what a deployment ships.
 
+### Measuring against your own store: `bench/hosted.py`
+
+Every corpus above was built for its benchmark. None has the shape a real
+store develops — the roadmap's census of one production store found ~95% of
+claims on predicates outside the declared vocabulary and a join rate of 0.5%.
+`bench/hosted.py` measures the read path against the store you actually have:
+
+    # hosted store (credentials from ~/.memvara), the default
+    PYTHONPATH=. python3 bench/hosted.py --probes ~/.memvara/probes.jsonl
+
+    # a local store file — `--db` is the only way to reach one
+    PYTHONPATH=. python3 bench/hosted.py --db ~/.memvara/store.db \
+        --probes ~/.memvara/probes.jsonl
+
+You author the probes once — `hit` (a question whose answer you know is
+stored, gold = its claim id), `abstain` (a question the store cannot answer,
+gold = nothing), `verbatim` (a claim's own text, which must return that claim
+first), `ambiguous` (real prompts from your logs, judged) — and the run
+reports hit@k, mean gold-rank, false-injection rate with per-failure score
+headroom, and self-retrieval@1. `--draft` and `--seed-from-recalled` help
+author; both refuse to produce a probe no person has reviewed.
+
+#### The probe file
+
+One JSON object per line, at `--probes PATH` (default `~/.memvara/probes.jsonl`).
+The runner refuses the whole file on the first bad row, naming the line — it
+never skips one.
+
+```jsonl
+{"id": "p001", "class": "hit",       "query": "what suite must run with -j1?", "gold": ["cl_..."]}
+{"id": "p002", "class": "abstain",   "query": "write a haiku about rain",      "gold": []}
+{"id": "p003", "class": "verbatim",  "query": "<the claim's own text>",        "gold": ["cl_..."]}
+{"id": "p004", "class": "ambiguous", "query": "<a real prompt from your log>", "gold": ["cl_..."], "judged": "2026-09-01"}
+```
+
+| field | required | meaning |
+|---|---|---|
+| `id` | yes | non-empty, unique within the file; it is what a result row is addressed by |
+| `class` | yes | one of `hit`, `abstain`, `verbatim`, `ambiguous` |
+| `query` | yes | non-empty; what you would actually type |
+| `gold` | yes | list of claim ids. Empty **only** for `abstain`; non-empty for every other class |
+| `judged` | no | date a human judged an `ambiguous` row, because a judgment ages as the store changes |
+| `draft` | no | `true` marks a row `--draft` emitted; the runner refuses it until you rewrite the query and remove the mark |
+
+Probe files are private to a store and never belong in this repository. The
+numbers are per-store and are not memvara scores: nothing measured here is
+comparable between two stores, let alone publishable against another system.
+
+One thing the hosted route cannot see, stated because hosted is the default
+above. `RemoteMemvara.recall` returns prose and names no claim ids, so on that
+route the injected set is inferred from `search()` at the same `k` and
+`min_score` — which is what `recall()` renders from, so the two agree by
+construction on the local engine. What it cannot catch is a server-side
+divergence between what `POST /v1/recall` renders and what `POST /v1/search`
+returns. `recall()` is still called, so a hosted recall failure still fails the
+run; it is only a difference in *which* claims the two endpoints pick that
+would pass unnoticed. Run against `--db` for a number read off the recall call
+itself.
+
+#### Seeding probes from the recall hook's own state: `--seed-from-recalled`
+
+    PYTHONPATH=. python3 bench/hosted.py \
+        --seed-from-recalled ~/.memvara/.hooks/recalled --dump pairs.jsonl
+    # judge pairs.jsonl into {"id", "gold": [claim ids]} rows, then
+    PYTHONPATH=. python3 bench/hosted.py \
+        --seed-from-recalled ~/.memvara/.hooks/recalled \
+        --dump pairs.jsonl --answers answers.jsonl --judged 2026-09-01
+
+The first pass dumps real queries, blinded — shuffled by `--seed`, carrying the
+query text and nothing else, so a judge answers from the store rather than from
+what the hook happened to return that day. The second turns the judgments into
+`ambiguous` probes (and `abstain` probes, where the judgment was "the store has
+nothing for this"). `--judged` is required: a judgment ages as the store
+changes.
+
+**Be clear about what that directory holds, because it is narrower than "real
+recall traffic".** `plugin/hooks/recall.py` keys **one file per session**, named
+for the session id, and rewrites it on every turn. Each file therefore carries a
+single query: that session's **most recent** substantive prompt, **truncated to
+300 characters** (`MAX_CARRY_CHARS`). Files older than **fourteen days**
+(`SEEN_TTL_SECONDS`) are pruned. No append-only log of recall events exists on
+disk, and this does not reconstruct one.
+
+So the sample is one query per recent session. It skews toward whatever each
+session last asked, it cannot see anything asked earlier in a session, and a
+long prompt reaches the judge clipped. On a machine in daily use that is still
+on the order of a thousand distinct real queries and worth judging — but when
+you read the resulting `ambiguous` rows, that is the population they came from.
+Unreadable files are counted and the count is printed, so a directory that
+failed to parse does not look like an empty one.
+
+Both read surfaces are queried at `--min-score`, whose default **resolves
+exactly as the recall hook's own `_min_score()` does**: `MEMVARA_RECALL_MIN_SCORE`
+when that is set (clamped to `[0, 1]`), otherwise the hook's `MIN_SCORE`. So a
+store owner who recalibrated and exported that variable — the workflow the hook's
+own comment recommends — measures their shipped configuration, not the constant,
+and the run measures what that hook actually injects on this machine.
+So false-injection is not predetermined: it counts how often the shipped floor
+still injects on a question the store cannot answer, and it can come back at
+zero or well above it depending on the store and the embedder. Pass
+`--min-score 0` to measure the unfloored read path instead — that number is
+100% by construction on any non-empty store, which is why it is not the
+default.
+
 ---
 
 Previous: [How it works](DESIGN.md) · Next: [Roadmap](ROADMAP.md) · [Documentation index](README.md)
