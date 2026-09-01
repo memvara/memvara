@@ -3196,6 +3196,37 @@ def test_a_missing_anthropic_sdk_is_a_startup_error_not_a_crash(monkeypatch):
                                             "MEMVARA_LLM": "anthropic"}))
 
 
+def test_the_openai_backend_is_opt_in(monkeypatch):
+    """Selectable from the environment, and never constructed unless it is asked for."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({"MEMVARA_DB": ":memory:",
+                                                 "MEMVARA_LLM": "openai"}))
+    assert memory.extractor.startswith("fast-path+openai/")
+    memory.close()
+
+
+def test_openai_backend_model_name_is_configurable(monkeypatch):
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+        "MEMVARA_LLM_MODEL": "Qwen/Qwen3.5-4B-Instruct"}))
+    assert memory.extractor == "fast-path+openai/Qwen/Qwen3.5-4B-Instruct"
+    memory.close()
+
+
+def test_a_missing_openai_sdk_is_a_startup_error_not_a_crash(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", None)
+    with pytest.raises(ConfigError, match="needs the openai SDK"):
+        build_memvara(ServerConfig.from_env({"MEMVARA_DB": ":memory:",
+                                            "MEMVARA_LLM": "openai"}))
+
+
 # -- the embedder, and the extra that used to change it ------------------------
 
 def _fake_sentence_transformers(monkeypatch, dim=384):

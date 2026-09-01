@@ -57,7 +57,7 @@ DEFAULT_SERVER_URL = "https://app.memvara.dev"
 #: Backends selectable from the environment. Anything needing constructor arguments —
 #: a custom model, an injected client — is a reason to import `MemvaraMCPServer` and wire
 #: it in Python rather than to grow a configuration language here.
-_BACKENDS = ("none", "anthropic")
+_BACKENDS = ("none", "anthropic", "openai")
 
 #: Embedders selectable from the environment, as `kind` or `kind:argument`.
 #:
@@ -113,6 +113,12 @@ class ServerConfig:
     session: str | None = None
     read_only: bool = False
     llm: str = "none"
+    #: The model name for the "openai" backend. `OpenAILLM(model=...)` defaults to
+    #: "gpt-4.1", which names nothing on a self-hosted OpenAI-compatible server (vLLM,
+    #: llama.cpp, Ollama's shim) — those need the id the server was started with. The
+    #: endpoint itself is not a memvara setting: `OpenAILLM`'s default client construction
+    #: reads `OPENAI_BASE_URL` from the SDK's own environment handling.
+    llm_model: str | None = None
     #: "local" (default) opens MEMVARA_DB on disk, exactly as before this field existed.
     #: "cloud" opens no local file at all; it resolves an API key (MEMVARA_API_KEY, or
     #: the credentials file `memvara-mcp login` writes) and talks to `server_url` instead.
@@ -198,6 +204,7 @@ class ServerConfig:
             session=_optional(env.get("MEMVARA_SESSION")),
             read_only=_flag(env.get("MEMVARA_READ_ONLY"), "MEMVARA_READ_ONLY"),
             llm=backend,
+            llm_model=_optional(env.get("MEMVARA_LLM_MODEL")),
             embedder=_embedder_spec(env.get("MEMVARA_EMBEDDER")),
             mode=mode,
             server_url=server_url,
@@ -301,6 +308,17 @@ def _anthropic() -> Any:
             f"MEMVARA_LLM=anthropic needs the anthropic SDK and a key: {exc}") from exc
 
 
+def _openai(model: str | None) -> Any:
+    # Imported here so the default offline configuration never touches the optional SDK.
+    from ..llm.openai import OpenAILLM
+
+    try:
+        return OpenAILLM(model=model) if model else OpenAILLM()
+    except ImportError as exc:
+        raise ConfigError(
+            f"MEMVARA_LLM=openai needs the openai SDK: {exc}") from exc
+
+
 def _local(model: str) -> Any:
     # Imported here so a hashing deployment — the default — never pays the torch import.
     from ..embed.local import LocalEmbedder
@@ -327,6 +345,14 @@ def _embedder(spec: str) -> Any:
         return _local(argument)
     return CachedEmbedder(
         HashingEmbedder(dim=int(argument) if argument else _DEFAULT_DIM))
+
+
+def _llm(config: ServerConfig) -> Any:
+    if config.llm == "none":
+        return NullLLM()
+    if config.llm == "anthropic":
+        return _anthropic()
+    return _openai(config.llm_model)
 
 
 def _registry(config: ServerConfig) -> PredicateRegistry | None:
@@ -406,7 +432,7 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         # extraction model, and that warning goes to stderr, which under stdio nobody
         # reads. `memory_stats` and the note on every lossy write say it where the model
         # and the user can actually see it.
-        llm=NullLLM() if config.llm == "none" else _anthropic(),
+        llm=_llm(config),
         # Explicit for a sharper reason than `llm`: the embedder decides whether this
         # store can be opened at all. Left unset, `Memvara()` calls `default_embedder()`,
         # which returns a sentence-transformers model as soon as that package is
