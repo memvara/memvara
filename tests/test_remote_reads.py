@@ -498,3 +498,49 @@ def test_a_read_decodes_on_a_python_that_cannot_parse_a_z_suffix(recorded, monke
     assert claim is not None
     assert claim.recorded_at.tzinfo is not None
     assert claim.valid_from.tzinfo is not None
+
+
+# -- anchored ------------------------------------------------------------------
+
+def _sent(recorded):
+    import json
+    return json.loads(recorded.calls[-1].content)
+
+
+def test_anchored_reaches_the_wire_only_when_asked_for(recorded):
+    """Omitted when false, so a server from before the field is not handed a key it
+    refuses; sent when true, so a server from before the field refuses loudly rather
+    than answering unfiltered as though it had honoured the request."""
+    empty = {"as_of": None, "valid_at": None, "known_at": None, "states": ["live"],
+             "count": 0, "results": []}
+    mem = recorded(empty)
+    mem.search("where does Oscar live")
+    assert "anchored" not in _sent(recorded)
+    mem.search("where does Oscar live", anchored=True)
+    assert _sent(recorded)["anchored"] is True
+
+    mem = recorded({"text": "", "empty": True})
+    mem.recall("where does Oscar live", anchored=True)
+    assert _sent(recorded) == {"query": "where does Oscar live", "k": 8,
+                               "min_score": 0.0, "anchored": True,
+                               "include_episodes": False}
+
+    mem = recorded({"question": "q", "at": "2024-03-01T00:00:00Z", "count": 0,
+                    "readings": [], "text": "", "diverged": False})
+    mem.ask("where does Oscar live", anchored=True)
+    assert _sent(recorded)["anchored"] is True
+
+
+def test_the_anchor_is_read_off_the_wire_and_absent_means_the_server_did_not_say(recorded):
+    """`Explanation.anchor` comes back as the server rendered it, and a server from
+    before the field leaves it `None` — the dataclass default — rather than failing."""
+    mem = recorded({"as_of": None, "valid_at": None, "known_at": None,
+                    "states": ["live"], "count": 2,
+                    "results": [{"kind": "claim", "score": 0.7,
+                                 "ranking": {**_ranking(), "anchor": "subject"},
+                                 "memory": _memory()},
+                                {"kind": "claim", "score": 0.6,
+                                 "ranking": _ranking(), "memory": _memory()}]})
+    named, unsaid = mem.search("where do I live")
+    assert named.explain.anchor == "subject"
+    assert unsaid.explain.anchor is None

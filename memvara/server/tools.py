@@ -263,6 +263,23 @@ _MIN_SCORE = {
     ),
 }
 
+_ANCHORED = {
+    "type": "boolean",
+    "default": False,
+    "description": (
+        "Return only memories the query is demonstrably about: a memory whose subject or "
+        "object the query names, or one reached by walking the graph out of such a memory. "
+        "Default false. Set it when a wrong entity is worse than no answer — a question "
+        "about a specific person, service or ticket — because without it the store answers "
+        "a question about a stranger from the nearest memory about somebody else, at a "
+        "relevance that looks like any other match. It needs no number, unlike min_score, "
+        "and the two can be combined. It also drops a memory the query names only by a "
+        "paraphrase of its subject ('the coverage threshold' for a memory filed under "
+        "coverage_gate), so leave it off for a topic-style question that names nothing "
+        "in particular."
+    ),
+}
+
 #: Caps for the two arguments that name a *slot* rather than carry a value. Generous
 #: against every real spelling — the longest built-in predicate is 21 characters and a
 #: person's name is far inside 128 — and they exist because neither had any bound at all:
@@ -390,6 +407,7 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
         args["query"],
         k=args["k"],
         min_score=args["min_score"],
+        anchored=bool(args.get("anchored", False)),
         memory_types=_memory_types(args.get("memory_types")),
         as_of=_timestamp(as_of, "memory_search.as_of") if as_of is not None else None,
         valid_at=(_timestamp(valid_at, "memory_search.valid_at")
@@ -430,6 +448,7 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
         args["query"],
         k=args["k"],
         min_score=args["min_score"],
+        anchored=bool(args.get("anchored", False)),
         memory_types=_memory_types(args.get("memory_types")),
         budget=args.get("budget"),
         include_episodes=bool(args.get("include_episodes", False)),
@@ -1500,6 +1519,7 @@ TOOLS: tuple[Tool, ...] = (
                 ),
             },
             "min_score": _MIN_SCORE,
+            "anchored": _ANCHORED,
             "memory_types": _MEMORY_TYPES_FILTER,
         },
         required=("query",),
@@ -1531,6 +1551,7 @@ TOOLS: tuple[Tool, ...] = (
                 "description": "Most results to return.",
             },
             "min_score": _MIN_SCORE,
+            "anchored": _ANCHORED,
             "memory_types": _MEMORY_TYPES_FILTER,
             "as_of": {
                 "type": "string",

@@ -72,6 +72,7 @@ class MemoryAPI(Protocol):
     # -- reading -------------------------------------------------------------
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
+               anchored: bool = False,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -87,6 +88,7 @@ class MemoryAPI(Protocol):
         """
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
+               anchored: bool = False,
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False,
                budget: int | None = None) -> str:

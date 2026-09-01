@@ -236,9 +236,10 @@ def test_every_tool_description_says_when_to_call_it():
 #: `memory_forget` gets two, because it refuses both of its addressing modes at once: no
 #: single call can touch all three of its properties, and the union of two can.
 _FORWARDING_CASES = {
-    "memory_recall": [{"query": "anything", "memory_types": ["semantic"]}],
+    "memory_recall": [{"query": "anything", "memory_types": ["semantic"],
+                       "anchored": True}],
     "memory_search": [{"query": "anything", "memory_types": ["semantic"],
-                       "as_of": "2024-03-01"}],
+                       "as_of": "2024-03-01", "anchored": True}],
     "memory_neighborhood": [{"entity": "Acme", "depth": 2, "k": 5, "min_hops": 1,
                              "as_of": "2024-03-01"}],
     "memory_paths": [{"source": "Alice", "target": "Acme", "depth": 3, "k": 3,
@@ -2997,7 +2998,7 @@ def test_read_only_explains_itself_rather_than_erroring(read_only):
 def test_unknown_argument_suggests_the_real_one(server):
     body, is_error = call(server, "memory_recall", {"query": "x", "kk": 3})
     assert is_error and "did you mean 'k'" in body
-    assert "Accepted: budget, include_episodes, k, memory_types" in body
+    assert "Accepted: anchored, budget, include_episodes, k, memory_types" in body
 
 
 def test_missing_required_argument(server):
@@ -3092,7 +3093,7 @@ def test_defaults_come_from_the_schema_the_model_read():
     is a default that is eventually wrong in the documentation."""
     args = validate(BY_NAME["memory_search"].properties, (), {"query": "x"},
                     tool="memory_search")
-    assert args == {"query": "x", "k": 10, "min_score": 0.0}
+    assert args == {"query": "x", "k": 10, "min_score": 0.0, "anchored": False}
 
 
 def test_a_tool_with_no_arguments_rejects_unknown_ones():
@@ -3911,3 +3912,26 @@ def test_the_receipt_says_when_an_already_known_fact_was_refiled(server):
     moved, _ = call(server, "memory_search", {"query": "embedder default",
                                               "memory_types": ["semantic"]})
     assert "auto as the embedder default" in moved, "and arrived in the other one"
+
+
+# -- anchored ------------------------------------------------------------------
+
+def test_anchored_recall_says_nothing_about_a_stranger_and_search_agrees(server):
+    """`anchored` is the way to say no that needs no number, on both read tools.
+
+    Without it a question about somebody the store has never heard of is answered from
+    the nearest memory about somebody else, at a relevance that looks like any other
+    match — which is the worst thing a memory tool can hand a model. With it the tools
+    return their no-match text, and a question that does name the entity still answers.
+    """
+    text(server, "memory_remember", {"subject": "Ivan", "predicate": "lives_in",
+                                     "object": "Lisbon"})
+    assert "Lisbon" in text(server, "memory_recall", {"query": "where does Oscar live"})
+    assert "No stored memory matched" in text(
+        server, "memory_recall", {"query": "where does Oscar live", "anchored": True})
+    assert "No stored memory matched" in text(
+        server, "memory_search", {"query": "where does Oscar live", "anchored": True})
+    assert "Lisbon" in text(server, "memory_recall",
+                            {"query": "where does Ivan live", "anchored": True})
+    assert "Lisbon" in text(server, "memory_search",
+                            {"query": "where does Ivan live", "anchored": True})

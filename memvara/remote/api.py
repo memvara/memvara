@@ -308,6 +308,7 @@ class RemoteMemvara:
     # none when it was not asked for them.
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -316,6 +317,7 @@ class RemoteMemvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -324,6 +326,7 @@ class RemoteMemvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -331,6 +334,7 @@ class RemoteMemvara:
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
+               anchored: bool = False,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -346,6 +350,7 @@ class RemoteMemvara:
         body = self._http.request(
             "POST", "/v1/search", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,
+                        "anchored": anchored or None,
                         "as_of": _iso(as_of), "valid_at": _iso(valid_at),
                         "known_at": _iso(known_at), "states": _states(states),
                         "include_invalidated": include_invalidated,
@@ -354,6 +359,7 @@ class RemoteMemvara:
         return [_hit(h) for h in body["results"]]
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
+               anchored: bool = False,
                memory_types: Sequence[MemoryType | str] | None = None,
                include_episodes: bool = False, budget: int | None = None) -> str:
         """Retrieval already formatted for a system prompt: prose, not rows.
@@ -378,6 +384,7 @@ class RemoteMemvara:
         body = self._http.request(
             "POST", "/v1/recall", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,
+                        "anchored": anchored or None,
                         "memory_types": _types(memory_types),
                         "include_episodes": include_episodes}))
         return str(body["text"])
@@ -457,7 +464,7 @@ class RemoteMemvara:
         return hydrate.provenance(body)
 
     def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
-            min_score: float = 0.0) -> Answer:
+            min_score: float = 0.0, anchored: bool = False) -> Answer:
         """What was true then, and what this store would have *told you* then.
 
         The two differing is the finding rather than a fault: it means the record was
@@ -467,7 +474,7 @@ class RemoteMemvara:
         body = self._http.request(
             "POST", "/v1/ask", params=self._params(),
             json=_sent({"question": question, "at": _iso(at), "k": k,
-                        "min_score": min_score}))
+                        "min_score": min_score, "anchored": anchored or None}))
         return hydrate.answer(body)
 
     def since(self, when: datetime) -> Delta:
@@ -859,6 +866,7 @@ class ScopedRemoteMemvara:
     # none when it was not asked for them.
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -867,6 +875,7 @@ class ScopedRemoteMemvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -875,6 +884,7 @@ class ScopedRemoteMemvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -882,6 +892,7 @@ class ScopedRemoteMemvara:
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
+               anchored: bool = False,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -889,15 +900,17 @@ class ScopedRemoteMemvara:
                memory_types: Sequence[MemoryType | str] | None = None,
                include_episodes: bool = False) -> list[Any]:
         return self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
+                                anchored=anchored,
                                 valid_at=valid_at, known_at=known_at, states=states,
                                 include_invalidated=include_invalidated,
                                 memory_types=memory_types,
                                 include_episodes=include_episodes)
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
+               anchored: bool = False,
                memory_types: Sequence[MemoryType | str] | None = None,
                include_episodes: bool = False, budget: int | None = None) -> str:
-        return self._mem.recall(query, k=k, min_score=min_score,
+        return self._mem.recall(query, k=k, min_score=min_score, anchored=anchored,
                                 memory_types=memory_types,
                                 include_episodes=include_episodes, budget=budget)
 
@@ -935,8 +948,8 @@ class ScopedRemoteMemvara:
                              known_at=known_at)
 
     def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
-            min_score: float = 0.0) -> Answer:
-        return self._mem.ask(question, at=at, k=k, min_score=min_score)
+            min_score: float = 0.0, anchored: bool = False) -> Answer:
+        return self._mem.ask(question, at=at, k=k, min_score=min_score, anchored=anchored)
 
     def since(self, when: datetime) -> Delta:
         return self._mem.since(when)
