@@ -48,18 +48,48 @@ reasoning with retrieval hides the thing you want to know: which half a system i
 
 ## The dataset
 
-`datasets/v1/` — **262 events, 100 questions, 16 scenarios, 66 entities**. Everything in
+`datasets/v2/` — **342 events, 122 questions, 18 scenarios, 82 entities**. Everything in
 it is invented. No real person, conversation, credential or system appears anywhere, and
 the whole corpus is safe to publish.
 
 Three files, and one generator that produces them:
 
 ```
-datasets/v1/events.jsonl      what each system is told, in the order it is told
-datasets/v1/questions.jsonl   what it is then asked, with the gold answer
-datasets/v1/metadata.json     the predicate schema, the dimension map, the counts
-datasets/build_v1.py          regenerates all three; the test suite asserts it reproduces them
+datasets/v2/events.jsonl      what each system is told, in the order it is told
+datasets/v2/questions.jsonl   what it is then asked, with the gold answer
+datasets/v2/metadata.json     the predicate schema, the dimension map, the counts
+datasets/build_v2.py          regenerates all three; the test suite asserts it reproduces them
 ```
+
+**v2 is v1 plus new material, and the addition is literal.** `build_v2.py` reads the
+committed `v1/*.jsonl` and appends; every v1 event and question keeps its id, its wording
+and its gold answer, and a test asserts it. So a v1 result and a v2 result compare
+question by question, even though their totals cannot be compared directly. `v1/` is
+still in the tree, still loads, and still runs: `--dataset v1`.
+
+### What v2 added, and why
+
+v1 measured two of its own dimensions and found neither separated anything. Both causes
+were in the dataset rather than in the systems.
+
+- **`irrelevance` was a three-way tie at 50%.** Six negative questions: three named a fact
+  slot outright, where every system saw an empty slot and abstained, and three were open,
+  where every system answered from the nearest match. Easy and impossible, with nothing
+  between. v2 adds the two bands in between — a slot that held nothing *at the instant
+  asked*, and a slot the record knew nothing about *as of the belief instant asked* — and
+  brings the category to sixteen questions in four difficulty bands.
+- **`multi_hop` was six questions over a corpus with no graph in it.**
+  `Memvara.connectivity()` reports 3 joinable claims out of 193 on v1 — 1.6%, where a
+  claim is joinable when its object is another claim's subject. memvara's own
+  `docs/BENCHMARKS.md` says a graph walk cannot pay for itself at that rate, so six
+  questions over three edges measured the wording of the six questions. v2 writes down the
+  edges the entities always implied: teams have leads, leads are people with cities and
+  languages and employers, employers have head offices. The corpus goes to **25.7%
+  joinable** and the chains run to four hops.
+
+The connective layer makes chained questions *harder* to retrieve, not easier —
+`team_lead` goes from one claim in the store to seven — and the added negatives are ones
+every system is free to get right.
 
 `events.jsonl` is not called `facts.jsonl` on purpose. It holds *observations* — things a
 system is handed, one of which is wrong and several of which are superseded later. The
@@ -86,9 +116,16 @@ memory system's hardest customer and their facts change fastest.
   rather than replacing them.
 - **Distractors** — four of five people in one scenario live in London.
 - **Multi-hop** — Alice works on Project Atlas; Project Atlas is deployed to a region that
-  changed in March.
-- **Hard negatives** — Mallory is in memory with a birthplace and an editor, and no
-  residence. Project Chronos does not exist.
+  changed in March. Eighteen chained questions in all, from two hops to four, some of them
+  reverse hops ("the service owned by team-payments") and some with a clock rewound.
+- **An organisation** — seven teams with leads, leads with cities and languages and
+  employers, employers with head offices, and everybody employed somewhere. This is what
+  the chains walk through, and it is why a quarter of the corpus joins onto more of it.
+- **Hard negatives, in four bands** — a slot that was never written (Mallory has a
+  birthplace and an editor and no residence); a slot with values, asked about a date
+  before the first of them; a slot with values, asked what was *believed* before the first
+  was recorded; and an open question about something the store never held (Project Chronos
+  does not exist; Globex has a head office and thirty employees and no plan).
 - **Filler** — 210 unrelated facts about thirty people and fifteen services, never asked
   about, so that retrieval has to do some work.
 
@@ -163,78 +200,123 @@ diagnosis.
 
 ## Systems
 
-Three adapters ship. `--system` also accepts a dotted import path, so a memory system in
-another repository is benchmarked without forking this one.
+Four entries ship, over three implementations. `--system` also accepts a dotted import
+path, so a memory system in another repository is benchmarked without forking this one.
 
 | Name | What it is |
 |---|---|
 | `naive` | A dictionary of current values, overwritten on each write, with the source kept beside it. What most agent memory actually is. |
 | `vector-rag` | Retrieval over the whole write log, with **one clock**. Keeps every observation, indexes each sentence, and answers a question about a past instant with the most recent write it had received by then. The strongest baseline that is not bitemporal. |
-| `memvara` | This repository's library, through its public API — `remember()`, `history()`, `search()`, `why()`. |
+| `memvara` | This repository's library, through its public API — `remember()`, `history()`, `search()`, `why()` — in its **shipped configuration**. |
+| `memvara-graph` | The same adapter with two constructor arguments changed: `read_w_graph=1.0` and `read_intent_weighting=False`. memvara ships its graph retrieval leg off; this is what turning it on buys and costs. |
 
 Neither baseline is a strawman. `vector-rag` gets current state, provenance, change time
 and knowledge time completely right, and reconstructs history correctly wherever a fact was
 recorded on the day it became true — which is most of the dataset.
 
+`memvara-graph` is a second entry rather than a changed default so that the shipped
+configuration keeps reporting the shipped configuration's numbers, and the leg's
+contribution stays a difference a reader can subtract. `intent_weighting` goes off with it
+because `Intent.TEMPORAL`'s multipliers zero the graph weight; a run that left it on would
+publish the leg as useless while barely running it, which `docs/BENCHMARKS.md` records
+happening once already.
+
 ---
 
 ## Results
 
-Measured on this repository at the commit these files landed in, Python 3.13.14 on macOS
-arm64, `numpy` 2.5.1, memvara 0.9.0. Reproduce with the command at the top of this file.
+Dataset v2, benchmark 2.0. Measured on this repository at the commit these files landed
+in: Python 3.13.14 on macOS arm64, 10 cores, `numpy` 2.5.1, memvara 0.9.0. Reproduce with
+the command at the top of this file.
 
 | System | Overall | current_state | temporal | knowledge_time | contradiction | provenance | retrieval | irrelevance |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| memvara 0.9.0 | **92.0%** | 100.0% | **100.0%** | 100.0% | 100.0% | 100.0% | 64.3% | 50.0% |
-| vector-rag 1.0 | 89.0% | 100.0% | 91.5% | 100.0% | 100.0% | 100.0% | **71.4%** | 50.0% |
-| naive 1.0 | 50.0% | 100.0% | 34.0% | 42.9% | 60.0% | 54.5% | 64.3% | 50.0% |
+| memvara-graph 0.9.0 | **84.4%** | 100.0% | **100.0%** | 100.0% | 100.0% | 100.0% | **53.8%** | 56.2% |
+| memvara 0.9.0 | 82.8% | 100.0% | **100.0%** | 100.0% | 100.0% | 100.0% | 46.2% | 56.2% |
+| vector-rag 1.0 | 80.3% | 100.0% | 91.5% | 100.0% | 100.0% | 100.0% | 50.0% | 56.2% |
+| naive 1.0 | 41.0% | 100.0% | 34.0% | 42.9% | 60.0% | 54.5% | 34.6% | 18.8% |
 
 By category, with the number of questions in each:
 
-| Category | memvara | vector-rag | naive | n |
-|---|---:|---:|---:|---:|
-| current_state | 100.0% | 100.0% | 100.0% | 10 |
-| historical_state | **100.0%** | 85.2% | 33.3% | 27 |
-| change_detection | 100.0% | 100.0% | 27.3% | 11 |
-| change_time | 100.0% | 100.0% | 44.4% | 9 |
-| knowledge_time | 100.0% | 100.0% | 42.9% | 7 |
-| provenance | 100.0% | 100.0% | 54.5% | 11 |
-| contradiction | 100.0% | 100.0% | 60.0% | 5 |
-| multi_hop | 16.7% | **33.3%** | **33.3%** | 6 |
-| distractor | 100.0% | 100.0% | 87.5% | 8 |
-| negative | 50.0% | 50.0% | 50.0% | 6 |
+| Category | memvara-graph | memvara | vector-rag | naive | n |
+|---|---:|---:|---:|---:|---:|
+| current_state | 100.0% | 100.0% | 100.0% | 100.0% | 10 |
+| historical_state | **100.0%** | **100.0%** | 85.2% | 33.3% | 27 |
+| change_detection | 100.0% | 100.0% | 100.0% | 27.3% | 11 |
+| change_time | 100.0% | 100.0% | 100.0% | 44.4% | 9 |
+| knowledge_time | 100.0% | 100.0% | 100.0% | 42.9% | 7 |
+| provenance | 100.0% | 100.0% | 100.0% | 54.5% | 11 |
+| contradiction | 100.0% | 100.0% | 100.0% | 60.0% | 5 |
+| multi_hop | **33.3%** | 22.2% | 27.8% | 11.1% | 18 |
+| distractor | 100.0% | 100.0% | 100.0% | 87.5% | 8 |
+| negative | 56.2% | 56.2% | 56.2% | 18.8% | 16 |
 
-**Three points separate memvara from a baseline built out of numpy in an afternoon**, and
-that is narrower than the pitch for bitemporal memory would suggest. Read the rows rather
-than the total:
+**Two and a half points separate memvara from a baseline built out of numpy in an
+afternoon**, and that is narrower than the pitch for bitemporal memory would suggest. Read
+the rows rather than the total:
 
-- **`temporal` is the whole of memvara's lead.** 100.0% against `vector-rag`'s 91.5%. The
-  four questions `vector-rag` misses are the four delayed-knowledge and correction
+- **`temporal` is the whole of memvara's lead over `vector-rag`.** 100.0% against 91.5%.
+  The four questions `vector-rag` misses are the four delayed-knowledge and correction
   scenarios — where the news arrived after the fact, so "what was true then" and "what had
   we heard by then" are different answers and one clock has to give the same one to both.
   Everywhere else in the dataset the two clocks coincide and a single-clock store is
   exactly right.
-- **memvara loses on retrieval**, 64.3% against `vector-rag`'s 71.4%, and it is now
-  entirely `multi_hop`: memvara answers 1 of 6, which is the **worst of the three
-  systems**. The failure signature is unusually clear — asked *"Which region is the
-  project Alice works on deployed to?"* it answers `Project Atlas`, and asked who leads
-  the team that owns the checkout service it answers `team-payments`. It finds the first
-  hop and stops, because that is all this adapter does: take the top-ranked slot. memvara
-  ships `neighborhood()` and `paths_between()` and this adapter uses neither. A
-  graph-aware adapter would very likely do better; nobody has measured that, so nothing
-  here claims it.
-- **`irrelevance` is 50% for all three, so it currently discriminates nothing.** Every
-  system answers the three open negative questions from the nearest match rather than
-  abstaining. That is a real and shared failure — memvara's own `search()` documentation
-  warns about exactly it — and a category where three systems tie is not yet earning its
-  place. See *Limitations*.
+- **Nobody can do multi-hop.** The best score in the category is 6 of 18. The systems
+  find the first hop and stop: asked *"In which city does the person who leads
+  team-payments live?"*, three of the four answer `Sam Okonkwo` — the right person, and
+  not a city; `naive` answers `Austin`, a city belonging to somebody else. The shared
+  slot-selection rule (below) recovers a chain when the question names the closing
+  relation distinctly, and this question names two of them — *leads* and
+  *live* — so it does not. This is the weakest dimension in the benchmark and the most
+  obvious thing a contributor could improve.
+- **memvara's shipped configuration loses `retrieval` to `vector-rag`**, 46.2% against
+  50.0%, and turning the graph leg on wins it back and a little more: 53.8%. The leg is
+  worth two `multi_hop` questions and costs 5× on query p95. Both halves of that are in
+  the tables.
+- **`irrelevance` separates the time-aware from the time-blind and nothing finer.** All
+  three time-aware systems score 9 of 16 and `naive` scores 3. The six questions that
+  create the gap are the two new bands, where the answer is nothing because of where the
+  question puts a clock; the seven that no system gets are the open ones, where every
+  system answers from the nearest match rather than abstaining. That is measured, not
+  assumed — see *Limitations*.
 - **`naive` scores 100% on current state.** It is not bad at memory. It is bad at *time*,
   and the benchmark's job is to say which.
 
+### What moved between v1.0 and 2.0, and what caused it
+
+Two things changed at once — the dataset grew and the harness gained a shared
+slot-selection rule — so the totals are not comparable across the versions. The
+per-question results are. For a like-for-like reading, here is **dataset v1 under the 2.0
+harness**, beside what benchmark 1.0 published for it:
+
+| System | v1 under 1.0 | v1 under 2.0 | v2 under 2.0 |
+|---|---:|---:|---:|
+| memvara-graph | — | 94.0% | 84.4% |
+| memvara | 92.0% | 93.0% | 82.8% |
+| vector-rag | 89.0% | 91.0% | 80.3% |
+| naive | 50.0% | 50.0% | 41.0% |
+
+Every score falls from v1 to v2 because v2 adds twelve chained questions nobody can answer
+and ten negatives, seven of which nobody can answer either. That is the dataset getting
+harder in the two places it was measuring nothing, which is what it was for.
+
+The harness change is one rule, `adapters/base.pick_slot`, shared by all three adapters:
+**prefer the highest-ranked candidate whose predicate the question actually names**,
+falling back to rank when none does. Taking the top hit answered the first hop of a
+chained question and stopped, and the claim holding the answer was already in the same
+candidate list — nothing was missing except a reason to prefer it. On v1 it moved
+`retrieval` 64.3% → 71.4% for memvara and 71.4% → 85.7% for `vector-rag`: **it helped the
+baseline more than it helped memvara**, which is the reason to trust it is not fitted to
+one system. It lives in `adapters/base.py` for the same reason `indexable` does — a
+selection rule that lived in one adapter would be measuring the harness.
+
 ### The harness had two defects, and they were found by investigating a loss
 
-Worth stating plainly, because it is the kind of thing a benchmark's author is tempted to
-fix quietly. An earlier run had memvara at 90.0% overall and 50.0% on `retrieval`. Asked
+Kept because it is the kind of thing a benchmark's author is tempted to fix quietly. Every
+figure in this subsection is **dataset v1 under benchmark 1.0** and is history; the tables
+above supersede it.
+
+An earlier run had memvara at 90.0% overall and 50.0% on `retrieval`. Asked
 *"Where does Frank live?"*, memvara returned Alice — and the diagnosis was not weak
 ranking. It was two mistakes in this harness:
 
@@ -258,56 +340,77 @@ result: `retrieval` went 57.1% → 64.3% for `naive`, 64.3% → 71.4% for `vecto
 **memvara still loses the category**, and it moved from tying on `multi_hop` to being last
 on it. No question, gold answer or scoring rule was touched.
 
-Cost and latency, measured in the same runs:
+Cost, measured in the same runs:
 
-| System | LLM calls | texts embedded | rows stored | write, per event | query, mean | query p95 |
-|---|---:|---:|---:|---:|---:|---:|
-| memvara | 0 | 520 | 241 | 0.8 – 2.9 ms | 0.9 – 2.6 ms | 2 – 15 ms |
-| vector-rag | 0 | 279 | 262 | 0.02 – 0.25 ms | 0.09 – 0.51 ms | 0.3 – 1.5 ms |
-| naive | 0 | 0 | **193** | 0.007 – 0.016 ms | 0.02 – 0.03 ms | 0.1 – 0.2 ms |
+| System | LLM calls | model tokens | texts embedded | rows stored | read calls |
+|---|---:|---:|---:|---:|---:|
+| memvara | 0 | 0 | 696 | 321 | 122 |
+| memvara-graph | 0 | 0 | 696 | 321 | 122 |
+| vector-rag | 0 | 0 | 375 | 342 | 122 |
+| naive | 0 | 0 | 0 | **272** | 122 |
 
-**memvara embeds 520 texts against `vector-rag`'s 279** — texts submitted, not requests made, which is the same quantity for both only because neither batches. The split is exact: 241
-claims plus 262 source episodes on the way in, then one per unprobed question. It embeds
-the claim *and* the turn the claim came from, which is what makes `why()` able to answer
-later and is the second cost the row above is the first half of. Until this was measured
-the column read `-` for memvara, so the system doing the most embedding was the one with
-no figure.
-
-**Ranges, not points, and wide ones.** These span every run taken on one laptop that was
-also doing other work, and the same figure moved by about 3× between runs depending on
-that load. Quoting a single number from this table would be false precision.
-
-**What is stable is the ordering**, which holds in every run: `naive` is fastest on both
-axes, then `vector-rag`, then memvara — which is doing SQLite, embedding and
-reconciliation on every write, and hybrid retrieval with a graph leg on every unprobed
-read. memvara is roughly two orders of magnitude slower per write than a dictionary. That
-is the trade the rest of this table is the other half of, and it is a real cost rather
-than a rounding error. Reproduce it on your own machine before quoting anything.
+**memvara embeds 696 texts against `vector-rag`'s 375** — texts submitted, not requests
+made, which is the same quantity for both only because neither batches. The split is
+exact: 321 claims plus 342 source episodes on the way in, then one per unprobed question.
+It embeds the claim *and* the turn the claim came from, which is what makes `why()` able to
+answer later. Until this was measured the column read `-` for memvara, so the system doing
+the most embedding was the one with no figure.
 
 **The `rows stored` column is the price of answering about the past, and it reads in the
 right direction only if all three numbers mean the same thing.** They did not until this
 was corrected: memvara reported rows while the baselines reported write *calls*, so the
 table said the dictionary stored more rows than the bitemporal store. It stores fewer.
 
-- **naive holds 193 rows** for 262 events, because it overwrites. Those 193 are exactly
+- **naive holds 272 rows** for 342 events, because it overwrites. Those 272 are exactly
   the current values and nothing else.
-- **memvara holds 241** — the same 193 live, plus 46 *ended* (they stopped being true) and
+- **memvara holds 321** — the same 272 live, plus 47 *ended* (they stopped being true) and
   2 *retired* (the record was wrong: the hearsay about Dana, and the standup note about
-  the quotes service). So **48 extra rows, a 25% overhead, is what the entire `temporal`
-  and `contradiction` result is bought with.** The two-against-forty-six split is itself
+  the quotes service). So **49 extra rows, an 18% overhead, is what the entire `temporal`
+  and `contradiction` result is bought with.** The two-against-forty-seven split is itself
   the distinction those categories score.
-- **vector-rag holds 262**, one per observation: it keeps everything, including the four
+- **vector-rag holds 342**, one per observation: it keeps everything, including the four
   restatements of the billing service's datastore that say nothing new.
 
-memvara's write receipts report 241 added and 21 reinforced — a restatement of something
-already believed bumps the existing claim rather than adding a row, which is why it holds
-fewer rows than `vector-rag` while remembering strictly more.
+memvara's write receipts report a restatement of something already believed bumping the
+existing claim rather than adding a row, which is why it holds fewer rows than
+`vector-rag` while remembering strictly more.
 
 memvara's **zero LLM calls on the write path is true by construction here, not a finding**:
 the benchmark hands every system a structured fact, so the adapter uses `remember()` and
 there is nothing to extract. It is recorded so that a change introducing a model call
 would be visible, not as evidence about extraction. An unmeasured counter prints `-`,
 never `0`.
+
+### Latency
+
+Run with `--latency-repeats 5`: the question set is asked five times, the first pass is
+discarded, and the four after it are aggregated. The first pass is where a system does
+whatever it deferred — `vector-rag` builds its index on first search — and that cost
+belongs to the cold path, not to a warm-path p95.
+
+| System | write, per event | write, whole corpus | query mean | query p50 | query p95 | query max | p50 spread |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| memvara | 0.425 ms | 145.2 ms | 0.563 ms | 0.066 ms | 2.153 ms | 2.904 ms | 0.003 ms |
+| memvara-graph | 0.432 ms | 147.9 ms | 2.165 ms | 0.068 ms | **10.074 ms** | 20.138 ms | 0.003 ms |
+| vector-rag | 0.020 ms | 6.8 ms | 0.123 ms | 0.015 ms | 0.484 ms | 0.669 ms | 0.001 ms |
+| naive | 0.004 ms | 1.2 ms | 0.029 ms | 0.001 ms | 0.123 ms | 0.231 ms | 0.000 ms |
+
+**`p50 spread` is the distance between the highest and lowest per-pass median, and it is
+the number that says whether to believe the others.** At 0.003 ms and below, these four
+passes agree with each other; a table measured once cannot say that, and the previous
+publication of this table could only quote ranges spanning about 3×. It still measures one
+machine under whatever load it was under — the spread says the passes agree, not that
+another machine would agree with them.
+
+**The graph leg costs 5× on the tail.** memvara's p95 goes from 2.2 ms to 10.1 ms for the
+two extra `multi_hop` questions it answers. That is the trade, stated in both directions.
+
+**The ordering is stable across every run taken:** `naive` fastest on both axes, then
+`vector-rag`, then memvara, which is doing SQLite, embedding and reconciliation on every
+write and hybrid retrieval on every unprobed read. memvara is roughly two orders of
+magnitude slower per write than a dictionary. That is a real cost rather than a rounding
+error, and it is the other half of everything above it. Reproduce it on your own machine
+before quoting anything.
 
 ### What the cost columns do not measure
 
@@ -320,7 +423,7 @@ for and are missing rather than declined:
   only that system could fill. `db_reads` is a different thing and says so — read calls
   the *benchmark* made, one per question, identical for every system.
 - **Wall-clock cost of the model** — no shipped system uses one, so `llm_calls` and
-  `tokens` are `0` for all three. Those are measurements rather than blanks: zero calls is
+  `tokens` are `0` for every one of them. Those are measurements rather than blanks: zero calls is
   zero tokens. The fields exist for adapters that do use a model, which
   [the contributor guide](https://github.com/memvara/memvara/blob/main/benchmarks/agent_memory/CONTRIBUTING.md)
   requires to disclose the model, version and temperature.
@@ -333,8 +436,14 @@ for and are missing rather than declined:
 ## Running it
 
 ```bash
-# everything, all three systems, side by side
-python -m benchmarks.agent_memory --system memvara --system naive --system vector-rag --compare
+# everything, every shipped system, side by side
+python -m benchmarks.agent_memory --system memvara --system memvara-graph --system naive --system vector-rag --compare
+
+# a superseded dataset version, still in the tree and still runnable
+python -m benchmarks.agent_memory --system memvara --dataset v1
+
+# timings you can quote: ask everything five times, report the spread between the medians
+python -m benchmarks.agent_memory --system memvara --latency-repeats 5
 
 # fast enough to run while you work: 40 questions, spread across all ten categories
 python -m benchmarks.agent_memory --system memvara --quick
@@ -389,10 +498,14 @@ Enforced by the code where the code can:
   others were denied would be the benchmark rigging itself.
 - **Which questions are easier is fixed by the dataset, not chosen by the system.** A
   question either names its fact slot for everyone or for nobody.
-- **Shared discriminators and shared index text live in `adapters/base.py`**, so three
-  adapters cannot read the same question three subtly different ways, and cannot feed
-  their retrievers three different strings. Both had happened; see *The harness had two
-  defects*.
+- **Shared discriminators, shared index text and the shared slot-selection rule live in
+  `adapters/base.py`**, so three adapters cannot read the same question three subtly
+  different ways, cannot feed their retrievers three different strings, and cannot choose
+  among their own candidates by three different rules. The first two had happened; see
+  *The harness had two defects*.
+- **A configuration change gets its own entry rather than a changed default.**
+  `memvara-graph` is the same adapter with two constructor arguments set, published beside
+  the shipped configuration rather than replacing it.
 - **Everything runs offline and deterministically.** No model, no judge, no network.
 - **Changing the dataset or the methodology increments the version.** See *Versioning*.
 
@@ -410,12 +523,17 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). It is one file with five methods, and on
 
 ## Versioning
 
-The dataset and the scoring are treated as an API. `BENCHMARK_VERSION` is `1.0` and the
-dataset is `v1`. A change that could move a published score is material and gets a new
-version: adding or rewording questions, changing a gold answer, changing a matching rule,
-changing the supersession rules. Adding a *system* is not material. Fixing a typo in a
-`note` is not material. When `v1` changes materially it becomes `v2`, `v1` stays where it
-is, and the change is documented in `CHANGELOG.md`.
+The dataset and the scoring are treated as an API. `BENCHMARK_VERSION` is `2.0` and the
+default dataset is `v2`. A change that could move a published score is material and gets a
+new version: adding or rewording questions, changing a gold answer, changing a matching
+rule, changing a rule every adapter shares, changing the supersession rules. Adding a
+*system* is not material. Fixing a typo in a `note` is not material.
+
+When a dataset version changes materially it becomes the next one and the old one **stays
+where it is**: `datasets/v1/` is still committed, still loads, still runs under
+`--dataset v1`, and the test suite regenerates and validates it on every run. A superseded
+version that stopped working would make its published numbers unreproducible, which is the
+opposite of what versioning it was for.
 
 ## Limitations
 
@@ -434,25 +552,37 @@ The honest list. Several of these are reasons to discount a number above.
    are derived from published rules, the baselines implement every rule memvara's adapter
    does, and every question is in a file you can read. A benchmark authored by an
    interested party is worth less than one that is not, whatever its methodology.
-3. **The `irrelevance` dimension does not discriminate.** All three systems score 50%,
-   failing the same three questions. Until either a system abstains or the questions get
-   harder, that row carries no information.
-4. **No adapter tested does multi-hop.** All three take the top-ranked slot and stop, so
-   `multi_hop` scores between 16.7% and 33.3% across the board. That is a limitation of
-   the adapters as written rather than a property of the systems — memvara ships
-   `neighborhood()` and `paths_between()` and this adapter uses neither — and it is the
-   most obvious thing a contributor could improve.
+3. **`irrelevance` separates the time-aware from the time-blind and nothing finer.** The
+   three time-aware systems tie at 9 of 16, and the seven questions none of them answers
+   are the open ones — a plausible question about something the store never held, where
+   every system answers from the nearest match. **A score floor does not fix it, and that
+   is measured rather than assumed.** `memvara.calibrate_min_score` fitted directly on
+   these questions — the most favourable case possible, and not one an honest adapter
+   could use — reports `separable=False`: the best floor available keeps all 26 answerable
+   open questions and silences 2 of the 7 unanswerable ones. The two distributions
+   overlap: the highest-scoring unanswerable question outranks fourteen of the 26
+   answerable ones. Abstention needs something other than a threshold, and nothing here
+   has it.
+4. **Nobody does multi-hop well.** The best score in the category is 6 of 18. The shared
+   slot-selection rule recovers a chain when the question names its closing relation
+   distinctly and does not when the question names two relations, which most of them do.
+   memvara ships `neighborhood()` and `paths_between()` and no adapter calls either; the
+   graph *retrieval* leg is exercised, through `memvara-graph`, and buys two questions.
+   Explicit traversal is unmeasured and is the most obvious thing a contributor could
+   improve.
 5. **`vector-rag`'s embedder is hashed TF-IDF, not a neural one.** It buys no API key and
    byte-identical runs; it costs paraphrase robustness. A sentence-transformer baseline
    would likely score higher on `multi_hop`. The questions are not written to defeat
    lexical matching, so the gap is probably small, but it is unmeasured.
-6. **262 events is small.** It is large enough that retrieval is not trivial and small
+6. **342 events is small.** It is large enough that retrieval is not trivial and small
    enough to run in a second. It says nothing about behaviour at a million memories.
 7. **Answers are values, not prose.** A real agent reads memory and writes a sentence, and
    nothing here measures that step. `demo/` in this repository is the harness for that
    question and it is a different one.
-8. **Latency is measured on one machine, single-process, with no concurrency.** Treat the
-   numbers as an order of magnitude.
+8. **Latency is measured on one machine, single-process, with no concurrency.**
+   `--latency-repeats` shows that repeated passes on that machine agree with each other,
+   which is not the same as showing that another machine would agree with them. Treat the
+   numbers as an order of magnitude and re-measure before quoting.
 9. **Date answers must be ISO-8601.** A system that answers `"the 15th of March"` is marked
    wrong for format. This is stated up front rather than papered over with a parser.
 10. **No question asks about a value a slot held twice.** Reversion makes "when did X move
@@ -482,8 +612,10 @@ benchmarks/agent_memory/
 │   ├── vector_rag.py    full write log, vector retrieval, one clock
 │   └── memvara_adapter.py
 └── datasets/
-    ├── build_v1.py      the generator
-    └── v1/              the committed dataset
+    ├── build_v1.py      the v1 generator
+    ├── build_v2.py      the v2 generator; reads v1 and appends to it
+    ├── v1/              the superseded dataset, still loadable and still tested
+    └── v2/              the committed dataset a bare run uses
 ```
 
 Tests are in `tests/test_agent_memory_bench.py`, with the rest of this repository's suite.

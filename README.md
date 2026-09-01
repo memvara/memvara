@@ -622,7 +622,7 @@ Memvara is built around the observation that **most of this doesn't need a model
 A public, reproducible benchmark for **memory systems in general**, not for memvara. It
 measures what happens to a fact that changes: current state, historical state,
 contradiction resolution, provenance, knowledge time, retrieval among distractors, cost
-and latency. 262 events, 100 questions, 16 scenarios, no API key, about a second a system.
+and latency. 342 events, 122 questions, 18 scenarios, no API key, about a second a system.
 
 ```bash
 python -m benchmarks.agent_memory --system memvara --system naive --system vector-rag --compare
@@ -630,7 +630,9 @@ python -m benchmarks.agent_memory --system memvara --system naive --system vecto
 
 Any memory system can implement the adapter interface and be scored on the same dataset by
 the same rules — including from another repository, without forking this one. Memvara does
-not win every category, and the table reports the ones it loses.
+not win every category, and the table reports the ones it loses: in its shipped
+configuration it loses `retrieval` to the vector baseline, and no system tested scores
+above 6 of 18 on chained questions.
 
 | | |
 |---|---|
@@ -664,7 +666,7 @@ wrongly.
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 4,172 passing, 10 skipped, no API key
+python3 -m pytest -q                              # 4,238 passing, 10 skipped, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 python3 -m benchmarks.agent_memory --system memvara --compare   # the agent memory benchmark
 PYTHONPATH=. python3 bench/temporal.py            # the two clocks, six families

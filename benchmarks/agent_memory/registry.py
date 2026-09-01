@@ -23,6 +23,7 @@ from .adapters.base import MemorySystem
 #: environment where memvara is not installed at all.
 BUILTIN: dict[str, str] = {
     "memvara": "benchmarks.agent_memory.adapters.memvara_adapter:build",
+    "memvara-graph": "benchmarks.agent_memory.adapters.memvara_adapter:build_graph",
     "naive": "benchmarks.agent_memory.adapters.naive:build",
     "vector-rag": "benchmarks.agent_memory.adapters.vector_rag:build",
 }

@@ -202,14 +202,23 @@ jobs:
       - run: |
           python -m pip install --upgrade pip
           python -m pip install -e .
-      - name: The dataset is still the generator's output
+      # Both datasets, not just the current one. A superseded version stays committed so
+      # its published numbers stay reproducible, and a generator that stopped reproducing
+      # it would take those numbers with it and say nothing.
+      - name: Every dataset is still its generator's output
         run: |
-          python benchmarks/agent_memory/datasets/build_v1.py --out /tmp/regen
-          diff -r /tmp/regen benchmarks/agent_memory/datasets/v1
+          python benchmarks/agent_memory/datasets/build_v1.py --out /tmp/regen-v1
+          diff -r /tmp/regen-v1 benchmarks/agent_memory/datasets/v1
+          python benchmarks/agent_memory/datasets/build_v2.py --out /tmp/regen-v2
+          diff -r /tmp/regen-v2 benchmarks/agent_memory/datasets/v2
       - name: Every system answers, twice, identically
         run: |
           python -m benchmarks.agent_memory --quick --repeat-check --quiet \
-            --system memvara --system naive --system vector-rag
+            --system memvara --system memvara-graph --system naive --system vector-rag
+      # The superseded dataset is not merely present, it still runs.
+      - name: The superseded dataset still loads and still scores
+        run: |
+          python -m benchmarks.agent_memory --dataset v1 --quick --quiet --system memvara
 
   npm-bridge:
     # `npx memvara` is JavaScript, and until 0.1.0 no JavaScript ran in this workflow at

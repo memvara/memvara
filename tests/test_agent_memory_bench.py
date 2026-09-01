@@ -37,7 +37,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:                       # `benchmarks` is not an installed package
     sys.path.insert(0, str(ROOT))
 
-from benchmarks.agent_memory import BENCHMARK_VERSION, cli, dataset as ds, normalization as nz  # noqa: E402
+from benchmarks.agent_memory import BENCHMARK_VERSION, DEFAULT_DATASET  # noqa: E402
+from benchmarks.agent_memory import cli, dataset as ds, normalization as nz  # noqa: E402
 from benchmarks.agent_memory import registry, report, results, runner, scoring, timeline  # noqa: E402
 from benchmarks.agent_memory.adapters import base  # noqa: E402
 from benchmarks.agent_memory.adapters.base import MemoryAnswer, Usage  # noqa: E402
@@ -63,9 +64,16 @@ def _child_env() -> dict[str, str]:
     return env
 
 
+#: Every dataset in the tree, and the generator that produces each. A superseded version
+#: stays runnable — that is the promise in `README.md`'s *Versioning* section — so its
+#: integrity is checked here on every run rather than trusted because it once passed.
+SHIPPED: dict[str, str] = {"v1": "build_v1.py", "v2": "build_v2.py"}
+
+
 @pytest.fixture(scope="module")
 def data() -> ds.Dataset:
-    return ds.load("v1")
+    """The dataset a bare run uses. Most tests want this one."""
+    return ds.load()
 
 
 @pytest.fixture(scope="module")
@@ -73,25 +81,33 @@ def truth(data: ds.Dataset) -> timeline.Truth:
     return timeline.Truth(data)
 
 
+@pytest.fixture(params=sorted(SHIPPED), scope="module")
+def shipped(request) -> ds.Dataset:
+    """Each shipped dataset in turn, for the checks that must hold for all of them."""
+    return ds.load(request.param)
+
+
 # --- the dataset itself -----------------------------------------------------
 
-def test_the_shipped_dataset_loads_and_is_not_trivially_small(data):
+def test_the_shipped_dataset_loads_and_is_not_trivially_small(shipped):
     """A benchmark small enough to answer by luck measures luck."""
-    assert data.version == "v1"
-    assert len(data.events) >= 200
-    assert len(data.questions) >= 80
-    assert len(data.scenarios) >= 10
-    assert set(q.category for q in data.questions) == set(ds.CATEGORIES)
+    assert shipped.version in SHIPPED
+    assert len(shipped.events) >= 200
+    assert len(shipped.questions) >= 80
+    assert len(shipped.scenarios) >= 10
+    assert set(q.category for q in shipped.questions) == set(ds.CATEGORIES)
 
 
-def test_every_category_carries_enough_questions_to_mean_something(data):
+def test_every_category_carries_enough_questions_to_mean_something(shipped):
     """A category with two questions reports 0%, 50% or 100% and nothing in between."""
-    counts = {c: sum(1 for q in data.questions if q.category == c) for c in ds.CATEGORIES}
+    counts = {c: sum(1 for q in shipped.questions if q.category == c)
+              for c in ds.CATEGORIES}
     thin = {c: n for c, n in counts.items() if n < 5}
     assert not thin, f"too few questions to report a rate: {thin}"
 
 
-def test_the_dataset_is_regenerated_byte_for_byte(tmp_path):
+@pytest.mark.parametrize("version,script", sorted(SHIPPED.items()))
+def test_the_dataset_is_regenerated_byte_for_byte(tmp_path, version, script):
     """The committed files are the generator's output and nothing else.
 
     Run in a subprocess because the generator accumulates into module-level lists, so
@@ -99,12 +115,12 @@ def test_the_dataset_is_regenerated_byte_for_byte(tmp_path):
     the command a contributor runs, so this tests the documented path.
     """
     proc = subprocess.run(
-        [sys.executable, "benchmarks/agent_memory/datasets/build_v1.py",
+        [sys.executable, f"benchmarks/agent_memory/datasets/{script}",
          "--out", str(tmp_path)],
         cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
         env=_child_env(), timeout=300)
     assert proc.returncode == 0, proc.stderr
-    committed = ROOT / "benchmarks" / "agent_memory" / "datasets" / "v1"
+    committed = ROOT / "benchmarks" / "agent_memory" / "datasets" / version
     for name in ("metadata.json", "events.jsonl", "questions.jsonl"):
         fresh, kept = (tmp_path / name).read_bytes(), (committed / name).read_bytes()
         if fresh != kept and fresh.replace(b"\r\n", b"\n") == kept.replace(b"\r\n", b"\n"):
@@ -117,7 +133,7 @@ def test_the_dataset_is_regenerated_byte_for_byte(tmp_path):
                 f"{name} differs from the committed copy by line endings and nothing "
                 f"else — the content is identical, and {crlf} has CRLF. Both sides must "
                 "be LF: `.gitattributes` pins this directory to `eol=lf` for the "
-                "checkout, and `build_v1.py::_write` passes `newline=\"\\n\"` for the "
+                f"checkout, and `{script}::_write` passes `newline=\"\\n\"` for the "
                 "generator. A checkout made before that `.gitattributes` line existed "
                 "needs `git rm --cached -r . && git reset --hard` to pick it up.")
         assert fresh == kept, (
@@ -126,17 +142,18 @@ def test_the_dataset_is_regenerated_byte_for_byte(tmp_path):
             "to anything")
 
 
-def test_every_gold_agrees_with_the_timeline_model(data, truth):
+def test_every_gold_agrees_with_the_timeline_model(shipped):
     """The double-entry check. Authored golds against derived ones, on every question.
 
     A failure here means one of two independent derivations is wrong, and the run cannot
     say which — that is the point. Read the disagreement, decide which side is right, and
     fix that one.
     """
+    truth = timeline.Truth(shipped)
     disagreements = []
-    for question in data.questions:
+    for question in shipped.questions:
         slot = truth.slot(*question.probe) if question.probe else None
-        when = question.at or data.evaluated_at
+        when = question.at or shipped.evaluated_at
         gold = question.gold
         if question.category == "negative":
             if slot is not None and slot.values_at(when, question.known_at):
@@ -171,10 +188,161 @@ def test_every_gold_agrees_with_the_timeline_model(data, truth):
     assert not disagreements, disagreements
 
 
-def test_no_question_carries_a_real_persons_data(data):
+#: Every unprobed chained question in the tree, written as the walk it describes: a
+#: starting entity and the relations to follow. `~p` is a reverse hop — the entity whose
+#: `p` is the value in hand — which is what "the service owned by team-payments" asks for.
+#:
+#: This is the double-entry check for the questions that have no probe, and until v2
+#: there was none: `test_every_gold_agrees_with_the_timeline_model` derives from
+#: `question.probe` and skips every question without one, which is all eighteen chained
+#: ones. An authored gold nobody could check is a benchmark scoring against a guess.
+CHAINS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "q-chain-atlas": ("alice", ("works_on", "deploy_region")),
+    "q-chain-globex": ("bob", ("works_at", "hq_city")),
+    "q-chain-lead-now": ("checkout-service", ("owned_by", "team_lead")),
+    "q-chain-lead-then": ("checkout-service", ("owned_by", "team_lead")),
+    "q-chain-datastore": ("team-payments", ("~owned_by", "datastore")),
+    "q-chain-languages": ("Project Atlas", ("~works_on", "speaks")),
+    "q2-chain-payments-lead-city": ("team-payments", ("team_lead", "lives_in")),
+    "q2-chain-checkout-lead-city": ("checkout-service",
+                                    ("owned_by", "team_lead", "lives_in")),
+    "q2-chain-pricing-lead": ("pricing-service", ("owned_by", "team_lead")),
+    "q2-chain-search-lead-languages": ("team-search", ("team_lead", "speaks")),
+    "q2-chain-infra-lead-employer-city": ("team-infra",
+                                          ("team_lead", "works_at", "hq_city")),
+    "q2-chain-kestrel-region": ("nadia", ("works_on", "deploy_region")),
+    "q2-chain-kestrel-region-then": ("nadia", ("works_on", "deploy_region")),
+    "q2-chain-vantage-owner": ("omar", ("works_on", "owned_by")),
+    "q2-chain-vantage-owner-lead": ("Project Vantage", ("owned_by", "team_lead")),
+    "q2-chain-kestrel-lead-editor": ("Project Kestrel",
+                                     ("owned_by", "team_lead", "favourite_editor")),
+    "q2-chain-trust-lead-employer": ("team-trust", ("team_lead", "works_at")),
+    "q2-chain-growth-lead-city": ("team-growth", ("team_lead", "lives_in")),
+}
+
+
+def _walk(truth: timeline.Truth, start: str, relations, when) -> set[str]:
+    """Follow `relations` out of `start` at `when`, returning the values reached."""
+    here = {start}
+    for relation in relations:
+        reached: set[str] = set()
+        if relation.startswith("~"):
+            predicate = relation[1:]
+            for (subject, name), slot in truth.slots.items():
+                if name == predicate and set(slot.values_at(when, None)) & here:
+                    reached.add(subject)
+        else:
+            for subject in here:
+                slot = truth.slot(subject, relation)
+                if slot is not None:
+                    reached.update(slot.values_at(when, None))
+        assert reached, f"{start} runs out of graph at {relation}"
+        here = reached
+    return here
+
+
+def test_every_chained_gold_agrees_with_the_walk_it_describes(shipped):
+    """The double-entry check for questions with no probe.
+
+    The chain is written out here, independently of the generator, and walked over the
+    timeline model. A disagreement means one of the two is wrong and the run cannot say
+    which — which is the point of deriving it twice.
+    """
+    asked = {q.id: q for q in shipped.questions}
+    truth = timeline.Truth(shipped)
+    checked = 0
+    for qid, (start, relations) in CHAINS.items():
+        question = asked.get(qid)
+        if question is None:
+            continue                                # a chain v1 does not ask
+        reached = _walk(truth, start, relations, question.at or shipped.evaluated_at)
+        got = {nz.normalize(v) for v in reached}
+        want = ({nz.normalize(v) for v in question.gold.values}
+                if question.gold.kind == "set" else {nz.normalize(question.gold.value)})
+        assert got == want, f"{qid}: walk reaches {sorted(got)}, gold says {sorted(want)}"
+        checked += 1
+    assert checked == sum(1 for q in shipped.questions if q.category == "multi_hop"), (
+        "every multi_hop question must have its chain written out above; one that does "
+        "not is a gold nothing checks")
+
+
+#: Every negative question that carries no probe, and the slot it is really about. The
+#: dataset withholds the slot from the systems on purpose — finding it is the difficulty —
+#: which also means `test_every_gold_agrees_with_the_timeline_model` skips these, and
+#: nothing checked that the store really holds nothing there. A gold of *nothing* that was
+#: wrong would be invisible: every system would be marked right for abstaining and marked
+#: wrong for the correct answer.
+#:
+#: The third element says whether the **subject** is one the store knows, which is the
+#: difficulty band the question belongs to: an entity nobody has heard of is an easier
+#: negative than one the store holds five other facts about. It is here because without
+#: it this table cannot be checked. `truth.slot()` returns `None` both for an entity that
+#: is genuinely absent and for one whose name is misspelled here, so a typo would make
+#: the assertion below pass while proving nothing — and the documents' claim that two of
+#: these name an entity the store knows well is exactly what would go unchecked.
+OPEN_NEGATIVES: dict[str, tuple[str, str, bool]] = {
+    "q-absent-open-1": ("Oscar", "lives_in", False),
+    "q-absent-open-2": ("reporting-service", "auth_strategy", True),
+    "q-absent-open-3": ("Project Chronos", "deploy_region", False),
+    "q2-none-globex-plan": ("Globex", "plan", True),
+    "q2-none-frank-title": ("frank", "job_title", True),
+    "q2-none-meridian-region": ("Project Meridian", "deploy_region", False),
+    "q2-none-orbit-lead": ("team-orbit", "team_lead", False),
+}
+
+
+def test_every_open_negative_really_is_about_nothing(shipped):
+    """The other half of the double entry, for the questions that name no slot."""
+    truth = timeline.Truth(shipped)
+    asked = {q.id: q for q in shipped.questions}
+    unprobed = [q for q in shipped.questions
+                if q.category == "negative" and q.probe is None]
+    for question in unprobed:
+        assert question.id in OPEN_NEGATIVES, (
+            f"{question.id} is an open negative with no slot written out above, so "
+            "nothing checks that its gold of *nothing* is true")
+        subject, predicate, known_entity = OPEN_NEGATIVES[question.id]
+        subjects = {s for s, _ in truth.slots}
+        assert (subject in subjects) is known_entity, (
+            f"{question.id}: this table says the store "
+            f"{'knows' if known_entity else 'has never heard of'} {subject!r} and it "
+            f"{'does not' if known_entity else 'does'}. Either the name is misspelled "
+            "here — in which case the check below proves nothing, because an absent "
+            "slot and a misspelled one look identical — or the dataset moved under it.")
+        slot = truth.slot(subject, predicate)
+        held = slot.values_at(question.at or shipped.evaluated_at, question.known_at) \
+            if slot is not None else ()
+        assert not held, f"{question.id} says nothing is held, and the store holds {held}"
+    for qid in OPEN_NEGATIVES:
+        if qid in asked:
+            assert asked[qid].probe is None, f"{qid} now carries a probe"
+
+
+def test_v2_is_v1_plus_and_changes_nothing_it_inherited(shipped):
+    """A superseded version stays reproducible, and the newer one has to contain it.
+
+    `README.md` says v1 stays where it is when v2 appears. That is a promise about the
+    files; this is the promise about the content — every inherited row is byte-identical,
+    so a per-question v1 result and a per-question v2 result compare directly even though
+    the totals cannot.
+    """
+    if shipped.version == "v1":
+        return
+    inherited = ds.load("v1")
+    for older, newer in ((inherited.events, shipped.events),
+                         (inherited.questions, shipped.questions)):
+        index = {row.id: row for row in newer}
+        for row in older:
+            assert row.id in index, f"v2 drops {row.id}, which v1 published"
+            assert index[row.id].to_json() == row.to_json(), (
+                f"v2 changes {row.id}, which v1 published — a v1 score for that question "
+                "would no longer mean what it meant")
+
+
+def test_no_question_carries_a_real_persons_data(shipped):
     """Everything published has to be synthetic. The check is crude on purpose: it
     catches the paste, not the invention."""
-    blob = " ".join(e.text for e in data.events).lower()
+    blob = " ".join(e.text for e in shipped.events).lower()
     for leak in ("@gmail", "@anthropic", "api_key", "sk-", "password", "bearer "):
         assert leak not in blob, f"{leak!r} appears in the dataset text"
 
@@ -480,7 +648,7 @@ def test_dimension_totals_add_up_to_the_overall_total(data):
 
 # --- the adapter interface --------------------------------------------------
 
-@pytest.mark.parametrize("name", ["naive", "vector-rag", "memvara"])
+@pytest.mark.parametrize("name", ["naive", "vector-rag", "memvara", "memvara-graph"])
 def test_every_shipped_adapter_satisfies_the_protocol(name):
     system = registry.build(name)
     try:
@@ -609,6 +777,88 @@ def test_every_adapter_indexes_the_same_text(data):
     assert "heidi" in text and event.object in text and event.text in text
 
 
+def test_the_slot_rule_prefers_the_relation_the_question_names():
+    """Rank alone answers the first hop of a chained question and stops.
+
+    All three systems rank `alice works_on Project Atlas` first for this question, and
+    correctly — it is the closest sentence to the wording. The claim holding the answer
+    is in the same list, and nothing was missing except a reason to prefer it.
+    """
+    candidates = [("alice", "works_on"), ("Project Atlas", "deploy_region"),
+                  ("alice", "speaks")]
+    chosen = base.pick_slot("Which region is the project Alice works on deployed to?",
+                            candidates)
+    assert chosen == ("Project Atlas", "deploy_region")
+
+
+@pytest.mark.parametrize("word,stem", [
+    ("owns", "own"),            # the question's verb for `owned_by`
+    ("deployed", "deploy"),     # ...for `deploy_region`
+    ("leads", "lead"),          # ...for `team_lead`
+    ("speaks", "speak"),        # ...for `speaks`
+    ("works", "work"),          # ...for `works_on` and `works_at`
+    ("live", "live"),           # already a stem; must not lose its `e`
+    ("lives", "live"),          # ...and must reach it from the plural
+    ("is", "is"),               # too short to strip: `i` would collide with everything
+    ("us", "us"),
+    ("region", "region"),       # no suffix to take
+])
+def test_the_stemmer_reaches_the_predicate_names_it_has_to(word, stem):
+    """Exercised directly, not only through `pick_slot`.
+
+    This is a ten-line heuristic that decides which fact slot an unprobed question is
+    answered from, so a wrong rule here moves the `retrieval` dimension for every system
+    at once and looks like a retrieval result. Statement coverage would call it covered
+    from one `pick_slot` test; these are the pairs it actually has to get right, and the
+    short words are the ones where an unbounded rule would over-strip.
+    """
+    assert base._stem(word) == stem
+
+
+def test_the_slot_rule_falls_back_to_rank_when_no_relation_is_named():
+    """A question that names no predicate must not be re-ordered by this rule."""
+    candidates = [("frank", "lives_in"), ("alice", "lives_in")]
+    assert base.pick_slot("Tell me about Frank.", candidates) == ("frank", "lives_in")
+    assert base.pick_slot("anything", []) is None
+
+
+def test_the_slot_rule_does_not_count_a_repeated_candidate_twice():
+    """memvara returns up to `max_per_slot` claims from one slot and `naive` has an entry
+    per event, so a ranked list names slots more than once. A repeat is not a second
+    reason to prefer one."""
+    candidates = [("bob", "works_at"), ("bob", "works_at"), ("Globex", "hq_city")]
+    assert base.pick_slot("In which city is Bob's employer headquartered?",
+                          candidates) == ("Globex", "hq_city")
+
+
+def test_a_preposition_in_a_predicate_name_earns_no_point():
+    """`works_on` would otherwise score for the word *on*, which half of English
+    questions contain, and beat `deploy_region` on a tie."""
+    assert base.pick_slot("Which region is it deployed to?",
+                          [("x", "works_on"), ("y", "deploy_region")]) == ("y", "deploy_region")
+
+
+@pytest.mark.parametrize("name", ["naive", "vector-rag", "memvara"])
+def test_every_adapter_resolves_a_chain_with_the_same_rule(data, name):
+    """The rule is shared, so a chained question must reach the second hop in all three.
+
+    Retrieval is a scored dimension. A slot-selection rule that lived in one adapter
+    would be measuring the harness, so the check is that no adapter has its own.
+    """
+    system = registry.build(name)
+    try:
+        runner.ingest(system, data)
+        question = next(q for q in data.questions if q.id == "q-chain-atlas")
+        ask = runner.ask_of(question, data.evaluated_at)
+        # memvara's resolver also takes the ask, because which claim states it searches
+        # depends on whether the question rewinds a clock.
+        chosen = (system._resolve(ask.question, ask) if name == "memvara"
+                  else system._resolve(ask.question))
+        assert chosen == ("Project Atlas", "deploy_region"), chosen
+    finally:
+        system.close()
+
+
 def test_events_are_delivered_in_recorded_order(data):
     ordered = base.sort_events(data.events)
     stamps = [e.recorded_at for e in ordered]
@@ -631,9 +881,9 @@ def test_a_result_carries_everything_needed_to_reproduce_it(naive_run):
     payload = naive_run.to_json()
     assert payload["benchmark"] == "agent-memory"
     assert payload["benchmark_version"] == BENCHMARK_VERSION
-    assert payload["dataset_version"] == "v1"
+    assert payload["dataset_version"] == DEFAULT_DATASET
     assert payload["system_version"]
-    for field in ("python", "implementation", "platform", "machine"):
+    for field in ("python", "implementation", "platform", "machine", "cpu_count"):
         assert payload["environment"][field]
     assert set(payload["metrics"]) >= {"overall", "by_category", "by_dimension"}
 
@@ -782,6 +1032,47 @@ def test_the_documented_result_schema_names_exactly_the_usage_fields():
         f"  a field but undocumented:   {sorted(declared - documented)}")
 
 
+def test_the_documented_result_schema_names_exactly_the_latency_fields():
+    """The same guard, one row down.
+
+    Written after `repeats` and `p50_spread_ms` were added to `Latency` and the schema
+    table was updated by hand — which is how the two `Usage` renames went wrong twice.
+    A guard that covers one row of a table and not the row beside it is the instance
+    fixed and the class left alone.
+    """
+    import dataclasses
+    import re
+
+    report_page = ROOT / "docs" / "benchmarks" / "agent-memory-benchmark.md"
+    row = next((line for line in report_page.read_text(encoding="utf-8").splitlines()
+                if line.startswith("| `latency` |")), None)
+    assert row is not None, "the result-schema table no longer has a `latency` row"
+
+    #: Backticked words in that row that are prose rather than field names.
+    not_fields = {"latency"}
+    documented = {w for w in re.findall(r"`([a-z0-9_]+)`", row)} - not_fields
+    declared = {f.name for f in dataclasses.fields(results.Latency)}
+    assert documented == declared, (
+        f"the schema table and `Latency` disagree.\n"
+        f"  documented but not a field: {sorted(documented - declared)}\n"
+        f"  a field but undocumented:   {sorted(declared - documented)}")
+
+
+def test_the_documented_environment_block_is_the_one_that_is_written():
+    """The environment block is a fixed list assembled by name, and the schema table
+    names it. `cpu_count` was added to one and had to be added to the other by hand."""
+    import re
+
+    report_page = ROOT / "docs" / "benchmarks" / "agent-memory-benchmark.md"
+    row = next((line for line in report_page.read_text(encoding="utf-8").splitlines()
+                if line.startswith("| `environment` |")), None)
+    assert row is not None, "the result-schema table no longer has an `environment` row"
+    documented = {w for w in re.findall(r"`([a-z0-9_]+)`", row)} - {"environment"}
+    assert documented == set(results.environment()), (
+        f"documented but not written: {sorted(documented - set(results.environment()))}; "
+        f"written but undocumented: {sorted(set(results.environment()) - documented)}")
+
+
 def test_every_usage_field_is_rendered_by_the_report():
     """A field nothing prints is a field nobody reads, however well documented.
 
@@ -820,6 +1111,59 @@ def test_percentiles_are_nearest_rank_and_never_invent_a_measurement():
     latency = results.latency_of(1.0, 10, [0.001, 0.002, 0.003, 0.004])
     assert latency.query_max_ms == pytest.approx(4.0)
     assert latency.query_p50_ms in (2.0, 3.0)
+
+
+def test_every_latency_field_is_rendered_by_the_report():
+    """A field added to `Latency` and forgotten in the report is silently absent.
+
+    The same guard as `test_every_usage_field_is_rendered_by_the_report`, and for the
+    same reason: `tokens` was added to `Usage` and went unprinted for exactly this
+    reason, because the block was a list of hardcoded f-strings.
+    """
+    named = [field for _, fields, _ in report.LATENCY_ROWS for field in fields]
+    assert sorted(named) == sorted(results.Latency.__dataclass_fields__), (
+        "LATENCY_ROWS and the Latency dataclass disagree; a field in one and not the "
+        "other is a number that is measured and never shown, or shown and never measured")
+    assert len(named) == len(set(named)), f"a field prints twice: {named}"
+
+
+def test_repeating_the_timings_does_not_change_the_cost_counters(data):
+    """`usage()` is read between the scored pass and the repeats, and the order matters.
+
+    Read after them, `db_reads` would multiply by `--latency-repeats` and a system would
+    look more expensive because the benchmark got more careful about its clock.
+    """
+    small = data.filter(limit=12)
+    counts = {}
+    for repeats in (1, 3):
+        system = registry.build("naive")
+        try:
+            result = runner.run(system, small, timestamp="2026-08-01T00:00:00+00:00",
+                                latency_repeats=repeats)
+        finally:
+            system.close()
+        counts[repeats] = result.usage.db_reads
+        assert result.latency.repeats == max(1, repeats - 1)
+    assert counts[1] == counts[3] == len(small.questions), counts
+
+
+def test_a_single_pass_reports_a_spread_of_zero_and_says_so(data):
+    """Zero spread across one pass means *not measured*, and the report must not let it
+    read as *perfectly stable*."""
+    system = registry.build("naive")
+    try:
+        result = runner.run(system, data.filter(limit=8),
+                            timestamp="2026-08-01T00:00:00+00:00")
+    finally:
+        system.close()
+    assert result.latency.repeats == 1
+    assert result.latency.p50_spread_ms == 0.0
+    assert "one pass" in report.scorecard(result, data)
+
+
+def test_a_repeat_count_below_one_is_refused(capsys):
+    assert cli.main(["--system", "naive", "--latency-repeats", "0"]) == 2
+    assert "at least 1" in capsys.readouterr().err
 
 
 def test_the_reproducibility_check_ignores_timings_and_internal_ids(naive_run):
@@ -900,6 +1244,49 @@ def test_the_counting_embedder_keeps_the_embedders_identity():
     assert fingerprint_of(wrapped) == fingerprint_of(inner)
     wrapped.encode(["a", "b", "c"])
     assert wrapped.texts_embedded == 3, "texts, not calls: a batch and a loop are equal work"
+
+
+def test_the_graph_entry_is_the_same_adapter_with_one_thing_changed():
+    """`memvara-graph` must differ from `memvara` by configuration and nothing else.
+
+    A second entry that was quietly a second implementation would publish the graph
+    leg's contribution as a difference it did not cause.
+    """
+    from benchmarks.agent_memory.adapters import memvara_adapter as ma
+
+    plain, graph = registry.build("memvara"), registry.build("memvara-graph")
+    try:
+        assert type(plain) is type(graph)
+        assert plain.name == "memvara" and graph.name == "memvara-graph"
+        assert plain._tuning == {}
+        assert graph._tuning == ma.GRAPH_TUNING
+        assert set(ma.GRAPH_TUNING) == {"read_w_graph", "read_intent_weighting"}
+    finally:
+        plain.close()
+        graph.close()
+
+
+def test_the_dataset_holds_enough_graph_for_a_walk_to_pay(shipped):
+    """The reason v2 exists, measured with memvara's own instrument.
+
+    `Memvara.connectivity()` reports the share of live claims whose object is another
+    claim's subject. On v1 it is 3 of 193 — 1.6% — and memvara's `docs/BENCHMARKS.md`
+    says a graph walk cannot pay for itself at that rate. Six chained questions over
+    three edges measure the wording of the six questions and nothing else.
+    """
+    system = registry.build("memvara")
+    try:
+        runner.ingest(system, shipped)
+        counts = system.mem.connectivity()
+    finally:
+        system.close()
+    rate = counts["joinable_claims"] / counts["live_claims"]
+    if shipped.version == "v1":
+        assert rate < 0.05, counts       # the finding v2 answers; pinned so it stays true
+    else:
+        assert rate > 0.15, (
+            f"v2 exists to give chained questions something to walk and this is "
+            f"{rate:.1%} joinable: {counts}")
 
 
 def test_the_memvara_adapter_uses_the_provenance_api(memvara_run):

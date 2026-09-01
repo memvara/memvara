@@ -26,7 +26,12 @@ from typing import Mapping
 
 from ..dataset import MemoryEvent, PredicateDecl
 from ..normalization import tokens
-from .base import Ask, MemoryAnswer, Usage, indexable, wants_a_date
+from .base import Ask, MemoryAnswer, Usage, indexable, pick_slot, wants_a_date
+
+#: How many distinct slots the overlap ranking offers `base.pick_slot`. Ten, the same as
+#: memvara's `SEARCH_K`, so the three systems choose from comparably deep lists and the
+#: retrieval dimension is not measuring who was allowed to look furthest.
+TOP_K = 10
 
 
 @dataclass
@@ -85,15 +90,19 @@ class NaiveMemory:
         self._texts.append((set(tokens(indexable(event))), event.subject, event.predicate))
 
     def _resolve(self, question: str) -> tuple[str, str] | None:
-        """Find the slot an unprobed question is about, by token overlap. Ties go to the
-        first stored text, which makes the choice deterministic rather than arbitrary."""
+        """Find the slot an unprobed question is about, by token overlap.
+
+        The ranking is this baseline's own and stays crude. Choosing among the top of it
+        is `base.pick_slot`, which every system shares — see there for why the choice is
+        not each adapter's to make. Ties go to the first stored text, which makes the
+        order deterministic rather than arbitrary.
+        """
         asked = set(tokens(question))
-        best, best_score = None, 0.0
-        for text, subject, predicate in self._texts:
-            score = overlap(asked, text)
-            if score > best_score:
-                best, best_score = (subject, predicate), score
-        return best if best_score > 0.0 else None
+        scored = [(overlap(asked, text), index, subject, predicate)
+                  for index, (text, subject, predicate) in enumerate(self._texts)]
+        ranked = sorted((s for s in scored if s[0] > 0.0), key=lambda s: (-s[0], s[1]))
+        slots = list(dict.fromkeys((s[2], s[3]) for s in ranked))[:TOP_K]
+        return pick_slot(question, slots)
 
     def query(self, ask: Ask) -> MemoryAnswer:
         self._reads += 1

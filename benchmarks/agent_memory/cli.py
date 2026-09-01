@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
-from . import BENCHMARK_VERSION
+from . import BENCHMARK_VERSION, DEFAULT_DATASET
 from .dataset import CATEGORIES, load
 from .registry import available, build
 from .report import failure_report, leaderboard, scorecard
@@ -41,8 +41,9 @@ def parser() -> argparse.ArgumentParser:
                 ". Any other value is imported as 'package.module:factory'."))
     p.add_argument("--system", action="append", metavar="NAME", default=None,
                    help="System to benchmark. Repeat to run several.")
-    p.add_argument("--dataset", default="v1", metavar="VERSION",
-                   help="Dataset version under datasets/ (default: v1).")
+    p.add_argument("--dataset", default=DEFAULT_DATASET, metavar="VERSION",
+                   help=f"Dataset version under datasets/ (default: {DEFAULT_DATASET}). "
+                        "Older versions stay in the tree and stay runnable.")
     p.add_argument("--category", action="append", choices=list(CATEGORIES), default=None,
                    metavar="NAME", help="Only ask this category. Repeat to select several.")
     p.add_argument("--limit", type=int, default=None, metavar="N",
@@ -62,6 +63,12 @@ def parser() -> argparse.ArgumentParser:
                         "the JSON.")
     p.add_argument("--compare", action="store_true",
                    help="Print the leaderboard table across the systems run.")
+    p.add_argument("--latency-repeats", type=int, default=1, metavar="N",
+                   help="Ask every question N times and report the timings over passes "
+                        "2..N, with the spread between their medians. The scores and the "
+                        "cost counters still come from one pass. Default 1, which times "
+                        "the scored pass and includes whatever a system defers to its "
+                        "first read.")
     p.add_argument("--repeat-check", action="store_true",
                    help="Run each system twice and assert the accuracy figures and every "
                         "per-question verdict are identical.")
@@ -95,6 +102,9 @@ def _output_path(base: str, system: str, many: bool) -> Path:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.latency_repeats < 1:
+        print("--latency-repeats must be at least 1.", file=sys.stderr)
+        return 2
     systems = args.system or ["memvara"]
     limit = QUICK if args.quick else args.limit
 
@@ -110,6 +120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "categories": args.category or "all",
         "limit": limit,
         "questions_asked": len(dataset.questions),
+        "latency_repeats": args.latency_repeats,
     }
 
     results: list[RunResult] = []
@@ -117,7 +128,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         system = build(name)
         try:
             result = run(system, dataset, lenient=args.match == "lenient",
-                         config=config, timestamp=_timestamp())
+                         config=config, timestamp=_timestamp(),
+                         latency_repeats=args.latency_repeats)
         finally:
             system.close()
         results.append(result)

@@ -20,6 +20,14 @@ Nothing here reaches the network, and no run needs an API key.
 #: new number incomparable with an old one. `docs/benchmarks/agent-memory-benchmark.md`
 #: explains what counts as material; the short version is that anything which could move
 #: a published score is material.
-BENCHMARK_VERSION = "1.0"
+#:
+#: 2.0 ships dataset v2 and a shared slot-selection rule for every adapter. Both move
+#: published scores, and v1 is still in the tree and still runs: `--dataset v1`.
+BENCHMARK_VERSION = "2.0"
 
-__all__ = ["BENCHMARK_VERSION"]
+#: The dataset a bare run uses. Older versions stay in `datasets/` and stay loadable, so
+#: a published v1 number can be reproduced after v2 exists — which is the whole reason
+#: the versioning rule says an old version stays where it is.
+DEFAULT_DATASET = "v2"
+
+__all__ = ["BENCHMARK_VERSION", "DEFAULT_DATASET"]

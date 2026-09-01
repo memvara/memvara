@@ -46,7 +46,7 @@ from memvara import (
 )
 
 from ..dataset import MemoryEvent, PredicateDecl
-from .base import Ask, MemoryAnswer, Usage, indexable, wants_a_date
+from .base import Ask, MemoryAnswer, Usage, indexable, pick_slot, wants_a_date
 
 #: Fixed rather than `default_embedder()`, which returns a sentence-transformer whenever
 #: one happens to be installed. A benchmark whose vector leg depends on what is in the
@@ -86,15 +86,26 @@ class _CountingEmbedder:
         return self._inner.encode(texts)
 
 
+#: The constructor arguments `--system memvara-graph` adds, and nothing else changes
+#: between the two entries. `w_graph` ships at 0.0 and `memvara/retrieve/hybrid.py` says
+#: why: the walk costs its budget on a store with nothing to walk. `intent_weighting`
+#: goes off with it because `Intent.TEMPORAL`'s multipliers zero the graph weight, so a
+#: benchmark that left it on would publish the leg as useless while never running it —
+#: `docs/BENCHMARKS.md` records that exact mistake being made and corrected.
+GRAPH_TUNING: dict[str, Any] = {"read_w_graph": 1.0, "read_intent_weighting": False}
+
+
 class MemvaraMemory:
     """memvara, driven the way an application drives it."""
 
-    name = "memvara"
     version = memvara_version
 
-    def __init__(self, path: str = ":memory:", user: str = "benchmark") -> None:
+    def __init__(self, path: str = ":memory:", user: str = "benchmark",
+                 label: str = "memvara", **tuning: Any) -> None:
+        self.name = label
         self._path = path
         self._user = user
+        self._tuning = dict(tuning)
         self._mem: Memvara | None = None
         self._single: dict[str, bool] = {}
         self._embedder: _CountingEmbedder | None = None
@@ -120,7 +131,7 @@ class MemvaraMemory:
         # extract from, only structured facts to record.
         self._embedder = _CountingEmbedder(HashingEmbedder(dim=EMBED_DIM))
         self._mem = Memvara(self._path, user=self._user, registry=registry,
-                            embedder=self._embedder, llm=NullLLM())
+                            embedder=self._embedder, llm=NullLLM(), **self._tuning)
         self._reads = 0
 
     # -- write --------------------------------------------------------------
@@ -174,7 +185,7 @@ class MemvaraMemory:
         past = ask.known_at is not None or ask.at < ask.evaluated_at
         states = ["live", "ended", "retired"] if past else None
         hits = self.mem.search(question, k=SEARCH_K, states=states)
-        return (hits[0].claim.subject, hits[0].claim.predicate) if hits else None
+        return pick_slot(question, [(h.claim.subject, h.claim.predicate) for h in hits])
 
     def _first_source(self, claim: Claim) -> str | None:
         """The label of the earliest turn this claim cites.
@@ -289,5 +300,17 @@ class MemvaraMemory:
             self._mem = None
 
 
-def build(**kwargs: object) -> MemvaraMemory:
-    return MemvaraMemory(**kwargs)  # type: ignore[arg-type]
+def build(**kwargs: Any) -> MemvaraMemory:
+    return MemvaraMemory(**kwargs)
+
+
+def build_graph(**kwargs: Any) -> MemvaraMemory:
+    """The same adapter with memvara's graph retrieval leg on.
+
+    A separate entry rather than a changed default, so the shipped configuration keeps
+    reporting the shipped configuration's numbers and the leg's contribution is a
+    difference a reader can subtract rather than a claim they have to take.
+    """
+    # Every default in the mapping, so a caller may override any of them. Passing
+    # `label=` alongside a `**kwargs` that also carried it raised TypeError instead.
+    return MemvaraMemory(**{"label": "memvara-graph", **GRAPH_TUNING, **kwargs})

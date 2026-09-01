@@ -282,6 +282,17 @@ PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-gr
 | `bench/multihop.py`, **as shipped** | 4,498 | **2.9% → 6.4%** at k=12, **7.6% → 21.8%** at k=25 |
 | `bench/twowiki.py`, gate off, **public** | 26,403 | **28.3% → 72.2%** at k=12 on chained questions; **−13.7** on flat ones |
 | `bench/twowiki.py`, **as shipped** | 26,403 | **28.3% → 42.1%** answer and **25.5% → 39.5%** chain on chained questions; −0.4 on flat |
+| Agent Memory Benchmark v2, 18 chained questions | 321 | **22.2% → 33.3%** on `multi_hop`, for **2.0 ms → 9.9 ms** on query p95 |
+
+The last row is a third instrument, and the only one that publishes the leg's tail cost
+beside its gain: two more chained questions answered, and query p95 five times worse. It
+also publishes a join rate, which the others do not — `Memvara.connectivity()` reports that
+corpus as 25.7% joinable. On the same benchmark's v1 dataset, 1.6% joinable, the leg moved
+one chained question of six; both samples are far too small to read a rate off, and they
+are reported because the leg is being exercised on a corpus whose graph is measured rather
+than assumed. It runs as `--system memvara-graph`, beside the shipped configuration rather
+than replacing it. See
+[the Agent Memory Benchmark report](benchmarks/agent-memory-benchmark.md#latency).
 
 The leg walks *claims*, and both public runs are episode retrieval: `SalienceGate` drops
 any turn whose role is not `user`, LOCOMO writes each turn under the speaker's name, and

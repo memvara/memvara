@@ -38,6 +38,7 @@ from datetime import datetime
 from typing import Mapping, Protocol, Sequence, runtime_checkable
 
 from ..dataset import MemoryEvent, PredicateDecl
+from ..normalization import tokens
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +218,77 @@ def indexable(event: MemoryEvent) -> str:
     """
     relation = event.predicate.replace("_", " ")
     return f"{event.subject} {relation} {event.object}. {event.text}"
+
+
+#: Prepositions dropped from a predicate name before it is matched against a question.
+#: Small and closed for the reason `normalization._ARTICLES` is: `works_on` would
+#: otherwise score a point for the word *on*, which every second English question
+#: contains, and `deploy_region` would lose a two-hop question to it on a tie.
+_PREDICATE_FUNCTION_WORDS = frozenset({"on", "by", "in", "at", "of", "to", "for", "with"})
+
+#: Suffixes stripped before a question word and a predicate word are compared. Crude, and
+#: deliberately so: *deployed* has to reach `deploy_region` and *owns* has to reach
+#: `owned_by`, and a real stemmer is a dependency and a second thing to explain.
+#:
+#: `es` is deliberately absent. With it, `lives_in` folds to *liv* while the question word
+#: *live* folds to itself, and the two stop matching — the rule would then be blind to the
+#: relation it most often has to recognise. Leaving it out costs a stem like *matche* for
+#: *matches*, which nothing here compares against anything.
+_SUFFIXES = ("ing", "ed", "s")
+
+
+def _stem(word: str) -> str:
+    for suffix in _SUFFIXES:
+        if len(word) > len(suffix) + 2 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
+def _predicate_words(predicate: str) -> frozenset[str]:
+    return frozenset(_stem(w) for w in predicate.split("_")
+                     if w not in _PREDICATE_FUNCTION_WORDS)
+
+
+def pick_slot(question: str,
+              candidates: Sequence[tuple[str, str]]) -> tuple[str, str] | None:
+    """Choose the fact slot an unprobed question is about, from ranked candidates.
+
+    `candidates` is `(subject, predicate)` best-first, as each system's own retrieval
+    ranked them. The rule: **prefer the highest-ranked candidate whose predicate the
+    question actually names**, and fall back to rank alone when none does.
+
+    Here rather than in each adapter, and identical for all of them, because retrieval is
+    a scored dimension. A rule that lived in one adapter would be measuring the harness.
+
+    ## Why rank alone is not enough
+
+    Taking the top hit answers the first hop of a chained question and stops. Asked
+    *"Which region is the project Alice works on deployed to?"*, memvara and `vector-rag`
+    both rank `alice works_on Project Atlas` first — correctly; it is the closest sentence
+    to the question — and answered `Project Atlas`. The claim holding the answer,
+    `Project Atlas deploy_region eu-west-1`, was second on both lists. Nothing was missing
+    except a reason to prefer it.
+
+    The predicate schema is published with the dataset and handed to every system in
+    `reset()`, so matching a question against predicate names uses an input every
+    adapter has, not private knowledge of the questions. It is a lexical heuristic and it
+    is stated as one: it resolves *which relation* is being asked about, and nothing
+    about which entity, so it cannot rescue a question whose answer is not in the
+    candidate list at all.
+    """
+    # Deduplicated first, order preserved. A ranked list can name the same slot twice —
+    # memvara returns up to `max_per_slot` claims from one, and `naive` has an entry per
+    # event — and a repeat is not a second reason to prefer it.
+    ranked = list(dict.fromkeys(candidates))
+    if not ranked:
+        return None
+    words = {_stem(w) for w in tokens(question)}
+    best_rank, best_score = 0, -1
+    for rank, (_, predicate) in enumerate(ranked):
+        score = len(_predicate_words(predicate) & words)
+        if score > best_score:
+            best_rank, best_score = rank, score
+    return ranked[best_rank]
 
 
 def wants_a_date(ask: Ask) -> bool:

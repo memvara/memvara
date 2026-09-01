@@ -23,6 +23,7 @@ on top.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -56,6 +57,9 @@ def environment() -> dict[str, Any]:
         "implementation": platform.python_implementation(),
         "platform": platform.system(),
         "machine": platform.machine(),
+        # How many cores the timings had. Not secret, and a latency table read without it
+        # cannot be compared against a re-run on different hardware.
+        "cpu_count": os.cpu_count(),
         "git_commit": git_commit(),
         "numpy": _version("numpy"),
         "memvara": _version("memvara"),
@@ -76,10 +80,19 @@ class Latency:
     """Timings, in milliseconds, separated so a slow write cannot hide behind a fast read.
 
     `write_total_ms` is the whole ingestion, which is the cold path: an empty store
-    filling up. `query_*` are per-question and are the warm path, measured after every
-    write has landed. The benchmark does not report a cold *query* number, because it
-    only ever asks a question against a full store — inventing one would be a metric with
-    no measurement behind it.
+    filling up. It is measured once, because repeating it means emptying the store again
+    and the second fill is no longer the cold path.
+
+    `query_*` are per-question and are the warm path. With `--latency-repeats N` the
+    question set is asked N times; the first pass is discarded and the rest are
+    aggregated, which is what makes "warm" true rather than merely claimed — `vector-rag`
+    builds its index on first search, and that construction used to land in
+    `query_max_ms` and be published as a tail.
+
+    `p50_spread_ms` is the distance between the highest and lowest per-pass p50. It is
+    the number that says whether to believe the others. A published latency measured once
+    on a laptop with a browser open cannot distinguish a system from the machine's mood,
+    and the spread is the only thing in this block that shows the difference.
     """
 
     write_total_ms: float
@@ -88,6 +101,12 @@ class Latency:
     query_p50_ms: float
     query_p95_ms: float
     query_max_ms: float
+    #: Timed query passes aggregated into the figures above. 1 means a single pass, which
+    #: includes whatever the system does lazily on its first read.
+    repeats: int = 1
+    #: max(per-pass p50) - min(per-pass p50). 0.0 when a single pass was aggregated,
+    #: where it means *not measured* rather than *perfectly stable*.
+    p50_spread_ms: float = 0.0
 
     def to_json(self) -> dict[str, float]:
         return {
@@ -97,30 +116,49 @@ class Latency:
             "query_p50_ms": round(self.query_p50_ms, 4),
             "query_p95_ms": round(self.query_p95_ms, 4),
             "query_max_ms": round(self.query_max_ms, 4),
+            "repeats": self.repeats,
+            "p50_spread_ms": round(self.p50_spread_ms, 4),
         }
 
 
-def latency_of(write_total_s: float, writes: int,
-               query_times_s: Sequence[float]) -> Latency:
-    ordered = sorted(query_times_s)
-    n = len(ordered)
+def _percentile(ordered: Sequence[float], q: float) -> float:
+    """Nearest-rank, in milliseconds. Deterministic, and does not interpolate between two
+    measurements to produce a number that was never measured."""
+    if not ordered:
+        return 0.0
+    index = min(len(ordered) - 1, max(0, int(round(q * (len(ordered) - 1)))))
+    return ordered[index] * 1000.0
 
-    def percentile(q: float) -> float:
-        if not ordered:
-            return 0.0
-        # Nearest-rank. Deterministic, and does not interpolate between two measurements
-        # to produce a number that was never measured.
-        index = min(n - 1, max(0, int(round(q * (n - 1)))))
-        return ordered[index] * 1000.0
+
+def latency_of(write_total_s: float, writes: int,
+               query_times_s: Sequence[Sequence[float]] | Sequence[float]) -> Latency:
+    """Aggregate one ingestion and one or more timed query passes.
+
+    `query_times_s` is a sequence of passes, each a sequence of per-question seconds. A
+    flat sequence of floats is accepted as the single-pass case, because that is what
+    every caller passed before repeats existed and the shape is unambiguous.
+    """
+    passes = _passes(query_times_s)
+    flat = sorted(t for one in passes for t in one)
+    n = len(flat)
+    per_pass_p50 = [_percentile(sorted(one), 0.50) for one in passes if one]
 
     return Latency(
         write_total_ms=write_total_s * 1000.0,
         write_mean_ms=(write_total_s / writes * 1000.0) if writes else 0.0,
-        query_mean_ms=(sum(ordered) / n * 1000.0) if n else 0.0,
-        query_p50_ms=percentile(0.50),
-        query_p95_ms=percentile(0.95),
-        query_max_ms=(ordered[-1] * 1000.0) if ordered else 0.0,
+        query_mean_ms=(sum(flat) / n * 1000.0) if n else 0.0,
+        query_p50_ms=_percentile(flat, 0.50),
+        query_p95_ms=_percentile(flat, 0.95),
+        query_max_ms=(flat[-1] * 1000.0) if flat else 0.0,
+        repeats=len(passes),
+        p50_spread_ms=(max(per_pass_p50) - min(per_pass_p50)) if per_pass_p50 else 0.0,
     )
+
+
+def _passes(times: Sequence[Sequence[float]] | Sequence[float]) -> list[list[float]]:
+    if times and isinstance(times[0], (int, float)):
+        return [list(times)]                            # type: ignore[arg-type]
+    return [list(one) for one in times]                 # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)
