@@ -40,6 +40,20 @@ def registration(host) -> bytes:
     session. A canonical name absent from `host.events` is a hook that client has no
     event for, and it is skipped rather than registered against a guessed event name.
     """
+    if not host.plugin_root_env:
+        # A host with no plugin-root variable does not register shell commands at all.
+        # OpenCode is the first: its hooks are in-process JavaScript, so its registration
+        # is `js/opencode.mjs` plus a config entry naming it, and there is no path for
+        # this function to interpolate. Refused here rather than left to fail on
+        # `plugin_root_env[-1]`, because an IndexError names neither the host nor the
+        # reason, and refused rather than defaulted because the file this would write --
+        # a hooks.json full of shell commands -- installs cleanly on a host that never
+        # reads it, which is the failure that looks like success.
+        raise ValueError(
+            f"{host.id} sets no plugin-root variable, so it does not register shell "
+            "hooks; its registration is a JavaScript module and this writer does not "
+            "build one")
+
     # Every name in the tuple, innermost last: `${A:-${B}}`. A host that sets more than
     # one -- Codex exports `PLUGIN_ROOT` and `CLAUDE_PLUGIN_ROOT` both -- can then name
     # them all and get a real fallback. Reading `[0]` and dropping the rest was the one
@@ -94,10 +108,20 @@ def main(argv: "list[str]") -> int:
         # success.
         print(f"{argv[0]} declares no hook events", file=sys.stderr)
         return 1
+    # Built BEFORE the file is opened, and that order is the whole point. `open(..., "wb")`
+    # truncates, so building inside the `with` meant any refusal in `registration` left
+    # the shipped manifest at zero bytes -- measured: `generate.py opencode` took a
+    # committed 1568-byte hooks.json to 0 and exited 1. A repository whose registration
+    # file is empty installs cleanly and registers nothing.
+    try:
+        body = registration(host)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     tree = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out = os.path.join(tree, "hooks.json")
     with open(out, "wb") as handle:
-        handle.write(registration(host))
+        handle.write(body)
     print(out)
     return 0
 
