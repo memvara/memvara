@@ -110,6 +110,12 @@ LAST_OBSERVED = "last_observed_at"
 # applying a late alias to existing rows is an explicit, dated, dry-run-first operation —
 # see `memvara.write.reconcile.backfill_entities`.
 
+#: The subject a first-person statement is filed under. Written by the deterministic
+#: matcher (`write/fast.py`) and by a model extraction that named no subject
+#: (`write/pipeline.py`), and read by `retrieve/anchor.py`, which has to know that "where
+#: do I live" is a question about this row. One spelling, so the three cannot drift.
+SELF_SUBJECT = "user"
+
 #: Resolved entity of `Claim.subject`. See `memvara/entities.py`.
 SUBJECT_ENTITY = "subject_entity"
 #: Resolved entity of `Claim.object`.
@@ -847,6 +853,13 @@ class Explanation:
     #: row here" but "why was the leg that would have found the other one switched off".
     #: See `memvara/retrieve/intent.py`.
     intent: str | None = None
+    #: What tied this result to the question. `"subject"` or `"object"` when the query
+    #: names that end of the claim, `"path"` when the graph leg reached it by walking out
+    #: of a claim that was named, and `None` when nothing did — the result surfaced on
+    #: vocabulary alone, which on a question the store cannot answer is what the best
+    #: available row looks like. `search(anchored=True)` returns only the first three.
+    #: See `memvara/retrieve/anchor.py`.
+    anchor: str | None = None
 
     def summary(self) -> str:
         bits = []

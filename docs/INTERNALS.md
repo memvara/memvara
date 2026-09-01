@@ -501,7 +501,8 @@ class HybridRetriever:
                  w_salience: float = 0.10, candidate_multiplier: int = 5,
                  w_graph: float = 0.0, graph_seeds: int = 5, graph_depth: int = 2,
                  w_temporal: float = 0.0, traverser: GraphTraverser | None = None,
-                 intent_weighting: bool = True) -> None
+                 intent_weighting: bool = True,
+                 entities: EntityRegistry | None = None) -> None
 
     def search(self, query: str, scope: Scope, *, k: int = 10,
                as_of: datetime | None = None, valid_at: datetime | None = None,
@@ -509,7 +510,7 @@ class HybridRetriever:
                states: Collection[str] | None = None,
                include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType] | None = None,
-               min_score: float = 0.0,
+               min_score: float = 0.0, anchored: bool = False,
                include_episodes: bool = False) -> list[Result]
 ```
 
@@ -524,7 +525,10 @@ Search must:
   invalidated. Decay is measured at `known_at`, not `valid_at`: recency asks how long ago
   we last heard something, and that is a question about the belief clock;
 - populate `Explanation` on every `Result` — per-retriever rank and raw score, the fusion
-  score, each scoring factor, and the final score. A result with no explanation is a bug.
+  score, each scoring factor, and the final score. A result with no explanation is a bug;
+- say on every `Result` what tied it to the question (`Explanation.anchor`), and with
+  `anchored=True` return only the results something did. See
+  [`retrieve/anchor.py`](#retrieveanchorpy).
 
 #### The third leg
 
@@ -592,14 +596,29 @@ Two properties are load-bearing.
 #### `retrieve/intent.py`
 
 ```python
-def classify(query: str) -> Intent          # lookup | temporal | relational | open
-def weights(intent, *, vector, lexical, graph) -> tuple[float, float, float]
+def classify(query: str, registry=None) -> Intent   # lookup | temporal | relational | open
+def is_relational(query: str, registry=None) -> bool
+def weights(intent, *, vector, lexical, graph, temporal) -> tuple[float, ...]
 ```
 
 Deterministic, model-free, and read off the *raw* tokens rather than `analyze()`'s terms —
 `when`, `whose`, `between` are all stopwords, and they are exactly the words that say what
 kind of question this is. The classes are checked in priority order, not as a taxonomy:
 time first, because a wrong instant is wrong in a way extra recall does not repair.
+
+`is_relational` is the reading the priority discards. A question can be about an instant
+*and* about a chain — "who currently leads the team that owns the checkout service" — and
+`classify` returns `temporal`, whose row zeroes the graph weight. `HybridRetriever._weights`
+asks this second question and keeps the graph weight when the answer is yes, exactly as it
+already did for a caller who named the instant as an argument; the comparison guard applies
+to both, and `Explanation.intent` still reports the primary reading.
+
+A question names a predicate in whatever form it inflects it. `predicate_refs` and
+`observed_refs` fold both the predicate's content tokens and the question's through
+`schema.word_stem` — the fold the registry uses to decide that `employer` and `employed_by`
+are one predicate — so "who *leads* the team" names `team_lead` and "where is it
+*deployed*" names `deploy_region`. Every content token still has to be present, which is
+what keeps the match from becoming a token index.
 
 `MULTIPLIERS` scales the *configured* weights rather than replacing them, so a deployment
 that tuned `w_vector` keeps its tuning. Every entry is 1.0 except the graph column, where
@@ -612,6 +631,55 @@ stage rather than argued about.
 Any multiplier that is not 1.0 must come from a per-category sweep recorded in
 `docs/BENCHMARKS.md`. A number picked because it sounds right is a ranking change with no
 evidence behind it.
+
+### `retrieve/anchor.py`
+
+```python
+SUBJECT, OBJECT, PATH = "subject", "object", "path"
+SELF_SUBJECT = "user"
+
+def query_tokens(query: str) -> frozenset[str]
+def anchor_of(claim: Claim, tokens: frozenset[str], spellings=...) -> str | None
+```
+
+What tied a result to the question, read off the rows rather than off the score. A claim
+is *anchored* when the question names one of its ends — `Claim.subject_key` or
+`Claim.object_key`, the folded identities the write path stamped, against the question
+folded the same way by `entity_key` — and *derived* when the graph leg reached it by walking
+out of an anchored claim. `Explanation.anchor` reports which; `None` is the finding: the row
+surfaced on vocabulary alone, which on a question the store cannot answer is what the best
+available row looks like from inside a ranker.
+
+Invariants:
+
+- **No extractor runs over the query.** The candidates supply the entities, exactly as the
+  graph leg's seeds do, and the question is only asked whether it contains them. Every
+  content token of a key has to be present, so `Project Chronos` does not anchor a row
+  about `Project Atlas` on the strength of `project`.
+- **A derivation starts at the entity the question named.** `_graph_search` returns the
+  ids on paths whose first node is the *named* end of an anchored candidate. Not its
+  other end: from `Project Atlas/deploy_region=eu-west-1` a walk out of the value reaches
+  every project in `eu-west-1`, one hop away at score 1.0, on the very predicate asked —
+  derivations from the answer, not from the question. Not an unanchored seed either —
+  the lookup legs' best guess on a question about nothing the store holds — or every
+  negative would be answered from that guess's neighbourhood. Under `anchored=True` with
+  nothing named the walk is not run at all, since nothing it found could survive.
+- **The self subject is named by a pronoun, a possessive is a mention, and an alias is a
+  spelling.** `user` is what `write/fast.py` and `write/pipeline.py` file a first-person
+  statement under, and "where do I live" has to reach it; `entities._tokens` drops
+  apostrophes so "Bob's" would fold to `bobs`; and `EntityRegistry.spellings(owner, key)`
+  returns the key and its learned aliases, resolved under the reader's own owner and no
+  wider, for the reason `Memvara._probe_entities` gives.
+- **`anchored=True` filters claims and retries like `memory_types`.** An anchored claim
+  with little vocabulary in common with the question sits past the first cut exactly as a
+  filtered memory type does, so the same widened second pass runs. `min_score` deliberately
+  gets no retry — deeper candidates have less evidence, not more. Episodes are untouched: a
+  turn has no subject to name.
+
+It is a filter on the *entity*, not on the slot. Asked about the reporting service's
+authentication strategy, a store holding only who owns the reporting service correctly
+keeps that row — the question is about an entity the store knows — and telling that row
+from the answer is a question about the predicate, which nothing here judges.
 
 ### `retrieve/traverse.py`
 
@@ -1072,7 +1140,7 @@ finding.
 Why the distinction earns a method at all: every claim is already an edge, so "is this
 store a graph" is always yes and predicts nothing. Connectivity is what varies. Measured
 on the two public corpora with identical retrieval code, 2Wiki joins at 40.6% and the
-graph leg takes chained questions from 28.3% to 42.1%; LongMemEval joins at **0.0%** —
+graph leg takes chained questions from 28.3% to 43.8%; LongMemEval joins at **0.0%** —
 one subject, 78 leaf objects, no two-hop path in the store at all — and the leg loses 1.6
 points. See [`docs/BENCHMARKS.md`](BENCHMARKS.md).
 

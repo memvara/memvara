@@ -149,10 +149,12 @@ def explanation(body: dict[str, Any] | None) -> Explanation:
     listing rather than a search — and an all-defaults `Explanation` is the right answer
     there, because nothing ranked it.
 
-    `graph_rank`, `graph_score`, `temporal_rank`, `temporal_score` and `intent` exist on
-    `Explanation` but not on `Ranking` — `render.ranking` never puts them on the wire, so
-    there is nothing here to read them back from; a restored `Explanation` reports them
-    at their dataclass defaults.
+    `graph_rank`, `graph_score`, `temporal_rank`, `temporal_score`, `intent` and `anchor`
+    exist on `Explanation` but not on `Ranking` — `render.ranking` never puts them on the
+    wire, so there is nothing here to read them back from; a restored `Explanation`
+    reports them at their dataclass defaults. For `anchor` that default is `None`, which
+    on a local result means "surfaced on vocabulary alone" and on a hosted one means only
+    that the server did not say.
 
     `recency`, `confidence` and `salience` are `float` on `Explanation`, not
     `float | None` — null on the wire means "not applicable" (an episode hit), and that

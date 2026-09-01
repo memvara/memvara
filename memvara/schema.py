@@ -231,6 +231,23 @@ def _stem(token: str) -> str:
     return token
 
 
+def word_stem(token: str) -> str:
+    """One word reduced to the form its inflections and derivations share.
+
+    Singularised first, then the derivational suffixes stripped, which is exactly the
+    fold `_loose_key` applies to a predicate's content words — made public so a query
+    can be folded the same way and compared against it. "leads", "led" and "leader" do
+    not all meet, and that is deliberate: this is a suffix stripper, not a lemmatiser,
+    and it only has to agree with itself on both sides of a comparison.
+
+    >>> word_stem("leads"), word_stem("deployed"), word_stem("speaks"), word_stem("owns")
+    ('lead', 'deploy', 'speak', 'own')
+    >>> word_stem("region") == word_stem("regions")
+    True
+    """
+    return _stem(_singular(token))
+
+
 def _strict_key(slug: str) -> tuple[str, ...]:
     """Order-insensitive identity of a predicate's content words, singularized."""
     return tuple(sorted(_singular(t) for t in _content_tokens(slug)))

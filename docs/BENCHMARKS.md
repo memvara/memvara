@@ -281,7 +281,7 @@ PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-gr
 | `bench/multihop.py` (synthetic), gate off | 4,498 | **2.9% → 20.0%** at k=12, **7.6% → 50.0%** at k=25 |
 | `bench/multihop.py`, **as shipped** | 4,498 | **2.9% → 6.4%** at k=12, **7.6% → 21.8%** at k=25 |
 | `bench/twowiki.py`, gate off, **public** | 26,403 | **28.3% → 72.2%** at k=12 on chained questions; **−13.7** on flat ones |
-| `bench/twowiki.py`, **as shipped** | 26,403 | **28.3% → 42.1%** answer and **25.5% → 39.5%** chain on chained questions; −0.4 on flat |
+| `bench/twowiki.py`, **as shipped** | 26,403 | **28.3% → 43.8%** answer and **25.5% → 41.3%** chain on chained questions; flat unchanged (+0.4) |
 
 The leg walks *claims*, and both public runs are episode retrieval: `SalienceGate` drops
 any turn whose role is not `user`, LOCOMO writes each turn under the speaker's name, and
@@ -441,14 +441,28 @@ returned rows / whole evidence chain returned*:
 ```
   k=12
   set                     n         search         +graph        +graph!
-  all                12,576   50.6% / 37.2%   57.9% / 43.8%   68.0% / 57.2%
-  chained             6,785   28.3% / 25.5%   42.1% / 39.5%   72.2% / 70.3%
-  flat                5,791   76.7% / 50.8%   76.3% / 48.9%   63.0% / 41.9%
-  compositional       5,236   22.8% / 20.5%   40.8% / 38.7%   70.1% / 68.3%
+  all                12,576   50.6% / 37.2%   59.0% / 44.5%   68.0% / 57.2%
+  chained             6,785   28.3% / 25.5%   43.8% / 41.3%   72.3% / 70.3%
+  flat                5,791   76.7% / 50.8%   76.7% / 48.3%   63.0% / 41.8%
+  compositional       5,236   22.8% / 20.5%   43.0% / 40.9%   70.2% / 68.3%
   inference           1,549   46.6% / 42.3%   46.6% / 42.3%   79.3% / 77.3%
-  comparison          3,040   73.9% / 96.8%   74.9% / 88.7%   60.7% / 58.2%
-  bridge_comparison   2,751   79.8% /  0.0%   77.8% /  4.9%   65.5% / 23.8%
+  comparison          3,040   73.9% / 96.8%   75.7% / 86.8%   60.8% / 58.1%
+  bridge_comparison   2,751   79.8% /  0.0%   77.9% /  5.7%   65.5% / 23.8%
 ```
+
+The `+graph` column is after the gate repair filed as
+[#150](https://github.com/memvara/memvara/issues/150): a question names a predicate in
+whatever form it inflects it, and a chain that also names an instant keeps the walk. Both
+runs, the branch and a pristine `origin/main`, were taken on the same day with the same
+harness; `main` reproduced the previously published column exactly, and the repair moved
+it as follows, answer / chain: `all` 57.9 / 43.8 → 59.0 / 44.5, `chained` 42.1 / 39.5 →
+43.8 / 41.3, `compositional` 40.8 / 38.7 → 43.0 / 40.9, `flat` 76.3 / 48.9 → 76.7 / 48.3,
+`comparison` 74.9 / 88.7 → 75.7 / 86.8, `bridge_comparison` 77.8 / 4.9 → 77.9 / 5.7,
+`inference` unchanged. The `search` and `+graph!` columns did not move, which is the check
+that only the gate changed. Chain recall on `comparison` gives up 1.9 points: a few more
+comparison questions now name two predicates through their inflections and are not
+written as a disjunction, so `is_comparison` does not catch them and the walk spends part
+of `k` there.
 
 **`chained` is the result.** `compositional` and `inference` questions chain one fact into
 the next — "who is the mother of the director of X" is `director` then `mother` — and the
@@ -465,7 +479,7 @@ rather than by following edges.
 
 **The intent gate is right in principle, and it now captures some of what it was
 blocking.** It exists to route flat questions past the walk, and on `flat` it does:
-76.3% against search's 76.7%. On `chained` it used to block almost the entire gain —
+76.7% against search's 76.7%. On `chained` it used to block almost the entire gain —
 29.1% where 72.2% was available, 0.9 points of 43.9.
 
 The reason was vocabulary, and not the kind a word list fixes. `classify` counts the
@@ -513,9 +527,9 @@ One false positive found on the way: `born_in` and `born_on` share the content t
 Matches are now deduplicated by what the question said rather than by how many predicates
 answer to it.
 
-**Answers and derivations move together.** On `chained`, the leg is worth +13.8 points of
-answer recall and **+14.0 of chain recall** — 28.3% → 42.1% and 25.5% → 39.5%. Ungated the
-two columns nearly meet, 72.2% against 70.3%: almost every answer the walk finds arrives
+**Answers and derivations move together.** On `chained`, the leg is worth +15.5 points of
+answer recall and **+15.8 of chain recall** — 28.3% → 43.8% and 25.5% → 41.3%. Ungated the
+two columns nearly meet, 72.3% against 70.3%: almost every answer the walk finds arrives
 with every triple that supports it. That is the property the library is for, and it is the
 one worth quoting.
 
@@ -616,6 +630,52 @@ end-to-end accuracy, which this file does not compute.
 These numbers are not comparable to the 2Wiki leaderboard, which retrieves from a
 per-question candidate set. That is reading comprehension; this is recall against 26,403
 competing facts.
+
+### Anchoring: abstention without a threshold, measured on the Agent Memory Benchmark
+
+`search(anchored=True)` keeps only the rows the question names an entity of — the folded
+subject or object key, every content token present — or that the graph leg reached by
+walking out of such a row, and `Explanation.anchor` reports which on every result
+(`memvara/retrieve/anchor.py`). It is the answer to the `irrelevance` half of
+[#129](https://github.com/memvara/memvara/issues/129), and it is measured here rather than
+in the published table because the shipped adapter does not set the flag; the rows below
+come from the same adapter with one keyword added to its `search()` call, over dataset v1,
+byte-identical on repeat.
+
+```
+  configuration                 overall  retrieval  irrelevance  multi_hop  negative
+  shipped                         92.0%      64.3%        50.0%        1/6       3/6
+  shipped, anchored=True          93.0%      57.1%        83.3%        0/6       5/6
+  read_w_graph=1.0                92.0%      64.3%        50.0%        1/6       3/6
+  read_w_graph=1.0, anchored      94.0%      64.3%        83.3%        1/6       5/6
+```
+
+**Two of the three open negatives are caught, and no threshold reaches either.** *Where
+does Oscar live* returns nothing because no row is about Oscar. *Which region is Project
+Chronos deployed to* is the case the issue singled out — it scores 0.450, above two
+genuine answers — and it returns nothing because `project` alone does not name `Project
+Atlas`. The third, the reporting service's authentication strategy, is correctly *not*
+caught: the store holds who owns the reporting service, that row is about the entity
+asked about, and telling it from the answer is a question about the predicate, which
+anchoring does not judge.
+
+**The one point it costs at the shipped defaults is a lucky hit, and the walk earns it
+back.** *In which city is Bob's employer headquartered* is answered by plain search from
+`Globex/hq_city=Munich`, which shares no entity with the question and sits a hair above
+`Initech/hq_city=Austin`; anchoring hands back Bob's own rows instead, and the adapter
+answers `Globex`. With the graph leg on, the walk out of `bob/works_at=Globex` reaches the
+same row and marks it `"path"`, so the filter keeps it. That is the shape the two halves
+of the issue share: on a negative "the top hit is not about what you asked" means *never
+told*, and on a chain it means *one more hop*, and the path anchor is what tells them
+apart.
+
+`multi_hop` does not move from anything in the read path, and the issue's own measurement
+says why: the answer is already retrieved — rank 1 for the Atlas question at the shipped
+defaults — and the adapter takes rank 0 and stops. The intent-gate repair in this same
+series (#150: a question names a predicate in whatever form it inflects it, and a chain
+that also names an instant keeps the walk) changes which questions walk and not that row.
+`bench/multihop.py` at 1,000 staff is byte-identical before and after, because its
+questions already name their predicates in the stored form.
 
 ### The temporal leg, and the abstention that is the actual finding
 

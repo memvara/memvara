@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Iterator
 
 from ..schema import PredicateRegistry
-from ..types import Claim, Derivation, Episode
+from ..types import SELF_SUBJECT, Claim, Derivation, Episode
 
 EXTRACTOR = "fast/v1"
 
@@ -272,7 +272,7 @@ class FastExtractor:
     def _claim(self, ep: Episode, predicate: str, value: str, polarity: int) -> Claim:
         spec = self.registry.spec(predicate)
         return Claim(
-            subject="user",
+            subject=SELF_SUBJECT,
             predicate=predicate,
             object=value,
             scope=ep.scope,

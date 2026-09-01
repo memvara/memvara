@@ -803,6 +803,11 @@ class Memvara:
         #: walk into retrieval than the one `neighborhood()` exposes.
         self.traverser = GraphTraverser(self.store, self.registry, **graph_kw)
         read_kw.setdefault("traverser", self.traverser)
+        # The writer's live entity registry, so a question spelled with a learned alias
+        # anchors the claims filed under the canonical key (`retrieve/anchor.py`). The
+        # same object `_probe_entities` reads, for the same reason: an alias learned this
+        # process applies to the next read without a round trip through the store.
+        read_kw.setdefault("entities", self.writer.reconciler.entities)
         self.reader = HybridRetriever(
             self.store, self.embedder, self.registry, **read_kw
         )
@@ -1686,6 +1691,7 @@ class Memvara:
     # bool. Dropping it would turn "pass the flag through" into a type error.
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
+               anchored: bool = ...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
                valid_at: datetime | None = ..., known_at: datetime | None = ...,
                states: Collection[str] | None = ...,
@@ -1695,6 +1701,7 @@ class Memvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
+               anchored: bool = ...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
                valid_at: datetime | None = ..., known_at: datetime | None = ...,
                states: Collection[str] | None = ...,
@@ -1704,6 +1711,7 @@ class Memvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
+               anchored: bool = ...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
                valid_at: datetime | None = ..., known_at: datetime | None = ...,
                states: Collection[str] | None = ...,
@@ -1712,6 +1720,7 @@ class Memvara:
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0, tenant=None,
+               anchored: bool = False,
                user=None, agent=None, session=None, as_of: datetime | None = None,
                valid_at: datetime | None = None, known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -1747,6 +1756,24 @@ class Memvara:
         derive one from your own labelled probes with
         `memvara.calibrate_min_score`, and re-derive it as the store grows.
 
+        `anchored=True` is the way to say no that needs no number. It keeps only the
+        results the question is demonstrably about: a claim whose subject or object the
+        question names, or one the graph leg reached by walking out of such a claim.
+        Asked about an entity the store has never heard of, it returns nothing rather
+        than the nearest row about somebody else. Every result reports which of those
+        tied it to the question as `Explanation.anchor`, so the signal is readable
+        without the filter; see `memvara/retrieve/anchor.py` for what it can and cannot
+        see.
+
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> _ = mem.remember("Ivan", "lives_in", "Lisbon")
+        >>> [r.claim.object for r in mem.search("where does Ivan live?", anchored=True)]
+        ['Lisbon']
+        >>> mem.search("where does Oscar live?", anchored=True)
+        []
+        >>> mem.search("where does Oscar live?")[0].explain.anchor is None
+        True
+
         `include_episodes=True` also searches the raw turns, which is the only way to
         reach anything the extractor declined — a decision and its reasoning, a
         constraint stated in passing, an argument that was settled. Those come back as
@@ -1762,7 +1789,7 @@ class Memvara:
         scope = self._scope(tenant, user, agent, session)
         return self.reader.search(
             query, scope, k=k, as_of=as_of, valid_at=valid_at, known_at=known_at,
-            min_score=min_score,
+            min_score=min_score, anchored=anchored,
             states=resolve_states(states, include_invalidated),
             memory_types=memory_types, include_episodes=include_episodes,
         )
@@ -2090,6 +2117,7 @@ class Memvara:
     # arguments dict) has to be able to pass the flag through without a type error.
     @overload
     def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                header: str | None = ..., tenant=..., user=..., agent=..., session=...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool = ..., episode_header: str | None = ...,
@@ -2099,6 +2127,7 @@ class Memvara:
 
     @overload
     def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                header: str | None = ..., tenant=..., user=..., agent=..., session=...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool = ..., episode_header: str | None = ...,
@@ -2108,6 +2137,7 @@ class Memvara:
 
     @overload
     def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                header: str | None = ..., tenant=..., user=..., agent=..., session=...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool = ..., episode_header: str | None = ...,
@@ -2116,6 +2146,7 @@ class Memvara:
                with_ids: bool) -> str | RecallResult: ...
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
+               anchored: bool = False,
                header: str | None = None, tenant=None, user=None, agent=None,
                session=None, memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False,
@@ -2141,6 +2172,10 @@ class Memvara:
 
         `min_score` is here because this output goes into a prompt: a weak match is not
         neutral there, it is a confident-looking irrelevant fact the model will use.
+        `anchored` is here for the same reason and needs no number: it keeps only the
+        claims the query names an entity of, or that the graph leg reached from one, so a
+        question about somebody the store has never heard of renders nothing rather than
+        the nearest fact about somebody else. See `search()`.
 
         It defaults to 0.0, and that is a deliberate refusal rather than an oversight.
         A floor was measured and very nearly shipped as a constant; a corpus-size sweep
@@ -2249,6 +2284,7 @@ class Memvara:
         True
         """
         results = self.search(query, k=k, min_score=min_score, tenant=tenant, user=user,
+                              anchored=anchored,
                               agent=agent, session=session, memory_types=memory_types,
                               include_episodes=include_episodes)
         claims = [r for r in results if not isinstance(r, EpisodeResult)]
@@ -2617,7 +2653,8 @@ class Memvara:
         return self.writer.reconciler.entities.probe_keys(owner_key(scope), surface)
 
     def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
-            min_score: float = 0.0, tenant=None, user=None, agent=None,
+            min_score: float = 0.0, anchored: bool = False, tenant=None, user=None,
+            agent=None,
             session=None) -> Answer:
         """Answer a question about one instant, and say whether the record has changed.
 
@@ -2652,7 +2689,10 @@ class Memvara:
         knows nothing about is still answered from the nearest slot it has, and the
         narrative will be confident about it. Every `Reading` names the subject and
         predicate it answered from, which is what lets a caller see that it answered the
-        wrong one; nothing here can tell them.
+        wrong one. `anchored=True` is the one judgement this method can make without a
+        number: it answers only from slots the question names an entity of, or that the
+        graph leg reached from one, so a question about an entity the store has never
+        heard of yields an `Answer` with no readings rather than a confident wrong one.
 
         **`Reading.stated` deliberately disagrees with `get_all(as_of=T)`**, and that is
         the one thing to know before quoting either. See `Reading`, which sets out why a
@@ -2680,6 +2720,7 @@ class Memvara:
         # live one. `k * 4` because several versions of one slot answer one query and
         # what is being counted here is slots.
         hits = self.search(question, k=max(k * 4, k), min_score=min_score,
+                           anchored=anchored,
                            tenant=tenant, user=user, agent=agent, session=session,
                            states=["live", "ended", "retired"])
         slots: list[tuple[str, str]] = []
@@ -3202,6 +3243,7 @@ class ScopedMemvara:
     # and this is the one the MCP server and every integration holds.
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -3210,6 +3252,7 @@ class ScopedMemvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -3218,6 +3261,7 @@ class ScopedMemvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -3225,6 +3269,7 @@ class ScopedMemvara:
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
+               anchored: bool = False,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -3232,6 +3277,7 @@ class ScopedMemvara:
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False) -> list[Any]:
         return self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
+                                anchored=anchored,
                                 valid_at=valid_at, known_at=known_at, states=states,
                                 include_invalidated=include_invalidated,
                                 memory_types=memory_types,
@@ -3242,6 +3288,7 @@ class ScopedMemvara:
     # and reads `with_ids` out of an arguments dict, where it is a runtime `bool`.
     @overload
     def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                header: str | None = ..., memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool = ..., episode_header: str | None = ...,
                include_history: bool = ..., history_header: str | None = ...,
@@ -3250,6 +3297,7 @@ class ScopedMemvara:
 
     @overload
     def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                header: str | None = ..., memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool = ..., episode_header: str | None = ...,
                include_history: bool = ..., history_header: str | None = ...,
@@ -3258,6 +3306,7 @@ class ScopedMemvara:
 
     @overload
     def recall(self, query: str, *, k: int = ..., min_score: float = ...,
+               anchored: bool = ...,
                header: str | None = ..., memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool = ..., episode_header: str | None = ...,
                include_history: bool = ..., history_header: str | None = ...,
@@ -3265,6 +3314,7 @@ class ScopedMemvara:
                with_ids: bool) -> str | RecallResult: ...
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
+               anchored: bool = False,
                header: str | None = None,
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False,
@@ -3275,6 +3325,7 @@ class ScopedMemvara:
                counter: Callable[[str], int] = _approx_tokens,
                with_ids: bool = False) -> Any:
         return self._mem.recall(query, k=k, min_score=min_score, header=header,
+                                anchored=anchored,
                                 memory_types=memory_types,
                                 include_episodes=include_episodes,
                                 episode_header=episode_header,
@@ -3283,8 +3334,9 @@ class ScopedMemvara:
                                 counter=counter, with_ids=with_ids, **self._kw)
 
     def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
-            min_score: float = 0.0) -> Answer:
-        return self._mem.ask(question, at=at, k=k, min_score=min_score, **self._kw)
+            min_score: float = 0.0, anchored: bool = False) -> Answer:
+        return self._mem.ask(question, at=at, k=k, min_score=min_score,
+                             anchored=anchored, **self._kw)
 
     def since(self, when: datetime) -> Delta:
         return self._mem.since(when, **self._kw)

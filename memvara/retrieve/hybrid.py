@@ -46,7 +46,10 @@ import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import perf_counter
-from typing import Any, ClassVar, Collection, Literal, NamedTuple, Sequence, overload
+from typing import (
+    TYPE_CHECKING, Any, Callable, ClassVar, Collection, Iterable, Literal, NamedTuple,
+    Sequence, overload,
+)
 
 import numpy as np
 
@@ -73,14 +76,16 @@ from ..types import (
     MemoryType,
     Result,
     Scope,
+    owner_key,
     time_axes,
     utcnow,
 )
+from .anchor import PATH, SUBJECT, anchor_of, query_tokens
 from .analyze import analyze
 from .fusion import reciprocal_rank_fusion
 from .intent import Intent, classify
 from .compose import names_derived
-from .intent import is_comparison, observed_refs
+from .intent import is_comparison, is_relational, observed_refs
 from .intent import weights as intent_weights
 from .scoring import (
     final_score,
@@ -94,6 +99,9 @@ from .scoring import (
 from .spread import rank_paths, seed_keys
 from .temporal import TEMPORAL, anchor_for, rank as rank_by_time
 from .traverse import GraphTraverser
+
+if TYPE_CHECKING:  # pragma: no cover - annotation only
+    from ..entities import EntityRegistry
 
 # Retriever names. Shared between the fusion weights and the `Explanation` fields so
 # the two cannot drift apart under a rename.
@@ -298,6 +306,7 @@ class HybridRetriever:
         reranker: "Reranker | None" = None,
         rerank_top_n: int = 20,
         telemetry: Recorder | None = None,
+        entities: "EntityRegistry | None" = None,
     ) -> None:
         self.store = store
         self.embedder = embedder
@@ -396,6 +405,12 @@ class HybridRetriever:
         #: caller's `k` can be promoted into it, which is the whole point of the stage.
         self.reranker = reranker
         self.rerank_top_n = rerank_top_n
+        #: The owner's learned entity aliases, or `None`. Read by the anchoring pass so
+        #: a question saying "Big Blue" names a claim filed under `ibm`; without one a
+        #: key is its own only spelling, which is what an unmerged store has anyway.
+        #: `Memvara` hands over the writer's live registry, so an alias learned this
+        #: process anchors the next search without a round trip through the store.
+        self.entities = entities
 
     # Three signatures for one method, because `include_episodes` decides what comes
     # back and the caller almost always knows which at the point of the call. Without
@@ -410,7 +425,8 @@ class HybridRetriever:
         known_at: datetime | None = ..., states: Collection[str] | None = ...,
         include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
-        include_episodes: Literal[False] = ..., now: datetime | None = ...,
+        anchored: bool = ..., include_episodes: Literal[False] = ...,
+        now: datetime | None = ...,
     ) -> list[Result]: ...
 
     @overload
@@ -420,7 +436,8 @@ class HybridRetriever:
         known_at: datetime | None = ..., states: Collection[str] | None = ...,
         include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
-        include_episodes: Literal[True], now: datetime | None = ...,
+        anchored: bool = ..., include_episodes: Literal[True],
+        now: datetime | None = ...,
     ) -> list[Retrieved]: ...
 
     @overload
@@ -430,7 +447,7 @@ class HybridRetriever:
         known_at: datetime | None = ..., states: Collection[str] | None = ...,
         include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
-        include_episodes: bool, now: datetime | None = ...,
+        anchored: bool = ..., include_episodes: bool, now: datetime | None = ...,
     ) -> list[Retrieved]: ...
 
     def search(
@@ -446,6 +463,7 @@ class HybridRetriever:
         include_invalidated: bool | None = None,
         memory_types: Sequence[MemoryType] | None = None,
         min_score: float = 0.0,
+        anchored: bool = False,
         include_episodes: bool = False,
         now: datetime | None = None,
     ) -> list[Any]:
@@ -476,6 +494,15 @@ class HybridRetriever:
         value is a property of the store rather than of this library - it moves with
         corpus size and with the embedder - so measure it with
         `calibrate.calibrate_min_score` rather than picking one.
+
+        `anchored` is the other way to say no, and it needs no number. Every result
+        carries `Explanation.anchor` — which end of the claim the query named, or
+        `"path"` for a claim the graph leg reached from one that was, or `None` for a
+        claim the query names at neither end. `anchored=True` drops that last kind before
+        the cut, so a question about an entity the store has never heard of comes back
+        empty instead of answered from the nearest row about somebody else. It is a
+        filter on *claims*: an episode has no subject to name, so the episode leg is
+        unaffected by it. See `retrieve/anchor.py`.
 
         `include_episodes` widens the search to the raw turns behind the claims, and
         returns `EpisodeResult` for those - so the caller can always tell a fact from
@@ -549,7 +576,7 @@ class HybridRetriever:
 
         results, saturated = self._gather(
             query, scope, limit, valid_at, known_at, wanted_states, wanted, now,
-            min_score, weights)
+            min_score, anchored, weights)
 
         # Filter starvation. `memory_types` is applied after fusion truncated the pool,
         # so a rejected candidate has already consumed a slot and a narrow filter can
@@ -557,10 +584,15 @@ class HybridRetriever:
         # both retrievers would widen the `Store` protocol for a case that is rare;
         # noticing that the pool was full and re-asking once is not. The retry is
         # bounded and happens only when the shortfall could actually be an artefact.
-        if wanted is not None and saturated and len(results) < depth:
+        #
+        # `anchored` is a filter of the same shape and gets the same retry: an anchored
+        # claim with little vocabulary in common with the question sits past the first
+        # cut exactly as a filtered memory type does. `min_score` deliberately does
+        # not — deeper candidates have less evidence, not more.
+        if (wanted is not None or anchored) and saturated and len(results) < depth:
             results, _ = self._gather(
                 query, scope, limit * self.filter_retry_multiplier, valid_at, known_at,
-                wanted_states, wanted, now, min_score, weights)
+                wanted_states, wanted, now, min_score, anchored, weights)
 
         ranked: list[Retrieved] = list(self._rank(results, depth))
         if include_episodes and wanted is None:
@@ -605,7 +637,8 @@ class HybridRetriever:
         vector, lexical, graph, temporal = intent_weights(
             intent, vector=self.w_vector, lexical=self.w_lexical, graph=self.w_graph,
             temporal=self.w_temporal)
-        if timed and shape is Intent.RELATIONAL:
+        if intent is Intent.TEMPORAL and not is_comparison(query) and (
+                shape is Intent.RELATIONAL or is_relational(query, self.registry)):
             # A question can be about a chain *and* about an instant, and the enum can
             # only hold one of them. Naming an instant used to answer both: `timed`
             # overrode the classifier outright, so `Intent.TEMPORAL`'s multipliers
@@ -616,6 +649,15 @@ class HybridRetriever:
             # meant to say anything about chains, and it silently said the strongest
             # possible thing. "Where was Alice's employer based in 2019" is exactly the
             # query this library exists for, and it was the shape that lost the walk.
+            #
+            # The same collision happens inside `classify` when the instant is named in
+            # words rather than as an argument: "who *currently* leads the team that
+            # owns the checkout service" is temporal first, so the chain it also names
+            # was discarded and the walk switched off on the query class it exists for.
+            # `is_relational` is the second reading the one label could not carry.
+            # A comparison frame stays out, as everywhere else the walk is opened:
+            # "whose grandfather was born earlier, A or B" is two lookups, and `whose`
+            # would otherwise open the walk on the family where it costs the most.
             #
             # So the temporal row still decides three legs and the graph leg keeps the
             # weight the query shape asked for. `Explanation.intent` still reports
@@ -691,6 +733,7 @@ class HybridRetriever:
         wanted: set[MemoryType] | None,
         now: datetime,
         min_score: float,
+        anchored: bool,
         weights: _Weights,
     ) -> tuple[list[Result], bool]:
         """Run the legs at `limit` and return the surviving results, unsorted.
@@ -776,12 +819,43 @@ class HybridRetriever:
         if weights.graph > 0.0 and not self._store_has_joins(scope.tenant):
             weights = weights._replace(graph=0.0)
 
-        # `now` handed down rather than re-read. Before this the traverser called
-        # `utcnow()` of its own, so one search decayed its quality multiplier and its edge
-        # strengths from two instants microseconds apart — coherent within each leg and
-        # not between them.
-        graph_hits, walked = self._graph_search(
-            claims, fused, scope, limit, valid_at, known_at, states, weights.graph, now)
+        # Which candidates the question actually names, decided before the walk so the
+        # walk can say which of its paths started from one. Read off the rows the lookup
+        # legs returned, exactly as the seeds are: no extractor runs over the query.
+        #
+        # Only the *named* end of each anchored claim is an origin. Its other end is the
+        # value, and a walk out of the value reaches the rows that merely share it: from
+        # `Project Atlas/deploy_region=eu-west-1`, every other project in `eu-west-1`, one
+        # hop away and scored 1.0, each on the very predicate asked. Those are not
+        # derivations from the question; they are derivations from its answer. Reached
+        # the long way round — out of the named entity and back through the value — they
+        # are derivations, two hops out, and are labelled and ranked as such.
+        tokens = query_tokens(query)
+        spellings = self._spellings(scope)
+        anchors = {cid: anchor_of(claim, tokens, spellings)
+                   for cid, claim in claims.items()}
+        anchored_keys = frozenset(
+            claims[cid].subject_key if end == SUBJECT else claims[cid].object_key
+            for cid, end in anchors.items() if end is not None)
+
+        graph_hits: list[tuple[str, float]] = []
+        walked: dict[str, Claim] = {}
+        derived: frozenset[str] = frozenset()
+        if anchored and not anchored_keys:
+            # Nothing the question is about is in hand, so no path could start from it
+            # and nothing the walk found could survive the filter. Skipping is the
+            # difference between a question about a stranger costing two legs and
+            # costing three, twice — the retry below would walk again at ten times the
+            # width.
+            pass
+        else:
+            # `now` handed down rather than re-read. Before this the traverser called
+            # `utcnow()` of its own, so one search decayed its quality multiplier and
+            # its edge strengths from two instants microseconds apart — coherent within
+            # each leg and not between them.
+            graph_hits, walked, derived = self._graph_search(
+                claims, fused, scope, limit, valid_at, known_at, states, weights.graph,
+                now, anchored_keys)
         if graph_hits:
             # Re-fused rather than merged, because RRF reads positions and the positions
             # in the two-leg fusion are not the positions in the three-leg one. Doing it
@@ -820,11 +894,32 @@ class HybridRetriever:
             if not self._believed_by(claim, known_at):
                 continue
 
-            result = self._explain(claim, fusion, legs, now, weights)
+            # A claim only the walk found was not in `anchors`; it can still be named
+            # outright, and if it is not, the path it arrived on is the tie.
+            anchor = (anchors[claim_id] if claim_id in anchors
+                      else anchor_of(claim, tokens, spellings))
+            if anchor is None and claim_id in derived:
+                anchor = PATH
+            if anchored and anchor is None:
+                continue
+            result = self._explain(claim, fusion, legs, now, weights, anchor)
             if result.score < min_score:
                 continue
             results.append(result)
         return results, saturated
+
+    def _spellings(self, scope: Scope) -> "Callable[[str], Iterable[str]]":
+        """How a stored key may be spelled in this reader's question.
+
+        Resolved under `owner_key(scope)` and nothing wider, for the reason
+        `Memvara._probe_entities` gives: an alias learned at tenant level must not
+        redefine a user's own entity underneath them.
+        """
+        entities = self.entities
+        if entities is None:
+            return lambda key: (key,)
+        owner = owner_key(scope)
+        return lambda key: entities.spellings(owner, key)
 
     def _store_has_joins(self, tenant: str) -> bool:
         """Does anything in this tenant lead to anything else in it?
@@ -888,12 +983,19 @@ class HybridRetriever:
         states: Sequence[str],
         w_graph: float,
         now: datetime,
-    ) -> tuple[list[tuple[str, float]], dict[str, Claim]]:
+        anchored: frozenset[str] = frozenset(),
+    ) -> tuple[list[tuple[str, float]], dict[str, Claim], frozenset[str]]:
         """The third leg: a bounded walk out of the entities the first two just named.
 
         Returns the ranked `(claim_id, path score)` list and the claims behind it, which
         the paths already carry — so a leg that reaches thirty rows the lookups missed
-        costs zero extra store round trips beyond the hops themselves.
+        costs zero extra store round trips beyond the hops themselves — and the ids of
+        every claim on a path that *started from* one of `anchored`, the entity keys the
+        question named. Those are the derivations: a claim the question does not mention
+        that the store nevertheless ties to one it does, which is the reading
+        `Explanation.anchor` reports as `"path"`. A path out of any other seed — the
+        value end of a named claim, or the lookup legs' best guess on a question about
+        nothing the store holds — proves nothing about the question and marks nothing.
 
         Every early return here is a *degradation*, and each is a different fact:
 
@@ -930,9 +1032,9 @@ class HybridRetriever:
         Filtering those out would fix this leg by breaking time travel in the other two.
         """
         if w_graph <= 0.0 or self.traverser is None or self._graph_unsupported:
-            return [], {}
+            return [], {}, frozenset()
         if "live" not in states:
-            return [], {}
+            return [], {}, frozenset()
         # Driven from `fused`, which is the authority on scores, rather than from what
         # the hydration returned. `get_claims` is on the Store protocol and a third-party
         # one that returns an id nobody asked for would otherwise take retrieval down
@@ -941,7 +1043,7 @@ class HybridRetriever:
         seeds = seed_keys([(claims[cid], score) for cid, score in fused.items()
                            if cid in claims], self.graph_seeds)
         if not seeds:
-            return [], {}
+            return [], {}, frozenset()
         try:
             paths = self.traverser.spread(
                 seeds, scope, depth=self.graph_depth, k=limit,
@@ -954,8 +1056,10 @@ class HybridRetriever:
                 DegradedRetrievalWarning,
                 stacklevel=2,
             )
-            return [], {}
-        return rank_paths(paths), {c.id: c for p in paths for c in p.claims}
+            return [], {}, frozenset()
+        derived = frozenset(c.id for p in paths if p.nodes[0] in anchored
+                            for c in p.claims)
+        return rank_paths(paths), {c.id: c for p in paths for c in p.claims}, derived
 
     def _episodes(
         self,
@@ -1262,7 +1366,7 @@ class HybridRetriever:
         return _as_utc(claim.recorded_at) <= _as_utc(known_at)
 
     def _explain(self, claim: Claim, fusion: float, legs: _Legs, now: datetime,
-                 weights: _Weights) -> Result:
+                 weights: _Weights, anchor: str | None = None) -> Result:
         v = legs.vector.get(claim.id)
         lx = legs.lexical.get(claim.id)
         g = legs.graph.get(claim.id)
@@ -1311,6 +1415,7 @@ class HybridRetriever:
             raw_score=final_score(fusion, **quality),
             final_score=score,
             intent=None if weights.intent is None else weights.intent.value,
+            anchor=anchor,
         )
         return Result(claim=claim, score=score, explain=explain)
 

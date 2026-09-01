@@ -87,7 +87,9 @@ from ..telemetry import (
     Recorder,
     script_of,
 )
-from ..types import Claim, Closure, Derivation, Episode, MemoryType, WriteReceipt, utcnow
+from ..types import (
+    SELF_SUBJECT, Claim, Closure, Derivation, Episode, MemoryType, WriteReceipt, utcnow,
+)
 from .fast import FastExtractor
 from .gate import SalienceGate
 from .reconcile import ReconcileResult, Reconciler
@@ -932,7 +934,7 @@ class WritePipeline:
             return None
         ep = episodes[idx]
 
-        subject = str(item.get("subject", "") or "").strip() or "user"
+        subject = str(item.get("subject", "") or "").strip() or SELF_SUBJECT
         predicate = self.registry.normalize(str(item.get("predicate", "") or ""))
         obj = str(item.get("object", "") or "").strip()
         if not predicate or not obj:

@@ -11,6 +11,42 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`search(anchored=True)`, and `Explanation.anchor` on every result — a way to say
+  "nothing here is about that" that needs no number.** Retrieval always returns
+  something: asked *where does Oscar live* of a store that has never heard of Oscar, it
+  ranks somebody else's city first at a score that looks like every other answer.
+  `min_score` was the only lever and it needs a floor nobody has on day one — and the
+  Agent Memory Benchmark holds a case no floor reaches: *which region is Project Chronos
+  deployed to* scores 0.450 against a store holding Project Atlas, above two genuine
+  answers at 0.410 and 0.417.
+
+  Every result now says what tied it to the question. `Explanation.anchor` is
+  `"subject"` or `"object"` when the question names that end of the claim, `"path"` when
+  the graph leg reached it by walking out of a claim that was named, and `None` when
+  nothing did — the row surfaced on vocabulary alone. `anchored=True` on `search()`,
+  `recall()` and `ask()` drops that last kind before the cut, on `Memvara`,
+  `ScopedMemvara` and both async facades. The match is on the folded entity keys the
+  write path already stamped, so no entity extractor runs over the query; the self
+  subject is named by a pronoun, a possessive is a mention, and a learned alias widens
+  the match under the reader's own owner (`EntityRegistry.spellings`).
+
+  Measured on the Agent Memory Benchmark through the adapter with the flag set (the
+  shipped adapter is unchanged, so the published table is too): `irrelevance` 3/6 → 5/6
+  at both the shipped configuration and `read_w_graph=1.0`, overall 92.0% → 93.0% and
+  94.0%. At the shipped defaults it costs one `multi_hop` question that plain search got
+  right by vocabulary alone — `Globex/hq_city=Munich` for *in which city is Bob's employer
+  headquartered*, with `Initech/hq_city=Austin` a hair behind it — and with the graph
+  leg on the walk from Bob's own row earns it back as a `"path"`. The third negative is
+  about the reporting service's authentication strategy; the store does hold a row about
+  the reporting service, so anchoring correctly keeps it, and telling that row from the
+  answer is a question about the *predicate*, which this does not judge. It is a filter
+  on claims: an episode has no subject to name and the episode leg is unaffected.
+
+  Not yet on the hosted facade. `RemoteMemvara.search` does not take the keyword, so a
+  caller against memvara-cloud gets a `TypeError` rather than a silently unfiltered
+  answer, until the server side lands — and a hosted result's `Explanation.anchor` is
+  `None` because the wire does not carry it yet, not because nothing named the row.
+
 - **`MEMVARA_LLM=openai` selects the OpenAI-compatible backend, which was finished and
   unreachable.** `OpenAILLM` has shipped complete since the `memvara[openai]` extra
   landed — Chat Completions with `strict: true` and explicit refusal handling — but
@@ -531,6 +567,35 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   them, pinned against `tomllib` by the agreement test as before.
 
 ### Changed
+
+- **A question names a predicate in whatever form it inflects it, so the graph leg
+  now runs on chained questions that name their relations as verbs** (#150). `team_lead`
+  is asked as *who leads the team*, `deploy_region` as *where is it deployed*, `owned_by`
+  as *the team that owns it*, and the intent gate matched predicate names token for
+  token, so four of the Agent Memory Benchmark's six chained questions read as a question
+  about one slot and had the walk switched off. Both sides now fold through
+  `schema.word_stem`, the same fold the registry already uses to decide that `employer`
+  and `employed_by` are one predicate. One predicate is still one slot: *which region is
+  Project Atlas deployed to* stays a lookup.
+
+  The same gate also discarded the chain when a question carried a time word: *who
+  currently leads the team that owns the checkout service* is `temporal` first, and that
+  row's multipliers zero the graph weight. `intent.is_relational` is the second reading
+  the one label could not carry, and `HybridRetriever._weights` now honours it exactly as
+  it already did for a caller who named the instant as an argument — the temporal row
+  decides the other legs, `Explanation.intent` still says `temporal`, and the walk runs.
+  A comparison frame stays out, as everywhere else the walk is opened.
+
+  At the shipped `w_graph=0.0` nothing changes. With the leg on, more chained questions
+  walk. On the full 2WikiMultihopQA dev set at k=12 the shipped-gate column moves from
+  42.1% / 39.5% to 43.8% / 41.3% answer / chain recall on chained questions and from
+  57.9% / 43.8% to 59.0% / 44.5% overall, with flat questions unchanged within a point
+  (76.3% → 76.7% answer, 48.9% → 48.3% chain); `docs/BENCHMARKS.md` has the whole table
+  and the one family that gives something up. `bench/multihop.py` is byte-identical
+  before and after, because its questions already named their predicates in the stored
+  form. Neither change moves the Agent Memory Benchmark's `multi_hop` row, and #129 says
+  why: the bottleneck there is what consumes a retrieved pair, not whether the pair is
+  retrieved.
 
 - **`README.md`'s *Quickstart* is two columns: run it yourself, or use the hosted service
   at memvara.dev.** The README described the hosted product in one cell of an *Other ways

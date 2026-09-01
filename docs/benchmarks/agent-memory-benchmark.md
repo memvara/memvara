@@ -282,6 +282,15 @@ never told, each answers from the nearest match instead of abstaining. That row 
 a shared gap in the field rather than a difference between these systems, and until either
 a system improves or the questions get harder it carries no information.
 
+memvara has since grown the way to abstain, and this table does not show it because the
+adapter does not use it. `search(anchored=True)` returns only the rows the question names
+an entity of, or that the graph leg reached from one; with the adapter passing that flag,
+`irrelevance` measures 5/6 at both the shipped configuration and `read_w_graph=1.0`, and
+overall 93.0% and 94.0%. At the shipped defaults it also costs one `multi_hop` question
+that plain search answered by vocabulary alone, which the graph leg recovers. The
+adapter is left as published so that the row above stays comparable across the three
+systems; `docs/BENCHMARKS.md` in the repository carries the measurement.
+
 **These numbers replace an earlier set, and the reason is worth reading.** An earlier run
 had memvara at 90.0% overall and 50.0% on `retrieval`. Investigating that loss found two
 defects in the harness rather than in any memory system: the memvara adapter searched
