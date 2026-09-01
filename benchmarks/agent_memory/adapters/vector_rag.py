@@ -40,7 +40,7 @@ import numpy as np
 
 from ..dataset import MemoryEvent, PredicateDecl
 from ..normalization import tokens
-from .base import Ask, MemoryAnswer, Usage, indexable, wants_a_date
+from .base import Ask, MemoryAnswer, Usage, indexable, pick_slot, wants_a_date
 
 #: Width of the hashed vocabulary. Large enough that collisions between the dataset's few
 #: hundred distinct tokens are rare, small enough that the index is trivial.
@@ -164,7 +164,7 @@ class VectorRAGMemory:
 
     def _resolve(self, question: str) -> tuple[str, str] | None:
         hits = self._search(question, self.top_k)
-        return (hits[0].subject, hits[0].predicate) if hits else None
+        return pick_slot(question, [(r.subject, r.predicate) for r in hits])
 
     @staticmethod
     def _latest(records: Sequence[Record], known_at: datetime | None) -> list[Record]:

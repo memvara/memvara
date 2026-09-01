@@ -37,6 +37,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
+from . import DEFAULT_DATASET
+
 #: Where the shipped datasets live. A caller may point `load()` anywhere else.
 DATASETS = Path(__file__).resolve().parent / "datasets"
 
@@ -349,7 +351,7 @@ def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
                 raise ValueError(f"{path}:{number}: {exc}") from exc
 
 
-def load(version: str = "v1", root: Path | None = None) -> Dataset:
+def load(version: str = DEFAULT_DATASET, root: Path | None = None) -> Dataset:
     """Load a shipped dataset by version, validating as it goes.
 
     Validation is not a formality here. Three of the defects a benchmark can carry are

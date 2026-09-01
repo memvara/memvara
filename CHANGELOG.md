@@ -11,6 +11,41 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **Agent Memory Benchmark 2.0, with dataset v2** — 342 events, 122 questions, 18
+  scenarios, up from 262/100/16. Two of the seven dimensions were ranking nobody, and both
+  causes were in the dataset rather than in the systems.
+
+  `irrelevance` was a three-way tie at 50%: three of its six questions named a fact slot
+  outright and every system abstained, and three were open and no system abstained. v2
+  adds the two bands in between — a slot that held nothing *at the instant asked*, and a
+  slot the record knew nothing about *as of the belief instant asked* — for sixteen
+  negative questions in four difficulty bands. `multi_hop` was six questions over a corpus
+  `Memvara.connectivity()` reports as 1.6% joinable, where a graph walk has nowhere to go;
+  v2 writes down the organisation the entities always implied, taking the corpus to 25.7%
+  joinable and the category to eighteen questions running two to four hops.
+
+  **v2 is v1 plus, literally**: `datasets/build_v2.py` reads the committed v1 files and
+  appends, every inherited id keeps its wording and gold answer, and a test asserts it.
+  `datasets/v1/` stays committed, stays loadable under `--dataset v1`, and is regenerated
+  and validated by the suite on every run.
+
+- **`--system memvara-graph`** — the same adapter with `read_w_graph=1.0` and
+  `read_intent_weighting=False`. memvara ships its graph retrieval leg off; this publishes
+  what turning it on buys and costs, as a second row rather than a changed default. It is
+  worth two chained questions and 5× on query p95, and both halves are in the tables.
+
+- **`--latency-repeats N`** — ask the question set N times, discard the first pass, and
+  report the timings over the rest together with `p50_spread_ms`, the distance between the
+  highest and lowest per-pass median. The published latency table could previously only
+  quote ranges spanning about 3×, because it was measured once on a machine that was also
+  doing other work and nothing separated the system from the machine's mood. The scores
+  and the cost counters still come from one pass: `usage()` is read between the scored
+  pass and the repeats, so `db_reads` does not multiply by the repeat count.
+
+  `Latency` gains `repeats` and `p50_spread_ms`, and the result `environment` block gains
+  `cpu_count`. Both are documented in the result schema, and both are now covered by
+  schema-drift guards of the kind that already covered `usage`.
+
 - **GitHub Copilot CLI is a supported hook host.** `plugin/hooks/hosts/copilot.py`, with
   every value measured against Copilot CLI 1.0.82. It registers Claude Code's four event
   names on purpose: Copilot fires either casing and the casing decides the payload, so
@@ -22,6 +57,23 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `lib/transcript.py` grew a third reader for it. Copilot keeps the typed prompt and the
   model-facing copy in separate fields; mining the typed one makes this host immune by
   construction to reading our own injected recall back in as conversation.
+
+### Changed
+
+- **All three benchmark adapters choose a fact slot by one shared rule**,
+  `adapters.base.pick_slot`: prefer the highest-ranked candidate whose predicate the
+  question actually names, falling back to rank when none does. Taking the top-ranked hit
+  answered the first hop of a chained question and stopped, while the claim holding the
+  answer sat in the same candidate list. On dataset v1 the rule moved `retrieval` from
+  64.3% to 71.4% for memvara and from 71.4% to 85.7% for `vector-rag` — **more help to the
+  baseline than to memvara**, which is the reason to trust it is not fitted to one system.
+  It lives in `base.py` for the same reason `indexable` does: a selection rule inside one
+  adapter would make `retrieval` a comparison of adapters.
+
+  This moves published scores, which is what `BENCHMARK_VERSION` is for; it is now `2.0`.
+  Dataset v1 under the 2.0 harness scores 93.0% for memvara against the 92.0% benchmark
+  1.0 published, and the report carries both numbers rather than replacing one with the
+  other.
 
 ### Fixed
 

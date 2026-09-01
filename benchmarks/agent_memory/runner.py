@@ -18,6 +18,16 @@ The clock starts and stops around the adapter call and nothing else. Building th
 loading the dataset, judging the answer and rendering the report are all outside it.
 `time.perf_counter` throughout — the monotonic one, so a clock adjustment mid-run cannot
 produce a negative interval.
+
+Ingestion is timed once. Repeating it means emptying the store and refilling it, and the
+second fill is no longer the cold path the number is supposed to describe.
+
+Queries can be timed more than once: `--latency-repeats N` asks the whole question set N
+times. Only the first pass is scored and only the first pass is charged for, and the
+timings come from the passes after it. A single timing of a hundred questions on a laptop
+with a browser open measures the machine's mood as much as the system, and the repeat
+spread reported beside the percentiles is what lets a reader see which they are looking
+at.
 """
 
 from __future__ import annotations
@@ -61,9 +71,10 @@ def ingest(system: MemorySystem, dataset: Dataset,
     return spent
 
 
-def interrogate(system: MemorySystem, dataset: Dataset, truth: Truth, *,
-                lenient: bool = True) -> tuple[list[Judgement], list[float]]:
-    judgements: list[Judgement] = []
+def _one_pass(system: MemorySystem, dataset: Dataset) -> tuple[list[MemoryAnswer],
+                                                                list[float]]:
+    """Ask every question once. Answers and per-question seconds, in dataset order."""
+    answers: list[MemoryAnswer] = []
     times: list[float] = []
     for question in dataset.questions:
         ask = ask_of(question, dataset.evaluated_at)
@@ -80,21 +91,48 @@ def interrogate(system: MemorySystem, dataset: Dataset, truth: Truth, *,
             raise TypeError(
                 f"{system.name}.query returned {type(answer).__name__} for {question.id}; "
                 "adapters must return adapters.base.MemoryAnswer.")
+        answers.append(answer)
         times.append(elapsed)
-        judgements.append(judge(question, answer, truth, dataset.evaluated_at,
-                                lenient=lenient, latency_s=elapsed))
+    return answers, times
+
+
+def interrogate(system: MemorySystem, dataset: Dataset, truth: Truth, *,
+                lenient: bool = True) -> tuple[list[Judgement], list[float]]:
+    """Ask and score every question once. This is the pass the scores come from."""
+    answers, times = _one_pass(system, dataset)
+    judgements = [
+        judge(question, answer, truth, dataset.evaluated_at,
+              lenient=lenient, latency_s=elapsed)
+        for question, answer, elapsed in zip(dataset.questions, answers, times)
+    ]
     return judgements, times
+
+
+def retime(system: MemorySystem, dataset: Dataset, passes: int) -> list[list[float]]:
+    """Ask every question `passes` more times, for timing only. Nothing is scored."""
+    return [_one_pass(system, dataset)[1] for _ in range(passes)]
 
 
 def run(system: MemorySystem, dataset: Dataset, *, lenient: bool = True,
         config: Mapping[str, Any] | None = None,
         timestamp: str | None = None,
+        latency_repeats: int = 1,
         progress: Callable[[int, int], None] | None = None) -> RunResult:
     """One system against one dataset. The whole benchmark, in twenty lines."""
     truth = Truth(dataset)
     write_seconds = ingest(system, dataset, progress)
-    judgements, times = interrogate(system, dataset, truth, lenient=lenient)
+    judgements, first = interrogate(system, dataset, truth, lenient=lenient)
+    # Read here, between the scored pass and any repeat, and the order is the point: the
+    # cost columns describe one pass over the dataset however many times the questions
+    # are asked for timing. Read after the repeats, `db_reads` would multiply by
+    # `--latency-repeats` and a system would look more expensive because the benchmark
+    # got more careful about its clock.
     usage: Usage = system.usage()
+    # With repeats, the scored pass is discarded from the timings: it is where a system
+    # does whatever it deferred — `vector-rag` builds its index on first search — and
+    # that belongs to the cold path rather than to a warm-path p95.
+    extra = retime(system, dataset, latency_repeats - 1) if latency_repeats > 1 else []
+    times = extra or [first]
     return RunResult(
         system=system.name,
         system_version=system.version,

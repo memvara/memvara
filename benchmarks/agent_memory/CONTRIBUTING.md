@@ -14,7 +14,9 @@ Five methods and two attributes. `benchmarks/agent_memory/adapters/base.py` is t
 authority; this is the shape.
 
 ```python
-from benchmarks.agent_memory.adapters.base import Ask, MemoryAnswer, Usage, wants_a_date
+from benchmarks.agent_memory.adapters.base import (
+    Ask, MemoryAnswer, Usage, indexable, pick_slot, wants_a_date,
+)
 
 
 class MyMemory:
@@ -112,6 +114,23 @@ an abstention makes the failure report readable instead of misleading.
 have said on this date". Both live in `knowledge_time`, they want different answer types,
 and three adapters got the distinction wrong independently before it moved into `base.py`.
 
+**Use `indexable(event)` as the text you index**, so retrieval is compared over one
+string rather than over whatever each adapter happened to feed its retriever. It returns
+the triple followed by the sentence; events written in the first person lose their subject
+without it.
+
+**Use `pick_slot(question, candidates)` when `ask.probe` is `None`.** Hand it your own
+ranked `(subject, predicate)` candidates, best first, and it returns the one to answer
+from: the highest-ranked candidate whose predicate the question actually names, falling
+back to rank when none does. Taking your top hit instead answers the first hop of a
+chained question and stops, and the claim holding the answer is usually already in your
+list. All three shipped adapters call it, and a system that chose by its own rule would be
+scored on a different `retrieval` dimension from everybody else.
+
+These three live in `base.py` rather than in each adapter for one reason: retrieval is a
+scored dimension, and three adapters reading the same question three subtly different ways
+turns it into a comparison of adapters.
+
 ## The rules your adapter must follow
 
 1. **No hardcoded answers**, and nothing keyed on a question id.
@@ -132,11 +151,14 @@ and three adapters got the distinction wrong independently before it moved into 
 python -m pytest tests/test_agent_memory_bench.py -q
 python -m benchmarks.agent_memory --system my-system --repeat-check
 python -m benchmarks.agent_memory --system my-system --system memvara --compare
+python -m benchmarks.agent_memory --system my-system --latency-repeats 5
 ```
 
-Include in the body: the leaderboard row, the environment (Python, platform, your
-system's version), and anything your adapter had to decide that the dataset did not decide
-for it. If a category scores badly, say why you think so — a known limitation stated is
+Include in the body: the leaderboard row, the environment (Python, platform, core count,
+your system's version), and anything your adapter had to decide that the dataset did not
+decide for it. Quote latency only from a `--latency-repeats` run and quote the `p50 spread`
+beside it — a single timing of a hundred questions measures the machine's mood as much as
+the system, and the spread is what says which you are looking at. If a category scores badly, say why you think so — a known limitation stated is
 worth more than a number without one.
 
 If your system beats memvara somewhere, that row goes in the README table as measured.

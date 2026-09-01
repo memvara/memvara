@@ -84,17 +84,32 @@ def scorecard(result: RunResult, dataset: Dataset) -> str:
     return "\n".join(lines)
 
 
+#: Every `Latency` field, the row it prints on, and how. A declaration rather than a
+#: block of f-strings for the reason `COST_LABELS` gives: a field added to the dataclass
+#: and forgotten here is silently absent from the report, and nothing says so.
+#: `tests/test_agent_memory_bench.py` asserts this covers the dataclass exactly once.
+LATENCY_ROWS: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("write, mean per event", ("write_mean_ms",), "{:.3f} ms"),
+    ("write, whole corpus", ("write_total_ms",), "{:.1f} ms"),
+    ("query, mean", ("query_mean_ms",), "{:.3f} ms"),
+    ("query, p50 / p95 / max", ("query_p50_ms", "query_p95_ms", "query_max_ms"),
+     "{:.3f} / {:.3f} / {:.3f} ms"),
+    ("query passes timed", ("repeats",), "{:d}"),
+    ("p50 spread across passes", ("p50_spread_ms",), "{:.3f} ms"),
+)
+
+
 def _timing_block(result: RunResult) -> list[str]:
     latency = result.latency
-    return [
-        "  Latency",
-        f"    write, mean per event        {latency.write_mean_ms:8.3f} ms",
-        f"    write, whole corpus          {latency.write_total_ms:8.1f} ms",
-        f"    query, mean                  {latency.query_mean_ms:8.3f} ms",
-        f"    query, p50 / p95 / max       {latency.query_p50_ms:.3f} / "
-        f"{latency.query_p95_ms:.3f} / {latency.query_max_ms:.3f} ms",
-        "",
-    ]
+    lines = ["  Latency"]
+    for label, fields, fmt in LATENCY_ROWS:
+        value = fmt.format(*(getattr(latency, f) for f in fields))
+        lines.append(f"    {label:<28} {value}")
+    if latency.repeats < 2:
+        lines.append("    (one pass; the spread above is not measured, and the timings "
+                     "include whatever each system defers to its first read)")
+    lines.append("")
+    return lines
 
 
 #: Every `Usage` field except `extra`, and the name it prints under. A mapping rather

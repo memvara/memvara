@@ -10,6 +10,6 @@
 #
 # Scoped to the dataset rather than declared repository-wide. A blanket `* text=auto
 # eol=lf` would change what every contributor's working tree looks like, which is a
-# larger decision than this change gets to make. These three files are the ones whose
-# bytes are asserted on.
+# larger decision than this change gets to make. The files under this directory — three
+# per dataset version — are the ones whose bytes are asserted on.
 benchmarks/agent_memory/datasets/** text eol=lf

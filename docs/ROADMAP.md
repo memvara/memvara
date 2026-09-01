@@ -120,27 +120,33 @@ nothing until it finishes. Slice it with `--shuffle SEED --limit N`, or use the
 Everything else in Phase 4 measures memvara against something we wrote or something we
 chose. `benchmarks/agent_memory/` is the first measurement here that a *different* memory
 system can run on the same dataset, by the same rules, without forking this repository:
-262 events, 100 questions, 16 scenarios, a five-method adapter interface, a versioned
+342 events, 122 questions, 18 scenarios, a five-method adapter interface, a versioned
 dataset, a published result schema, and `--system` accepting a dotted import path. Offline
 and deterministic — `--repeat-check` runs a system twice and fails on a single differing
 verdict.
 
 The result is the reason it earns a line here rather than a bullet in the README:
 
-| | memvara | vector-rag | naive |
-|---|---:|---:|---:|
-| overall | **92.0%** | 89.0% | 50.0% |
-| temporal | **100.0%** | 91.5% | 34.0% |
-| retrieval | 64.3% | **71.4%** | 64.3% |
-| irrelevance | 50.0% | 50.0% | 50.0% |
+| | memvara-graph | memvara | vector-rag | naive |
+|---|---:|---:|---:|---:|
+| overall | **84.4%** | 82.8% | 80.3% | 41.0% |
+| temporal | **100.0%** | **100.0%** | 91.5% | 34.0% |
+| retrieval | **53.8%** | 46.2% | 50.0% | 34.6% |
+| irrelevance | 56.2% | 56.2% | 56.2% | 18.8% |
 
-**Three points separate memvara from a baseline built out of numpy**, and the whole of the
-lead is the `temporal` dimension — where the four questions that separate them are the four
-delayed-knowledge and same-instant-correction scenarios. That is the narrow, specific claim
-the two clocks support, and it is narrower than the pitch: everywhere the two clocks
-coincide, a single-clock store is exactly right. memvara **loses** `retrieval`, and
-`irrelevance` is a three-way tie. Both are reported in the tables rather than a footnote,
-and the core weaknesses behind them are tracked in
+**Two and a half points separate memvara from a baseline built out of numpy**, and the
+whole of the lead is the `temporal` dimension — where the four questions that separate them
+are the four delayed-knowledge and same-instant-correction scenarios. That is the narrow,
+specific claim the two clocks support, and it is narrower than the pitch: everywhere the
+two clocks coincide, a single-clock store is exactly right.
+
+memvara's **shipped configuration loses `retrieval`** to `vector-rag`. Turning its graph
+retrieval leg on (`memvara-graph`, two constructor arguments) wins the dimension back and
+costs 5× on query p95; both halves are published. `irrelevance` separates the time-aware
+from the time-blind and no finer: the three time-aware entries tie, and the seven open
+negative questions defeat every system. That last one is measured rather than asserted —
+`calibrate_min_score` fitted directly on those questions reports `separable=False`. The
+core weaknesses behind both are tracked in
 [#129](https://github.com/memvara/memvara/issues/129).
 
 `docs/benchmarks/agent-memory-benchmark.md` is the public report and
@@ -629,18 +635,21 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
    the point: a stub reader picks the retrieved line with the most words in common with the
    question, so its accuracy column measures the corpus and the arms and nothing about
    answers.
-2. **Nobody outside this repository has reproduced the Agent Memory Benchmark**, and two
-   of its seven dimensions do not yet discriminate. Every number in
+2. **Nobody outside this repository has reproduced the Agent Memory Benchmark.** Every
+   number in
    [4d](#4d-a-benchmark-other-systems-can-run-done-and-memvara-does-not-win-it-outright)
    was measured by the people who wrote both the benchmark and one of the systems in it —
    which is the objection the whole design tries to answer and cannot answer alone. The
    answer is somebody else's adapter, and the contributor guide exists for that.
 
-   `irrelevance` is a three-way tie at 50%, and `multi_hop` is 16.7% / 33.3% / 33.3%: no
-   system tested abstains when it knows nothing, and none joins two facts. A dimension all
-   three systems fail identically measures the field rather than the systems, and until
-   either the questions get harder or a system improves, those two rows carry no
-   information.
+   The two dimensions that used to rank nobody now rank something. Dataset v2 took
+   `multi_hop` from six questions over a corpus 1.6% joinable to eighteen over one 25.7%
+   joinable, and it now separates the four entries into four places — every one of them a
+   failing grade, the best being 6 of 18. `irrelevance` gained two difficulty bands and
+   now separates the time-aware from the time-blind, and no finer: the seven open negative
+   questions defeat every system, and the floor measurement says a threshold is not the
+   fix. **Neither of those is closed.** What is closed is the earlier state, where the two
+   rows carried no information at all.
 3. **No external user has run this in production.** 3,593 tests prove the code does what we
    said it does. They prove nothing about what happens on someone else's data.
 4. **The English-centrism is measured, not fixed.** The salience gate and the fast extractor
