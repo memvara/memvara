@@ -104,7 +104,7 @@ def test_load_probes_accepts_a_valid_file(tmp_path):
     ({"id": "p1", "class": "sonnet", "query": "q", "gold": []}, "class"),
     ({"id": "p1", "class": "hit", "query": "q", "gold": "cl_a"}, "gold"),
     ({"id": "p1", "class": "abstain", "query": "q", "gold": ["cl_a"]}, "abstain"),
-    ({"class": "hit", "query": "q", "gold": ["cl_a"]}, "id"),
+    ({"class": "hit", "query": "q", "gold": ["cl_a"]}, "'id'"),
     ({"id": "p1", "class": "hit", "gold": ["cl_a"]}, "query"),
 ])
 def test_load_probes_refuses_malformed_rows_naming_the_line(tmp_path, row, complaint):
@@ -120,8 +120,9 @@ def test_load_probes_refuses_a_duplicate_id(tmp_path):
         {"id": "p1", "class": "hit", "query": "a", "gold": ["cl_a"]},
         {"id": "p1", "class": "hit", "query": "b", "gold": ["cl_b"]},
     ])
-    with pytest.raises(SystemExit, match="duplicate"):
+    with pytest.raises(SystemExit, match="duplicate") as exc:
         hosted.load_probes(path)
+    assert "line 2" in str(exc.value)
 
 
 def test_load_probes_refuses_an_unedited_draft_row(tmp_path):
@@ -130,5 +131,6 @@ def test_load_probes_refuses_an_unedited_draft_row(tmp_path):
     path = _write_probes(tmp_path, [
         {"id": "p1", "class": "hit", "query": "q", "gold": ["cl_a"], "draft": True},
     ])
-    with pytest.raises(SystemExit, match="draft"):
+    with pytest.raises(SystemExit, match="draft") as exc:
         hosted.load_probes(path)
+    assert "line 1" in str(exc.value)
