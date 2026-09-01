@@ -141,10 +141,28 @@ def test_cached_embedder_survives_one_call_exceeding_max_items():
     # A single encode() whose distinct texts outnumber max_items evicts its own
     # earlier entries before the final read-back — the return must not depend on
     # what happened to survive eviction.
-    cache = CachedEmbedder(HashingEmbedder(dim=16), max_items=4)
+    inner = HashingEmbedder(dim=16)
+    cache = CachedEmbedder(inner, max_items=4)
     texts = [f"unique text {i}" for i in range(10)]
     out = cache.encode(texts)
     assert out.shape == (10, 16)
+    # Against the inner embedder rather than against the shape: a return of the
+    # right size full of zeros, or with two rows transposed, satisfies `shape`
+    # and is exactly the regression the key-to-row lookup here can reintroduce.
+    assert np.array_equal(out, inner.encode(texts))
+
+
+def test_cached_embedder_returns_a_row_it_cached_then_evicted_in_the_same_call():
+    # The other half of the same defect, and the one a fix serving only this
+    # call's *newly computed* rows still gets wrong: a key that was a cache hit
+    # when the call started is evicted by this call's own inserts once they
+    # outnumber the room left. The row is still owed to the caller.
+    inner = HashingEmbedder(dim=16)
+    cache = CachedEmbedder(inner, max_items=4)
+    cache.encode(["A", "B", "C", "D"])          # fill it exactly
+    texts = ["A", "E", "F", "G", "H"]           # "A" hits, then four inserts evict it
+    out = cache.encode(texts)
+    assert np.array_equal(out, inner.encode(texts))
 
 
 def test_hashing_embedder_is_deterministic_across_instances():
