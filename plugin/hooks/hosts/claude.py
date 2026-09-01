@@ -43,7 +43,12 @@ HOST = Host(
     #: Uncapped: this client imposes no ceiling of its own on injected context, so the
     #: only budget is the one `recall.BUDGET` sets for cost reasons.
     context_token_cap=0,
+    #: Claude Code honours `async: true` on Stop, so capture never blocks and never
+    #: needs to fork. See the note on both fields in `core/host.py`.
     supports_async=True,
+    detach_capture=False,
+    #: This client imposes no ceiling of its own, so nothing is declared to it.
+    context_limit_key=0,
     timeouts={"session_start": 20, "recall": 10, "capture": 120, "approve": 5},
     client_configs=("~/.claude.json", "~/.claude/settings.json"),
     config_format="json",

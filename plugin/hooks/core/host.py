@@ -65,13 +65,84 @@ ApproveSpec = namedtuple("ApproveSpec", "matcher separators decision_key reason_
 #: failure. Splitting them -- two on the record and one still spelled inline in
 #: `lib/extract.py` -- would mean a port that got its reply key right could still read
 #: every error as a success, which stores nothing and reports nothing.
-ExtractorSpec = namedtuple("ExtractorSpec", "argv reply_key usage_key error_key")
+#: How to read a reply out of a CLI that prints a JSONL EVENT STREAM rather than one
+#: envelope object. `claude -p --output-format json` prints a single object and needs
+#: none of this; `codex exec --json` and `opencode run --format json` both print a line
+#: per event, so the reply has to be selected out of the stream instead of looked up.
+#:
+#: `reply_match` is a tuple of `(dotted key, expected value)` pairs that must ALL hold for
+#: a line to be part of the reply, and `reply_path` is where the text sits in that line.
+#: Every matching line is concatenated, because a host may stream one text part per chunk.
+#: `usage_match`/`usage_path` are the same for the accounting line.
+#:
+#: Declarative on purpose. The alternative was a parser per host, which is the shape this
+#: package moved everything else away from -- a host difference belongs in the record.
+StreamSpec = namedtuple("StreamSpec", "reply_match reply_path usage_match usage_path")
+
+#: `stream` is None for a CLI that prints one JSON object, in which case `reply_key`,
+#: `usage_key` and `error_key` are read from it. When `stream` is present those three are
+#: unused and the `StreamSpec` decides everything.
+#: `model` is the model this argv PINS, or "" when the CLI mines with whatever the user
+#: has configured. It exists because `usage.jsonl` records what a run cost against a model
+#: name, and that name has to be the one actually invoked. While every host shelled out to
+#: `claude -p` a single constant was correct; now that a host mines with its own CLI, a
+#: hardcoded label would record spend against a model that never ran -- wrong in the one
+#: file whose whole job is to say what was spent. An empty string is recorded as the
+#: program name, which is true and checkable, rather than a guess at the user's default.
+ExtractorSpec = namedtuple(
+    "ExtractorSpec", "argv reply_key usage_key error_key stream model",
+    defaults=(None, ""))
 
 #: The model `claude -p` is asked for. Named once because it is spelled twice: in the
 #: argv below, and as the label `lib.extract` writes to `usage.jsonl`. Two spellings
 #: would let the ledger name a model that was never invoked, which is wrong in the one
 #: file that exists to say what was spent.
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
+
+#: Codex's own headless CLI, measured on codex-cli 0.151.0. `codex exec --json` prints
+#: `{"type": "item.completed", "item": {"type": "agent_message", "text": ...}}` for the
+#: reply and `{"type": "turn.completed", "usage": {...}}` for the cost.
+#:
+#: `--skip-git-repo-check` because the extractor runs wherever the turn happened, which
+#: is frequently not a repository, and Codex refuses outside one without it.
+CODEX_CLI = ExtractorSpec(
+    argv=("codex", "exec", "--skip-git-repo-check", "--json"),
+    reply_key="", usage_key="", error_key="",
+    stream=StreamSpec(
+        reply_match=(("type", "item.completed"), ("item.type", "agent_message")),
+        reply_path="item.text",
+        usage_match=(("type", "turn.completed"),),
+        usage_path="usage",
+    ),
+)
+
+#: OpenCode's own, measured on opencode 1.18.20. `opencode run --format json` prints
+#: `{"type": "text", "part": {"text": ...}}` for the reply and
+#: `{"type": "step_finish", "part": {"tokens": {...}}}` for the cost.
+#:
+#: No `--model`: the point of a host-native extractor is that it mines the turn with the
+#: model that user already chose and pays for. Naming one here would override their
+#: configuration from inside a hook they did not read.
+OPENCODE_CLI = ExtractorSpec(
+    argv=("opencode", "run", "--format", "json"),
+    reply_key="", usage_key="", error_key="",
+    stream=StreamSpec(
+        reply_match=(("type", "text"),),
+        reply_path="part.text",
+        usage_match=(("type", "step_finish"),),
+        usage_path="part.tokens",
+    ),
+)
+
+#: One consequence of mining with the user's own model, recorded because it is a real
+#: trade and not a free win: extraction latency and quality become theirs. Measured on
+#: 2026-09-01 against a free OpenRouter model configured in OpenCode, one run exceeded
+#: `extract.TIMEOUT_SEC` and logged "no reply within 90s" before a retry succeeded, and
+#: the reply came back conversational where `claude -p` returns the terse list the prompt
+#: asks for. Both are handled -- a timeout is a logged failure that raises the capture
+#: alert, and a reply the parser cannot use stores nothing rather than storing junk -- but
+#: a user on a slow or small model will see capture fail more often than one on Claude
+#: Code, and the log is where they will see it.
 
 #: The second rung of the extractor chain, available to every host rather than only to
 #: the one that packages Claude Code.
@@ -95,15 +166,37 @@ CLAUDE_CLI = ExtractorSpec(
     reply_key="result",
     usage_key="usage",
     error_key="is_error",
+    model=CLAUDE_MODEL,
 )
 
 Host = namedtuple(
     "Host",
     "id plugin_root_env events fields envelope context_key status_key "
-    "context_token_cap supports_async timeouts client_configs config_format "
+    "context_token_cap context_limit_key supports_async detach_capture "
+    "timeouts client_configs config_format "
     "transcript tools noise skip_prefixes machine_prompt_prefixes reentry_field approve "
     "extractor extractor_label description",
 )
+
+#: Two fields that both sound like "capture must not block" and are NOT the same fact,
+#: separated because one host has one and not the other.
+#:
+#: `supports_async` says the client will run the capture hook asynchronously if the
+#: registration asks it to. `detach_capture` says this host's capture hook has to detach
+#: ITSELF -- `run.py` re-execs into a new session and returns immediately.
+#:
+#: Codex is why they are two. Its registration schema accepts `async: true` and its
+#: documentation offers it, but an async hook there does not run AT ALL: measured on
+#: codex-cli 0.151.0, an async Stop hook wrote no receipt even though writing one is the
+#: first statement in the script. The same hook declared synchronous fires, and a child it
+#: spawns with `start_new_session=True` OUTLIVES the `codex exec` process and finishes
+#: twelve seconds after the turn ended. So Codex is `supports_async=False` -- asking for
+#: async would silently disable capture -- and `detach_capture=True`.
+#:
+#: A host may have neither (capture blocks, and must be short), one, or in principle both.
+#: Nothing infers one from the other, because "the client honours the flag" and "we fork"
+#: fail in opposite directions: guessing the first wrong loses the hook, guessing the
+#: second wrong holds the turn open for the whole extraction.
 
 #: Canonical hook names. The bodies and `run.py` speak these; `Host.events` maps each to
 #: whatever the host calls the event it fires.
