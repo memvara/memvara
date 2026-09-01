@@ -1145,6 +1145,67 @@ Hard API requirements — these are current and getting them wrong is a 400:
 
 ---
 
+## `plugin/hooks/` — the client-side tree
+
+Not part of the package. `pyproject.toml` sweeps `packages = ["memvara"]` into the wheel,
+so this lives at the top level: in the sdist, out of the wheel, and at the same path the
+plugin repositories vendor it to, which makes syncing a subtree copy with no rewriting and
+the drift guard a plain byte compare.
+
+**Every host difference is data, until it is a difference in kind.** A client is one
+`Host` record in `hosts/<id>.py` — event names, the stdin keys each field may arrive
+under, reply keys, timeouts, config paths, an `ApproveSpec`, an `ExtractorSpec`. The four
+bodies (`recall`, `session_start`, `capture`, `approve`) read the record and never a
+client. `run.py <hook> --host <id>` binds it before importing a body, because
+`lib/transcript.py` resolves the bound host's noise markers at import time.
+
+**The record says what a host CANNOT do, not only what it does.** A canonical hook absent
+from `events` is a hook that client has no event for. `context_key = ""` is a host with no
+per-turn injection channel; `status_key = ""` is one with no operator-visible line, and
+the renderer then DROPS that half of a reply rather than addressing a key nobody reads.
+`transcript = None` is a host where capture cannot run at all. An absent key is the one
+spelling that cannot be mistaken for a working default.
+
+**Three envelope shapes, measured, none inferable from the others.** Claude Code and Codex
+read `{"hookSpecificOutput": {"hookEventName": ..., "additionalContext": ...}}`; Copilot
+reads the same keys flat at the top level and ignores the nested form; Cursor reads flat
+`additional_context`. A port that ships the wrong one installs cleanly, runs, logs
+success, and delivers nothing.
+
+**Capture must not hold a turn open, and how it avoids that is per host.**
+`supports_async` says the client honours `async: true` on the registration.
+`detach_capture` says the hook must fork itself — `run.py` re-execs into a new session and
+returns. They are separate fields because Codex accepts the async flag and then does not
+run the hook at all, and guessing either wrong fails in opposite directions: losing the
+hook, or holding the turn for the whole 12–14 second extraction.
+
+**Extraction never recurses, and the guard is one line in one place.**
+`lib/extract.py` refuses to run when `MEMVARA_CAPTURE_ACTIVE` is set, and sets it on the
+child it spawns. This matters more now that a host mines with its own CLI: `codex exec`
+inside a Codex Stop hook starts a session that fires the same hooks. The read hooks stand
+down on the same sentinel; capture's own extraction is what refuses.
+
+**Extraction is a chain, and a host must not pin a model.** `ExtractorSpec` names the CLI
+that mines a turn: the host's own first, `claude -p` second, and then a logged failure that
+raises the capture alert. There is deliberately no third rung handing the prose to the
+server — `memory_add` on an `MEMVARA_LLM=none` deployment would accept it and store
+nothing while logging success, which is the shape of every defect in this repository's
+history.
+
+A host CLI declares no `--model`. The point of mining with the host's own is that the user
+already configured and authenticated it; naming a model inside a hook nobody read can name
+one their account cannot reach, and capture then fails on every turn for a reason only the
+log shows. `ExtractorSpec.model` is empty for such a CLI, and the label recorded in
+`usage.jsonl` follows the rung that actually answered — a hardcoded label would account a
+Codex extraction against the model `claude -p` pins, which is wrong in the one file whose
+whole job is to say what was spent.
+
+**A hook may never fail a turn.** Every path out of `run.py` returns 0, including the ones
+it does not know about — the `__main__` block catches `BaseException`. That is the rule
+that outranks reporting a problem: a hook that fails a prompt is worse than a hook that
+does nothing. The obligation to say something moves to `~/.memvara/.hooks/`, where every
+path that reaches a decision writes a line, including the ones that decide to do nothing.
+
 ## Testing requirements
 
 - `pytest`, no network, no API key, no sleeping. Use `SQLiteStore(":memory:")`,
