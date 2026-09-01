@@ -791,6 +791,30 @@ def test_the_slot_rule_prefers_the_relation_the_question_names():
     assert chosen == ("Project Atlas", "deploy_region")
 
 
+@pytest.mark.parametrize("word,stem", [
+    ("owns", "own"),            # the question's verb for `owned_by`
+    ("deployed", "deploy"),     # ...for `deploy_region`
+    ("leads", "lead"),          # ...for `team_lead`
+    ("speaks", "speak"),        # ...for `speaks`
+    ("works", "work"),          # ...for `works_on` and `works_at`
+    ("live", "live"),           # already a stem; must not lose its `e`
+    ("lives", "live"),          # ...and must reach it from the plural
+    ("is", "is"),               # too short to strip: `i` would collide with everything
+    ("us", "us"),
+    ("region", "region"),       # no suffix to take
+])
+def test_the_stemmer_reaches_the_predicate_names_it_has_to(word, stem):
+    """Exercised directly, not only through `pick_slot`.
+
+    This is a ten-line heuristic that decides which fact slot an unprobed question is
+    answered from, so a wrong rule here moves the `retrieval` dimension for every system
+    at once and looks like a retrieval result. Statement coverage would call it covered
+    from one `pick_slot` test; these are the pairs it actually has to get right, and the
+    short words are the ones where an unbounded rule would over-strip.
+    """
+    assert base._stem(word) == stem
+
+
 def test_the_slot_rule_falls_back_to_rank_when_no_relation_is_named():
     """A question that names no predicate must not be re-ordered by this rule."""
     candidates = [("frank", "lives_in"), ("alice", "lives_in")]
