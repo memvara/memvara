@@ -285,17 +285,80 @@ def store_fingerprint(mem: Any) -> dict:
     `.inner` and falls back to the class name, where the hand-rolled lookup
     reported `embedder: None` for both — a fingerprint that cannot report the
     embedder cannot warn that it changed, which is the drift this exists for.
+
+    `tenant` and `user` are here for the same reason `claims` is. Two runs at
+    different scopes read two different populations out of one file, so their
+    deltas are not a before/after any more than two different stores' are, and
+    `compare_runs` warns on all five keys alike. A result file written before
+    these keys existed records neither, so comparing one against a new file
+    warns `tenant None -> ...`: that is a true statement — the earlier run did
+    not record the scope it read — and the conservative direction for a warning
+    whose whole job is to say "these two may not be comparable".
+
+    On the hosted route the scope is the client's own view of itself. The
+    facade resolves the tenant from the bearer token and `RemoteMemvara` never
+    sends the parameter (`memvara/remote/api.py`), which is why `--tenant` is
+    refused there rather than recorded.
     """
     from memvara.embed.fingerprint import embedder_name
 
     embedder = getattr(mem, "embedder", None)
     name = embedder_name(embedder) if embedder is not None else None
+    scope = getattr(mem, "default_scope", None)
     return {
         "claims": mem.count(),
         "surface": "local" if embedder is not None else "hosted",
         "embedder": name,
+        "tenant": getattr(scope, "tenant", None),
+        "user": getattr(scope, "user", None),
         "when": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+
+
+def scope_blindspot(mem: Any) -> "str | None":
+    """The warning for a store whose claims are all outside the scope being read.
+
+    The shipped defect this exists for: `--db PATH` opened at `tenant="default"`
+    against a real store whose claims all live under a named tenant. `--draft`
+    printed nothing, the run exited 0, and the fingerprint said `claims: 0` — a
+    wrongly-scoped store and a genuinely empty one were the same output.
+    "Skipped" and "never ran" must not look alike.
+
+    Two numbers make them tellable apart, and the second is the only one that is
+    not already on the page. `mem.count()` is what the configured scope can see.
+    `SQLiteStore.stats(None)` — the *unfiltered* call — reports the whole file;
+    its docstring says so, and says why only the unfiltered call may:
+    "unfiltered counts disclose how much data other tenants hold". So this is
+    asked of a local store and never of a hosted one. `RemoteMemvara` talks to a
+    shared multi-tenant server, and asking it for whole-store counts is exactly
+    the disclosure that docstring guards against — hence the `--db`-only gate at
+    the call site in `main`. Where the question cannot be asked cheaply and
+    safely, it is not asked: silence there is correct, and a warning built on a
+    number this tool has no business holding would be worse than none.
+
+    Returns None when there is nothing to say — claims are visible, the file is
+    genuinely empty, or the backend cannot answer the unfiltered question. It
+    never raises and never changes the exit code: this tool has no pass/fail
+    exit status, and a measurement harness that starts failing runs is a
+    different tool.
+    """
+    if mem.count():
+        return None
+    stats = getattr(getattr(mem, "store", None), "stats", None)
+    if stats is None:
+        return None
+    try:
+        total = stats(None).get("claims", 0)
+    except TypeError:  # a Store predating the tenant argument
+        return None
+    if not total:
+        return None
+    scope = getattr(mem, "default_scope", None)
+    key = scope.key() if scope is not None else "unknown"
+    return (f"WARNING: 0 of this store's {total} claims are visible at scope "
+            f"{key} — every probe will miss and --draft will print nothing. "
+            f"Re-run with --tenant/--user naming the scope the claims are "
+            f"under.")
 
 
 def render_table(agg: dict, fingerprint: dict) -> str:
@@ -343,7 +406,7 @@ def compare_runs(a: Path, b: Path) -> str:
     fp_b, agg_b = load(b)
     out: list[str] = []
     moved = [f"{key} {fp_a.get(key)} -> {fp_b.get(key)}"
-             for key in ("claims", "embedder", "surface")
+             for key in ("claims", "embedder", "surface", "tenant", "user")
              if fp_a.get(key) != fp_b.get(key)]
     if moved:
         out.append("  WARNING: the store moved between these runs — "
@@ -593,6 +656,19 @@ def _open_store(args: argparse.Namespace) -> Any:
     `--db` opens with the embedder the store was built with (`_store_embedder`),
     not with whatever `default_embedder()` returns in this process.
 
+    **And at the scope `--tenant`/`--user` name, not at `tenant="default"`.**
+    A store file is not one population — scopes inherit upward, and a file whose
+    claims all live under a named tenant answers nothing at `default`. Opened
+    unscoped, a real store read as empty and the tool printed nothing at all.
+
+    `--tenant` is refused on the hosted route rather than forwarded. The
+    parameter exists on `RemoteMemvara` but is "held for `default_scope`'s sake
+    and never sent" — the facade resolves the tenant from the bearer token — so
+    forwarding it would move the recorded fingerprint without moving a single
+    byte of what was read, which is a silent no-op wearing the appearance of a
+    setting. `--user` *is* a real narrowing on both routes and is forwarded to
+    both.
+
     The `SQLiteStore` is built here rather than left to `Memvara(path)` because
     deciding the embedder means reading the store — both its recorded fingerprint
     and, decisively, whether it holds any vectors for that record to describe. One
@@ -610,9 +686,16 @@ def _open_store(args: argparse.Namespace) -> Any:
         except BaseException:
             store.close()
             raise
-        return Memvara(store=store, embedder=embedder)
+        return Memvara(store=store, embedder=embedder,
+                       tenant=args.tenant, user=args.user or None)
+    if args.tenant != "default":
+        raise SystemExit(
+            f"--tenant {args.tenant!r} needs --db PATH. On the hosted route the "
+            "facade resolves the tenant from your credential and the client "
+            "never sends the parameter, so honouring the flag here would change "
+            "what this run records about itself without changing what it read.")
     from memvara.remote.api import RemoteMemvara
-    return RemoteMemvara()
+    return RemoteMemvara(user=args.user or None)
 
 
 def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
@@ -628,6 +711,11 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
                              "actually injects on this machine. Pass 0 to measure "
                              "the unfloored read path.")
     parser.add_argument("--db", default="", help="local store path; omit for hosted")
+    parser.add_argument("--tenant", default="default",
+                        help="tenant to read at; --db only, because the hosted "
+                             "facade resolves the tenant from your credential")
+    parser.add_argument("--user", default="",
+                        help="user scope to read at; omit to read the whole tenant")
     parser.add_argument("--out", default="", help="write per-probe JSONL here")
     parser.add_argument("--compare", nargs=2, metavar=("A", "B"), default=None)
     # Default None, not 0: `--draft 0` computed by a wrapper ("draft up to the
@@ -682,6 +770,20 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
         mem = _open_store(args)
         close = True
     try:
+        # Before every branch that reads the store, so the one warning covers a
+        # --draft run that prints nothing and a scoring run whose table reads
+        # `0 claims` alike. stderr, not stdout: --draft writes JSONL to stdout
+        # and a person redirects it into a probe file, so a warning printed
+        # there would corrupt the file it is trying to help them build.
+        #
+        # `args.db`, not `close`: the gate is *local store*, not *this function
+        # opened it*, so a caller who hands in `mem=` for a file it names is
+        # covered too — and the hosted route is never asked a whole-store
+        # question it has no business answering.
+        if args.db:
+            blindspot = scope_blindspot(mem)
+            if blindspot:
+                print(blindspot, file=sys.stderr)
         # Opened before load_probes so a --draft branch (Task 5) can use the
         # store handle to generate probes for someone with no probe file yet.
         if args.draft is not None:

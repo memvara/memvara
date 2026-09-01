@@ -961,9 +961,16 @@ def test_main_draft_passes_the_seed_through(tmp_path, capsys):
 import argparse  # noqa: E402
 
 
-def _store_on_disk(path, embedder):
+def _args(db, **kw):
+    """The namespace `main` would have built, so a new flag cannot silently
+    default to whatever `getattr` happened to return in a test."""
+    return argparse.Namespace(db=str(db), tenant=kw.pop("tenant", "default"),
+                              user=kw.pop("user", ""), **kw)
+
+
+def _store_on_disk(path, embedder, **scope):
     """A one-claim store at `path`, written by `embedder`, closed. Returns its ids."""
-    with Memvara(str(path), embedder=embedder, llm=NullLLM()) as mem:
+    with Memvara(str(path), embedder=embedder, llm=NullLLM(), **scope) as mem:
         mem.remember("larkspur", "test_flag", "the Larkspur suite needs -j1")
         return {c.subject: c.id for c in mem.get_all()}
 
@@ -1000,7 +1007,7 @@ def test_open_store_opens_a_store_built_with_a_non_default_embedder(tmp_path):
     db = tmp_path / "probe.db"
     ids = _store_on_disk(db, HashingEmbedder(dim=64))
 
-    mem = hosted._open_store(argparse.Namespace(db=str(db)))
+    mem = hosted._open_store(_args(db))
     try:
         assert hosted.store_fingerprint(mem)["embedder"] == "hashing:64:3-5", (
             "the store must be opened with the embedder that wrote it, read back "
@@ -1032,7 +1039,7 @@ def test_open_store_refuses_a_store_whose_embedder_it_cannot_reconstruct(
                         lambda *a, **k: HashingEmbedder(dim=512))
 
     with pytest.raises(SystemExit) as exc:
-        hosted._open_store(argparse.Namespace(db=str(db)))
+        hosted._open_store(_args(db))
     message = str(exc.value)
     assert "local:pretend/tiny-model" in message, (
         "the refusal must name what wrote the store")
@@ -1054,7 +1061,7 @@ def test_open_store_still_uses_the_default_when_that_is_what_wrote_the_store(
         "memvara.embed.default_embedder",
         lambda *a, **k: _NamedLikeAModel("local:pretend/tiny-model", 48))
 
-    mem = hosted._open_store(argparse.Namespace(db=str(db)))
+    mem = hosted._open_store(_args(db))
     try:
         found = [r.claim.id for r in
                  mem.search("which suite needs -j1?", k=4, min_score=0.0)]
@@ -1111,7 +1118,7 @@ def test_open_store_ignores_a_fingerprint_with_no_vectors_behind_it(
     for binding in ("memvara.core.default_embedder", "memvara.embed.default_embedder"):
         monkeypatch.setattr(binding, lambda dim=512: HashingEmbedder(dim=512))
 
-    mem = hosted._open_store(argparse.Namespace(db=str(db)))
+    mem = hosted._open_store(_args(db))
     try:
         assert hosted.store_fingerprint(mem)["embedder"] == "hashing:512:3-5", (
             "an empty store must be owned by the embedder this process would "
@@ -1121,3 +1128,218 @@ def test_open_store_ignores_a_fingerprint_with_no_vectors_behind_it(
             "and it must be readable afterwards")
     finally:
         mem.close()
+
+
+# --- scope: the store is a file, but a run reads one scope out of it ---------
+#
+# The second shipped defect, and the same shape as the first: `_open_store` built
+# a `Memvara` with no scope, so `--db PATH` opened at `tenant="default"` against
+# a real store whose claims all live under a named tenant. The tool's own
+# documented invocation exited 0 and printed nothing; `store_fingerprint` said
+# `claims: 0`. A wrongly-scoped store and a genuinely empty one were
+# byte-identical in the output.
+#
+# Every store here is built under `tmp_path` with `HashingEmbedder` — offline,
+# deterministic, milliseconds. Nothing reads `~/.memvara/` or the network.
+
+
+def test_store_fingerprint_names_the_scope_it_read_at(planted):
+    """Positively, both keys, so a fingerprint that stopped recording the scope
+    fails here rather than passing by absence."""
+    fp = hosted.store_fingerprint(planted[0])
+    assert fp["tenant"] == "default"
+    assert fp["user"] == "probe", (
+        "the planted fixture reads at user=probe; a fingerprint that cannot "
+        "state the scope cannot warn that two runs read different populations")
+
+
+def test_compare_runs_warns_when_only_the_scope_moved(tmp_path):
+    """Same file, same embedder, same claim count — different populations.
+
+    Two runs at different scopes are no more a before/after than two different
+    stores are, which is why the drift banner covers the scope keys the same
+    way it covers `claims` and `embedder`.
+    """
+    def run_file(path, tenant, user):
+        rows = [json.dumps({"claims": 10, "surface": "local",
+                            "embedder": "hashing:64:3-5", "tenant": tenant,
+                            "user": user, "when": "t"}),
+                json.dumps({"probe_id": "p1", "cls": "hit", "hit": True,
+                            "gold_rank": 1, "false_injection": None,
+                            "top_score": 0.5})]
+        path.write_text("\n".join(rows) + "\n")
+    a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    run_file(a, "workstation", None)
+    run_file(b, "default", "probe")
+    text = hosted.compare_runs(a, b)
+    assert "WARNING" in text
+    assert "tenant workstation -> default" in text
+    assert "user None -> probe" in text
+
+
+def test_open_store_reads_the_tenant_the_claims_are_under(tmp_path):
+    """The shipped defect, at the layer that could have caught it.
+
+    Unscoped, this store reads as empty — that is the whole bug, so it is
+    asserted rather than merely implied. `--tenant` then makes the same file
+    answer, which is the fix.
+    """
+    db = tmp_path / "scoped.db"
+    ids = _store_on_disk(db, HashingEmbedder(dim=64), tenant="workstation")
+
+    blind = hosted._open_store(_args(db))
+    try:
+        assert blind.count() == 0, (
+            "the premise: a store whose claims are all under another tenant "
+            "reads as empty, and that is indistinguishable from empty")
+    finally:
+        blind.close()
+
+    mem = hosted._open_store(_args(db, tenant="workstation"))
+    try:
+        assert mem.count() == 1
+        assert hosted.store_fingerprint(mem)["tenant"] == "workstation"
+        found = [r.claim.id for r in
+                 mem.search("which suite needs -j1?", k=4, min_score=0.0)]
+        assert ids["larkspur"] in found, (
+            "opened at the right tenant and still not readable is a different "
+            "defect from opening at the wrong one")
+    finally:
+        mem.close()
+
+
+def test_open_store_reads_the_user_scope_the_claims_are_under(tmp_path):
+    """`--user` is the second half, and is a real narrowing on both routes."""
+    db = tmp_path / "user.db"
+    _store_on_disk(db, HashingEmbedder(dim=64), tenant="workstation",
+                   user="inder")
+    mem = hosted._open_store(_args(db, tenant="workstation", user="inder"))
+    try:
+        assert mem.count() == 1
+        assert hosted.store_fingerprint(mem)["user"] == "inder"
+    finally:
+        mem.close()
+
+
+def test_the_hosted_route_refuses_a_tenant_flag_rather_than_ignoring_it(tmp_path):
+    """A flag that changes only the fingerprint is worse than no flag.
+
+    `RemoteMemvara` accepts `tenant=` and never sends it — the facade resolves
+    the tenant from the bearer token — so forwarding `--tenant` there would
+    record a scope the run did not read at. The refusal happens before any
+    client is constructed, so this test performs no network call and needs no
+    credential.
+    """
+    with pytest.raises(SystemExit) as exc:
+        hosted._open_store(_args("", tenant="workstation"))
+    message = str(exc.value)
+    assert "--db" in message, "the refusal must say what would make it work"
+    assert "workstation" in message, "and name the value it is refusing"
+
+
+def test_main_warns_on_stderr_when_the_scope_sees_nothing_the_file_holds(
+        tmp_path, capsys):
+    """The shipped invocation, end to end: silence becomes an account of itself.
+
+    On stdout there must still be nothing — `--draft` writes JSONL there and a
+    person redirects it into a probe file, so a warning printed to stdout would
+    corrupt the very file it is trying to help them build. Both numbers and the
+    scope are asserted positively: "some warning fired" would pass on a line
+    that told the reader nothing they could act on.
+    """
+    db = tmp_path / "scoped.db"
+    _store_on_disk(db, HashingEmbedder(dim=64), tenant="workstation")
+
+    assert hosted.main(["--db", str(db), "--draft", "2"]) == 0, (
+        "this tool has no pass/fail exit code and must not grow one here")
+    out = capsys.readouterr()
+    assert out.out == "", "stdout carries drafted probes and nothing else"
+    assert "WARNING" in out.err
+    assert "0 of this store's 1 claims" in out.err, (
+        "both numbers, so the reader can tell a mis-scoped store from an empty "
+        "one without opening the file themselves")
+    assert "default/*/*/*" in out.err, "and the scope that could not see them"
+    assert "--tenant" in out.err, "and what to do about it"
+
+
+def test_the_scope_warning_is_silent_once_the_scope_is_right(tmp_path, capsys):
+    """A warning that fires on every run is the same as no warning."""
+    db = tmp_path / "scoped.db"
+    _store_on_disk(db, HashingEmbedder(dim=64), tenant="workstation")
+
+    assert hosted.main(["--db", str(db), "--tenant", "workstation",
+                        "--draft", "1"]) == 0
+    out = capsys.readouterr()
+    assert out.out.strip(), "the drafted rows are the positive half of this"
+    assert "WARNING" not in out.err
+
+
+def test_the_scope_warning_is_silent_on_a_file_that_is_genuinely_empty(
+        tmp_path, capsys, monkeypatch):
+    """Nothing visible and nothing stored is not a scope problem.
+
+    Warning here would be the mirror of the defect: telling someone their scope
+    is wrong when their store is simply empty sends them looking for a tenant
+    that does not exist.
+
+    A store with no vectors binds no recorded embedder, so `_open_store` hands
+    `Memvara` `embedder=None` and the library default owns it. Both bindings are
+    pinned for the reason
+    `test_open_store_ignores_a_fingerprint_with_no_vectors_behind_it` states:
+    `conftest.py` redirects `HOME` away from the model cache, so an unpinned
+    `default_embedder()` reaches the network and a sabotage run of this test
+    would hang rather than go red.
+    """
+    for binding in ("memvara.core.default_embedder",
+                    "memvara.embed.default_embedder"):
+        monkeypatch.setattr(binding, lambda dim=512: HashingEmbedder(dim=512))
+    db = tmp_path / "empty.db"
+    with Memvara(str(db), embedder=HashingEmbedder(dim=64), llm=NullLLM()):
+        pass
+
+    assert hosted.main(["--db", str(db), "--draft", "1"]) == 0
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_the_scope_warning_fires_on_a_scoring_run_too(tmp_path, capsys):
+    """Not only on `--draft`. A table reading `0 claims` is the same ambiguity."""
+    db = tmp_path / "scoped.db"
+    _store_on_disk(db, HashingEmbedder(dim=64), tenant="workstation")
+    probes = tmp_path / "probes.jsonl"
+    probes.write_text(json.dumps(
+        {"id": "p1", "class": "hit", "query": "which suite needs -j1?",
+         "gold": ["cl_whatever"]}) + "\n")
+
+    assert hosted.main(["--db", str(db), "--probes", str(probes)]) == 0
+    out = capsys.readouterr()
+    assert "0 claims" in out.out, "the ambiguous table is still printed"
+    assert "0 of this store's 1 claims" in out.err, "and now accounted for"
+
+
+def test_the_hosted_route_is_never_asked_a_whole_store_question(capsys):
+    """`stats(None)` discloses every tenant's cardinality; hosted is shared.
+
+    `SQLiteStore.stats`' own docstring is the referent: "unfiltered counts
+    disclose how much data other tenants hold", and only the unfiltered call
+    reports the whole matrix. So the check is gated on `--db`. This asserts the
+    gate by making the unfiltered call fail loudly if it is ever reached on a
+    store this tool did not open from a local file.
+    """
+    class Leaky:
+        class store:
+            @staticmethod
+            def stats(tenant=None):
+                raise AssertionError(
+                    "bench/hosted.py asked a hosted store for whole-store "
+                    "counts — that is another tenant's cardinality")
+
+        default_scope = None
+
+        def count(self):
+            return 0
+
+        def get_all(self):
+            return []
+
+    assert hosted.main(["--draft", "1"], mem=Leaky()) == 0
+    assert "WARNING" not in capsys.readouterr().err
