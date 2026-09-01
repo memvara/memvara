@@ -1255,9 +1255,10 @@ def test_main_warns_on_stderr_when_the_scope_sees_nothing_the_file_holds(
     out = capsys.readouterr()
     assert out.out == "", "stdout carries drafted probes and nothing else"
     assert "WARNING" in out.err
-    assert "0 of this store's 1 claims" in out.err, (
+    assert "holds 1 live claims and none of them are visible" in out.err, (
         "both numbers, so the reader can tell a mis-scoped store from an empty "
-        "one without opening the file themselves")
+        "one without opening the file themselves — and stated as *live* claims, "
+        "which is the population count() measures")
     assert "default/*/*/*" in out.err, "and the scope that could not see them"
     assert "--tenant" in out.err, "and what to do about it"
 
@@ -1301,6 +1302,58 @@ def test_the_scope_warning_is_silent_on_a_file_that_is_genuinely_empty(
     assert "WARNING" not in capsys.readouterr().err
 
 
+def test_the_scope_warning_is_silent_when_the_claims_are_merely_retired(
+        tmp_path, capsys):
+    """Zero *live* rows is not the same question as zero rows.
+
+    The two numbers this warning compares have to carry the same state
+    semantics. `count()` resolves states through `resolve_states(None, None)` —
+    `("live",)` — while `stats`' `claims` counts every row in the table,
+    retired and ended alike. Compared against `claims`, a store whose facts are
+    all at the *right* tenant but retired trips the warning and tells the reader
+    to re-run with `--tenant`, which cannot help them: nothing is misscoped.
+
+    So the claim here is written and then retired, at the default tenant the run
+    opens at. `claims` is 1 and `live_claims` is 0, which is the whole
+    distinction. The pre-existing empty-store case could never have caught this
+    — it has no rows at all, so it tests zero rows rather than zero live rows,
+    and both readings pass it.
+    """
+    db = tmp_path / "retired.db"
+    with Memvara(str(db), embedder=HashingEmbedder(dim=64), llm=NullLLM()) as mem:
+        mem.remember("larkspur", "test_flag", "the Larkspur suite needs -j1")
+        mem.forget("larkspur", "test_flag")
+        assert mem.count() == 0 and mem.store.stats(None)["claims"] == 1, (
+            "the premise: rows in the file, none of them live, none misscoped")
+
+    assert hosted.main(["--db", str(db), "--draft", "1"]) == 0
+    assert "WARNING" not in capsys.readouterr().err, (
+        "re-scoping cannot surface a retired claim, so advising it is advice "
+        "that cannot help")
+
+
+def test_a_backend_without_live_claims_says_nothing_rather_than_guessing():
+    """The docstring claims this, so something has to check it.
+
+    `stats` is a `Store` protocol method and a third-party backend may predate
+    `live_claims`. Falling back to `claims` there would quietly reinstate the
+    false positive the key exists to avoid — on exactly the backends nobody is
+    testing — so an unanswerable question produces silence instead.
+    """
+    class OldBackend:
+        class store:
+            @staticmethod
+            def stats(tenant=None):
+                return {"episodes": 0, "claims": 5}
+
+        default_scope = None
+
+        def count(self):
+            return 0
+
+    assert hosted.scope_blindspot(OldBackend()) is None
+
+
 def test_the_scope_warning_fires_on_a_scoring_run_too(tmp_path, capsys):
     """Not only on `--draft`. A table reading `0 claims` is the same ambiguity."""
     db = tmp_path / "scoped.db"
@@ -1313,7 +1366,8 @@ def test_the_scope_warning_fires_on_a_scoring_run_too(tmp_path, capsys):
     assert hosted.main(["--db", str(db), "--probes", str(probes)]) == 0
     out = capsys.readouterr()
     assert "0 claims" in out.out, "the ambiguous table is still printed"
-    assert "0 of this store's 1 claims" in out.err, "and now accounted for"
+    assert "holds 1 live claims and none of them are visible" in out.err, (
+        "and now accounted for")
 
 
 def test_the_hosted_route_is_never_asked_a_whole_store_question(capsys):

@@ -105,14 +105,26 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
   `--tenant` and `--user` now say which scope to read at, and the ambiguity is
   closed from the other side too: a `--db` run that can see no claims while the
-  file itself holds some says so, naming both numbers and the scope it read at.
-  The whole-file count comes from the unfiltered `SQLiteStore.stats(None)`, so the
-  question is put only to a local store — unfiltered counts disclose how much data
-  other tenants hold, and `RemoteMemvara` talks to a shared server. The warning
-  goes to **stderr**: `--draft` and the seeding phases write JSONL to stdout and a
-  person redirects that into a probe file, so a warning on stdout would corrupt
-  the file it exists to help them build. The exit code is unchanged — this tool
-  has no pass/fail status.
+  file itself holds live ones says so, naming both numbers and the scope it read
+  at. The whole-file count comes from the unfiltered `SQLiteStore.stats(None)`, so
+  the question is put only to a local store — unfiltered counts disclose how much
+  data other tenants hold, and `RemoteMemvara` talks to a shared server. The
+  warning goes to **stderr**: `--draft` and the seeding phases write JSONL to
+  stdout and a person redirects that into a probe file, so a warning on stdout
+  would corrupt the file it exists to help them build. The exit code is unchanged
+  — this tool has no pass/fail status.
+
+  Both numbers are *live* claims. `count()` resolves its states through
+  `resolve_states(None, None)`, which is `("live",)`, so the whole-file figure is
+  `live_claims` and not `claims` — the latter counts every row in the table,
+  retired and ended included, and comparing against it fires on a store whose
+  facts are all at the right tenant but retired, advising a re-scope that cannot
+  help. Both figures compile from the same `base.state_predicate` at the same one
+  state, so they line up by construction; measured across retired, superseded,
+  ended and not-yet-valid claims, `count()` and `live_claims` agreed on every one
+  while `claims` did not. A backend whose `stats` predates `live_claims` gets
+  silence rather than a fallback to `claims`, which would reinstate the false
+  positive on exactly the backends nobody tests.
 
   `--tenant` is refused without `--db` rather than accepted and ignored. The
   parameter exists on `RemoteMemvara` and is never sent, because the facade

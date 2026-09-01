@@ -336,11 +336,33 @@ def scope_blindspot(mem: Any) -> "str | None":
     safely, it is not asked: silence there is correct, and a warning built on a
     number this tool has no business holding would be worse than none.
 
-    Returns None when there is nothing to say — claims are visible, the file is
-    genuinely empty, or the backend cannot answer the unfiltered question. It
-    never raises and never changes the exit code: this tool has no pass/fail
-    exit status, and a measurement harness that starts failing runs is a
-    different tool.
+    **`live_claims`, not `claims`, and the difference is a false positive.** The
+    two numbers have to carry the same state semantics or they are not
+    comparable. `count()` resolves its states through `resolve_states(None,
+    None)`, which is `("live",)`; `stats`' `claims` is `SELECT COUNT(*) FROM
+    claims` with no state filter at all, so it counts retired and ended rows
+    too. Against `claims`, a store whose facts are all at the *right* tenant but
+    retired reads as `count() == 0` beside a non-zero total, and the tool tells
+    someone their scope is wrong and to re-run with `--tenant` — advice that
+    cannot help, because nothing is misscoped. `live_claims` compiles from the
+    same `base.state_predicate` at the same one state, so the two line up by
+    construction rather than by coincidence. Measured on all four non-live
+    cases — retired, superseded, ended, and a claim whose valid interval has not
+    opened yet — `count()` and `live_claims` were both 0 while `claims` was not,
+    and on the store that produced this bug `count()` at the right tenant and
+    the file's `live_claims` were the same number.
+
+    A store holding *only* claims none of the three live-time states names — a
+    fact scheduled to start next month — stays silent, which is right: no scope
+    would show it either, so `--tenant` is not the answer there.
+
+    Returns None when there is nothing to say — claims are visible, the file
+    holds no live claims, or the backend cannot answer the unfiltered question.
+    A backend whose `stats` predates `live_claims` says nothing rather than
+    falling back to `claims`: falling back would reinstate exactly the false
+    positive this key exists to avoid. It never raises and never changes the
+    exit code: this tool has no pass/fail exit status, and a measurement harness
+    that starts failing runs is a different tool.
     """
     if mem.count():
         return None
@@ -348,17 +370,17 @@ def scope_blindspot(mem: Any) -> "str | None":
     if stats is None:
         return None
     try:
-        total = stats(None).get("claims", 0)
+        live = stats(None).get("live_claims")
     except TypeError:  # a Store predating the tenant argument
         return None
-    if not total:
+    if not live:
         return None
     scope = getattr(mem, "default_scope", None)
     key = scope.key() if scope is not None else "unknown"
-    return (f"WARNING: 0 of this store's {total} claims are visible at scope "
-            f"{key} — every probe will miss and --draft will print nothing. "
-            f"Re-run with --tenant/--user naming the scope the claims are "
-            f"under.")
+    return (f"WARNING: this store holds {live} live claims and none of them are "
+            f"visible at scope {key} — every probe will miss and --draft will "
+            f"print nothing. Re-run with --tenant/--user naming the scope the "
+            f"claims are under.")
 
 
 def render_table(agg: dict, fingerprint: dict) -> str:

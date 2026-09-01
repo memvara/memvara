@@ -894,12 +894,19 @@ file whose claims all live under one named tenant answers *nothing* at
 `--draft` printed no rows, the run exited 0, and the fingerprint said `claims:
 0`, which is exactly what an empty store prints.
 
-So a `--db` run that can see nothing while the file itself holds claims now
-says so, on **stderr**, naming both numbers and the scope:
+So a `--db` run that can see nothing while the file itself holds live claims
+now says so, on **stderr**, naming both numbers and the scope:
 
-    WARNING: 0 of this store's 1240 claims are visible at scope default/*/*/* —
-    every probe will miss and --draft will print nothing. Re-run with
-    --tenant/--user naming the scope the claims are under.
+    WARNING: this store holds 1240 live claims and none of them are visible at
+    scope default/*/*/* — every probe will miss and --draft will print nothing.
+    Re-run with --tenant/--user naming the scope the claims are under.
+
+Both numbers are *live* claims. `count()` resolves its states to `("live",)`,
+so the whole-file figure is `stats(None)["live_claims"]` and not `claims`,
+which counts retired and ended rows too. Comparing against `claims` would fire
+on a store whose facts are all at the right tenant but retired — telling
+someone to re-scope when nothing is misscoped. A backend whose `stats` predates
+`live_claims` gets silence rather than a fallback, for the same reason.
 
 stderr rather than stdout because `--draft` and the seeding phases write JSONL
 to stdout and you redirect that into a file; a warning on stdout would corrupt
