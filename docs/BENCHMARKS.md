@@ -886,6 +886,19 @@ claims on predicates outside the declared vocabulary and a join rate of 0.5%.
     PYTHONPATH=. python3 bench/hosted.py --db ~/.memvara/store.db \
         --probes ~/.memvara/probes.jsonl
 
+`--db` opens the store with the embedder that **wrote** it, read back from the
+fingerprint the library records beside the file, not with `default_embedder()` —
+which returns a 384-dimensional sentence-transformers model as soon as that
+package is importable, and so could not open a store built by the 512-dimensional
+fallback at all. A hashing embedder is reconstructed from its recorded name
+(`hashing:<dim>:<lo>-<hi>` carries its whole vector space); a store with no
+fingerprint on record takes the library default as before. Any other name is used
+only when `default_embedder()` is itself what wrote the store, and is otherwise
+refused, naming the embedder on record — install it and re-run, or open the store
+yourself and pass it in as `mem=`. Measuring with the wrong embedder either raises
+on every read or, at equal width, silently scores two unrelated vector spaces
+against each other.
+
 You author the probes once — `hit` (a question whose answer you know is
 stored, gold = its claim id), `abstain` (a question the store cannot answer,
 gold = nothing), `verbatim` (a claim's own text, which must return that claim

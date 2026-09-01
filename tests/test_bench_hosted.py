@@ -946,3 +946,118 @@ def test_main_draft_passes_the_seed_through(tmp_path, capsys):
         assert any(draft(s) != base for s in range(20) if s != 11), (
             "no seed changed the draft — main is not passing --seed to "
             "draft_probes, so the flag steers only --seed-from-recalled")
+
+
+# --- `_open_store`, against real stores on disk ------------------------------
+#
+# The one part of this tool that only ever runs in production. Every test above
+# hands `main` a `mem=`, so `_open_store` shipped with no guard at all and
+# `--db` — its own documented local invocation — could not open a store built by
+# anything other than whatever `default_embedder()` returns in this process. The
+# stores here are built under `tmp_path` with `HashingEmbedder`, which is
+# deterministic, offline and costs milliseconds; nothing in this section reads
+# `~/.memvara/` or the network.
+
+import argparse  # noqa: E402
+
+
+def _store_on_disk(path, embedder):
+    """A one-claim store at `path`, written by `embedder`, closed. Returns its ids."""
+    with Memvara(str(path), embedder=embedder, llm=NullLLM()) as mem:
+        mem.remember("larkspur", "test_flag", "the Larkspur suite needs -j1")
+        return {c.subject: c.id for c in mem.get_all()}
+
+
+class _NamedLikeAModel(HashingEmbedder):
+    """Real vectors under a name no constructor can be recovered from.
+
+    Stands in for a store built by a neural model: `LocalEmbedder` fingerprints
+    itself as `local:<model id>`, which names the model but is not something this
+    bench may turn back into an object — doing so would mean deciding, for
+    somebody, to import torch and possibly fetch weights. A `HashingEmbedder`
+    underneath keeps the test offline and deterministic; only the name matters.
+    """
+
+    def __init__(self, name: str, dim: int) -> None:
+        super().__init__(dim=dim)
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+
+def test_open_store_opens_a_store_built_with_a_non_default_embedder(tmp_path):
+    """The shipped defect, at the only layer that could have caught it.
+
+    `Memvara(path)` takes `default_embedder()`, which is a 384-dimensional
+    sentence-transformers model wherever `memvara[local-embed]` is installed and
+    a 512-dimensional `HashingEmbedder` where it is not. This store is neither,
+    so against the old one-line body — `return Memvara(args.db)` — this raises
+    `EmbedderMismatchError` on both kinds of machine, which is exactly what
+    running the tool against a real store did.
+    """
+    db = tmp_path / "probe.db"
+    ids = _store_on_disk(db, HashingEmbedder(dim=64))
+
+    mem = hosted._open_store(argparse.Namespace(db=str(db)))
+    try:
+        assert hosted.store_fingerprint(mem)["embedder"] == "hashing:64:3-5", (
+            "the store must be opened with the embedder that wrote it, read back "
+            "off the fingerprint the run records")
+        found = [r.claim.id for r in
+                 mem.search("which suite needs -j1?", k=4, min_score=0.0)]
+        assert ids["larkspur"] in found, (
+            "opened, but not readable — a store opened with an embedder of the "
+            "right width but the wrong space would look exactly like this")
+    finally:
+        mem.close()
+
+
+def test_open_store_refuses_a_store_whose_embedder_it_cannot_reconstruct(
+        tmp_path, monkeypatch):
+    """A name that is not a hashing embedder and is not what this process has.
+
+    The refusal has to name the store's recorded embedder, because "cannot open
+    it" without saying what wrote it leaves the reader with nothing to install
+    or pass.
+
+    `default_embedder` is stubbed so the verdict is the same on a machine with
+    sentence-transformers and one without — and so no test here is the thing that
+    imports torch.
+    """
+    db = tmp_path / "unknown.db"
+    _store_on_disk(db, _NamedLikeAModel("local:pretend/tiny-model", 48))
+    monkeypatch.setattr("memvara.embed.default_embedder",
+                        lambda *a, **k: HashingEmbedder(dim=512))
+
+    with pytest.raises(SystemExit) as exc:
+        hosted._open_store(argparse.Namespace(db=str(db)))
+    message = str(exc.value)
+    assert "local:pretend/tiny-model" in message, (
+        "the refusal must name what wrote the store")
+    assert str(db) in message, "and which store it is talking about"
+
+
+def test_open_store_still_uses_the_default_when_that_is_what_wrote_the_store(
+        tmp_path, monkeypatch):
+    """The branch that keeps the sentence-transformers case working.
+
+    A store built by a neural model opens fine today, because `default_embedder()`
+    returns that same model wherever it is installed. Reconstructing hashing
+    embedders and refusing everything else would have taken that away, and the
+    only people who would have noticed are the ones with the extra installed.
+    """
+    db = tmp_path / "modelled.db"
+    ids = _store_on_disk(db, _NamedLikeAModel("local:pretend/tiny-model", 48))
+    monkeypatch.setattr(
+        "memvara.embed.default_embedder",
+        lambda *a, **k: _NamedLikeAModel("local:pretend/tiny-model", 48))
+
+    mem = hosted._open_store(argparse.Namespace(db=str(db)))
+    try:
+        found = [r.claim.id for r in
+                 mem.search("which suite needs -j1?", k=4, min_score=0.0)]
+        assert ids["larkspur"] in found
+    finally:
+        mem.close()
