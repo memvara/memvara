@@ -143,6 +143,47 @@ class ScoringTests(unittest.TestCase):
         self.assertIn("unavailable", render(result))
 
 
+#: Injects a block on the FIRST prompt of any session and nothing afterwards -- a
+#: once-per-session preamble, which is what memvara's standing-preferences block is.
+PREAMBLE_ONCE = """
+mkdir -p "$PREAMBLE_STATE"
+marker="$PREAMBLE_STATE/$BENCH_SESSION"
+if [ -e "$marker" ]; then printf '{"continue":true}'; else
+  : > "$marker"
+  printf '{"hookSpecificOutput":{"additionalContext":"- standing: prefers pnpm"}}'
+fi
+"""
+
+
+class PreambleTests(unittest.TestCase):
+    def test_a_once_per_session_preamble_is_not_scored_as_a_failure(self):
+        """Each case's own session must be warmed, not just the base session.
+
+        The first version warmed `base_session` and then scored each case in
+        `base_session-N`. With one session per case, every case was a first prompt and
+        received the preamble again, so every scored reply came back non-empty and the
+        silence rate read 0% on any store whose extractor writes procedural claims.
+
+        The floor was working throughout -- zero memories recalled, every score far below
+        it. The harness was measuring its own session policy and reporting it as the
+        plugin filling every slot. Two identically-built stores scored 0% and 100% on
+        different runs, which is what sent someone looking.
+        """
+        from benchmarks.plugin_recall.cases import DEFAULT_CASES
+
+        with TemporaryDirectory() as tmp:
+            root = make_plugin(Path(tmp) / "p", PREAMBLE_ONCE)
+            state = Path(tmp) / "seen"
+            result = run(discover(str(root)), load(DEFAULT_CASES), cwd=Path(tmp),
+                         extra_env={"PREAMBLE_STATE": str(state)})
+            self.assertTrue(result.validated,
+                            "the preamble itself proves the plugin can speak")
+            self.assertEqual(
+                result.rate("silence"), 1.0,
+                "a preamble paid once per session must not be scored as an injection on "
+                f"every case: {[o.case.id for o in result.outcomes if not o.correct]}")
+
+
 class CorpusTests(unittest.TestCase):
     def _write(self, tmp, rows):
         path = Path(tmp) / "cases.jsonl"

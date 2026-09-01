@@ -195,7 +195,10 @@ def invoke(plugin: Plugin, prompt: str, *, session_id: str, cwd: Path,
     # last so it wins, and the report prints it, because a result measured against a
     # different store than the reader assumes is the most misleading kind there is.
     env = {**os.environ, "CLAUDE_PLUGIN_ROOT": str(plugin.root),
-           "CLAUDE_PROJECT_DIR": str(cwd), **(extra_env or {})}
+           "CLAUDE_PROJECT_DIR": str(cwd),
+           # The session under test, so a hook can behave differently on a session's
+           # first prompt -- which is what a once-per-session preamble does.
+           "BENCH_SESSION": session_id, **(extra_env or {})}
     started = time.monotonic()
     try:
         done = subprocess.run(

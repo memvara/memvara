@@ -145,12 +145,25 @@ def run(plugin: Plugin, cases: list[Case], *, cwd: Path,
     """
     base_session = session_id or f"bench-{uuid.uuid4()}"
     preamble = invoke(plugin, WARMUP, session_id=base_session, cwd=cwd, extra_env=extra_env)
-    outcomes = tuple(
-        Outcome(case, invoke(
-            plugin, case.prompt, cwd=cwd, extra_env=extra_env,
-            session_id=base_session if shared_session else f"{base_session}-{index}"))
-        for index, case in enumerate(cases)
-    )
+
+    def scored(index: int, case: Case) -> Outcome:
+        session = base_session if shared_session else f"{base_session}-{index}"
+        if not shared_session:
+            # The warmup runs again, inside THIS case's session. One warmup in the base
+            # session absorbs a once-per-session preamble only for the base session, and
+            # per-case sessions mean every case is a first prompt -- so each one paid the
+            # preamble again and every scored reply came back non-empty.
+            #
+            # That produced a 0% silence rate on any store whose extractor wrote
+            # procedural claims, because the standing block is exactly what a first prompt
+            # receives. The floor was working the whole time: zero memories recalled, all
+            # scores far below it. The benchmark was measuring its own session policy and
+            # reporting it as the plugin filling every slot.
+            invoke(plugin, WARMUP, session_id=session, cwd=cwd, extra_env=extra_env)
+        return Outcome(case, invoke(plugin, case.prompt, session_id=session, cwd=cwd,
+                                    extra_env=extra_env))
+
+    outcomes = tuple(scored(index, case) for index, case in enumerate(cases))
     # Only the names are kept. A value here can be a path, a URL or a token, and a report
     # is something people paste into issues.
     return Result(plugin, outcomes, preamble, cwd, tuple(sorted(extra_env or {})),
