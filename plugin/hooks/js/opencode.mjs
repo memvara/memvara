@@ -34,14 +34,17 @@ const HOOKS_DIR = fileURLToPath(new URL("..", import.meta.url))
  * In memory rather than on disk, and correct only because an OpenCode plugin is loaded
  * once into a server process that outlives the turn -- the same property that makes
  * detached capture work. If that ever stops being true this degrades to running
- * `session_start` more often, never to running it never.
+ * `session_start` more often, never to running it never -- and the entry is released
+ * again when the hook did not run, so a transient failure degrades the same way rather
+ * than suppressing the standing block for the rest of the session.
  */
 const started = new Set()
 
 /** One line, once per process, recording what `permission.ask` actually hands a hook. */
 let askShapeLogged = false
 
-const TIMEOUTS = { session_start: 20000, recall: 10000, capture: 120000, approve: 5000 }
+const TIMEOUTS = { session_start: 20000, recall: 10000, capture: 120000,
+                   approve: 5000, transcript: 15000 }
 
 export const MemvaraPlugin = async ({ client, directory, worktree }) => {
   note("hooks", `opencode plugin loaded dir=${HOOKS_DIR}`)
@@ -49,7 +52,17 @@ export const MemvaraPlugin = async ({ client, directory, worktree }) => {
   /** Materialise a transcript OpenCode never hands us, in the shape `lib.transcript` reads. */
   const writeTranscript = async (sessionID) => {
     try {
-      const res = await client.session.messages({ path: { id: sessionID } })
+      // Bounded, like every other call out of this file. `runHook` enforces a timeout
+      // because the host publishes none; this call had none at all, and it sits BEFORE
+      // the detached capture -- so a wedged server would hold the event handler open
+      // forever and the "capture cannot stall anything" property would not cover the
+      // transcript step capture depends on.
+      const res = await Promise.race([
+        client.session.messages({ path: { id: sessionID } }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("session.messages timed out")),
+                     TIMEOUTS.transcript)),
+      ])
       const rows = res?.data ?? res ?? []
       const lines = []
       for (const row of rows) {
@@ -97,23 +110,40 @@ export const MemvaraPlugin = async ({ client, directory, worktree }) => {
         .map((p) => p.text)
         .join("\n")
 
+      // Point 1 in this file's header is an invariant about the part we push, so it has
+      // to be checked before the work rather than asserted in prose and then defaulted
+      // away. Injecting is the whole point, but a part built from ids we do not have is
+      // the one thing measured to take the entire turn down with an opaque error, and
+      // one missed recall costs a turn's memories rather than the turn.
+      if (!sessionID || !messageID) {
+        note("hooks", `skipped=chat.message has no ids session=${!!sessionID} ` +
+                      `message=${!!messageID}`)
+        return
+      }
+
       const payload = { session_id: sessionID, cwd: directory ?? worktree ?? "", prompt }
       const blocks = []
 
-      if (sessionID && !started.has(sessionID)) {
+      if (!started.has(sessionID)) {
+        // Claimed BEFORE the await so two messages racing into the same new session
+        // cannot both run it, and released again if it did not run -- `null` from the
+        // shim means exactly that, as opposed to `{}` for "ran, nothing stored yet".
+        // Without the release a single 20s timeout on the first message of a session
+        // would suppress the standing block for the rest of that session, silently.
         started.add(sessionID)
         const reply = await runHook({
           hooksDir: HOOKS_DIR, hook: "session_start", host: HOST,
           payload, timeoutMs: TIMEOUTS.session_start,
         })
-        if (reply.additionalContext) blocks.push(reply.additionalContext)
+        if (reply === null) started.delete(sessionID)
+        else if (reply.additionalContext) blocks.push(reply.additionalContext)
       }
 
       const reply = await runHook({
         hooksDir: HOOKS_DIR, hook: "recall", host: HOST,
         payload, timeoutMs: TIMEOUTS.recall,
       })
-      if (reply.additionalContext) blocks.push(reply.additionalContext)
+      if (reply?.additionalContext) blocks.push(reply.additionalContext)
       if (!blocks.length) return
 
       // Every required key, for the reason in this file's header.
@@ -145,7 +175,7 @@ export const MemvaraPlugin = async ({ client, directory, worktree }) => {
       })
       // Only ever widens to "allow". A hook that could deny would be able to block a
       // tool call the user asked for, which is not what auto-approving reads is for.
-      if (reply.status === "allow") output.status = "allow"
+      if (reply?.status === "allow") output.status = "allow"
     },
 
     event: async ({ event }) => {
