@@ -128,6 +128,54 @@ def test_the_daemon_does_not_send_a_floor_it_was_not_given():
     assert "who owns billing" in reply.get("text", "")
 
 
+@pytest.mark.parametrize("floor", [0.0, 0.29])
+def test_both_routes_build_the_same_call_over_one_backend(monkeypatch, tmp_path, floor):
+    """The parity invariant itself, asserted where the code lives.
+
+    The test above pins one argument by name, which is enough to stop *this* regression
+    coming back and not enough to stop the next one: add a new optional argument to either
+    call site and every test here still passes, while the divergence surfaces only when
+    `claude-memvara` next vendors the tree and its route-parity test fails on the sync PR
+    -- after the change has already merged here. That is precisely the sequence that
+    produced this fix.
+
+    So both routes are driven over one backend and their text compared. The backend records
+    the keyword arguments it was handed, and the two records must match exactly: it is the
+    *call* that has to agree, and two routes can return identical text while disagreeing
+    about what they asked for, right up until a backend cares.
+    """
+    import daemon as daemon_hook
+    from lib import fast
+    from lib import open as opener
+
+    class Recorder:
+        def __init__(self):
+            self.calls = []
+
+        def recall(self, query, **kwargs):
+            self.calls.append(dict(kwargs))
+            return f"- {query} ({sorted(kwargs)})"
+
+    direct_backend, daemon_backend = Recorder(), Recorder()
+    query, args = "who owns billing", {"k": 3, "budget": 200}
+
+    # No daemon listening, so `fast.recall` takes the in-process route to `open_store`.
+    monkeypatch.setattr(fast, "socket_path", lambda *a, **k: str(tmp_path / "absent.sock"))
+    monkeypatch.setattr(opener, "open_store", lambda: direct_backend)
+    direct_text, ok, _ = fast.recall(query, min_score=floor, spawn=False, **args)
+    assert ok is True
+
+    daemon_reply = daemon_hook.Daemon(str(tmp_path / "unused.sock"),
+                                      daemon_backend)._answer({"q": query, "min_score": floor,
+                                                               **args})
+    assert daemon_reply.get("ok") is True, daemon_reply
+
+    assert daemon_reply["text"] == direct_text, "the two routes disagree on the answer"
+    assert daemon_backend.calls == direct_backend.calls, (
+        "the two routes disagree on what they asked the backend: "
+        f"daemon={daemon_backend.calls} direct={direct_backend.calls}")
+
+
 def test_the_standing_interval_still_has_its_own_documentation():
     """The floor's comment block was appended to this constant's, leaving it undocumented
     and attributing its measured rationale to the floor instead."""
