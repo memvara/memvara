@@ -140,12 +140,23 @@ class CachedEmbedder:
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         keys = [hashlib.blake2b(t.encode(), digest_size=16).hexdigest() for t in texts]
         missing = [(i, t) for i, (t, k) in enumerate(zip(texts, keys)) if k not in self._cache]
+        # Everything this call owes the caller, captured before any eviction can run.
+        # Both halves of the batch are at risk once it is larger than the cache, and
+        # for the same reason: inserting this call's own results evicts, in insertion
+        # order, whatever the cache held first - which is this call's earlier inserts
+        # on a batch of more than `max_items` distinct texts, and this call's cache
+        # *hits* as soon as the inserts outnumber the room left. A row that was a hit
+        # is still owed even after its entry is gone, so the return cannot be read
+        # back out of `_cache` at all.
+        have = {k: self._cache[k] for k in keys if k in self._cache}
         if missing:
             self.misses += len(missing)
             vecs = self.inner.encode([t for _, t in missing])
-            for (i, _), v in zip(missing, vecs):
+            fresh = {keys[i]: v for (i, _), v in zip(missing, vecs)}
+            for k, v in fresh.items():
                 if len(self._cache) >= self.max_items:
                     self._cache.pop(next(iter(self._cache)))
-                self._cache[keys[i]] = v
+                self._cache[k] = v
+            have.update(fresh)
         self.hits += len(texts) - len(missing)
-        return np.stack([self._cache[k] for k in keys]).astype(np.float32)
+        return np.stack([have[k] for k in keys]).astype(np.float32)
