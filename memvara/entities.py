@@ -328,6 +328,33 @@ class EntityRegistry:
         self._load(tenant_of(owner))
         return sorted(self._specs.get(owner, {}).values(), key=lambda s: s.key)
 
+    def spellings(self, owner: str, key: str) -> tuple[str, ...]:
+        """Every folded spelling a stored key answers to: the key, then its aliases.
+
+        The inverse direction from `probe_keys`. That one starts from what a reader
+        *said* and finds the keys claims were written under; this starts from the key
+        on a stored claim and finds the spellings a reader might use for it, which is
+        what `retrieve/anchor.py` needs to tell that "where is Big Blue based" names a
+        claim filed under `ibm`. A key nothing has been learned about is its own only
+        spelling, so a reader gets exactly the fold it always got.
+
+        >>> reg = EntityRegistry()
+        >>> owner = "acme" + OWNER_SEP + "alice"
+        >>> reg.spellings(owner, "ibm")
+        ('ibm',)
+        >>> _ = reg.resolve(owner, "IBM")
+        >>> _ = reg.learn_alias(owner, "IBM", "Big Blue")
+        >>> reg.spellings(owner, "ibm")
+        ('ibm', 'big blue')
+
+        No side effects, for the reason `probe_keys` gives.
+        """
+        self._load(tenant_of(owner))
+        spec = self._specs.get(owner, {}).get(key)
+        if spec is None:
+            return (key,)
+        return tuple(dict.fromkeys((key, *spec.aliases)))
+
     # -- acquisition -----------------------------------------------------------
 
     def candidates(self, owner: str, surface: str,

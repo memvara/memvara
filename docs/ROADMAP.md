@@ -143,6 +143,14 @@ coincide, a single-clock store is exactly right. memvara **loses** `retrieval`, 
 and the core weaknesses behind them are tracked in
 [#129](https://github.com/memvara/memvara/issues/129).
 
+The `irrelevance` half has a core answer now, and the table above does not show it because
+the shipped adapter does not use it: `search(anchored=True)` keeps only the rows the
+question names an entity of, or that the graph leg reached from one, and through the
+adapter with that flag set `irrelevance` goes 3/6 → 5/6 at both configurations. The
+`multi_hop` half does not move from anything in the read path — the issue's own
+measurement is that the answer is already retrieved and nothing consumes the pair — so
+that row is the adapter's to change, and `docs/BENCHMARKS.md` carries both measurements.
+
 `docs/benchmarks/agent-memory-benchmark.md` is the public report and
 `benchmarks/agent_memory/README.md` the methodology. What this does **not** close is
 [4b](#4b-locomo-and-longmemeval-done-for-retrieval-not-for-accuracy)'s open half: every
@@ -640,7 +648,8 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
    system tested abstains when it knows nothing, and none joins two facts. A dimension all
    three systems fail identically measures the field rather than the systems, and until
    either the questions get harder or a system improves, those two rows carry no
-   information.
+   information. memvara can now abstain — `search(anchored=True)` — and the published
+   row will move once the adapter asks it to; `multi_hop` is still nobody's.
 3. **No external user has run this in production.** 3,593 tests prove the code does what we
    said it does. They prove nothing about what happens on someone else's data.
 4. **The English-centrism is measured, not fixed.** The salience gate and the fast extractor

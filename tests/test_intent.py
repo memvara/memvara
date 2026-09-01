@@ -22,6 +22,8 @@ from memvara.retrieve.intent import (
     RELATIONAL_MARKERS,
     TEMPORAL_MARKERS,
     classify,
+    is_relational,
+    predicate_refs,
     weights,
 )
 
@@ -369,3 +371,54 @@ def test_a_vocabulary_that_genuinely_composes_into_nothing_is_not_a_failure() ->
         w.simplefilter("always")
         assert acquire(Honest(), ["name", "email"]) == frozenset()
     assert caught == []
+
+
+def test_a_question_names_a_predicate_in_whatever_form_it_inflects_it() -> None:
+    """A question inflects what a predicate name does not.
+
+    `team_lead` is asked as "who *leads* the team", `deploy_region` as "where is it
+    *deployed*", `owned_by` as "the team that *owns* it". On the Agent Memory
+    Benchmark four of six chained questions named their second predicate only in a form
+    the exact match could not see, so the gate read each as a question about one slot
+    and switched the walk off on the query class it exists for (#150).
+
+    Both sides fold through `schema.word_stem`, the same fold the registry uses to
+    decide two predicate names are one predicate, so the match only has to agree with
+    itself.
+    """
+    from memvara.schema import PredicateRegistry, PredicateSpec
+
+    registry = PredicateRegistry()
+    for name in ("team_lead", "owned_by", "deploy_region", "works_on"):
+        registry.register(PredicateSpec(name=name))
+
+    assert predicate_refs("who leads the team that owns the checkout service?",
+                          registry) == {"team_lead", "owned_by"}
+    assert classify("Which region is the project Alice works on deployed to?",
+                    registry) is Intent.RELATIONAL
+    # One predicate is still one slot: a lookup does not become a chain by inflecting.
+    assert classify("Which region is Project Atlas deployed to?",
+                    registry) is Intent.LOOKUP
+
+
+def test_a_chain_that_also_names_an_instant_keeps_its_second_reading() -> None:
+    """`classify` returns one label and time wins; `is_relational` is the other one.
+
+    "Who *currently* leads the team that owns the checkout service" is temporal first,
+    which is right for the temporal leg, and it is also a chain, which the one label
+    cannot say. The retriever reads both so the walk runs on it — see
+    `HybridRetriever._weights`. Without a registry nothing in it is relational, because
+    "leads" and "owns" are predicates and only a registry knows that.
+    """
+    from memvara.schema import PredicateRegistry, PredicateSpec
+
+    registry = PredicateRegistry()
+    for name in ("team_lead", "owned_by"):
+        registry.register(PredicateSpec(name=name))
+    question = "who currently leads the team that owns the checkout service?"
+
+    assert classify(question, registry) is Intent.TEMPORAL
+    assert is_relational(question, registry) is True
+    assert is_relational(question) is False
+    assert is_relational("who is my manager's manager?") is True
+    assert is_relational("what happened last March?", registry) is False

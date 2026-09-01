@@ -227,7 +227,9 @@ than the total:
   system answers the three open negative questions from the nearest match rather than
   abstaining. That is a real and shared failure — memvara's own `search()` documentation
   warns about exactly it — and a category where three systems tie is not yet earning its
-  place. See *Limitations*.
+  place. See *Limitations*. memvara's `search(anchored=True)` can now abstain, and this
+  adapter deliberately does not pass it, so the row stays a like-for-like comparison;
+  `docs/BENCHMARKS.md` in the repository carries what it measures with the flag set.
 - **`naive` scores 100% on current state.** It is not bad at memory. It is bad at *time*,
   and the benchmark's job is to say which.
 

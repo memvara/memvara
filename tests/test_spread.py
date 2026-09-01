@@ -597,3 +597,30 @@ def test_pinning_now_does_not_move_either_time_axis(mem):
     pinned = mem.traverser._pin(None, known, now=datetime(2020, 1, 1, tzinfo=timezone.utc))
     assert pinned.known_at == known, "known_at must win over now"
     assert pinned.valid_at == datetime(2020, 1, 1, tzinfo=timezone.utc)
+
+
+def test_a_chain_that_names_an_instant_in_words_still_walks(mem):
+    """The same collision as `test_naming_an_instant_no_longer_switches_the_walk_off`,
+    with the instant in the question instead of in the argument list (#150).
+
+    "Who does Alice *currently* report to" classifies `temporal`, and that row's
+    multipliers zero the graph weight — on a question that names a relation outright.
+    The temporal reading still decides the other legs and `Explanation.intent` still
+    says so; the walk runs because the question is also a chain.
+    """
+    rows = mem.search("who does Alice currently report to?", k=10)
+    assert any(r.explain.graph_rank is not None for r in rows), (
+        "a temporal-worded relational question lost the graph leg"
+    )
+    assert rows[0].explain.intent == "temporal"
+
+
+def test_a_comparison_frame_with_a_time_word_still_does_not_walk(mem):
+    """The second reading is opened with the same guard as everywhere else.
+
+    "Who reported earlier, Alice or Bruno" carries a relational marker and a time word
+    and is two lookups compared, the family where the walk costs the most.
+    """
+    rows = mem.search("who reported earlier, Alice or Bruno?", k=10)
+    assert rows, "the query should still return something"
+    assert all(r.explain.graph_rank is None for r in rows)

@@ -617,6 +617,52 @@ These numbers are not comparable to the 2Wiki leaderboard, which retrieves from 
 per-question candidate set. That is reading comprehension; this is recall against 26,403
 competing facts.
 
+### Anchoring: abstention without a threshold, measured on the Agent Memory Benchmark
+
+`search(anchored=True)` keeps only the rows the question names an entity of — the folded
+subject or object key, every content token present — or that the graph leg reached by
+walking out of such a row, and `Explanation.anchor` reports which on every result
+(`memvara/retrieve/anchor.py`). It is the answer to the `irrelevance` half of
+[#129](https://github.com/memvara/memvara/issues/129), and it is measured here rather than
+in the published table because the shipped adapter does not set the flag; the rows below
+come from the same adapter with one keyword added to its `search()` call, over dataset v1,
+byte-identical on repeat.
+
+```
+  configuration                 overall  retrieval  irrelevance  multi_hop  negative
+  shipped                         92.0%      64.3%        50.0%        1/6       3/6
+  shipped, anchored=True          93.0%      57.1%        83.3%        0/6       5/6
+  read_w_graph=1.0                92.0%      64.3%        50.0%        1/6       3/6
+  read_w_graph=1.0, anchored      94.0%      64.3%        83.3%        1/6       5/6
+```
+
+**Two of the three open negatives are caught, and no threshold reaches either.** *Where
+does Oscar live* returns nothing because no row is about Oscar. *Which region is Project
+Chronos deployed to* is the case the issue singled out — it scores 0.450, above two
+genuine answers — and it returns nothing because `project` alone does not name `Project
+Atlas`. The third, the reporting service's authentication strategy, is correctly *not*
+caught: the store holds who owns the reporting service, that row is about the entity
+asked about, and telling it from the answer is a question about the predicate, which
+anchoring does not judge.
+
+**The one point it costs at the shipped defaults is a lucky hit, and the walk earns it
+back.** *In which city is Bob's employer headquartered* is answered by plain search from
+`Globex/hq_city=Munich`, which shares no entity with the question and sits a hair above
+`Initech/hq_city=Austin`; anchoring hands back Bob's own rows instead, and the adapter
+answers `Globex`. With the graph leg on, the walk out of `bob/works_at=Globex` reaches the
+same row and marks it `"path"`, so the filter keeps it. That is the shape the two halves
+of the issue share: on a negative "the top hit is not about what you asked" means *never
+told*, and on a chain it means *one more hop*, and the path anchor is what tells them
+apart.
+
+`multi_hop` does not move from anything in the read path, and the issue's own measurement
+says why: the answer is already retrieved — rank 1 for the Atlas question at the shipped
+defaults — and the adapter takes rank 0 and stops. The intent-gate repair in this same
+series (#150: a question names a predicate in whatever form it inflects it, and a chain
+that also names an instant keeps the walk) changes which questions walk and not that row.
+`bench/multihop.py` at 1,000 staff is byte-identical before and after, because its
+questions already name their predicates in the stored form.
+
 ### The temporal leg, and the abstention that is the actual finding
 
 `w_temporal > 0` adds a fourth leg over **raw turns**: the ones nearest in time to the

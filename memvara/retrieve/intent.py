@@ -34,6 +34,7 @@ from enum import Enum
 
 from typing import TYPE_CHECKING, Callable, Iterable, Mapping
 
+from ..schema import word_stem
 from .analyze import STOPWORDS, tokenize
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, annotation only
@@ -254,8 +255,17 @@ def _content(predicate: str) -> frozenset[str]:
     Every token has to be present, which is what keeps this from collapsing into a token
     index: `country_of_citizenship` needs both `country` and `citizenship`, so a question
     mentioning a country does not thereby name the predicate.
+
+    Stemmed, because a question inflects what a predicate name does not. `team_lead` is
+    asked as "who *leads* the team", `deploy_region` as "where is it *deployed*", `owned_by`
+    as "the team that *owns* it" — and on the Agent Memory Benchmark four of the six
+    chained questions named their second predicate only in a form the exact match could
+    not see, so the gate read each of them as a question about one slot. The fold is
+    `schema.word_stem`, the same one the registry uses to decide that `employer` and
+    `employed_by` are one predicate, applied to both sides so it only has to agree with
+    itself.
     """
-    return frozenset(t for t in tokenize(predicate.replace("_", " "))
+    return frozenset(word_stem(t) for t in tokenize(predicate.replace("_", " "))
                      if t not in STOPWORDS)
 
 
@@ -269,7 +279,7 @@ def _named_in(query: str, spoken: "Mapping[str, str] | Iterable[str]",
     read almost every query as naming several predicates — the opposite failure to the one
     this fixes, and visible only as latency.
     """
-    tokens = set(tokenize(query))
+    tokens = {word_stem(t) for t in tokenize(query)}
     pairs = (spoken.items() if isinstance(spoken, Mapping)
              else ((phrase, phrase.replace(" ", "_")) for phrase in spoken))
     # One entry per *thing the question said*, not per predicate that answers to it.
@@ -365,18 +375,50 @@ def classify(query: str, registry: "PredicateRegistry | None" = None) -> Intent:
     <Intent.OPEN: 'open'>
     """
     tokens = set(tokenize(query))
-    if tokens & TEMPORAL_MARKERS or any(_YEAR.match(t) for t in tokens):
+    if _about_time(tokens):
         return Intent.TEMPORAL
-    if (tokens & RELATIONAL_MARKERS or len(_POSSESSIVE.findall(query)) > 1
-            or _BETWEEN_AND.search(query)
-            or (registry is not None and not is_comparison(query)
-                and len(predicate_refs(query, registry)) > 1)):
+    if _about_a_relation(query, tokens, registry):
         return Intent.RELATIONAL
     if tokens & LOOKUP_MARKERS:
         # A pointed question with no time and no relation in it. One row answers it, and
         # the two lookup legs are what find that row.
         return Intent.LOOKUP
     return Intent.OPEN
+
+
+def is_relational(query: str, registry: "PredicateRegistry | None" = None) -> bool:
+    """Would this query be `RELATIONAL`, if time were not being asked about as well?
+
+    `classify` returns one label and time outranks relation, so a question that is about
+    both — "who *currently* leads the team that owns the checkout service" — reads as
+    `TEMPORAL`, and that row's multipliers switch the graph leg off. This is the second
+    reading, kept available so the retriever can honour both: the temporal row still
+    decides the other legs, and the walk runs because the question is also a chain. It
+    is the same repair `HybridRetriever._weights` already made for a caller who named an
+    instant as an argument rather than in words.
+
+    >>> is_relational("who currently leads the team that owns the checkout service?")
+    False
+    >>> is_relational("who is my manager's manager?")
+    True
+
+    The first is `False` without a registry because nothing in it is in the relational
+    vocabulary: "leads" and "owns" name predicates, and only a registry can say so.
+    """
+    return _about_a_relation(query, set(tokenize(query)), registry)
+
+
+def _about_time(tokens: set[str]) -> bool:
+    return bool(tokens & TEMPORAL_MARKERS) or any(_YEAR.match(t) for t in tokens)
+
+
+def _about_a_relation(query: str, tokens: set[str],
+                      registry: "PredicateRegistry | None") -> bool:
+    return bool(
+        tokens & RELATIONAL_MARKERS or len(_POSSESSIVE.findall(query)) > 1
+        or _BETWEEN_AND.search(query)
+        or (registry is not None and not is_comparison(query)
+            and len(predicate_refs(query, registry)) > 1))
 
 
 #: Per-intent multipliers on the retriever's configured leg weights.
