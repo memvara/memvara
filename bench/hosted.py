@@ -338,6 +338,10 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
     # dump/answers files directly.
     if args.seed_from_recalled:
         if args.answers:
+            if not args.dump:
+                raise SystemExit("--answers needs --dump PATH: the dump phase one "
+                                 "wrote, so judgments can be matched back to "
+                                 "their queries")
             if not args.judged:
                 raise SystemExit("--answers needs --judged YYYY-MM-DD: a judgment "
                                  "ages as the store changes, and the date is how "

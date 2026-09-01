@@ -292,6 +292,9 @@ def test_seed_dump_samples_filters_and_shuffles_deterministically(tmp_path):
     # not reach a judge (it would waste the judging budget the seeding spends).
     assert n == 2 and len(rows) == 2
     assert all("Extract durable facts" not in r["query"] for r in rows)
+    # Blinding is the mechanism this helper rests on: a dump row must carry
+    # only the query, never a results/seen field a judge could be anchored by.
+    assert all(set(r.keys()) == {"id", "query"} for r in rows)
     dump2 = tmp_path / "pairs2.jsonl"
     hosted.seed_dump(d, dump2, sample=10, seed=7)
     assert dump.read_text() == dump2.read_text(), "same seed, same dump"
@@ -311,4 +314,16 @@ def test_seed_answers_turns_judgments_into_probes(tmp_path):
     assert by_class["ambiguous"]["gold"] == ["cl_a"]
     assert by_class["ambiguous"]["judged"] == "2026-09-01"
     assert by_class["abstain"]["gold"] == []
+    assert "judged" not in by_class["abstain"], (
+        "a judgment date belongs only to ambiguous probes; a stale judged "
+        "leaking onto an abstain row must not pass silently")
     assert len(probes) == 2, "a skipped row produces no probe"
+
+
+def test_main_seed_answers_without_dump_refuses(tmp_path):
+    answers = tmp_path / "answers.jsonl"
+    answers.write_text(json.dumps({"id": "d1", "gold": []}) + "\n")
+    with pytest.raises(SystemExit, match="--dump") as exc:
+        hosted.main(["--seed-from-recalled", str(tmp_path), "--answers",
+                     str(answers), "--judged", "2026-09-01"])
+    assert "--dump" in str(exc.value)
