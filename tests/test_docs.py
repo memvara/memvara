@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from memvara.server.config import _BACKENDS
 from memvara.server.tools import TOOLS
 
 from test_doc_links import ROOT, anchors
@@ -123,6 +124,28 @@ def test_the_docs_mcp_page_names_every_tool_the_server_serves() -> None:
     assert seen == [t.name for t in TOOLS], (
         "the page must name every tool, once, in the order the server declares them; "
         f"got {seen}")
+
+
+def test_the_deploy_page_names_every_backend_the_server_accepts() -> None:
+    """`docs/DEPLOY.md`'s environment table states the `MEMVARA_LLM` vocabulary.
+
+    Checked against `_BACKENDS` rather than against a second copy of the list in this
+    file, because the referent is what the server actually accepts. The sibling guard
+    above does the same for the tool table, and its absence here is exactly how the
+    table came to say `none` or `anthropic` for a release in which `openai` also worked:
+    a reader was told the value they needed was not a value.
+
+    Stated positively, so a row that stops naming a backend fails as loudly as one that
+    names the wrong set.
+    """
+    page = (ROOT / "docs" / "DEPLOY.md").read_text(encoding="utf-8")
+    row = next((line for line in page.splitlines()
+                if line.startswith("| `MEMVARA_LLM` |")), None)
+    assert row is not None, "docs/DEPLOY.md must carry a `MEMVARA_LLM` row"
+    missing = [b for b in _BACKENDS if f"`{b}`" not in row]
+    assert not missing, (
+        f"docs/DEPLOY.md's MEMVARA_LLM row must name every backend in _BACKENDS; "
+        f"missing {missing}")
 
 
 #: Documents that are not on a reader's path through the product, and are excluded from
