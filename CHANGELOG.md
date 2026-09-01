@@ -95,6 +95,58 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   in production — with no guard at all. Three now exercise `_open_store` against
   real stores under `tmp_path`.
 
+- **`bench/hosted.py --db PATH` read the wrong scope, and said nothing about it.**
+  `_open_store` built its `Memvara` with no scope, so it opened at
+  `tenant="default"`. Against a real store whose claims all live under a named
+  tenant, the tool's own documented invocation exited 0 and printed nothing at all
+  — `--draft` emitted no rows and the fingerprint recorded `claims: 0`, which is
+  byte-for-byte what a genuinely empty store prints. A wrongly-scoped store and an
+  empty one were indistinguishable in the output.
+
+  `--tenant` and `--user` now say which scope to read at, and the ambiguity is
+  closed from the other side too: a `--db` run that can see no claims while the
+  file itself holds live ones says so, naming both numbers and the scope it read
+  at. The whole-file count comes from the unfiltered `SQLiteStore.stats(None)`, so
+  the question is put only to a local store — unfiltered counts disclose how much
+  data other tenants hold, and `RemoteMemvara` talks to a shared server. The
+  warning goes to **stderr**: `--draft` and the seeding phases write JSONL to
+  stdout and a person redirects that into a probe file, so a warning on stdout
+  would corrupt the file it exists to help them build. The exit code is unchanged
+  — this tool has no pass/fail status.
+
+  Both numbers are *live* claims. `count()` resolves its states through
+  `resolve_states(None, None)`, which is `("live",)`, so the whole-file figure is
+  `live_claims` and not `claims` — the latter counts every row in the table,
+  retired and ended included, and comparing against it fires on a store whose
+  facts are all at the right tenant but retired, advising a re-scope that cannot
+  help. Both figures compile from the same `base.state_predicate` at the same one
+  state, so they line up by construction; measured across retired, superseded,
+  ended and not-yet-valid claims, `count()` and `live_claims` agreed on every one
+  while `claims` did not. A backend whose `stats` predates `live_claims` gets
+  silence rather than a fallback to `claims`, which would reinstate the false
+  positive on exactly the backends nobody tests.
+
+  `--tenant` is refused without `--db` rather than accepted and ignored. The
+  parameter exists on `RemoteMemvara` and is never sent, because the facade
+  resolves the tenant from the bearer token, so forwarding it would have moved
+  what a run records about itself without moving what it read. `--user` is a real
+  narrowing and applies to both routes. No `--agent` or `--session` was added:
+  nothing has asked for them, and a flag that exists only for symmetry is a
+  surface to keep working for no reader.
+
+  The run fingerprint records the scope alongside the claim count, embedder and
+  surface, and `--compare`'s drift banner covers the two new keys the same way:
+  two runs at different scopes read two different populations out of one file, and
+  their deltas are not a before/after. A result file written before those keys
+  existed records neither, so comparing one against a newer file warns
+  `tenant None -> ...` — a true statement about what the earlier run failed to
+  record, and the conservative direction for a warning whose job is to say these
+  two may not be comparable.
+
+  Found the same way as the defect above, by running the shipped tool against a
+  real store, which no test does. Eight tests now cover the scope, each proven able
+  to fail by breaking what it watches.
+
 - **`CachedEmbedder.encode` raised `KeyError` on a batch larger than the cache**, on keys
   it had written itself moments earlier. Once the cache is full each insert evicts the
   oldest entry, and within a single call the oldest entries are that same call's — so a

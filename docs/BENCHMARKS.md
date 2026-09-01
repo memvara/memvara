@@ -884,7 +884,50 @@ claims on predicates outside the declared vocabulary and a join rate of 0.5%.
 
     # a local store file — `--db` is the only way to reach one
     PYTHONPATH=. python3 bench/hosted.py --db ~/.memvara/store.db \
-        --probes ~/.memvara/probes.jsonl
+        --tenant workstation --probes ~/.memvara/probes.jsonl
+
+`--tenant` and `--user` say which scope to read the file at, and default to
+`default` and the whole tenant. A store file is not one population: scopes
+inherit upward, so a run reads the claims visible at the scope it opened, and a
+file whose claims all live under one named tenant answers *nothing* at
+`default`. That is not hypothetical — it is what a real store did, silently:
+`--draft` printed no rows, the run exited 0, and the fingerprint said `claims:
+0`, which is exactly what an empty store prints.
+
+So a `--db` run that can see nothing while the file itself holds live claims
+now says so, on **stderr**, naming both numbers and the scope:
+
+    WARNING: this store holds 1240 live claims and none of them are visible at
+    scope default/*/*/* — every probe will miss and --draft will print nothing.
+    Re-run with --tenant/--user naming the scope the claims are under.
+
+Both numbers are *live* claims. `count()` resolves its states to `("live",)`,
+so the whole-file figure is `stats(None)["live_claims"]` and not `claims`,
+which counts retired and ended rows too. Comparing against `claims` would fire
+on a store whose facts are all at the right tenant but retired — telling
+someone to re-scope when nothing is misscoped. A backend whose `stats` predates
+`live_claims` gets silence rather than a fallback, for the same reason.
+
+stderr rather than stdout because `--draft` and the seeding phases write JSONL
+to stdout and you redirect that into a file; a warning on stdout would corrupt
+the probe file it exists to help you build. The exit code does not change —
+this tool has no pass/fail status — and the warning fires on both the `--draft`
+path and a scoring run whose table would read `0 claims`.
+
+It is asked only of a local store. The whole-file count comes from
+`SQLiteStore.stats(None)`, the unfiltered call, and unfiltered counts disclose
+how much data other tenants hold; `RemoteMemvara` talks to a shared
+multi-tenant server, so that question is never put to it and no warning is
+issued there. `--tenant` is likewise refused without `--db`, rather than
+accepted and ignored: the hosted facade resolves the tenant from your
+credential and the client never sends the parameter, so honouring the flag
+there would change what a run records about itself without changing a byte of
+what it read. `--user` is a real narrowing and applies to both routes.
+
+The scope is recorded in the run's fingerprint alongside the claim count,
+embedder and surface, and `--compare` warns on it: two runs at different scopes
+read two different populations out of one file and their deltas are not a
+before/after.
 
 `--db` opens the store with the embedder that **wrote** it, read back from the
 fingerprint the library records beside the file, not with `default_embedder()` —
