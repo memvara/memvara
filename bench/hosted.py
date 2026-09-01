@@ -178,7 +178,11 @@ def render_table(agg: dict, fingerprint: dict) -> str:
             a = agg[cls]
             rank = (f"  mean gold-rank {a['mean_gold_rank']:.1f}"
                     if a["mean_gold_rank"] is not None else "")
-            lines.append(f"  {cls:<9} {a['n']:>3}   hit@k {a['hit_at_k']:.1%}{rank}")
+            # verbatim only counts a hit at rank 1 exactly, never at rank k —
+            # "hit@k" would misdescribe it. self-retrieval@1 is the design
+            # doc's own name for this metric.
+            label = "self-retrieval@1" if cls == "verbatim" else "hit@k"
+            lines.append(f"  {cls:<9} {a['n']:>3}   {label} {a['hit_at_k']:.1%}{rank}")
     if "abstain" in agg:
         a = agg["abstain"]
         lines.append(f"  {'abstain':<9} {a['n']:>3}   false-injection "

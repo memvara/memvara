@@ -194,6 +194,7 @@ def test_store_fingerprint_names_what_a_drift_warning_needs(planted):
 def test_render_table_states_every_metric_present():
     agg = {
         "hit": {"n": 2, "hit_at_k": 0.5, "mean_gold_rank": 1.0},
+        "verbatim": {"n": 1, "hit_at_k": 1.0, "mean_gold_rank": 2.0},
         "abstain": {"n": 2, "false_injection_rate": 1.0, "headroom": [0.45, 0.31]},
     }
     fp = {"claims": 10, "surface": "local", "when": "2026-09-01T00:00:00",
@@ -201,6 +202,12 @@ def test_render_table_states_every_metric_present():
     table = hosted.render_table(agg, fp)
     # Positive statements, so a deleted line fails as loudly as a wrong one.
     assert "hit@k" in table and "50.0%" in table
+    assert "mean gold-rank 1.0" in table, "gold-rank must be visible — agg sets it, the render must show it"
+    assert "verbatim" in table
+    assert "self-retrieval@1" in table, (
+        "verbatim only hits at rank 1 exactly, never at rank k — the generic "
+        "hit@k label misdescribes it; the design doc names this self-retrieval@1")
+    assert "mean gold-rank 2.0" in table
     assert "false-injection" in table and "100.0%" in table
     assert "0.45" in table, "headroom must be visible — it is the abstain fix's brief"
     assert "10 claims" in table
