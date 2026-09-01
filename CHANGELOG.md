@@ -67,6 +67,34 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`bench/hosted.py --db PATH` could not open the store it exists to measure.**
+  `_open_store` built `Memvara(path)` with no `embedder=`, so it took
+  `default_embedder()` — a 384-dimensional sentence-transformers model wherever
+  `memvara[local-embed]` is installed. Against a store written by the
+  512-dimensional fallback that is `EmbedderMismatchError` before the first probe
+  runs, which is what the tool's own documented local invocation did on a real
+  store.
+
+  It now opens with the embedder that *wrote* the store, read back from the
+  fingerprint the library records beside the file. A hashing embedder is
+  reconstructed from its recorded name — `hashing:<dim>:<lo>-<hi>` carries every
+  parameter of its vector space — and the reconstruction is checked against
+  `fingerprint_of` rather than trusted. The record binds only while the store holds
+  vectors, which is the condition `Memvara._check_embedder` skips its own
+  compatibility check on: a sidecar outliving its store must not refuse an empty
+  store, nor silently open a new one at a stale dimension. A store with nothing on
+  record, or nothing binding, still takes the library default, unchanged. Anything else is opened only when
+  `default_embedder()` is itself what wrote the store, so the sentence-transformers
+  case keeps working, and is otherwise refused by name: a `local:MODEL` fingerprint
+  names a model but building one would mean this bench deciding to import torch and
+  fetch weights on somebody's behalf, and at equal width a wrong embedder raises
+  nothing while every score compares unrelated vector spaces.
+
+  No test caught it because every test in `tests/test_bench_hosted.py` injects
+  `mem=`, leaving the store-opening path — the one piece of the tool that only runs
+  in production — with no guard at all. Three now exercise `_open_store` against
+  real stores under `tmp_path`.
+
 - **`CachedEmbedder.encode` raised `KeyError` on a batch larger than the cache**, on keys
   it had written itself moments earlier. Once the cache is full each insert evicts the
   oldest entry, and within a single call the oldest entries are that same call's — so a

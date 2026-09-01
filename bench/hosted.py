@@ -17,6 +17,7 @@ import inspect
 import json
 import os
 import random
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -498,10 +499,118 @@ def seed_answers(dump_path: Path, answers_path: Path, judged: str) -> list[dict]
     return probes
 
 
+#: A `HashingEmbedder`'s recorded name. Every parameter that defines its vector
+#: space is in the string — `hashing:<dim>:<lo>-<hi>`, built by
+#: `HashingEmbedder.name` in `memvara/embed/base.py`, which says the dimension and
+#: the n-gram range both belong in the fingerprint — so the name is enough to
+#: construct the embedder back, and the reconstruction is checked against
+#: `fingerprint_of` rather than trusted.
+_HASHING_NAME = re.compile(r"^hashing:(\d+):(\d+)-(\d+)$")
+
+
+def _store_embedder(store: Any) -> Any:
+    """The embedder this store's vectors were written by, or None to let the library pick.
+
+    `Memvara(path)` with no embedder takes `default_embedder()`, which returns a
+    384-dimensional sentence-transformers model as soon as that package is
+    importable and a 512-dimensional `HashingEmbedder` otherwise. So on a machine
+    with the extra installed, `--db` against a store built by the fallback opened
+    with `EmbedderMismatchError: ... holds 512-dimensional vectors ... but the
+    configured embedder is local:... (dim 384)`. The tool could not open the store
+    it exists to measure, and nothing caught it because every test injects `mem=`.
+
+    The store records who wrote it — that is how the library detects the mismatch —
+    so this reads that record back and honours it, on exactly the condition
+    `Memvara._check_embedder` honours it on. Three answers, in order:
+
+    * **Nothing binding**: None, which is today's behaviour unchanged, and the
+      library's own dimension check still stands behind it. Either there is no
+      record (no sidecar, an older store, a copy taken without it) *or* there are
+      no vectors for a record to describe.
+    * **A hashing embedder**: reconstructed from the name. `fingerprint_of` is then
+      asked whether the reconstruction *is* what the store records, so a sidecar
+      whose name and dim disagree falls through rather than opening a store with an
+      embedder that merely looks right.
+    * **Anything else**: `default_embedder()` is used only when it is itself what
+      wrote the store — the sentence-transformers case, which works today and must
+      keep working — and otherwise this refuses.
+
+    **The record only binds while the store has vectors.** `_check_embedder` reads
+    `stored_dim(self.store)` alongside the fingerprint and, when it is `None`,
+    skips the compatibility check outright: a store with nothing in it has nothing
+    to be incompatible with, and the embedder in hand simply becomes its owner.
+    Reading the sidecar without asking the same question regressed two cases the
+    pre-fix one-liner handled correctly, because it never read the sidecar at all —
+    an orphaned sidecar with no store behind it refused an empty store that would
+    have opened fine, and a reconstructable stale name silently opened a brand-new
+    store at the *old* dimension. `stored_dim` is read off the vectors themselves
+    and so cannot be stale; the sidecar can.
+
+    What it deliberately does not do is construct a `local:MODEL` name by hand.
+    The name does carry the model id, but building it means this bench deciding, on
+    someone's behalf, to import torch and possibly download a model — and if the
+    package is absent the answer is not a guess this tool gets to make. Where
+    `default_embedder()` already returns that model, the branch above covers it.
+    """
+    from memvara.embed import HashingEmbedder, default_embedder
+    from memvara.embed.fingerprint import fingerprint_of, read_fingerprint, stored_dim
+
+    recorded = read_fingerprint(store)
+    if recorded is None or stored_dim(store) is None:
+        return None
+
+    match = _HASHING_NAME.match(recorded.name)
+    if match:
+        dim, lo, hi = (int(g) for g in match.groups())
+        candidate = HashingEmbedder(dim=dim, ngram=(lo, hi))
+        if fingerprint_of(candidate) == recorded:
+            return candidate
+
+    fallback = default_embedder()
+    if fingerprint_of(fallback) == recorded:
+        return fallback
+
+    # `store.path`, unguarded: a fingerprint was read, and `read_fingerprint` only
+    # locates a sidecar for a store that has a non-empty string path.
+    db = store.path
+    raise SystemExit(
+        f"{db}: these vectors were written by {recorded}, and this bench cannot "
+        f"construct that embedder. The embedder it would otherwise use is "
+        f"{fingerprint_of(fallback)}; opening with it raises EmbedderMismatchError "
+        "at a different width, and at the same width raises nothing while every "
+        "score compares two unrelated vector spaces.\n"
+        "If that name is a model you have not installed, install it — "
+        "pip install 'memvara[local-embed]' for a 'local:' name — and re-run. "
+        "Otherwise open the store yourself and hand it in:\n"
+        "    import bench.hosted as hosted\n"
+        "    from memvara import Memvara\n"
+        f"    hosted.main([...], mem=Memvara({db!r}, embedder=<{recorded.name}>))")
+
+
 def _open_store(args: argparse.Namespace) -> Any:
+    """The store to measure: a local file under `--db`, else the hosted deployment.
+
+    `--db` opens with the embedder the store was built with (`_store_embedder`),
+    not with whatever `default_embedder()` returns in this process.
+
+    The `SQLiteStore` is built here rather than left to `Memvara(path)` because
+    deciding the embedder means reading the store — both its recorded fingerprint
+    and, decisively, whether it holds any vectors for that record to describe. One
+    store object answers that question and then goes on to be the one measured, so
+    there is no second open and no chance of the two disagreeing. `Memvara.close()`
+    closes it, which is what the `finally` in `main` already relies on; a refusal
+    happens before any `Memvara` exists, so it closes the store itself.
+    """
     if args.db:
         from memvara import Memvara
-        return Memvara(args.db)
+        from memvara.store import SQLiteStore
+        store = SQLiteStore(args.db)
+        try:
+            embedder = _store_embedder(store)
+        except BaseException:
+            store.close()
+            raise
+        return Memvara(store=store, embedder=embedder)
     from memvara.remote.api import RemoteMemvara
     return RemoteMemvara()
 
