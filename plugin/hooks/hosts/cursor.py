@@ -78,9 +78,16 @@ HOST = Host(
     #: Claude Code's `message.content` blocks, with the speaker under `role` rather than
     #: `type`. One field, not a reader.
     transcript=TranscriptSpec(format="jsonl", role_key="role"),
-    #: Cursor names its shell tool in `tool_name` on preToolUse; the list grows as more are
-    #: seen rather than being guessed ahead of them.
-    tools=frozenset({"Shell", "Read", "Edit", "Write"}),
+    #: Observed on `preToolUse`, and filtered by what this field MEANS -- the tools whose
+    #: use is evidence a turn did something. A probe that read, wrote and ran a command
+    #: reported `Grep`, `Read`, `Shell` and `Write`; only the last two are evidence, so
+    #: the reads are excluded exactly as Claude Code's record excludes its own.
+    #:
+    #: An earlier draft listed `Edit` too. Cursor has no such tool -- it appended with
+    #: `Write` -- and it listed `Read`, which would have put every file this agent opened
+    #: into the mined turn as if it were work. Both were guesses in a record whose
+    #: docstring claims measurement. The list grows as more are seen.
+    tools=frozenset({"Shell", "Write"}),
     #: Cursor wraps every user message in `<user_query>` and prefixes a `<timestamp>` line.
     #: Those are NOT listed as noise on purpose: `_clean` drops a whole block that contains
     #: a marker, so naming the tag that wraps every prompt would discard every prompt.

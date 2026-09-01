@@ -49,7 +49,17 @@ def read_event(host, hook: str, raw) -> "Event":
     def pick(field: str) -> str:
         for key in host.fields.get(field, ()):
             if key in data:
-                return str(data.get(key) or "")
+                value = data.get(key)
+                if isinstance(value, (list, tuple)):
+                    # A host may send a field as a list where every consumer expects one
+                    # string: Cursor has no `cwd` and sends `workspace_roots: [path]`.
+                    # Without this, `str(value)` handed the bodies "['/a/b']" -- a string
+                    # that is not a path, which survived only because `project_subject`
+                    # takes a basename, and picked the LAST root on a multi-root
+                    # workspace. First element, because that is the one a host lists first
+                    # and the one a single-root workspace has.
+                    value = value[0] if value else ""
+                return str(value or "")
         return ""
 
     return Event(
