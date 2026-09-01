@@ -199,6 +199,226 @@ writes with a "Generated with Claude Code" line. The rule against that is absolu
 lives in `~/.claude/CLAUDE.md`. Prefer `--fix` and a summary in your own words; if you do
 post, read what you are posting first.
 
+## A validation result belongs to a code state, not to a commit or a conversation
+
+`mypy` and the coverage suite read file contents. They do not read commit messages, branch
+names or your place in a workflow. So a passing result stays valid until the contents they
+read change, and these are **not** reasons to run either of them again:
+
+- a code review finished, and changed nothing;
+- the session resumed, or you are picking work back up;
+- a commit was made, amended or squashed;
+- the branch was rebased;
+- the same command already ran in an earlier phase of this task.
+
+The suite here is the expensive one — it runs under coverage gated at 100%, and
+`--doctest-modules` puts every docstring in the package through it as well. Running it
+twice on the same bytes buys nothing.
+
+### The fingerprint is the working tree, hashed
+
+Paste this once per session. It hashes the *contents* of every tracked and every
+untracked-but-not-ignored file under the paths you give it:
+
+```bash
+fp() {
+  local root out
+  root=$(git rev-parse --show-toplevel) || return 1
+  out=$(cd "$root" && git ls-files -co --exclude-standard -z -- "$@" \
+        | LC_ALL=C sort -z | xargs -0 git hash-object) || {
+    echo "fp: hashing failed (is a tracked file deleted from the working tree?)" >&2
+    return 1; }
+  [ -n "$out" ] || { echo "fp: no files matched: $*" >&2; return 1; }
+  printf '%s\n' "$out" | git hash-object --stdin
+}
+
+td() { printf '%s' "$*" | git hash-object --stdin | cut -c1-12; }
+```
+
+No commit SHA enters that pipeline, which is the whole point: `git hash-object <file>`
+hashes the file on disk, not the blob in the index. Rebase, amend and squash rewrite
+history without touching the working tree, so they cannot move the number. A `git add`
+cannot move it either — the file is hashed whether or not it is staged, so an uncommitted
+edit is caught. Verified against all four: a working-tree edit moves it, a new untracked
+file moves it, restoring the file returns it to the original digest, and committing does
+not change it.
+
+**The three guards are not decoration — each closes a silent false pass**, and each was
+reproduced before being written down.
+
+*It refuses to return a digest for nothing.* The naive one-liner pipes an empty file list
+into `git hash-object --stdin`, which happily hashes empty input and returns
+`e69de29bb2d1d6434b8b29ae775ad8c2e48c5391` with exit status 0. Two different typos in the
+path arguments produce that same digest, so one mistyped input set records a checkpoint that
+every later mistyped check matches — the validation then never runs again.
+
+*It fails when a tracked file is missing from the working tree.* `git ls-files -c` still
+lists a file you deleted without `git rm`, and `git hash-object` aborts the entire `xargs`
+batch at the first unreadable path — so every file sorted after it is silently dropped from
+the digest. Reproduced on a scratch repository: with `b.txt` deleted, editing `d.txt` left
+the digest identical. Every edit to those files would have been invisible.
+
+*It hashes from the repository root.* Both `.` and `':!CLAUDE.md'` resolve against the
+current directory, so the same command run from `tests/` covers 51 files instead of 221 and
+returns a different, entirely valid-looking digest. `cd "$root"` makes the input sets below
+mean the same thing wherever you run them.
+
+`td` exists because the fingerprint is only half the state; see the checkpoint rules.
+
+
+### The two input sets
+
+| validation | command | `fp` arguments |
+| --- | --- | --- |
+| `mypy` | `python3 -m mypy -p memvara` | `memvara pyproject.toml` |
+| `gate` | `python3 -m coverage run -m pytest && python3 -m coverage report` | `. ':!CLAUDE.md'` |
+
+**The gate's input set is the whole repository, and that is a measurement rather than
+laziness.** The tests here read far more than `tests/` and `memvara/`:
+`tests/test_doc_links.py` globs `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`,
+`SECURITY.md` and all of `docs/*.md`; `tests/test_plugin.py` reads
+`memvara/skills/memvara/SKILL.md`, `plugin-claude.md`, `plugin-repos.txt` and the plugin
+`README.md`; `tests/test_packaging.py` pins a version string in `README.md`; and the
+doc-link tests stat `bench/`, `demo/` and `scripts/` to check that link targets exist. A
+shorter list is one I cannot prove, and a wrong narrowing produces a *false pass* — the
+gate skipped on the strength of a fingerprint that did not cover what changed. Under-hitting
+costs a suite run. Over-hitting ships the broken link that `test_doc_links.py` exists to
+catch.
+
+So **a documentation change does invalidate the gate here.** That is the opposite of the
+usual rule, and it is a property of this repository's tests rather than a general truth.
+
+`CLAUDE.md` is the single exclusion, because no test reads it — checked across `tests/`,
+where every `CLAUDE.md` hit is either prose in a docstring or a `tmp_path` fixture written
+by `tests/test_init.py`. **If you ever add a test that reads the root `CLAUDE.md`, delete
+the `':!CLAUDE.md'` from the table in the same commit**, or every edit to this file will
+silently authorise skipping the gate.
+
+### Recording a checkpoint
+
+State lives in `local/validation-checkpoints`, which is outside the commit — `/local/` is
+ignored whole — and outside the build, so nothing here reaches an sdist. One line per
+passing run, appended:
+
+```
+<validation> <fingerprint> <tool-digest> pass <timestamp> <tool versions>
+```
+
+The first three fields are the key, and all three have to match before a result is reused.
+Compute them into shell variables first, so that a failing `fp` aborts the line instead of
+letting an empty digest reach `grep`:
+
+```bash
+V=mypy; T="$(python3 -m mypy --version)"
+FP=$(fp memvara pyproject.toml) && TD=$(td "$T")
+```
+
+```bash
+V=gate; T="$(python3 -m coverage --version | head -1) / $(python3 -V)"
+FP=$(fp . ':!CLAUDE.md') && TD=$(td "$T")
+```
+
+Both are written out because the second is easy to improvise wrongly: `coverage --version`
+prints `Coverage.py, version 7.15.4 with C extension`, so the version is the third field and
+not the second. Then the check and the record are the same two commands either way:
+
+```bash
+grep -q "^$V $FP $TD pass " local/validation-checkpoints 2>/dev/null \
+  && echo "reuse: $V already passed for this code state, with this toolchain"
+```
+
+```bash
+mkdir -p local && printf '%s %s %s pass %s %s\n' "$V" "$FP" "$TD" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$T" >> local/validation-checkpoints
+```
+
+Four rules hold the thing up.
+
+**Only a pass is ever recorded.** A failure needs a fix, and the fix moves the fingerprint,
+so there is nothing to cache. That makes a missing entry unambiguous: it means *run it*.
+
+**Never write a checkpoint for a run whose output you did not read.** A checkpoint is a
+claim that you saw a number, so the exit status is not enough: an earlier session recorded a
+local gate run here exiting 139 after the tests had passed but before `coverage report`
+printed anything, which is why `CONTRIBUTING.md` spells the gate as two commands rather than
+one. A checkpoint written from that would record a coverage gate that never reached a
+verdict. Read the percentage, then write the line.
+
+**The toolchain is part of the key, not just the record.** `pyproject.toml` pins
+`mypy>=1.8` rather than an exact version, so upgrading the checker can produce new errors on
+unchanged code — the installed one here is already 2.3.0. Recording the version is not
+enough to prevent that: a check keyed on the fingerprint alone still hits after an upgrade,
+which was measured by rewriting a recorded version and watching the reuse check succeed.
+That is what `td` closes. The digest of the version string sits in the key, so upgrading
+mypy misses and the checker runs again.
+
+**In a worktree, pin `PYTHONPATH` before you run anything you intend to record.** The
+editable install on this machine points at the main checkout, so a bare `pytest` in a
+worktree can import `memvara` from there instead — passing against code you did not write
+and did not fingerprint. That is the one way to get a false pass that the fingerprint cannot
+catch, because the fingerprint measured this worktree while the suite measured another. Run
+`export PYTHONPATH="$PWD"` first, and confirm it took:
+
+```bash
+python3 -c "import memvara; print(memvara.__file__)"
+```
+
+### Rebase, review, and the final check
+
+After a rebase, compute the fingerprint and compare it — do not reflexively rerun. A rebase
+that only replayed commits leaves the number alone and every checkpoint stands. If conflict
+resolution edited source, that is an ordinary code change and the number moves on its own;
+you do not need to reason about which files git touched.
+
+After a review, the same. A review that changed nothing invalidates nothing. A review whose
+fixes you applied has already changed the fingerprint.
+
+Before you say the work is done, check both entries against the current fingerprint and run
+whichever is missing. The last code state has to have a passing `mypy` **and** a passing
+gate recorded against it — the point of all this is to validate each code state once, not
+to skip validating the one that ships.
+
+
+### How this sits with the rules above
+
+Five rules elsewhere in this file predate this section and one of them can be read against
+it. None is weakened here; each is worth stating precisely, because an ambiguity between
+two instructions is resolved by whichever the reader happens to hit first.
+
+**"Fix everything it finds, then re-run the gate" still means what it says.** Applying
+review fixes edits source, which moves the fingerprint, so the gate is stale and has to
+run — this section agrees and does not soften it. What it rules out is treating *the
+review itself* as the trigger. A review that changed nothing leaves every checkpoint
+standing; a review whose fixes you applied has already invalidated them without anyone
+having to decide.
+
+**"Ensure tests pass before and after" (§4) costs one run, not two,** when the "before"
+state already has a checkpoint. The requirement is evidence at both ends, not two
+executions of the same command against identical bytes.
+
+**Reporting a reuse in the PR body.** `CONTRIBUTING.md` and the review section both expect
+the PR body to say what was run. A reused result still has to appear there, and it is
+written as a reuse rather than dressed up as a fresh run: name the validation, the
+fingerprint it passed against, and when. "gate reused from the checkpoint recorded against
+f0031a8f; mypy re-run, clean" is a complete and honest sentence. What is not acceptable is
+a PR body that implies a run you did not make — the record exists so a reader knows what
+was verified, and a reused pass is a real answer to that.
+
+**"Verify means comparing an output, never that a command exited 0" is the reason this
+works, not an exception to it.** Reuse does not skip the comparison; it moves it. The
+checkpoint exists only because somebody read a number, and the fingerprint is the evidence
+that the number still describes this code. That is also why a checkpoint is never written
+from an exit status, and why a missing entry means run rather than assume.
+
+**The boundary against not running a check at all.** The Karpathy notes below say
+verification means comparing an output, and `~/.claude/CLAUDE.md` forbids making a check
+pass by removing what it was checking. This section is the only sanctioned reason in this
+repository to not run a gate now, so the line matters: reuse is permitted when the code
+state is byte-for-byte the one that already passed, and never otherwise. "The fingerprint
+moved but the change looks harmless" is not reuse — it is the judgement call the
+fingerprint exists to replace. When in doubt, the cost of running is a few minutes and the
+cost of a wrong skip is a merge nobody checked.
+
 ## What you learn here goes in Memvara
 
 Memvara is the memory store for work in this repository, reached through the plugin's MCP
