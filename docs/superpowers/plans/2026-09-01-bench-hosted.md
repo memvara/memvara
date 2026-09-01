@@ -10,6 +10,22 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-01-hosted-retrieval-bench-design.md` — read it first; every decision below argues from it.
 
+> **Superseded in two places, 2026-09-01.** This plan is kept as the record of what was
+> executed; the whole-branch review then found two premises in it that were false against
+> the tree, and the shipped code follows the corrected spec, not this document.
+>
+> 1. **"`recall()` has no floor."** It does. `plugin/hooks/recall.py` defines
+>    `MIN_SCORE = 0.29` and passes it at both call sites, and that shipped before this
+>    branch was cut. Every "false-injection is 100% by construction" line below — including
+>    the test comment quoted around the Task 3 verification step — is stale. The harness
+>    takes `--min-score`, defaulting to the hook's own constant.
+> 2. **"`RemoteMemvara` takes the same two calls."** It does not take `with_ids`, and
+>    `recall(..., with_ids=True)` raises `TypeError` against a hosted store. The harness
+>    now asks the signature and derives the injected set from `search()` on that route.
+>
+> Both were claims checked against a log and against an assumption rather than against
+> their referent, which is the failure mode this repository's `CLAUDE.md` names first.
+
 ## Global Constraints
 
 - Measurement only: no retrieval behaviour may change anywhere in `memvara/`.

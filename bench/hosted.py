@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import random
 import sys
@@ -21,9 +22,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-#: The recall hook's own K, mirrored so the default measurement is of what the
-#: hook actually injects. See plugin/hooks/recall.py.
+#: The recall hook's own `K` and `MIN_SCORE`, mirrored so the default measurement
+#: is of what the hook actually injects — not of an unfloored read path no shipped
+#: surface uses. `plugin/hooks/recall.py` passes `min_score=_min_score()` at both
+#: of its call sites, and `MIN_SCORE` is that function's default.
+#:
+#: Mirrored rather than imported because importing the hook runs
+#: `sys.path.insert(0, plugin/hooks)` at its own module scope, which would put
+#: generic package names (`core`, `lib`) on the path of every process that merely
+#: runs this bench. The copy is therefore checked against its referent instead of
+#: trusted: `tests/test_bench_hosted.py::test_bench_defaults_equal_the_hook_constants`
+#: imports the hook module and asserts both values match. Change one, that test
+#: goes red — it never compares this file against itself.
 DEFAULT_K = 4
+DEFAULT_MIN_SCORE = 0.29
 
 CLASSES = ("hit", "abstain", "verbatim", "ambiguous")
 
@@ -130,22 +142,79 @@ def aggregate(rows: "Sequence[dict]") -> dict:
     return out
 
 
-def run_probes(mem: Any, probes: "Sequence[dict]", *, k: int) -> list[dict]:
+def _names_what_it_rendered(mem: Any) -> bool:
+    """Whether this store's `recall()` can name the claims it injected.
+
+    `Memvara.recall` takes `with_ids` and returns a `RecallResult`;
+    `RemoteMemvara.recall` takes no such argument and returns a plain `str`
+    (`memvara/remote/api.py`). Asked of the signature rather than by catching
+    `TypeError`, because a `TypeError` raised *inside* `recall` would answer the
+    same way and quietly send the hosted run down the degraded path.
+    """
+    try:
+        return "with_ids" in inspect.signature(mem.recall).parameters
+    except (TypeError, ValueError):  # pragma: no cover - not a callable surface
+        return False
+
+
+def _injected_ids(recalled: Any, results: "Sequence[tuple[str, float]]",
+                  *, named: bool) -> list[str]:
+    """What the recall surface put in the prompt, as claim ids.
+
+    Two routes, and the difference is the reason this is a function.
+
+    `named` — the local engine — reads `claim_ids` off the `RecallResult`, and
+    **refuses** an object that does not carry them. There is no empty-list
+    fallback on purpose: `claim_ids` missing would score every abstain probe as
+    a pass and report a flawless 0% false-injection rate, which is precisely a
+    guard a deletion satisfies.
+
+    Otherwise — the hosted engine — `recall()` returns prose and names nothing,
+    so the injected set is taken from `search()` at the same `k` and
+    `min_score`. That is what `recall()` renders: `Memvara.recall` calls
+    `search(query, k=k, min_score=min_score, ...)` and renders those claim rows
+    in order. The cost is stated rather than hidden — on the hosted route this
+    measures the set `POST /v1/search` returns, not the block `POST /v1/recall`
+    actually rendered, so a server-side divergence between the two (rendering,
+    a budget this bench never asks for, episode handling) would not show up
+    here. `recall()` is still called on that route, so a hosted recall failure
+    still fails the run rather than passing unmeasured.
+    """
+    if not named:
+        return [cid for cid, _ in results]
+    claim_ids = getattr(recalled, "claim_ids", None)
+    if claim_ids is None:
+        raise SystemExit(
+            f"recall(with_ids=True) returned {type(recalled).__name__} with no "
+            "claim_ids: the injection surface cannot be read. Refusing rather "
+            "than treating it as an empty injection, which would score every "
+            "abstain probe as a pass and report 0% false injection.")
+    return list(claim_ids)
+
+
+def run_probes(mem: Any, probes: "Sequence[dict]", *, k: int,
+               min_score: float) -> list[dict]:
     """Every probe through both read surfaces, scored.
 
-    search() supplies ranks and scores; recall(with_ids=True) supplies what
-    would actually be injected. Both run per probe because they answer
-    different halves of the question (spec: a core ranking defect and a
-    surface gating defect must show up as different numbers).
+    search() supplies ranks and scores; recall() supplies what would actually
+    be injected. Both run per probe because they answer different halves of the
+    question (spec: a core ranking defect and a surface gating defect must show
+    up as different numbers).
+
+    `min_score` goes to both, and defaults at the CLI to the recall hook's own
+    `MIN_SCORE`. Measuring an unfloored read path would measure a configuration
+    no shipped surface uses.
     """
+    named = _names_what_it_rendered(mem)
     rows: list[dict] = []
     for probe in probes:
         t0 = time.perf_counter()
         results = [(r.claim.id, r.score)
-                   for r in mem.search(probe["query"], k=k)]
-        recalled = mem.recall(probe["query"], k=k, with_ids=True)
+                   for r in mem.search(probe["query"], k=k, min_score=min_score)]
+        extra = {"with_ids": True} if named else {}
+        recalled = mem.recall(probe["query"], k=k, min_score=min_score, **extra)
         elapsed = (time.perf_counter() - t0) * 1000.0
-        injected = list(getattr(recalled, "claim_ids", []) or [])
+        injected = _injected_ids(recalled, results, named=named)
         row = score_probe(probe, results, injected)
         row["results"] = [[cid, round(score, 4)] for cid, score in results]
         row["injected"] = injected
@@ -178,7 +247,12 @@ def render_table(agg: dict, fingerprint: dict) -> str:
     for cls in ("hit", "ambiguous", "verbatim"):
         if cls in agg:
             a = agg[cls]
-            rank = (f"  mean gold-rank {a['mean_gold_rank']:.1f}"
+            # No rank on the verbatim row. A verbatim hit is rank 1 by
+            # definition, so the number could only ever print 1.0 or vanish —
+            # a column that cannot vary is not a measurement, and the spec
+            # assigns gold-rank to hit/ambiguous only.
+            rank = ("" if cls == "verbatim" else
+                    f"  mean gold-rank {a['mean_gold_rank']:.1f}"
                     if a["mean_gold_rank"] is not None else "")
             # verbatim only counts a hit at rank 1 exactly, never at rank k —
             # "hit@k" would misdescribe it. self-retrieval@1 is the design
@@ -227,14 +301,25 @@ def compare_runs(a: Path, b: Path) -> str:
     return "\n".join(out)
 
 
-def draft_probes(mem: Any, n: int) -> list[dict]:
+def draft_probes(mem: Any, n: int, *, seed: int = 20260901) -> list[dict]:
     """Skeleton probes from live claims, every one refusing to run as-is.
 
     The query IS the claim's text, which is exactly what a probe must not be —
     so each row carries draft: true and load_probes refuses it until a person
     rewrites the query into how they would actually ask.
+
+    A **sample**, drawn with a seeded `random.Random` off the id-sorted
+    population: same store and same seed give the same rows, but the rows are
+    not the lexicographically-first ids. Claim ids are content digests, so a
+    lexicographic prefix is an arbitrary slice of the store that never moves —
+    ten drafts in a row would keep proposing the same corner of it.
+
+    Note the population itself is bounded on a hosted store: `RemoteMemvara.get_all`
+    pages at `limit=100` and this asks once, so against a hosted deployment the
+    sample is drawn from the first hundred claims, not from all of them.
     """
-    claims = sorted(mem.get_all(), key=lambda c: c.id)[:n]
+    population = sorted(mem.get_all(), key=lambda c: c.id)
+    claims = random.Random(seed).sample(population, min(n, len(population)))
     rows: list[dict] = []
     for i, claim in enumerate(claims, start=1):
         text = claim.object
@@ -317,6 +402,11 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
     parser.add_argument("--probes", default=str(Path.home() / ".memvara" / "probes.jsonl"))
     parser.add_argument("--k", type=int, default=DEFAULT_K,
                         help="results per probe; 4 is the recall hook's own K")
+    parser.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE,
+                        help="relevance floor on both read surfaces; the default "
+                             "is the recall hook's own MIN_SCORE, so the run "
+                             "measures what the hook actually injects. Pass 0 to "
+                             "measure the unfloored read path.")
     parser.add_argument("--db", default="", help="local store path; omit for hosted")
     parser.add_argument("--out", default="", help="write per-probe JSONL here")
     parser.add_argument("--compare", nargs=2, metavar=("A", "B"), default=None)
@@ -374,7 +464,7 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
             return 0
         probes = load_probes(Path(args.probes))
         fingerprint = store_fingerprint(mem)
-        rows = run_probes(mem, probes, k=args.k)
+        rows = run_probes(mem, probes, k=args.k, min_score=args.min_score)
     finally:
         if close:
             mem.close()

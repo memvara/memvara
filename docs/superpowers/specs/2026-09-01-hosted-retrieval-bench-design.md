@@ -17,10 +17,23 @@ transfers is exactly the mistake the benchmarks were built to prevent.
 Meanwhile the recall hook — the surface a user meets on every prompt — was shipped with
 its measurement loop deliberately open. `plugin/hooks/recall.py` logs prompt and
 injected memories to `recall-sample.log` so that, in its own words, a human can be the
-judge. Nothing closes that loop. On this machine's log the open loop is visible as a
-concrete failure: a prompt with no connection to the store ("write a haiku about rain")
-still receives four injected memories, every time, because `memory_recall` returns no
-scores and the hook has no floor — there is no abstention mechanism on that path at all.
+judge. Nothing closes that loop.
+
+> **Correction, 2026-09-01.** The first draft of this section said the hook has no floor
+> and no abstention mechanism at all, citing a production log where a prompt with no
+> connection to the store ("write a haiku about rain") received four injected memories
+> every time. That reading was true of the log and **false of this tree**: the log
+> predates the floor. `plugin/hooks/recall.py` defines `MIN_SCORE = 0.29` and passes
+> `_min_score()` at both of its recall call sites, guarded by
+> `tests/test_hook_recall_floor.py`, and all of that shipped before this branch was cut.
+> The premise was checked against a log rather than against the code it describes, which
+> is the same shape of mistake this repository's `CLAUDE.md` warns about under *a guard
+> compares a claim against its referent*. The correction changes what the numbers below
+> mean, not whether they are worth having; see the false-injection bullet.
+
+What is still true is that the floor is a single measured constant, store-specific by its
+own documentation ("scores are not comparable between embedders"), and nothing reports
+how it behaves on the store in front of you.
 
 `bench/hosted.py` closes the loop: a probe suite a store's owner authors once and runs
 whenever they want a number.
@@ -48,12 +61,21 @@ their gold is a judgment, not a fact, and the two must stay tellable apart.
 
 Two clarifications that keep the numbers honest:
 
-- **False-injection rate reads 100% at baseline, by construction.** The hook always
-  injects K=4 and `search()`'s `min_score` defaults to 0.0. That is the point: the
-  metric exists so an abstention mechanism, when one is designed, has a number to move.
+- **False-injection rate measures the shipped floor, and is not predetermined.** Both
+  read surfaces are queried at `--min-score`, whose default is the recall hook's own
+  `MIN_SCORE` (0.29 today) rather than the library default of 0.0 — measuring an
+  unfloored read path would measure a configuration no shipped surface uses. So the
+  number answers: *how often does the floor the hook actually applies still inject on a
+  question this store cannot answer?* It can come back at zero, and on a store where the
+  floor is miscalibrated it can come back high; which of those it is, is the finding.
+  `--min-score 0` reproduces the unfloored path, where the rate is 100% by construction
+  on any non-empty store — useful once, as a sanity check that the probe file is wired
+  up, and useless as a default because it cannot vary.
   Each abstain failure also records the top score, so every run reports the headroom —
   "a floor at 0.35 would have silenced 4 of 6" — the way the same analysis was done on
-  the Agent Memory Benchmark corpus in memvara/memvara#129.
+  the Agent Memory Benchmark corpus in memvara/memvara#129. With a floor in place that
+  headroom reads as a **recalibration** brief for this store rather than as a case for
+  building abstention from nothing.
 - **self-retrieval@1 exists because of a recorded production defect**: the published
   relevance score blends confidence with similarity, and a verbatim-text query for a
   low-confidence claim was measured returning a different, higher-confidence claim
@@ -104,11 +126,23 @@ Two subcommand-style flags, both write-nothing-without-review:
 
 The configured store, through the public read path:
 
-- **Local** (`MEMVARA_DB`): a `Memvara` over the file, `search()` for scored results and
-  `recall()` for the rendered-text behaviour the hook sees.
-- **Hosted** (`MEMVARA_MODE=cloud` / credentials file): `RemoteMemvara`, same two calls.
+- **Local** (`--db PATH`): a `Memvara` over the file, `search()` for scored results and
+  `recall(with_ids=True)` for the rendered-text behaviour the hook sees, plus the ids of
+  the claims it rendered.
+- **Hosted** (default; credentials file): `RemoteMemvara`, the same two calls but **not
+  the same signatures**. `RemoteMemvara.recall` takes no `with_ids` and returns a plain
+  `str` (`memvara/remote/api.py`) — an earlier draft of this document asserted the two
+  surfaces matched, and they do not. The harness asks the signature and, where `recall()`
+  cannot name what it rendered, takes the injected set from `search()` at the same `k`
+  and `min_score`, which is what `recall()` renders from. It still calls `recall()`, so a
+  hosted recall failure fails the run; what it does not see on that route is a
+  server-side divergence between `POST /v1/recall`'s rendering and `POST /v1/search`.
+  What it must never do is read the missing surface as an empty injection: that would
+  report a flawless 0% false-injection rate on the hosted path, so the harness refuses
+  outright rather than falling back to an empty list.
   One probe at a time is exactly the hook's own traffic shape, so the no-bulk-API
   limitation that ruled the HTTP client out for mass ingestion does not apply here.
+  `--draft` is bounded on this route too: `RemoteMemvara.get_all` pages at `limit=100`.
 
 Every result file records a **store fingerprint**: claim count, embedder identity (from
 the store's own fingerprint), server version where hosted, and the run timestamp. The
@@ -153,8 +187,9 @@ what it deliberately does not (see below), and that probe files are private to a
 
 ## Open questions carried, not blocking
 
-- Whether `recall()`'s rendered-text surface should learn to expose ids/scores so the
-  hook could gate — that is a core API question the baseline will inform, and it belongs
-  to the abstention work, not here.
+- Whether **`RemoteMemvara.recall` should learn `with_ids`**, as the local engine already
+  has it. Until it does, the hosted route's injected set is inferred from `search()`
+  rather than read off the call that rendered the block. That is a core API question and
+  it belongs to whoever owns the hosted facade, not to this measurement branch.
 - Whether `ambiguous` probes should expire (`judged` date + store drift) automatically
   or by warning only. v1 warns.

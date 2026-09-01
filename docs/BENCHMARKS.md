@@ -879,7 +879,12 @@ store develops — the roadmap's census of one production store found ~95% of
 claims on predicates outside the declared vocabulary and a join rate of 0.5%.
 `bench/hosted.py` measures the read path against the store you actually have:
 
+    # hosted store (credentials from ~/.memvara), the default
     PYTHONPATH=. python3 bench/hosted.py --probes ~/.memvara/probes.jsonl
+
+    # a local store file — `--db` is the only way to reach one
+    PYTHONPATH=. python3 bench/hosted.py --db ~/.memvara/store.db \
+        --probes ~/.memvara/probes.jsonl
 
 You author the probes once — `hit` (a question whose answer you know is
 stored, gold = its claim id), `abstain` (a question the store cannot answer,
@@ -889,12 +894,40 @@ reports hit@k, mean gold-rank, false-injection rate with per-failure score
 headroom, and self-retrieval@1. `--draft` and `--seed-from-recalled` help
 author; both refuse to produce a probe no person has reviewed.
 
+#### The probe file
+
+One JSON object per line, at `--probes PATH` (default `~/.memvara/probes.jsonl`).
+The runner refuses the whole file on the first bad row, naming the line — it
+never skips one.
+
+```jsonl
+{"id": "p001", "class": "hit",       "query": "what suite must run with -j1?", "gold": ["cl_..."]}
+{"id": "p002", "class": "abstain",   "query": "write a haiku about rain",      "gold": []}
+{"id": "p003", "class": "verbatim",  "query": "<the claim's own object text>", "gold": ["cl_..."]}
+{"id": "p004", "class": "ambiguous", "query": "<a real prompt from your log>", "gold": ["cl_..."], "judged": "2026-09-01"}
+```
+
+| field | required | meaning |
+|---|---|---|
+| `id` | yes | non-empty, unique within the file; it is what a result row is addressed by |
+| `class` | yes | one of `hit`, `abstain`, `verbatim`, `ambiguous` |
+| `query` | yes | non-empty; what you would actually type |
+| `gold` | yes | list of claim ids. Empty **only** for `abstain`; non-empty for every other class |
+| `judged` | no | date a human judged an `ambiguous` row, because a judgment ages as the store changes |
+| `draft` | no | `true` marks a row `--draft` emitted; the runner refuses it until you rewrite the query and remove the mark |
+
 Probe files are private to a store and never belong in this repository. The
 numbers are per-store and are not memvara scores: nothing measured here is
 comparable between two stores, let alone publishable against another system.
-False-injection starts at 100% by construction — `recall()` has no floor —
-and that number existing is the point: it is the baseline an abstention
-design would be judged against.
+
+Both read surfaces are queried at `--min-score`, which **defaults to the recall
+hook's own `MIN_SCORE`** so the run measures what that hook actually injects.
+So false-injection is not predetermined: it counts how often the shipped floor
+still injects on a question the store cannot answer, and it can come back at
+zero or well above it depending on the store and the embedder. Pass
+`--min-score 0` to measure the unfloored read path instead — that number is
+100% by construction on any non-empty store, which is why it is not the
+default.
 
 ---
 

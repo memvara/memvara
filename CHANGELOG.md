@@ -26,13 +26,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 - **`bench/hosted.py` — measure retrieval against your own store.** Every
   published benchmark runs on a corpus built for it; this runs on the store
   you have. Four numbers from an owner-authored probe file: hit@k and mean
-  gold-rank, false-injection rate on questions the store cannot answer (100%
-  at baseline, by construction — `recall()` has no floor, which is the fact
-  the metric exists to track), and self-retrieval@1, which pins the recorded
-  defect where a claim's own text returns a different, higher-confidence
-  claim. Probes stay private to the store; `--draft` and
-  `--seed-from-recalled` help author them and refuse to emit anything a
-  person has not reviewed.
+  gold-rank, false-injection rate on questions the store cannot answer, and
+  self-retrieval@1, which pins the recorded defect where a claim's own text
+  returns a different, higher-confidence claim. Probes stay private to the
+  store; `--draft` and `--seed-from-recalled` help author them and refuse to
+  emit anything a person has not reviewed.
+
+  Both read surfaces are queried at `--min-score`, defaulting to the recall
+  hook's own `MIN_SCORE` — measuring an unfloored read path would measure a
+  configuration no shipped surface uses. False-injection therefore counts how
+  often the *shipped* floor still injects on a question the store cannot
+  answer, a number that can land anywhere; `--min-score 0` reproduces the
+  unfloored path, where it is 100% by construction.
 
 ### Fixed
 
