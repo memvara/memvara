@@ -86,13 +86,22 @@ export async function runHook({ hooksDir, hook, host, payload, timeoutMs = 10000
       finish(null, `timeout hook=${hook} host=${host} after=${timeoutMs}ms`)
     }, timeoutMs)
 
-    // `setEncoding`, not `out += buffer`. Concatenating Buffers coerces each chunk to a
-    // string on its own, so a multi-byte character split across two chunks becomes U+FFFD
-    // -- SILENTLY, because the surrounding JSON still parses. Measured with a boundary
-    // forced inside an em dash: three replacement characters and a successful parse, so
-    // corrupted memories reach the model and nothing errors. Recalled text here is dense
-    // with em dashes and routinely exceeds the pipe buffer. `setEncoding` holds a partial
-    // sequence back until the rest of it arrives.
+    // `setEncoding`, not `out += buffer`. Concatenating Buffers decodes each chunk on its
+    // own, so a multi-byte character split across two chunks becomes U+FFFD -- silently,
+    // because the surrounding JSON still parses.
+    //
+    // Belt-and-braces rather than a live fix, and worth saying so plainly: `run.py`
+    // answers through `json.dumps`, which escapes non-ASCII by default, so an em dash
+    // leaves as the seven ASCII bytes `\u2014` and there is nothing for a boundary to
+    // split. Measured -- 16,371 bytes of real recall output, zero bytes above 127. A
+    // review of this file asserted the corruption was live and was wrong: the synthetic
+    // proof used JavaScript's `JSON.stringify`, which does NOT escape non-ASCII, so it
+    // demonstrated a property of a payload this path never produces.
+    //
+    // Kept because it is the correct way to read text off a stream and costs nothing, and
+    // because the ASCII property is an accident of a default rather than a promise. The
+    // plugin repository pins it: a guard there fails if the renderer ever passes
+    // `ensure_ascii=False`, which is the moment this line stops being defensive.
     child.stdout.setEncoding("utf8")
     child.stdout.on("data", (chunk) => { out += chunk })
     child.stderr.on("data", () => { /* the body logs its own reasons */ })
