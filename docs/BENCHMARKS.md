@@ -281,7 +281,7 @@ PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-gr
 | `bench/multihop.py` (synthetic), gate off | 4,498 | **2.9% → 20.0%** at k=12, **7.6% → 50.0%** at k=25 |
 | `bench/multihop.py`, **as shipped** | 4,498 | **2.9% → 6.4%** at k=12, **7.6% → 21.8%** at k=25 |
 | `bench/twowiki.py`, gate off, **public** | 26,403 | **28.3% → 72.2%** at k=12 on chained questions; **−13.7** on flat ones |
-| `bench/twowiki.py`, **as shipped** | 26,403 | **28.3% → 42.1%** answer and **25.5% → 39.5%** chain on chained questions; −0.4 on flat |
+| `bench/twowiki.py`, **as shipped** | 26,403 | **28.3% → 43.8%** answer and **25.5% → 41.3%** chain on chained questions; flat unchanged (+0.4) |
 
 The leg walks *claims*, and both public runs are episode retrieval: `SalienceGate` drops
 any turn whose role is not `user`, LOCOMO writes each turn under the speaker's name, and
@@ -441,14 +441,28 @@ returned rows / whole evidence chain returned*:
 ```
   k=12
   set                     n         search         +graph        +graph!
-  all                12,576   50.6% / 37.2%   57.9% / 43.8%   68.0% / 57.2%
-  chained             6,785   28.3% / 25.5%   42.1% / 39.5%   72.2% / 70.3%
-  flat                5,791   76.7% / 50.8%   76.3% / 48.9%   63.0% / 41.9%
-  compositional       5,236   22.8% / 20.5%   40.8% / 38.7%   70.1% / 68.3%
+  all                12,576   50.6% / 37.2%   59.0% / 44.5%   68.0% / 57.2%
+  chained             6,785   28.3% / 25.5%   43.8% / 41.3%   72.3% / 70.3%
+  flat                5,791   76.7% / 50.8%   76.7% / 48.3%   63.0% / 41.8%
+  compositional       5,236   22.8% / 20.5%   43.0% / 40.9%   70.2% / 68.3%
   inference           1,549   46.6% / 42.3%   46.6% / 42.3%   79.3% / 77.3%
-  comparison          3,040   73.9% / 96.8%   74.9% / 88.7%   60.7% / 58.2%
-  bridge_comparison   2,751   79.8% /  0.0%   77.8% /  4.9%   65.5% / 23.8%
+  comparison          3,040   73.9% / 96.8%   75.7% / 86.8%   60.8% / 58.1%
+  bridge_comparison   2,751   79.8% /  0.0%   77.9% /  5.7%   65.5% / 23.8%
 ```
+
+The `+graph` column is after the gate repair filed as
+[#150](https://github.com/memvara/memvara/issues/150): a question names a predicate in
+whatever form it inflects it, and a chain that also names an instant keeps the walk. Both
+runs, the branch and a pristine `origin/main`, were taken on the same day with the same
+harness; `main` reproduced the previously published column exactly, and the repair moved
+it as follows, answer / chain: `all` 57.9 / 43.8 → 59.0 / 44.5, `chained` 42.1 / 39.5 →
+43.8 / 41.3, `compositional` 40.8 / 38.7 → 43.0 / 40.9, `flat` 76.3 / 48.9 → 76.7 / 48.3,
+`comparison` 74.9 / 88.7 → 75.7 / 86.8, `bridge_comparison` 77.8 / 4.9 → 77.9 / 5.7,
+`inference` unchanged. The `search` and `+graph!` columns did not move, which is the check
+that only the gate changed. Chain recall on `comparison` gives up 1.9 points: a few more
+comparison questions now name two predicates through their inflections and are not
+written as a disjunction, so `is_comparison` does not catch them and the walk spends part
+of `k` there.
 
 **`chained` is the result.** `compositional` and `inference` questions chain one fact into
 the next — "who is the mother of the director of X" is `director` then `mother` — and the
@@ -465,7 +479,7 @@ rather than by following edges.
 
 **The intent gate is right in principle, and it now captures some of what it was
 blocking.** It exists to route flat questions past the walk, and on `flat` it does:
-76.3% against search's 76.7%. On `chained` it used to block almost the entire gain —
+76.7% against search's 76.7%. On `chained` it used to block almost the entire gain —
 29.1% where 72.2% was available, 0.9 points of 43.9.
 
 The reason was vocabulary, and not the kind a word list fixes. `classify` counts the
@@ -513,9 +527,9 @@ One false positive found on the way: `born_in` and `born_on` share the content t
 Matches are now deduplicated by what the question said rather than by how many predicates
 answer to it.
 
-**Answers and derivations move together.** On `chained`, the leg is worth +13.8 points of
-answer recall and **+14.0 of chain recall** — 28.3% → 42.1% and 25.5% → 39.5%. Ungated the
-two columns nearly meet, 72.2% against 70.3%: almost every answer the walk finds arrives
+**Answers and derivations move together.** On `chained`, the leg is worth +15.5 points of
+answer recall and **+15.8 of chain recall** — 28.3% → 43.8% and 25.5% → 41.3%. Ungated the
+two columns nearly meet, 72.3% against 70.3%: almost every answer the walk finds arrives
 with every triple that supports it. That is the property the library is for, and it is the
 one worth quoting.
 

@@ -507,10 +507,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   A comparison frame stays out, as everywhere else the walk is opened.
 
   At the shipped `w_graph=0.0` nothing changes. With the leg on, more chained questions
-  walk; `bench/multihop.py` is byte-identical before and after, because its questions
-  already named their predicates in the stored form. Neither change moves the Agent
-  Memory Benchmark's `multi_hop` row, and #129 says why: the bottleneck there is what
-  consumes a retrieved pair, not whether the pair is retrieved.
+  walk. On the full 2WikiMultihopQA dev set at k=12 the shipped-gate column moves from
+  42.1% / 39.5% to 43.8% / 41.3% answer / chain recall on chained questions and from
+  57.9% / 43.8% to 59.0% / 44.5% overall, with flat questions unchanged within a point
+  (76.3% → 76.7% answer, 48.9% → 48.3% chain); `docs/BENCHMARKS.md` has the whole table
+  and the one family that gives something up. `bench/multihop.py` is byte-identical
+  before and after, because its questions already named their predicates in the stored
+  form. Neither change moves the Agent Memory Benchmark's `multi_hop` row, and #129 says
+  why: the bottleneck there is what consumes a retrieved pair, not whether the pair is
+  retrieved.
 
 - **`README.md`'s *Quickstart* is two columns: run it yourself, or use the hosted service
   at memvara.dev.** The README described the hosted product in one cell of an *Other ways
