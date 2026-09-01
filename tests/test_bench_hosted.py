@@ -134,3 +134,49 @@ def test_load_probes_refuses_an_unedited_draft_row(tmp_path):
     with pytest.raises(SystemExit, match="draft") as exc:
         hosted.load_probes(path)
     assert "line 1" in str(exc.value)
+
+
+from memvara import HashingEmbedder, Memvara, NullLLM
+
+
+@pytest.fixture()
+def planted():
+    """A tiny store whose contents the tests know exactly."""
+    with Memvara(":memory:", user="probe",
+                 embedder=HashingEmbedder(dim=64), llm=NullLLM()) as mem:
+        mem.remember("larkspur", "test_flag", "the Larkspur suite needs -j1")
+        mem.remember("kestrel", "deploy_branch", "Kestrel deploys from release")
+        ids = {c.subject: c.id for c in mem.get_all()}
+        yield mem, ids
+
+
+def test_run_probes_scores_a_hit_against_the_planted_store(planted):
+    mem, ids = planted
+    probes = [{"id": "p1", "class": "hit",
+               "query": "which suite needs -j1?", "gold": [ids["larkspur"]]}]
+    rows = hosted.run_probes(mem, probes, k=4)
+    assert rows[0]["hit"] is True
+    assert rows[0]["results"], "the row must carry the raw results for --out"
+    assert rows[0]["latency_ms"] >= 0.0
+
+
+def test_run_probes_records_injection_for_an_abstain_probe(planted):
+    mem, _ = planted
+    probes = [{"id": "p2", "class": "abstain",
+               "query": "write a haiku about rain", "gold": []}]
+    rows = hosted.run_probes(mem, probes, k=4)
+    # Baseline truth, stated by the spec: with no floor anywhere, the store
+    # injects on anything. If this ever starts passing None/False at k=4 with
+    # min_score=0, the recall surface changed and the spec's baseline claim
+    # needs re-verifying — that is a real signal, not a flaky test.
+    assert rows[0]["false_injection"] is True
+    assert rows[0]["top_score"] is not None
+
+
+def test_run_probes_verbatim_uses_rank_one(planted):
+    mem, ids = planted
+    probes = [{"id": "p3", "class": "verbatim",
+               "query": "the Larkspur suite needs -j1",
+               "gold": [ids["larkspur"]]}]
+    rows = hosted.run_probes(mem, probes, k=4)
+    assert rows[0]["gold_rank"] is not None

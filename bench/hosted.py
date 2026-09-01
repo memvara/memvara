@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -124,3 +125,27 @@ def aggregate(rows: "Sequence[dict]") -> dict:
                 "mean_gold_rank": (sum(ranks) / len(ranks)) if ranks else None,
             }
     return out
+
+
+def run_probes(mem: Any, probes: "Sequence[dict]", *, k: int) -> list[dict]:
+    """Every probe through both read surfaces, scored.
+
+    search() supplies ranks and scores; recall(with_ids=True) supplies what
+    would actually be injected. Both run per probe because they answer
+    different halves of the question (spec: a core ranking defect and a
+    surface gating defect must show up as different numbers).
+    """
+    rows: list[dict] = []
+    for probe in probes:
+        t0 = time.perf_counter()
+        results = [(r.claim.id, r.score)
+                   for r in mem.search(probe["query"], k=k)]
+        recalled = mem.recall(probe["query"], k=k, with_ids=True)
+        elapsed = (time.perf_counter() - t0) * 1000.0
+        injected = list(getattr(recalled, "claim_ids", []) or [])
+        row = score_probe(probe, results, injected)
+        row["results"] = [[cid, round(score, 4)] for cid, score in results]
+        row["injected"] = injected
+        row["latency_ms"] = round(elapsed, 2)
+        rows.append(row)
+    return rows
