@@ -656,11 +656,14 @@ Invariants:
   graph leg's seeds do, and the question is only asked whether it contains them. Every
   content token of a key has to be present, so `Project Chronos` does not anchor a row
   about `Project Atlas` on the strength of `project`.
-- **A derivation counts only from an anchored origin.** `_graph_search` returns the ids on
-  paths whose first node is one of the anchored candidates' keys. A walk out of an
-  unanchored seed — the lookup legs' best guess on a question about nothing the store
-  holds — marks nothing, or every negative would be answered from that guess's
-  neighbourhood.
+- **A derivation starts at the entity the question named.** `_graph_search` returns the
+  ids on paths whose first node is the *named* end of an anchored candidate. Not its
+  other end: from `Project Atlas/deploy_region=eu-west-1` a walk out of the value reaches
+  every project in `eu-west-1`, one hop away at score 1.0, on the very predicate asked —
+  derivations from the answer, not from the question. Not an unanchored seed either —
+  the lookup legs' best guess on a question about nothing the store holds — or every
+  negative would be answered from that guess's neighbourhood. Under `anchored=True` with
+  nothing named the walk is not run at all, since nothing it found could survive.
 - **The self subject is named by a pronoun, a possessive is a mention, and an alias is a
   spelling.** `user` is what `write/fast.py` and `write/pipeline.py` file a first-person
   statement under, and "where do I live" has to reach it; `entities._tokens` drops

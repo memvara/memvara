@@ -70,6 +70,7 @@ calls.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass, replace
 from typing import Callable, Sequence
@@ -94,6 +95,11 @@ _ARTICLES = frozenset({"the"})
 
 #: Removed rather than treated as a separator, so "O'Reilly" is one token and not two.
 _APOSTROPHES = frozenset("'‘’ʼ´`")
+
+#: A possessive suffix, in every apostrophe `_tokens` folds away. Built from the same set
+#: so a reader stripping possessives and the fold agree on what an apostrophe is: iOS
+#: and Word emit U+02BC, and "Bobʼs" has to name Bob exactly as "Bob's" does.
+POSSESSIVE = re.compile("[" + "".join(re.escape(ch) for ch in sorted(_APOSTROPHES)) + r"]s\b")
 
 #: How many known entities to offer a model asked to merge a surface form. Bounded for
 #: the same reason the predicate shortlist is: an owner's entity set has no ceiling worth

@@ -80,7 +80,7 @@ from ..types import (
     time_axes,
     utcnow,
 )
-from .anchor import PATH, anchor_of, query_tokens
+from .anchor import PATH, SUBJECT, anchor_of, query_tokens
 from .analyze import analyze
 from .fusion import reciprocal_rank_fusion
 from .intent import Intent, classify
@@ -822,21 +822,40 @@ class HybridRetriever:
         # Which candidates the question actually names, decided before the walk so the
         # walk can say which of its paths started from one. Read off the rows the lookup
         # legs returned, exactly as the seeds are: no extractor runs over the query.
+        #
+        # Only the *named* end of each anchored claim is an origin. Its other end is the
+        # value, and a walk out of the value reaches the rows that merely share it: from
+        # `Project Atlas/deploy_region=eu-west-1`, every other project in `eu-west-1`, one
+        # hop away and scored 1.0, each on the very predicate asked. Those are not
+        # derivations from the question; they are derivations from its answer. Reached
+        # the long way round — out of the named entity and back through the value — they
+        # are derivations, two hops out, and are labelled and ranked as such.
         tokens = query_tokens(query)
         spellings = self._spellings(scope)
         anchors = {cid: anchor_of(claim, tokens, spellings)
                    for cid, claim in claims.items()}
         anchored_keys = frozenset(
-            key for cid, end in anchors.items() if end is not None
-            for key in (claims[cid].subject_key, claims[cid].object_key) if key)
+            claims[cid].subject_key if end == SUBJECT else claims[cid].object_key
+            for cid, end in anchors.items() if end is not None)
 
-        # `now` handed down rather than re-read. Before this the traverser called
-        # `utcnow()` of its own, so one search decayed its quality multiplier and its edge
-        # strengths from two instants microseconds apart — coherent within each leg and
-        # not between them.
-        graph_hits, walked, derived = self._graph_search(
-            claims, fused, scope, limit, valid_at, known_at, states, weights.graph, now,
-            anchored_keys)
+        graph_hits: list[tuple[str, float]] = []
+        walked: dict[str, Claim] = {}
+        derived: frozenset[str] = frozenset()
+        if anchored and not anchored_keys:
+            # Nothing the question is about is in hand, so no path could start from it
+            # and nothing the walk found could survive the filter. Skipping is the
+            # difference between a question about a stranger costing two legs and
+            # costing three, twice — the retry below would walk again at ten times the
+            # width.
+            pass
+        else:
+            # `now` handed down rather than re-read. Before this the traverser called
+            # `utcnow()` of its own, so one search decayed its quality multiplier and
+            # its edge strengths from two instants microseconds apart — coherent within
+            # each leg and not between them.
+            graph_hits, walked, derived = self._graph_search(
+                claims, fused, scope, limit, valid_at, known_at, states, weights.graph,
+                now, anchored_keys)
         if graph_hits:
             # Re-fused rather than merged, because RRF reads positions and the positions
             # in the two-leg fusion are not the positions in the three-leg one. Doing it
@@ -974,8 +993,9 @@ class HybridRetriever:
         every claim on a path that *started from* one of `anchored`, the entity keys the
         question named. Those are the derivations: a claim the question does not mention
         that the store nevertheless ties to one it does, which is the reading
-        `Explanation.anchor` reports as `"path"`. A path out of an unanchored seed
-        proves nothing about the question and marks nothing.
+        `Explanation.anchor` reports as `"path"`. A path out of any other seed — the
+        value end of a named claim, or the lookup legs' best guess on a question about
+        nothing the store holds — proves nothing about the question and marks nothing.
 
         Every early return here is a *degradation*, and each is a different fact:
 

@@ -44,7 +44,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
   Not yet on the hosted facade. `RemoteMemvara.search` does not take the keyword, so a
   caller against memvara-cloud gets a `TypeError` rather than a silently unfiltered
-  answer, until the server side lands.
+  answer, until the server side lands — and a hosted result's `Explanation.anchor` is
+  `None` because the wire does not carry it yet, not because nothing named the row.
 
 - **`MEMVARA_LLM=openai` selects the OpenAI-compatible backend, which was finished and
   unreachable.** `OpenAILLM` has shipped complete since the `memvara[openai]` extra
@@ -507,10 +508,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
   At the shipped `w_graph=0.0` nothing changes. With the leg on, more chained questions
   walk; `bench/multihop.py` is byte-identical before and after, because its questions
-  already named their predicates in the stored form, and `docs/BENCHMARKS.md` carries
-  the 2WikiMultihopQA re-measurement. Neither change moves the Agent Memory Benchmark's
-  `multi_hop` row, and #129 says why: the bottleneck there is what consumes a retrieved
-  pair, not whether the pair is retrieved.
+  already named their predicates in the stored form. Neither change moves the Agent
+  Memory Benchmark's `multi_hop` row, and #129 says why: the bottleneck there is what
+  consumes a retrieved pair, not whether the pair is retrieved.
 
 - **`README.md`'s *Quickstart* is two columns: run it yourself, or use the hosted service
   at memvara.dev.** The README described the hosted product in one cell of an *Other ways

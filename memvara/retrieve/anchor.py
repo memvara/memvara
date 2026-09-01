@@ -27,18 +27,17 @@ word from anchoring a sibling.
 
 Two things a key comparison cannot see are handled here and nowhere else. A first-person
 statement is stored under the subject `user` and asked about with a pronoun, so the self
-subject is anchored by `I`, `my`, `you` and the rest. And a possessive is a mention:
-"Bob's employer" names Bob, and the fold would otherwise read it as an entity called
-`bobs`.
+subject is anchored by `I`, `my` and the rest of the first person. And a possessive is a
+mention: "Bob's employer" names Bob, and the fold would otherwise read it as an entity
+called `bobs`.
 """
 
 from __future__ import annotations
 
-import re
 from typing import Callable, Iterable
 
-from ..entities import entity_key
-from ..types import Claim
+from ..entities import POSSESSIVE, entity_key
+from ..types import SELF_SUBJECT, Claim
 
 #: The three ways a result can be tied to the question, as `Explanation.anchor` reports
 #: them. `None` is the fourth state and the finding: nothing in the question named
@@ -47,22 +46,15 @@ SUBJECT = "subject"
 OBJECT = "object"
 PATH = "path"
 
-#: The subject the write path files a first-person statement under. Written in two
-#: places — `write/fast.py` for the deterministic matcher and `write/pipeline.py` for a
-#: model extraction that named no subject — and neither exports it, so it is spelled
-#: here as well and pinned by a test against both.
-SELF_SUBJECT = "user"
-
-#: How a question refers to the self subject. First and second person both: an agent
-#: asks its memory "what does the user prefer" as often as a user asks "what do I
-#: prefer", and the stored row is the same row.
+#: How a question refers to the self subject (`types.SELF_SUBJECT`, the row a
+#: first-person statement is filed under). First person only. "Do you know where Oscar
+#: lives" addresses the agent, not the user, and `us` is also a country — both were in
+#: this set once and anchored every `user` row on exactly the questions the filter exists
+#: to return nothing for. An agent asking "what does the user prefer" names the row by
+#: its key, which needs no pronoun.
 SELF_PRONOUNS: frozenset[str] = frozenset("""
-    i me my mine myself we us our ours ourselves you your yours yourself
+    i me my mine myself we our ours ourselves
 """.split())
-
-#: A possessive suffix, stripped before the fold. `entities._tokens` drops apostrophes
-#: rather than splitting on them, so "Bob's" would fold to `bobs` and never meet `bob`.
-_POSSESSIVE = re.compile(r"['’]s\b")
 
 #: Every spelling a stored entity key answers to. The registry supplies learned aliases;
 #: a retriever built without one gets the key alone.
@@ -77,7 +69,7 @@ def query_tokens(query: str) -> frozenset[str]:
     >>> query_tokens("???")
     frozenset()
     """
-    return frozenset(entity_key(_POSSESSIVE.sub("", query)).split())
+    return frozenset(entity_key(POSSESSIVE.sub("", query)).split())
 
 
 def anchor_of(claim: Claim, tokens: frozenset[str],

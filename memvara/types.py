@@ -110,6 +110,12 @@ LAST_OBSERVED = "last_observed_at"
 # applying a late alias to existing rows is an explicit, dated, dry-run-first operation —
 # see `memvara.write.reconcile.backfill_entities`.
 
+#: The subject a first-person statement is filed under. Written by the deterministic
+#: matcher (`write/fast.py`) and by a model extraction that named no subject
+#: (`write/pipeline.py`), and read by `retrieve/anchor.py`, which has to know that "where
+#: do I live" is a question about this row. One spelling, so the three cannot drift.
+SELF_SUBJECT = "user"
+
 #: Resolved entity of `Claim.subject`. See `memvara/entities.py`.
 SUBJECT_ENTITY = "subject_entity"
 #: Resolved entity of `Claim.object`.

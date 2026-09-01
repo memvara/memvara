@@ -34,6 +34,7 @@ from enum import Enum
 
 from typing import TYPE_CHECKING, Callable, Iterable, Mapping
 
+from ..entities import POSSESSIVE
 from ..schema import word_stem
 from .analyze import STOPWORDS, tokenize
 
@@ -164,7 +165,9 @@ LOOKUP_MARKERS: frozenset[str] = frozenset("""
 
 #: A possessive chain: two `'s` in one query, as in "my manager's employer's office".
 #: One possessive is ordinary ("what is my manager's name"); two is a join, spelled out.
-_POSSESSIVE = re.compile(r"['’]s\b")
+#: The pattern is `entities.POSSESSIVE`, so every apostrophe the entity fold recognises
+#: counts here too.
+_POSSESSIVE = POSSESSIVE
 
 #: `between X and Y` — the one surface form that names two endpoints and asks for what
 #: lies between them, which is `paths_between` written in English.

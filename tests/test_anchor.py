@@ -259,3 +259,71 @@ def test_a_retriever_built_without_a_registry_anchors_on_the_key_alone(mem):
     assert [r.claim.subject for r in rows] == ["ivan"]
     assert reader.search("Where does Oscar live?", mem.default_scope, k=3,
                          anchored=True) == []
+
+
+# -- what the review found -----------------------------------------------------
+
+def test_a_derivation_starts_at_the_named_entity_and_not_at_its_value():
+    """A walk out of the *value* end of a named claim reaches the rows that share it.
+
+    From `Project Atlas/deploy_region=eu-west-1`, every other project deployed to
+    `eu-west-1` is one hop from the value, scored 1.0, on the very predicate asked — and
+    each was coming back marked `"path"`, ranked by the walk above the genuine answer.
+    Those are derivations from the answer, not from the question. Only the named end is
+    an origin now. The siblings are still reachable the long way round — out of Project
+    Atlas and back through the region, two hops — and are labelled as the derivations
+    they are at that distance; what changes is that the row the question is about ranks
+    first, and a sibling one hop from the value no longer counts as tied to the question
+    by that hop alone.
+    """
+    with build(read_w_graph=1.0, read_intent_weighting=False) as mem:
+        for sibling in ("Project Zeta", "Project Omega"):
+            mem.remember(sibling, "deploy_region", "eu-west-1", recorded_at=T0)
+        rows = mem.search("Which region is Project Atlas deployed to?", k=5,
+                          anchored=True)
+        assert rows[0].claim.subject == "Project Atlas"
+        assert rows[0].explain.anchor == "subject"
+        siblings = [r for r in rows if r.claim.subject in ("Project Zeta", "Project Omega")]
+        assert siblings and all(r.explain.anchor == "path" for r in siblings)
+        assert all(r.score < rows[0].score for r in siblings)
+
+
+def test_the_second_person_does_not_name_the_self_subject():
+    """"Do you know where Oscar lives" addresses the agent, and `us` is a country.
+
+    Both anchored every `user` row on exactly the questions the filter exists to return
+    nothing for; the pronoun set is first person only.
+    """
+    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=128), user="alice") as mem:
+        mem.add("I live in Lisbon.")
+        assert mem.search("Do you know where Oscar lives?", k=5, anchored=True) == []
+        assert mem.search("Which US region is Project Chronos deployed to?", k=5,
+                          anchored=True) == []
+        assert mem.search("where do I live?", k=5, anchored=True)
+
+
+def test_every_apostrophe_the_fold_drops_is_a_possessive_here():
+    """iOS and Word emit U+02BC; the fold already treats it as an apostrophe."""
+    claim = Claim(subject="Bob", predicate="works_at", object="Globex")
+    for apostrophe in "'‘’ʼ´`":
+        question = f"where is Bob{apostrophe}s office?"
+        assert anchor_of(claim, query_tokens(question)) == "subject", repr(apostrophe)
+
+
+def test_the_walk_is_not_run_under_the_filter_when_nothing_is_named(monkeypatch):
+    """No path can start from an entity the question did not name, so nothing the walk
+    finds could survive `anchored=True`. It used to run anyway — and again on the
+    widened retry — on every question about a stranger."""
+    with build(read_w_graph=1.0, read_intent_weighting=False) as mem:
+        calls: list[int] = []
+        original = type(mem.traverser).spread
+
+        def spy(self, *args, **kw):
+            calls.append(1)
+            return original(self, *args, **kw)
+
+        monkeypatch.setattr(type(mem.traverser), "spread", spy)
+        assert mem.search("Where does Oscar live?", k=5, anchored=True) == []
+        assert calls == [], "the walk ran with nothing to start from"
+        mem.search("Where does Oscar live?", k=5)
+        assert calls, "premise: without the filter the walk still runs"
