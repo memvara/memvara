@@ -272,14 +272,22 @@ def test_every_chained_gold_agrees_with_the_walk_it_describes(shipped):
 #: nothing checked that the store really holds nothing there. A gold of *nothing* that was
 #: wrong would be invisible: every system would be marked right for abstaining and marked
 #: wrong for the correct answer.
-OPEN_NEGATIVES: dict[str, tuple[str, str]] = {
-    "q-absent-open-1": ("Oscar", "lives_in"),
-    "q-absent-open-2": ("reporting-service", "auth_strategy"),
-    "q-absent-open-3": ("Project Chronos", "deploy_region"),
-    "q2-none-globex-plan": ("Globex", "plan"),
-    "q2-none-frank-title": ("frank", "job_title"),
-    "q2-none-meridian-region": ("Project Meridian", "deploy_region"),
-    "q2-none-orbit-lead": ("team-orbit", "team_lead"),
+#:
+#: The third element says whether the **subject** is one the store knows, which is the
+#: difficulty band the question belongs to: an entity nobody has heard of is an easier
+#: negative than one the store holds five other facts about. It is here because without
+#: it this table cannot be checked. `truth.slot()` returns `None` both for an entity that
+#: is genuinely absent and for one whose name is misspelled here, so a typo would make
+#: the assertion below pass while proving nothing — and the documents' claim that two of
+#: these name an entity the store knows well is exactly what would go unchecked.
+OPEN_NEGATIVES: dict[str, tuple[str, str, bool]] = {
+    "q-absent-open-1": ("Oscar", "lives_in", False),
+    "q-absent-open-2": ("reporting-service", "auth_strategy", True),
+    "q-absent-open-3": ("Project Chronos", "deploy_region", False),
+    "q2-none-globex-plan": ("Globex", "plan", True),
+    "q2-none-frank-title": ("frank", "job_title", True),
+    "q2-none-meridian-region": ("Project Meridian", "deploy_region", False),
+    "q2-none-orbit-lead": ("team-orbit", "team_lead", False),
 }
 
 
@@ -293,7 +301,15 @@ def test_every_open_negative_really_is_about_nothing(shipped):
         assert question.id in OPEN_NEGATIVES, (
             f"{question.id} is an open negative with no slot written out above, so "
             "nothing checks that its gold of *nothing* is true")
-        slot = truth.slot(*OPEN_NEGATIVES[question.id])
+        subject, predicate, known_entity = OPEN_NEGATIVES[question.id]
+        subjects = {s for s, _ in truth.slots}
+        assert (subject in subjects) is known_entity, (
+            f"{question.id}: this table says the store "
+            f"{'knows' if known_entity else 'has never heard of'} {subject!r} and it "
+            f"{'does not' if known_entity else 'does'}. Either the name is misspelled "
+            "here — in which case the check below proves nothing, because an absent "
+            "slot and a misspelled one look identical — or the dataset moved under it.")
+        slot = truth.slot(subject, predicate)
         held = slot.values_at(question.at or shipped.evaluated_at, question.known_at) \
             if slot is not None else ()
         assert not held, f"{question.id} says nothing is held, and the store holds {held}"

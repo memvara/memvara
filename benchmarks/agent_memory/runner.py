@@ -33,7 +33,9 @@ at.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
+from statistics import median_low
 from typing import Any, Callable, Mapping, Sequence
 
 from .adapters.base import Ask, MemoryAnswer, MemorySystem, Usage, sort_events
@@ -113,6 +115,25 @@ def retime(system: MemorySystem, dataset: Dataset, passes: int) -> list[list[flo
     return [_one_pass(system, dataset)[1] for _ in range(passes)]
 
 
+def restamp(judgements: Sequence[Judgement],
+            passes: Sequence[Sequence[float]]) -> list[Judgement]:
+    """Re-time each judgement from `passes`, keeping every verdict as it was scored.
+
+    The median across passes rather than the mean, matching `query_p50_ms`: one slow
+    question on one pass should not move the figure a reader compares against the block.
+
+    `median_low`, not `median`. An even number of passes — four is what
+    `--latency-repeats 5` produces — makes the plain median average the two middle
+    readings into a duration nothing ever measured, which is the thing
+    `results._percentile` picks nearest-rank to avoid. Every `latency_s` published here
+    is a timing that actually happened.
+    """
+    return [
+        replace(judgement, latency_s=median_low(column))
+        for judgement, column in zip(judgements, zip(*passes))
+    ]
+
+
 def run(system: MemorySystem, dataset: Dataset, *, lenient: bool = True,
         config: Mapping[str, Any] | None = None,
         timestamp: str | None = None,
@@ -133,6 +154,13 @@ def run(system: MemorySystem, dataset: Dataset, *, lenient: bool = True,
     # that belongs to the cold path rather than to a warm-path p95.
     extra = retime(system, dataset, latency_repeats - 1) if latency_repeats > 1 else []
     times = extra or [first]
+    if extra:
+        # And the per-question figures move with them. `questions[].latency_s` used to
+        # keep the discarded cold pass while the summary block reported the warm ones,
+        # so one result file published two answers to "how long does a query take" —
+        # measured at 0.38 ms against 0.09 ms on the same run. Whatever a reader
+        # averages has to agree with what the block above it says.
+        judgements = restamp(judgements, times)
     return RunResult(
         system=system.name,
         system_version=system.version,

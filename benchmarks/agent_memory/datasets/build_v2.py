@@ -60,11 +60,6 @@ HERE = Path(__file__).resolve().parent
 SOURCE = HERE / "v1"
 OUT = HERE / "v2"
 
-#: v2 inherits v1's instant. Moving it would silently change the answer to every
-#: present-tense question in the inherited half, which is the one thing "v2 is v1 plus"
-#: must not do.
-EVALUATED_AT = "2026-08-01T00:00:00+00:00"
-
 DESCRIPTION = (
     "Agent Memory Benchmark v2. Every v1 scenario, question and gold answer unchanged, "
     "plus an organisation graph that gives chained questions something to walk, and "
@@ -225,14 +220,22 @@ for _n, (_person, _employer) in enumerate(EMPLOYERS.items(), 1):
 
 
 # ---------------------------------------------------------------------------
-# chains_v2: what the connective layer makes askable.
+# What the connective layer makes askable.
 #
 # All unprobed, all `multi_hop`. A probed chain would measure nothing: told the start and
 # the relations, any key-value store follows them. The difficulty is finding the slot
 # from the wording, which is what the dimension is for and what its results should be
 # read as measuring.
+#
+# **Filed under `org_chart`, the scenario whose events they walk, and not under a label
+# of their own.** `timeline.Truth.competitors` answers an unprobed question with every
+# value in its scenario, and that set is built from events — so a question in a scenario
+# with none has no competitors, and `--match lenient` stops refusing an answer that names
+# two candidate values. These twelve shipped that way once: "Sam Okonkwo, who lives in
+# Accra" scored correct here and wrong for the identically shaped v1 question beside it.
+# `dataset.validate` now refuses a question whose scenario has no events.
 # ---------------------------------------------------------------------------
-S = "chains_v2"
+S = "org_chart"
 
 q(S, "q2-chain-payments-lead-city", "multi_hop",
   "In which city does the person who leads team-payments live?", value("Accra"),
@@ -276,14 +279,18 @@ q(S, "q2-chain-growth-lead-city", "multi_hop",
 
 
 # ---------------------------------------------------------------------------
-# absent_v2: the two middle bands of the negative category.
+# The two middle bands of the negative category.
 #
 # v1's negatives were an absent slot (every system abstains) or an open question about
 # something that was never held (no system abstains). These sit between: the slot is
 # real, the store holds values for it, and the answer to *this* question is still
 # nothing, because of where the question puts one of the two clocks.
+#
+# Filed under `absent`, v1's scenario for questions whose answer is nothing, for the
+# reason given above the chained questions: a scenario with no events of its own has no
+# competing values, and `dataset.validate` refuses one.
 # ---------------------------------------------------------------------------
-S = "absent_v2"
+S = "absent"
 
 # Band 2: the world clock is before anything was ever true.
 q(S, "q2-none-alice-before", "negative",
@@ -383,7 +390,12 @@ def build() -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]
         "benchmark": "agent-memory",
         "version": "v2",
         "description": DESCRIPTION,
-        "evaluated_at": EVALUATED_AT,
+        # Read from v1 rather than restated here. Moving this instant would change the
+        # answer to every present-tense question in the inherited half, which is the one
+        # thing "v2 is v1 plus" must not do — and a second copy of it is how that would
+        # happen without anything failing. `predicates` and `dimensions` come from the
+        # same place for the same reason.
+        "evaluated_at": inherited_meta["evaluated_at"],
         "predicates": inherited_meta["predicates"],
         "dimensions": inherited_meta["dimensions"],
         "counts": {

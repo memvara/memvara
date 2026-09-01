@@ -311,4 +311,6 @@ def build_graph(**kwargs: Any) -> MemvaraMemory:
     reporting the shipped configuration's numbers and the leg's contribution is a
     difference a reader can subtract rather than a claim they have to take.
     """
-    return MemvaraMemory(label="memvara-graph", **{**GRAPH_TUNING, **kwargs})
+    # Every default in the mapping, so a caller may override any of them. Passing
+    # `label=` alongside a `**kwargs` that also carried it raised TypeError instead.
+    return MemvaraMemory(**{"label": "memvara-graph", **GRAPH_TUNING, **kwargs})

@@ -105,7 +105,9 @@ def _timing_block(result: RunResult) -> list[str]:
     for label, fields, fmt in LATENCY_ROWS:
         value = fmt.format(*(getattr(latency, f) for f in fields))
         lines.append(f"    {label:<28} {value}")
-    if latency.repeats < 2:
+    if latency.repeats == 0:
+        lines.append("    (nothing was timed; every figure above is a placeholder)")
+    elif latency.repeats == 1:
         lines.append("    (one pass; the spread above is not measured, and the timings "
                      "include whatever each system defers to its first read)")
     lines.append("")

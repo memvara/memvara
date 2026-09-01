@@ -390,19 +390,19 @@ belongs to the cold path, not to a warm-path p95.
 
 | System | write, per event | write, whole corpus | query mean | query p50 | query p95 | query max | p50 spread |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| memvara | 0.397 ms | 135.8 ms | 0.527 ms | 0.062 ms | 2.013 ms | 2.566 ms | 0.001 ms |
-| memvara-graph | 0.406 ms | 138.7 ms | 2.085 ms | 0.065 ms | **9.899 ms** | 14.585 ms | 0.002 ms |
-| vector-rag | 0.020 ms | 7.0 ms | 0.121 ms | 0.015 ms | 0.424 ms | 0.607 ms | 0.000 ms |
-| naive | 0.004 ms | 1.3 ms | 0.028 ms | 0.001 ms | 0.120 ms | 0.141 ms | 0.000 ms |
+| memvara | 0.425 ms | 145.2 ms | 0.563 ms | 0.066 ms | 2.153 ms | 2.904 ms | 0.003 ms |
+| memvara-graph | 0.432 ms | 147.9 ms | 2.165 ms | 0.068 ms | **10.074 ms** | 20.138 ms | 0.003 ms |
+| vector-rag | 0.020 ms | 6.8 ms | 0.123 ms | 0.015 ms | 0.484 ms | 0.669 ms | 0.001 ms |
+| naive | 0.004 ms | 1.2 ms | 0.029 ms | 0.001 ms | 0.123 ms | 0.231 ms | 0.000 ms |
 
 **`p50 spread` is the distance between the highest and lowest per-pass median, and it is
-the number that says whether to believe the others.** At 0.002 ms and below, these four
+the number that says whether to believe the others.** At 0.003 ms and below, these four
 passes agree with each other; a table measured once cannot say that, and the previous
 publication of this table could only quote ranges spanning about 3×. It still measures one
 machine under whatever load it was under — the spread says the passes agree, not that
 another machine would agree with them.
 
-**The graph leg costs 5× on the tail.** memvara's p95 goes from 2.0 ms to 9.9 ms for the
+**The graph leg costs 5× on the tail.** memvara's p95 goes from 2.2 ms to 10.1 ms for the
 two extra `multi_hop` questions it answers. That is the trade, stated in both directions.
 
 **The ordering is stable across every run taken:** `naive` fastest on both axes, then

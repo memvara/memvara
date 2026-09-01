@@ -77,6 +77,22 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A question filed under a scenario with no events is now a load error.** It looks
+  cosmetic and is not: `timeline.Truth.competitors` answers an unprobed question with
+  every value in its scenario, and that set is built from events — so such a question has
+  no competing values and `--match lenient` silently stops refusing an answer that names
+  two of them. Dataset v2's twelve chained questions shipped that way for one commit and
+  were graded more leniently than the six v1 questions beside them in the same category.
+  They now live in `org_chart` and `absent`, and `dataset.validate` refuses the shape.
+  No accuracy figure moved; six failure *reasons* per system changed from `unknown_value`
+  to `wrong_value`, which is what those answers always were.
+
+- **`questions[].latency_s` agrees with the `latency` block again.** With
+  `--latency-repeats > 1` the summary reported the warm passes while the per-question
+  field kept the discarded cold one, so a result file published two answers to "how long
+  does a query take" — measured at 0.38 ms against 0.09 ms on one run. Each judgement is
+  now re-timed from the median of the warm passes.
+
 - **A long run of reinforcements could fail with `database disk image is malformed`, on a
   store that was never damaged.** `put_claim` deleted and re-inserted the claim's row in
   `claims_fts` on every write — including the overwhelmingly common one where the text had

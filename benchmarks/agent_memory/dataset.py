@@ -354,11 +354,15 @@ def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
 def load(version: str = DEFAULT_DATASET, root: Path | None = None) -> Dataset:
     """Load a shipped dataset by version, validating as it goes.
 
-    Validation is not a formality here. Three of the defects a benchmark can carry are
-    invisible in a passing run and all three are load-time checks: a question probing a
-    slot no event ever wrote, a duplicate question id quietly overwriting another, and a
-    predicate used by an event but absent from the declared schema — which would hand
-    one system a cardinality and leave the next to guess.
+    Validation is not a formality here. The defects a benchmark can carry that are
+    invisible in a passing run are load-time checks, because there is no later moment at
+    which they announce themselves: a question probing a slot no event ever wrote, a
+    duplicate question id quietly overwriting another, a predicate used by an event but
+    absent from the declared schema — which would hand one system a cardinality and leave
+    the next to guess — and a question filed under a scenario with no events, which turns
+    off the lenient rule's ambiguity check for that question alone. `validate` has the
+    whole list; it is deliberately not restated here as a number, because the number went
+    stale the first time the list grew.
     """
     base = (root or DATASETS) / version
     meta = json.loads((base / "metadata.json").read_text(encoding="utf-8"))
@@ -400,11 +404,27 @@ def validate(dataset: Dataset) -> None:
                 "instant and no query on either clock can return it")
 
     slots = {(e.subject, e.predicate) for e in dataset.events}
+    populated = {e.scenario for e in dataset.events}
     seen_questions: set[str] = set()
     for question in dataset.questions:
         if question.id in seen_questions:
             raise ValueError(f"duplicate question id {question.id!r}")
         seen_questions.add(question.id)
+        if question.scenario not in populated:
+            # Not cosmetic. `timeline.Truth.competitors` answers an unprobed question
+            # with *every value in its scenario*, and that set is built from events —
+            # so a question filed under a scenario with none gets an empty competitor
+            # set, and the lenient rule's ambiguity check silently stops running. It
+            # then accepts an answer naming two candidate values, which is exactly the
+            # abuse `normalization` was written to refuse. Dataset v2 shipped twelve
+            # chained questions this way and they were graded more leniently than the
+            # six v1 questions beside them in the same category.
+            raise ValueError(
+                f"question {question.id!r} is filed under scenario "
+                f"{question.scenario!r}, which no event writes to. An unprobed question "
+                "there has no competing values, so `--match lenient` would accept an "
+                "ambiguous answer that the same question in a populated scenario would "
+                "refuse. File it under the scenario whose events it is about.")
         if question.probe is not None and question.probe not in slots:
             # A `negative` question may legitimately probe an empty slot; anything else
             # probing one is asking about a fact the dataset never delivered.
