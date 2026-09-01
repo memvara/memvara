@@ -241,7 +241,11 @@ def _format_codex_entry(entry: dict) -> list[str]:
     if entry.get("type") != "response_item":
         return []
     payload = entry.get("payload")
-    if not isinstance(payload, dict) or payload.get("type") != "message":
+    if not isinstance(payload, dict):
+        return []
+    if payload.get("type") == "custom_tool_call":
+        return _codex_tool_call(payload)
+    if payload.get("type") != "message":
         return []
     role = payload.get("role")
     if role not in ("user", "assistant"):
@@ -260,6 +264,30 @@ def _format_codex_entry(entry: dict) -> list[str]:
         if cleaned:
             out.append(f"{speaker}: {cleaned}")
     return out
+
+
+def _codex_tool_call(payload: dict) -> list[str]:
+    """What a Codex turn DID, not only what it said about it.
+
+    Measured shape: `{"type": "custom_tool_call", "name": "exec", "input": "..."}`. Read
+    without this the mined turn was the assistant's prose alone, while the same turn on
+    Claude Code yields `Claude used Edit ...` lines -- so a fact grounded in the action
+    rather than stated in the reply was kept on one host and lost on the other, with
+    nothing saying capture mined less here.
+
+    `_skip_tool` is applied, which is what makes `Host.tools` a live setting on this host
+    rather than a field that reads as configuration and is never consulted.
+
+    The matching `custom_tool_call_output` entry is deliberately NOT emitted: it carries a
+    `call_id` and no tool name, so it can be neither labelled nor filtered by the same
+    allowlist, and inventing a label for it is the kind of guess this package refuses. The
+    call already says what was done.
+    """
+    name = str(payload.get("name") or "")
+    if not name or _skip_tool(name):
+        return []
+    args = _truncate(_clean(str(payload.get("input") or "")), MAX_TOOL_RESULT)
+    return [f"Claude used {name} {args}".rstrip()]
 
 
 def format_entry(entry: dict) -> list[str]:

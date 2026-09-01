@@ -413,6 +413,26 @@ def _dig(node, path: str):
     return node
 
 
+def _add_usage(into: dict, more: dict) -> None:
+    """Sum one usage object into another, one level deep.
+
+    Numbers add; nested dicts recurse, because a token count can arrive under `cache` as
+    well as at the top. Anything else is taken from the first object that had it -- a
+    model name is not a quantity and adding it would be nonsense.
+    """
+    for key, value in more.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            into[key] = (into.get(key) or 0) + value
+        elif isinstance(value, dict):
+            nested = into.setdefault(key, {})
+            if isinstance(nested, dict):
+                _add_usage(nested, value)
+        elif key not in into:
+            into[key] = value
+
+
 def _stream(proc: "subprocess.CompletedProcess", spec: "ExtractorSpec",
             label: str) -> "tuple[str, dict]":
     """Read a reply out of a JSONL event stream, for a CLI that does not print one object.
@@ -446,7 +466,14 @@ def _stream(proc: "subprocess.CompletedProcess", spec: "ExtractorSpec",
         if all(_dig(event, key) == value for key, value in spec.stream.usage_match):
             found = _dig(event, spec.stream.usage_path)
             if isinstance(found, dict):
-                usage = found
+                # ACCUMULATED, not replaced. OpenCode reports cost per STEP, not per turn
+                # -- one `step_finish` for a single-step answer, several when the model
+                # plans before answering -- so keeping the last line silently understates
+                # spend in the one file whose whole job is to say what was spent, and
+                # understates it in a way nothing downstream can detect. Codex reports
+                # once per turn and is unaffected, which is exactly why this was easy to
+                # miss: it is correct on the host that was tested hardest.
+                _add_usage(usage, found)
 
     if proc.returncode != 0:
         reason = f"{label} exited {proc.returncode}"

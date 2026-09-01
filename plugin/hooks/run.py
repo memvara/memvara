@@ -69,15 +69,35 @@ def _detach(hook: str, host_id: str) -> int:
     that raises is a broken one.
     """
     import subprocess  # noqa: PLC0415 -- off the per-prompt path, paid only on capture
+    import tempfile  # noqa: PLC0415
 
     try:
         payload = sys.stdin.read()
     except (OSError, ValueError):
         payload = ""
+
+    # A FILE rather than a pipe, and that is the whole point of these six lines. Writing
+    # the payload into `stdin=PIPE` blocks once the 64KB buffer fills, and the child does
+    # not drain it for ~95ms while it imports -- so the parent, which is a SYNCHRONOUS
+    # Stop hook whose only job is to return immediately, would sit holding the turn open
+    # on exactly the large payloads worth capturing. `Stop` carries the assistant's whole
+    # last message, so payload size is the host's to choose, not ours.
+    #
+    # Unlinked as soon as it is open: on POSIX the child keeps a valid descriptor to an
+    # inode with no name, so nothing is left behind however the child ends -- no temp file
+    # to clean up on a path where the parent is already gone.
+    try:
+        handle = tempfile.TemporaryFile()
+        handle.write(payload.encode("utf-8"))
+        handle.seek(0)
+    except (OSError, ValueError) as exc:
+        _note(f"failed hook={hook} host={host_id} detach-payload: {type(exc).__name__}")
+        return 0
+
     try:
         child = subprocess.Popen(
             [sys.executable, os.path.abspath(__file__), hook, "--host", host_id],
-            stdin=subprocess.PIPE,
+            stdin=handle,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -86,12 +106,14 @@ def _detach(hook: str, host_id: str) -> int:
     except (OSError, ValueError) as exc:
         _note(f"failed hook={hook} host={host_id} detach: {type(exc).__name__}: {exc}")
         return 0
-    try:
-        child.stdin.write(payload.encode("utf-8"))
-        child.stdin.close()
-    except (OSError, ValueError, AttributeError) as exc:
-        _note(f"failed hook={hook} host={host_id} detach-stdin: {type(exc).__name__}")
-        return 0
+    finally:
+        # Ours to close either way: the child has its own descriptor once spawned, and on
+        # the failure path nobody else will.
+        try:
+            handle.close()
+        except OSError:
+            pass
+
     _note(f"detached hook={hook} host={host_id} pid={child.pid} bytes={len(payload)}")
     return 0
 

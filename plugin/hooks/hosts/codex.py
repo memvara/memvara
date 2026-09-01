@@ -83,8 +83,16 @@ HOST = Host(
     #: `~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl`, present on Stop and real -- the
     #: probe read it back.
     transcript=TranscriptSpec(format="codex-rollout"),
-    #: Codex's own spellings, seen on PreToolUse/PostToolUse payloads.
-    tools=frozenset({"Bash", "Edit", "Write", "ApplyPatch"}),
+    #: The tools whose use is evidence a turn did something, and CONSULTED -- the Codex
+    #: transcript reader passes tool calls through `_skip_tool` like every other host.
+    #:
+    #: One name, because one is what has been observed: a shell command arrives as
+    #: `custom_tool_call` with `name: "exec"`. An earlier draft listed Claude Code's four
+    #: spellings here, which was wrong twice over -- they are not Codex's names, and
+    #: nothing read the field on this host at all, so it looked like configuration and was
+    #: decoration. A tool this list does not name is dropped from the mined turn, so the
+    #: list grows as more are seen rather than being guessed ahead of them.
+    tools=frozenset({"exec"}),
     #: Codex injects a plugin advertisement into the conversation as a USER message, so
     #: unlike its `developer` content it is not excluded by role and has to be named.
     noise=("<recommended_plugins>", "<skills_instructions>"),
