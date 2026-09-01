@@ -38,6 +38,8 @@ import os
 import os.path
 import ssl
 
+from .ipc import log_line
+
 #: Anything but the stdlib default. See the module docstring: this single header is the
 #: difference between reaching the application and being refused at the edge.
 USER_AGENT = "memvara-hook/0.1"
@@ -169,6 +171,10 @@ class HostedRecall:
         self._session: "str | None" = None
         self._schemas: "dict[str, set[str]] | None" = None
         self._id = 0
+        #: True when the last `recall()` had to drop its `min_score` because this
+        #: deployment's tool surface has no such argument. Initialised here so reading it
+        #: before the first call is a plain False rather than an AttributeError.
+        self.unfiltered = False
 
     # -- transport -------------------------------------------------------------
 
@@ -337,7 +343,8 @@ class HostedRecall:
     def recall(self, query: str, *, k: int = 6, budget: int = 700,
                header: "str | None" = None,
                include_episodes: bool = False,
-               memory_types: "list[str] | None" = None) -> str:
+               memory_types: "list[str] | None" = None,
+               min_score: float = 0.0) -> str:
         """Recall text, or raise `HostedError`. An empty string is a real answer.
 
         Empty means this store had nothing relevant, which is information; a failure means
@@ -347,6 +354,8 @@ class HostedRecall:
         if not query.strip():
             return ""
         args: dict = {"query": query, "k": k, "budget": budget}
+        if min_score:
+            args["min_score"] = min_score
         if include_episodes:
             args["include_episodes"] = True
         if memory_types:
@@ -358,21 +367,43 @@ class HostedRecall:
         try:
             text = self._call("memory_recall", args)
         except HostedError:
-            if not include_episodes:
-                raise
+            # Optional arguments are dropped one at a time, cumulatively, in the order
+            # that loses least -- the floor before the episodes, because unfiltered
+            # memories beat none and a widened brief beats a narrow one.
+            #
+            # Written as a loop rather than as a chain of branches because the chain is
+            # what broke: `min_score` was added as the first branch and returned from
+            # inside it, so a call carrying BOTH arguments and rejected because of
+            # `include_episodes` retried with the episodes still attached, failed again,
+            # and propagated -- leaving the older `include_episodes` fallback below
+            # unreachable for the one call site that uses it. Dropping in sequence has no
+            # such ordering hazard: whatever the server objected to is gone by the end.
+            #
             # `include_episodes` is the only boolean argument anywhere in the tool surface,
             # and the server's own validator has no branch for that type: a boolean falls
             # through to the string check and dies on a `KeyError: 'boolean'` looking up the
-            # article for the error message it was about to raise. So the argument has never
-            # worked on any deployment, for either value.
-            #
-            # Asking again without it is not a workaround for a bug we could fix here -- it
-            # is server-side and pinned -- but it is the difference between a degraded
-            # opening brief and none at all, and it costs one round trip on a hook that runs
-            # once per session. It also self-heals: the day the server grows the branch,
-            # the first call stops failing and nothing here needs to change.
-            del args["include_episodes"]
-            text = self._call("memory_recall", args)
+            # article for the error message it was about to raise. So that argument has
+            # never worked on any deployment, for either value. Both drops self-heal the
+            # day the server grows the branch, with no release here.
+            optional = [key for key in ("min_score", "include_episodes") if key in args]
+            if not optional:
+                raise
+            for index, key in enumerate(optional):
+                del args[key]
+                if key == "min_score":
+                    # Recorded where a person actually looks. The flag alone was not
+                    # enough: nothing read it, so a hosted store that cannot filter
+                    # returned unfiltered memories while every visible signal said the
+                    # recall had succeeded normally.
+                    self.unfiltered = True
+                    log_line("recall", "hosted rejected min_score; this recall is "
+                                       "UNFILTERED -- the floor was not applied")
+                try:
+                    text = self._call("memory_recall", args)
+                    break
+                except HostedError:
+                    if index == len(optional) - 1:
+                        raise
         if not text:
             return ""
         return _reheader(text, header)

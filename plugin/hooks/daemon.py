@@ -100,6 +100,9 @@ class Daemon:
             kwargs = {
                 "k": int(request.get("k") or 6),
                 "budget": int(request.get("budget") or 700),
+                # Applied here as well as on the direct path, because the two must return
+                # the same text for the same query.
+                "min_score": float(request.get("min_score") or 0.0),
             }
         except (TypeError, ValueError):
             # A request this process cannot parse. Reported as a failed query, but

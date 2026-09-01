@@ -13,6 +13,31 @@ See [the report](benchmarks/agent-memory-benchmark.md), or run it:
 python -m benchmarks.agent_memory --system memvara --system naive --system vector-rag --compare
 ```
 
+## The Plugin Recall Benchmark is also on its own page
+
+`benchmarks/agent_memory` grades memory *systems*. `benchmarks/plugin_recall` grades what a
+memory **plugin** puts in a model's context, driven through the editor's own hook protocol
+so it needs no per-vendor code — see [its README](../benchmarks/plugin_recall/README.md).
+
+```bash
+python -m benchmarks.plugin_recall --plugin memvara
+```
+
+Half its corpus is prompts with **no** right answer, because a plugin that injects its whole
+store on every prompt scores 100% on a hit-only benchmark. On the seeded reference store,
+the shipped hook scored 100% on hits and **0% on silence** — it answered every bare
+acknowledgement, every arithmetic question, and all eight lexical traps. Passing the
+`min_score` floor that `Memvara.recall` has always accepted took it to 100%/100%, and cut
+mean injected tokens from 111 to 23.
+
+The floor is store-specific: scores are not comparable between embedders, and the value
+that separates cleanly on the reference store filters nothing on the hosted one. Calibrate
+against your own store rather than trusting the default:
+
+```bash
+python -m benchmarks.plugin_recall.calibrate --db ~/.memvara/store.db
+```
+
 ## Measured against the real mem0 package
 
 `pip install mem0ai && PYTHONPATH=. python3 bench/mem0_real.py` — mem0 **2.0.17**, not a
