@@ -872,6 +872,30 @@ counts and the way out are in
 That is why there are two memvara arms and why neither may be deleted: the first is what
 an evaluator meets on a weekend, and the second is what a deployment ships.
 
+### Measuring against your own store: `bench/hosted.py`
+
+Every corpus above was built for its benchmark. None has the shape a real
+store develops — the roadmap's census of one production store found ~95% of
+claims on predicates outside the declared vocabulary and a join rate of 0.5%.
+`bench/hosted.py` measures the read path against the store you actually have:
+
+    PYTHONPATH=. python3 bench/hosted.py --probes ~/.memvara/probes.jsonl
+
+You author the probes once — `hit` (a question whose answer you know is
+stored, gold = its claim id), `abstain` (a question the store cannot answer,
+gold = nothing), `verbatim` (a claim's own text, which must return that claim
+first), `ambiguous` (real prompts from your logs, judged) — and the run
+reports hit@k, mean gold-rank, false-injection rate with per-failure score
+headroom, and self-retrieval@1. `--draft` and `--seed-from-recalled` help
+author; both refuse to produce a probe no person has reviewed.
+
+Probe files are private to a store and never belong in this repository. The
+numbers are per-store and are not memvara scores: nothing measured here is
+comparable between two stores, let alone publishable against another system.
+False-injection starts at 100% by construction — `recall()` has no floor —
+and that number existing is the point: it is the baseline an abstention
+design would be judged against.
+
 ---
 
 Previous: [How it works](DESIGN.md) · Next: [Roadmap](ROADMAP.md) · [Documentation index](README.md)

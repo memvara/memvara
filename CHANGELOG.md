@@ -23,6 +23,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   model-facing copy in separate fields; mining the typed one makes this host immune by
   construction to reading our own injected recall back in as conversation.
 
+- **`bench/hosted.py` — measure retrieval against your own store.** Every
+  published benchmark runs on a corpus built for it; this runs on the store
+  you have. Four numbers from an owner-authored probe file: hit@k and mean
+  gold-rank, false-injection rate on questions the store cannot answer (100%
+  at baseline, by construction — `recall()` has no floor, which is the fact
+  the metric exists to track), and self-retrieval@1, which pins the recorded
+  defect where a claim's own text returns a different, higher-confidence
+  claim. Probes stay private to the store; `--draft` and
+  `--seed-from-recalled` help author them and refuse to emit anything a
+  person has not reviewed.
+
 ### Fixed
 
 - **A long run of reinforcements could fail with `database disk image is malformed`, on a
