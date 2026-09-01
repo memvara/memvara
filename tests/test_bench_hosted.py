@@ -180,3 +180,58 @@ def test_run_probes_verbatim_uses_rank_one(planted):
                "gold": [ids["larkspur"]]}]
     rows = hosted.run_probes(mem, probes, k=4)
     assert rows[0]["gold_rank"] is not None
+
+
+def test_store_fingerprint_names_what_a_drift_warning_needs(planted):
+    mem, _ = planted
+    fp = hosted.store_fingerprint(mem)
+    assert fp["claims"] == 2
+    assert fp["surface"] == "local"
+    assert fp["embedder"] and "hashing" in fp["embedder"]
+    assert fp["when"]
+
+
+def test_render_table_states_every_metric_present():
+    agg = {
+        "hit": {"n": 2, "hit_at_k": 0.5, "mean_gold_rank": 1.0},
+        "abstain": {"n": 2, "false_injection_rate": 1.0, "headroom": [0.45, 0.31]},
+    }
+    fp = {"claims": 10, "surface": "local", "when": "2026-09-01T00:00:00",
+          "embedder": "hashing:64:3-5"}
+    table = hosted.render_table(agg, fp)
+    # Positive statements, so a deleted line fails as loudly as a wrong one.
+    assert "hit@k" in table and "50.0%" in table
+    assert "false-injection" in table and "100.0%" in table
+    assert "0.45" in table, "headroom must be visible — it is the abstain fix's brief"
+    assert "10 claims" in table
+
+
+def test_main_writes_fingerprint_then_rows_to_out(tmp_path, planted):
+    mem, ids = planted
+    probes_path = _write_probes(tmp_path, [
+        {"id": "p1", "class": "hit", "query": "which suite needs -j1?",
+         "gold": [ids["larkspur"]]},
+    ])
+    out = tmp_path / "run.jsonl"
+    rc = hosted.main(["--probes", str(probes_path), "--out", str(out)],
+                     mem=mem)
+    assert rc == 0
+    lines = [json.loads(l) for l in out.read_text().splitlines()]
+    assert "claims" in lines[0], "first line is the fingerprint"
+    assert lines[1]["probe_id"] == "p1"
+
+
+def test_compare_runs_warns_when_the_store_moved(tmp_path):
+    def run_file(path, claims, hit_rate):
+        rows = [json.dumps({"claims": claims, "surface": "local",
+                            "embedder": "hashing:64:3-5", "when": "t"})]
+        rows.append(json.dumps({"probe_id": "p1", "cls": "hit",
+                                "hit": hit_rate > 0, "gold_rank": 1,
+                                "false_injection": None, "top_score": 0.5}))
+        path.write_text("\n".join(rows) + "\n")
+    a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    run_file(a, 10, 1)
+    run_file(b, 25, 0)
+    text = hosted.compare_runs(a, b)
+    assert "10" in text and "25" in text and "moved" in text.lower()
+    assert "hit" in text

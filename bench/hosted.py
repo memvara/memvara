@@ -15,6 +15,7 @@ import argparse
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -149,3 +150,122 @@ def run_probes(mem: Any, probes: "Sequence[dict]", *, k: int) -> list[dict]:
         row["latency_ms"] = round(elapsed, 2)
         rows.append(row)
     return rows
+
+
+def store_fingerprint(mem: Any) -> dict:
+    """What a drift warning needs: enough to say the store moved, no content."""
+    embedder = getattr(mem, "embedder", None)
+    name = getattr(embedder, "name", None) if embedder is not None else None
+    return {
+        "claims": mem.count(),
+        "surface": "local" if embedder is not None else "hosted",
+        "embedder": name,
+        "when": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+def render_table(agg: dict, fingerprint: dict) -> str:
+    lines = [
+        f"  store: {fingerprint['claims']} claims"
+        f"  surface={fingerprint['surface']}"
+        + (f"  embedder={fingerprint['embedder']}" if fingerprint["embedder"] else ""),
+        "",
+        "  class       n   metric",
+        "  ---------  --   ------",
+    ]
+    for cls in ("hit", "ambiguous", "verbatim"):
+        if cls in agg:
+            a = agg[cls]
+            rank = (f"  mean gold-rank {a['mean_gold_rank']:.1f}"
+                    if a["mean_gold_rank"] is not None else "")
+            lines.append(f"  {cls:<9} {a['n']:>3}   hit@k {a['hit_at_k']:.1%}{rank}")
+    if "abstain" in agg:
+        a = agg["abstain"]
+        lines.append(f"  {'abstain':<9} {a['n']:>3}   false-injection "
+                     f"{a['false_injection_rate']:.1%}")
+        if a["headroom"]:
+            tops = ", ".join(f"{s:.2f}" for s in sorted(a["headroom"]))
+            lines.append(f"                  scores on failures: {tops}  "
+                         "(a floor above a value silences that failure)")
+    return "\n".join(lines)
+
+
+def compare_runs(a: Path, b: Path) -> str:
+    """Two --out files side by side, led by a drift warning when due.
+
+    The warning comes first because it changes how the deltas read: a hit@k
+    that moved on a store that also moved is not a before/after, and saying so
+    below the numbers is saying it too late."""
+    def load(path: Path) -> tuple[dict, dict]:
+        lines = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+        return lines[0], aggregate(lines[1:])
+    fp_a, agg_a = load(a)
+    fp_b, agg_b = load(b)
+    out: list[str] = []
+    moved = [f"{key} {fp_a.get(key)} -> {fp_b.get(key)}"
+             for key in ("claims", "embedder", "surface")
+             if fp_a.get(key) != fp_b.get(key)]
+    if moved:
+        out.append("  WARNING: the store moved between these runs — "
+                   + "; ".join(moved))
+        out.append("  deltas below compare two different stores, not one store twice")
+    for cls in CLASSES:
+        if cls in agg_a and cls in agg_b:
+            if cls == "abstain":
+                out.append(f"  {cls}: false-injection "
+                           f"{agg_a[cls]['false_injection_rate']:.1%} -> "
+                           f"{agg_b[cls]['false_injection_rate']:.1%}")
+            else:
+                out.append(f"  {cls}: hit@k {agg_a[cls]['hit_at_k']:.1%} -> "
+                           f"{agg_b[cls]['hit_at_k']:.1%}")
+    return "\n".join(out)
+
+
+def _open_store(args: argparse.Namespace) -> Any:
+    if args.db:
+        from memvara import Memvara
+        return Memvara(args.db)
+    from memvara.remote.api import RemoteMemvara
+    return RemoteMemvara()
+
+
+def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--probes", default=str(Path.home() / ".memvara" / "probes.jsonl"))
+    parser.add_argument("--k", type=int, default=DEFAULT_K,
+                        help="results per probe; 4 is the recall hook's own K")
+    parser.add_argument("--db", default="", help="local store path; omit for hosted")
+    parser.add_argument("--out", default="", help="write per-probe JSONL here")
+    parser.add_argument("--compare", nargs=2, metavar=("A", "B"), default=None)
+    args = parser.parse_args(argv)
+
+    # --compare needs no store — two result files, read and diffed.
+    if args.compare:
+        print(compare_runs(Path(args.compare[0]), Path(args.compare[1])))
+        return 0
+
+    close = False
+    if mem is None:
+        mem = _open_store(args)
+        close = True
+    try:
+        # Opened before load_probes so a --draft branch (Task 5) can use the
+        # store handle to generate probes for someone with no probe file yet.
+        probes = load_probes(Path(args.probes))
+        fingerprint = store_fingerprint(mem)
+        rows = run_probes(mem, probes, k=args.k)
+    finally:
+        if close:
+            mem.close()
+    agg = aggregate(rows)
+    if args.out:
+        with open(args.out, "w") as fh:
+            fh.write(json.dumps(fingerprint) + "\n")
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+    print(render_table(agg, fingerprint))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
