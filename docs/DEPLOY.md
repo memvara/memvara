@@ -120,7 +120,8 @@ transport is stdio and the configuration is entirely environment.
 | `MEMVARA_USER` | who this server remembers for. Unset means the whole tenant. |
 | `MEMVARA_TENANT` | isolation boundary above the user. Default `default`. |
 | `MEMVARA_AGENT`, `MEMVARA_SESSION` | narrow further. Leave unset for durable facts — memory written at session scope is invisible to the next session. |
-| `MEMVARA_LLM` | `none` (default, offline) or `anthropic` (needs `ANTHROPIC_API_KEY` and `memvara[anthropic]`). |
+| `MEMVARA_LLM` | `none` (default, offline), `anthropic` (needs `ANTHROPIC_API_KEY` and `memvara[anthropic]`), or `openai` (needs `OPENAI_API_KEY` and `memvara[openai]`). |
+| `MEMVARA_LLM_MODEL` | Model name for `MEMVARA_LLM=openai`. Unset uses the adapter's own default. Point `OPENAI_BASE_URL` at a self-hosted OpenAI-compatible server (vLLM, llama.cpp, Ollama's shim) and name its model here. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_EMBEDDER` | `hashing` (default, offline, 512-dimensional), `hashing:<dim>`, `local` or `local:<model>` (needs `memvara[local-embed]`), or `auto`. See [The embedder is named, not discovered](#the-embedder-is-named-not-discovered). |
 | `MEMVARA_READ_ONLY` | `1` hides every tool that writes. |
 
@@ -128,6 +129,29 @@ The scope is bound at startup and **cannot be changed by a tool call**. That is 
 security property of the stdio transport: the process is the user, because the client
 launched it with the user's environment, so there is no caller-supplied scope string for
 a model to be talked into changing.
+
+### Talking to a self-hosted model
+
+`MEMVARA_LLM=openai` reaches any OpenAI-compatible endpoint, not just OpenAI's. The
+endpoint is deliberately **not** a memvara setting: the adapter builds its client through
+the official SDK, which reads `OPENAI_BASE_URL` and `OPENAI_API_KEY` from the environment
+itself. So there is one variable of memvara's own here, and it is the model name.
+
+```bash
+OPENAI_BASE_URL=http://127.0.0.1:8000/v1 \
+OPENAI_API_KEY=whatever \
+MEMVARA_LLM=openai \
+MEMVARA_LLM_MODEL=Qwen/Qwen3.5-4B-Instruct \
+MEMVARA_DB=$HOME/.memvara/memory.db python3 -m memvara.server
+```
+
+`OPENAI_API_KEY` has to be set even when the server ignores it, because the SDK refuses
+to construct a client without one. A server started without it fails at startup with a
+`ConfigError` saying so, rather than on the first turn that needed extraction.
+
+`MEMVARA_LLM_MODEL` applies to the `openai` backend only. Under `MEMVARA_MODE=cloud` it is
+refused outright, along with `MEMVARA_LLM` and `MEMVARA_EMBEDDER`: extraction runs inside
+the deployment, so a model named here would be read and never used.
 
 ### The embedder is named, not discovered
 

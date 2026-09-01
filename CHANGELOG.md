@@ -11,6 +11,26 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`MEMVARA_LLM=openai` selects the OpenAI-compatible backend, which was finished and
+  unreachable.** `OpenAILLM` has shipped complete since the `memvara[openai]` extra
+  landed — Chat Completions with `strict: true` and explicit refusal handling — but
+  `_BACKENDS` never named it, so the one value that would have selected it was a startup
+  error. Wiring it up costs one tuple entry and one helper.
+
+  The endpoint needs no variable of memvara's own: the adapter constructs its client
+  through the official SDK, which reads `OPENAI_BASE_URL` and `OPENAI_API_KEY` from the
+  environment itself. So a local vLLM, llama.cpp server or Ollama shim is reachable by
+  pointing `OPENAI_BASE_URL` at it. What that does need is a model name, since
+  `OpenAILLM`'s default names nothing on a self-hosted server — `MEMVARA_LLM_MODEL`, the
+  one variable added, refused under `MEMVARA_MODE=cloud` alongside `MEMVARA_LLM` and
+  `MEMVARA_EMBEDDER` for the reason all three share.
+
+  `OPENAI_API_KEY` must be set even against a server that ignores it, because the SDK
+  refuses to construct a client without one. That refusal is now a startup `ConfigError`
+  naming the variable rather than a traceback out of `build_memvara` on the first turn
+  that reached extraction.
+
+
 - **GitHub Copilot CLI is a supported hook host.** `plugin/hooks/hosts/copilot.py`, with
   every value measured against Copilot CLI 1.0.82. It registers Claude Code's four event
   names on purpose: Copilot fires either casing and the casing decides the payload, so
@@ -24,6 +44,21 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   construction to reading our own injected recall back in as conversation.
 
 ### Fixed
+
+- **`CachedEmbedder.encode` raised `KeyError` on a batch larger than the cache**, on keys
+  it had written itself moments earlier. Once the cache is full each insert evicts the
+  oldest entry, and within a single call the oldest entries are that same call's — so a
+  batch of more than `max_items` distinct texts evicted its own early results before the
+  final read-back, and a batch mixing cache hits with enough new texts evicted the hits
+  too. Either way the row was still owed to the caller.
+
+  The threshold is *distinct* texts rather than list length, so duplicates masked it
+  entirely: a fixture that was half repeats worked at 48k and the same code crashed at
+  100k. Shipped paths were mostly safe — `reembed` batches at 256 — and it bit bulk
+  callers: a migration, an import, a benchmark harness.
+
+  Every row a call has to return is now captured before any eviction can run. Eviction
+  behaviour, cache bounds and the hit/miss counters are unchanged.
 
 - **A long run of reinforcements could fail with `database disk image is malformed`, on a
   store that was never damaged.** `put_claim` deleted and re-inserted the claim's row in
