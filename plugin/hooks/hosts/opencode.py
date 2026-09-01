@@ -85,6 +85,10 @@ HOST = Host(
     context_token_cap=0,
     #: Measured: a detached promise outlives the turn. See the module docstring.
     supports_async=True,
+    #: The shim simply does not await capture, so nothing here has to fork.
+    detach_capture=False,
+    #: Injected parts are ordinary message content, with no cap to declare.
+    context_limit_key=0,
     #: Enforced by the shim, which kills the child, because OpenCode publishes no hook
     #: timeout of its own -- an unbounded handler would simply hold the turn open.
     timeouts={"session_start": 20, "recall": 10, "capture": 120, "approve": 5},

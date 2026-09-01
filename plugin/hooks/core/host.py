@@ -100,10 +100,31 @@ CLAUDE_CLI = ExtractorSpec(
 Host = namedtuple(
     "Host",
     "id plugin_root_env events fields envelope context_key status_key "
-    "context_token_cap supports_async timeouts client_configs config_format "
+    "context_token_cap context_limit_key supports_async detach_capture "
+    "timeouts client_configs config_format "
     "transcript tools noise skip_prefixes machine_prompt_prefixes reentry_field approve "
     "extractor extractor_label description",
 )
+
+#: Two fields that both sound like "capture must not block" and are NOT the same fact,
+#: separated because one host has one and not the other.
+#:
+#: `supports_async` says the client will run the capture hook asynchronously if the
+#: registration asks it to. `detach_capture` says this host's capture hook has to detach
+#: ITSELF -- `run.py` re-execs into a new session and returns immediately.
+#:
+#: Codex is why they are two. Its registration schema accepts `async: true` and its
+#: documentation offers it, but an async hook there does not run AT ALL: measured on
+#: codex-cli 0.151.0, an async Stop hook wrote no receipt even though writing one is the
+#: first statement in the script. The same hook declared synchronous fires, and a child it
+#: spawns with `start_new_session=True` OUTLIVES the `codex exec` process and finishes
+#: twelve seconds after the turn ended. So Codex is `supports_async=False` -- asking for
+#: async would silently disable capture -- and `detach_capture=True`.
+#:
+#: A host may have neither (capture blocks, and must be short), one, or in principle both.
+#: Nothing infers one from the other, because "the client honours the flag" and "we fork"
+#: fail in opposite directions: guessing the first wrong loses the hook, guessing the
+#: second wrong holds the turn open for the whole extraction.
 
 #: Canonical hook names. The bodies and `run.py` speak these; `Host.events` maps each to
 #: whatever the host calls the event it fires.

@@ -221,7 +221,50 @@ def format_assistant(message: Any) -> list[str]:
     return out
 
 
+def _format_codex_entry(entry: dict) -> list[str]:
+    """One line of a Codex rollout, which is not the shape the entries above are.
+
+    Codex writes `{"type": "response_item", "payload": {"type": "message", "role": ...,
+    "content": [{"type": "input_text" | "output_text", "text": ...}]}}` -- no `message`
+    key, roles nested a level down, and its own content-block types. Read with the reader
+    above it produced nothing at all: every line formatted to `[]`, so capture ran on
+    every turn, found an empty string, and logged `no turn to mine` forever. That is the
+    shape of failure this package exists to avoid, and it is why `TranscriptSpec.format`
+    stopped being decorative.
+
+    `developer` is skipped rather than mined, and that is the important line here. It is
+    where the host puts its own instructions AND where this plugin's own injected recall
+    arrives -- so on this client the blocks we wrote are excluded by role, before the
+    marker matching in `NOISE` is ever consulted. Mining our own output back in
+    manufactures duplicates of facts already stored, and gets worse every session.
+    """
+    if entry.get("type") != "response_item":
+        return []
+    payload = entry.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") != "message":
+        return []
+    role = payload.get("role")
+    if role not in ("user", "assistant"):
+        return []
+    blocks = payload.get("content")
+    if not isinstance(blocks, list):
+        return []
+    speaker = "User" if role == "user" else "Claude"
+    out: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") not in ("input_text", "output_text", "text"):
+            continue
+        cleaned = _clean(str(block.get("text") or ""))
+        if cleaned:
+            out.append(f"{speaker}: {cleaned}")
+    return out
+
+
 def format_entry(entry: dict) -> list[str]:
+    if _HOST.transcript is not None and _HOST.transcript.format == "codex-rollout":
+        return _format_codex_entry(entry)
     kind = entry.get("type")
     message = entry.get("message")
     if kind == "user":
@@ -261,10 +304,14 @@ def last_turn_with_injections(raw: bytes) -> "tuple[str, list[str]]":
 
     start = None
     for index in range(len(entries) - 1, -1, -1):
-        entry = entries[index]
-        if entry.get("type") != "user":
-            continue
-        if any(line.startswith("User: ") for line in format_entry(entry)):
+        # Asked of `format_entry` alone, with no pre-filter on the entry's own `type`.
+        # That filter said `type != "user"` -- Claude Code's spelling, and an entry shape
+        # no other host uses. On a Codex rollout every entry is a `response_item`, so the
+        # scan skipped all of them, `start` stayed None, and capture returned an empty
+        # turn on every single turn while logging `no turn to mine`. The filter only ever
+        # saved formatting a few entries during a scan that breaks at the first match, and
+        # it cost the whole hook on the second host to use it.
+        if any(line.startswith("User: ") for line in format_entry(entries[index])):
             start = index
             break
     if start is None:

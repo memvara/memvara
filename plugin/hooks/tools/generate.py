@@ -32,6 +32,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.host import HOOKS  # noqa: E402
 
+#: The canonical hooks whose replies can carry context at all. `capture` is absent on
+#: purpose: on Codex the Stop event has no HookSpecificOutput wire type, and emitting one
+#: there made the hook FAIL outright rather than be ignored.
+_CONTEXT_HOOKS = ("session_start", "recall", "approve")
+
 
 def registration(host) -> bytes:
     """The bytes of `host`'s registration file.
@@ -78,6 +83,17 @@ def registration(host) -> bytes:
             command["async"] = True
         if name in host.timeouts:
             command["timeout"] = host.timeouts[name]
+        if host.context_limit_key and name in _CONTEXT_HOOKS:
+            # Declared per hook, and only on the hooks that can carry context. Codex
+            # truncates `additionalContext` MIDDLE-OUT above a default measured between
+            # 8KB (intact) and 12KB (cut, and it says so: "Warning: truncated output"),
+            # which would silently drop the middle of a standing block. Raising the limit
+            # is the client's own mechanism -- measured, 32000 let a 16,384-byte block
+            # through whole, and the same body at 500 was cut. Emitted only where it
+            # applies: the host warns "ignoring additionalContextLimit for <event>: this
+            # event cannot emit additionalContext" and a key it ignores is a key that
+            # goes stale unnoticed.
+            command["additionalContextLimit"] = host.context_limit_key
         entry = {"hooks": [command]}
         if name == "approve":
             if host.approve is None:
