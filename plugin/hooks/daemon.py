@@ -100,10 +100,17 @@ class Daemon:
             kwargs = {
                 "k": int(request.get("k") or 6),
                 "budget": int(request.get("budget") or 700),
-                # Applied here as well as on the direct path, because the two must return
-                # the same text for the same query.
-                "min_score": float(request.get("min_score") or 0.0),
             }
+            floor = float(request.get("min_score") or 0.0)
+            if floor:
+                # Sent only when there is a floor to apply, which is exactly what
+                # `lib.fast.recall` does on the direct path. Passing it unconditionally
+                # looked harmless -- `min_score=0.0` filters nothing -- and was not: a
+                # backend whose `recall()` predates the argument raises `TypeError` on
+                # every call, so the daemon route answered nothing at all while the direct
+                # route answered normally. That is the one divergence a daemon may never
+                # have, and it was introduced by the change whose comment said so.
+                kwargs["min_score"] = floor
         except (TypeError, ValueError):
             # A request this process cannot parse. Reported as a failed query, but
             # deliberately NOT counted against `failures`: the backend is fine, and letting

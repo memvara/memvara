@@ -101,6 +101,33 @@ def test_the_default_applies_when_nothing_is_configured(monkeypatch):
     assert recall_hook._min_score() == pytest.approx(recall_hook.MIN_SCORE)
 
 
+class OlderBackend:
+    """A store whose `recall()` predates `min_score`, which is most of them."""
+
+    def recall(self, query, k=6, budget=700, header=None,
+               include_episodes=False, memory_types=None):
+        return f"- {query}"
+
+
+def test_the_daemon_does_not_send_a_floor_it_was_not_given():
+    """The daemon and the direct path must call one backend identically.
+
+    `lib.fast.recall` adds `min_score` only when it is set. The daemon was written to add
+    it always, on the reasoning that `0.0` filters nothing -- which is true of the value
+    and false of the call: a backend whose signature predates the argument raises
+    `TypeError`, so the daemon route returned nothing at all while the direct route
+    answered normally. `claude-memvara`'s route-parity test caught it as
+    `(True, None, None)`, and this asserts the same thing where the code lives.
+    """
+    import daemon as daemon_hook
+
+    served = daemon_hook.Daemon("/tmp/unused-parity.sock", OlderBackend())
+    reply = served._answer({"q": "who owns billing", "k": 2, "budget": 100})
+    assert reply.get("ok") is True, (
+        f"a backend without min_score must still be answerable: {reply}")
+    assert "who owns billing" in reply.get("text", "")
+
+
 def test_the_standing_interval_still_has_its_own_documentation():
     """The floor's comment block was appended to this constant's, leaving it undocumented
     and attributing its measured rationale to the floor instead."""
