@@ -1061,3 +1061,63 @@ def test_open_store_still_uses_the_default_when_that_is_what_wrote_the_store(
         assert ids["larkspur"] in found
     finally:
         mem.close()
+
+
+@pytest.mark.parametrize("recorded_name, recorded_dim", [
+    # Reconstructable: the pre-guard code built HashingEmbedder(dim=64) off this
+    # name and opened a brand-new store at the stale width, silently.
+    ("hashing:64:3-5", 64),
+    # Not reconstructable: the pre-guard code refused outright, claiming a store
+    # that does not exist held vectors it could not read.
+    ("local:pretend/tiny-model", 48),
+])
+def test_open_store_ignores_a_fingerprint_with_no_vectors_behind_it(
+        tmp_path, monkeypatch, recorded_name, recorded_dim):
+    """A sidecar outliving its store must not decide anything.
+
+    `Memvara._check_embedder` reads `stored_dim(self.store)` next to the recorded
+    fingerprint and skips the whole compatibility check when it is `None`: a store
+    with no vectors has nothing to be incompatible with, so the embedder in hand
+    becomes its owner. Honouring the sidecar without asking that question regressed
+    two cases the shipped one-liner got right for free, by never reading the sidecar
+    at all — this file's entire subject is measurement honesty, so a fix that
+    invents a constraint the library does not have is worse than the defect.
+
+    Both sidecars here are orphans: the `.db` they name was never created. The
+    assertion is positive — the *default* embedder must be the one that ends up
+    owning the store — because "not the stale one" would also pass on a refusal.
+
+    `default_embedder` is pinned rather than reached: `tests/conftest.py` makes
+    reaching it a hard failure so the suite's vector space is not a property of what
+    happens to be installed, and it also redirects `HOME`, so the real one cannot
+    see the model cache and goes to the network. Pinning it to
+    `HashingEmbedder(dim=512)` — what `default_embedder()` returns with
+    sentence-transformers absent — is that rule honoured, not evaded, and it is the
+    only way to exercise a branch whose whole content is *fall through to the
+    library default*.
+
+    Both names are pinned, because they are two different bindings and this test
+    can traverse either: `Memvara.__init__` looks up `memvara.core.default_embedder`
+    and `_store_embedder` imports `memvara.embed.default_embedder`. Pinning only the
+    first made the sabotage run for this test hang on a model download instead of
+    going red, which is a guard that cannot be proven to fail.
+    """
+    from memvara.embed.fingerprint import SIDECAR_SUFFIX
+
+    db = tmp_path / "orphaned.db"
+    (tmp_path / ("orphaned.db" + SIDECAR_SUFFIX)).write_text(
+        json.dumps({"embedder": recorded_name, "dim": recorded_dim}))
+    assert not db.exists(), "the point of the case is that no store is there yet"
+    for binding in ("memvara.core.default_embedder", "memvara.embed.default_embedder"):
+        monkeypatch.setattr(binding, lambda dim=512: HashingEmbedder(dim=512))
+
+    mem = hosted._open_store(argparse.Namespace(db=str(db)))
+    try:
+        assert hosted.store_fingerprint(mem)["embedder"] == "hashing:512:3-5", (
+            "an empty store must be owned by the embedder this process would "
+            "otherwise use, not by whatever a leftover sidecar names")
+        mem.remember("larkspur", "test_flag", "the Larkspur suite needs -j1")
+        assert mem.search("which suite needs -j1?", k=4, min_score=0.0), (
+            "and it must be readable afterwards")
+    finally:
+        mem.close()

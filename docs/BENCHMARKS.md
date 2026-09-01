@@ -892,7 +892,9 @@ which returns a 384-dimensional sentence-transformers model as soon as that
 package is importable, and so could not open a store built by the 512-dimensional
 fallback at all. A hashing embedder is reconstructed from its recorded name
 (`hashing:<dim>:<lo>-<hi>` carries its whole vector space); a store with no
-fingerprint on record takes the library default as before. Any other name is used
+fingerprint on record — or none that binds, because it holds no vectors for a
+fingerprint to describe, which is the same condition `Memvara` itself skips its
+compatibility check on — takes the library default as before. Any other name is used
 only when `default_embedder()` is itself what wrote the store, and is otherwise
 refused, naming the embedder on record — install it and re-run, or open the store
 yourself and pass it in as `mem=`. Measuring with the wrong embedder either raises

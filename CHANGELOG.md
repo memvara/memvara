@@ -79,8 +79,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   fingerprint the library records beside the file. A hashing embedder is
   reconstructed from its recorded name — `hashing:<dim>:<lo>-<hi>` carries every
   parameter of its vector space — and the reconstruction is checked against
-  `fingerprint_of` rather than trusted. A store with nothing on record still takes
-  the library default, unchanged. Anything else is opened only when
+  `fingerprint_of` rather than trusted. The record binds only while the store holds
+  vectors, which is the condition `Memvara._check_embedder` skips its own
+  compatibility check on: a sidecar outliving its store must not refuse an empty
+  store, nor silently open a new one at a stale dimension. A store with nothing on
+  record, or nothing binding, still takes the library default, unchanged. Anything else is opened only when
   `default_embedder()` is itself what wrote the store, so the sentence-transformers
   case keeps working, and is otherwise refused by name: a `local:MODEL` fingerprint
   names a model but building one would mean this bench deciding to import torch and
