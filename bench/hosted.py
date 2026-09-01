@@ -15,6 +15,7 @@ import argparse
 import hashlib
 import inspect
 import json
+import os
 import random
 import sys
 import time
@@ -37,7 +38,50 @@ from typing import Any, Sequence
 DEFAULT_K = 4
 DEFAULT_MIN_SCORE = 0.29
 
+#: The environment variable the recall hook's own `_min_score()` reads, mirrored
+#: for the same reason the constants above are.
+ENV_MIN_SCORE = "MEMVARA_RECALL_MIN_SCORE"
+
 CLASSES = ("hit", "abstain", "verbatim", "ambiguous")
+
+
+def default_min_score() -> float:
+    """The floor the recall hook would actually apply on this machine.
+
+    `MIN_SCORE` is the hook's *constant*; `_min_score()` is its effective value,
+    and the hook's own comment above `MIN_SCORE` tells a store owner to
+    recalibrate and set `MEMVARA_RECALL_MIN_SCORE`. Mirroring only the constant
+    would mean that anyone who followed that advice measured 0.29 rather than
+    their shipped configuration — the bench would be describing a deployment
+    they do not have while claiming to measure what the hook injects.
+
+    So the resolution is mirrored too, clamp included: `0` is a legitimate
+    setting (it restores the unfiltered read path), a value above 1.0 filters
+    everything, and a value that is not a number leaves the constant standing.
+    `tests/test_bench_hosted.py::test_bench_default_floor_resolves_as_the_hook_resolves_it`
+    compares this against the hook's own `_min_score()` on every branch —
+    unset, set, both clamps, unparseable — so the two resolutions cannot drift
+    apart in silence.
+    """
+    raw = os.environ.get(ENV_MIN_SCORE)
+    if raw is None:
+        return DEFAULT_MIN_SCORE
+    try:
+        return min(1.0, max(0.0, float(raw)))
+    except ValueError:
+        return DEFAULT_MIN_SCORE
+
+
+def _class_label(cls: str) -> str:
+    """The metric name for a class, in the one place both renderers read it.
+
+    verbatim only counts a hit at rank 1 exactly, never at rank k — "hit@k"
+    would misdescribe it, and self-retrieval@1 is the design doc's own name for
+    it. `render_table` and `compare_runs` both print this label and had it
+    spelled out separately; one of the two said "hit@k" for every class,
+    including the one the other explicitly says it must not.
+    """
+    return "self-retrieval@1" if cls == "verbatim" else "hit@k"
 
 
 def score_probe(probe: dict, results: "Sequence[tuple[str, float]]",
@@ -143,6 +187,8 @@ def aggregate(rows: "Sequence[dict]") -> dict:
             out[cls] = {
                 "n": len(mine),
                 "hit_at_k": len(hits) / len(mine),
+                # None, not `evalkit.mean`'s 0.0: "no hits to average" must
+                # render as an absent column, where 0.0 reads as rank zero.
                 "mean_gold_rank": (sum(ranks) / len(ranks)) if ranks else None,
             }
     return out
@@ -207,9 +253,10 @@ def run_probes(mem: Any, probes: "Sequence[dict]", *, k: int,
     question (spec: a core ranking defect and a surface gating defect must show
     up as different numbers).
 
-    `min_score` goes to both, and defaults at the CLI to the recall hook's own
-    `MIN_SCORE`. Measuring an unfloored read path would measure a configuration
-    no shipped surface uses.
+    `min_score` goes to both, and defaults at the CLI to whatever the recall
+    hook's own `_min_score()` would resolve to here (`default_min_score`).
+    Measuring an unfloored read path would measure a configuration no shipped
+    surface uses.
     """
     named = _names_what_it_rendered(mem)
     rows: list[dict] = []
@@ -230,9 +277,18 @@ def run_probes(mem: Any, probes: "Sequence[dict]", *, k: int,
 
 
 def store_fingerprint(mem: Any) -> dict:
-    """What a drift warning needs: enough to say the store moved, no content."""
+    """What a drift warning needs: enough to say the store moved, no content.
+
+    The embedder identity comes from the library's own `embedder_name`, not
+    from `getattr(embedder, "name", None)`: that helper unwraps a wrapper's
+    `.inner` and falls back to the class name, where the hand-rolled lookup
+    reported `embedder: None` for both — a fingerprint that cannot report the
+    embedder cannot warn that it changed, which is the drift this exists for.
+    """
+    from memvara.embed.fingerprint import embedder_name
+
     embedder = getattr(mem, "embedder", None)
-    name = getattr(embedder, "name", None) if embedder is not None else None
+    name = embedder_name(embedder) if embedder is not None else None
     return {
         "claims": mem.count(),
         "surface": "local" if embedder is not None else "hosted",
@@ -260,10 +316,7 @@ def render_table(agg: dict, fingerprint: dict) -> str:
             rank = ("" if cls == "verbatim" else
                     f"  mean gold-rank {a['mean_gold_rank']:.1f}"
                     if a["mean_gold_rank"] is not None else "")
-            # verbatim only counts a hit at rank 1 exactly, never at rank k —
-            # "hit@k" would misdescribe it. self-retrieval@1 is the design
-            # doc's own name for this metric.
-            label = "self-retrieval@1" if cls == "verbatim" else "hit@k"
+            label = _class_label(cls)
             lines.append(f"  {cls:<9} {a['n']:>3}   {label} {a['hit_at_k']:.1%}{rank}")
     if "abstain" in agg:
         a = agg["abstain"]
@@ -302,7 +355,8 @@ def compare_runs(a: Path, b: Path) -> str:
                            f"{agg_a[cls]['false_injection_rate']:.1%} -> "
                            f"{agg_b[cls]['false_injection_rate']:.1%}")
             else:
-                out.append(f"  {cls}: hit@k {agg_a[cls]['hit_at_k']:.1%} -> "
+                out.append(f"  {cls}: {_class_label(cls)} "
+                           f"{agg_a[cls]['hit_at_k']:.1%} -> "
                            f"{agg_b[cls]['hit_at_k']:.1%}")
     return "\n".join(out)
 
@@ -313,6 +367,14 @@ def draft_probes(mem: Any, n: int, *, seed: int = 20260901) -> list[dict]:
     The query IS the claim's text, which is exactly what a probe must not be —
     so each row carries draft: true and load_probes refuses it until a person
     rewrites the query into how they would actually ask.
+
+    `Claim.text` and not `Claim.object`: `text` is the "natural-language
+    rendering, used for embedding" (`memvara/types.py`), so it is the string
+    retrieval actually indexed, and self-retrieval@1 asks whether a claim's own
+    text returns that claim first. Drafting from the raw object slot ("Lisbon"
+    where the embedded text is "user lives in Lisbon") measures something
+    weaker than the metric is named for. `text` defaults to `""` on the
+    dataclass, so `object` remains the fallback for a claim that has none.
 
     A **sample**, drawn with a seeded `random.Random` off the id-sorted
     population: same store and same seed give the same rows, but the rows are
@@ -328,7 +390,7 @@ def draft_probes(mem: Any, n: int, *, seed: int = 20260901) -> list[dict]:
     claims = random.Random(seed).sample(population, min(n, len(population)))
     rows: list[dict] = []
     for i, claim in enumerate(claims, start=1):
-        text = claim.object
+        text = claim.text or claim.object
         rows.append({"id": f"draft-hit-{i}", "class": "hit",
                      "query": text, "gold": [claim.id], "draft": True})
         rows.append({"id": f"draft-verbatim-{i}", "class": "verbatim",
@@ -343,20 +405,45 @@ _INTERNAL_PREFIXES = ("Extract durable facts",)
 
 
 def seed_dump(recalled_dir: Path, dump_path: Path, *, sample: int,
-              seed: int = 20260901) -> int:
+              seed: int = 20260901) -> "tuple[int, int]":
     """Phase one of closing the judgment loop: real queries, blinded, dumped.
 
     Blinding here means order (shuffled by seed) and absence of results — the
     judge sees only the query text and answers from the store, not from what
     the hook happened to return that day.
+
+    **What this actually samples, which is narrower than "real recall
+    traffic".** The directory is written by `plugin/hooks/recall.py`, which
+    keys one file *per session* (`_seen_path` → `f"{session}.json"`) and
+    rewrites it with `open(path, "w")` on every turn. So each file holds one
+    query: that session's most recent substantive prompt, truncated to
+    `MAX_CARRY_CHARS` (300) characters. `_prune_seen` deletes files older than
+    `SEEN_TTL_SECONDS` (14 days). There is no append-only log of recall events
+    anywhere on disk, and this does not reconstruct one.
+
+    The consequence for anyone judging these rows: the sample is one query per
+    recent session, skewed toward whatever each session happened to ask last,
+    and blind to everything asked earlier in that session. It is still a
+    thousand-odd distinct real queries on a working machine — worth judging —
+    but it is a sample of session tails, not of traffic.
+
+    Returns `(written, skipped)`. Files that could not be read as a JSON object
+    are counted rather than dropped in silence: a directory where every file
+    failed to parse would otherwise print exactly what an empty directory
+    prints.
     """
     queries: dict[str, str] = {}
+    skipped = 0
     for f in sorted(recalled_dir.glob("*.json")):
         try:
             query = json.loads(f.read_text()).get("query", "")
-        except ValueError:
+        except (ValueError, OSError, AttributeError, TypeError):
+            # Valid-but-not-an-object JSON (`null`, `[]`, a bare number) parses
+            # and then fails on `.get`, which crashed the whole run over one
+            # bad file. `_state_json` in the hook tolerates the same shapes.
+            skipped += 1
             continue
-        query = " ".join(query.split())
+        query = " ".join(query.split()) if isinstance(query, str) else ""
         if not query or any(query.startswith(p) for p in _INTERNAL_PREFIXES):
             continue
         digest = hashlib.blake2b(query.encode(), digest_size=8).hexdigest()
@@ -367,7 +454,7 @@ def seed_dump(recalled_dir: Path, dump_path: Path, *, sample: int,
     with open(dump_path, "w") as fh:
         for row in rows:
             fh.write(json.dumps(row) + "\n")
-    return len(rows)
+    return len(rows), skipped
 
 
 def seed_answers(dump_path: Path, answers_path: Path, judged: str) -> list[dict]:
@@ -375,14 +462,30 @@ def seed_answers(dump_path: Path, answers_path: Path, judged: str) -> list[dict]
 
     gold=[] is a judgment too — 'the store has nothing for this' — and becomes
     an abstain probe rather than being dropped; only skip:true drops a row.
+
+    A repeated id refuses, following `bench/evalkit.FileReader._load_answers`:
+    an answers file assembled by concatenating two judging passes would
+    otherwise be scored against whichever copy happened to be last, and which
+    judgment was meant is not recoverable from the file.
     """
-    dumped = {json.loads(l)["id"]: json.loads(l)["query"]
-              for l in dump_path.read_text().splitlines() if l.strip()}
+    dumped: dict[str, str] = {}
+    for line in dump_path.read_text().splitlines():
+        if line.strip():
+            row = json.loads(line)
+            dumped[row["id"]] = row["query"]
     probes: list[dict] = []
-    for raw in answers_path.read_text().splitlines():
+    seen: dict[str, int] = {}
+    for lineno, raw in enumerate(answers_path.read_text().splitlines(), start=1):
         if not raw.strip():
             continue
         row = json.loads(raw)
+        if row["id"] in seen:
+            raise SystemExit(
+                f"{answers_path}: line {lineno}: id {row['id']!r} was already "
+                f"judged on line {seen[row['id']]}. Which judgment was meant is "
+                "not recoverable, and taking the last one silently seeds a probe "
+                "nobody can reproduce. Remove the duplicate and re-run.")
+        seen[row["id"]] = lineno
         if row.get("skip") or row["id"] not in dumped:
             continue
         gold = row.get("gold", [])
@@ -408,15 +511,20 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
     parser.add_argument("--probes", default=str(Path.home() / ".memvara" / "probes.jsonl"))
     parser.add_argument("--k", type=int, default=DEFAULT_K,
                         help="results per probe; 4 is the recall hook's own K")
-    parser.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE,
+    parser.add_argument("--min-score", type=float, default=default_min_score(),
                         help="relevance floor on both read surfaces; the default "
-                             "is the recall hook's own MIN_SCORE, so the run "
-                             "measures what the hook actually injects. Pass 0 to "
-                             "measure the unfloored read path.")
+                             "resolves exactly as the recall hook's own "
+                             "_min_score() does (MEMVARA_RECALL_MIN_SCORE if set, "
+                             "else MIN_SCORE), so the run measures what the hook "
+                             "actually injects on this machine. Pass 0 to measure "
+                             "the unfloored read path.")
     parser.add_argument("--db", default="", help="local store path; omit for hosted")
     parser.add_argument("--out", default="", help="write per-probe JSONL here")
     parser.add_argument("--compare", nargs=2, metavar=("A", "B"), default=None)
-    parser.add_argument("--draft", type=int, default=0, metavar="N")
+    # Default None, not 0: `--draft 0` computed by a wrapper ("draft up to the
+    # remaining budget") must be a no-op, not a fall-through into a full
+    # scoring run against a probe file that may not exist.
+    parser.add_argument("--draft", type=int, default=None, metavar="N")
     parser.add_argument("--seed-from-recalled", default="", metavar="DIR")
     parser.add_argument("--dump", default="", metavar="PATH")
     parser.add_argument("--answers", default="", metavar="PATH")
@@ -430,8 +538,8 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
         print(compare_runs(Path(args.compare[0]), Path(args.compare[1])))
         return 0
 
-    # Seeding needs no store either — it reads/writes recalled-event and
-    # dump/answers files directly.
+    # Seeding needs no store either — it reads/writes the recall hook's
+    # per-session state files and the dump/answers files directly.
     if args.seed_from_recalled:
         if args.answers:
             if not args.dump:
@@ -449,8 +557,11 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
         if not args.dump:
             raise SystemExit("--seed-from-recalled needs --dump PATH on the "
                              "first pass, then --answers PATH on the second")
-        n = seed_dump(Path(args.seed_from_recalled), Path(args.dump),
-                      sample=args.sample, seed=args.seed)
+        n, skipped = seed_dump(Path(args.seed_from_recalled), Path(args.dump),
+                               sample=args.sample, seed=args.seed)
+        if skipped:
+            print(f"skipped {skipped} unreadable file(s) in "
+                  f"{args.seed_from_recalled}")
         print(f"wrote {n} blinded queries to {args.dump}; judge them into "
               f"{{\"id\", \"gold\": [claim ids]}} rows (gold [] = nothing "
               f"relevant; \"skip\": true = drop), then re-run with "
@@ -464,7 +575,7 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
     try:
         # Opened before load_probes so a --draft branch (Task 5) can use the
         # store handle to generate probes for someone with no probe file yet.
-        if args.draft:
+        if args.draft is not None:
             for row in draft_probes(mem, args.draft, seed=args.seed):
                 print(json.dumps(row))
             return 0

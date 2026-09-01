@@ -823,7 +823,7 @@ git commit -m "bench/hosted: --draft emits skeletons the runner refuses"
 - Modify: `tests/test_bench_hosted.py`
 
 **Interfaces:**
-- Consumes: `main`'s parser; the recalled-event format `{"seen": [...], "query": str, ...}` (one JSON file per event).
+- Consumes: `main`'s parser; the recall hook's per-session state format `{"seen": [...], "query": str, "standing": str, "standing_at": float}` (one JSON file per *session*, rewritten each turn, carrying that session's most recent prompt truncated to 300 chars and pruned after 14 days).
 - Deliberate deviation from the spec's letter: the spec names "the `bench/evalkit.FileReader` dump/answers shape", whose rows carry `system_prompt`/`prompt`. Here there is no prompt — only a query — so the dump rows are `{"id", "query"}`. The *pattern* (two-phase blinded round trip, deterministic shuffle, key held back) is what the spec means; do not import or mimic `FileReader` itself, and do not add empty prompt fields to match its schema.
 - Produces: `seed_dump(recalled_dir: Path, dump_path: Path, *, sample: int, seed: int) -> int` (events written); `seed_answers(dump_path: Path, answers_path: Path, judged: str) -> list[dict]` (ambiguous probes). Dump rows are `{"id": <digest>, "query": <text>}`, shuffled with `random.Random(seed)`; answers rows are `{"id": ..., "gold": [claim ids]}` (empty list = judged irrelevant → becomes an `abstain` probe instead; `"skip"` key true = dropped). CLI: `--seed-from-recalled DIR --dump PATH [--sample N] [--seed INT]`, then later `--seed-from-recalled DIR --answers PATH --judged YYYY-MM-DD --dump PATH`, which prints probe JSONL to stdout.
 
@@ -1074,4 +1074,4 @@ Expected: JSONL skeleton probes on stdout (the store is empty, so possibly zero 
 
 ## After the tasks
 
-Open the PR from `bench/hosted-store-measurement`, then run `/code-review high <PR#>` in the open-review-fix window, fix findings on the branch, and note the review model in a PR comment if it is not the latest Sonnet. Do not merge without the review. The first real measurement run (authoring your actual probes, seeding from your 1,052 recall events) is deliberately after merge — it is use, not development.
+Open the PR from `bench/hosted-store-measurement`, then run `/code-review high <PR#>` in the open-review-fix window, fix findings on the branch, and note the review model in a PR comment if it is not the latest Sonnet. Do not merge without the review. The first real measurement run (authoring your actual probes, seeding from your ~1,050 per-session recall state files) is deliberately after merge — it is use, not development.

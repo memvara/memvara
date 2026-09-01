@@ -96,7 +96,7 @@ documentation section; the probe file lives with the store owner.
 ```jsonl
 {"id": "p001", "class": "hit",      "query": "what suite must run with -j1?",  "gold": ["<claim-id>"]}
 {"id": "p002", "class": "abstain",  "query": "write a haiku about rain",       "gold": []}
-{"id": "p003", "class": "verbatim", "query": "<the claim's own object text>",  "gold": ["<claim-id>"]}
+{"id": "p003", "class": "verbatim", "query": "<the claim's own text>",         "gold": ["<claim-id>"]}
 {"id": "p004", "class": "ambiguous","query": "<a real prompt from the log>",   "gold": ["<claim-id>"], "judged": "2026-09-01"}
 ```
 
@@ -111,16 +111,28 @@ Two subcommand-style flags, both write-nothing-without-review:
 
 - `--draft N` samples N live claims from the configured store and emits skeleton `hit`
   and `verbatim` probes on stdout — the owner edits the queries into how they would
-  actually ask, then appends to their probe file. Drafted queries are deliberately not
+  actually ask, then appends to their probe file. The drafted query is `Claim.text`,
+  the natural-language rendering retrieval actually embeds, falling back to
+  `Claim.object` for a claim with none: self-retrieval@1 asks whether a claim's own
+  text returns that claim first, so drafting from the raw object slot would measure
+  something weaker than the metric is named for. Drafted queries are deliberately not
   auto-usable: a query generated from the claim's own text measures lexical echo, which
   is the bias this tool exists to escape. The draft marks each row `"draft": true`, and
   the runner refuses rows still carrying the mark.
-- `--seed-from-recalled DIR` closes the loop the hook left open. It samples real recall
-  events (`~/.memvara/.hooks/recalled/`, 1,052 on this machine), dumps blinded
-  query/result pairs in the `bench/evalkit.FileReader` dump/answers shape, and on the
-  second pass (`--answers PATH`) converts the judgments into `ambiguous` probes. The
-  same blinding discipline applies and the same caveat is printed: judged rows are a
-  sanity anchor, not a reproducible measurement.
+- `--seed-from-recalled DIR` closes the loop the hook left open, for the part of it the
+  hook actually records. `~/.memvara/.hooks/recalled/` is **not** an event log:
+  `plugin/hooks/recall.py` keys one file per *session* and rewrites it every turn, so
+  each file holds that session's most recent substantive prompt, truncated to
+  `MAX_CARRY_CHARS` (300), and files expire after `SEEN_TTL_SECONDS` (14 days). The
+  sample is therefore one query per recent session — a thousand-odd distinct real
+  queries on a working machine (1,050 files on this one), but skewed toward what each
+  session asked last and blind to everything earlier in it. That has to be said where
+  the rows are judged, because it is a property of the evidence and not of the tool.
+  The dump is blinded query rows in the `bench/evalkit.FileReader` dump/answers
+  *pattern* — the shape differs, since there is no prompt here, only a query — and on
+  the second pass (`--answers PATH`) the judgments become `ambiguous` probes. The same
+  blinding discipline applies and the same caveat is printed: judged rows are a sanity
+  anchor, not a reproducible measurement.
 
 ## How it queries
 

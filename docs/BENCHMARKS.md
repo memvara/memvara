@@ -903,7 +903,7 @@ never skips one.
 ```jsonl
 {"id": "p001", "class": "hit",       "query": "what suite must run with -j1?", "gold": ["cl_..."]}
 {"id": "p002", "class": "abstain",   "query": "write a haiku about rain",      "gold": []}
-{"id": "p003", "class": "verbatim",  "query": "<the claim's own object text>", "gold": ["cl_..."]}
+{"id": "p003", "class": "verbatim",  "query": "<the claim's own text>",        "gold": ["cl_..."]}
 {"id": "p004", "class": "ambiguous", "query": "<a real prompt from your log>", "gold": ["cl_..."], "judged": "2026-09-01"}
 ```
 
@@ -931,8 +931,44 @@ run; it is only a difference in *which* claims the two endpoints pick that
 would pass unnoticed. Run against `--db` for a number read off the recall call
 itself.
 
-Both read surfaces are queried at `--min-score`, which **defaults to the recall
-hook's own `MIN_SCORE`** so the run measures what that hook actually injects.
+#### Seeding probes from the recall hook's own state: `--seed-from-recalled`
+
+    PYTHONPATH=. python3 bench/hosted.py \
+        --seed-from-recalled ~/.memvara/.hooks/recalled --dump pairs.jsonl
+    # judge pairs.jsonl into {"id", "gold": [claim ids]} rows, then
+    PYTHONPATH=. python3 bench/hosted.py \
+        --seed-from-recalled ~/.memvara/.hooks/recalled \
+        --dump pairs.jsonl --answers answers.jsonl --judged 2026-09-01
+
+The first pass dumps real queries, blinded — shuffled by `--seed`, carrying the
+query text and nothing else, so a judge answers from the store rather than from
+what the hook happened to return that day. The second turns the judgments into
+`ambiguous` probes (and `abstain` probes, where the judgment was "the store has
+nothing for this"). `--judged` is required: a judgment ages as the store
+changes.
+
+**Be clear about what that directory holds, because it is narrower than "real
+recall traffic".** `plugin/hooks/recall.py` keys **one file per session**, named
+for the session id, and rewrites it on every turn. Each file therefore carries a
+single query: that session's **most recent** substantive prompt, **truncated to
+300 characters** (`MAX_CARRY_CHARS`). Files older than **fourteen days**
+(`SEEN_TTL_SECONDS`) are pruned. No append-only log of recall events exists on
+disk, and this does not reconstruct one.
+
+So the sample is one query per recent session. It skews toward whatever each
+session last asked, it cannot see anything asked earlier in a session, and a
+long prompt reaches the judge clipped. On a machine in daily use that is still
+on the order of a thousand distinct real queries and worth judging — but when
+you read the resulting `ambiguous` rows, that is the population they came from.
+Unreadable files are counted and the count is printed, so a directory that
+failed to parse does not look like an empty one.
+
+Both read surfaces are queried at `--min-score`, whose default **resolves
+exactly as the recall hook's own `_min_score()` does**: `MEMVARA_RECALL_MIN_SCORE`
+when that is set (clamped to `[0, 1]`), otherwise the hook's `MIN_SCORE`. So a
+store owner who recalibrated and exported that variable — the workflow the hook's
+own comment recommends — measures their shipped configuration, not the constant,
+and the run measures what that hook actually injects on this machine.
 So false-injection is not predetermined: it counts how often the shipped floor
 still injects on a question the store cannot answer, and it can come back at
 zero or well above it depending on the store and the embedder. Pass

@@ -214,6 +214,64 @@ def test_bench_defaults_equal_the_hook_constants():
         "bench/hosted.py mirrors the recall hook's K; they have drifted")
 
 
+@pytest.mark.parametrize("raw, description", [
+    (None, "unset — the constant stands"),
+    ("0.45", "a recalibrated floor"),
+    ("0", "zero is a setting, not an absence"),
+    ("1.7", "clamped to 1.0"),
+    ("-3", "clamped to 0.0"),
+    ("banana", "unparseable — the constant stands"),
+])
+def test_bench_default_floor_resolves_as_the_hook_resolves_it(monkeypatch, raw,
+                                                              description):
+    """The *effective* floor, not just the constant, compared to the referent.
+
+    The hook's shipped value is `_min_score()`, which honours
+    `MEMVARA_RECALL_MIN_SCORE` — and the hook's own comment tells a store owner
+    to recalibrate and set it. A bench that mirrored only `MIN_SCORE` would
+    measure 0.29 for anyone who followed that advice while the documentation
+    claimed it measured what the hook injects. Every branch of the resolution
+    is compared against the hook's own function, so the two cannot diverge:
+    change either clamp, either fallback, or the variable name, and this goes
+    red for the case that changed.
+    """
+    hooks = Path(__file__).resolve().parent.parent / "plugin" / "hooks"
+    if str(hooks) not in sys.path:
+        sys.path.insert(0, str(hooks))
+    import recall as recall_hook  # noqa: PLC0415 - the referent, read at test time
+
+    if raw is None:
+        monkeypatch.delenv(hosted.ENV_MIN_SCORE, raising=False)
+    else:
+        monkeypatch.setenv(hosted.ENV_MIN_SCORE, raw)
+    assert hosted.default_min_score() == recall_hook._min_score(), description
+
+
+def test_main_takes_its_default_floor_from_the_environment(tmp_path, planted,
+                                                           monkeypatch):
+    """The resolution has to reach the run, not only the helper.
+
+    A `default=` computed once at import, or a helper nothing calls, would
+    leave `--min-score` on the constant while `default_min_score` tested clean.
+    1.0 filters everything on this store, 0.0 filters nothing, so the two
+    settings give opposite verdicts on the same probe.
+    """
+    mem, ids = planted
+    probes = _write_probes(tmp_path, [
+        {"id": "p1", "class": "hit", "query": "which suite needs -j1?",
+         "gold": [ids["larkspur"]]}])
+
+    def run(value, out):
+        monkeypatch.setenv(hosted.ENV_MIN_SCORE, value)
+        assert hosted.main(["--probes", str(probes), "--out", str(out)],
+                           mem=mem) == 0
+        return [json.loads(l) for l in out.read_text().splitlines()][1]
+
+    assert run("0", tmp_path / "low.jsonl")["hit"] is True
+    assert run("1.0", tmp_path / "high.jsonl")["hit"] is False, (
+        "MEMVARA_RECALL_MIN_SCORE did not reach the run's --min-score default")
+
+
 def test_run_probes_verbatim_uses_rank_one(planted):
     mem, ids = planted
     probes = [{"id": "p3", "class": "verbatim",
@@ -234,6 +292,42 @@ def test_store_fingerprint_names_what_a_drift_warning_needs(planted):
     assert fp["surface"] == "local"
     assert fp["embedder"] and "hashing" in fp["embedder"]
     assert fp["when"]
+
+
+def test_store_fingerprint_names_a_wrapped_embedder(planted):
+    """A wrapper must not fingerprint as `embedder: None`.
+
+    `getattr(embedder, "name", None)` returns None for anything that delegates,
+    and a fingerprint that cannot state the embedder cannot warn that it
+    changed — which is the whole job `compare_runs`' drift banner reads it for.
+    The library's own `embedder_name` unwraps `.inner` and falls back to the
+    class name; this pins that the bench uses it.
+    """
+    from memvara.embed.fingerprint import embedder_name
+
+    mem, _ = planted
+
+    class Wrapping:
+        """Declares no `name`; delegates to what it wraps, as `_name_of` expects."""
+
+        def __init__(self, inner):
+            self.inner = inner
+
+    class Nameless:
+        pass
+
+    class _Store:
+        def __init__(self, embedder):
+            self.embedder = embedder
+
+        def count(self):
+            return 1
+
+    wrapped = Wrapping(mem.embedder)
+    fp = hosted.store_fingerprint(_Store(wrapped))
+    assert fp["embedder"] == embedder_name(wrapped) == embedder_name(mem.embedder)
+    assert hosted.store_fingerprint(_Store(Nameless()))["embedder"] == "Nameless", (
+        "a nameless embedder falls back to its class name, never to None")
 
 
 def test_render_table_states_every_metric_present():
@@ -324,6 +418,37 @@ def test_compare_runs_is_silent_when_the_store_did_not_move(tmp_path):
         "not a signal")
 
 
+def test_compare_runs_labels_the_verbatim_delta_self_retrieval(tmp_path):
+    """The two renderers must name the metric the same way.
+
+    `render_table` branches to self-retrieval@1 for verbatim with a comment
+    saying hit@k would misdescribe it; `compare_runs` hard-coded hit@k for
+    every non-abstain class, so the same number carried two names depending on
+    which command printed it. Neither existing compare test had a verbatim row,
+    which is why the two could disagree undisturbed.
+    """
+    def run_file(path, hit):
+        rows = [json.dumps({"claims": 10, "surface": "local",
+                            "embedder": "hashing:64:3-5", "when": "t"}),
+                json.dumps({"probe_id": "p1", "cls": "verbatim", "hit": hit,
+                            "gold_rank": 1 if hit else 2,
+                            "false_injection": None, "top_score": 0.5}),
+                json.dumps({"probe_id": "p2", "cls": "hit", "hit": True,
+                            "gold_rank": 1, "false_injection": None,
+                            "top_score": 0.5})]
+        path.write_text("\n".join(rows) + "\n")
+    a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    run_file(a, True)
+    run_file(b, False)
+    text = hosted.compare_runs(a, b)
+    verbatim_line = next(l for l in text.splitlines() if "verbatim" in l)
+    assert "self-retrieval@1 100.0% -> 0.0%" in verbatim_line, (
+        "verbatim only counts a hit at rank 1 exactly; the compare view must "
+        "use the same label render_table does")
+    hit_line = next(l for l in text.splitlines() if l.strip().startswith("hit:"))
+    assert "hit@k" in hit_line, "the hit class keeps its own label"
+
+
 def test_draft_probes_mark_every_row_as_draft(planted):
     mem, _ = planted
     rows = hosted.draft_probes(mem, 2)
@@ -331,6 +456,44 @@ def test_draft_probes_mark_every_row_as_draft(planted):
     classes = {r["class"] for r in rows}
     assert classes == {"hit", "verbatim"}
     assert all(r["gold"] for r in rows)
+
+
+def test_draft_probes_query_the_embedded_text_not_the_raw_object_slot(planted):
+    """`Claim.text` is what retrieval embedded; `Claim.object` is a slot value.
+
+    self-retrieval@1 asks whether a claim's own text returns that claim first,
+    so a verbatim probe drafted from the raw object ("Lisbon" where the indexed
+    string is "user lives in Lisbon") measures something weaker than the metric
+    is named for. The planted store's two fields genuinely differ — `remember`
+    renders `text` as "<subject> <predicate> <object>" — so a regression to
+    `.object` fails here rather than passing on a fixture where they coincide.
+    """
+    mem, _ = planted
+    by_id = {c.id: c for c in mem.get_all()}
+    rows = hosted.draft_probes(mem, 2)
+    assert rows
+    for row in rows:
+        claim = by_id[row["gold"][0]]
+        assert claim.text != claim.object, (
+            "this fixture cannot tell the two fields apart — it guards nothing")
+        assert row["query"] == claim.text, (
+            "a drafted query must be the embedded text, not the object slot")
+
+
+def test_draft_probes_fall_back_to_the_object_when_a_claim_has_no_text():
+    """`Claim.text` defaults to `""`, and an empty query is refused by
+    `load_probes` — so a textless claim must still draft something askable."""
+    class _Textless:
+        id = "cl_textless"
+        text = ""
+        object = "the Larkspur suite needs -j1"
+
+    class _Store:
+        def get_all(self):
+            return [_Textless()]
+
+    rows = hosted.draft_probes(_Store(), 1)
+    assert {r["query"] for r in rows} == {"the Larkspur suite needs -j1"}
 
 
 def test_draft_probes_sample_rather_than_take_the_id_sorted_prefix():
@@ -379,34 +542,147 @@ def test_main_draft_prints_jsonl_and_runs_nothing(tmp_path, planted, capsys):
     assert all(json.loads(l)["draft"] for l in out)
 
 
-def _write_recalled(tmp_path, events):
+#: The recall hook's own truncation length, mirrored so the fixture below can
+#: write a query at the boundary the real writer produces. Read off the hook in
+#: `test_the_recalled_fixture_matches_what_the_hook_writes` rather than trusted.
+MAX_CARRY_CHARS = 300
+
+
+def test_main_draft_zero_is_a_no_op_not_a_full_run(tmp_path, planted, capsys):
+    """`--draft 0` must draft nothing, not fall through to a scoring pass.
+
+    The flag defaulted to `0`, so `if args.draft:` could not tell an explicit
+    zero from an absent flag. A wrapper computing `--draft {remaining}` then
+    got a full probe-suite run — here, against a probes path that does not
+    exist. `--probes` names a missing file deliberately: a fall-through raises
+    rather than passing quietly, so this test cannot go green by accident.
+    """
+    mem, _ = planted
+    rc = hosted.main(["--draft", "0", "--probes", str(tmp_path / "absent.jsonl")],
+                     mem=mem)
+    assert rc == 0
+    assert capsys.readouterr().out == "", "--draft 0 drafts nothing"
+
+
+def _write_recalled(tmp_path, queries):
+    """The directory `plugin/hooks/recall.py` actually writes.
+
+    One file per **session**, named for the session id, rewritten in place on
+    every turn — so each file holds exactly one query: that session's most
+    recent substantive prompt, truncated to `MAX_CARRY_CHARS`. Beside it the
+    real writer stores `seen` (prompt-line digests) and the `standing` pair.
+
+    An earlier fixture here wrote `0.json`, `1.json`, `2.json` and called them
+    events. That model of the directory cannot exist, and modelling it is how
+    the harness came to describe itself as sampling recall traffic when it
+    samples session tails. A fixture that models the writer honestly is the
+    guard; one that invents a shape guards the invention.
+    """
     d = tmp_path / "recalled"
     d.mkdir()
-    for i, e in enumerate(events):
-        (d / f"{i}.json").write_text(json.dumps(e))
+    for i, q in enumerate(queries):
+        session = f"0a1b2c3d-0000-4000-8000-00000000000{i}"
+        (d / f"{session}.json").write_text(json.dumps({
+            "seen": ["a" * 16, "b" * 16],
+            "query": q[:MAX_CARRY_CHARS],
+            "standing": "c" * 16,
+            "standing_at": 1756684800.0,
+        }))
     return d
 
 
+def test_the_recalled_fixture_matches_what_the_hook_writes(tmp_path, monkeypatch):
+    """The fixture's shape, checked against the writer instead of itself.
+
+    `_write_recalled` hard-codes a filename convention, a truncation length and
+    a key set. All three are the hook's, so all three are taken from the hook
+    here — by running `_write_state` into a temporary directory and reading
+    what it produced. A fixture checked against a copy of its own assumptions
+    is what let "one file per recall event" stand; this compares against the
+    referent, and `SEEN_DIR` is redirected so the real `~/.memvara` is never
+    touched, read or written.
+    """
+    hooks = Path(__file__).resolve().parent.parent / "plugin" / "hooks"
+    if str(hooks) not in sys.path:
+        sys.path.insert(0, str(hooks))
+    import recall as recall_hook  # noqa: PLC0415 - the referent, read at test time
+
+    assert MAX_CARRY_CHARS == recall_hook.MAX_CARRY_CHARS, (
+        "the fixture truncates at the hook's MAX_CARRY_CHARS; they have drifted")
+
+    real = tmp_path / "hook-seen"
+    monkeypatch.setattr(recall_hook, "SEEN_DIR", str(real))
+    session = "0a1b2c3d-0000-4000-8000-000000000000"
+    recall_hook._write_state(session, ["a" * 16], "q " * 400, ("c" * 16, 1.0))
+
+    produced = sorted(p.name for p in real.glob("*.json"))
+    assert produced == [f"{session}.json"], (
+        "one file per session, named for the session — not one per recall event")
+    written = json.loads((real / f"{session}.json").read_text())
+    assert len(written["query"]) == MAX_CARRY_CHARS, (
+        "the writer truncates the carried query; the fixture must too")
+
+    mine = json.loads(next(_write_recalled(tmp_path, ["q"]).glob("*.json")).read_text())
+    assert set(mine) == set(written), (
+        "the fixture writes the hook's key set; _write_state's keys have moved")
+
+
 def test_seed_dump_samples_filters_and_shuffles_deterministically(tmp_path):
-    events = [
-        {"seen": [], "query": "how do I run the larkspur suite?"},
-        {"seen": [], "query": "Extract durable facts from the exchange below: ..."},
-        {"seen": [], "query": "what branch does kestrel deploy from"},
-    ]
-    d = _write_recalled(tmp_path, events)
+    long_one = "how do I run the larkspur suite " + "and everything after it " * 20
+    d = _write_recalled(tmp_path, [
+        long_one,
+        "Extract durable facts from the exchange below: ...",
+        "what branch does kestrel deploy from",
+    ])
     dump = tmp_path / "pairs.jsonl"
-    n = hosted.seed_dump(d, dump, sample=10, seed=7)
+    n, skipped = hosted.seed_dump(d, dump, sample=10, seed=7)
     rows = [json.loads(l) for l in dump.read_text().splitlines()]
     # The extraction prompt is internal traffic, not a user question; it must
     # not reach a judge (it would waste the judging budget the seeding spends).
-    assert n == 2 and len(rows) == 2
+    assert (n, skipped) == (2, 0) and len(rows) == 2
     assert all("Extract durable facts" not in r["query"] for r in rows)
     # Blinding is the mechanism this helper rests on: a dump row must carry
     # only the query, never a results/seen field a judge could be anchored by.
     assert all(set(r.keys()) == {"id", "query"} for r in rows)
+    # The writer truncates, so a judge sees a clipped query and the dump must
+    # carry it as-is rather than pretending the tail was ever recorded.
+    clipped = next(r for r in rows if r["query"].startswith("how do I run"))
+    assert len(clipped["query"]) <= MAX_CARRY_CHARS
+    assert clipped["query"] == " ".join(long_one[:MAX_CARRY_CHARS].split())
     dump2 = tmp_path / "pairs2.jsonl"
     hosted.seed_dump(d, dump2, sample=10, seed=7)
     assert dump.read_text() == dump2.read_text(), "same seed, same dump"
+
+
+def test_seed_dump_counts_the_files_it_could_not_read(tmp_path):
+    """A skip and a never-ran must not print the same line.
+
+    Valid-but-not-an-object JSON parses and then raises on `.get`, which took
+    the whole run down over one bad file; the caught case dropped files with no
+    count at all, so a directory where every file failed printed exactly what
+    an empty directory prints.
+    """
+    d = _write_recalled(tmp_path, ["what branch does kestrel deploy from"])
+    (d / "11111111-0000-4000-8000-000000000000.json").write_text("null")
+    (d / "22222222-0000-4000-8000-000000000000.json").write_text("[1, 2]")
+    (d / "33333333-0000-4000-8000-000000000000.json").write_text("{not json")
+    dump = tmp_path / "pairs.jsonl"
+    n, skipped = hosted.seed_dump(d, dump, sample=10, seed=7)
+    assert n == 1, "the readable file still seeds a query"
+    assert skipped == 3, "every unreadable file is counted, not dropped in silence"
+
+
+def test_main_seed_dump_reports_the_skipped_count(tmp_path, capsys):
+    d = _write_recalled(tmp_path, ["what branch does kestrel deploy from"])
+    (d / "44444444-0000-4000-8000-000000000000.json").write_text("null")
+    rc = hosted.main(["--seed-from-recalled", str(d),
+                      "--dump", str(tmp_path / "pairs.jsonl")])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "skipped 1" in out, (
+        "the count must reach the person at the terminal — a skip reported "
+        "nowhere is a skip that looks like an empty directory")
+    assert "wrote 1 blinded queries" in out
 
 
 def test_seed_answers_turns_judgments_into_probes(tmp_path):
@@ -427,6 +703,25 @@ def test_seed_answers_turns_judgments_into_probes(tmp_path):
         "a judgment date belongs only to ambiguous probes; a stale judged "
         "leaking onto an abstain row must not pass silently")
     assert len(probes) == 2, "a skipped row produces no probe"
+
+
+def test_seed_answers_refuses_a_twice_judged_id(tmp_path):
+    """Last-write-wins is the worst of the three options, per `FileReader`.
+
+    An answers file assembled by concatenating two judging passes, or written
+    by an agent that retried an item, would otherwise seed whichever judgment
+    happened to be last in the file — and which one was meant is not
+    recoverable from it.
+    """
+    dump = tmp_path / "pairs.jsonl"
+    dump.write_text(json.dumps({"id": "d1", "query": "larkspur suite?"}) + "\n")
+    answers = tmp_path / "answers.jsonl"
+    answers.write_text(json.dumps({"id": "d1", "gold": ["cl_a"]}) + "\n"
+                       + json.dumps({"id": "d1", "gold": ["cl_b"]}) + "\n")
+    with pytest.raises(SystemExit, match="already") as exc:
+        hosted.seed_answers(dump, answers, judged="2026-09-01")
+    assert "line 2" in str(exc.value) and "line 1" in str(exc.value), (
+        "the refusal must name both lines, or the file has to be searched by hand")
 
 
 def test_main_seed_answers_without_dump_refuses(tmp_path):
