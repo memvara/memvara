@@ -92,6 +92,16 @@ Move everything under `## [Unreleased]` into `## [0.4.0] — YYYY-MM-DD`, and le
 supersession left two live values for a single-valued predicate" is the entry someone
 searches for; "bug fixes" is not.
 
+**If the release adds or renames an MCP tool, say that connected sessions will not see
+it.** One line is enough — *connected MCP sessions keep the old tool list until they
+reconnect*. The hosted server negotiates its tool list once per connection and declares
+`listChanged: false`, which it cannot honour across a redeploy, so an editor session left
+open keeps the old list for as long as it stays open. The tool is absent rather than
+erroring, which reads as *not shipped yet*: `0.6.0` and `0.7.0` each added one, and two
+sessions independently went auditing releases and deployments before suspecting the
+client. The people affected are reading the release notes, so this is where the line
+belongs.
+
 ### 3. Tag the commit CI went green on
 
 ```bash
