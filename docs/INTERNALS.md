@@ -1185,6 +1185,21 @@ child it spawns. This matters more now that a host mines with its own CLI: `code
 inside a Codex Stop hook starts a session that fires the same hooks. The read hooks stand
 down on the same sentinel; capture's own extraction is what refuses.
 
+**Extraction is a chain, and a host must not pin a model.** `ExtractorSpec` names the CLI
+that mines a turn: the host's own first, `claude -p` second, and then a logged failure that
+raises the capture alert. There is deliberately no third rung handing the prose to the
+server — `memory_add` on an `MEMVARA_LLM=none` deployment would accept it and store
+nothing while logging success, which is the shape of every defect in this repository's
+history.
+
+A host CLI declares no `--model`. The point of mining with the host's own is that the user
+already configured and authenticated it; naming a model inside a hook nobody read can name
+one their account cannot reach, and capture then fails on every turn for a reason only the
+log shows. `ExtractorSpec.model` is empty for such a CLI, and the label recorded in
+`usage.jsonl` follows the rung that actually answered — a hardcoded label would account a
+Codex extraction against the model `claude -p` pins, which is wrong in the one file whose
+whole job is to say what was spent.
+
 **A hook may never fail a turn.** Every path out of `run.py` returns 0, including the ones
 it does not know about — the `__main__` block catches `BaseException`. That is the rule
 that outranks reporting a problem: a hook that fails a prompt is worse than a hook that

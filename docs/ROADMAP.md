@@ -551,7 +551,7 @@ test, and a sync PR for every hook change.
 
 Every one of those held until six hosts were measured. What changed the answer is the
 condition the entry itself set: a second client grew hooks. `opencode-memvara` ships them,
-`codex-memvara` is in review, and the measuring turned up that no two hosts agree on
+`codex-memvara` ships them too, and the measuring turned up that no two hosts agree on
 anything that matters — three different reply envelopes (nested, flat, and flat
 snake_case), three different transcript formats, and three different answers to whether an
 async hook runs at all. Seven copies of that would have been seven places to get each
