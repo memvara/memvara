@@ -8,6 +8,7 @@ the network.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -82,3 +83,52 @@ def test_aggregate_reports_each_class_separately():
     assert agg["abstain"]["n"] == 2
     assert agg["abstain"]["false_injection_rate"] == 0.5
     assert agg["abstain"]["headroom"] == [0.45]
+
+
+def _write_probes(tmp_path, lines):
+    p = tmp_path / "probes.jsonl"
+    p.write_text("\n".join(json.dumps(l) for l in lines) + "\n")
+    return p
+
+
+def test_load_probes_accepts_a_valid_file(tmp_path):
+    path = _write_probes(tmp_path, [
+        {"id": "p1", "class": "hit", "query": "q", "gold": ["cl_a"]},
+        {"id": "p2", "class": "abstain", "query": "haiku", "gold": []},
+    ])
+    probes = hosted.load_probes(path)
+    assert [p["id"] for p in probes] == ["p1", "p2"]
+
+
+@pytest.mark.parametrize("row, complaint", [
+    ({"id": "p1", "class": "sonnet", "query": "q", "gold": []}, "class"),
+    ({"id": "p1", "class": "hit", "query": "q", "gold": "cl_a"}, "gold"),
+    ({"id": "p1", "class": "abstain", "query": "q", "gold": ["cl_a"]}, "abstain"),
+    ({"class": "hit", "query": "q", "gold": ["cl_a"]}, "id"),
+    ({"id": "p1", "class": "hit", "gold": ["cl_a"]}, "query"),
+])
+def test_load_probes_refuses_malformed_rows_naming_the_line(tmp_path, row, complaint):
+    path = _write_probes(tmp_path, [row])
+    with pytest.raises(SystemExit) as exc:
+        hosted.load_probes(path)
+    assert complaint in str(exc.value).lower()
+    assert "line 1" in str(exc.value)
+
+
+def test_load_probes_refuses_a_duplicate_id(tmp_path):
+    path = _write_probes(tmp_path, [
+        {"id": "p1", "class": "hit", "query": "a", "gold": ["cl_a"]},
+        {"id": "p1", "class": "hit", "query": "b", "gold": ["cl_b"]},
+    ])
+    with pytest.raises(SystemExit, match="duplicate"):
+        hosted.load_probes(path)
+
+
+def test_load_probes_refuses_an_unedited_draft_row(tmp_path):
+    # A drafted probe quotes the claim's own text, which measures lexical echo.
+    # The runner refusing the mark is what makes --draft safe to ship (spec).
+    path = _write_probes(tmp_path, [
+        {"id": "p1", "class": "hit", "query": "q", "gold": ["cl_a"], "draft": True},
+    ])
+    with pytest.raises(SystemExit, match="draft"):
+        hosted.load_probes(path)

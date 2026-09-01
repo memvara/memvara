@@ -51,6 +51,54 @@ def score_probe(probe: dict, results: "Sequence[tuple[str, float]]",
     return row
 
 
+def load_probes(path: Path) -> list[dict]:
+    """Read and validate a probe file, refusing rather than skipping.
+
+    Every refusal names the line, because the file is hand-edited and 'invalid
+    probe file' with no address costs a search. A row still marked draft:true
+    is refused outright: a drafted query is the claim's own text, and scoring
+    it would measure lexical echo — the bias this tool exists to escape.
+    """
+    probes: list[dict] = []
+    seen: set[str] = set()
+    for lineno, raw in enumerate(path.read_text().splitlines(), start=1):
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw)
+        except ValueError as exc:
+            raise SystemExit(f"{path}: line {lineno}: not JSON: {exc}")
+        for field in ("id", "query", "class"):
+            if not isinstance(row.get(field), str) or not row.get(field):
+                raise SystemExit(f"{path}: line {lineno}: missing or empty {field!r}")
+        if row["class"] not in CLASSES:
+            raise SystemExit(
+                f"{path}: line {lineno}: unknown class {row['class']!r}; "
+                f"expected one of {', '.join(CLASSES)}")
+        if not isinstance(row.get("gold"), list):
+            raise SystemExit(f"{path}: line {lineno}: gold must be a list of claim ids")
+        if row["class"] == "abstain" and row["gold"]:
+            raise SystemExit(
+                f"{path}: line {lineno}: an abstain probe's gold must be empty — "
+                "a non-empty gold is a hit probe")
+        if row["class"] != "abstain" and not row["gold"]:
+            raise SystemExit(
+                f"{path}: line {lineno}: a {row['class']} probe needs at least "
+                "one gold claim id")
+        if row.get("draft"):
+            raise SystemExit(
+                f"{path}: line {lineno}: probe {row['id']!r} is still marked "
+                "draft: true. Edit the query into how you would actually ask, "
+                "then remove the mark — a drafted query measures lexical echo.")
+        if row["id"] in seen:
+            raise SystemExit(f"{path}: line {lineno}: duplicate probe id {row['id']!r}")
+        seen.add(row["id"])
+        probes.append(row)
+    if not probes:
+        raise SystemExit(f"{path}: no probes. See the schema in docs/BENCHMARKS.md.")
+    return probes
+
+
 def aggregate(rows: "Sequence[dict]") -> dict:
     """Per-class summary. `ambiguous` is never folded into `hit`: its gold is
     a judgment, not a fact, and the two must stay tellable apart (spec)."""
