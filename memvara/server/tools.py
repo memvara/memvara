@@ -594,7 +594,7 @@ def _ask(ctx: ToolContext, args: dict[str, Any]) -> str:
     answer = ctx.memory.ask(
         args["question"],
         at=_timestamp(at, "memory_ask.at") if at is not None else None,
-        k=args["k"])
+        k=args["k"], anchored=bool(args.get("anchored", False)))
     if not answer.readings:
         return (f"Nothing in this scope matches: {safe_line(args['question'])}. "
                 "memory_search with a shorter query will say whether the store holds "
@@ -1771,6 +1771,7 @@ TOOLS: tuple[Tool, ...] = (
                     "topic rather than a value."
                 ),
             },
+            "anchored": _ANCHORED,
         },
         required=("question",),
         handler=_ask,

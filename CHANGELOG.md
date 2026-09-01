@@ -16,7 +16,7 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   and `ask()` and send it only when set, so a server from before the field refuses the
   request rather than answering unfiltered as though it had honoured it; and
   `Explanation.anchor` is read off the wire when the server sends it, with `None` for a
-  server that does not. `memory_search` and `memory_recall` take `anchored` too, with a
+  server that does not. `memory_search`, `memory_recall` and `memory_ask` take `anchored` too, with a
   description that says when to set it and when not to — a question about a specific
   person, service or ticket, and not a topic-style question that names nothing, because
   the filter drops a memory the query names only by a paraphrase of its subject. The

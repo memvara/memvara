@@ -246,7 +246,7 @@ _FORWARDING_CASES = {
                       "valid_at": "2024-03-01"}],
     # Two sets: `at` omitted is the present-tense question, which reaches a different
     # branch of the narrative than a dated one, and the tool's whole point is the second.
-    "memory_ask": [{"question": "where do they live", "k": 2},
+    "memory_ask": [{"question": "where do they live", "k": 2, "anchored": True},
                    {"question": "where do they live", "at": "2024-03-01"}],
     "memory_since": [{"since": "2024-03-01"}],
     "memory_standing": [{"k": 5}],
@@ -3935,3 +3935,9 @@ def test_anchored_recall_says_nothing_about_a_stranger_and_search_agrees(server)
                             {"query": "where does Ivan live", "anchored": True})
     assert "Lisbon" in text(server, "memory_search",
                             {"query": "where does Ivan live", "anchored": True})
+    # The third read tool, and the one built for entity-specific questions about a past
+    # instant, where a confident narrative about the wrong entity is the worst outcome.
+    assert "Nothing in this scope matches" in text(
+        server, "memory_ask", {"question": "where does Oscar live", "anchored": True})
+    assert "Lisbon" in text(server, "memory_ask",
+                            {"question": "where does Ivan live", "anchored": True})
