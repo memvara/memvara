@@ -293,7 +293,11 @@ def _codex_tool_call(payload: dict) -> list[str]:
 def format_entry(entry: dict) -> list[str]:
     if _HOST.transcript is not None and _HOST.transcript.format == "codex-rollout":
         return _format_codex_entry(entry)
-    kind = entry.get("type")
+    # Asked of the record, not hardcoded. Cursor writes the same `message.content` blocks
+    # as Claude Code but names the speaker under `role`, so reading `type` there found no
+    # user entry, no boundary, and an empty turn on every capture -- the identical failure
+    # the Codex reader was added for, one key over.
+    kind = entry.get(_HOST.transcript.role_key if _HOST.transcript else "type")
     message = entry.get("message")
     if kind == "user":
         return format_user(message)

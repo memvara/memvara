@@ -45,7 +45,12 @@ Reply = namedtuple("Reply", "hook status context decision reason",
 #: How a host keeps the conversation on disk, and therefore whether `capture` can mine it.
 #: Presence is the capability flag: `Host.transcript = None` means this host does not hand
 #: a hook anything to read back, so the Stop-equivalent body must not run at all.
-TranscriptSpec = namedtuple("TranscriptSpec", "format")
+#: `role_key` is the entry key that says who is speaking. Claude Code and OpenCode put it
+#: under `type`; Cursor writes the same `message.content` blocks under `role`. One field
+#: rather than a third reader, because that is the whole difference between them -- and a
+#: host that differs in KIND rather than in spelling gets a `format` of its own instead,
+#: as Codex does.
+TranscriptSpec = namedtuple("TranscriptSpec", "format role_key", defaults=("type",))
 
 #: Everything the pre-tool auto-approve needs that differs by host. Deliberately NOT the
 #: read-only tool list: which memory_* tools are safe to run unprompted is a fact about
@@ -132,6 +137,24 @@ OPENCODE_CLI = ExtractorSpec(
         usage_match=(("type", "step_finish"),),
         usage_path="part.tokens",
     ),
+)
+
+#: Cursor's own headless CLI, measured on cursor-agent 2026.08.25. It prints a SINGLE
+#: envelope rather than an event stream -- `result`, `usage`, `is_error` -- which is the
+#: same shape `claude -p` prints, so this needs no `StreamSpec`.
+#:
+#: `--mode ask` is not a preference. `-p` alone "has access to all tools, including write
+#: and shell", and what this command is handed is a mined turn: arbitrary text, including
+#: anything the user pasted into their session. Read-only mode is what makes the `--trust`
+#: beside it defensible -- and `--trust` is required, not optional, because an extraction
+#: runs wherever the turn happened and Cursor refuses an untrusted directory outright.
+#: Granting trust to a command that can only read is a different act from granting it to
+#: one that can run shell.
+CURSOR_CLI = ExtractorSpec(
+    argv=("cursor-agent", "--trust", "--mode", "ask", "-p", "--output-format", "json"),
+    reply_key="result",
+    usage_key="usage",
+    error_key="is_error",
 )
 
 #: One consequence of mining with the user's own model, recorded because it is a real
