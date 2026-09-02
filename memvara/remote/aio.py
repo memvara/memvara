@@ -159,6 +159,7 @@ class AsyncRemoteMemvara:
     # docstring promises it is `RemoteMemvara`'s twin down to the arguments.
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     anchored: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -168,6 +169,7 @@ class AsyncRemoteMemvara:
 
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     anchored: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -177,6 +179,7 @@ class AsyncRemoteMemvara:
 
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     anchored: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -185,6 +188,7 @@ class AsyncRemoteMemvara:
                      include_episodes: bool) -> list[Retrieved]: ...
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
+                     anchored: bool = False,
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
                      states: Collection[str] | None = None,
@@ -194,6 +198,7 @@ class AsyncRemoteMemvara:
         body = await self._http.request(
             "POST", "/v1/search", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,
+                        "anchored": anchored or None,
                         "as_of": _iso(as_of), "valid_at": _iso(valid_at),
                         "known_at": _iso(known_at), "states": _states(states),
                         "include_invalidated": include_invalidated,
@@ -202,6 +207,7 @@ class AsyncRemoteMemvara:
         return [_hit(h) for h in body["results"]]
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
+                     anchored: bool = False,
                      memory_types: Sequence[MemoryType | str] | None = None,
                      include_episodes: bool = False,
                      budget: int | None = None) -> str:
@@ -213,6 +219,7 @@ class AsyncRemoteMemvara:
         body = await self._http.request(
             "POST", "/v1/recall", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,
+                        "anchored": anchored or None,
                         "memory_types": _types(memory_types),
                         "include_episodes": include_episodes}))
         return str(body["text"])
@@ -272,11 +279,11 @@ class AsyncRemoteMemvara:
         return hydrate.provenance(body)
 
     async def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
-                 min_score: float = 0.0) -> Answer:
+                 min_score: float = 0.0, anchored: bool = False) -> Answer:
         body = await self._http.request(
             "POST", "/v1/ask", params=self._params(),
             json=_sent({"question": question, "at": _iso(at), "k": k,
-                        "min_score": min_score}))
+                        "min_score": min_score, "anchored": anchored or None}))
         return hydrate.answer(body)
 
     async def since(self, when: datetime) -> Delta:
@@ -503,6 +510,7 @@ class AsyncScopedRemoteMemvara:
     # docstring promises it is `RemoteMemvara`'s twin down to the arguments.
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     anchored: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -512,6 +520,7 @@ class AsyncScopedRemoteMemvara:
 
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     anchored: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -521,6 +530,7 @@ class AsyncScopedRemoteMemvara:
 
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
+                     anchored: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -529,6 +539,7 @@ class AsyncScopedRemoteMemvara:
                      include_episodes: bool) -> list[Retrieved]: ...
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
+                     anchored: bool = False,
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
                      states: Collection[str] | None = None,
@@ -536,6 +547,7 @@ class AsyncScopedRemoteMemvara:
                      memory_types: Sequence[MemoryType | str] | None = None,
                      include_episodes: bool = False) -> list[Any]:
         return await self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
+                                      anchored=anchored,
                                       valid_at=valid_at, known_at=known_at,
                                       states=states,
                                       include_invalidated=include_invalidated,
@@ -543,10 +555,11 @@ class AsyncScopedRemoteMemvara:
                                       include_episodes=include_episodes)
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
+                     anchored: bool = False,
                      memory_types: Sequence[MemoryType | str] | None = None,
                      include_episodes: bool = False,
                      budget: int | None = None) -> str:
-        return await self._mem.recall(query, k=k, min_score=min_score,
+        return await self._mem.recall(query, k=k, min_score=min_score, anchored=anchored,
                                       memory_types=memory_types,
                                       include_episodes=include_episodes,
                                       budget=budget)
@@ -585,8 +598,9 @@ class AsyncScopedRemoteMemvara:
                                    known_at=known_at)
 
     async def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
-                 min_score: float = 0.0) -> Answer:
-        return await self._mem.ask(question, at=at, k=k, min_score=min_score)
+                 min_score: float = 0.0, anchored: bool = False) -> Answer:
+        return await self._mem.ask(question, at=at, k=k, min_score=min_score,
+                                   anchored=anchored)
 
     async def since(self, when: datetime) -> Delta:
         return await self._mem.since(when)

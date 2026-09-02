@@ -9,7 +9,10 @@ on the first call rather than hand back a claim carrying a plausible zero, which
 downstream can tell from a real one. Every field indexed here is required on the wire model
 it comes from (present, even when its value may be `null`) — `.get()` is used only where the
 wire model genuinely has no such field at all, so a default is the honest answer rather than
-a guess about a key that could be missing.
+a guess about a key that could be missing. One exception, and it is named at the call:
+`anchor` on a ranking is `.get()` because the client has to read results from a server
+that predates the field, and for that field alone a missing key means the server did not
+say, which is what `None` on `Explanation.anchor` is documented to mean on a hosted result.
 
 **Instants are parsed by two functions, and which one a field gets is read off the wire
 model.** `_dt` is for fields that may legitimately be null; `_required_dt` is for the ones
@@ -149,12 +152,12 @@ def explanation(body: dict[str, Any] | None) -> Explanation:
     listing rather than a search — and an all-defaults `Explanation` is the right answer
     there, because nothing ranked it.
 
-    `graph_rank`, `graph_score`, `temporal_rank`, `temporal_score`, `intent` and `anchor`
-    exist on `Explanation` but not on `Ranking` — `render.ranking` never puts them on the
-    wire, so there is nothing here to read them back from; a restored `Explanation`
-    reports them at their dataclass defaults. For `anchor` that default is `None`, which
-    on a local result means "surfaced on vocabulary alone" and on a hosted one means only
-    that the server did not say.
+    `graph_rank`, `graph_score`, `temporal_rank`, `temporal_score` and `intent` exist on
+    `Explanation` but not on `Ranking` — `render.ranking` never puts them on the wire, so
+    there is nothing here to read them back from; a restored `Explanation` reports them
+    at their dataclass defaults. `anchor` is read when the server sent it and left at
+    `None` when it did not, so against a server from before the field a hosted result
+    reports `None` for a reason a local one never would: the server did not say.
 
     `recency`, `confidence` and `salience` are `float` on `Explanation`, not
     `float | None` — null on the wire means "not applicable" (an episode hit), and that
@@ -172,6 +175,9 @@ def explanation(body: dict[str, Any] | None) -> Explanation:
         rerank_score=body["rerank_score"],
         raw_score=body["raw_score"],
         final_score=body["final_score"],
+        # `.get`, not `[]`: a server from before the field omits it, and a result it
+        # ranked is not malformed for having no anchor to report.
+        anchor=body.get("anchor"),
     )
     for name in ("recency", "confidence", "salience"):
         if body[name] is not None:

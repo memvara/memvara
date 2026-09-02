@@ -40,10 +40,18 @@ mem.reset()                                       -> dict[str, int] # scope + sc
 #   valid_at=  the world clock   known_at=  the belief clock   as_of=  both at once
 # the first three also take `states=`, any non-empty subset of ("live", "ended",
 # "retired"), defaulting to ["live"]; `include_invalidated=` is its two-valued alias.
-mem.search(query, *, k=10, min_score=0.0, T=None, memory_types=None,
+mem.search(query, *, k=10, min_score=0.0, anchored=False, T=None, memory_types=None,
            states=None, include_invalidated=None, include_episodes=False)
                                                   -> list[Retrieved]
-mem.recall(query, *, k=8, min_score=0.0, header=None, include_episodes=False,
+#   anchored=True keeps only the results the query names an entity of — a claim whose
+#     subject or object the query names, or one the graph leg reached from such a
+#     claim — so a question about an entity the store has never heard of returns []
+#     rather than the nearest row about somebody else. Every result reports which as
+#     `Explanation.anchor` (subject | object | path | None). Needs no number; combines
+#     with min_score. Against a hosted deployment it is sent only when set, so a server
+#     from before the field refuses it rather than quietly answering unfiltered.
+mem.recall(query, *, k=8, min_score=0.0, anchored=False, header=None,
+           include_episodes=False,
            episode_header=None, include_history=False, history_header=None,
            budget=None, counter=<internal>, with_ids=False)
                                                   -> str | RecallResult
@@ -67,7 +75,7 @@ mem.history(subject, predicate, *, T=None)        -> list[Claim]    # timeline o
 mem.why(claim_id, *, T=None)                      -> Provenance | None
 mem.produced(episode_id, *, T=None)               -> list[Claim]    # why(), backwards
 mem.since(when)                                   -> Delta          # what changed since
-mem.ask(question, *, at=None, k=3, min_score=0.0)  -> Answer        # three readings, narrated
+mem.ask(question, *, at=None, k=3, min_score=0.0, anchored=False)  -> Answer  # narrated
 #   Answer(question, at, readings, text). One `Reading` per fact slot, each holding
 #   `now`, `then` (what we believe today was true at `at`) and `stated` (what this
 #   store would have answered at `at`). The last two differing is the finding, and

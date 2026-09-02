@@ -11,6 +11,23 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`anchored` reaches the hosted facade and the three read tools.** `RemoteMemvara`,
+  `ScopedRemoteMemvara` and their async twins take `anchored` on `search()`, `recall()`
+  and `ask()` and send it only when set, so a server from before the field refuses the
+  request rather than answering unfiltered as though it had honoured it; and
+  `Explanation.anchor` is read off the wire when the server sends it, with `None` for a
+  server that does not. `memory_search`, `memory_recall` and `memory_ask` take `anchored`
+  too, each with a description that says when to set it and when not to — a question
+  about a specific person, service or ticket, and not a topic-style question that names
+  nothing, because the filter drops a memory the query names only by a paraphrase of its
+  subject. The server side is a companion change in `memvara-cloud`; until it is
+  deployed a hosted caller setting the flag gets a 422 rather than an unfiltered answer.
+
+  `MemoryAPI.search`, `.recall` and `.ask` declare the parameter and the three handlers
+  always pass it, so an alternative implementation of that protocol has to accept
+  `anchored` or every call from those tools raises `TypeError`. `docs/UPGRADING.md` says
+  how to find one.
+
 - **`search(anchored=True)`, and `Explanation.anchor` on every result — a way to say
   "nothing here is about that" that needs no number.** Retrieval always returns
   something: asked *where does Oscar live* of a store that has never heard of Oscar, it

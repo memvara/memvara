@@ -263,6 +263,40 @@ _MIN_SCORE = {
     ),
 }
 
+_ANCHORED = {
+    "type": "boolean",
+    "default": False,
+    "description": (
+        "Return only memories the query is demonstrably about: a memory whose subject or "
+        "object the query names, or one reached by walking the graph out of such a memory. "
+        "Default false. Set it when a wrong entity is worse than no answer — a question "
+        "about a specific person, service or ticket — because without it the store answers "
+        "a question about a stranger from the nearest memory about somebody else, at a "
+        "relevance that looks like any other match. It needs no number, unlike min_score, "
+        "and the two can be combined. It also drops a memory the query names only by a "
+        "paraphrase of its subject ('the coverage threshold' for a memory filed under "
+        "coverage_gate), so leave it off for a topic-style question that names nothing "
+        "in particular."
+    ),
+}
+
+#: The same switch on `memory_ask`, described for a tool that returns readings about
+#: fact slots rather than a list of memories, and that has no `min_score` to combine with.
+_ANCHORED_ASK = {
+    "type": "boolean",
+    "default": False,
+    "description": (
+        "Answer only from fact slots the question is demonstrably about: a slot whose "
+        "subject or object the question names, or one reached by walking the graph out "
+        "of such a slot. Default false. Set it when a wrong entity is worse than no "
+        "answer — a question about a specific person, service or ticket — because "
+        "without it a question about an entity this store has never heard of is still "
+        "narrated, confidently, from the nearest slot it has. With it that question "
+        "answers that nothing matches. It also skips a slot the question names only by a "
+        "paraphrase of its subject, so leave it off for a topic-style question."
+    ),
+}
+
 #: Caps for the two arguments that name a *slot* rather than carry a value. Generous
 #: against every real spelling — the longest built-in predicate is 21 characters and a
 #: person's name is far inside 128 — and they exist because neither had any bound at all:
@@ -390,6 +424,7 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
         args["query"],
         k=args["k"],
         min_score=args["min_score"],
+        anchored=bool(args.get("anchored", False)),
         memory_types=_memory_types(args.get("memory_types")),
         as_of=_timestamp(as_of, "memory_search.as_of") if as_of is not None else None,
         valid_at=(_timestamp(valid_at, "memory_search.valid_at")
@@ -430,6 +465,7 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
         args["query"],
         k=args["k"],
         min_score=args["min_score"],
+        anchored=bool(args.get("anchored", False)),
         memory_types=_memory_types(args.get("memory_types")),
         budget=args.get("budget"),
         include_episodes=bool(args.get("include_episodes", False)),
@@ -575,7 +611,7 @@ def _ask(ctx: ToolContext, args: dict[str, Any]) -> str:
     answer = ctx.memory.ask(
         args["question"],
         at=_timestamp(at, "memory_ask.at") if at is not None else None,
-        k=args["k"])
+        k=args["k"], anchored=bool(args.get("anchored", False)))
     if not answer.readings:
         return (f"Nothing in this scope matches: {safe_line(args['question'])}. "
                 "memory_search with a shorter query will say whether the store holds "
@@ -1500,6 +1536,7 @@ TOOLS: tuple[Tool, ...] = (
                 ),
             },
             "min_score": _MIN_SCORE,
+            "anchored": _ANCHORED,
             "memory_types": _MEMORY_TYPES_FILTER,
         },
         required=("query",),
@@ -1531,6 +1568,7 @@ TOOLS: tuple[Tool, ...] = (
                 "description": "Most results to return.",
             },
             "min_score": _MIN_SCORE,
+            "anchored": _ANCHORED,
             "memory_types": _MEMORY_TYPES_FILTER,
             "as_of": {
                 "type": "string",
@@ -1750,6 +1788,7 @@ TOOLS: tuple[Tool, ...] = (
                     "topic rather than a value."
                 ),
             },
+            "anchored": _ANCHORED_ASK,
         },
         required=("question",),
         handler=_ask,
