@@ -1096,8 +1096,6 @@ default.
 
 ---
 
-Previous: [How it works](DESIGN.md) · Next: [Roadmap](ROADMAP.md) · [Documentation index](README.md)
-
 ### A before/after of one retrieval change: `bench/floor_e2e.py`
 
 `bench/floor_e2e.py` is `bench/hosted.py` under one fixed set of arguments — the recall
@@ -1117,3 +1115,5 @@ and it refuses to run under the hashing fallback), and reads at the scope most o
 claims live under. It is evidence, not the decision: SQLite's lexical leg is not
 Postgres's. `SESSION-2026-09-02-candidate-floor-e2e.md` is the run sheet, including what
 the `compare` output has to show before the change merges.
+
+Previous: [How it works](DESIGN.md) · Next: [Roadmap](ROADMAP.md) · [Documentation index](README.md)
