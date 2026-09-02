@@ -1115,4 +1115,5 @@ Postgres's. `SESSION-2026-09-02-candidate-floor-e2e.md` is the run sheet, includ
 the `compare` output has to show before the change merges.
 
 ---
+
 Previous: [How it works](DESIGN.md) · Next: [Roadmap](ROADMAP.md) · [Documentation index](README.md)
