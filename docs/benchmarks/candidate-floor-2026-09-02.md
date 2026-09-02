@@ -88,7 +88,7 @@ The floor merged. All three conditions held on the hosted store at `k=4`.
 | `before`, box at core `3d3ab84` | 85.0% | 1.5 | 100% | 37.5% (3 of 8) |
 | `replay-floor-0`, local copy | 85.0% | 1.5 | 100% | 37.5% |
 | `replay-floor-50`, local copy | 90.0% | 1.6 | 100% | 37.5% |
-| `after`, box at core `9bf0715` | 90.0% | 1.4 | 100% | 37.5% (the same 3) |
+| `after`, box at core `4fc97b0` | 90.0% | 1.4 | 100% | 37.5% (the same 3) |
 
 - **The lost probe hits.** `h017`, "why can't we trust the version number?", was absent
   at `k=4` in `before` and is rank 1 in `after`. The copy predicted rank 3.
@@ -113,7 +113,9 @@ Two things the compare output flagged, and how they were read.
    the copy agreed with `before` on 38 of 40 probes, the other two off by one rank.
 
 The four result files and the release log are kept under `local/floor-e2e/` in the
-checkout that ran them.
+checkout that ran them. The box's `DEPLOYED` file names the shipped core commit as
+`9bf0715`; the branch's history was rewritten after the deploy to strip commit
+trailers, and `4fc97b0` is the same tree under its new name.
 
 ## What the number is, and is not
 
