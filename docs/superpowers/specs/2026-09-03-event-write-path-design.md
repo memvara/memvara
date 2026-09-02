@@ -39,7 +39,12 @@ not populate it.** It is a field (`types.py:527`), the store round-trips it, and
 anything the source said. That is a different mechanism from a source-derived end: "I lived
 in London from 2019 to 2022" states an end, whereas "I live in London" followed later by "I
 moved to Lisbon" has reconciliation infer one. The field can hold either, and extraction
-writes neither today. Teaching it to is a follow-up with its own
+writes neither today.
+
+**`valid_to` stays outside extraction and outside temporal ordering in this change.** It is
+not part of claim identity and takes no part in the comparison machinery below; the existing
+reconciliation-generated behaviour is preserved unchanged. An implementer does not need to
+incorporate it. Teaching it to is a follow-up with its own
 design, because a closed interval written at extraction time interacts with supersession in
 ways a single boundary does not. Recording that here so the gap reads as deferred rather
 than unnoticed.
@@ -47,10 +52,10 @@ than unnoticed.
 ## Temporal precision, and why it is not optional
 
 Resolving "last month" to the first of the previous month turns a MONTH into an INSTANT and
-tells nothing downstream that it did. Anything later reading that claim sees
-`valid_from = 2026-08-01` and can only conclude the claim became true on the 1st of August.
-That is false, and it is false in the silent way this repository's telemetry module exists to
-catch.
+tells nothing downstream that it did. Without precision, a downstream consumer can only
+read `valid_from = 2026-08-01` as an exact onset and has no way to know a month was flattened
+into it. That loss is silent, which is the failure class this repository's telemetry module
+exists to catch. `temporal_precision` prevents it.
 
 So the resolver returns a boundary **and** the precision it was resolved at, and the claim
 stores both:
@@ -87,26 +92,36 @@ comparable.
 timestamp and an explicitly resolved expression while requiring no migration of existing
 claims.
 
-Each precision denotes a half-open interval:
+**Ordering compares bounds, not intervals.** Every temporal value yields a lower and an upper
+comparison bound. `upper` is exclusive for the calendar precisions, and for an instant the two
+bounds coincide:
 
-| precision | represented interval |
-| --- | --- |
-| `instant` / `None` | `[t, t]` |
-| `day` | `[start of day, start of next day)` |
-| `week` | `[start of week, start of next week)` |
-| `month` | `[start of month, start of next month)` |
-| `season` | `[start of season, start of next season)` |
-| `year` | `[start of year, start of next year)` |
+| precision | lower | upper (exclusive) |
+| --- | --- | --- |
+| `instant` / `None` | `t` | `t` |
+| `day` | start of day | start of next day |
+| `week` | start of ISO week | start of next ISO week |
+| `month` | start of month | start of next month |
+| `season` | start of season | start of next season |
+| `year` | start of year | start of next year |
 
-Two boundaries are confidently ordered only when their intervals do not overlap:
+An existing claim `c` is compared against an incoming `claim`:
 
-- A precedes B when `end(A) <= start(B)`
-- B precedes A when `end(B) <= start(A)`
-- otherwise they are **incomparable**, and precedence falls to `recorded_at`
+```
+c is confidently AFTER    iff  c.lower >= claim.upper  and  c.lower > claim.lower
+c is confidently BEFORE   iff  claim.lower >= c.upper  and  claim.lower > c.lower
+otherwise                      incomparable -> recorded_at decides
+```
 
-Stating it as interval containment rather than as a comparison of precisions matters, because
-two coarse boundaries can still be perfectly orderable: `year 2024` and `year 2025` do not
-overlap and order fine, while `year 2025` and `day 2025-12-01` do overlap and cannot.
+**When both sides are instants the rule reduces exactly to today's strict `>`.** Two equal
+instants satisfy neither branch, fall to `recorded_at`, and an already-stored claim is by
+construction the earlier one — so it lands in `older` and stays supersedable, which is what
+line 516 does now. That equivalence is the backwards-compatibility guarantee and it gets a
+test.
+
+Comparing bounds rather than precisions matters, because two coarse values can still be
+perfectly orderable: `year 2024` and `year 2025` do not overlap and order fine, while
+`year 2025` and `day 2025-12-01` do overlap and cannot.
 
 The motivating case:
 
@@ -131,6 +146,26 @@ expressions alike. Whether a future boundary is meaningful for a given predicate
 elsewhere — and `reconcile._observed_at` already clamps a future `valid_from` to the
 reconciliation instant, on the stated ground that a claim asserted as true from next month is
 not evidence about the freshness of anything today.
+
+### Temporal ordering changes ordering only, never eligibility
+
+Verified in `write/reconcile.py:_victims` (line 483) rather than assumed, because getting this
+wrong would make unrelated events supersede each other.
+
+Supersession candidates are collected **only** when `spec.functional` — that is,
+`Cardinality.ONE`. For `Cardinality.MANY`, including every predicate with no spec, the
+comment is explicit: *"Values accumulate and nothing is retired."* Candidates are further
+narrowed to the same `fact_key` with a *different* `value_key`, under the same owner.
+
+So the `older`/`newer` split this design modifies runs only over claims already eligible to
+supersede one another. Temporal ordering cannot cause an event claim to retire another; it can
+only reorder claims that today's code would already have had compete.
+
+**This puts a hard requirement on `packs/events.toml`: event predicates are declared
+`cardinality = "many"`.** "I visited London last year" and "I visited Paris this year" are two
+observations that both remain true, and a `one` there would make the second retire the first
+with nothing raising. The pack header states this and a test asserts it for every predicate
+the pack declares.
 
 ### Where this lands in the existing code
 
@@ -185,6 +220,30 @@ expression writes a false world time indistinguishable from a true one.
 It handles the expressions the fast path already recognises, because that set came from real
 writes rather than from a grammar: `yesterday`, `N days|weeks|months|years ago`,
 `last|this|next week|month|year|summer|winter|spring|fall|autumn`, `in YYYY`.
+
+**Calendar definitions, fixed so two implementations cannot disagree.**
+
+- **Weeks are ISO weeks**, beginning Monday at 00:00.
+- **Seasons are meteorological**, northern hemisphere: spring is March to May, summer June to
+  August, autumn September to November, winter December to February. `fall` and `autumn` are
+  the same season. **Winter spans the year boundary**: winter 2025 is December 2025 through
+  February 2026, so its lower bound is 2025-12-01 and its upper is 2026-03-01. A southern
+  hemisphere reading is a real limitation and is not addressed here; it is recorded in
+  `docs/LIMITATIONS.md` rather than left for someone to discover from a wrong answer.
+
+**Subtraction semantics, because "2 months ago" has more than one defensible meaning.**
+
+- `N days ago` and `N weeks ago` subtract `N` and `7N` calendar days from the anchor's date.
+  Both resolve at **`day` precision** — the speaker named a specific day even if imprecisely.
+- `N months ago` and `N years ago` subtract calendar months or years from the anchor's date,
+  **clamped to the last valid day of the destination**: one month before 2026-03-31 is
+  2026-02-28, and 2026-02-29 in a leap year. They too resolve at `day` precision, because the
+  expression still denotes a particular day.
+- `last week`, `last month`, `last year` name a *period*, not a day, and resolve at `week`,
+  `month` and `year` precision respectively with the boundary at that period's start.
+
+That distinction is deliberate and load-bearing: "three weeks ago" is a day the speaker could
+in principle name, while "last month" is a month they did not.
 
 **Timezone contract.** Calendar arithmetic runs in the anchor's timezone when the anchor is
 aware, and a naive anchor is treated as UTC — which is not a new rule but `types.as_utc`,
@@ -327,7 +386,19 @@ that.
   - "I used to live in London, but moved to Lisbon last year";
   - "I lived in Lisbon last year but now live in London" — the same facts in the opposite
     order, which must not produce the same answer.
-- **Round-trip**: the three new fields survive `put_claim` → `get_claim`, and a v8 file
+- **Quantity does not touch identity**, tested in both directions, because the failure mode is
+  someone adding the new fields to a serialisation tuple the identity functions read:
+  - `user | weight | ... | 70 kg` and `user | weight | ... | 71 kg` produce identical
+    `fact_key` and `value_key`, occupy one slot, and reconcile rather than coexisting as
+    unrelated facts;
+  - changing `subject`, `predicate` or `object` still changes the identity keys.
+- **Eligibility is unchanged**: a `Cardinality.MANY` predicate collects no victims whatever
+  the temporal ordering says, and every predicate `packs/events.toml` declares is `many`.
+- **Instant-only ordering is byte-identical to today**, including two claims with equal
+  `valid_from`, which must still leave the stored one supersedable.
+- **Calendar edges**: one month before 2026-03-31; ISO week boundaries across a Sunday;
+  winter across the year boundary.
+- **Round-trip**: the three new fields survive `put_claim` to `get_claim`, and a v8 file
   opened by this build migrates and reads back.
 - Docstring examples execute under `--doctest-modules`.
 
