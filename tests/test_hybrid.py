@@ -1066,7 +1066,9 @@ def test_a_narrow_filter_is_retried_against_a_wider_candidate_pool(
 
     # Without the retry the pool of 10 is spent entirely on semantic claims, and a
     # filter with three live matches behind it returns nothing at all. The floor is
-    # off so the pool *is* 10: at the shipped 50 it would hold every claim here.
+    # off so the pool is the 10 the docstring measures. Sixty-three rows do not fit in
+    # 50 either, and the three procedural ones sit past it: measured, the shipped
+    # floor starves the same way.
     assert starved.search(query, scope, k=2, memory_types=[MemoryType.PROCEDURAL]) == []
 
     found = retriever.search(query, scope, k=2, memory_types=[MemoryType.PROCEDURAL])

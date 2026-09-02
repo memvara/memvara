@@ -20,11 +20,14 @@ and the recall hook asks for exactly four (#155). The window now has a floor:
 
 ### Who this changes, and in which direction
 
-**If you call `search()`, `recall()` or `ask()` with `k < 10`, results can change, in
-one direction.** A claim the old window cut can now appear, and only a claim that
-outscores what you were getting can displace it. `k >= 10` is unchanged, and so is any
-retriever with a reranker configured — that path already cut at
-`rerank_top_n * candidate_multiplier`, 100 at the defaults.
+**If you call `search()`, `recall()` or `ask()` with `k < 10`, results can change.** At
+the shipped `read_w_graph=0.0` they change in one direction: a claim the old window cut
+can now appear, and only a claim that outscores what you were getting can displace it.
+With the graph leg on, a wider window can also open a walk the old one did not — the
+leg's gate counts predicates across every hydrated candidate — and when it does, all
+three legs are fused again and every rank can move. `k >= 10` is unchanged. A reranker
+cuts at `max(k, rerank_top_n) * candidate_multiplier`, so it is unchanged at the
+default `rerank_top_n=20` and reached by the floor only below `rerank_top_n=10`.
 
 **If a test of yours depends on the window being exactly `k * candidate_multiplier` —
 to watch a filter starve, or to prove a state filter runs in the store rather than after
@@ -40,8 +43,12 @@ now decides instead. Set both if you meant the window to be small.
 
 ```bash
 grep -rn "read_candidate_multiplier\|candidate_multiplier=" .   # a window you sized by hand
-grep -rn "k=[1-9]\b" . --include="*.py" | grep -i "search(\|recall(\|ask("   # small-k callers
+grep -rn "\.search(\|\.recall(\|\.ask(" . --include="*.py"        # every caller
 ```
+
+Then read what each caller passes as `k`. The value is often not on the call line:
+`plugin/hooks/recall.py`, the caller this change is about, passes `k=K` with `K = 4`
+defined near the top of the file, and a bench passes `k=args.k`.
 
 ---
 

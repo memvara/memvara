@@ -340,12 +340,14 @@ class HybridRetriever:
         #: 90.0%. The recall hook asks for exactly four (`plugin/hooks/recall.py`), so the
         #: surface every prompt meets was the narrowest window in the system.
         #:
-        #: 50 is half the window a configured reranker already uses —
-        #: `max(k, rerank_top_n) * candidate_multiplier`, 100 at the defaults — and it
-        #: changes nothing for `k >= 10`. The cost is bounded: at most 45 more rows per
-        #: leg to fetch, hydrate and rescore on a small-`k` query, and none above it.
-        #: `0` disables it, which is what a test that wants to see the window truncate
-        #: needs.
+        #: 50 is half the window a reranker at the default `rerank_top_n=20` already
+        #: uses — `max(k, rerank_top_n) * candidate_multiplier`, 100 — and it changes
+        #: nothing for `k >= 10`, reranked or not. The first pass costs at most 45 more
+        #: rows per leg to fetch, hydrate and rescore on a small-`k` query, and none
+        #: above it; the filter-starvation retry below multiplies the floored window
+        #: too, so its second pass at `k=4` asks for 500 rows per leg where it asked for
+        #: 200. `0` disables it, which is what a test that wants to see the window
+        #: truncate needs.
         self.candidate_floor = candidate_floor
         self.max_per_slot = max_per_slot
         self.filter_retry_multiplier = filter_retry_multiplier

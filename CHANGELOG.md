@@ -131,9 +131,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
   The window is now `max(k * candidate_multiplier, candidate_floor)`, with
   `candidate_floor=50` on `HybridRetriever` and `read_candidate_floor` on `Memvara`. It
-  changes nothing at `k >= 10`, nothing with a reranker configured (that path already cut
-  at 100), and costs at most 45 more rows per leg to fetch, hydrate and rescore on a
-  small-`k` query, none above it. `0` disables it, which is what a test that wants to
+  changes nothing at `k >= 10`, reranked or not: a reranker cuts at
+  `max(k, rerank_top_n) * candidate_multiplier`, so the floor reaches that path only
+  below `rerank_top_n=10`, and not at the default 20. The first pass costs at most 45
+  more rows per leg to fetch, hydrate and rescore on a small-`k` query, none above it;
+  the filter-starvation retry multiplies the floored window too, so a `memory_types` or
+  `anchored` query at `k=4` that saturates now retries at 500 rows per leg where it
+  retried at 200. `0` disables it, which is what a test that wants to
   watch the window truncate now has to say; `tests/test_bitemporal.py` and
   `tests/test_anchor.py` do. Results at small `k` can change, in the one direction: a
   claim the old window cut can now appear. On the Agent Memory Benchmark, whose adapter
