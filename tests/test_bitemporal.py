@@ -472,22 +472,27 @@ def test_search_carries_the_state_filter_through_both_retrieval_legs(mem, four):
     assert found() == found(states=["live"]) == ["Lisbon"]
 
 
-def test_the_state_filter_is_in_the_sql_not_applied_after_the_page(mem):
+def test_the_state_filter_is_in_the_sql_not_applied_after_the_page():
     """The reason this could not have been a client-side filter, and the reason it is a
     store parameter rather than a comprehension in the facade.
 
-    `search` is capped: it over-fetches `k * candidate_multiplier` candidates and ranks
-    those. Filter afterwards and the retired claim is only found when it happens to land
-    inside that window — so a store with enough live claims to fill the page returns an
-    empty audit, with nothing in the result to say the answer was truncated rather than
-    absent. Twelve live rows against `k=1` is a window of five.
+    `search` is capped: it over-fetches `k * candidate_multiplier` candidates, never
+    fewer than `candidate_floor`, and ranks those. Filter afterwards and the retired
+    claim is only found when it happens to land inside that window — so a store with
+    enough live claims to fill the page returns an empty audit, with nothing in the
+    result to say the answer was truncated rather than absent. Twelve live rows against
+    `k=1` is a window of five, with the floor off: at the shipped 50 all thirteen rows
+    fit and a client-side filter would pass this test.
     """
-    for i in range(12):
-        put(mem, f"City{i}", predicate=f"lived_in_{i}", valid_from=JAN, recorded_at=JAN)
-    corrected = put(mem, "Atlantis", predicate="lived_in_99", valid_from=JAN,
-                    recorded_at=JAN, invalidated_at=JULY)
+    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64), tenant="acme",
+                 user="alice", read_candidate_floor=0) as mem:
+        for i in range(12):
+            put(mem, f"City{i}", predicate=f"lived_in_{i}", valid_from=JAN,
+                recorded_at=JAN)
+        corrected = put(mem, "Atlantis", predicate="lived_in_99", valid_from=JAN,
+                        recorded_at=JAN, invalidated_at=JULY)
 
-    hits = mem.search("user lived in", k=1, states=["retired"])
+        hits = mem.search("user lived in", k=1, states=["retired"])
     assert [r.claim.id for r in hits] == [corrected.id]
 
 

@@ -292,6 +292,7 @@ class HybridRetriever:
         w_confidence: float = 0.15,
         w_salience: float = 0.10,
         candidate_multiplier: int = 5,
+        candidate_floor: int = 50,
         max_per_slot: int = 2,
         filter_retry_multiplier: int = 10,
         w_episode: float = 0.5,
@@ -327,6 +328,25 @@ class HybridRetriever:
         self.w_confidence = w_confidence
         self.w_salience = w_salience
         self.candidate_multiplier = candidate_multiplier
+        #: The fewest candidates each leg is asked for, whatever `k` is. The window is
+        #: `k * candidate_multiplier` and a pure multiple is smallest exactly where the
+        #: risk is highest: a caller asking for four results is asking for a short
+        #: answer, not a shallow search, and at `k=4` the multiplier alone gives a
+        #: window of 20. Measured on a hosted store of 730 claims, one probe lost its
+        #: best-scoring claim *entirely* at `k=4` — it sat between the 20th and 25th
+        #: position in one leg's own ordering, so fusion never saw it and a weaker claim
+        #: won — and had it at rank 1 from `k=5` upward with nothing else changed. Across
+        #: a 40-probe suite on the same store, `k=4` → `k=6` moved hit@k from 85.0% to
+        #: 90.0%. The recall hook asks for exactly four (`plugin/hooks/recall.py`), so the
+        #: surface every prompt meets was the narrowest window in the system.
+        #:
+        #: 50 is half the window a configured reranker already uses —
+        #: `max(k, rerank_top_n) * candidate_multiplier`, 100 at the defaults — and it
+        #: changes nothing for `k >= 10`. The cost is bounded: at most 45 more rows per
+        #: leg to fetch, hydrate and rescore on a small-`k` query, and none above it.
+        #: `0` disables it, which is what a test that wants to see the window truncate
+        #: needs.
+        self.candidate_floor = candidate_floor
         self.max_per_slot = max_per_slot
         self.filter_retry_multiplier = filter_retry_multiplier
         # An episode has to be *twice* as convincing as a claim to outrank it. Raw turn
@@ -561,7 +581,9 @@ class HybridRetriever:
 
         # Over-fetch per retriever: fusion can only rank what it was given, and a claim
         # that BM25 puts first is worthless if the vector list was cut before it and
-        # the final k is small.
+        # the final k is small. The floor is the other half of that sentence: a small
+        # `k` multiplied up is still a small window, and `candidate_floor` says how
+        # narrow it may get. See the attribute for the measurement behind it.
         # How deep the pipeline ranks before the caller's `k` is applied. Identical to
         # `k` unless a reranker is configured, in which case the stage needs candidates
         # below the cut to have anything to promote: reranking the same `k` items the
@@ -569,7 +591,7 @@ class HybridRetriever:
         # first and cannot change what is present at all.
         depth = k if self.reranker is None else max(k, self.rerank_top_n)
 
-        limit = max(depth * self.candidate_multiplier, depth)
+        limit = max(depth * self.candidate_multiplier, depth, self.candidate_floor)
         wanted = set(memory_types) if memory_types is not None else None
 
         weights = self._weights(query, timed=valid_at is not None or known_at is not None)

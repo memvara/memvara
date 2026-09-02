@@ -7,6 +7,44 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `search()` at a small `k` looks 50 candidates deep instead of `k * 5`
+
+### What changed
+
+`HybridRetriever` sized its candidate window as `k * candidate_multiplier`, so a caller
+asking for four results had each retrieval leg cut at 20. On a real store that was small
+enough to lose the best-scoring claim before fusion saw it — not rank it low, drop it —
+and the recall hook asks for exactly four (#155). The window now has a floor:
+`max(k * candidate_multiplier, candidate_floor)`, with `candidate_floor=50` on
+`HybridRetriever` and `read_candidate_floor=50` on `Memvara`.
+
+### Who this changes, and in which direction
+
+**If you call `search()`, `recall()` or `ask()` with `k < 10`, results can change, in
+one direction.** A claim the old window cut can now appear, and only a claim that
+outscores what you were getting can displace it. `k >= 10` is unchanged, and so is any
+retriever with a reranker configured — that path already cut at
+`rerank_top_n * candidate_multiplier`, 100 at the defaults.
+
+**If a test of yours depends on the window being exactly `k * candidate_multiplier` —
+to watch a filter starve, or to prove a state filter runs in the store rather than after
+the page — pass `read_candidate_floor=0`** (or `candidate_floor=0` on a bare
+`HybridRetriever`). This repository's own `tests/test_bitemporal.py` and
+`tests/test_anchor.py` needed exactly that: at the shipped floor, thirteen rows fit in
+the window and the test that shows truncation stops showing anything.
+
+**If you tuned `read_candidate_multiplier` down to save work at small `k`**, the floor
+now decides instead. Set both if you meant the window to be small.
+
+### How to find your own instances
+
+```bash
+grep -rn "read_candidate_multiplier\|candidate_multiplier=" .   # a window you sized by hand
+grep -rn "k=[1-9]\b" . --include="*.py" | grep -i "search(\|recall(\|ask("   # small-k callers
+```
+
+---
+
 ## `MEMVARA_MODE=cloud` now starts a server, and refuses two variables it used to accept
 
 ### What changed

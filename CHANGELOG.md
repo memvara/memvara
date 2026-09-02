@@ -118,6 +118,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   answer, a number that can land anywhere; `--min-score 0` reproduces the
   unfloored path, where it is 100% by construction.
 
+### Changed
+
+- **The candidate window has a floor of 50, so a caller asking for four results no longer
+  searches 20 deep.** `HybridRetriever` sized the window as a pure multiple of `k` —
+  `k * candidate_multiplier`, 20 at the recall hook's `K = 4` — which made it smallest
+  exactly where the risk was highest. Measured on a hosted store of 730 claims, one probe
+  lost its best-scoring claim entirely at `k=4`: it sat between the 20th and 25th
+  position in one leg's own ordering, so fusion never saw it and a weaker claim won, and
+  from `k=5` upward it was rank 1 with nothing else changed. Across a 40-probe suite on
+  the same store, `k=4` → `k=6` moved hit@k from 85.0% to 90.0% (#155).
+
+  The window is now `max(k * candidate_multiplier, candidate_floor)`, with
+  `candidate_floor=50` on `HybridRetriever` and `read_candidate_floor` on `Memvara`. It
+  changes nothing at `k >= 10`, nothing with a reranker configured (that path already cut
+  at 100), and costs at most 45 more rows per leg to fetch, hydrate and rescore on a
+  small-`k` query, none above it. `0` disables it, which is what a test that wants to
+  watch the window truncate now has to say; `tests/test_bitemporal.py` and
+  `tests/test_anchor.py` do. Results at small `k` can change, in the one direction: a
+  claim the old window cut can now appear. On the Agent Memory Benchmark, whose adapter
+  asks for ten, nothing moves.
+
 ### Fixed
 
 - **`bench/hosted.py --db PATH` could not open the store it exists to measure.**
