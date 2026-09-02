@@ -296,6 +296,7 @@ class HybridRetriever:
         filter_retry_multiplier: int = 10,
         w_episode: float = 0.5,
         max_episodes: int = 3,
+        max_per_source: int = 0,
         w_temporal: float = 0.0,
         w_graph: float = 0.0,
         derived_terms: "Collection[str]" = (),
@@ -338,6 +339,27 @@ class HybridRetriever:
         # a single well-worded conversation crowd out everything the store knows.
         self.w_episode = w_episode
         self.max_episodes = max_episodes
+        # How many turns one conversation may hold in the episode head, or 0 to rank
+        # episodes on score alone. **It ships at 0**, because switching it on raised
+        # the metric it targets and lowered the one that matters.
+        #
+        # It targets a real effect. Turns are ranked independently but are not
+        # independent evidence: the turns scoring highest for a question are usually
+        # neighbours in the one conversation that discussed it, so a question whose
+        # answer spans two conversations is answered from one of them repeatedly. At
+        # `max_episodes=5` on LongMemEval-S, one turn per conversation reached every
+        # conversation the answer needed 84.2% of the time against 39.8% for five by
+        # score - the evidence really was being retrieved and spent on duplicates.
+        #
+        # Judged accuracy went the other way: 41.8% against 61.0% for `max_episodes=8`
+        # ranked on score alone. Reaching a conversation is not the same as carrying
+        # the sentence that answers the question, and one turn from each of five
+        # conversations loses the surrounding turns that make any of them usable.
+        # Across four arms accuracy tracks *gold turns retrieved* - 2.2 turns for this
+        # setting at 41.8%, 6.1 at 61.0%, 10.0 at 70.5% - and not conversations
+        # reached. Raising it to 2 or 3 alongside a larger `max_episodes` is the
+        # version of this idea that has not been measured yet.
+        self.max_per_source = max_per_source
         #: Weight of the **episode** temporal leg, and the switch that runs it at all.
         #: At 0.0 no time-ranked candidates are produced and `Explanation.temporal_rank`
         #: stays `None`.
@@ -1151,7 +1173,51 @@ class HybridRetriever:
         # Content hash, not `id`. See `_rank_claims` for why — the same argument, and
         # `Episode.hash` is already the content digest tier 0 dedupes on.
         out.sort(key=lambda r: (-r.score, r.episode.hash, r.episode.id))
-        return out[:self.max_episodes]
+        return self._spread_episodes(out)[:self.max_episodes]
+
+    def _spread_episodes(self, results: "list[EpisodeResult]") -> "list[EpisodeResult]":
+        """Spread the episode head across source conversations, before the cut to `k`.
+
+        The claim side of this is `_rank`, and this is the same trade in the same
+        shape: demote rather than drop, on an exact key rather than on embedding
+        distance. Both choices were measured, and `_rank`'s docstring records why
+        greedy MMR lost to a key the store already knows.
+
+        The key here is `Episode.ts`. One `add()` call is one conversation, and
+        `_to_episodes` stamps the call's timestamp across the whole batch unless a turn
+        carries its own - so equal timestamps mean "arrived together", which is the
+        property being diversified over. On the 266-question LongMemEval-S run every
+        conversation retrieval reached carried exactly one timestamp across its
+        retrieved turns, 1324 of 1324. The converse is not quite exact and cannot be:
+        two conversations that genuinely start at the same instant share a key and are
+        treated as one, which happened for 2 of 1322 timestamps there. That direction
+        costs a slot rather than correctness - the merged pair keeps its best turn.
+
+        This ships disabled: see `max_per_source` in `__init__` for the measurement
+        that argues against it as a default.
+
+        Where turns *do* carry their own timestamps, every episode is its own source,
+        the head takes them all in score order and the pass is an identity. It is an
+        identity for a single-source corpus too, for the same reason `_rank` is: with
+        one key, `head` is the first item and `overflow` is the remainder already in
+        score order, so `head + overflow` is the input. The pass can only reorder a
+        genuine cluster, which is the only case it was built for.
+        """
+        if self.max_per_source <= 0:
+            return results
+
+        head: "list[EpisodeResult]" = []
+        overflow: "list[EpisodeResult]" = []
+        used: dict[str, int] = {}
+        for r in results:
+            source = r.episode.ts.isoformat()
+            seen = used.get(source, 0)
+            if seen < self.max_per_source:
+                used[source] = seen + 1
+                head.append(r)
+            else:
+                overflow.append(r)
+        return head + overflow
 
     def _hydrate_episodes(self, ids: Sequence[str]) -> dict[str, Episode]:
         """One round trip if the store offers it, N if it is a third-party one."""

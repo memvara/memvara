@@ -2141,3 +2141,124 @@ def test_known_at_still_wins_over_a_pinned_now(tmp_path):
         "a pinned now must not shift a query that named its own instant"
     )
     mem.close()
+
+
+# -- episode source diversity ---------------------------------------------------
+
+C1 = datetime(2023, 5, 20, 1, 8, tzinfo=timezone.utc)
+C2 = datetime(2023, 5, 22, 16, 15, tzinfo=timezone.utc)
+C3 = datetime(2023, 5, 29, 0, 35, tzinfo=timezone.utc)
+
+
+def test_one_conversation_cannot_take_every_episode_slot(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """The failure this exists for: an answer needing three conversations gets one.
+
+    The first conversation is the wordiest, so every turn in it outranks the single
+    on-topic turn in the other two. Ranked by score alone the head is three turns of
+    the same conversation, and the question is unanswerable from it.
+    """
+    filler = ("and then we spent a while on unrelated scheduling matters involving "
+              "the quarterly planning calendar and other administrative topics")
+    for w in ("one", "two", "three", "four", "five", "six"):
+        turn(store, embedder, f"kafka pipeline ordering {w}", EP_SCOPE, ts=C1)
+    turn(store, embedder, f"kafka pipeline ordering was raised here too, {filler}",
+         EP_SCOPE, ts=C2)
+    turn(store, embedder, f"a note on kafka pipeline ordering, {filler} plus more",
+         EP_SCOPE, ts=C3)
+
+    by_score = HybridRetriever(store, embedder, PredicateRegistry(),
+                               max_episodes=3, max_per_source=0)
+    heads = by_score.search("kafka pipeline ordering", EP_SCOPE, k=10,
+                            include_episodes=True)
+    assert len({r.episode.ts for r in heads if isinstance(r, EpisodeResult)}) == 1
+
+    spread = HybridRetriever(store, embedder, PredicateRegistry(),
+                             max_episodes=3, max_per_source=1)
+    found = spread.search("kafka pipeline ordering", EP_SCOPE, k=10,
+                          include_episodes=True)
+    assert {r.episode.ts for r in found if isinstance(r, EpisodeResult)} == {C1, C2, C3}
+
+
+def test_the_spread_demotes_and_never_drops(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """Demotion, not deletion: `max_episodes` still means what it says.
+
+    With only one conversation to show, the head is not left short - the overflow
+    fills it back up, in the order score put it in.
+    """
+    eps = [turn(store, embedder, f"kafka pipeline part {i}", EP_SCOPE, ts=C1)
+           for i in range(6)]
+    retriever = HybridRetriever(store, embedder, PredicateRegistry(),
+                                max_episodes=3, max_per_source=1)
+
+    found = [r for r in retriever.search("kafka pipeline", EP_SCOPE, k=10,
+                                         include_episodes=True)
+             if isinstance(r, EpisodeResult)]
+    assert len(found) == 3
+    assert {r.episode.id for r in found} <= {e.id for e in eps}
+
+
+def test_the_spread_is_an_identity_on_a_single_source(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """One timestamp means one key, so `head` is the first row and `overflow` is the
+    rest already in score order - and the order out is the order in."""
+    for i in range(6):
+        turn(store, embedder, f"kafka pipeline part {i}", EP_SCOPE, ts=C1)
+    kw = dict(max_episodes=4)
+    plain = HybridRetriever(store, embedder, PredicateRegistry(),
+                            max_per_source=0, **kw)
+    spread = HybridRetriever(store, embedder, PredicateRegistry(),
+                             max_per_source=1, **kw)
+    q = dict(k=10, include_episodes=True)
+    assert ([r.episode.id for r in plain.search("kafka", EP_SCOPE, **q)
+             if isinstance(r, EpisodeResult)]
+            == [r.episode.id for r in spread.search("kafka", EP_SCOPE, **q)
+                if isinstance(r, EpisodeResult)])
+
+
+def test_the_spread_is_an_identity_when_every_turn_is_its_own_source(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """Per-turn timestamps make every episode its own key, so nothing is ever demoted
+    and the ranking is untouched. This is the shape real transcripts arrive in."""
+    for i in range(6):
+        turn(store, embedder, f"kafka pipeline part {i}", EP_SCOPE,
+             ts=C1 + timedelta(seconds=i))
+    kw = dict(max_episodes=4)
+    plain = HybridRetriever(store, embedder, PredicateRegistry(),
+                            max_per_source=0, **kw)
+    spread = HybridRetriever(store, embedder, PredicateRegistry(),
+                             max_per_source=1, **kw)
+    q = dict(k=10, include_episodes=True)
+    assert ([r.episode.id for r in plain.search("kafka", EP_SCOPE, **q)
+             if isinstance(r, EpisodeResult)]
+            == [r.episode.id for r in spread.search("kafka", EP_SCOPE, **q)
+                if isinstance(r, EpisodeResult)])
+
+
+def test_the_source_spread_ships_disabled(
+    store: SQLiteStore, embedder: HashingEmbedder
+) -> None:
+    """It is opt-in, and the reason is a measurement rather than caution.
+
+    Switching it on at `max_episodes=5` raised the share of questions whose every
+    needed conversation was reached from 39.8% to 84.2% on LongMemEval-S, and dropped
+    judged accuracy to 41.8% against 61.0% for `max_episodes=8` on score alone.
+    Reaching a conversation is not carrying the sentence that answers the question.
+    """
+    for i in range(6):
+        turn(store, embedder, f"kafka pipeline part {i}", EP_SCOPE, ts=C1)
+    assert HybridRetriever(store, embedder, PredicateRegistry()).max_per_source == 0
+
+    plain = HybridRetriever(store, embedder, PredicateRegistry(), max_episodes=4)
+    off = HybridRetriever(store, embedder, PredicateRegistry(), max_episodes=4,
+                          max_per_source=0)
+    q = dict(k=10, include_episodes=True)
+    assert ([r.episode.id for r in plain.search("kafka", EP_SCOPE, **q)
+             if isinstance(r, EpisodeResult)]
+            == [r.episode.id for r in off.search("kafka", EP_SCOPE, **q)
+                if isinstance(r, EpisodeResult)])

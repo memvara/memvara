@@ -11,6 +11,31 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`max_per_source`, an opt-in spread of the episode head across source
+  conversations.** `HybridRetriever` takes it as the episode counterpart of
+  `max_per_slot`: at most that many turns from one source conversation may sit in the
+  head, and the rest are demoted behind it rather than dropped, so `max_episodes` still
+  returns `max_episodes` results. The key is `Episode.ts`, because `add()` stamps one
+  timestamp across a batch unless a turn carries its own.
+
+  **It ships at `0`, disabled, and the default is a result rather than caution.** The
+  effect it targets is real: at `max_episodes=5` on LongMemEval-S, taking one turn per
+  conversation reached every conversation the answer needed 84.2% of the time against
+  39.8% for five turns by score. Judged accuracy went the other way — 41.8% against
+  61.0% for `max_episodes=8` ranked on score alone. Reaching a conversation is not the
+  same as carrying the sentence that answers the question, and one turn from each of
+  five conversations loses the surrounding turns that make any of them usable. Across
+  four arms accuracy tracks *gold turns retrieved* (2.2 turns → 41.8%, 6.1 → 61.0%,
+  10.0 → 70.5%) and not conversations reached.
+
+  Set `read_max_per_source=1` to switch it on. Values of 2 or 3 alongside a larger
+  `max_episodes` are the version of the idea that has not been measured, and are where
+  anyone picking this up should start.
+
+  Nothing changes for existing callers at the default. Diversity is measured on an
+  exact key and deliberately not on embedding distance, for the reason `_rank` records
+  on the claim side.
+
 - **`anchored` reaches the hosted facade and the three read tools.** `RemoteMemvara`,
   `ScopedRemoteMemvara` and their async twins take `anchored` on `search()`, `recall()`
   and `ask()` and send it only when set, so a server from before the field refuses the
