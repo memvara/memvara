@@ -187,3 +187,76 @@ def test_extraction_is_deterministic(fast):
     second = triples(FastExtractor(PredicateRegistry()).extract(e))
     assert first == second == [("name", "Goldy", 1), ("lives_in", "Berlin", 1),
                                ("works_at", "Acme", 1)]
+
+
+# --- event time on the fast path ---------------------------------------------
+#
+# `_FILLER` already recognised these tails and threw them away, because leaving them in
+# the object fragments slot identity: "Lisbon" and "Lisbon last month" would be two
+# facts. That stays true. What changes is that the tail now reaches `when.resolve()`
+# instead of the floor.
+
+from datetime import datetime, timezone  # noqa: E402
+
+from memvara.write.fast import split_temporal_mention  # noqa: E402
+
+SAID = datetime(2026, 9, 3, 14, 30, tzinfo=timezone.utc)
+
+
+def test_a_temporal_tail_sets_valid_from_and_records_its_precision(fast) -> None:
+    [claim] = fast.extract(ep("I moved to Lisbon last month.", ts=SAID))
+    assert claim.valid_from == datetime(2026, 8, 1, tzinfo=timezone.utc)
+    assert claim.temporal_precision == "month"
+
+
+def test_the_object_and_identity_are_untouched_by_the_temporal_tail(fast) -> None:
+    """The assertion that protects slot identity. If the tail ever leaks into the
+    object, "Lisbon" and "Lisbon last month" become two facts and nothing supersedes."""
+    [tailed] = fast.extract(ep("I moved to Lisbon last month.", ts=SAID))
+    [plain] = fast.extract(ep("I moved to Lisbon.", ts=SAID))
+    assert tailed.object == plain.object == "Lisbon"
+    assert tailed.fact_key == plain.fact_key
+    assert tailed.value_key == plain.value_key
+
+
+def test_a_turn_stating_no_time_is_stored_exactly_as_it_is_today(fast) -> None:
+    [claim] = fast.extract(ep("I live in Berlin.", ts=SAID))
+    assert claim.valid_from == SAID
+    assert claim.temporal_precision is None
+
+
+def test_a_present_tense_marker_is_not_a_temporal_location(fast) -> None:
+    """"now" and "currently" say the claim holds at the speaking moment, which `ep.ts`
+    already records to the second. Resolving them would round a precise instant down to
+    midnight and call the result an improvement."""
+    # "I currently live in Berlin" is deliberately not here: no rule matches that
+    # phrasing, on this branch or before it, so it extracts nothing at all and would
+    # test the gap rather than the behaviour.
+    for content in ("I live in Berlin now.", "I live in Berlin these days."):
+        [claim] = fast.extract(ep(content, ts=SAID))
+        assert claim.valid_from == SAID, content
+        assert claim.temporal_precision is None, content
+
+
+def test_an_unresolvable_tail_falls_back_rather_than_guessing(fast) -> None:
+    [claim] = fast.extract(ep("I moved to Lisbon recently.", ts=SAID))
+    assert claim.valid_from == SAID
+    assert claim.temporal_precision is None
+
+
+# --- the seam itself ----------------------------------------------------------
+
+def test_the_splitter_returns_the_value_and_the_mention_separately() -> None:
+    """The regex reports what it saw; `when.resolve()` decides what it means. Keeping
+    that boundary is what stops `fast.py` growing a temporal grammar the first time
+    somebody wants "from X until Y"."""
+    assert split_temporal_mention("Lisbon last month") == ("Lisbon", "last month")
+    assert split_temporal_mention("Lisbon") == ("Lisbon", None)
+    assert split_temporal_mention("Lisbon now") == ("Lisbon now", None)
+
+
+def test_the_splitter_takes_the_temporal_tail_out_of_stacked_filler() -> None:
+    """Filler stacks — "in Berlin last year too". The temporal part is still one
+    mention, and the rest is still stripped by the existing loop."""
+    value, mention = split_temporal_mention("Berlin last year")
+    assert (value, mention) == ("Berlin", "last year")

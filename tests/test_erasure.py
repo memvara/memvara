@@ -233,8 +233,14 @@ def test_a_failed_audit_write_leaves_the_claim_in_place(mem):
 
 def test_the_erasures_table_is_schema_seven():
     """A store upgraded from an older file gets an empty table, and an empty table means
-    "nothing erased since the upgrade" — never "nothing was ever erased here"."""
-    assert SCHEMA_VERSION == 8
+    "nothing erased since the upgrade" — never "nothing was ever erased here".
+
+    The version assertion is a tripwire rather than a fact worth pinning: it fails on any
+    schema bump so that whoever makes one has to come and decide whether the sentence
+    above still holds. Version 9 added three nullable claim columns and no table, so it
+    does.
+    """
+    assert SCHEMA_VERSION == 9
     store = SQLiteStore(":memory:")
     try:
         assert store.erasure_record("anything") is None

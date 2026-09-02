@@ -21,6 +21,7 @@ from typing import Iterator
 
 from ..schema import PredicateRegistry
 from ..types import SELF_SUBJECT, Claim, Derivation, Episode
+from .when import resolve
 
 EXTRACTOR = "fast/v1"
 
@@ -85,6 +86,43 @@ _FILLER = re.compile(
     r"\d+\s+(?:years?|months?|weeks?|days?)|in\s+\d{4})$",
     re.IGNORECASE,
 )
+
+# The temporal subset of `_FILLER`: the tails that locate a claim at a time *other than
+# the speaking moment*. `_FILLER` strips more than this — "now", "currently", "these
+# days", "again", "too" — and those deliberately stay out. They say the claim holds as
+# the sentence is spoken, which `ep.ts` already records to the second; resolving them
+# would round that precise instant down to midnight and call it an improvement.
+#
+# This pattern reports what it saw. `write.when` decides what it means. Keeping those
+# two apart is what stops this module growing a temporal grammar the first time somebody
+# wants "from X until Y".
+_TEMPORAL_MENTION = re.compile(
+    r"\s+(?P<mention>yesterday|"
+    r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|an?)\s+"
+    r"(?:day|week|month|year)s?\s+ago|"
+    r"(?:last|this|next)\s+"
+    r"(?:week|month|year|summer|winter|spring|fall|autumn)|"
+    r"in\s+\d{4})$",
+    re.IGNORECASE,
+)
+
+
+def split_temporal_mention(value: str) -> tuple[str, str | None]:
+    """A cleaned object, split into the value and the temporal tail it carried.
+
+    Returns the value unchanged and `None` when there is no tail, which is the common
+    case and must stay free.
+
+        >>> split_temporal_mention("Lisbon last month")
+        ('Lisbon', 'last month')
+        >>> split_temporal_mention("Lisbon")
+        ('Lisbon', None)
+    """
+    m = _TEMPORAL_MENTION.search(value)
+    if m is None:
+        return value, None
+    return value[:m.start()].strip(), m.group("mention")
+
 
 _BAD_OBJECT_PREFIX = (
     "to ", "that ", "it ", "this ", "there ", "here ", "you ", "your ", "he ", "she ",
@@ -182,38 +220,49 @@ def _clauses(content: str) -> Iterator[str]:
                 yield p
 
 
-def _clean_object(raw: str) -> str | None:
+def _clean_object(raw: str) -> tuple[str | None, str | None]:
     """Normalize a captured object, or reject it outright.
 
-    Every rejection here is a deliberate hand-off to the LLM tier rather than a guess.
+    Returns the value and the temporal tail it carried, if any. Every rejection here is
+    a deliberate hand-off to the LLM tier rather than a guess.
+
+    The temporal split happens *inside* the stripping loop rather than before it, because
+    filler stacks and the temporal part need not be last: "in Berlin last year too" ends
+    in a non-temporal tail with the temporal one behind it. One pass of each, until
+    neither moves.
     """
     o = raw.strip().strip("\"'“”‘’ ").rstrip(".,;:!? ").strip()
     o = _ARTICLE.sub("", o).strip()
+    mention: str | None = None
     prev = ""
     while prev != o:  # filler can stack: "in Berlin now too"
         prev = o
+        o, found = split_temporal_mention(o)
+        # The first mention wins. A second would mean two temporal claims in one object,
+        # which is a clause the LLM tier should be handling rather than this one.
+        mention = mention or found
         o = _FILLER.sub("", o).strip()
 
     if not o or len(o) > _MAX_OBJECT_CHARS:
-        return None
+        return None, None
     low = o.lower()
     if low in _BAD_OBJECT_EXACT or low.startswith(_BAD_OBJECT_PREFIX):
-        return None
+        return None, None
     # A coordinated object is two facts wearing one hat ("coffee and tea"). Splitting it
     # correctly needs real parsing, so hand the whole clause to the LLM instead.
     if " and " in low or " or " in low or " but " in low:
-        return None
+        return None, None
     if len(o.split()) > _MAX_OBJECT_WORDS:
-        return None
+        return None, None
     # A pronoun inside the value means this is a referential phrase, not a value:
     # "the place we discussed", "the company you know about". Resolving those needs
     # the conversation, which is exactly what the LLM tier has and these rules do not.
     # Real values — "Acme Corp", "San Francisco", "pytest" — never contain one.
     if _REFERENTIAL.search(o):
-        return None
+        return None, None
     if not any(ch.isalnum() for ch in o):
-        return None
-    return o
+        return None, None
+    return o, mention
 
 
 class FastExtractor:
@@ -247,30 +296,33 @@ class FastExtractor:
                 m = rule.pattern.search(clause)
                 if m is None:
                     continue
-                triples: list[tuple[str, str, int]] = []
+                triples: list[tuple[str, str, int, str | None]] = []
                 for group, predicate, polarity in rule.outputs:
-                    value = _clean_object(m.group(group) or "")
+                    value, mention = _clean_object(m.group(group) or "")
                     if value is None:
                         triples = []
                         break
-                    triples.append((predicate, value, polarity))
+                    triples.append((predicate, value, polarity, mention))
                 if not triples:
                     continue  # cleaning failed; a later, looser rule may still fit
-                for predicate, value, polarity in triples:
+                for predicate, value, polarity, mention in triples:
                     pred = self.registry.normalize(predicate)
                     key = (pred, value.casefold(), polarity)
                     if key in seen:
                         continue
                     seen.add(key)
-                    out.append(self._claim(ep, pred, value, polarity))
+                    out.append(self._claim(ep, pred, value, polarity, mention))
                 # One rule per clause: a clause asserts one thing, and letting a second,
                 # looser rule fire on the same words produces duplicate garbage.
                 break
 
         return out
 
-    def _claim(self, ep: Episode, predicate: str, value: str, polarity: int) -> Claim:
+    def _claim(self, ep: Episode, predicate: str, value: str, polarity: int,
+               mention: str | None = None) -> Claim:
         spec = self.registry.spec(predicate)
+        resolved = resolve(mention, ep.ts) if mention else None
+        valid_from, precision = resolved if resolved else (ep.ts, None)
         return Claim(
             subject=SELF_SUBJECT,
             predicate=predicate,
@@ -278,9 +330,12 @@ class FastExtractor:
             scope=ep.scope,
             polarity=polarity,
             memory_type=spec.memory_type,
-            # Valid time is when the user said it; transaction time is set by the caller
-            # so a whole batch shares one "when we came to believe this" instant.
-            valid_from=ep.ts,
+            # Valid time is the earliest boundary the turn supports: the tail it carried
+            # if one resolved, and otherwise when the user said it. Transaction time is
+            # set by the caller so a whole batch shares one "when we came to believe
+            # this" instant.
+            valid_from=valid_from,
+            temporal_precision=precision,
             confidence=CONFIDENCE,
             sources=[ep.id],
             derivation=Derivation.FAST_PATH,

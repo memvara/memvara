@@ -16,7 +16,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any, Sequence
 
@@ -1970,3 +1970,69 @@ def test_the_script_is_read_from_the_stored_turn_when_no_redactor_rewrote_it():
     pipe.add([ep("我住在北京")])
     assert rec.total("gate.pass", script="han") == 1
     store.close()
+
+
+# --- event time and quantity from the LLM tier --------------------------------
+
+SAID = datetime(2026, 9, 3, 14, 30, tzinfo=timezone.utc)
+
+
+def _one(claims, content, ts=SAID):
+    """Write one turn through the LLM tier and hand back what landed in the store."""
+    pipe, store, _ = build(CountingLLM(claims))
+    pipe.add([ep(content, ts=ts)])
+    rows = store._db.execute("SELECT id FROM claims").fetchall()
+    return [store.get_claim(r["id"]) for r in rows]
+
+
+def test_the_extractors_when_field_sets_valid_from_and_precision():
+    """The model reports the expression; `write.when` decides what it means. A model
+    computing its own date would be doing arithmetic it is measurably bad at, in a field
+    nothing downstream can check."""
+    claims = [{
+        "subject": "user", "predicate": "ran", "object": "5k",
+        "polarity": 1, "memory_type": "episodic", "confidence": 0.9,
+        "source_index": 0, "when": "last month", "amount": 5.0, "unit": "kilometres",
+    }]
+    [claim] = _one(claims, "I ran a 5k last month.")
+    assert claim.valid_from == datetime(2026, 8, 1, tzinfo=timezone.utc)
+    assert claim.temporal_precision == "month"
+    assert (claim.amount, claim.unit) == (5.0, "kilometer")
+
+
+def test_an_absent_when_falls_back_to_the_episode_timestamp():
+    claims = [{
+        "subject": "user", "predicate": "likes", "object": "coffee",
+        "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
+        "source_index": 0, "when": None, "amount": None, "unit": None,
+    }]
+    [claim] = _one(claims, "I like coffee.")
+    assert claim.valid_from == SAID
+    assert claim.temporal_precision is None
+    assert (claim.amount, claim.unit) == (None, None)
+
+
+def test_a_unit_without_an_amount_is_dropped():
+    """A unit alone measures nothing, and keeping it would put "minutes" in the store
+    attached to no number for somebody to later read as a value."""
+    claims = [{
+        "subject": "user", "predicate": "ran", "object": "this morning",
+        "polarity": 1, "memory_type": "episodic", "confidence": 0.9,
+        "source_index": 0, "when": None, "amount": None, "unit": "minutes",
+    }]
+    [claim] = _one(claims, "I ran this morning.")
+    assert (claim.amount, claim.unit) == (None, None)
+
+
+def test_a_model_inventing_a_date_instead_of_an_expression_is_ignored():
+    """The contract says copy the words. A model that returns "2026-08-01" anyway gets
+    no boundary rather than one this code did not derive — the resolver declines, and
+    declining falls back to the timestamp the store already trusted."""
+    claims = [{
+        "subject": "user", "predicate": "ran", "object": "5k",
+        "polarity": 1, "memory_type": "episodic", "confidence": 0.9,
+        "source_index": 0, "when": "2026-08-01", "amount": None, "unit": None,
+    }]
+    [claim] = _one(claims, "I ran a 5k last month.")
+    assert claim.valid_from == SAID
+    assert claim.temporal_precision is None

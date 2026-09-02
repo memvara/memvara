@@ -162,10 +162,17 @@ CLAIM_SCHEMA: dict[str, Any] = {
                     },
                     "confidence": {"type": "number"},
                     "source_index": {"type": "integer"},
+                    # Nullable rather than optional: strict `json_schema` requires every
+                    # declared property in `required`, so "the turn stated no time" is
+                    # spelled `null` rather than by omitting the key.
+                    "when": {"type": ["string", "null"]},
+                    "amount": {"type": ["number", "null"]},
+                    "unit": {"type": ["string", "null"]},
                 },
                 "required": [
                     "subject", "predicate", "object", "polarity",
                     "memory_type", "confidence", "source_index",
+                    "when", "amount", "unit",
                 ],
                 "additionalProperties": False,
             },
@@ -204,6 +211,14 @@ point in time, "procedural" for how the user wants an assistant to behave.
 - confidence: 0.0-1.0. Use lower values for facts that were implied rather than stated.
 - source_index: the 0-based index of the turn the fact came from. This is load-bearing \
 provenance, so it must be exact.
+- when: the temporal expression exactly as it appears in the turn, naming the single \
+earliest time this fact is tied to - "yesterday", "last month", "three weeks ago", "in 2019". \
+Copy the words; never compute a date, and never sharpen a vague expression into a precise \
+one. null when the turn states no time, which is the common case.
+- amount and unit: a measured quantity, if the turn states one - amount 30, unit "minutes". \
+At most one per fact: "I ran 5 km in 30 minutes" is two facts, one for the distance and one \
+for the duration, never one fact with a compound object. null for both when nothing is \
+measured.
 
 Return an empty list when a turn carries no durable fact. That is the common case, and \
 an empty list is a correct answer."""

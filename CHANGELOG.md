@@ -15,6 +15,56 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   Keep an episode while it scores at least this fraction of the best one, and stop where
   the curve falls off. **It ships at `0.0`**, which takes `max_episodes` regardless and is
   today's behaviour exactly.
+- **Event time and quantities on the write path.** Both write tiers now resolve the
+  temporal expression a turn carries and store it as `valid_from`, with the precision it
+  was resolved at; and a claim can carry one measured quantity.
+
+  The defect this fixes: `valid_from` was hardcoded to the episode's timestamp on both
+  paths and the extractor was never asked when the described event happened, so the world
+  clock and the belief clock recorded the same thing for every extracted claim. "I ran 30
+  minutes yesterday", said on the 20th, was stored as an event on the 20th.
+
+  - **`memvara/write/when.py`** resolves an expression against an anchor, deterministically
+    and with no model. The extraction model reports the expression it saw and never
+    computes a date. Weeks are ISO weeks; seasons are meteorological with winter spanning
+    the year boundary; month and year subtraction clamps to the last valid day, so one
+    month before 2026-03-31 is 2026-02-28. It returns `None` rather than guessing, and the
+    caller then falls back to the episode timestamp exactly as before.
+  - **`Claim.temporal_precision`** records how coarse `valid_from` is, or `None` when it
+    came from the fallback. Resolving "last month" to the 1st invents a day nobody said,
+    and without this a reader can only take the stored instant as an exact onset.
+  - **`Claim.amount` and `Claim.unit`**, generic to any predicate and outside claim
+    identity, so 70kg and 71kg remain one slot that updates rather than two facts that
+    never supersede. At most one quantity per claim. `normalize_unit` folds spellings and
+    converts nothing.
+  - **`packs/events.toml`**, loaded with `MEMVARA_PREDICATES=events`: twelve event
+    predicates, every one multi-valued, because `Cardinality.ONE` would make "visited
+    Paris" silently retire "visited London".
+  - **`SCHEMA_VERSION` 8 to 9** adds the three nullable columns. No `Store` protocol
+    method changed.
+
+  **Supersession now runs on temporal bounds rather than a scalar.** Two boundaries order
+  confidently only when their intervals do not overlap; overlapping ones fall back to
+  `recorded_at`. With no precision on either side this is exactly the comparison it
+  replaces, including that an equal `valid_from` leaves the stored claim supersedable.
+
+  **A claim with no precision can never be confidently after one that has a precision.** A
+  fallback timestamp bounds a fact's onset from above without locating it, so it cannot
+  establish that its fact began later than a stated boundary. Without this, "I live in
+  Berlin" followed by "Actually, I moved to Lisbon last month" left the store believing
+  Berlin.
+
+  **Nothing is backfilled.** A claim written before this has `valid_from` meaning the
+  conversation's timestamp and `temporal_precision` `None`, which is the truthful record of
+  what was known; inventing event times for existing rows would be the forged history this
+  library exists to prevent.
+
+- **`max_per_source`, an opt-in spread of the episode head across source
+  conversations.** `HybridRetriever` takes it as the episode counterpart of
+  `max_per_slot`: at most that many turns from one source conversation may sit in the
+  head, and the rest are demoted behind it rather than dropped, so `max_episodes` still
+  returns `max_episodes` results. The key is `Episode.ts`, because `add()` stamps one
+  timestamp across a batch unless a turn carries its own.
 
   One budget is spent on every question, and questions differ in how much evidence they
   need by a factor of three. Measured on LongMemEval-S, a multi-session answer needs a

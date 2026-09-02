@@ -408,8 +408,12 @@ takes the safe default twice over: multi-valued, so nothing supersedes, and slow
 so this morning's deploy still ranks as fresh in two years.
 
 ```bash
-MEMVARA_PREDICATES=engineering memvara-mcp        # or: engineering,decisions,./ours.toml
+MEMVARA_PREDICATES=engineering memvara-mcp   # or: engineering,events,decisions,./ours.toml
 ```
+
+Three packs ship: `engineering`, `events` and `decisions`. Naming several is normal and
+they do not collide — loading all three declares 48 predicates against a 64-name ceiling
+on what each extraction prompt carries.
 
 ```toml
 [[predicate]]
