@@ -1,5 +1,15 @@
 # LongMemEval failure taxonomy, and what it says to build
 
+> **Superseded in part on 2026-09-03 by the arm that tested it.** The central
+> recommendation below — select for gold-*session* coverage — was implemented, run, and
+> refuted. Coverage rose from 39.8% to 84.2% and judged accuracy *fell* to 41.8%, against
+> 61.0% for simply taking more turns by score. Accuracy tracks gold **turns** retrieved,
+> not sessions reached, and the "accuracy ≈ 0.85 × coverage" law below was a confound:
+> reaching every gold session correlated with retrieving many turns, and this document
+> read the correlation as the cause. The section "What this document got wrong" at the end
+> records the corrected numbers. What still stands: the harness's retrieval metrics are
+> broken, the offline coverage measurement is sound, and the failure-mode table.
+
 **Date:** 2026-09-03
 **Data:** `memvara-baseline-18e3626` (500 questions), `memvara-epcap8` (160), `memvara-epcap15` (266)
 **Analysis scripts:** `local/failure-taxonomy/` (not committed)
@@ -66,8 +76,10 @@ The three episode-cap arms confirm the relationship holds as we change retrieval
 | cap 8 | 74.4% | 61.9% | 2,051 |
 | cap 15 | 87.2% | 74.1% | 4,070 |
 
-Accuracy runs at roughly 0.85 × coverage across all three. Driving coverage to 100% at that
-rate implies about 85%, above Supermemory's published 81.6%.
+Accuracy runs at roughly 0.85 × coverage across all three, which looked at the time like a
+law worth extrapolating: drive coverage to 100% and get about 85%, above Supermemory's
+published 81.6%. **A later arm broke it.** All three of these arms vary coverage and turn
+count together, so the relationship they show is not evidence about which one is causal.
 
 ## The 228 failures
 
@@ -106,7 +118,8 @@ different selection policies, at no cost:
 
 Five slots chosen one-per-session cover more gold than eight chosen by rank, and nearly as
 much as the entire fifteen. Expected accuracy at 0.85 × 82.3% is about 70%, at roughly a
-third of cap-15's tokens.
+third of cap-15's tokens. **The measured answer was 41.8%.** The coverage prediction held
+almost exactly — 84.2% against 82.3% predicted — and the accuracy prediction did not.
 
 This also explains why the cross-encoder reranker bought nothing. A reranker scores each
 item independently for topical relevance. On a question spanning three sessions, the eight
@@ -162,3 +175,38 @@ points. Whatever else changes, claims should not be taking half the slots.
 result stands as measured; the explanation offered for it at the time — that precision was
 already adequate — was wrong, and the correct explanation is that per-item relevance
 scoring cannot improve a set-coverage objective.
+
+## What this document got wrong
+
+The recommendation above was implemented as `max_per_source` in `memvara` and run as the
+`memvara-spread5` arm: `max_episodes=5`, one turn per source conversation, on the same 266
+questions and the same ingested data as the other three arms. It reached 146 of them before
+the gateway key was exhausted.
+
+| arm | multi | temporal | total | ctx tokens | gold **sessions** | gold **turns** |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| cap 3 baseline | 18.9% | 45.8% | 32.2% | 758 | ~40% | 3.0 |
+| cap 5 + spread | 31.1% | 52.8% | **41.8%** | 1,238 | **84.2%** | **2.0** |
+| cap 8 | 48.6% | 73.6% | 61.0% | 2,050 | 74.4% | 7.0 |
+| cap 15 | 56.8% | 84.7% | 70.5% | 4,051 | 87.2% | 11.0 |
+
+The mechanism did exactly what the simulation said it would. Session coverage went from
+39.8% to 84.2%, within two points of prediction. Accuracy did not follow it: at 84.2%
+coverage the arm scores 41.8%, where cap 15 scores 70.5% at 87.2%.
+
+Read the last two columns together. Accuracy tracks gold **turns** retrieved — 2.0 turns
+at 41.8%, 7.0 at 61.0%, 11.0 at 70.5% — and is indifferent to how many distinct
+conversations were touched. Reaching a conversation is not carrying the sentence that
+answers the question, and one turn from each of five conversations loses the surrounding
+turns that make any of them usable.
+
+Against the token curve the arm sits about where plain ranking would at 1,238 tokens, so
+the spread bought nothing; it bought the same accuracy differently. `max_per_source`
+therefore ships disabled, and the missing control — `max_episodes=5` with the spread off —
+is what would say whether it actively hurt at that budget or merely failed to help.
+
+The depth argument earlier in this document ("accuracy was 78.9% at one gold turn, 79.2% at
+two and 75.1% at three — flat") is the specific claim that misled. That measurement came
+from the cap-3 baseline's full-coverage subset, which is dominated by questions needing a
+single session, where one turn is often the whole answer. It does not generalise to
+questions spanning several conversations, and it was used as though it did.
