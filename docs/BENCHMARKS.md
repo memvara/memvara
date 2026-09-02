@@ -1112,7 +1112,9 @@ in a SQLite file re-embedded with the deployment's own model (`memvara[local-emb
 and it refuses to run under the hashing fallback), and reads at the scope most of the
 claims live under. It is evidence, not the decision: SQLite's lexical leg is not
 Postgres's. `SESSION-2026-09-02-candidate-floor-e2e.md` is the run sheet, including what
-the `compare` output has to show before the change merges.
+the `compare` output has to show before the change merges, and it records the result of
+the run that was made on 2026-09-02: the floor recovered the issue's probe and moved
+nothing else.
 
 ---
 

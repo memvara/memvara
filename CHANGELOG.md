@@ -129,6 +129,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   from `k=5` upward it was rank 1 with nothing else changed. Across a 40-probe suite on
   the same store, `k=4` → `k=6` moved hit@k from 85.0% to 90.0% (#155).
 
+  The floor was measured on that store before it merged, at the hook's `k=4`: hit@k
+  85.0% → 90.0%, mean gold-rank 1.5 → 1.4. The one probe that changed is the one the
+  issue lost, absent before and rank 1 after. No other hit probe moved, verbatim
+  self-retrieval stayed at 100%, and the abstain class kept the same false-injection
+  rate on the same three probes. `bench/floor_e2e.py` is the measurement and
+  `SESSION-2026-09-02-candidate-floor-e2e.md` records the run.
+
   The window is now `max(k * candidate_multiplier, candidate_floor)`, with
   `candidate_floor=50` on `HybridRetriever` and `read_candidate_floor` on `Memvara`. It
   changes nothing at `k >= 10`, reranked or not: a reranker cuts at

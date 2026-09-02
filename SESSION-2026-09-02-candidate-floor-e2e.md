@@ -95,3 +95,41 @@ lower floor (25 recovers the issue's probe by its own sweep) before any other di
 from the issue. `read_candidate_floor` is a constructor argument, so the box can run a
 different value without a code change once memvara-cloud exposes it; today it does not,
 and a different value is a one-line change to the default in `memvara/retrieve/hybrid.py`.
+
+## Result, 2026-09-02
+
+The floor merges. All three conditions held on the hosted store at `k=4`.
+
+| run | hit@4 | mean gold-rank | verbatim@1 | abstain false-injection |
+|---|---|---|---|---|
+| `before`, box at core `3d3ab84` | 85.0% | 1.5 | 100% | 37.5% (3 of 8) |
+| `replay-floor-0`, local copy | 85.0% | 1.5 | 100% | 37.5% |
+| `replay-floor-50`, local copy | 90.0% | 1.6 | 100% | 37.5% |
+| `after`, box at core `9bf0715` | 90.0% | 1.4 | 100% | 37.5% (the same 3) |
+
+- **The lost probe hits.** `h017`, "why can't we trust the version number?", was absent
+  at `k=4` in `before` and is rank 1 in `after`. The copy predicted rank 3.
+- **No hit probe regressed.** The other 19 hit probes have the same rank in both runs.
+- **Abstain probes still abstain.** The same three probes leak in both runs and the same
+  five stay silent. The top score on the three that leak rose a little (0.29 → 0.33,
+  0.31 → 0.31, 0.35 → 0.40), which is the deeper window handing `min_score` more
+  candidates; none crossed from silent to injected.
+
+Two things the compare output flagged, and how they were read.
+
+1. **The store moved between `before` and `after`: 740 → 745 live claims.** Another
+   session wrote five claims in the fifteen minutes between the runs, all `user` or
+   `memvara_code` facts unrelated to any probe. Nothing was removed, so every gold claim
+   exists in both. Two of the five appear in the `after` results of `h019` and `h020`
+   below the gold claim, which stayed at rank 1 in both.
+2. **The box did not go from `main` to `main` plus the floor.** It ran core `3d3ab84`,
+   57 commits behind `main`, so the release carried those too (anchored search, the
+   embed-cache fix, the openai backend, among others). memvara-cloud stayed at `fe17d5f`,
+   the sha already deployed. The replay isolates the floor from that: the same code at
+   floor 0 and floor 50 on the same copy gives the same one-probe delta, and floor 0 on
+   the copy agreed with `before` on 38 of 40 probes, the other two off by one rank.
+
+The four result files and the release log are under `local/floor-e2e/` in the checkout
+that ran them, with a copy in the main checkout's `local/floor-e2e/`. The release was
+`memvara-provision.sh release` with `CORE_REPO` pointed at the branch's worktree, and it
+shipped agent-memory at `9bf0715`, which is the branch before this section was added.

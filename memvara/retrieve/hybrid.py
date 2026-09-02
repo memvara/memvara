@@ -340,6 +340,17 @@ class HybridRetriever:
         #: 90.0%. The recall hook asks for exactly four (`plugin/hooks/recall.py`), so the
         #: surface every prompt meets was the narrowest window in the system.
         #:
+        #: The floor itself was then measured on that store, at the hook's `k=4`, on
+        #: 2026-09-02 (`bench/floor_e2e.py`, run sheet
+        #: `SESSION-2026-09-02-candidate-floor-e2e.md`). Before the floor: hit@k 85.0%,
+        #: mean gold-rank 1.5. After: 90.0% and 1.4. The one probe that changed is the
+        #: one the issue lost, absent before and rank 1 after; the other 19 hit probes
+        #: kept their exact rank, all 12 verbatim probes stayed at rank 1, and the
+        #: abstain set was the same 3 false injections of 8 both times. A local copy of
+        #: the store run at floor 0 and floor 50 with nothing else different gave the
+        #: same delta, which is what isolates the floor from the other changes the
+        #: deploy carried.
+        #:
         #: 50 is half the window a reranker at the default `rerank_top_n=20` already
         #: uses — `max(k, rerank_top_n) * candidate_multiplier`, 100 — and it changes
         #: nothing for `k >= 10`, reranked or not. The first pass costs at most 45 more
