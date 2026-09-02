@@ -1,0 +1,107 @@
+# Things that happened, at a time, sometimes with a quantity.
+#
+# The 23 builtins describe what a user *is like* — where they live, what they prefer, what
+# they are working on. They cannot describe what a user *did*: there is no predicate here
+# for a run, a purchase or a visit, so a store asked "how much did I spend on gifts last
+# month" has nothing to add up. Measured on LongMemEval-S, where the categories memvara
+# loses on are exactly the ones asking for totals, elapsed time and event order.
+#
+# Load with MEMVARA_PREDICATES=events, or beside another pack:
+# MEMVARA_PREDICATES=engineering,events.
+#
+# ## What belongs here, and what does not
+#
+# **Event predicates only** — a thing that happened, which `valid_from` places in time and
+# `amount`/`unit` can measure. `ran`, `bought`, `visited`, `attended`.
+#
+# **Not quantity predicates.** There is no `distance`, `duration`, `cost` or `weight` here
+# and there should not be. A quantity is carried by the `amount` and `unit` fields on the
+# claim, which are generic and available to any predicate; a `distance` predicate would be
+# a second way to say the same thing, and the two would drift. Without this rule the file
+# becomes forty unrelated measurements inside six months.
+#
+# ## Every predicate here is multi-valued, and that is load-bearing
+#
+# `Cardinality.ONE` means a new value *retires* the old one. That is right for `lives_in`
+# and catastrophic for `visited`: "I visited London last year" and "I visited Paris this
+# year" are both still true, and declaring either `one` would make the second silently
+# retire the first. `write/reconcile.py:_victims` collects supersession candidates only
+# for functional predicates, so `many` is what keeps two events from competing at all —
+# no temporal rule can rescue a predicate declared wrongly here.
+#
+# `tests/test_packs.py` asserts this for every predicate below rather than trusting the
+# comment, because the failure is silent and looks like ordinary forgetting.
+#
+# Volatility is `fast` throughout: an event is evidence about the moment it happened, and
+# a run last March should not still rank as fresh news two years on.
+
+[[predicate]]
+name = "ran"
+cardinality = "many"
+volatility = "fast"
+aliases = ["went_for_a_run", "jogged"]
+
+[[predicate]]
+name = "walked"
+cardinality = "many"
+volatility = "fast"
+aliases = ["hiked"]
+
+[[predicate]]
+name = "exercised"
+cardinality = "many"
+volatility = "fast"
+aliases = ["worked_out", "trained"]
+
+[[predicate]]
+name = "bought"
+cardinality = "many"
+volatility = "fast"
+aliases = ["purchased", "ordered"]
+
+[[predicate]]
+name = "spent"
+cardinality = "many"
+volatility = "fast"
+aliases = ["paid"]
+
+[[predicate]]
+name = "visited"
+cardinality = "many"
+volatility = "fast"
+aliases = ["travelled_to", "traveled_to", "went_to"]
+
+[[predicate]]
+name = "attended"
+cardinality = "many"
+volatility = "fast"
+aliases = ["went_to_event"]
+
+[[predicate]]
+name = "completed"
+cardinality = "many"
+volatility = "fast"
+aliases = ["finished"]
+
+[[predicate]]
+name = "started"
+cardinality = "many"
+volatility = "fast"
+aliases = ["began"]
+
+[[predicate]]
+name = "watched"
+cardinality = "many"
+volatility = "fast"
+aliases = ["saw"]
+
+[[predicate]]
+name = "read"
+cardinality = "many"
+volatility = "fast"
+
+[[predicate]]
+name = "met"
+cardinality = "many"
+volatility = "fast"
+aliases = ["met_with"]

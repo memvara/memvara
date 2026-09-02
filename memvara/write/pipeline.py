@@ -91,6 +91,7 @@ from ..types import (
     SELF_SUBJECT, Claim, Closure, Derivation, Episode, MemoryType, WriteReceipt, utcnow,
 )
 from .fast import FastExtractor
+from .when import normalize_unit, resolve
 from .gate import SalienceGate
 from .reconcile import ReconcileResult, Reconciler
 
@@ -962,6 +963,18 @@ class WritePipeline:
         else:
             memory_type = _coerce(MemoryType, item.get("memory_type"), MemoryType.SEMANTIC)
 
+        # The model reports the expression it saw; `write.when` decides what it means, and
+        # falls back to the episode's timestamp when nothing was stated or nothing
+        # resolved. A model that computed its own date would be doing arithmetic it is
+        # measurably bad at, in a field nothing downstream can check.
+        mention = item.get("when")
+        resolved = resolve(mention, ep.ts) if isinstance(mention, str) else None
+        valid_from, precision = resolved if resolved else (ep.ts, None)
+        raw_amount = item.get("amount")
+        amount = float(raw_amount) if isinstance(raw_amount, (int, float)) \
+            and not isinstance(raw_amount, bool) else None
+        unit = normalize_unit(item.get("unit")) if amount is not None else None
+
         return Claim(
             subject=subject,
             predicate=predicate,
@@ -969,7 +982,10 @@ class WritePipeline:
             scope=ep.scope,
             polarity=polarity,
             memory_type=memory_type,
-            valid_from=ep.ts,
+            valid_from=valid_from,
+            temporal_precision=precision,
+            amount=amount,
+            unit=unit,
             recorded_at=now,
             confidence=confidence,
             sources=[ep.id],

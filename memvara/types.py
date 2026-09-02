@@ -18,6 +18,10 @@ from typing import Any, ClassVar, Literal, cast
 from .entities import OWNER_SEP, entity_key
 
 
+#: How coarse a resolved temporal boundary is. See `Claim.temporal_precision`.
+Precision = Literal["instant", "day", "week", "month", "season", "year"]
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -523,8 +527,23 @@ class Claim:
     memory_type: MemoryType = MemoryType.SEMANTIC
 
     # --- valid time: when this was true in the world ---
+    #: The **earliest resolved temporal boundary at which this claim is asserted to
+    #: hold** — not simply "the event time", because an event's occurrence and a state's
+    #: onset are different things and this field holds whichever the source stated
+    #: earliest. `recorded_at` is the separate question of when we were told.
     valid_from: datetime = field(default_factory=utcnow)
     valid_to: datetime | None = None
+    #: How coarse `valid_from` is, or `None` when it was not resolved from a temporal
+    #: expression — the `ep.ts` fallback, and what every claim written before this field
+    #: existed carries.
+    #:
+    #: Resolving "last month" to the 1st invents a day nobody said. Without this, a
+    #: reader sees `valid_from = 2026-08-01` and can only take it as an exact onset.
+    #: **For ordering `None` is an exact instant**; it stays `None` in storage so the
+    #: distinction between a fallback timestamp and a resolved expression survives, and
+    #: so no existing claim needs migrating. See `write.reconcile` for what precision
+    #: buys: two boundaries order confidently only when their bounds do not overlap.
+    temporal_precision: Precision | None = None
 
     # --- transaction time: when we believed it ---
     recorded_at: datetime = field(default_factory=utcnow)
@@ -557,6 +576,23 @@ class Claim:
     #: half of the pair that re-observation actually raises.
     salience: float = 1.0
     observation_count: int = 1           # how many times we've independently seen this
+
+    # --- quantity: at most one per claim ---
+    #: The measured value this observation carries, with `unit`. A claim holds **at most
+    #: one** quantity: "I ran 5 km in 30 minutes" is two independent measurements and is
+    #: two claims, never one with a compound object.
+    #:
+    #: Generic, not tied to any predicate pack — `user | goal | save for camera` with
+    #: `amount=1000, unit="usd"` is intended and valid.
+    #:
+    #: **Neither field takes part in identity.** They describe the particular
+    #: observation, so `fact_key` and `value_key` ignore them; putting a quantity in the
+    #: identity would make 70kg and 71kg two facts that never supersede each other.
+    amount: float | None = None
+    #: Canonical, singular, lowercase — `minute`, `kilometer`, `usd`. Folded by
+    #: `write.when.normalize_unit`, which converts nothing: 120 minutes never becomes 2
+    #: hours, and an unrecognised unit is kept rather than guessed at.
+    unit: str | None = None
 
     # --- provenance ---
     sources: list[str] = field(default_factory=list)   # Episode ids
