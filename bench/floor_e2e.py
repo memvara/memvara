@@ -7,8 +7,8 @@
 
 Every step is `bench/hosted.py` under a fixed set of arguments, so the numbers here are the
 numbers the issue was measured with: the hook's `k=4`, the hook's own relevance floor, and
-one result file per run under `local/floor-e2e/`. `SESSION-2026-09-02-candidate-floor-e2e.md`
-says which order to run them in and what decides.
+one result file per run under `local/floor-e2e/`. `docs/benchmarks/candidate-floor-2026-09-02.md`
+says which order to run them in, what decides, and what the run found.
 
 The floor lives in the retriever, which runs inside memvara-cloud, so `before` and `after`
 differ only in what the box is running. `replay` is the same measurement against a copy of
@@ -62,14 +62,27 @@ def export_claims(source: Any) -> list[Any]:
     than the deployment does, and the whole point of the copy is the population.
     """
     states = ["live", "ended", "retired"]
-    claims: list[Any] = []
+    before = source.count(states=states)
+    pages: list[Any] = []
     offset = 0
     while True:
         page = source.get_all(states=states, limit=PAGE, offset=offset)
-        claims.extend(page)
+        pages.extend(page)
         if len(page) < PAGE:
-            return claims
+            break
         offset += PAGE
+    # The listing is newest-first and re-cut on every request, so a row written or
+    # erased between two pages shifts the window: a write repeats one claim at the
+    # boundary, which the id map below folds, and an erasure skips one, which nothing
+    # in the pages themselves reveals. The store's own count, read before and after,
+    # is what says the export is whole.
+    claims = list({c.id: c for c in pages}.values())
+    after = source.count(states=states)
+    if before != after or len(claims) != after:
+        raise RuntimeError(
+            f"the store moved during the export: {before} claims before, {after} after, "
+            f"{len(claims)} distinct exported. Run replay again.")
+    return claims
 
 
 def build_copy(claims: Sequence[Any], db: Path, embedder: Any) -> Any:
@@ -88,8 +101,9 @@ def build_copy(claims: Sequence[Any], db: Path, embedder: Any) -> Any:
     if db.exists():
         db.unlink()
     store = SQLiteStore(str(db))
-    for claim in claims:
-        store.put_claim(claim)
+    with store.batch():
+        for claim in claims:
+            store.put_claim(claim)
     mem = Memvara(store=store, embedder=embedder, llm=NullLLM(),
                   tenant=claims[0].scope.tenant)
     embedded = mem.reembed()
@@ -154,10 +168,11 @@ def replay(args: argparse.Namespace) -> int:
                           tenant=scope.tenant, user=scope.user, agent=scope.agent,
                           session=scope.session, read_candidate_floor=floor)
             print(f"== replay: floor {floor}, k={args.k}, writing {out}")
+            # The scope is on `mem`; `hosted.main` reads `--tenant` and `--user` only
+            # when it opens a store itself. `--db` still matters: it is what tells the
+            # bench this is a local file it may ask whole-store questions of.
             argv = ["--probes", str(args.probes), "--db", str(db),
-                    "--tenant", scope.tenant, "--k", str(args.k), "--out", str(out)]
-            if scope.user:
-                argv += ["--user", scope.user]
+                    "--k", str(args.k), "--out", str(out)]
             hosted.main(argv, mem=mem)
     finally:
         base.close()
@@ -177,16 +192,38 @@ def compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _shared(parser: argparse.ArgumentParser, *, defaults: bool) -> None:
+    """The three options every step takes, accepted on either side of the step name.
+
+    Declared twice on purpose. The top-level parser carries the defaults; each
+    subparser declares the same options with `SUPPRESS`, so it writes a value into the
+    namespace only when the option was typed after the step and otherwise leaves what
+    the top-level parser already put there. Declaring them once with `parents=` does
+    not do this: the subparser's copy then wins with its default, and a value typed
+    before the step name is silently replaced.
+    """
+    none = argparse.SUPPRESS
+    parser.add_argument("--probes", type=Path, default=PROBES if defaults else none,
+                        help=f"probe file, default {PROBES}")
+    parser.add_argument("--k", type=int, default=K if defaults else none,
+                        help=f"the hook's own K, {K}")
+    parser.add_argument("--user", default="" if defaults else none,
+                        help="narrow to one user, on every step")
+
+
 def main(argv: "Sequence[str] | None" = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--probes", type=Path, default=PROBES)
-    parser.add_argument("--k", type=int, default=K, help=f"the hook's own K, {K}")
-    parser.add_argument("--user", default="", help="narrow to one user, on every step")
+    _shared(parser, defaults=True)
     sub = parser.add_subparsers(dest="step", required=True)
-    sub.add_parser("before", help="hosted store as deployed today")
-    sub.add_parser("replay", help="local copy of the store at floor 0 and floor 50")
-    sub.add_parser("after", help="hosted store once the box carries the branch")
-    cmp = sub.add_parser("compare", help="diff two result files by name")
+    steps = {
+        "before": "hosted store as deployed today",
+        "replay": "local copy of the store at floor 0 and floor 50",
+        "after": "hosted store once the box carries the branch",
+        "compare": "diff two result files by name",
+    }
+    for name, help_ in steps.items():
+        _shared(sub.add_parser(name, help=help_), defaults=False)
+    cmp = sub.choices["compare"]
     cmp.add_argument("runs", nargs=2, metavar="RUN",
                      help="before, after, replay-floor-0 or replay-floor-50")
     args = parser.parse_args(argv)

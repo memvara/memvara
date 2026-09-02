@@ -25,16 +25,19 @@ the shipped `read_w_graph=0.0` they change in one direction: a claim the old win
 can now appear, and only a claim that outscores what you were getting can displace it.
 With the graph leg on, a wider window can also open a walk the old one did not — the
 leg's gate counts predicates across every hydrated candidate — and when it does, all
-three legs are fused again and every rank can move. `k >= 10` is unchanged. A reranker
+three legs are fused again and every rank can move. `k >= 10` is unchanged at the
+default `read_candidate_multiplier=5`; a smaller multiplier raises the crossover, to
+`k=25` at 2. Episodes are unchanged at every `k`: the episode legs keep the
+multiplier's window. A reranker
 cuts at `max(k, rerank_top_n) * candidate_multiplier`, so it is unchanged at the
 default `rerank_top_n=20` and reached by the floor only below `rerank_top_n=10`.
 
 **If a test of yours depends on the window being exactly `k * candidate_multiplier` —
 to watch a filter starve, or to prove a state filter runs in the store rather than after
 the page — pass `read_candidate_floor=0`** (or `candidate_floor=0` on a bare
-`HybridRetriever`). This repository's own `tests/test_bitemporal.py` and
-`tests/test_anchor.py` needed exactly that: at the shipped floor, thirteen rows fit in
-the window and the test that shows truncation stops showing anything.
+`HybridRetriever`). This repository's own `tests/test_anchor.py` needed exactly that:
+it sizes the window with `read_candidate_multiplier=1` so a `k=1` first pass starves
+and the retry has something to show, and at the shipped floor all four of its rows fit.
 
 **If you tuned `read_candidate_multiplier` down to save work at small `k`**, the floor
 now decides instead. Set both if you meant the window to be small.

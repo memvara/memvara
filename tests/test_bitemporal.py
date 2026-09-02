@@ -34,7 +34,7 @@ import pytest
 from memvara import Claim, Episode, HashingEmbedder, Memvara, NullLLM, Scope, utcnow
 from memvara.aio import AsyncMemvara
 from memvara.schema import Cardinality, PredicateSpec, Volatility
-from memvara.store import STATES
+from memvara.store import STATES, SQLiteStore
 from memvara.types import time_axes
 
 TZ = timezone.utc
@@ -472,20 +472,37 @@ def test_search_carries_the_state_filter_through_both_retrieval_legs(mem, four):
     assert found() == found(states=["live"]) == ["Lisbon"]
 
 
-def test_the_state_filter_is_in_the_sql_not_applied_after_the_page():
-    """The reason this could not have been a client-side filter, and the reason it is a
-    store parameter rather than a comprehension in the facade.
+def test_the_state_filter_is_in_the_sql_not_applied_after_the_page(monkeypatch):
+    """The reason this is a store parameter rather than a comprehension in the facade.
 
-    `search` is capped: it over-fetches `k * candidate_multiplier` candidates, never
-    fewer than `candidate_floor`, and ranks those. Filter afterwards and the retired
-    claim is only found when it happens to land inside that window — so a store with
-    enough live claims to fill the page returns an empty audit, with nothing in the
-    result to say the answer was truncated rather than absent. Twelve live rows against
-    `k=1` is a window of five, with the floor off: at the shipped 50 all thirteen rows
-    fit and a client-side filter would pass this test.
+    `search` is capped: it over-fetches a window of candidates and ranks those. Filter
+    afterwards and the retired claim is only found when it happens to land inside that
+    window — so a store with enough live claims to fill the page returns an empty
+    audit, with nothing in the result to say the answer was truncated rather than
+    absent.
+
+    The result alone cannot prove where the filter ran: on this fixture the retired row
+    sits inside the window in both legs at any floor (every row ties on BM25 for the
+    query and the store breaks ties by content hash), so a client-side filter would
+    return the same list. What proves it is what each leg was asked for: both receive
+    `states=["retired"]`, which a filter applied after the page never sends.
     """
+    seen: dict[str, list[tuple[str, ...]]] = {"vector": [], "lexical": []}
+    original_vector, original_lexical = SQLiteStore.vector_search, SQLiteStore.lexical_search
+
+    def spy_vector(self, qvec, scopes, limit, **kw):
+        seen["vector"].append(tuple(kw.get("states") or ()))
+        return original_vector(self, qvec, scopes, limit, **kw)
+
+    def spy_lexical(self, query, scopes, limit, **kw):
+        seen["lexical"].append(tuple(kw.get("states") or ()))
+        return original_lexical(self, query, scopes, limit, **kw)
+
+    monkeypatch.setattr(SQLiteStore, "vector_search", spy_vector)
+    monkeypatch.setattr(SQLiteStore, "lexical_search", spy_lexical)
+
     with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64), tenant="acme",
-                 user="alice", read_candidate_floor=0) as mem:
+                 user="alice") as mem:
         for i in range(12):
             put(mem, f"City{i}", predicate=f"lived_in_{i}", valid_from=JAN,
                 recorded_at=JAN)
@@ -494,6 +511,8 @@ def test_the_state_filter_is_in_the_sql_not_applied_after_the_page():
 
         hits = mem.search("user lived in", k=1, states=["retired"])
     assert [r.claim.id for r in hits] == [corrected.id]
+    assert seen["vector"] and seen["lexical"], "both legs must have reached the store"
+    assert all(set(s) == {"retired"} for s in seen["vector"] + seen["lexical"]), seen
 
 
 # =============================================================================

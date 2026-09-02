@@ -1066,10 +1066,18 @@ def test_a_narrow_filter_is_retried_against_a_wider_candidate_pool(
 
     # Without the retry the pool of 10 is spent entirely on semantic claims, and a
     # filter with three live matches behind it returns nothing at all. The floor is
-    # off so the pool is the 10 the docstring measures. Sixty-three rows do not fit in
-    # 50 either, and the three procedural ones sit past it: measured, the shipped
-    # floor starves the same way.
+    # off so the pool is the 10 the docstring measures.
     assert starved.search(query, scope, k=2, memory_types=[MemoryType.PROCEDURAL]) == []
+
+    # The shipped floor starves the same way: sixty-three rows do not fit in 50 and the
+    # three procedural ones sit past it. Asserted rather than noted, so that `found`
+    # below is known to pass because the retry ran and not because the fixture drifted
+    # inside the window — this is the one test that exercises the retry firing at the
+    # shipped floor.
+    starved_at_the_floor = HybridRetriever(store, embedder, PredicateRegistry(),
+                                           filter_retry_multiplier=1)
+    assert starved_at_the_floor.search(
+        query, scope, k=2, memory_types=[MemoryType.PROCEDURAL]) == []
 
     found = retriever.search(query, scope, k=2, memory_types=[MemoryType.PROCEDURAL])
     assert len(found) == 2
@@ -1152,7 +1160,7 @@ def test_a_claim_past_k_times_the_multiplier_still_reaches_fusion_at_a_small_k()
 
     def retriever(**kw) -> HybridRetriever:
         return HybridRetriever(store, HashingEmbedder(dim=64), PredicateRegistry(),
-                               w_lexical=0.0, w_recency=0.0, **kw)
+                               w_recency=0.0, **kw)
 
     floored = retriever().search("version", scope, k=4)
     unfloored = retriever(candidate_floor=0).search("version", scope, k=4)

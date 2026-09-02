@@ -1111,10 +1111,10 @@ the candidate floor (#155, PR #159) and its subcommands are named for that run:
 in a SQLite file re-embedded with the deployment's own model (`memvara[local-embed]`,
 and it refuses to run under the hashing fallback), and reads at the scope most of the
 claims live under. It is evidence, not the decision: SQLite's lexical leg is not
-Postgres's. `SESSION-2026-09-02-candidate-floor-e2e.md` is the run sheet, including what
-the `compare` output has to show before the change merges, and it records the result of
-the run that was made on 2026-09-02: the floor recovered the issue's probe and moved
-nothing else.
+Postgres's. [The candidate floor, measured](benchmarks/candidate-floor-2026-09-02.md)
+is the run sheet, including what the `compare` output had to show before the change
+merged, and the result of the run made on 2026-09-02: the floor recovered the issue's
+probe and moved nothing else.
 
 ---
 
