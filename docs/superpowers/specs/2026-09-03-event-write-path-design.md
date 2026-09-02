@@ -33,10 +33,13 @@ otherwise: when an event happened, when a state began, and when the observation 
 The third is `recorded_at` and always was. The first two are both boundaries, and this field
 holds the earliest one known.
 
-**The interval's end already exists and this design does not populate it.** `Claim.valid_to`
-is a field (`types.py:527`), the store round-trips it, and `reconcile.py` sets it when a
-claim is superseded. So "I worked at Google from 2019 to 2022" is *representable today* —
-extraction simply never writes the end boundary. Teaching it to is a follow-up with its own
+**`Claim.valid_to` already exists as the claim's validity end boundary, and this design does
+not populate it.** It is a field (`types.py:527`), the store round-trips it, and
+`reconcile.py` sets it when a claim is superseded — at the successor's `valid_from`, not at
+anything the source said. That is a different mechanism from a source-derived end: "I lived
+in London from 2019 to 2022" states an end, whereas "I live in London" followed later by "I
+moved to Lisbon" has reconciliation infer one. The field can hold either, and extraction
+writes neither today. Teaching it to is a follow-up with its own
 design, because a closed interval written at extraction time interacts with supersession in
 ways a single boundary does not. Recording that here so the gap reads as deferred rather
 than unnoticed.
@@ -73,30 +76,92 @@ boundary was invented by normalisation.
 
 ## Temporal ordering semantics
 
-This is the section the first draft was missing, and it decides what supersession does.
+`recorded_at` orders belief: when memvara learned the claim. It is unaffected by this change
+and remains a total ordering.
 
-- **`recorded_at`** orders belief. It is unaffected by this change and remains total.
-- **`valid_from`** orders the world, **when the two boundaries are confidently comparable**.
-- **`temporal_precision`** decides whether they are.
+`valid_from` orders the world, but only when the represented boundaries are confidently
+comparable.
 
-Two boundaries are **not** confidently orderable when the coarser one's interval contains
-the finer one's boundary — a claim resolved to "2025" could be anywhere in 2025, so it
-cannot be said to precede a claim at 2025-12-01. In that case reconciliation falls back to
-`recorded_at` for precedence.
+**For comparison, `temporal_precision=None` is an exact `instant`.** It stays persisted as
+`None` rather than being rewritten, which preserves the distinction between a fallback
+timestamp and an explicitly resolved expression while requiring no migration of existing
+claims.
 
-The worked example from review, which is exactly the case that motivates the rule:
+Each precision denotes a half-open interval:
+
+| precision | represented interval |
+| --- | --- |
+| `instant` / `None` | `[t, t]` |
+| `day` | `[start of day, start of next day)` |
+| `week` | `[start of week, start of next week)` |
+| `month` | `[start of month, start of next month)` |
+| `season` | `[start of season, start of next season)` |
+| `year` | `[start of year, start of next year)` |
+
+Two boundaries are confidently ordered only when their intervals do not overlap:
+
+- A precedes B when `end(A) <= start(B)`
+- B precedes A when `end(B) <= start(A)`
+- otherwise they are **incomparable**, and precedence falls to `recorded_at`
+
+Stating it as interval containment rather than as a comparison of precisions matters, because
+two coarse boundaries can still be perfectly orderable: `year 2024` and `year 2025` do not
+overlap and order fine, while `year 2025` and `day 2025-12-01` do overlap and cannot.
+
+The motivating case:
 
 ```
 2025-12-01  "I live in London."             valid_from=2025-12-01  precision=None
 2026-09-03  "I moved to Lisbon last year."  valid_from=2025-01-01  precision=year
 ```
 
-Ordering on `valid_from` alone puts Lisbon *before* London, so Lisbon supersedes nothing and
-the store still believes London. With the rule, 2025-12-01 falls inside the year 2025, the
-boundaries are not comparable, precedence falls to `recorded_at`, and Lisbon supersedes
-London — which is what a person reading those two sentences concludes.
+The exact 2025-12-01 boundary lies inside the year the second claim resolved to, so the two
+are incomparable, precedence falls to `recorded_at`, and the later observation supersedes the
+earlier one.
 
-This is precision paying for itself on the first case that exercises it.
+**The resolver infers no semantics beyond the boundary.** It does not conclude that a state
+persisted after its boundary: "I moved to Lisbon last year" implies to a reader that the user
+now lives in Lisbon, and `valid_from + precision` does not express that. `valid_from` records
+only the earliest boundary the source explicitly supports; what that boundary means for a
+claim is predicate and reconciliation semantics. This is a real limit of the model, recorded
+so that `temporal_precision` is not mistaken for a solution to temporal semantics.
+
+**The resolver is temporal, not truth-semantic.** It resolves past, present and future
+expressions alike. Whether a future boundary is meaningful for a given predicate is decided
+elsewhere — and `reconcile._observed_at` already clamps a future `valid_from` to the
+reconciliation instant, on the stated ground that a claim asserted as true from next month is
+not evidence about the freshness of anything today.
+
+### Where this lands in the existing code
+
+Verified against `write/reconcile.py` rather than assumed, because the section above is only
+implementable if it matches what that module does.
+
+The whole of ordering today is one scalar comparison, at line 516:
+
+```python
+(newer if c.valid_from > claim.valid_from else older).append(c)
+```
+
+`older` becomes the supersession candidates; `newer` means the incoming claim is history and
+gets `valid_to = min(c.valid_from for c in newer)` (line 282). So this change replaces one
+two-way split with a three-way classification — confidently newer, confidently older,
+incomparable — where incomparable is decided by `recorded_at`. Nothing else in the module
+compares `valid_from` between claims.
+
+**Two properties of that line must be preserved.** It is a strict `>`, so an existing claim
+with an equal `valid_from` falls to `older` and stays supersedable; and the iteration is over
+`sorted(victims.values(), key=lambda c: (c.recorded_at, c.id))`, which the new classification
+must keep so the outcome stays deterministic across ingests.
+
+**`valid_from` has a second consumer that this change reaches.** `_observed_at` (line 383)
+returns `valid_from` as "when the incoming assertion was made", clamped to `t`, and that feeds
+the authority comparison deciding whether a candidate is worth enough to close a victim. Once
+`valid_from` is an event boundary, a claim about last year counts as an older observation for
+authority purposes than the same sentence would today. That follows from the field meaning
+what it now means, and it is a behaviour change beyond supersession ordering, so it is tested
+and documented rather than discovered.
+
 
 ## What is being built
 
@@ -179,14 +244,23 @@ quantities and must be emitted as two claims where predicate semantics allow, ne
 `amount=5, unit="kilometer", object="5 km in 30 minutes"`. The extractor prompt states this;
 a claim is one observation of one measurable thing.
 
-**`unit` is canonical, singular, lowercase**: `minute`, `hour`, `kilometer`, `usd`. The
-extractor normalises `mins`/`min`/`minutes` to `minute` on the way in. **Unit conversion is
-out of scope** — nothing turns 120 minutes into 2 hours, and `amount=30, unit="minute"`
+**`unit` is canonical, singular, lowercase**: `minute`, `hour`, `kilometer`, `usd`. The model
+returns the unit as it appears — `mins`, `minutes`, `min` — and a deterministic
+`normalize_unit()` folds it, for the same reason the model never computes a date:
+correctness-critical normalisation does not belong in probabilistic output. A small lookup is
+the whole of it, and an unrecognised unit is kept verbatim rather than guessed at, so the
+failure mode is an uncanonical unit and never a wrong one. **Unit conversion is out of
+scope** — nothing turns 120 minutes into 2 hours, and `amount=30, unit="minute"`
 versus `amount=30, unit="usd"` are interpreted by whoever reads the predicate and unit
 together. A measurement abstraction can arrive later if a measurement need does.
 
 No `quantity_type`. `amount + unit` is sufficient for a first version and the alternative is
 designing a type system before there is a second consumer.
+
+**`amount` and `unit` are generic claim attributes.** They may be populated for any predicate
+whose semantics support a measurable quantity — `user | goal | save for camera` with
+`amount=1000, unit="usd"` is intended and valid. The `events` pack is not required for a claim
+to carry a quantity: the pack supplies vocabulary, not the capability.
 
 **Quantities stay out of `fact_key` and `value_key`.** `amount` and `unit` are attributes of
 a claim observation and so do not participate in claim identity; identity remains
