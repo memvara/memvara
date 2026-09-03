@@ -26,6 +26,7 @@ from memvara.llm.base import (
     MAX_CLAIMS,
     PREDICATE_SCHEMA,
     RESOLVE_SCHEMA,
+    bounded_claim_schema,
 )
 from memvara.llm.openai import OpenAILLM, _first_text
 from memvara.types import Episode, Scope
@@ -103,12 +104,31 @@ def test_the_request_asks_for_strict_structured_output():
     assert fmt["json_schema"]["name"]        # the API rejects a request without one
 
 
+#: JSON Schema keywords OpenAI's strict-mode structured output does not permit. Sending
+#: one is a 400 rather than a keyword that gets ignored, so this is the boundary between
+#: "the schema is stricter" and "the backend is down".
+_UNSUPPORTED_IN_STRICT_MODE = {
+    "minItems", "maxItems", "uniqueItems", "contains", "minContains", "maxContains",
+    "unevaluatedItems", "minLength", "maxLength", "pattern", "format",
+    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+    "patternProperties", "unevaluatedProperties", "propertyNames",
+    "minProperties", "maxProperties", "allOf", "not", "dependentRequired",
+}
+
+
 @pytest.mark.parametrize("schema", [CLAIM_SCHEMA, RESOLVE_SCHEMA, PREDICATE_SCHEMA])
 def test_every_schema_satisfies_strict_mode(schema):
     """Strict mode requires every property listed in `required` and
     `additionalProperties: false` at each object level. The schemas already comply, and
     this pins it so a later edit cannot break the OpenAI path without failing here."""
     def check(node):
+        # Strict mode rejects these outright — an unsupported keyword is a 400, not
+        # something ignored — so a schema carrying one takes the backend off the air.
+        # Checked here because no test double can catch it: `FakeCompletions` records the
+        # request and returns a canned payload without validating the schema, so the whole
+        # suite stays green while every real call fails.
+        assert not _UNSUPPORTED_IN_STRICT_MODE & set(node), (
+            f"strict mode rejects {sorted(_UNSUPPORTED_IN_STRICT_MODE & set(node))}")
         if node.get("type") == "object":
             assert node.get("additionalProperties") is False
             assert set(node.get("required", [])) == set(node.get("properties", {}))
@@ -120,20 +140,44 @@ def test_every_schema_satisfies_strict_mode(schema):
     check(schema)
 
 
-def test_the_claims_array_is_bounded_so_a_grammar_can_end_it():
-    """An unbounded array leaves "one more claim" permanently legal, which is only safe
-    for a model that stops on its own.
+def test_the_shared_claim_schema_stays_uncapped_for_the_hosted_path():
+    """The cap lives in `bounded_claim_schema`, not `CLAIM_SCHEMA`, and that is load-bearing.
 
-    A backend that compiles this schema to a grammar — llama.cpp, vLLM — cannot end a
-    response the grammar still permits to continue. Measured against phi-4-mini: one run
-    in three ran to its token limit emitting well-formed claim objects and arrived as
-    truncated JSON, losing the real claims that came before the restatements as well as
-    the restatements. The hosted backends hide this because a frontier model closes the
-    array itself, so nothing here fails without this assertion."""
-    claims = CLAIM_SCHEMA["properties"]["claims"]
-    assert claims["maxItems"] == MAX_CLAIMS
-    # Above any well-formed response measured (19), below the observed runaway (35). A
-    # bound that clips real answers is a different bug from the one it prevents.
+    `maxItems` is on strict mode's unsupported list, so capping the shared schema would
+    400 every hosted extraction in order to protect a self-hosted one. The default request
+    therefore has to carry the uncapped schema."""
+    assert "maxItems" not in CLAIM_SCHEMA["properties"]["claims"]
+
+    client = FakeClient({"claims": []})
+    OpenAILLM(client=client).extract(episodes("hi"), [])
+    sent = client.calls[0]["response_format"]["json_schema"]
+    assert sent["schema"] is CLAIM_SCHEMA
+    assert "maxItems" not in sent["schema"]["properties"]["claims"]
+
+
+def test_a_cap_is_opt_in_and_rides_on_the_request_under_its_own_name():
+    """`max_claims` is how a self-hosted server gets a grammar that can end a response.
+
+    Unbounded, "one more claim" stays legal forever: measured against phi-4-mini, one
+    extraction in three ran to its token limit emitting well-formed claim objects and
+    arrived as truncated JSON, losing the real claims that came before the restatements.
+
+    The name is asserted because `_SCHEMA_NAMES` is keyed on the identity of the
+    module-level dicts. A bounded schema is a copy, so an id() lookup would quietly send
+    it as "result" — which the API accepts, leaving nothing to notice."""
+    client = FakeClient({"claims": []})
+    OpenAILLM(client=client, max_claims=7).extract(episodes("hi"), [])
+    sent = client.calls[0]["response_format"]["json_schema"]
+    assert sent["schema"]["properties"]["claims"]["maxItems"] == 7
+    assert sent["name"] == "claims"
+    # The shared schema is untouched by any of it.
+    assert "maxItems" not in CLAIM_SCHEMA["properties"]["claims"]
+
+
+def test_the_default_cap_sits_between_a_real_answer_and_the_runaway():
+    """Above every well-formed response measured (19 or fewer), below the observed runaway
+    (past 35). A cap that clips real claims is a different bug from the one it prevents."""
+    assert bounded_claim_schema()["properties"]["claims"]["maxItems"] == MAX_CLAIMS
     assert 19 < MAX_CLAIMS < 35
 
 

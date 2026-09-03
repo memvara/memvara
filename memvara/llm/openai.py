@@ -36,6 +36,7 @@ from .base import (
     RESOLVE_SCHEMA,
     RESOLVE_SYSTEM,
     Usage,
+    bounded_claim_schema,
 )
 
 #: `json_schema` requires a name. It is echoed back in nothing we read, but the API
@@ -84,9 +85,16 @@ class OpenAILLM:
         client: Any = None,
         max_tokens: int = 8192,
         temperature: float = 0.0,
+        max_claims: int | None = None,
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens
+        # Cap the claims array, for a self-hosted server reached through this backend. Off
+        # by default because hosted OpenAI rejects `maxItems` under `strict: True` — see
+        # `bounded_claim_schema`, which carries the reasoning and the measurement. Built
+        # once here rather than per call, since it is the same dict every time.
+        self._claim_schema = (
+            CLAIM_SCHEMA if max_claims is None else bounded_claim_schema(max_claims))
         # Extraction is a parsing task, not a creative one, and the same turn arriving
         # twice should produce the same claim rather than two spellings of it that the
         # reconciler then has to treat as competing values.
@@ -113,7 +121,7 @@ class OpenAILLM:
     # -- request ------------------------------------------------------------
 
     def _call(self, system: str, prompt: str, schema: dict[str, Any],
-              usage: Usage | None = None) -> Any:
+              usage: Usage | None = None, *, name: str | None = None) -> Any:
         response = self._client.chat.completions.create(
             model=self.model,
             max_completion_tokens=self.max_tokens,
@@ -125,7 +133,7 @@ class OpenAILLM:
             response_format={
                 "type": "json_schema",
                 "json_schema": {
-                    "name": _SCHEMA_NAMES.get(id(schema), "result"),
+                    "name": name or _SCHEMA_NAMES.get(id(schema), "result"),
                     "strict": True,
                     "schema": schema,
                 },
@@ -147,8 +155,9 @@ class OpenAILLM:
         response = self._call(
             EXTRACT_SYSTEM,
             _shape.extract_prompt(episodes, known_predicates),
-            CLAIM_SCHEMA,
+            self._claim_schema,
             usage,
+            name="claims",
         )
         return _shape.shape_claims(
             _shape.parse_json_object(_first_text(response)), len(episodes))
