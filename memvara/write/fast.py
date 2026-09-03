@@ -321,7 +321,19 @@ class FastExtractor:
     def _claim(self, ep: Episode, predicate: str, value: str, polarity: int,
                mention: str | None = None) -> Claim:
         spec = self.registry.spec(predicate)
-        resolved = resolve(mention, ep.ts) if mention else None
+        # Only for predicates that accumulate, never for the ones that supersede.
+        #
+        # A functional predicate's `valid_from` is the onset of a state and supersession
+        # orders on it, so moving it back to a stated boundary changes which value is
+        # current. "I live in Berlin" then "Actually, I moved to Lisbon last month" put
+        # Berlin's timestamp after August and left Berlin standing — a user would report
+        # that as the memory refusing to update. Answering it properly needs an interval
+        # on the world clock rather than a boundary, which is a larger change than this.
+        #
+        # A multi-valued predicate retires nothing, so its boundary is free to be the
+        # event's, and events are what the boundary was added for: every predicate in
+        # `packs/events.toml` is `many`.
+        resolved = resolve(mention, ep.ts) if mention and not spec.functional else None
         valid_from, precision = resolved if resolved else (ep.ts, None)
         return Claim(
             subject=SELF_SUBJECT,

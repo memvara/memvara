@@ -967,8 +967,12 @@ class WritePipeline:
         # falls back to the episode's timestamp when nothing was stated or nothing
         # resolved. A model that computed its own date would be doing arithmetic it is
         # measurably bad at, in a field nothing downstream can check.
+        # Only for predicates that accumulate — see `fast.py:_claim` for why a stated
+        # boundary on a superseding predicate changes which value reads as current.
         mention = item.get("when")
-        resolved = resolve(mention, ep.ts) if isinstance(mention, str) else None
+        resolved = (resolve(mention, ep.ts)
+                    if isinstance(mention, str)
+                    and not self.registry.functional(predicate) else None)
         valid_from, precision = resolved if resolved else (ep.ts, None)
         raw_amount = item.get("amount")
         amount = float(raw_amount) if isinstance(raw_amount, (int, float)) \

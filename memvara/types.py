@@ -539,10 +539,15 @@ class Claim:
     #:
     #: Resolving "last month" to the 1st invents a day nobody said. Without this, a
     #: reader sees `valid_from = 2026-08-01` and can only take it as an exact onset.
-    #: **For ordering `None` is an exact instant**; it stays `None` in storage so the
-    #: distinction between a fallback timestamp and a resolved expression survives, and
-    #: so no existing claim needs migrating. See `write.reconcile` for what precision
-    #: buys: two boundaries order confidently only when their bounds do not overlap.
+    #: It stays `None` in storage so the distinction between a fallback timestamp and a
+    #: resolved expression survives, and so no existing claim needs migrating.
+    #:
+    #: **For ordering, `None` is an exact instant**, which makes `write.reconcile`'s rule
+    #: reduce to the plain scalar comparison it replaced whenever nothing was resolved.
+    #: That is the whole of it: there is no separate treatment of a fallback boundary
+    #: meeting a stated one, because the write path does not produce that pairing on a
+    #: predicate where it could matter — a boundary is resolved only for predicates that
+    #: accumulate, never for the ones that supersede.
     temporal_precision: Precision | None = None
 
     # --- transaction time: when we believed it ---

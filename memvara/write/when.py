@@ -63,6 +63,10 @@ _RELATIVE_PERIOD = re.compile(
 )
 _YEAR = re.compile(r"^in\s+(?P<year>\d{4})$", re.IGNORECASE)
 
+#: Present-tense markers. They locate a claim at the speaking moment, which the anchor
+#: already is, so resolving them loses precision rather than adding any.
+_PRESENT = frozenset({"now", "today", "currently", "these days", "at the moment"})
+
 
 def _midnight(moment: datetime) -> datetime:
     return moment.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -94,6 +98,11 @@ def _named_season(at: datetime, name: str, step: int) -> datetime:
     disagree for two of its three months.
     """
     start = _midnight(at.replace(month=_SEASON_START[name], day=1))
+    # Winter starts in December and runs into the next year, so in January and February
+    # the season the speaker is standing in began *last* December. Without this, "this
+    # winter" said in January resolves eleven months into the future.
+    if name == "winter" and at.month < _SEASON_START["spring"]:
+        start = start.replace(year=start.year - 1)
     if step < 0 and start >= at:
         start = start.replace(year=start.year - 1)
     elif step > 0 and start <= at:
@@ -120,8 +129,13 @@ def resolve(expression: str, anchor: datetime) -> tuple[datetime, Precision] | N
 
     if text == "yesterday":
         return _midnight(at - timedelta(days=1)), "day"
-    if text in {"today", "now"}:
-        return _midnight(at), "day"
+    if text in _PRESENT:
+        # "now", "today", "currently" say the claim holds as the sentence is spoken,
+        # which the anchor already records to the second. Resolving them would replace a
+        # precise instant with midnight and stamp a `day` precision on it, which is
+        # strictly less information presented as more. `fast.py` excludes these from the
+        # tail it captures for the same reason; declining here makes the LLM tier agree.
+        return None
     if text == "tomorrow":
         return _midnight(at + timedelta(days=1)), "day"
 

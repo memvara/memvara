@@ -225,23 +225,16 @@ def _is_after(candidate: "Claim", incoming: "Claim") -> bool:
     intervals are points, `c.lower >= claim.upper` reads `c.valid_from >= claim.valid_from`
     and the second conjunct restores the strictness, so an equal boundary still lands in
     `older` and stays supersedable.
-    """
-    # A claim with no precision carries a *fallback* boundary — the episode's timestamp,
-    # meaning "nobody said when this became true, only that it held when we heard it".
-    # That bounds the onset from above and does not locate it: "I live in Berlin", said
-    # today, is equally true if Berlin began years ago. So it can never establish that
-    # its fact began *later* than one with a stated boundary.
-    #
-    # Without this the README walkthrough breaks. "I live in Berlin" then "Actually, I
-    # moved to Lisbon last month" compares a September timestamp against August, reads
-    # Berlin as the later fact, and leaves the store believing Berlin — a user would
-    # report that as the memory refusing to update.
-    #
-    # It costs nothing in the other direction: when neither side has a precision the
-    # guard cannot fire, so two fallback claims still compare exactly as they always did.
-    if candidate.temporal_precision is None and incoming.temporal_precision is not None:
-        return False
 
+    There is deliberately no special case for a no-precision boundary meeting a stated
+    one. One was tried: "a fallback timestamp cannot be confidently after a stated
+    boundary", on the ground that it bounds a fact's onset from above without locating
+    it. That is true, and as a rule it is far too strong — it made *any* stated boundary
+    outrank an undated fact on arrival order, so an extracted "I moved to Lisbon in 2019"
+    retired a Berlin claim stated today and broke the invariant `_victims` states above.
+    The case it was introduced for is handled at the write path instead, by not resolving
+    a boundary for the predicates that supersede at all.
+    """
     c_lo, c_hi = _bounds(candidate)
     i_lo, i_hi = _bounds(incoming)
     return c_lo >= i_hi and c_lo > i_lo

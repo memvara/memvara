@@ -204,9 +204,11 @@ SAID = datetime(2026, 9, 3, 14, 30, tzinfo=timezone.utc)
 
 
 def test_a_temporal_tail_sets_valid_from_and_records_its_precision(fast) -> None:
-    [claim] = fast.extract(ep("I moved to Lisbon last month.", ts=SAID))
-    assert claim.valid_from == datetime(2026, 8, 1, tzinfo=timezone.utc)
-    assert claim.temporal_precision == "month"
+    """On a predicate that accumulates. `likes` is multi-valued, so nothing supersedes
+    on it and its boundary is free to be the one the turn stated."""
+    [claim] = fast.extract(ep("I like jazz last year.", ts=SAID))
+    assert claim.valid_from == datetime(2025, 1, 1, tzinfo=timezone.utc)
+    assert claim.temporal_precision == "year"
 
 
 def test_the_object_and_identity_are_untouched_by_the_temporal_tail(fast) -> None:
@@ -260,3 +262,30 @@ def test_the_splitter_takes_the_temporal_tail_out_of_stacked_filler() -> None:
     mention, and the rest is still stripped by the existing loop."""
     value, mention = split_temporal_mention("Berlin last year")
     assert (value, mention) == ("Berlin", "last year")
+
+
+def test_a_state_predicate_keeps_the_episode_timestamp(fast) -> None:
+    """Event time is resolved only for predicates that accumulate, never for the ones
+    that supersede.
+
+    A functional predicate's `valid_from` is the onset of a state, and supersession
+    orders on it — so moving it backwards to a stated boundary makes "I live in Berlin"
+    followed by "Actually, I moved to Lisbon last month" leave Berlin standing, since
+    Berlin's timestamp is then later than August. A multi-valued predicate retires
+    nothing, so its boundary is free to be the event's.
+    """
+    [claim] = fast.extract(ep("I moved to Lisbon last month.", ts=SAID))
+    assert claim.valid_from == SAID
+    assert claim.temporal_precision is None
+
+
+def test_the_readme_walkthrough_still_updates_the_current_city(fast) -> None:
+    """The end-to-end shape of the case above, which is what a user would notice."""
+    from memvara import Memvara
+    from memvara.embed import HashingEmbedder
+    from memvara.llm import NullLLM
+    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=512), user="alice") as mem:
+        mem.add("I live in Berlin and work at Acme")
+        mem.add("Actually, I moved to Lisbon last month")
+        assert [(c.object, c.state) for c in mem.history("user", "lives_in")] == [
+            ("Berlin", "ended"), ("Lisbon", "live")]
