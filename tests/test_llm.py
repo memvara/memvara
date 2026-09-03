@@ -66,6 +66,14 @@ def claim(**overrides) -> dict:
         "memory_type": "semantic",
         "confidence": 0.9,
         "source_index": 0,
+        # `shape_claims` emits these for every claim, `None` when the turn stated no time
+        # and measured nothing — which is the common case and what most of these tests
+        # assert. They are present rather than omitted so that a shaped claim has one
+        # shape, and a reader never has to ask whether a missing key means "no value" or
+        # "an older extractor".
+        "when": None,
+        "amount": None,
+        "unit": None,
     }
     base.update(overrides)
     return base
@@ -657,3 +665,39 @@ def test_the_durability_rule_admits_dated_and_measured_happenings() -> None:
         "the undated case must stay excluded, or the store fills with chatter"
     for field in ("`when`", "`amount`/`unit`"):
         assert field in EXTRACT_SYSTEM, f"the prompt must name {field} for it to be filled"
+
+
+def test_shape_claims_carries_the_event_fields_through() -> None:
+    """The normaliser rebuilds each claim from an explicit key list, so a field the
+    schema gains and this function does not name is dropped between the model and the
+    write path — silently, because the result is still a well-formed claim.
+
+    That is the third place in this change with the same shape: the extraction schema,
+    this allowlist, and each store's field tuple all enumerate a claim's fields
+    independently, and none of them fails when one is missing. It cost a benchmark arm
+    to find the store's copy and a second probe run to find this one.
+    """
+    from memvara.llm._shape import shape_claims
+
+    base = {"subject": "user", "predicate": "ran", "object": "5k", "polarity": 1,
+            "memory_type": "episodic", "confidence": 0.9, "source_index": 0}
+    [got] = shape_claims({"claims": [dict(base, when="last month", amount=5,
+                                          unit="Kilometres")]}, 1)
+    assert (got["when"], got["amount"], got["unit"]) == ("last month", 5.0, "kilometres")
+
+
+def test_shape_claims_declines_a_quantity_it_cannot_trust() -> None:
+    """`isinstance(True, int)` is True in Python, so a stray boolean would land as
+    `amount=1.0` — a measurement nobody made, indistinguishable afterwards from one
+    somebody did. The same slip `source_index` already guards against.
+
+    A blank `when` is `None` rather than an empty string, and a unit without an amount is
+    dropped: a unit alone measures nothing, and storing it invites a later reader to take
+    it for a value.
+    """
+    from memvara.llm._shape import shape_claims
+
+    base = {"subject": "user", "predicate": "ran", "object": "5k", "polarity": 1,
+            "memory_type": "episodic", "confidence": 0.9, "source_index": 0}
+    [got] = shape_claims({"claims": [dict(base, when="   ", amount=True, unit="min")]}, 1)
+    assert (got["when"], got["amount"], got["unit"]) == (None, None, None)

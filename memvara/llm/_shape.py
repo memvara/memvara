@@ -190,6 +190,12 @@ def shape_claims(parsed: dict[str, Any], n_episodes: int) -> list[dict[str, Any]
         if not (subject and predicate and obj):
             continue
         memory_type = str(item.get("memory_type") or "")
+        raw_when = item.get("when")
+        when = raw_when.strip() if isinstance(raw_when, str) and raw_when.strip() else None
+        raw_amount = item.get("amount")
+        amount = (float(raw_amount)
+                  if isinstance(raw_amount, (int, float)) and not isinstance(raw_amount, bool)
+                  else None)
         out.append(
             {
                 "subject": subject,
@@ -203,6 +209,18 @@ def shape_claims(parsed: dict[str, Any], n_episodes: int) -> list[dict[str, Any]
                 ),
                 "confidence": clamp_confidence(item.get("confidence")),
                 "source_index": index,
+                # The temporal expression as the model saw it, never a date it computed:
+                # `write.when` is the only thing allowed to decide what a phrase means.
+                # Anything that is not a non-empty string becomes `None`, and the caller
+                # then falls back to the episode's timestamp exactly as before.
+                "when": when,
+                # A quantity is kept only as a pair. `bool` is excluded before the numeric
+                # test because `isinstance(True, int)` is True in Python and `amount=1`
+                # from a stray boolean is a measurement nobody made — the same slip
+                # `source_index` guards against a few lines up.
+                "amount": amount,
+                "unit": str(item.get("unit") or "").strip().lower() or None
+                        if amount is not None else None,
             }
         )
     return out
