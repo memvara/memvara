@@ -1,6 +1,10 @@
 # Releasing memvara
 
-PyPI has `memvara` 0.7.0 (first upload 2026-08-14, `0.1.0`). npm has `memvara` 0.1.0.
+PyPI and npm both carry `memvara`, on independent version lines; the first PyPI upload
+was `0.1.0` on 2026-08-14. This document deliberately does not restate what is published
+right now. That is a second copy of a fact the repository cannot check, and the copy was
+three releases stale when 0.10.0 was cut. Read `pip index versions memvara` and
+`npm view memvara version` instead.
 
 **The two release on separate tags and this document covers both.** `v*` publishes the
 Python package through `release.yml`; `npm-v*` publishes the npm package through
@@ -28,13 +32,15 @@ out of `npm/memvara/package.json`, asks the registry, and skips `publish-npm` if
 already there. A tag pushed while that file still said `0.0.1` would have been a green
 release that published nothing to npm, which was the expected first run.
 
-**Check that comparison before assuming a tag ships JavaScript.** As of 0.7.0 the file
-and the registry both say `0.1.0`, so `check-npm` logs `SKIP` and `publish-npm` does not
-run. Bumping `npm/memvara/package.json` is the only thing that changes that.
+**Check that comparison before assuming a tag ships JavaScript.** Compare the version in
+`npm/memvara/package.json` against `npm view memvara version`: when they match, `check-npm`
+logs `SKIP` and `publish-npm` does not run. Bumping `npm/memvara/package.json` is the only
+thing that changes that.
 
-That matters here more than a skipped job usually would. Until the file moves, the npm
-page keeps 0.1.0's README, so **a Python release that improves the README does not reach
-an npm reader at all** — 0.7.0 rewrote it and npm will not show a word of it.
+That matters here more than a skipped job usually would. npm serves the README of the
+version it holds, so until that file moves, **a Python release that improves the README does
+not reach an npm reader at all** — 0.7.0 rewrote it, and npm readers saw none of that until
+`npm/memvara/package.json` moved and an `npm-v*` tag shipped it.
 
 ---
 
