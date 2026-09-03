@@ -2173,14 +2173,28 @@ def test_the_episode_floor_ships_off(store, embedder) -> None:
 
 def test_a_plateau_is_kept_up_to_the_ceiling(store, embedder) -> None:
     """Near-identical turns score alike, so none falls below the floor and the ceiling is
-    what stops it. This is the multi-session shape: more evidence, all of it relevant."""
+    what stops it. This is the multi-session shape: more evidence, all of it relevant.
+
+    Asserted against the disabled retriever rather than against a bare count, because a
+    count alone says nothing: `max_episodes=6` produces six whether the floor runs or
+    not. The comparison states the real claim — the floor left the plateau *intact*.
+
+    It still cannot detect the floor being removed, and no test of a plateau can: a
+    correct floor and no floor agree here by construction, which is the property being
+    asserted. `test_a_cliff_stops_early` is the one that fails when `_above_floor` is
+    gutted, and the two are only meaningful as a pair — this one says the floor does no
+    harm where the evidence continues, that one says it does its job where it stops.
+    """
     for i in range(8):
         turn(store, embedder, f"kafka pipeline ordering note {i}", EP_SCOPE, ts=_D1)
-    r = HybridRetriever(store, embedder, PredicateRegistry(),
-                        max_episodes=6, episode_score_floor=0.55)
-    assert len([x for x in r.search("kafka pipeline ordering", EP_SCOPE, k=20,
-                                    include_episodes=True)
-                if isinstance(x, EpisodeResult)]) == 6
+    q = dict(k=20, include_episodes=True)
+    def ids(floor):
+        r = HybridRetriever(store, embedder, PredicateRegistry(),
+                            max_episodes=6, episode_score_floor=floor)
+        return [x.episode.id for x in r.search("kafka pipeline ordering", EP_SCOPE, **q)
+                if isinstance(x, EpisodeResult)]
+    assert ids(0.55) == ids(0.0), "a plateau must survive the floor untouched"
+    assert len(ids(0.55)) == 6
 
 
 def test_a_cliff_stops_early(store, embedder) -> None:
@@ -2191,11 +2205,15 @@ def test_a_cliff_stops_early(store, embedder) -> None:
         turn(store, embedder,
              f"unrelated note about the quarterly planning calendar, number {i}",
              EP_SCOPE, ts=_D2)
-    r = HybridRetriever(store, embedder, PredicateRegistry(),
-                        max_episodes=6, episode_score_floor=0.55)
-    found = [x for x in r.search("kafka pipeline ordering guarantees", EP_SCOPE, k=20,
-                                 include_episodes=True) if isinstance(x, EpisodeResult)]
-    assert 0 < len(found) < 6
+    q = dict(k=20, include_episodes=True)
+    def ids(floor):
+        r = HybridRetriever(store, embedder, PredicateRegistry(),
+                            max_episodes=6, episode_score_floor=floor)
+        return [x.episode.id for x in
+                r.search("kafka pipeline ordering guarantees", EP_SCOPE, **q)
+                if isinstance(x, EpisodeResult)]
+    assert 0 < len(ids(0.55)) < len(ids(0.0)), \
+        "the floor must cut the weak tail that the ceiling alone would keep"
 
 
 def test_the_floor_is_relative_to_the_best_match(store, embedder) -> None:
@@ -2222,3 +2240,31 @@ def test_the_best_match_survives_any_floor(store, embedder) -> None:
     assert len([x for x in r.search("kafka pipeline ordering guarantees", EP_SCOPE,
                                     k=20, include_episodes=True)
                 if isinstance(x, EpisodeResult)]) >= 1
+
+
+@pytest.mark.parametrize("bad", [1.5, 55.0, -0.5])
+def test_a_floor_outside_the_unit_range_is_refused(store, embedder, bad) -> None:
+    """The failure it prevents is silent and drastic.
+
+    Above 1.0 the cutoff exceeds the top score, every result is filtered out, and the
+    "keep the best match" fallback returns exactly one episode — on every query, for the
+    life of the process, with nothing raised or logged. A caller reading "fraction of the
+    best one" as a percentage and passing 55 gets one turn per query and simply worse
+    answers. Below 0.0 is as quiet in the other direction: it takes the disabled branch,
+    so a fat-fingered sign leaves the old behaviour while the caller believes the feature
+    is on.
+
+    Refused at construction rather than clamped, because both mistakes mean the caller
+    believes something false about what retrieval will do, and a clamp would let them go
+    on believing it.
+    """
+    with pytest.raises(ValueError, match="episode_score_floor"):
+        HybridRetriever(store, embedder, PredicateRegistry(), episode_score_floor=bad)
+
+
+def test_the_bounds_of_the_range_are_allowed(store, embedder) -> None:
+    """0.0 disables it and 1.0 keeps only exact ties with the best. Both are meaningful,
+    so the guard is a range check and not a check for "sensible"."""
+    for floor in (0.0, 1.0):
+        assert HybridRetriever(store, embedder, PredicateRegistry(),
+                               episode_score_floor=floor).episode_score_floor == floor

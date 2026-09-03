@@ -28,10 +28,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   0.35 for the three at parity, well past the cliff. That ordering matches the accuracy
   ordering across all six categories.
 
-  Measured at `0.55` over 199 stratified questions against a fixed cap of 15: **accuracy
-  86.4% to 87.4%, median context tokens down 10%.** Multi-session and temporal reasoning
-  rose, the categories already at parity were unchanged, and depth ranged from 1 to 30
-  turns with nothing reaching the ceiling — so the floor decided every query.
+  Measured at `0.55` over 199 stratified questions against a fixed cap of 15: **median
+  context tokens down 10% at no measurable cost in accuracy**, which went 86.4% to 87.4%.
+  Read the token figure as the result and the accuracy figure as a reassurance: paired
+  over the same questions the floor wins 8 and the fixed cap 6, an exact p of 0.79, so
+  the accuracy difference is one or two questions and would plausibly reverse on another
+  sample. The token reduction is a direct measurement rather than a judged outcome.
+
+  Multi-session and temporal reasoning rose, the categories already at parity were
+  unchanged, and depth ranged from 1 to 30 turns with nothing reaching the ceiling — so
+  the floor decided every query.
 
   **Relative, not absolute**, and the distinction matters: `min_score` already refuses
   evidence that is weak in itself, while this asks whether a result is weak *beside the

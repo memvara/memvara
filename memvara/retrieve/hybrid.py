@@ -365,6 +365,21 @@ class HybridRetriever:
         #: **Relative, not absolute.** `min_score` already refuses evidence that is weak
         #: in itself; this asks whether a result is weak *beside the rest of this answer*,
         #: so a query whose whole result set scores low still keeps its plateau.
+        #: Refused outside [0, 1] rather than clamped. Above 1.0 the cutoff exceeds the
+        #: top score, so every result is filtered and the "keep the best match" fallback
+        #: returns exactly one episode — silently, on every query, for the life of the
+        #: process. A caller reading "fraction" as a percentage and passing 55 would get
+        #: one turn per query and simply worse answers. Below 0.0 takes the disabled
+        #: branch, which is as quiet in the other direction. Both mistakes leave the
+        #: caller believing something false about what retrieval will do, and clamping
+        #: would let them go on believing it.
+        if not 0.0 <= episode_score_floor <= 1.0:
+            raise ValueError(
+                f"episode_score_floor must be between 0.0 and 1.0, got "
+                f"{episode_score_floor!r}. It is a fraction of the best result's score, "
+                f"not a percentage: 0.55 keeps results scoring at least 55% of the top "
+                f"one, and 0.0 disables the floor."
+            )
         self.episode_score_floor = episode_score_floor
         #: Weight of the **episode** temporal leg, and the switch that runs it at all.
         #: At 0.0 no time-ranked candidates are produced and `Explanation.temporal_rank`
