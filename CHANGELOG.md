@@ -156,6 +156,50 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   answer, a number that can land anywhere; `--min-score 0` reproduces the
   unfloored path, where it is 100% by construction.
 
+### Changed
+
+- **The candidate window has a floor of 50, so a caller asking for four results no longer
+  searches 20 deep.** `HybridRetriever` sized the window as a pure multiple of `k` —
+  `k * candidate_multiplier`, 20 at the recall hook's `K = 4` — which made it smallest
+  exactly where the risk was highest. Measured on a hosted store of 730 claims, one probe
+  lost its best-scoring claim entirely at `k=4`: it sat between the 20th and 25th
+  position in one leg's own ordering, so fusion never saw it and a weaker claim won, and
+  from `k=5` upward it was rank 1 with nothing else changed. Across a 40-probe suite on
+  the same store, `k=4` → `k=6` moved hit@k from 85.0% to 90.0% (#155).
+
+  The floor was measured on that store before it merged, at the hook's `k=4`: hit@k
+  85.0% → 90.0%, mean gold-rank 1.5 → 1.4. The one probe that changed is the one the
+  issue lost, absent before and rank 1 after. No other hit probe moved, verbatim
+  self-retrieval stayed at 100%, and the abstain class kept the same false-injection
+  rate on the same three probes. `bench/floor_e2e.py` is the measurement and
+  `docs/benchmarks/candidate-floor-2026-09-02.md` records the run.
+
+  50 is a measured value for a store of that size, not a bound. The loss it fixes is a
+  score band, not a small-`k` effect: fusion rescores by the quality boost over `span`,
+  1.5 at the default weights, so a full-quality claim at cosine `c` outranks any claim
+  up to `1.5c` with no quality behind it, and how many such claims sit above the answer
+  in a leg's ordering is a property of the store. The reproduction in
+  `tests/test_hybrid.py` loses the answer again with 60 such fillers. The same reasoning
+  is why `min_score` ships with no default (0.6.0); #160 tracks the floor that reads the
+  band instead of assuming it.
+
+  The window is now `max(k * candidate_multiplier, candidate_floor)`, with
+  `candidate_floor=50` on `HybridRetriever` and `read_candidate_floor` on `Memvara`. At
+  the default `candidate_multiplier=5` it changes nothing at `k >= 10`, reranked or not:
+  a reranker cuts at `max(k, rerank_top_n) * candidate_multiplier`, so the floor reaches
+  that path only below `rerank_top_n=10`, and not at the default 20. A smaller
+  multiplier raises the crossover. The floor reaches the two claim legs and the graph
+  walk's result cap; the episode legs keep the multiplier's window, because they do no
+  quality rescoring and the displacement is a claim-scoring effect. The first pass costs
+  at most 45 more rows per claim leg to fetch, hydrate and rescore on a small-`k` query,
+  none above it; the filter-starvation retry multiplies the floored window too, so a
+  `memory_types` or `anchored` query at `k=4` that saturates now retries at 500 rows per
+  leg where it retried at 200. `0` disables it, which is what a test that wants to
+  watch the window truncate now has to say; `tests/test_anchor.py` does. Results at
+  small `k` can change, in the one direction: a
+  claim the old window cut can now appear. On the Agent Memory Benchmark, whose adapter
+  asks for ten, nothing moves.
+
 ### Fixed
 
 - **`bench/hosted.py --db PATH` could not open the store it exists to measure.**

@@ -1094,6 +1094,28 @@ zero or well above it depending on the store and the embedder. Pass
 100% by construction on any non-empty store, which is why it is not the
 default.
 
+### A before/after of one retrieval change: `bench/floor_e2e.py`
+
+`bench/floor_e2e.py` is `bench/hosted.py` under one fixed set of arguments — the recall
+hook's `k=4`, the hook's own relevance floor, one result file per run under
+`local/floor-e2e/` — so that a change to the retriever can be measured on a real store as
+a before and an after rather than as two runs that happened to differ. It was written for
+the candidate floor (#155, PR #159) and its subcommands are named for that run:
+
+    PYTHONPATH=. python3 bench/floor_e2e.py before      # the hosted store as deployed
+    PYTHONPATH=. python3 bench/floor_e2e.py replay      # a local copy, floor 0 and floor 50
+    PYTHONPATH=. python3 bench/floor_e2e.py after       # the hosted store on the branch
+    PYTHONPATH=. python3 bench/floor_e2e.py compare before after
+
+`replay` exports every claim the credential can see, in all three states, rebuilds them
+in a SQLite file re-embedded with the deployment's own model (`memvara[local-embed]`,
+and it refuses to run under the hashing fallback), and reads at the scope most of the
+claims live under. It is evidence, not the decision: SQLite's lexical leg is not
+Postgres's. [The candidate floor, measured](benchmarks/candidate-floor-2026-09-02.md)
+is the run sheet, including what the `compare` output had to show before the change
+merged, and the result of the run made on 2026-09-02: the floor recovered the issue's
+probe and moved nothing else.
+
 ---
 
 Previous: [How it works](DESIGN.md) · Next: [Roadmap](ROADMAP.md) · [Documentation index](README.md)

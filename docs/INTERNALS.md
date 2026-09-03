@@ -163,10 +163,11 @@ was being read as holding further than it does.
    a `scopes` argument and with the caller filtering afterwards, and on a shared tenant a
    question with 20 answers returned 8. This applies to any future store method that caps
    rows the caller is expected to authorize. It is why `states=` is a store parameter and
-   not a comprehension in the facade: `search` over-fetches `k * candidate_multiplier` and
-   ranks those, so a state filter applied afterwards finds a retired claim only when it
-   happens to land inside that window — twelve live rows against `k=1` is a window of
-   five, and the audit comes back empty with nothing saying it was truncated.
+   not a comprehension in the facade: `search` over-fetches a window of candidates
+   (`k * candidate_multiplier`, never fewer than `candidate_floor`) and ranks those, so a
+   state filter applied afterwards finds a retired claim only when it happens to land
+   inside that window, and the audit comes back empty with nothing saying it was
+   truncated.
 
    > **Claim.** Whatever narrows rows runs where the truncation runs.
    > **Scope.** Store methods that cap rows the caller is expected to authorize or filter.
@@ -177,7 +178,11 @@ was being read as holding further than it does.
    > **Measured.** With one user holding 20 readable claims about a hub, a Python-side
    > filter over a store-side page returned **19** of them against 15,000 competing claims
    > and **8** against 40,000, with nothing in the result to say it was partial. The
-   > `states=` half is measured too: twelve live rows against `k=1` is a window of five.
+   > `states=` half is asserted rather than measured: on a small fixture the result is
+   > the same whether the filter ran in the store or after the page, so
+   > `tests/test_bitemporal.py::test_the_state_filter_is_in_the_sql_not_applied_after_
+   > the_page` records what each leg asks the store for and requires the state filter
+   > in both.
    > `tests/test_traverse.py::test_the_scope_reaches_the_store_rather_than_being_applied_
    > after_it` is the assertion.
 
@@ -499,6 +504,7 @@ class HybridRetriever:
                  w_vector: float = 1.0, w_lexical: float = 1.0, rrf_k: int = 60,
                  w_recency: float = 0.25, w_confidence: float = 0.15,
                  w_salience: float = 0.10, candidate_multiplier: int = 5,
+                 candidate_floor: int = 50,
                  w_graph: float = 0.0, graph_seeds: int = 5, graph_depth: int = 2,
                  w_temporal: float = 0.0, traverser: GraphTraverser | None = None,
                  intent_weighting: bool = True,
@@ -516,7 +522,14 @@ class HybridRetriever:
 
 Search must:
 - expand `scope` via `scope.ancestors()` so a session query also sees user-level memory;
-- run vector and lexical retrieval over `k * candidate_multiplier` candidates each;
+- run vector and lexical retrieval over `k * candidate_multiplier` candidates each, and
+  never fewer than `candidate_floor` (50). A pure multiple is smallest where the risk is
+  highest: at `k=4` it is a window of 20, and on a hosted store of 730 claims that lost
+  the best-scoring claim before fusion saw it (#155). At the default
+  `candidate_multiplier=5` the floor changes nothing at `k >= 10`; a smaller multiplier
+  raises that crossover. It reaches the two claim legs and the graph walk's cap, not
+  the episode legs, and `0` disables it. It is a constant against a displacement that
+  grows with the store, which the attribute comment in `retrieve/hybrid.py` explains;
 - fuse with RRF, then rescore with recency/confidence/salience;
 - resolve the three time keywords through `types.time_axes` **before anything else**, so
   `as_of` + `valid_at` raises whatever else the call would have done;

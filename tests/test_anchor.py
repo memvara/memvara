@@ -169,12 +169,13 @@ def test_an_anchored_claim_past_the_first_cut_is_found_on_the_retry(monkeypatch)
     """Filter starvation, and the retry `memory_types` already gets.
 
     Three rows about Bea say "city" and "live" over and over; Ada's one row says
-    neither and only its subject names her. At `candidate_multiplier=1` and `k=1` the
-    first pass fetches one candidate per leg, both Bea's, and filters both. Without the
-    retry the answer would be an empty list with Ada's row one position past the cut.
+    neither and only its subject names her. At `candidate_multiplier=1`, the candidate
+    floor off and `k=1`, the first pass fetches one candidate per leg, both Bea's, and
+    filters both. Without the retry the answer would be an empty list with Ada's row
+    one position past the cut.
     """
     with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=128), tenant="acme",
-                 user="alice", read_candidate_multiplier=1) as mem:
+                 user="alice", read_candidate_multiplier=1, read_candidate_floor=0) as mem:
         for n in range(3):
             mem.remember("Bea", f"note_{n}", f"note {n}",
                          text="the city where Bea lives is a city she lives in",

@@ -7,6 +7,54 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `search()` at a small `k` looks 50 candidates deep instead of `k * 5`
+
+### What changed
+
+`HybridRetriever` sized its candidate window as `k * candidate_multiplier`, so a caller
+asking for four results had each retrieval leg cut at 20. On a real store that was small
+enough to lose the best-scoring claim before fusion saw it — not rank it low, drop it —
+and the recall hook asks for exactly four (#155). The window now has a floor:
+`max(k * candidate_multiplier, candidate_floor)`, with `candidate_floor=50` on
+`HybridRetriever` and `read_candidate_floor=50` on `Memvara`.
+
+### Who this changes, and in which direction
+
+**If you call `search()`, `recall()` or `ask()` with `k < 10`, results can change.** At
+the shipped `read_w_graph=0.0` they change in one direction: a claim the old window cut
+can now appear, and only a claim that outscores what you were getting can displace it.
+With the graph leg on, a wider window can also open a walk the old one did not — the
+leg's gate counts predicates across every hydrated candidate — and when it does, all
+three legs are fused again and every rank can move. `k >= 10` is unchanged at the
+default `read_candidate_multiplier=5`; a smaller multiplier raises the crossover, to
+`k=25` at 2. Episodes are unchanged at every `k`: the episode legs keep the
+multiplier's window. A reranker
+cuts at `max(k, rerank_top_n) * candidate_multiplier`, so it is unchanged at the
+default `rerank_top_n=20` and reached by the floor only below `rerank_top_n=10`.
+
+**If a test of yours depends on the window being exactly `k * candidate_multiplier` —
+to watch a filter starve, or to prove a state filter runs in the store rather than after
+the page — pass `read_candidate_floor=0`** (or `candidate_floor=0` on a bare
+`HybridRetriever`). This repository's own `tests/test_anchor.py` needed exactly that:
+it sizes the window with `read_candidate_multiplier=1` so a `k=1` first pass starves
+and the retry has something to show, and at the shipped floor all four of its rows fit.
+
+**If you tuned `read_candidate_multiplier` down to save work at small `k`**, the floor
+now decides instead. Set both if you meant the window to be small.
+
+### How to find your own instances
+
+```bash
+grep -rn "read_candidate_multiplier\|candidate_multiplier=" .   # a window you sized by hand
+grep -rn "\.search(\|\.recall(\|\.ask(" . --include="*.py"        # every caller
+```
+
+Then read what each caller passes as `k`. The value is often not on the call line:
+`plugin/hooks/recall.py`, the caller this change is about, passes `k=K` with `K = 4`
+defined near the top of the file, and a bench passes `k=args.k`.
+
+---
+
 ## `MEMVARA_MODE=cloud` now starts a server, and refuses two variables it used to accept
 
 ### What changed

@@ -1061,12 +1061,23 @@ def test_a_narrow_filter_is_retried_against_a_wider_candidate_pool(
     ]
 
     starved = HybridRetriever(store, embedder, PredicateRegistry(),
-                              filter_retry_multiplier=1)
+                              filter_retry_multiplier=1, candidate_floor=0)
     query = "release detail"
 
     # Without the retry the pool of 10 is spent entirely on semantic claims, and a
-    # filter with three live matches behind it returns nothing at all.
+    # filter with three live matches behind it returns nothing at all. The floor is
+    # off so the pool is the 10 the docstring measures.
     assert starved.search(query, scope, k=2, memory_types=[MemoryType.PROCEDURAL]) == []
+
+    # The shipped floor starves the same way: sixty-three rows do not fit in 50 and the
+    # three procedural ones sit past it. Asserted rather than noted, so that `found`
+    # below is known to pass because the retry ran and not because the fixture drifted
+    # inside the window — this is the one test that exercises the retry firing at the
+    # shipped floor.
+    starved_at_the_floor = HybridRetriever(store, embedder, PredicateRegistry(),
+                                           filter_retry_multiplier=1)
+    assert starved_at_the_floor.search(
+        query, scope, k=2, memory_types=[MemoryType.PROCEDURAL]) == []
 
     found = retriever.search(query, scope, k=2, memory_types=[MemoryType.PROCEDURAL])
     assert len(found) == 2
@@ -1099,8 +1110,73 @@ def test_the_retry_does_not_fire_when_the_pool_was_never_full(
 
     assert retriever.search("lisbon", scope, k=5,
                             memory_types=[MemoryType.PROCEDURAL]) == []
-    assert calls == [25], "one pass only: the pool was never truncated"
+    assert calls == [50], "one pass only: the pool was never truncated"
     counting.close()
+
+
+# ===========================================================================
+# The candidate floor
+# ===========================================================================
+
+
+class OrderedLegs(SQLiteStore):
+    """A real store whose vector leg returns a fixed ordering cut at `limit`.
+
+    The test needs a claim at an exact position in a leg's own ranking, which no
+    embedder gives deterministically. Everything else — the rows, hydration, the
+    belief filters, the lexical leg's abstention — is `SQLiteStore` as shipped.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(":memory:")
+        self.order: list[tuple[str, float]] = []
+        self.limits: list[int] = []
+
+    def vector_search(self, qvec, scopes, limit, **kw):
+        self.limits.append(limit)
+        return self.order[:limit]
+
+    def lexical_search(self, query, scopes, limit, **kw):
+        return []
+
+
+def test_a_claim_past_k_times_the_multiplier_still_reaches_fusion_at_a_small_k() -> None:
+    """memvara/memvara#155: the window was a pure multiple of `k`, so a caller asking
+    for four results searched 20 deep and lost the best-scoring claim entirely.
+
+    Twenty-one stale, low-quality claims outrank the answer on cosine alone, so the
+    vector leg puts it 22nd. Rescoring would put it first — its evidence is a little
+    lower and its quality is a lot higher — but rescoring only sees what the leg
+    returned. At the shipped floor the leg returns 50 and the answer wins; with the
+    floor off the leg returns 20 and the answer is not ranked low, it is absent.
+    """
+    scope = Scope("acme", "alice")
+    store = OrderedLegs()
+    fillers = [add(store, None, f"release note number {i}", scope,
+                   confidence=0.0, salience=0.0) for i in range(21)]
+    gold = add(store, None, "the version number cannot be trusted", scope)
+    store.order = ([(c.id, 0.70 - i * 0.004) for i, c in enumerate(fillers)]
+                   + [(gold.id, 0.60)])
+
+    def retriever(**kw) -> HybridRetriever:
+        return HybridRetriever(store, HashingEmbedder(dim=64), PredicateRegistry(),
+                               w_recency=0.0, **kw)
+
+    floored = retriever().search("version", scope, k=4)
+    unfloored = retriever(candidate_floor=0).search("version", scope, k=4)
+
+    assert ids(floored)[0] == gold.id
+    assert gold.id not in ids(unfloored)
+    assert store.limits == [50, 20]
+
+
+@pytest.mark.parametrize("k, window", [(1, 50), (4, 50), (10, 50), (11, 55), (20, 100)])
+def test_the_window_is_the_floor_until_the_multiple_passes_it(k: int, window: int) -> None:
+    """`max(k * 5, 50)`: the floor decides at small `k` and costs nothing at large."""
+    store = OrderedLegs()
+    HybridRetriever(store, HashingEmbedder(dim=64), PredicateRegistry()).search(
+        "anything", Scope("acme", "alice"), k=k)
+    assert store.limits == [window]
 
 
 # ===========================================================================
