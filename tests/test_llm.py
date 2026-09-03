@@ -701,3 +701,49 @@ def test_shape_claims_declines_a_quantity_it_cannot_trust() -> None:
             "memory_type": "episodic", "confidence": 0.9, "source_index": 0}
     [got] = shape_claims({"claims": [dict(base, when="   ", amount=True, unit="min")]}, 1)
     assert (got["when"], got["amount"], got["unit"]) == (None, None, None)
+
+
+@pytest.mark.parametrize("raw, why", [
+    (float("inf"), "a JSON 1e400 parses to inf rather than raising"),
+    (float("-inf"), "and the same in the other direction"),
+    (float("nan"), "nan compares false against everything, including itself"),
+])
+def test_a_non_finite_amount_is_not_a_measurement(raw, why) -> None:
+    """`inf` is not a distance, and storing it makes a measurement nobody took
+    indistinguishable from one somebody did.
+
+    It reaches here intact: `json.loads('{"amount": 1e400}')` yields `inf` rather than
+    raising, `isinstance(inf, float)` is True, and the bool guard does not fire. Without a
+    check it round-trips through `put_claim` and sits in the store reading as real, and
+    nothing downstream rejects it — `amount` is not part of claim identity, so it does not
+    even change which slot the claim occupies.
+    """
+    from memvara.llm._shape import shape_claims
+
+    base = {"subject": "user", "predicate": "ran", "object": "5k", "polarity": 1,
+            "memory_type": "episodic", "confidence": 0.9, "source_index": 0,
+            "when": None, "unit": "km"}
+    [got] = shape_claims({"claims": [dict(base, amount=raw)]}, 1)
+    assert (got["amount"], got["unit"]) == (None, None), why
+
+
+def test_an_unconvertible_amount_does_not_cost_the_whole_batch() -> None:
+    """A 400-digit integer raises `OverflowError` from `float()`, and `WritePipeline`
+    catches it around the whole `extract` call — so one malformed number discards every
+    claim the model returned for that batch, recorded the same way a provider 429 is. An
+    operator watching extraction yield drop cannot tell the two apart.
+
+    A value that cannot become a float cannot be a measurement, so it is dropped like any
+    other unusable one and the claim survives without a quantity.
+    """
+    import json
+
+    from memvara.llm._shape import shape_claims
+
+    huge = json.loads('{"a": 1' + "0" * 400 + "}")["a"]
+    base = {"subject": "user", "predicate": "ran", "object": "5k", "polarity": 1,
+            "memory_type": "episodic", "confidence": 0.9, "source_index": 0,
+            "when": None, "unit": "km"}
+    [got] = shape_claims({"claims": [dict(base, amount=huge)]}, 1)
+    assert (got["amount"], got["unit"]) == (None, None)
+    assert got["object"] == "5k", "the claim itself must survive a bad quantity"

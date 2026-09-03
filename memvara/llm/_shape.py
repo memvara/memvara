@@ -85,6 +85,36 @@ def parse_json_object(text: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def finite_amount(value: Any) -> float | None:
+    """A measured quantity, or `None` for anything that cannot be one.
+
+    The last unguarded field in this module, and it is guarded for the reasons its
+    neighbours are. `isinstance(True, int)` is True in Python, so a stray boolean would
+    land as `amount=1.0` — a measurement nobody took, the same slip `source_index` refuses
+    a few lines down.
+
+    Two more arrive from the wire rather than from a typo. `json.loads('{"a": 1e400}')`
+    yields `inf` rather than raising, and `inf` is a perfectly valid `float` that
+    round-trips through the store and reads afterwards as a real distance. And an integer
+    of a few hundred digits raises `OverflowError` from `float()` — which `WritePipeline`
+    catches around the whole `extract` call, so one malformed number silently discards
+    every claim the model returned for that batch, recorded exactly as a provider 429 is.
+
+    A value that cannot become a finite float is not a quantity, so it is dropped and the
+    claim keeps everything else.
+
+        >>> finite_amount(30), finite_amount(True), finite_amount(float("inf"))
+        (30.0, None, None)
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
 def clamp_confidence(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return UNKNOWN_CONFIDENCE
@@ -192,10 +222,7 @@ def shape_claims(parsed: dict[str, Any], n_episodes: int) -> list[dict[str, Any]
         memory_type = str(item.get("memory_type") or "")
         raw_when = item.get("when")
         when = raw_when.strip() if isinstance(raw_when, str) and raw_when.strip() else None
-        raw_amount = item.get("amount")
-        amount = (float(raw_amount)
-                  if isinstance(raw_amount, (int, float)) and not isinstance(raw_amount, bool)
-                  else None)
+        amount = finite_amount(item.get("amount"))
         out.append(
             {
                 "subject": subject,

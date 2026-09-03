@@ -55,6 +55,7 @@ from time import perf_counter
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..embed.base import Embedder
+from ..llm._shape import finite_amount
 from ..llm.base import LLM, Usage
 from ..redact import Redactor, redact_claim, redact_episode
 from ..schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
@@ -974,9 +975,10 @@ class WritePipeline:
                     if isinstance(mention, str)
                     and not self.registry.functional(predicate) else None)
         valid_from, precision = resolved if resolved else (ep.ts, None)
-        raw_amount = item.get("amount")
-        amount = float(raw_amount) if isinstance(raw_amount, (int, float)) \
-            and not isinstance(raw_amount, bool) else None
+        # Through the same guard as the shaping layer rather than a second copy of the
+        # test. The backends run `shape_claims` before returning, but an alternative
+        # `LLM` implementing the protocol need not, and this is where its items arrive.
+        amount = finite_amount(item.get("amount"))
         unit = normalize_unit(item.get("unit")) if amount is not None else None
 
         return Claim(

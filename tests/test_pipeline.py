@@ -2036,3 +2036,19 @@ def test_a_model_inventing_a_date_instead_of_an_expression_is_ignored():
     [claim] = _one(claims, "I ran a 5k last month.")
     assert claim.valid_from == SAID
     assert claim.temporal_precision is None
+
+
+def test_a_non_finite_amount_from_a_custom_llm_is_dropped():
+    """The backends shape their own output, but the `LLM` protocol does not require it —
+    an alternative implementation returns items straight to this path. Both places now
+    call the same guard rather than repeating the test, which is the pattern that let
+    these fields go missing in three separate field lists earlier in this change.
+    """
+    claims = [{
+        "subject": "user", "predicate": "ran", "object": "5k",
+        "polarity": 1, "memory_type": "episodic", "confidence": 0.9,
+        "source_index": 0, "when": None, "amount": float("inf"), "unit": "km",
+    }]
+    [claim] = _one(claims, "I ran a 5k.")
+    assert (claim.amount, claim.unit) == (None, None)
+    assert claim.object == "5k", "the claim survives; only the bad quantity is dropped"
