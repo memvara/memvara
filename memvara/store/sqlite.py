@@ -130,7 +130,7 @@ if TYPE_CHECKING:  # pragma: no cover
 #    backfill and nothing an earlier version could have written. The stamp is what tells
 #    the next migration whether the table it sees was built here or invented on the spot
 #    by its own `IF NOT EXISTS`.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Kept separate because the v1 -> v2 migration has to recreate this table: SQLite
 # cannot add a column to an existing primary key, and (tenant, name) is now the key.
@@ -203,7 +203,12 @@ CREATE TABLE IF NOT EXISTS claims (
     fact_key       TEXT NOT NULL,
     value_key      TEXT NOT NULL,
     subject_key    TEXT NOT NULL DEFAULT '',
-    object_key     TEXT NOT NULL DEFAULT ''
+    object_key     TEXT NOT NULL DEFAULT '',
+    -- Version 9. All three nullable, because every claim written before it has no
+    -- answer for them and inventing one would be forging history.
+    temporal_precision TEXT,
+    amount             REAL,
+    unit               TEXT
 );
 -- The index that makes contradiction detection O(1) instead of a similarity search.
 CREATE INDEX IF NOT EXISTS cl_fact  ON claims(tenant, fact_key, invalidated_at);
@@ -367,6 +372,7 @@ _CLAIM_FIELDS = (
     "polarity", "memory_type", "valid_from", "valid_to", "recorded_at", "invalidated_at",
     "invalidated_by", "confidence", "salience", "obs_count", "sources", "derivation",
     "extractor", "meta", "fact_key", "value_key", "subject_key", "object_key",
+    "temporal_precision", "amount", "unit",
 )
 _CLAIM_COLS = ", ".join(_CLAIM_FIELDS)
 _CLAIM_VALUES = ", ".join("?" * len(_CLAIM_FIELDS))
@@ -1158,6 +1164,7 @@ class SQLiteStore:
             self._migrate_to_v5()
             self._migrate_to_v6()
             self._migrate_to_v7()
+            self._migrate_to_v9()
             # No `_migrate_to_v8`: version 8 added a table nothing had ever written to
             # and that holds no derived data, so its `CREATE TABLE IF NOT EXISTS` above
             # genuinely is the whole migration — the same shape as version 4. What it
@@ -1165,6 +1172,27 @@ class SQLiteStore:
             # table, and an empty one means "nothing has been erased *since this file was
             # upgraded*", never "nothing has ever been erased here".
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _migrate_to_v9(self) -> None:
+        """Add the temporal-precision and quantity columns.
+
+        Driven by the shape of the file rather than the version stamp, like every
+        migration here: a brand-new database arrives with version 0 and already has these
+        from `SCHEMA`, so this is a no-op for it.
+
+        All three are nullable and **nothing backfills them**. A claim written before
+        version 9 has `valid_from` meaning the conversation's timestamp and no way to
+        recover what the speaker actually said; `temporal_precision IS NULL` records
+        exactly that, and reading it as an exact instant is the correct interpretation
+        for those rows. Inventing an event time for them would be the forged history this
+        library exists to prevent.
+        """
+        have = {r["name"] for r in self._db.execute("PRAGMA table_info(claims)")}
+        for column, decl in (("temporal_precision", "TEXT"),
+                             ("amount", "REAL"),
+                             ("unit", "TEXT")):
+            if column not in have:
+                self._db.execute(f"ALTER TABLE claims ADD COLUMN {column} {decl}")
 
     def _migrate_to_v2(self) -> None:
         """Tenant-scope the predicate table; make embeddings addressable.
@@ -1925,6 +1953,7 @@ class SQLiteStore:
                     # folds the subject and `value_key` folds both — so the write costs
                     # two dict lookups and the two extra index rows below.
                     claim.subject_key, claim.object_key,
+                    claim.temporal_precision, claim.amount, claim.unit,
                 ),
             )
             # Mirror the claim's rowid into the FTS table so the index entry can be
@@ -2036,6 +2065,9 @@ class SQLiteStore:
             derivation=Derivation(r["derivation"]),
             extractor=r["extractor"],
             meta=json.loads(r["meta"]),
+            temporal_precision=r["temporal_precision"],
+            amount=r["amount"],
+            unit=r["unit"],
         )
 
     def get_claim(self, claim_id: str) -> Claim | None:

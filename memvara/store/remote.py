@@ -204,6 +204,15 @@ class RemoteStore:
         returned `Claim` computes the same identities a locally-written one would.
         Everything else the wire carries (id, the two clocks, provenance, salience)
         round-trips exactly.
+
+        **`temporal_precision`, `amount` and `unit` do not**, and cannot from here: they
+        are not in the wire schema, so `render.memory()` never publishes them and there
+        is nothing to read. A claim fetched through this store therefore has them at
+        their defaults whatever the server holds, which means a hosted reader sees no
+        quantity and `write.reconcile` falls back to the plain scalar comparison for it.
+        Fixing that is a change to the facade's `Memory` model rather than to this
+        function, and until it lands this is a real difference between a local store and
+        a hosted one rather than an oversight in the conversion.
         """
         scope = Scope(tenant=body["scope"]["tenant"], user=body["scope"].get("user"),
                       agent=body["scope"].get("agent"), session=body["scope"].get("session"))

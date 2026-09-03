@@ -55,6 +55,7 @@ from time import perf_counter
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..embed.base import Embedder
+from ..llm._shape import finite_amount
 from ..llm.base import LLM, Usage
 from ..redact import Redactor, redact_claim, redact_episode
 from ..schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
@@ -91,6 +92,7 @@ from ..types import (
     SELF_SUBJECT, Claim, Closure, Derivation, Episode, MemoryType, WriteReceipt, utcnow,
 )
 from .fast import FastExtractor
+from .when import normalize_unit, resolve
 from .gate import SalienceGate
 from .reconcile import ReconcileResult, Reconciler
 
@@ -962,6 +964,23 @@ class WritePipeline:
         else:
             memory_type = _coerce(MemoryType, item.get("memory_type"), MemoryType.SEMANTIC)
 
+        # The model reports the expression it saw; `write.when` decides what it means, and
+        # falls back to the episode's timestamp when nothing was stated or nothing
+        # resolved. A model that computed its own date would be doing arithmetic it is
+        # measurably bad at, in a field nothing downstream can check.
+        # Only for predicates that accumulate — see `fast.py:_claim` for why a stated
+        # boundary on a superseding predicate changes which value reads as current.
+        mention = item.get("when")
+        resolved = (resolve(mention, ep.ts)
+                    if isinstance(mention, str)
+                    and not self.registry.functional(predicate) else None)
+        valid_from, precision = resolved if resolved else (ep.ts, None)
+        # Through the same guard as the shaping layer rather than a second copy of the
+        # test. The backends run `shape_claims` before returning, but an alternative
+        # `LLM` implementing the protocol need not, and this is where its items arrive.
+        amount = finite_amount(item.get("amount"))
+        unit = normalize_unit(item.get("unit")) if amount is not None else None
+
         return Claim(
             subject=subject,
             predicate=predicate,
@@ -969,7 +988,10 @@ class WritePipeline:
             scope=ep.scope,
             polarity=polarity,
             memory_type=memory_type,
-            valid_from=ep.ts,
+            valid_from=valid_from,
+            temporal_precision=precision,
+            amount=amount,
+            unit=unit,
             recorded_at=now,
             confidence=confidence,
             sources=[ep.id],

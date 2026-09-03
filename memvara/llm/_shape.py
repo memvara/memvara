@@ -85,6 +85,36 @@ def parse_json_object(text: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def finite_amount(value: Any) -> float | None:
+    """A measured quantity, or `None` for anything that cannot be one.
+
+    The last unguarded field in this module, and it is guarded for the reasons its
+    neighbours are. `isinstance(True, int)` is True in Python, so a stray boolean would
+    land as `amount=1.0` — a measurement nobody took, the same slip `source_index` refuses
+    a few lines down.
+
+    Two more arrive from the wire rather than from a typo. `json.loads('{"a": 1e400}')`
+    yields `inf` rather than raising, and `inf` is a perfectly valid `float` that
+    round-trips through the store and reads afterwards as a real distance. And an integer
+    of a few hundred digits raises `OverflowError` from `float()` — which `WritePipeline`
+    catches around the whole `extract` call, so one malformed number silently discards
+    every claim the model returned for that batch, recorded exactly as a provider 429 is.
+
+    A value that cannot become a finite float is not a quantity, so it is dropped and the
+    claim keeps everything else.
+
+        >>> finite_amount(30), finite_amount(True), finite_amount(float("inf"))
+        (30.0, None, None)
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
 def clamp_confidence(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return UNKNOWN_CONFIDENCE
@@ -190,6 +220,9 @@ def shape_claims(parsed: dict[str, Any], n_episodes: int) -> list[dict[str, Any]
         if not (subject and predicate and obj):
             continue
         memory_type = str(item.get("memory_type") or "")
+        raw_when = item.get("when")
+        when = raw_when.strip() if isinstance(raw_when, str) and raw_when.strip() else None
+        amount = finite_amount(item.get("amount"))
         out.append(
             {
                 "subject": subject,
@@ -203,6 +236,18 @@ def shape_claims(parsed: dict[str, Any], n_episodes: int) -> list[dict[str, Any]
                 ),
                 "confidence": clamp_confidence(item.get("confidence")),
                 "source_index": index,
+                # The temporal expression as the model saw it, never a date it computed:
+                # `write.when` is the only thing allowed to decide what a phrase means.
+                # Anything that is not a non-empty string becomes `None`, and the caller
+                # then falls back to the episode's timestamp exactly as before.
+                "when": when,
+                # A quantity is kept only as a pair. `bool` is excluded before the numeric
+                # test because `isinstance(True, int)` is True in Python and `amount=1`
+                # from a stray boolean is a measurement nobody made — the same slip
+                # `source_index` guards against a few lines up.
+                "amount": amount,
+                "unit": str(item.get("unit") or "").strip().lower() or None
+                        if amount is not None else None,
             }
         )
     return out

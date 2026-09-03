@@ -998,3 +998,164 @@ def test_a_superseded_claim_still_answers_what_was_true_back_then(rec, store):
     believed_now_about_then = [
         c.object for c in store.competing_claims("acme", first.fact_key, valid_at=mid)]
     assert believed_now_about_then == ["Berlin"]
+
+
+# --- temporal ordering: bounds, not scalars ----------------------------------
+#
+# `valid_from` now carries the earliest boundary the source stated, which can be far
+# earlier than the sentence that stated it. Ordering on the scalar alone would then let a
+# vague boundary outrank a precise one purely because normalising it moved it backwards.
+
+from datetime import datetime, timezone  # noqa: E402
+
+UTC = timezone.utc
+
+
+def at(y, m, d, hh=12):
+    return datetime(y, m, d, hh, tzinfo=UTC)
+
+
+def test_a_backfilled_event_does_not_retire_a_later_one(rec, store):
+    """The property that already held and must keep holding: supersession runs along
+    valid time, so a fact stated today but true from 2019 is history, not news."""
+    rec.apply(claim("lives_in", "Berlin", valid_from=at(2026, 1, 1)), now=at(2026, 1, 1))
+    rec.apply(claim("lives_in", "Lisbon", valid_from=at(2019, 1, 1)), now=at(2026, 9, 3))
+    assert live_objects(store, claim("lives_in", "x")) == ["Berlin"]
+
+
+def test_an_equal_valid_from_still_leaves_the_stored_claim_supersedable(rec, store):
+    """The strict `>` at the old comparison put an equal boundary in `older`. The
+    bounds rule has to agree, or every same-instant rewrite silently stops superseding."""
+    same = at(2026, 5, 1)
+    rec.apply(claim("lives_in", "Berlin", valid_from=same), now=same)
+    rec.apply(claim("lives_in", "Lisbon", valid_from=same), now=same)
+    assert live_objects(store, claim("lives_in", "x")) == ["Lisbon"]
+
+
+def test_instant_only_ordering_is_what_it_always_was(rec, store):
+    """No precision anywhere means the rule must reduce exactly to the scalar compare."""
+    rec.apply(claim("lives_in", "Berlin", valid_from=at(2026, 1, 1)), now=at(2026, 1, 1))
+    rec.apply(claim("lives_in", "Lisbon", valid_from=at(2026, 6, 1)), now=at(2026, 6, 1))
+    assert live_objects(store, claim("lives_in", "x")) == ["Lisbon"]
+
+
+def test_a_coarse_boundary_containing_a_precise_one_falls_back_to_belief(rec, store):
+    """The case the whole rule exists for.
+
+        2025-12-01  "I live in London."            -> instant
+        2026-09-03  "I moved to Lisbon last year." -> the year 2025
+
+    2025-12-01 lies inside 2025, so the two boundaries cannot be ordered. Precedence
+    falls to `recorded_at`, and the later statement wins — which is what a person reading
+    those two sentences concludes. Ordering on the scalar alone leaves London standing.
+    """
+    rec.apply(claim("lives_in", "London", valid_from=at(2025, 12, 1)),
+                  now=at(2025, 12, 1))
+    rec.apply(claim("lives_in", "Lisbon", valid_from=at(2025, 1, 1),
+                        temporal_precision="year"), now=at(2026, 9, 3))
+    assert live_objects(store, claim("lives_in", "x")) == ["Lisbon"]
+
+
+def test_two_coarse_boundaries_that_do_not_overlap_still_order(rec, store):
+    """Precision does not mean "give up". Year 2024 and year 2025 are disjoint, so the
+    later one supersedes on valid time exactly as two instants would."""
+    rec.apply(claim("lives_in", "Lisbon", valid_from=at(2025, 1, 1),
+                        temporal_precision="year"), now=at(2026, 1, 1))
+    rec.apply(claim("lives_in", "London", valid_from=at(2024, 1, 1),
+                        temporal_precision="year"), now=at(2026, 9, 3))
+    # London is confidently *earlier*, so it is history and does not displace Lisbon,
+    # even though it was said later.
+    assert live_objects(store, claim("lives_in", "x")) == ["Lisbon"]
+
+
+def test_eligibility_is_untouched_by_temporal_ordering(rec, store):
+    """Ordering decides *which* competing claim wins, never *whether* two claims
+    compete. A many-valued predicate collects no victims at all, so two events with
+    overlapping boundaries both survive."""
+    rec.apply(claim("likes", "London", valid_from=at(2025, 1, 1),
+                        temporal_precision="year"), now=at(2025, 6, 1))
+    rec.apply(claim("likes", "Lisbon", valid_from=at(2025, 12, 1)), now=at(2026, 9, 3))
+    assert live_objects(store, claim("likes", "x")) == ["Lisbon", "London"]
+
+
+# --- quantity is not identity ------------------------------------------------
+
+def test_quantity_does_not_open_a_second_slot(rec, store):
+    """`amount` and `unit` describe the observation, not the fact. If they ever leak
+    into `fact_key` or `value_key`, 70kg and 71kg become unrelated facts and a weight
+    log accumulates forever instead of updating."""
+    first = claim("prefers", "70", amount=70.0, unit="kilogram")
+    second = claim("prefers", "70", amount=71.0, unit="kilogram")
+    assert first.fact_key == second.fact_key
+    assert first.value_key == second.value_key
+
+
+def test_changing_the_triple_still_changes_identity(rec, store):
+    """The converse, because the failure mode is someone adding the new fields to a
+    serialisation tuple the identity functions read — which would break both directions
+    at once and this asserts the half that keeps working."""
+    base = claim("prefers", "tea")
+    assert base.fact_key != claim("prefers", "tea", subject="bob").fact_key
+    assert base.fact_key != claim("likes", "tea").fact_key
+    assert base.value_key != claim("prefers", "coffee").value_key
+
+
+def test_the_reverse_order_still_lets_the_later_statement_win(rec, store):
+    """The converse, so the rule above is not just "precision always wins": stating a
+    boundary first and an unqualified fact second must leave the second standing."""
+    rec.apply(claim("lives_in", "Lisbon", valid_from=at(2026, 8, 1),
+                    temporal_precision="month"), now=at(2026, 8, 15))
+    rec.apply(claim("lives_in", "Berlin", valid_from=at(2026, 9, 3)), now=at(2026, 9, 3))
+    assert live_objects(store, claim("lives_in", "x"),
+                        as_of=at(2026, 9, 3)) == ["Berlin"]
+
+
+def test_a_stated_boundary_never_retires_a_later_undated_fact(rec, store):
+    """The invariant this module states at `_victims`, tested against the path that
+    broke it: "a fact backfilled today but true from 2019 must not retire the 2026 fact
+    that replaced it".
+
+    An extracted "I moved to Lisbon in 2019" is that fact, arriving through extraction
+    rather than through `remember(valid_from=...)`. A first attempt at the ordering rule
+    let it retire a Berlin claim stated today, because a no-precision boundary was
+    treated as never confidently after a stated one, whatever the distance between them.
+    """
+    rec.apply(claim("lives_in", "Berlin", valid_from=at(2026, 9, 3)), now=at(2026, 9, 3))
+    rec.apply(claim("lives_in", "Lisbon", valid_from=at(2019, 1, 1),
+                    temporal_precision="year"), now=at(2026, 9, 4))
+    assert live_objects(store, claim("lives_in", "x"),
+                        as_of=at(2026, 9, 4)) == ["Berlin"]
+
+
+@pytest.mark.parametrize("precision, inside, outside", [
+    ("day", at(2026, 5, 1, 23), at(2026, 5, 2, 1)),
+    ("week", at(2026, 5, 6, 12), at(2026, 5, 12, 1)),
+    ("season", at(2026, 6, 15, 12), at(2026, 9, 2, 1)),
+])
+def test_every_precision_covers_the_span_it_names(rec, store, precision, inside, outside):
+    """Each precision denotes an interval, and ordering is decided by whether the two
+    intervals overlap. A boundary inside the span cannot be ordered against it and falls
+    to belief; one past the span's end is confidently later and stays live.
+
+    Covers the `day`, `week` and `season` arms of `_bounds`, which the month and year
+    cases above do not reach.
+    """
+    span_start = {"day": at(2026, 5, 1, 0), "week": at(2026, 5, 4, 0),
+                  "season": at(2026, 6, 1, 0)}[precision]
+
+    # A precise claim inside the span: incomparable, so the later statement wins.
+    rec.apply(claim("lives_in", "Inside", valid_from=inside), now=inside)
+    rec.apply(claim("lives_in", "Spanning", valid_from=span_start,
+                    temporal_precision=precision), now=at(2026, 9, 30))
+    assert live_objects(store, claim("lives_in", "x"),
+                        as_of=at(2026, 9, 30)) == ["Spanning"]
+
+    # A precise claim past the span's end: confidently later, so it survives a
+    # subsequent statement about the span it already postdates.
+    other = SQLiteStore(":memory:")
+    rec2 = Reconciler(other, PredicateRegistry())
+    rec2.apply(claim("lives_in", "After", valid_from=outside), now=outside)
+    rec2.apply(claim("lives_in", "Spanning", valid_from=span_start,
+                     temporal_precision=precision), now=at(2026, 9, 30))
+    assert live_objects(other, claim("lives_in", "x"),
+                        as_of=at(2026, 9, 30)) == ["After"]

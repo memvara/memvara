@@ -7,6 +7,47 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `valid_from` now carries the time a turn stated, not the time it was said
+
+### What changed
+
+Both write paths used to set `valid_from` to the episode's timestamp. They now resolve any
+temporal expression the turn carried — "yesterday", "last month", "three weeks ago" — and
+store that instead, together with a new `Claim.temporal_precision` recording how coarse it
+was. A turn stating no time is unchanged: `valid_from` is still the episode's timestamp and
+the precision is `None`.
+
+`Claim.amount` and `Claim.unit` are new and default to `None`. `SCHEMA_VERSION` moves from
+8 to 9, which adds three nullable columns; an older file upgrades in place on open.
+
+### Who this changes, and in which direction
+
+**Your existing claims are not touched.** Nothing backfills an event time, because it cannot
+be recovered without re-extraction and inventing one would be forging history. Every claim
+written before this upgrade keeps `valid_from` meaning the conversation's timestamp, and
+`temporal_precision IS NULL` is the honest record of that.
+
+**A build older than this cannot open a file this one has upgraded.** That is the usual
+one-way schema door and the store refuses rather than corrupting. Take a copy first if you
+may need to roll back.
+
+**Supersession outcomes change for claims written after the upgrade.** Two boundaries now
+order confidently only when their intervals do not overlap, and overlapping ones fall back
+to `recorded_at`. Two claims with no precision compare exactly as they did before, so a
+store that never records an event time sees no difference at all.
+
+**Ranking changes with it.** `recency_factor` measures age from `valid_from`, so a claim
+whose turn stated a past time is now scored as that old rather than as new. That is the
+documented meaning of the field, and it is a real change in what comes back first for a
+store that starts recording event times.
+
+**If you need the old behaviour**, do not set event times: nothing resolves an expression
+the extractor did not report, and the fast path only resolves tails it already stripped. To
+be certain, run with `MEMVARA_LLM=none` and no `events` pack; a store that records no
+precisions behaves as it did.
+
+---
+
 ## `MEMVARA_MODE=cloud` now starts a server, and refuses two variables it used to accept
 
 ### What changed

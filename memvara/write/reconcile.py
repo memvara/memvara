@@ -62,7 +62,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Sequence
 
 from ..entities import EntityRegistry, entity_key
@@ -182,6 +182,62 @@ class ReconcileResult:
     #: one on record, so the claim was re-filed — see `Retype`. `None` on every other
     #: action, and on every re-observation that asserted nothing.
     retyped: "Retype | None" = None
+
+
+#: What each precision covers, as a lower bound and an exclusive upper bound. `instant`
+#: and `None` collapse to a point, which is what makes the rule below reduce to the plain
+#: scalar comparison it replaced whenever no expression was resolved.
+def _bounds(claim: "Claim") -> tuple[datetime, datetime]:
+    """The interval a claim's `valid_from` actually denotes.
+
+    "Last month" is stored as the 1st because a boundary has to be *some* instant, but
+    the speaker named a month. Comparing the stored instants alone would let that
+    normalisation decide an ordering it has no business deciding.
+    """
+    start = as_utc(claim.valid_from)
+    precision = claim.temporal_precision
+    if precision is None or precision == "instant":
+        return start, start
+    if precision == "day":
+        return start, start + timedelta(days=1)
+    if precision == "week":
+        return start, start + timedelta(weeks=1)
+    if precision == "month":
+        year, month = divmod(start.year * 12 + start.month, 12)
+        return start, start.replace(year=year, month=month + 1, day=1)
+    if precision == "season":
+        year, month = divmod(start.year * 12 + start.month + 2, 12)
+        return start, start.replace(year=year, month=month + 1, day=1)
+    return start, start.replace(year=start.year + 1, month=1, day=1)
+
+
+def _is_after(candidate: "Claim", incoming: "Claim") -> bool:
+    """Is `candidate` confidently later in the world than `incoming`?
+
+    Supersession runs along valid time, and a boundary resolved from "last year" covers
+    a year — so it cannot be said to precede a claim dated inside that year, however the
+    two stored instants compare. When the bounds overlap the world clock has no opinion
+    and precedence falls to belief: `_victims` iterates in `recorded_at` order and an
+    already-stored claim was believed first, so an overlap leaves the candidate in
+    `older` and the newly-arrived statement supersedes it.
+
+    **With no precision on either side this is exactly the strict `>` it replaces.** Both
+    intervals are points, `c.lower >= claim.upper` reads `c.valid_from >= claim.valid_from`
+    and the second conjunct restores the strictness, so an equal boundary still lands in
+    `older` and stays supersedable.
+
+    There is deliberately no special case for a no-precision boundary meeting a stated
+    one. One was tried: "a fallback timestamp cannot be confidently after a stated
+    boundary", on the ground that it bounds a fact's onset from above without locating
+    it. That is true, and as a rule it is far too strong — it made *any* stated boundary
+    outrank an undated fact on arrival order, so an extracted "I moved to Lisbon in 2019"
+    retired a Berlin claim stated today and broke the invariant `_victims` states above.
+    The case it was introduced for is handled at the write path instead, by not resolving
+    a boundary for the predicates that supersede at all.
+    """
+    c_lo, c_hi = _bounds(candidate)
+    i_lo, i_hi = _bounds(incoming)
+    return c_lo >= i_hi and c_lo > i_lo
 
 
 class Reconciler:
@@ -513,7 +569,7 @@ class Reconciler:
         older: list[Claim] = []
         newer: list[Claim] = []
         for c in sorted(victims.values(), key=lambda c: (c.recorded_at, c.id)):
-            (newer if c.valid_from > claim.valid_from else older).append(c)
+            (newer if _is_after(c, claim) else older).append(c)
         return older, newer
 
     @staticmethod

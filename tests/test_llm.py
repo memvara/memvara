@@ -66,6 +66,14 @@ def claim(**overrides) -> dict:
         "memory_type": "semantic",
         "confidence": 0.9,
         "source_index": 0,
+        # `shape_claims` emits these for every claim, `None` when the turn stated no time
+        # and measured nothing — which is the common case and what most of these tests
+        # assert. They are present rather than omitted so that a shaped claim has one
+        # shape, and a reader never has to ask whether a missing key means "no value" or
+        # "an older extractor".
+        "when": None,
+        "amount": None,
+        "unit": None,
     }
     base.update(overrides)
     return base
@@ -632,3 +640,110 @@ def test_compose_relations_reads_a_bare_map_as_well_as_the_wrapped_one() -> None
         "grandfather": 2, "uncle": 2}
     assert AnthropicLLM(client=bare).compose_relations(["father"]) == {
         "grandfather": 2, "uncle": 2}
+
+
+def test_the_durability_rule_admits_dated_and_measured_happenings() -> None:
+    """The extraction prompt used to rule events out by construction.
+
+    "Skip anything transient to the current exchange" is the rule that keeps a memory
+    store from filling with chatter, and it is right — but it also classified "I ran 30
+    minutes yesterday" as transient, so no amount of event *vocabulary* could produce an
+    event *claim*. A predicate pack supplies names; it does not supply intent.
+
+    The carve-out is deliberately conditional rather than a relaxation: a happening earns
+    durability by carrying a time or a measurement, and an undated, unmeasured one is
+    still skipped. Asserted here because the prompt is the only place this is stated and
+    a later edit could quietly drop the clause.
+    """
+    from memvara.llm.base import EXTRACT_SYSTEM
+
+    assert "transient to the current exchange" in EXTRACT_SYSTEM, \
+        "the durability rule itself must survive; this is a carve-out, not a removal"
+    assert "counts as durable when the turn gives it a time or a measured quantity" \
+        in EXTRACT_SYSTEM
+    assert "still skipped" in EXTRACT_SYSTEM, \
+        "the undated case must stay excluded, or the store fills with chatter"
+    for field in ("`when`", "`amount`/`unit`"):
+        assert field in EXTRACT_SYSTEM, f"the prompt must name {field} for it to be filled"
+
+
+def test_shape_claims_carries_the_event_fields_through() -> None:
+    """The normaliser rebuilds each claim from an explicit key list, so a field the
+    schema gains and this function does not name is dropped between the model and the
+    write path — silently, because the result is still a well-formed claim.
+
+    That is the third place in this change with the same shape: the extraction schema,
+    this allowlist, and each store's field tuple all enumerate a claim's fields
+    independently, and none of them fails when one is missing. It cost a benchmark arm
+    to find the store's copy and a second probe run to find this one.
+    """
+    from memvara.llm._shape import shape_claims
+
+    base = {"subject": "user", "predicate": "ran", "object": "5k", "polarity": 1,
+            "memory_type": "episodic", "confidence": 0.9, "source_index": 0}
+    [got] = shape_claims({"claims": [dict(base, when="last month", amount=5,
+                                          unit="Kilometres")]}, 1)
+    assert (got["when"], got["amount"], got["unit"]) == ("last month", 5.0, "kilometres")
+
+
+def test_shape_claims_declines_a_quantity_it_cannot_trust() -> None:
+    """`isinstance(True, int)` is True in Python, so a stray boolean would land as
+    `amount=1.0` — a measurement nobody made, indistinguishable afterwards from one
+    somebody did. The same slip `source_index` already guards against.
+
+    A blank `when` is `None` rather than an empty string, and a unit without an amount is
+    dropped: a unit alone measures nothing, and storing it invites a later reader to take
+    it for a value.
+    """
+    from memvara.llm._shape import shape_claims
+
+    base = {"subject": "user", "predicate": "ran", "object": "5k", "polarity": 1,
+            "memory_type": "episodic", "confidence": 0.9, "source_index": 0}
+    [got] = shape_claims({"claims": [dict(base, when="   ", amount=True, unit="min")]}, 1)
+    assert (got["when"], got["amount"], got["unit"]) == (None, None, None)
+
+
+@pytest.mark.parametrize("raw, why", [
+    (float("inf"), "a JSON 1e400 parses to inf rather than raising"),
+    (float("-inf"), "and the same in the other direction"),
+    (float("nan"), "nan compares false against everything, including itself"),
+])
+def test_a_non_finite_amount_is_not_a_measurement(raw, why) -> None:
+    """`inf` is not a distance, and storing it makes a measurement nobody took
+    indistinguishable from one somebody did.
+
+    It reaches here intact: `json.loads('{"amount": 1e400}')` yields `inf` rather than
+    raising, `isinstance(inf, float)` is True, and the bool guard does not fire. Without a
+    check it round-trips through `put_claim` and sits in the store reading as real, and
+    nothing downstream rejects it — `amount` is not part of claim identity, so it does not
+    even change which slot the claim occupies.
+    """
+    from memvara.llm._shape import shape_claims
+
+    base = {"subject": "user", "predicate": "ran", "object": "5k", "polarity": 1,
+            "memory_type": "episodic", "confidence": 0.9, "source_index": 0,
+            "when": None, "unit": "km"}
+    [got] = shape_claims({"claims": [dict(base, amount=raw)]}, 1)
+    assert (got["amount"], got["unit"]) == (None, None), why
+
+
+def test_an_unconvertible_amount_does_not_cost_the_whole_batch() -> None:
+    """A 400-digit integer raises `OverflowError` from `float()`, and `WritePipeline`
+    catches it around the whole `extract` call — so one malformed number discards every
+    claim the model returned for that batch, recorded the same way a provider 429 is. An
+    operator watching extraction yield drop cannot tell the two apart.
+
+    A value that cannot become a float cannot be a measurement, so it is dropped like any
+    other unusable one and the claim survives without a quantity.
+    """
+    import json
+
+    from memvara.llm._shape import shape_claims
+
+    huge = json.loads('{"a": 1' + "0" * 400 + "}")["a"]
+    base = {"subject": "user", "predicate": "ran", "object": "5k", "polarity": 1,
+            "memory_type": "episodic", "confidence": 0.9, "source_index": 0,
+            "when": None, "unit": "km"}
+    [got] = shape_claims({"claims": [dict(base, amount=huge)]}, 1)
+    assert (got["amount"], got["unit"]) == (None, None)
+    assert got["object"] == "5k", "the claim itself must survive a bad quantity"

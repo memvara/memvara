@@ -162,10 +162,17 @@ CLAIM_SCHEMA: dict[str, Any] = {
                     },
                     "confidence": {"type": "number"},
                     "source_index": {"type": "integer"},
+                    # Nullable rather than optional: strict `json_schema` requires every
+                    # declared property in `required`, so "the turn stated no time" is
+                    # spelled `null` rather than by omitting the key.
+                    "when": {"type": ["string", "null"]},
+                    "amount": {"type": ["number", "null"]},
+                    "unit": {"type": ["string", "null"]},
                 },
                 "required": [
                     "subject", "predicate", "object", "polarity",
                     "memory_type", "confidence", "source_index",
+                    "when", "amount", "unit",
                 ],
                 "additionalProperties": False,
             },
@@ -192,6 +199,11 @@ You extract durable facts from conversation turns and emit them as (subject, pre
 Rules:
 - Only extract facts that will still be worth knowing in a later, unrelated conversation. \
 Skip pleasantries, acknowledgements, questions, and anything transient to the current exchange.
+- A thing that happened counts as durable when the turn gives it a time or a measured \
+quantity: "I ran 30 minutes yesterday", "I spent $40 on groceries last week", "I finished \
+the course in March". Record those, with the time in `when` and the measurement in \
+`amount`/`unit`. An undated, unmeasured happening is transient and is still skipped - \
+"I went for a run" alone is not worth a later conversation, and "I ran 5k on Tuesday" is.
 - subject: use "user" for the person speaking, or a lowercase entity name.
 - predicate: lowercase snake_case. Reuse a predicate from the known list whenever it fits \
 - consistency matters far more than precision here, because predicates are how \
@@ -204,6 +216,14 @@ point in time, "procedural" for how the user wants an assistant to behave.
 - confidence: 0.0-1.0. Use lower values for facts that were implied rather than stated.
 - source_index: the 0-based index of the turn the fact came from. This is load-bearing \
 provenance, so it must be exact.
+- when: the temporal expression exactly as it appears in the turn, naming the single \
+earliest time this fact is tied to - "yesterday", "last month", "three weeks ago", "in 2019". \
+Copy the words; never compute a date, and never sharpen a vague expression into a precise \
+one. null when the turn states no time, which is the common case.
+- amount and unit: a measured quantity, if the turn states one - amount 30, unit "minutes". \
+At most one per fact: "I ran 5 km in 30 minutes" is two facts, one for the distance and one \
+for the duration, never one fact with a compound object. null for both when nothing is \
+measured.
 
 Return an empty list when a turn carries no durable fact. That is the common case, and \
 an empty list is a correct answer."""
