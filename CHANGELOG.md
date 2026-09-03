@@ -17,6 +17,40 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   Keep an episode while it scores at least this fraction of the best one, and stop where
   the curve falls off. **It ships at `0.0`**, which takes `max_episodes` regardless and is
   today's behaviour exactly.
+
+  One budget is spent on every question, and questions differ in how much evidence they
+  need by a factor of three. Measured on LongMemEval-S, a multi-session answer needs a
+  median of 24 turns of gold evidence and a single-session-assistant answer needs 8 — and
+  both are served 15. The first is cut mid-evidence and scores 75.5%; the second is
+  over-served and scores 100%.
+
+  The score curve says which case a query is in without anyone knowing its type. The
+  fifteenth turn's score as a fraction of the first's is 0.60, 0.58 and 0.55 for the three
+  categories below parity — still on a plateau of comparable evidence — and 0.47, 0.39 and
+  0.35 for the three at parity, well past the cliff. That ordering matches the accuracy
+  ordering across all six categories.
+
+  Measured at `0.55` over 199 stratified questions against a fixed cap of 15: **median
+  context tokens down 10% at no measurable cost in accuracy**, which went 86.4% to 87.4%.
+  Read the token figure as the result and the accuracy figure as a reassurance: paired
+  over the same questions the floor wins 8 and the fixed cap 6, an exact p of 0.79, so
+  the accuracy difference is one or two questions and would plausibly reverse on another
+  sample. The token reduction is a direct measurement rather than a judged outcome.
+
+  Multi-session and temporal reasoning rose, the categories already at parity were
+  unchanged, and depth ranged from 1 to 30 turns with nothing reaching the ceiling — so
+  the floor decided every query.
+
+  **Relative, not absolute**, and the distinction matters: `min_score` already refuses
+  evidence that is weak in itself, while this asks whether a result is weak *beside the
+  rest of this answer*, so a query whose whole result set scores low keeps its plateau.
+  The best match survives any floor, including `1.0`, because an empty answer is worse
+  than a thin one.
+
+  `0.55` was chosen from the corpus it was then evaluated on. It sits between the two
+  clusters above, which is a defensible boundary, but a second corpus is what would show
+  whether the value generalises.
+
 - **Event time and quantities on the write path.** Both write tiers now resolve the
   temporal expression a turn carries and store it as `valid_from`, with the precision it
   was resolved at; and a claim can carry one measured quantity.
