@@ -116,7 +116,7 @@ class OpenAILLM:
               usage: Usage | None = None) -> Any:
         response = self._client.chat.completions.create(
             model=self.model,
-            max_tokens=self.max_tokens,
+            max_completion_tokens=self.max_tokens,
             temperature=self.temperature,
             messages=[
                 {"role": "system", "content": system},
