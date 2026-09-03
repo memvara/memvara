@@ -20,7 +20,13 @@ from types import SimpleNamespace
 import pytest
 
 from memvara.llm import LLM
-from memvara.llm.base import CLAIM_SCHEMA, EXTRACT_SYSTEM, PREDICATE_SCHEMA, RESOLVE_SCHEMA
+from memvara.llm.base import (
+    CLAIM_SCHEMA,
+    EXTRACT_SYSTEM,
+    MAX_CLAIMS,
+    PREDICATE_SCHEMA,
+    RESOLVE_SCHEMA,
+)
 from memvara.llm.openai import OpenAILLM, _first_text
 from memvara.types import Episode, Scope
 
@@ -112,6 +118,23 @@ def test_every_schema_satisfies_strict_mode(schema):
             check(node["items"])
 
     check(schema)
+
+
+def test_the_claims_array_is_bounded_so_a_grammar_can_end_it():
+    """An unbounded array leaves "one more claim" permanently legal, which is only safe
+    for a model that stops on its own.
+
+    A backend that compiles this schema to a grammar — llama.cpp, vLLM — cannot end a
+    response the grammar still permits to continue. Measured against phi-4-mini: one run
+    in three ran to its token limit emitting well-formed claim objects and arrived as
+    truncated JSON, losing the real claims that came before the restatements as well as
+    the restatements. The hosted backends hide this because a frontier model closes the
+    array itself, so nothing here fails without this assertion."""
+    claims = CLAIM_SCHEMA["properties"]["claims"]
+    assert claims["maxItems"] == MAX_CLAIMS
+    # Above any well-formed response measured (19), below the observed runaway (35). A
+    # bound that clips real answers is a different bug from the one it prevents.
+    assert 19 < MAX_CLAIMS < 35
 
 
 def test_the_system_prompt_and_temperature_ride_on_the_request():

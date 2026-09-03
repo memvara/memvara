@@ -9,6 +9,21 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`CLAIM_SCHEMA` now bounds the claims array at 32, so a grammar-constrained backend
+  can end a response.** Unbounded, "one more claim" is permanently a legal continuation:
+  a backend that compiles the schema to a grammar — llama.cpp, vLLM — has no legal way to
+  stop a model that has begun restating itself, so it runs to its token limit still
+  emitting well-formed claim objects and the reply arrives as truncated JSON. Everything
+  in that response is lost, including the real claims that came before the restatements.
+
+  The hosted backends never showed this, because a frontier model closes the array on its
+  own. Measured against phi-4-mini through llama.cpp: one extraction in three was lost
+  this way, and bounding the array removed all of them. 32 is above every well-formed
+  response measured (19 or fewer) and below the observed runaway (past 35), so it stops
+  the failure without truncating a real answer.
+
 ## [0.10.0] — 2026-09-03
 
 ### Added

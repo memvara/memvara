@@ -144,11 +144,36 @@ class NullLLM:
 # Constrained decoding rather than "please reply with JSON": no parse-retry loop, no
 # markdown fences to strip, no partially-valid objects to defend against.
 
+#: Ceiling on the claims array, which exists to make termination a property of the schema
+#: rather than of the model's judgement.
+#:
+#: Unbounded, "one more claim" is forever a legal continuation. A backend that constrains
+#: decoding to this schema — llama.cpp and vLLM compile it to a grammar — therefore has no
+#: legal way to stop a model that has started restating itself: it runs to its token limit
+#: still emitting well-formed claim objects, and the response arrives as truncated JSON
+#: that no longer parses. The claims are lost, and so is every real claim that preceded
+#: them in the same response.
+#:
+#: The hosted backends never showed this, which is why the array went unbounded for so
+#: long: a frontier model closes the array on its own. So this is not a fix for a bug any
+#: current caller has hit — it is what makes the schema safe for a backend whose stopping
+#: behaviour cannot be assumed, and self-hosted OpenAI-compatible servers are exactly that
+#: (see `ServerConfig.llm_model`, which documents pointing this package at one).
+#:
+#: 32 rather than something tighter because the bound is here to stop a runaway, not to
+#: edit a good answer. Measured against phi-4-mini through llama.cpp on 2026-09-03: the
+#: runaway passed 35 claims, while every well-formed response produced 19 or fewer, so 32
+#: sits above anything real and below the failure. A turn that genuinely carries more than
+#: 32 durable facts loses the tail, and that is the trade — a truncated tail beats a
+#: response that parses as nothing.
+MAX_CLAIMS = 32
+
 CLAIM_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "claims": {
             "type": "array",
+            "maxItems": MAX_CLAIMS,
             "items": {
                 "type": "object",
                 "properties": {
