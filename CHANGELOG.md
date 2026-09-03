@@ -201,130 +201,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   often the *shipped* floor still injects on a question the store cannot
   answer, a number that can land anywhere; `--min-score 0` reproduces the
   unfloored path, where it is 100% by construction.
-
-### Fixed
-
-- **`bench/hosted.py --db PATH` could not open the store it exists to measure.**
-  `_open_store` built `Memvara(path)` with no `embedder=`, so it took
-  `default_embedder()` — a 384-dimensional sentence-transformers model wherever
-  `memvara[local-embed]` is installed. Against a store written by the
-  512-dimensional fallback that is `EmbedderMismatchError` before the first probe
-  runs, which is what the tool's own documented local invocation did on a real
-  store.
-
-  It now opens with the embedder that *wrote* the store, read back from the
-  fingerprint the library records beside the file. A hashing embedder is
-  reconstructed from its recorded name — `hashing:<dim>:<lo>-<hi>` carries every
-  parameter of its vector space — and the reconstruction is checked against
-  `fingerprint_of` rather than trusted. The record binds only while the store holds
-  vectors, which is the condition `Memvara._check_embedder` skips its own
-  compatibility check on: a sidecar outliving its store must not refuse an empty
-  store, nor silently open a new one at a stale dimension. A store with nothing on
-  record, or nothing binding, still takes the library default, unchanged. Anything else is opened only when
-  `default_embedder()` is itself what wrote the store, so the sentence-transformers
-  case keeps working, and is otherwise refused by name: a `local:MODEL` fingerprint
-  names a model but building one would mean this bench deciding to import torch and
-  fetch weights on somebody's behalf, and at equal width a wrong embedder raises
-  nothing while every score compares unrelated vector spaces.
-
-  No test caught it because every test in `tests/test_bench_hosted.py` injects
-  `mem=`, leaving the store-opening path — the one piece of the tool that only runs
-  in production — with no guard at all. Three now exercise `_open_store` against
-  real stores under `tmp_path`.
-
-- **`bench/hosted.py --db PATH` read the wrong scope, and said nothing about it.**
-  `_open_store` built its `Memvara` with no scope, so it opened at
-  `tenant="default"`. Against a real store whose claims all live under a named
-  tenant, the tool's own documented invocation exited 0 and printed nothing at all
-  — `--draft` emitted no rows and the fingerprint recorded `claims: 0`, which is
-  byte-for-byte what a genuinely empty store prints. A wrongly-scoped store and an
-  empty one were indistinguishable in the output.
-
-  `--tenant` and `--user` now say which scope to read at, and the ambiguity is
-  closed from the other side too: a `--db` run that can see no claims while the
-  file itself holds live ones says so, naming both numbers and the scope it read
-  at. The whole-file count comes from the unfiltered `SQLiteStore.stats(None)`, so
-  the question is put only to a local store — unfiltered counts disclose how much
-  data other tenants hold, and `RemoteMemvara` talks to a shared server. The
-  warning goes to **stderr**: `--draft` and the seeding phases write JSONL to
-  stdout and a person redirects that into a probe file, so a warning on stdout
-  would corrupt the file it exists to help them build. The exit code is unchanged
-  — this tool has no pass/fail status.
-
-  Both numbers are *live* claims. `count()` resolves its states through
-  `resolve_states(None, None)`, which is `("live",)`, so the whole-file figure is
-  `live_claims` and not `claims` — the latter counts every row in the table,
-  retired and ended included, and comparing against it fires on a store whose
-  facts are all at the right tenant but retired, advising a re-scope that cannot
-  help. Both figures compile from the same `base.state_predicate` at the same one
-  state, so they line up by construction; measured across retired, superseded,
-  ended and not-yet-valid claims, `count()` and `live_claims` agreed on every one
-  while `claims` did not. A backend whose `stats` predates `live_claims` gets
-  silence rather than a fallback to `claims`, which would reinstate the false
-  positive on exactly the backends nobody tests.
-
-  `--tenant` is refused without `--db` rather than accepted and ignored. The
-  parameter exists on `RemoteMemvara` and is never sent, because the facade
-  resolves the tenant from the bearer token, so forwarding it would have moved
-  what a run records about itself without moving what it read. `--user` is a real
-  narrowing and applies to both routes. No `--agent` or `--session` was added:
-  nothing has asked for them, and a flag that exists only for symmetry is a
-  surface to keep working for no reader.
-
-  The run fingerprint records the scope alongside the claim count, embedder and
-  surface, and `--compare`'s drift banner covers the two new keys the same way:
-  two runs at different scopes read two different populations out of one file, and
-  their deltas are not a before/after. A result file written before those keys
-  existed records neither, so comparing one against a newer file warns
-  `tenant None -> ...` — a true statement about what the earlier run failed to
-  record, and the conservative direction for a warning whose job is to say these
-  two may not be comparable.
-
-  Found the same way as the defect above, by running the shipped tool against a
-  real store, which no test does. Eight tests now cover the scope, each proven able
-  to fail by breaking what it watches.
-
-- **`CachedEmbedder.encode` raised `KeyError` on a batch larger than the cache**, on keys
-  it had written itself moments earlier. Once the cache is full each insert evicts the
-  oldest entry, and within a single call the oldest entries are that same call's — so a
-  batch of more than `max_items` distinct texts evicted its own early results before the
-  final read-back, and a batch mixing cache hits with enough new texts evicted the hits
-  too. Either way the row was still owed to the caller.
-
-  The threshold is *distinct* texts rather than list length, so duplicates masked it
-  entirely: a fixture that was half repeats worked at 48k and the same code crashed at
-  100k. Shipped paths were mostly safe — `reembed` batches at 256 — and it bit bulk
-  callers: a migration, an import, a benchmark harness.
-
-  Every row a call has to return is now captured before any eviction can run. Eviction
-  behaviour, cache bounds and the hit/miss counters are unchanged.
-
-- **A long run of reinforcements could fail with `database disk image is malformed`, on a
-  store that was never damaged.** `put_claim` deleted and re-inserted the claim's row in
-  `claims_fts` on every write — including the overwhelmingly common one where the text had
-  not changed and the rewrite reproduced exactly what was already indexed. FTS5's
-  `secure-delete`, on for `claims_fts` since the v7 migration and so on for every store
-  this library has written since, makes such a delete rewrite the doclist inside existing
-  segment pages rather than append a marker. Accumulate enough of them inside one
-  uncommitted transaction and FTS5 raises `SQLITE_CORRUPT_VTAB`, which reaches Python
-  under that message.
-
-  Nothing is wrong with the file, and the error names the wrong thing. At the instant of
-  failure `PRAGMA integrity_check` returns `ok` on any other connection, the committed
-  index passes FTS5's own integrity-check, and a `rollback()` clears the state outright:
-  what goes inconsistent is the pending index inside the open transaction, which is also
-  why a page-level check could never have caught it.
-
-  `put_claim` now reads `text` alongside `rowid` and `sources` in the SELECT it was
-  already running, and rewrites the FTS row only when the text has actually moved. The
-  read has to happen before the upsert, which sets every column including `text` — after
-  it, the stored and incoming values are equal every time and the skip would swallow real
-  changes. Measured against a store that reproduces the failure: 19,420 of 19,420 rewrites
-  in the first transaction were of unchanged text, and the run now gets past the write it
-  used to die on.
-
-### Added
-
 - **The benchmark's cost columns say what they do not measure**, and `Usage` has a
   `tokens` field. Both were named in the plan the benchmark was built from and neither
   had shipped: storage operations and model tokens were absent, and an absent metric
@@ -827,6 +703,124 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`bench/hosted.py --db PATH` could not open the store it exists to measure.**
+  `_open_store` built `Memvara(path)` with no `embedder=`, so it took
+  `default_embedder()` — a 384-dimensional sentence-transformers model wherever
+  `memvara[local-embed]` is installed. Against a store written by the
+  512-dimensional fallback that is `EmbedderMismatchError` before the first probe
+  runs, which is what the tool's own documented local invocation did on a real
+  store.
+
+  It now opens with the embedder that *wrote* the store, read back from the
+  fingerprint the library records beside the file. A hashing embedder is
+  reconstructed from its recorded name — `hashing:<dim>:<lo>-<hi>` carries every
+  parameter of its vector space — and the reconstruction is checked against
+  `fingerprint_of` rather than trusted. The record binds only while the store holds
+  vectors, which is the condition `Memvara._check_embedder` skips its own
+  compatibility check on: a sidecar outliving its store must not refuse an empty
+  store, nor silently open a new one at a stale dimension. A store with nothing on
+  record, or nothing binding, still takes the library default, unchanged. Anything else is opened only when
+  `default_embedder()` is itself what wrote the store, so the sentence-transformers
+  case keeps working, and is otherwise refused by name: a `local:MODEL` fingerprint
+  names a model but building one would mean this bench deciding to import torch and
+  fetch weights on somebody's behalf, and at equal width a wrong embedder raises
+  nothing while every score compares unrelated vector spaces.
+
+  No test caught it because every test in `tests/test_bench_hosted.py` injects
+  `mem=`, leaving the store-opening path — the one piece of the tool that only runs
+  in production — with no guard at all. Three now exercise `_open_store` against
+  real stores under `tmp_path`.
+
+- **`bench/hosted.py --db PATH` read the wrong scope, and said nothing about it.**
+  `_open_store` built its `Memvara` with no scope, so it opened at
+  `tenant="default"`. Against a real store whose claims all live under a named
+  tenant, the tool's own documented invocation exited 0 and printed nothing at all
+  — `--draft` emitted no rows and the fingerprint recorded `claims: 0`, which is
+  byte-for-byte what a genuinely empty store prints. A wrongly-scoped store and an
+  empty one were indistinguishable in the output.
+
+  `--tenant` and `--user` now say which scope to read at, and the ambiguity is
+  closed from the other side too: a `--db` run that can see no claims while the
+  file itself holds live ones says so, naming both numbers and the scope it read
+  at. The whole-file count comes from the unfiltered `SQLiteStore.stats(None)`, so
+  the question is put only to a local store — unfiltered counts disclose how much
+  data other tenants hold, and `RemoteMemvara` talks to a shared server. The
+  warning goes to **stderr**: `--draft` and the seeding phases write JSONL to
+  stdout and a person redirects that into a probe file, so a warning on stdout
+  would corrupt the file it exists to help them build. The exit code is unchanged
+  — this tool has no pass/fail status.
+
+  Both numbers are *live* claims. `count()` resolves its states through
+  `resolve_states(None, None)`, which is `("live",)`, so the whole-file figure is
+  `live_claims` and not `claims` — the latter counts every row in the table,
+  retired and ended included, and comparing against it fires on a store whose
+  facts are all at the right tenant but retired, advising a re-scope that cannot
+  help. Both figures compile from the same `base.state_predicate` at the same one
+  state, so they line up by construction; measured across retired, superseded,
+  ended and not-yet-valid claims, `count()` and `live_claims` agreed on every one
+  while `claims` did not. A backend whose `stats` predates `live_claims` gets
+  silence rather than a fallback to `claims`, which would reinstate the false
+  positive on exactly the backends nobody tests.
+
+  `--tenant` is refused without `--db` rather than accepted and ignored. The
+  parameter exists on `RemoteMemvara` and is never sent, because the facade
+  resolves the tenant from the bearer token, so forwarding it would have moved
+  what a run records about itself without moving what it read. `--user` is a real
+  narrowing and applies to both routes. No `--agent` or `--session` was added:
+  nothing has asked for them, and a flag that exists only for symmetry is a
+  surface to keep working for no reader.
+
+  The run fingerprint records the scope alongside the claim count, embedder and
+  surface, and `--compare`'s drift banner covers the two new keys the same way:
+  two runs at different scopes read two different populations out of one file, and
+  their deltas are not a before/after. A result file written before those keys
+  existed records neither, so comparing one against a newer file warns
+  `tenant None -> ...` — a true statement about what the earlier run failed to
+  record, and the conservative direction for a warning whose job is to say these
+  two may not be comparable.
+
+  Found the same way as the defect above, by running the shipped tool against a
+  real store, which no test does. Eight tests now cover the scope, each proven able
+  to fail by breaking what it watches.
+
+- **`CachedEmbedder.encode` raised `KeyError` on a batch larger than the cache**, on keys
+  it had written itself moments earlier. Once the cache is full each insert evicts the
+  oldest entry, and within a single call the oldest entries are that same call's — so a
+  batch of more than `max_items` distinct texts evicted its own early results before the
+  final read-back, and a batch mixing cache hits with enough new texts evicted the hits
+  too. Either way the row was still owed to the caller.
+
+  The threshold is *distinct* texts rather than list length, so duplicates masked it
+  entirely: a fixture that was half repeats worked at 48k and the same code crashed at
+  100k. Shipped paths were mostly safe — `reembed` batches at 256 — and it bit bulk
+  callers: a migration, an import, a benchmark harness.
+
+  Every row a call has to return is now captured before any eviction can run. Eviction
+  behaviour, cache bounds and the hit/miss counters are unchanged.
+
+- **A long run of reinforcements could fail with `database disk image is malformed`, on a
+  store that was never damaged.** `put_claim` deleted and re-inserted the claim's row in
+  `claims_fts` on every write — including the overwhelmingly common one where the text had
+  not changed and the rewrite reproduced exactly what was already indexed. FTS5's
+  `secure-delete`, on for `claims_fts` since the v7 migration and so on for every store
+  this library has written since, makes such a delete rewrite the doclist inside existing
+  segment pages rather than append a marker. Accumulate enough of them inside one
+  uncommitted transaction and FTS5 raises `SQLITE_CORRUPT_VTAB`, which reaches Python
+  under that message.
+
+  Nothing is wrong with the file, and the error names the wrong thing. At the instant of
+  failure `PRAGMA integrity_check` returns `ok` on any other connection, the committed
+  index passes FTS5's own integrity-check, and a `rollback()` clears the state outright:
+  what goes inconsistent is the pending index inside the open transaction, which is also
+  why a page-level check could never have caught it.
+
+  `put_claim` now reads `text` alongside `rowid` and `sources` in the SELECT it was
+  already running, and rewrites the FTS row only when the text has actually moved. The
+  read has to happen before the upsert, which sets every column including `text` — after
+  it, the stored and incoming values are equal every time and the skip would swallow real
+  changes. Measured against a store that reproduces the failure: 19,420 of 19,420 rewrites
+  in the first transaction were of unchanged text, and the run now gets past the write it
+  used to die on.
 - **Twelve links still pointed at `/docs/agents`, and one of them was a real 404.**
   `memvara.dev/docs/agents` is retired; it 301s to `/docs/cloud`, so eleven of the twelve
   were working links costing a reader an extra hop. The twelfth was not: the tool
@@ -2217,6 +2211,184 @@ stopped being kept is worse than none.
   `docs/ROADMAP.md`'s summary of the leg is corrected to match: what the leg is worth
   depends on how much graph the store holds, and the public corpora disagree because they
   hold 26,403 claims and 78.
+- **A blank part of a triple was stored as nothing, in silence.** `memory_remember` with
+  an empty or whitespace `subject`, `predicate` or `object` wrote nothing and reported
+  `added 0, ended 0, retired 0, already-known 0, no-fact 0` with `isError` false — which
+  is also exactly what a legitimate already-known write looks like. A model had no way to
+  tell "you sent nothing" from "there was nothing to do", so it either believed the fact
+  was on record or repeated the call. Now refused, naming the field, like every other
+  rejection on this surface.
+
+- **`memory_end` on an already-retired claim contradicted itself in one line.** It
+  rendered the state as `retired` and then asserted, in the next sentence, that
+  `memory_history` shows the claim as *ended, not retired*. Stored state was never wrong —
+  the store keeps `retired`, the stronger statement and the one made first — so this was a
+  message defect. But an agent that believed it would report a false reason for a change,
+  which is the one mistake the two-tool split exists to make unmakeable, because nothing
+  downstream can detect it. It now says the claim is already retired, stays that way, and
+  that nothing changed.
+
+- **`memory_since` with a future instant answered "what you knew then still stands".**
+  True of the future and useless: unqualified it reads as *you are up to date*, so a model
+  stops asking, having learned nothing about the period it meant to ask about. It now says
+  the instant has not arrived, and names the usual cause — a local time sent as UTC lands
+  ahead of now for anyone west of Greenwich.
+
+- **`recall(budget=)`'s cut notice implied a total it never counted.** It said "n further
+  notes **matched**", counted over the pool `search()` had already truncated to `k`. So it
+  reported how many *retrieved* notes the budget dropped and nothing about how many more
+  the store holds, while reading as the complete remainder. Reworded to name the second
+  cap. Deliberately three characters *shorter* than the sentence it replaces: the notice
+  is counted against the budget and is the floor of a squeezed block, so a longer one
+  silently lowers how many real notes fit — the first rewrite was 29 characters longer and
+  cost a note, which is now pinned by its own test.
+
+- **Two tool descriptions claimed more than the code does.** `memory_search` published
+  `relevance` as a bare number without saying it is match strength adjusted by recency,
+  writer-set confidence and reinforcement — so a smaller number reads as a worse match
+  when it may not be. And `memory_remember.memory_type` said omitting it lets "the
+  predicate's own classification decide, which is usually right"; a predicate this store
+  has never seen has no classification and becomes `semantic`, and nothing infers a type
+  from the words. Both now say what actually happens.
+
+- **A failing tool replayed its exception message into the model's context unflattened
+  and uncapped.** Stored claims have been treated as untrusted at the rendering boundary
+  since the beginning; the failure path was the one line that was not, and it is the same
+  kind of text arriving through a different door. An exception message is not this
+  process's to trust — a store error can quote a value somebody wrote, and against a
+  hosted backend it can carry an upstream body verbatim — so it could open its own line,
+  spell something that reads as a result row, or run to the length of an HTML error page
+  inside a context window.
+
+  It now goes through `safe_detail`: `safe_line` for the structure, and a 300-character
+  cap for the volume. The exception *class* is kept whole — it is a Python identifier and
+  it is the half that says what went wrong. `SECURITY.md` now names the failure path as in
+  scope on the same terms as the result path.
+
+- **`memvara-mcp login` echoed an upstream error body whole.** A different audience and so
+  a different risk: this reaches a terminal rather than a model, and the problem is
+  volume. A gateway answering with an HTML error page put five kilobytes into stderr —
+  which for a login run in CI is a build log, and on a public repository that log is
+  public. Bounded to 200 characters, the same cap `compat/supermemory_import.py` already
+  applies to the same kind of text. A short body, the normal case, is unchanged.
+
+- **A predicate folded onto its canonical name silently, changing how many values the
+  slot holds.** `uses_tool` is an alias of `prefers_tool`; a predicate the store has never
+  seen is `MANY` and accumulates, and `prefers_tool` is `ONE`, where the next write ends
+  the last. So writing two values under `uses_tool` keeps one, and writing them under a
+  name the store does not know keeps both — a different outcome for the data, decided by a
+  rename the caller was never told about. `memory_remember`'s own schema offers
+  `uses_tool` as an example spelling, so this was reached by following the tool
+  description rather than by getting it wrong.
+
+  `memory_remember`, `memory_forget` and `memory_end` now say when the predicate they
+  acted on is not the one they were given, and on a write they say what the fold decided
+  about cardinality. The fold itself is unchanged and remains the right behaviour: without
+  it two spellings of one fact become two slots that cannot contradict each other.
+
+  **Addressing was never affected**, and the note says so rather than implying otherwise —
+  every predicate-addressed tool resolves through the same registry, so the original
+  spelling still finds the fact.
+
+- **`subject` and `predicate` had no length bound.** A 2,000-character subject and a
+  1,000-character predicate were both accepted, echoed back by the write, and re-rendered
+  by every later `memory_search` and `memory_recall` that matched them. The validator
+  implemented `minimum`/`maximum` for numbers and `enum` for strings but never checked
+  string length, and no tool schema declared one. It now supports `maxLength`, and the two
+  arguments that name a *slot* declare it: 128 characters for `subject`, 64 for
+  `predicate`. `object` is deliberately left uncapped — it carries the fact itself, and a
+  caller who needs a long one is not misusing the tool.
+
+- **A write note sent the model to a search that can never succeed.** Storing a fact whose
+  valid interval was already over emitted `memory_history shows it, and so does
+  memory_search with as_of inside that period`. The second half is false at every instant:
+  reaching a closed interval needs a moment *inside* it, reaching a claim recorded just now
+  needs a moment at or after the write, and `as_of` moves both clocks together, so no
+  single value satisfies both. The claim is stored and correct and simply not reachable by
+  search from this surface.
+
+  That made the note worse than saying nothing. `_interval_note` exists because a correct
+  write whose effect is invisible gets "fixed" by a second write with the argument dropped
+  — and this pointed at a query that comes back empty, with the server's authority behind
+  it. It fires on the single-call closed-interval write, which `memory_remember` actively
+  recommends over write-then-`memory_end`, so the recommended path was the one being
+  misinformed. The note now names `memory_history`, says search will not find it, and says
+  why. Exposing the two time axes separately on `memory_search`, which would make the
+  original promise keepable, is #16.
+
+- **`memory_history` printed only one of the two clocks.** Rows carried `recorded_at` and
+  the closing instant, never `valid_from`, under a header that said "oldest first" —
+  ordering by recording time, as every backend's protocol declares. A value backfilled
+  today about two years ago was therefore listed last while being the earliest thing the
+  slot had ever held, with nothing in the output saying so. Rows now carry `true from`, and
+  the header names which clock the order is in. The `ORDER BY` is unchanged: printing the
+  clock the order is *not* in is what makes the order safe to read.
+
+- **Stored text could forge a result row without opening a line.** `_safe_line` flattens
+  a claim so it cannot start its own block, and every surface writes its metadata before
+  the untrusted span so nothing can *follow* a claim and impersonate this system. Neither
+  rule covers the rest of the line the claim is already on: a value containing
+  `[id=cl_… relevance=0.99] …` rendered as what read like an additional, higher-scoring
+  result. It reached `memory_search`, `memory_recall`, `memory_history`, `memory_since`
+  and `memory_why` — including the two surfaces the dispute flow tells an agent to consult
+  when a user challenges a memory, which is what made it worth a fix rather than a note.
+  Write and read need not be the same session, so the payload is planted once and read
+  later by an agent that never saw it arrive.
+
+  `_safe_line` now maps `[` and `]` to their fullwidth forms wherever they occur, rather
+  than only stripping markers from the head. A substitution and not a deletion: a note
+  about `arr[0]` still reads as `arr［0］`, where dropping the brackets would quietly
+  rewrite the fact into a different one. **Rendered output changes for any stored value
+  containing a square bracket** — see `docs/UPGRADING.md`. Nothing on disk is touched, and
+  because the fix is at render time it also covers rows already in the store, which a
+  write-time fix could not: `remember(..., text=…)` lets a caller supply the rendered line
+  directly and the reconciler deliberately preserves it.
+
+  `memvara.server.tools.safe_line` now calls `Memvara._safe_line` instead of holding a
+  second copy of it. The two had already drifted — the library's set had stopped stripping
+  `>` and backticks — so the same stored value was neutralised one way through
+  `memory_recall` and another through `memory_search`.
+
+- **`memvara-mcp login` never completed against the hosted console.** Two independent
+  refusals stacked: `POST /api/auth/device/authorize` answers 403 `csrf_failed` unless
+  `X-Memvara-CSRF` is present (presence is the whole check with no session cookie, which
+  a CLI never has), and a successful mint is 201, which the client treated as "the
+  server refused to start." Either one alone was enough for login to exit 1 before a
+  browser opened. The client now sends the header and accepts 200 or 201.
+
+- **`supersede()` reported closing nothing, from the one call whose whole purpose is
+  closing a claim out.** `receipt.closed` came back empty — and with it `receipt.ended`
+  and `receipt.retired` — while the predecessor was closed correctly on disk. Only the
+  report of it was missing.
+
+  The cause is an ordering the transaction requires. `_write_claim` closes the
+  predecessor **before** `assert_claim`, because afterwards the reconciler gets there
+  first and stamps the wall clock over `at`, which turns a backdated import into a pile
+  of things that all changed today. But `closed` is filled in by that same reconciler
+  from the victims it finds, and by then the predecessor is no longer live: it finds
+  none, reports none, and the receipt went back to the caller as `assert_claim` built it.
+
+  Two closure surfaces disagreed as a result. `forget()` returns its closed claims
+  directly, so a caller replaying somebody else's mutation log had the retraction
+  confirmed through one door and got silence from the other, with no way to tell that
+  silence from "nothing was closed" short of re-reading the store. `WriteReceipt.closed`
+  is documented as "claims this write closed out, as they read *after* the write", and
+  that is now what it returns: `close_out` has already stamped the object, so
+  `Claim.state` names the axis that actually stopped and `ended`/`retired` split it.
+
+  **If you meter on `len(receipt.closed)`**, supersede-heavy workloads will report more
+  closures than before. The old number was an undercount, not a different definition.
+
+- **`compat/_notes.write_note` had the same defect, and dropped `episode_ids` as well.**
+  Same ordering, one layer below the facade — so *every* note write, including ones that
+  retire nothing, reported storing no turn while the turn sat committed on disk. That is
+  the door `Mem0Memory.add(infer=False)` and every row of a mem0 import go through. It
+  was latent rather than live: the importer counts its own rows and reads only `added`
+  and `reinforced`, which is the argument for fixing it before something trusts it
+  rather than after.
+
+  Both receipts are now completed after their transaction commits, so neither can
+  describe a write that rolled back.
 
 ### Added
 
@@ -2978,187 +3150,6 @@ stopped being kept is worse than none.
   reopening silently — a new tool taking `recorded_at` because it seemed harmless would
   otherwise ship green.
 
-### Fixed
-
-- **A blank part of a triple was stored as nothing, in silence.** `memory_remember` with
-  an empty or whitespace `subject`, `predicate` or `object` wrote nothing and reported
-  `added 0, ended 0, retired 0, already-known 0, no-fact 0` with `isError` false — which
-  is also exactly what a legitimate already-known write looks like. A model had no way to
-  tell "you sent nothing" from "there was nothing to do", so it either believed the fact
-  was on record or repeated the call. Now refused, naming the field, like every other
-  rejection on this surface.
-
-- **`memory_end` on an already-retired claim contradicted itself in one line.** It
-  rendered the state as `retired` and then asserted, in the next sentence, that
-  `memory_history` shows the claim as *ended, not retired*. Stored state was never wrong —
-  the store keeps `retired`, the stronger statement and the one made first — so this was a
-  message defect. But an agent that believed it would report a false reason for a change,
-  which is the one mistake the two-tool split exists to make unmakeable, because nothing
-  downstream can detect it. It now says the claim is already retired, stays that way, and
-  that nothing changed.
-
-- **`memory_since` with a future instant answered "what you knew then still stands".**
-  True of the future and useless: unqualified it reads as *you are up to date*, so a model
-  stops asking, having learned nothing about the period it meant to ask about. It now says
-  the instant has not arrived, and names the usual cause — a local time sent as UTC lands
-  ahead of now for anyone west of Greenwich.
-
-- **`recall(budget=)`'s cut notice implied a total it never counted.** It said "n further
-  notes **matched**", counted over the pool `search()` had already truncated to `k`. So it
-  reported how many *retrieved* notes the budget dropped and nothing about how many more
-  the store holds, while reading as the complete remainder. Reworded to name the second
-  cap. Deliberately three characters *shorter* than the sentence it replaces: the notice
-  is counted against the budget and is the floor of a squeezed block, so a longer one
-  silently lowers how many real notes fit — the first rewrite was 29 characters longer and
-  cost a note, which is now pinned by its own test.
-
-- **Two tool descriptions claimed more than the code does.** `memory_search` published
-  `relevance` as a bare number without saying it is match strength adjusted by recency,
-  writer-set confidence and reinforcement — so a smaller number reads as a worse match
-  when it may not be. And `memory_remember.memory_type` said omitting it lets "the
-  predicate's own classification decide, which is usually right"; a predicate this store
-  has never seen has no classification and becomes `semantic`, and nothing infers a type
-  from the words. Both now say what actually happens.
-
-- **A failing tool replayed its exception message into the model's context unflattened
-  and uncapped.** Stored claims have been treated as untrusted at the rendering boundary
-  since the beginning; the failure path was the one line that was not, and it is the same
-  kind of text arriving through a different door. An exception message is not this
-  process's to trust — a store error can quote a value somebody wrote, and against a
-  hosted backend it can carry an upstream body verbatim — so it could open its own line,
-  spell something that reads as a result row, or run to the length of an HTML error page
-  inside a context window.
-
-  It now goes through `safe_detail`: `safe_line` for the structure, and a 300-character
-  cap for the volume. The exception *class* is kept whole — it is a Python identifier and
-  it is the half that says what went wrong. `SECURITY.md` now names the failure path as in
-  scope on the same terms as the result path.
-
-- **`memvara-mcp login` echoed an upstream error body whole.** A different audience and so
-  a different risk: this reaches a terminal rather than a model, and the problem is
-  volume. A gateway answering with an HTML error page put five kilobytes into stderr —
-  which for a login run in CI is a build log, and on a public repository that log is
-  public. Bounded to 200 characters, the same cap `compat/supermemory_import.py` already
-  applies to the same kind of text. A short body, the normal case, is unchanged.
-
-- **A predicate folded onto its canonical name silently, changing how many values the
-  slot holds.** `uses_tool` is an alias of `prefers_tool`; a predicate the store has never
-  seen is `MANY` and accumulates, and `prefers_tool` is `ONE`, where the next write ends
-  the last. So writing two values under `uses_tool` keeps one, and writing them under a
-  name the store does not know keeps both — a different outcome for the data, decided by a
-  rename the caller was never told about. `memory_remember`'s own schema offers
-  `uses_tool` as an example spelling, so this was reached by following the tool
-  description rather than by getting it wrong.
-
-  `memory_remember`, `memory_forget` and `memory_end` now say when the predicate they
-  acted on is not the one they were given, and on a write they say what the fold decided
-  about cardinality. The fold itself is unchanged and remains the right behaviour: without
-  it two spellings of one fact become two slots that cannot contradict each other.
-
-  **Addressing was never affected**, and the note says so rather than implying otherwise —
-  every predicate-addressed tool resolves through the same registry, so the original
-  spelling still finds the fact.
-
-- **`subject` and `predicate` had no length bound.** A 2,000-character subject and a
-  1,000-character predicate were both accepted, echoed back by the write, and re-rendered
-  by every later `memory_search` and `memory_recall` that matched them. The validator
-  implemented `minimum`/`maximum` for numbers and `enum` for strings but never checked
-  string length, and no tool schema declared one. It now supports `maxLength`, and the two
-  arguments that name a *slot* declare it: 128 characters for `subject`, 64 for
-  `predicate`. `object` is deliberately left uncapped — it carries the fact itself, and a
-  caller who needs a long one is not misusing the tool.
-
-- **A write note sent the model to a search that can never succeed.** Storing a fact whose
-  valid interval was already over emitted `memory_history shows it, and so does
-  memory_search with as_of inside that period`. The second half is false at every instant:
-  reaching a closed interval needs a moment *inside* it, reaching a claim recorded just now
-  needs a moment at or after the write, and `as_of` moves both clocks together, so no
-  single value satisfies both. The claim is stored and correct and simply not reachable by
-  search from this surface.
-
-  That made the note worse than saying nothing. `_interval_note` exists because a correct
-  write whose effect is invisible gets "fixed" by a second write with the argument dropped
-  — and this pointed at a query that comes back empty, with the server's authority behind
-  it. It fires on the single-call closed-interval write, which `memory_remember` actively
-  recommends over write-then-`memory_end`, so the recommended path was the one being
-  misinformed. The note now names `memory_history`, says search will not find it, and says
-  why. Exposing the two time axes separately on `memory_search`, which would make the
-  original promise keepable, is #16.
-
-- **`memory_history` printed only one of the two clocks.** Rows carried `recorded_at` and
-  the closing instant, never `valid_from`, under a header that said "oldest first" —
-  ordering by recording time, as every backend's protocol declares. A value backfilled
-  today about two years ago was therefore listed last while being the earliest thing the
-  slot had ever held, with nothing in the output saying so. Rows now carry `true from`, and
-  the header names which clock the order is in. The `ORDER BY` is unchanged: printing the
-  clock the order is *not* in is what makes the order safe to read.
-
-- **Stored text could forge a result row without opening a line.** `_safe_line` flattens
-  a claim so it cannot start its own block, and every surface writes its metadata before
-  the untrusted span so nothing can *follow* a claim and impersonate this system. Neither
-  rule covers the rest of the line the claim is already on: a value containing
-  `[id=cl_… relevance=0.99] …` rendered as what read like an additional, higher-scoring
-  result. It reached `memory_search`, `memory_recall`, `memory_history`, `memory_since`
-  and `memory_why` — including the two surfaces the dispute flow tells an agent to consult
-  when a user challenges a memory, which is what made it worth a fix rather than a note.
-  Write and read need not be the same session, so the payload is planted once and read
-  later by an agent that never saw it arrive.
-
-  `_safe_line` now maps `[` and `]` to their fullwidth forms wherever they occur, rather
-  than only stripping markers from the head. A substitution and not a deletion: a note
-  about `arr[0]` still reads as `arr［0］`, where dropping the brackets would quietly
-  rewrite the fact into a different one. **Rendered output changes for any stored value
-  containing a square bracket** — see `docs/UPGRADING.md`. Nothing on disk is touched, and
-  because the fix is at render time it also covers rows already in the store, which a
-  write-time fix could not: `remember(..., text=…)` lets a caller supply the rendered line
-  directly and the reconciler deliberately preserves it.
-
-  `memvara.server.tools.safe_line` now calls `Memvara._safe_line` instead of holding a
-  second copy of it. The two had already drifted — the library's set had stopped stripping
-  `>` and backticks — so the same stored value was neutralised one way through
-  `memory_recall` and another through `memory_search`.
-
-- **`memvara-mcp login` never completed against the hosted console.** Two independent
-  refusals stacked: `POST /api/auth/device/authorize` answers 403 `csrf_failed` unless
-  `X-Memvara-CSRF` is present (presence is the whole check with no session cookie, which
-  a CLI never has), and a successful mint is 201, which the client treated as "the
-  server refused to start." Either one alone was enough for login to exit 1 before a
-  browser opened. The client now sends the header and accepts 200 or 201.
-
-- **`supersede()` reported closing nothing, from the one call whose whole purpose is
-  closing a claim out.** `receipt.closed` came back empty — and with it `receipt.ended`
-  and `receipt.retired` — while the predecessor was closed correctly on disk. Only the
-  report of it was missing.
-
-  The cause is an ordering the transaction requires. `_write_claim` closes the
-  predecessor **before** `assert_claim`, because afterwards the reconciler gets there
-  first and stamps the wall clock over `at`, which turns a backdated import into a pile
-  of things that all changed today. But `closed` is filled in by that same reconciler
-  from the victims it finds, and by then the predecessor is no longer live: it finds
-  none, reports none, and the receipt went back to the caller as `assert_claim` built it.
-
-  Two closure surfaces disagreed as a result. `forget()` returns its closed claims
-  directly, so a caller replaying somebody else's mutation log had the retraction
-  confirmed through one door and got silence from the other, with no way to tell that
-  silence from "nothing was closed" short of re-reading the store. `WriteReceipt.closed`
-  is documented as "claims this write closed out, as they read *after* the write", and
-  that is now what it returns: `close_out` has already stamped the object, so
-  `Claim.state` names the axis that actually stopped and `ended`/`retired` split it.
-
-  **If you meter on `len(receipt.closed)`**, supersede-heavy workloads will report more
-  closures than before. The old number was an undercount, not a different definition.
-
-- **`compat/_notes.write_note` had the same defect, and dropped `episode_ids` as well.**
-  Same ordering, one layer below the facade — so *every* note write, including ones that
-  retire nothing, reported storing no turn while the turn sat committed on disk. That is
-  the door `Mem0Memory.add(infer=False)` and every row of a mem0 import go through. It
-  was latent rather than live: the importer counts its own rows and reads only `added`
-  and `reinforced`, which is the argument for fixing it before something trusts it
-  rather than after.
-
-  Both receipts are now completed after their transaction commits, so neither can
-  describe a write that rolled back.
-
 ## [0.2.0] — 2026-08-16
 
 The first release with an agent-facing surface: a prompt block that can say what it
@@ -3605,122 +3596,6 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
   spellings give 2 and both are wrong. The counts still do not sum, and the leftover is no
   longer the ended rows but the scheduled one; `claims` is the only total that covers
   everything.
-
-### Changed
-
-- **`Store.erase_claim` returns per-table counts instead of a `bool`.** The same four keys
-  `purge` returns — `claims`, `episodes`, `embeddings`, `entities` — so the two erasure
-  paths evidence themselves the same way. Of the two it was the weaker witness, and it is
-  the path an erasure request naming one memory actually takes. A missing id returns **all
-  zeroes rather than an absent key**, so a caller totalling an erasure campaign never
-  special-cases it; `counts["claims"]` is 0 or 1 and carries what the boolean carried.
-
-  **`Memvara.erase()` deliberately still returns `bool`.** Widening it would change a
-  published v0.1.0 signature from a flag to a mapping, and every `if mem.erase(id):` in
-  existence would start taking the branch unconditionally, because a dict of zeroes is
-  truthy. A caller wanting the evidence calls `store.erase_claim` or `purge()`.
-
-- **The `Store` read path takes `states` alongside a widened `include_invalidated`.**
-  `candidate_ids`, `lexical_search` and `vector_search` now take
-  `states: Collection[str] | None = None` and `include_invalidated: bool | None = None`;
-  `None` on the flag means "not passed", and passing both raises. `iter_claims` gains
-  `states` as a keyword while `include_invalidated` stays positional there, because it
-  always was — and its unflagged view remains `("live", "ended")` rather than live-only.
-  That default is load-bearing: `reembed()` walks this, and narrowing it would silently
-  stop re-encoding every superseded version in the store.
-
-  The episode reads take neither. Episodes are not bitemporal — nothing retires or
-  supersedes them — so there is no end-of-life to lift.
-
-- **`WriteReceipt.invalidated` → `closed`, plus `ended` and `retired`.** The field holds
-  the claims a write closed out, and after the closure split that is claims on *either*
-  clock: `close="ended"` puts still-believed claims in it, `close="retired"` puts
-  no-longer-believed ones. One name could not say which, so every consumer had to
-  re-derive it from `Claim.state` — and of the three that existed, two did not, and
-  called every closure a retirement.
-
-  ```python
-  receipt.closed        # what this write closed out, either clock
-  receipt.ended         # the world moved past these  — still believed
-  receipt.retired       # we stopped believing these
-  receipt.invalidated   # the old name, same list object, removed at 1.0.0
-  ```
-
-  `ended` and `retired` are derived from `Claim.state` rather than stored, so they cannot
-  disagree with the claims themselves. The alias raises **no** `DeprecationWarning` on
-  purpose: `filterwarnings = ["error::DeprecationWarning"]` in `pyproject.toml` would
-  turn a warning into a failure at every existing call site, including this package's own
-  write path.
-
-- **The MCP server distinguishes the two closures.** `memory_add` and `memory_remember`
-  reported `retired N` for every claim a write displaced — so a supersession, which is
-  the common case and which *ends* a claim, was announced to the model as a correction.
-  The same server rendered that claim as `ended` under `memory_history` and used
-  "retired" correctly under `memory_forget`, leaving three names for two events on one
-  transport. The summary line now carries both counts, and each displaced claim is
-  listed with its own closure and timestamp:
-
-  ```
-  added 1, ended 1, retired 0, already-known 0, no-fact 0 (0 model call(s))
-  + [cl_44b2c5ad486f491d9d43] user lives in Lisbon
-  - [cl_047bac579e6d4ed680cc ended 2026-08-13 06:58Z] user lives in Berlin
-  ```
-
-### Fixed
-
-- **Two more tool descriptions called one closure by the other's name.** `memory_forget`'s
-  is fixed in the `memory_end` entry above; these two were still standing after it.
-  `memory_remember` said an exact predicate lets the store "*retire* the previous value" —
-  it **ends** it, and that sentence was on the one tool whose whole job is writing the
-  replacement. `memory_history` described every past value as "*retired*", though
-  `_history` renders `_state()`, which emits both words, so supersession — the common case
-  — was mislabelled to every model that read it.
-
-  This is the same bug `_receipt_summary`'s docstring was written about ("a model reading
-  its own memory tool had three names for two events"), now on its third and fourth
-  instance: that fix corrected the receipt line, `memory_end` corrected `memory_forget`,
-  and neither swept the rest. So two guards now exist rather than a third correction —
-  one asserting every handler reads every property its own schema declares, and one
-  asserting no description uses a retire-word for an operation that ends or the reverse.
-  Both were confirmed to fail against the pre-fix code before being kept, and the second
-  one is what found these two.
-
-- **A fact's past no longer outlives the fact under a budget.** `recall(include_history=…)`
-  built its past values in a flat list that was not index-aligned to the claims, so a
-  budget that dropped a note could leave that note's history rendered beneath a fact no
-  longer there.
-
-- **Superseding a claim no longer records it as an error.** `Reconciler._retire` closed
-  *both* clocks when one value replaced another. `valid_to` was right — Berlin stopped
-  being true when Lisbon began — but `invalidated_at` means *we no longer believe this
-  record*, and the record was never wrong. Every superseded claim in every store this
-  library wrote was marked as a mistake.
-
-  The consequence was that one of the two readings the axes had just gained did not work
-  at all: **"what do we now believe was true in June" returned nothing on any history the
-  write path produced.**
-
-  ```python
-  mem.remember("user", "lives_in", "Berlin", valid_from=J23, recorded_at=J23)
-  mem.remember("user", "lives_in", "Lisbon", valid_from=J26, recorded_at=J26)
-  mem.get_all(as_of=MID)      # ['Berlin']  — worked, and hid the bug
-  mem.get_all(valid_at=MID)   # []          — now ['Berlin']
-  ```
-
-  `as_of` kept answering the whole time, because it rewinds the belief clock past the
-  supersession and so never reads the stamp that was wrong. `valid_at` worked only on
-  stores built by calling `store.put_claim` directly — which is what
-  `tests/test_bitemporal.py`'s fixture did, and its docstring said why.
-
-  The rule now, one line: **closing valid time says the world changed; closing
-  transaction time says the record was wrong, and no write asserts both.** Supersession
-  and retraction are always the first kind — the reconciler is told "here is the new
-  value", never "the old one was a mistake" — so they leave `invalidated_at` unset,
-  keep `invalidated_by`, and produce `Claim.state == "ended"`. `retired` now means what
-  its name says.
-
-### Added
-
 - **`AsyncMemvara.scope()` and `AsyncScopedMemvara`.** The async facade was the one of
   the three that could not bind a scope. It was documented as a deliberate omission on
   the grounds that every method there already takes the four scope keywords, so nothing
@@ -3876,6 +3751,63 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
 
 ### Changed
 
+- **`Store.erase_claim` returns per-table counts instead of a `bool`.** The same four keys
+  `purge` returns — `claims`, `episodes`, `embeddings`, `entities` — so the two erasure
+  paths evidence themselves the same way. Of the two it was the weaker witness, and it is
+  the path an erasure request naming one memory actually takes. A missing id returns **all
+  zeroes rather than an absent key**, so a caller totalling an erasure campaign never
+  special-cases it; `counts["claims"]` is 0 or 1 and carries what the boolean carried.
+
+  **`Memvara.erase()` deliberately still returns `bool`.** Widening it would change a
+  published v0.1.0 signature from a flag to a mapping, and every `if mem.erase(id):` in
+  existence would start taking the branch unconditionally, because a dict of zeroes is
+  truthy. A caller wanting the evidence calls `store.erase_claim` or `purge()`.
+
+- **The `Store` read path takes `states` alongside a widened `include_invalidated`.**
+  `candidate_ids`, `lexical_search` and `vector_search` now take
+  `states: Collection[str] | None = None` and `include_invalidated: bool | None = None`;
+  `None` on the flag means "not passed", and passing both raises. `iter_claims` gains
+  `states` as a keyword while `include_invalidated` stays positional there, because it
+  always was — and its unflagged view remains `("live", "ended")` rather than live-only.
+  That default is load-bearing: `reembed()` walks this, and narrowing it would silently
+  stop re-encoding every superseded version in the store.
+
+  The episode reads take neither. Episodes are not bitemporal — nothing retires or
+  supersedes them — so there is no end-of-life to lift.
+
+- **`WriteReceipt.invalidated` → `closed`, plus `ended` and `retired`.** The field holds
+  the claims a write closed out, and after the closure split that is claims on *either*
+  clock: `close="ended"` puts still-believed claims in it, `close="retired"` puts
+  no-longer-believed ones. One name could not say which, so every consumer had to
+  re-derive it from `Claim.state` — and of the three that existed, two did not, and
+  called every closure a retirement.
+
+  ```python
+  receipt.closed        # what this write closed out, either clock
+  receipt.ended         # the world moved past these  — still believed
+  receipt.retired       # we stopped believing these
+  receipt.invalidated   # the old name, same list object, removed at 1.0.0
+  ```
+
+  `ended` and `retired` are derived from `Claim.state` rather than stored, so they cannot
+  disagree with the claims themselves. The alias raises **no** `DeprecationWarning` on
+  purpose: `filterwarnings = ["error::DeprecationWarning"]` in `pyproject.toml` would
+  turn a warning into a failure at every existing call site, including this package's own
+  write path.
+
+- **The MCP server distinguishes the two closures.** `memory_add` and `memory_remember`
+  reported `retired N` for every claim a write displaced — so a supersession, which is
+  the common case and which *ends* a claim, was announced to the model as a correction.
+  The same server rendered that claim as `ended` under `memory_history` and used
+  "retired" correctly under `memory_forget`, leaving three names for two events on one
+  transport. The summary line now carries both counts, and each displaced claim is
+  listed with its own closure and timestamp:
+
+  ```
+  added 1, ended 1, retired 0, already-known 0, no-fact 0 (0 model call(s))
+  + [cl_44b2c5ad486f491d9d43] user lives in Lisbon
+  - [cl_047bac579e6d4ed680cc ended 2026-08-13 06:58Z] user lives in Berlin
+  ```
 - **The `Store` protocol speaks in two axes; `as_of` survives on the facade only.**
   Every protocol method that took `as_of` now takes `valid_at` and `known_at`, both
   keyword-only: `competing_claims`, `adjacent`, `candidate_ids`, `lexical_search`,
@@ -3899,14 +3831,14 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
   calls neither.** Every write that ends a claim now goes through `types.close_out` plus
   `put_claim`, because closing a claim moves exactly one clock and neither method can
   express that: `invalidate` writes `invalidated_at` and `invalidated_by` in one
-  statement — that pairing *is* the bug above, written into a signature — and
-  `set_valid_to` writes no pointer at all. They are kept because they are the protocol's
-  only single-statement writes, because `set_valid_to(id, None)` **reopens** an interval
-  and no write path can (`close_out` only ever moves an end earlier), and because both
-  store suites use them to build fixtures. Their docstrings now say which of the two
-  clocks each one stops, and a test refuses a store whose targeted writes are called
-  from any engine path — the row a mistaken caller leaves behind is almost right, and
-  it is the extra column that is wrong.
+  statement — that pairing *is* the `Reconciler._retire` bug under **Fixed**, written
+  into a signature — and `set_valid_to` writes no pointer at all. They are kept because
+  they are the protocol's only single-statement writes, because `set_valid_to(id, None)`
+  **reopens** an interval and no write path can (`close_out` only ever moves an end
+  earlier), and because both store suites use them to build fixtures. Their docstrings now
+  say which of the two clocks each one stops, and a test refuses a store whose targeted
+  writes are called from any engine path — the row a mistaken caller leaves behind is
+  almost right, and it is the extra column that is wrong.
 - **`Store.stats` states that its claim counts do not sum.** `live_claims` is the full
   predicate; a backend that "corrects" the arithmetic has reintroduced the conflation.
   (`ended_claims` joined them later in this release — see *Added*.)
@@ -3930,6 +3862,56 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
 
 ### Fixed
 
+- **Two more tool descriptions called one closure by the other's name.** `memory_forget`'s
+  is fixed in the `memory_end` entry above; these two were still standing after it.
+  `memory_remember` said an exact predicate lets the store "*retire* the previous value" —
+  it **ends** it, and that sentence was on the one tool whose whole job is writing the
+  replacement. `memory_history` described every past value as "*retired*", though
+  `_history` renders `_state()`, which emits both words, so supersession — the common case
+  — was mislabelled to every model that read it.
+
+  This is the same bug `_receipt_summary`'s docstring was written about ("a model reading
+  its own memory tool had three names for two events"), now on its third and fourth
+  instance: that fix corrected the receipt line, `memory_end` corrected `memory_forget`,
+  and neither swept the rest. So two guards now exist rather than a third correction —
+  one asserting every handler reads every property its own schema declares, and one
+  asserting no description uses a retire-word for an operation that ends or the reverse.
+  Both were confirmed to fail against the pre-fix code before being kept, and the second
+  one is what found these two.
+
+- **A fact's past no longer outlives the fact under a budget.** `recall(include_history=…)`
+  built its past values in a flat list that was not index-aligned to the claims, so a
+  budget that dropped a note could leave that note's history rendered beneath a fact no
+  longer there.
+
+- **Superseding a claim no longer records it as an error.** `Reconciler._retire` closed
+  *both* clocks when one value replaced another. `valid_to` was right — Berlin stopped
+  being true when Lisbon began — but `invalidated_at` means *we no longer believe this
+  record*, and the record was never wrong. Every superseded claim in every store this
+  library wrote was marked as a mistake.
+
+  The consequence was that one of the two readings the axes had just gained did not work
+  at all: **"what do we now believe was true in June" returned nothing on any history the
+  write path produced.**
+
+  ```python
+  mem.remember("user", "lives_in", "Berlin", valid_from=J23, recorded_at=J23)
+  mem.remember("user", "lives_in", "Lisbon", valid_from=J26, recorded_at=J26)
+  mem.get_all(as_of=MID)      # ['Berlin']  — worked, and hid the bug
+  mem.get_all(valid_at=MID)   # []          — now ['Berlin']
+  ```
+
+  `as_of` kept answering the whole time, because it rewinds the belief clock past the
+  supersession and so never reads the stamp that was wrong. `valid_at` worked only on
+  stores built by calling `store.put_claim` directly — which is what
+  `tests/test_bitemporal.py`'s fixture did, and its docstring said why.
+
+  The rule now, one line: **closing valid time says the world changed; closing
+  transaction time says the record was wrong, and no write asserts both.** Supersession
+  and retraction are always the first kind — the reconciler is told "here is the new
+  value", never "the old one was a mistake" — so they leave `invalidated_at` unset,
+  keep `invalidated_by`, and produce `Claim.state == "ended"`. `retired` now means what
+  its name says.
 - **A later retirement re-dated the supersession that preceded it.** `why()`'s
   `superseded` list read `invalidated_at` when the row had one, which dates a different
   event: when we stopped believing the *predecessor*, not when the successor displaced
@@ -3995,6 +3977,11 @@ someone reading the store's semantics needs to know is deliberate.
   *descriptive* of the product's own function — the weakest and hardest-to-defend
   trademark class. `memvara` is coined, is a fanciful mark, and is verified free on PyPI,
   GitHub and npm.
+- **Model-backend validation is now shared** (`memvara/llm/_shape.py`). It was private to
+  `anthropic.py`; a second backend reimplementing those rules would drift, and the drift
+  would show up as differently-shaped claims in one store depending on which model was
+  configured the day a turn was written. `anthropic.py` went 296 → 127 lines and is now
+  transport plus response shape only.
 
 ### Added
 
@@ -4030,14 +4017,6 @@ someone reading the store's semantics needs to know is deliberate.
   Windows. A separate job gates coverage at 100%, and a third installs the package with
   no extras and imports every module, so an accidental top-level SDK import cannot pass.
 - **`docs/ROADMAP.md`** — phases 4–8 and the monetization argument.
-
-### Changed
-
-- **Model-backend validation is now shared** (`memvara/llm/_shape.py`). It was private to
-  `anthropic.py`; a second backend reimplementing those rules would drift, and the drift
-  would show up as differently-shaped claims in one store depending on which model was
-  configured the day a turn was written. `anthropic.py` went 296 → 127 lines and is now
-  transport plus response shape only.
 
 ### Fixed
 
