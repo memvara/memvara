@@ -11,6 +11,32 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`episode_score_floor`, which makes `max_episodes` a ceiling rather than a target.**
+  Keep an episode while it scores at least this fraction of the best one; stop where the
+  curve falls off. **It ships at `0.0`**, which takes `max_episodes` regardless and is
+  today's behaviour exactly.
+
+  The problem it addresses: one budget is spent on every question, and questions differ in
+  how much evidence they need by a factor of three. Measured on LongMemEval-S, a
+  multi-session answer needs a median of 24 turns of gold evidence and a
+  single-session-assistant answer needs 8 — and both are served 15. The first is cut
+  mid-evidence and scores 75.5%; the second is over-served and scores 100%.
+
+  The score curve says which case a query is in without anyone knowing its type. The
+  fifteenth turn's score as a fraction of the first's is 0.60, 0.58 and 0.55 for the three
+  categories below parity — still on a plateau of comparable evidence — and 0.47, 0.39 and
+  0.35 for the three at parity, well past the cliff. That ordering matches the accuracy
+  ordering across all six categories.
+
+  Simulated on a 199-question run at `0.55`, it cuts context tokens 27% while allocating by
+  need: 13.5 turns to multi-session, 6.8 to single-session-assistant.
+
+  **Relative, not absolute**, and the distinction matters: `min_score` already refuses
+  evidence that is weak in itself, while this asks whether a result is weak *beside the
+  rest of this answer*, so a query whose whole result set scores low keeps its plateau. The
+  best match always survives whatever the floor, because an empty answer is worse than a
+  thin one.
+
 - **`claims_as_index`, an opt-in that spends a matched claim on finding turns rather than
   on a slot of its own.** With it set, and only when `include_episodes` is also set, a
   ranked claim is replaced by the episodes its `sources` names — each inheriting the
