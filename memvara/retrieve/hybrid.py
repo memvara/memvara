@@ -1327,8 +1327,8 @@ class HybridRetriever:
         out.extend(pending)
         return out[:k]
 
-    def _sourced(self, claims: "list[Retrieved]", episodes: "list[EpisodeResult]",
-                 k: int) -> "list[Retrieved]":
+    def _sourced(self, claims: "Sequence[Retrieved]",
+                 episodes: "Sequence[EpisodeResult]", k: int) -> "list[Retrieved]":
         """Replace each ranked claim with the turns it was extracted from.
 
         The claim keeps its place in the ranking and gives up its slot: every episode it
@@ -1356,7 +1356,13 @@ class HybridRetriever:
         seen = {e.episode.id for e in episodes}
         wanted: dict[str, float] = {}
         for r in claims:
-            for episode_id in getattr(r.claim, "sources", ()) or ():
+            # `Retrieved` is a union and only the claim arm has provenance. `_rank`
+            # returns claims alone today, so this never fires — but the annotation is
+            # the contract, and an episode arriving here should pass through as a turn
+            # rather than raise on a missing attribute.
+            if isinstance(r, EpisodeResult):
+                continue
+            for episode_id in r.claim.sources or ():
                 if episode_id in seen:
                     continue
                 # First claim to cite a turn sets its score: claims arrive in rank order,
@@ -1364,7 +1370,8 @@ class HybridRetriever:
                 wanted.setdefault(episode_id, r.score)
 
         hydrated = self._hydrate_episodes(list(wanted)) if wanted else {}
-        out = list(episodes)
+        # Episodes throughout: every claim gave up its slot, so what comes back is turns.
+        out: list[EpisodeResult] = list(episodes)
         for episode_id, score in wanted.items():
             episode = hydrated.get(episode_id)
             if episode is None:
@@ -1384,7 +1391,11 @@ class HybridRetriever:
         # minted at ingest, so breaking ties on it makes the order a property of which
         # ingest ran rather than of the data.
         out.sort(key=lambda r: (-r.score, r.episode.hash, r.episode.id))
-        return out[:k]
+        # Widened at the boundary rather than typed loosely throughout: `list` is
+        # invariant, so a `list[EpisodeResult]` is not a `list[Retrieved]` however
+        # obviously every element is one.
+        widened: list[Retrieved] = [*out[:k]]
+        return widened
 
     def _rank(self, results: list[Result], k: int) -> list[Result]:
         """Order by score, then spread the head across fact slots, then cut to `k`.
