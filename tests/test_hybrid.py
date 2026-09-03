@@ -2357,3 +2357,22 @@ def test_a_sourced_turn_says_how_it_got_there(store, embedder) -> None:
     assert found.explain.raw_score == found.score
     # No leg fired: this turn was cited, not matched.
     assert (found.explain.vector_rank, found.explain.lexical_rank) == (None, None)
+
+
+def test_an_episode_among_the_claims_contributes_no_sources(store, embedder) -> None:
+    """`Retrieved` is a union and only the claim arm carries provenance.
+
+    `_rank` returns claims alone, so `search` cannot deliver an episode here — but the
+    parameter is annotated with the union, and a caller honouring that annotation would
+    otherwise hit `r.claim` on an episode and raise. Skipping is the contract: an episode
+    has no sources to contribute.
+    """
+    ep, claim_obj = _sourced(store, embedder, "the offsite ran long",
+                             "team", "decided", "sunset kafka")
+    retriever = HybridRetriever(store, embedder, PredicateRegistry(),
+                                claims_as_index=True)
+    stray = EpisodeResult(episode=ep, score=0.9)
+
+    # The stray episode contributes nothing; with no claims alongside it, and no episode
+    # leg results, there is nothing to return at all.
+    assert retriever._sourced([stray], [], 5) == []

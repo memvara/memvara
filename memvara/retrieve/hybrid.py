@@ -1356,10 +1356,11 @@ class HybridRetriever:
         seen = {e.episode.id for e in episodes}
         wanted: dict[str, float] = {}
         for r in claims:
-            # `Retrieved` is a union and only the claim arm has provenance. `_rank`
-            # returns claims alone today, so this never fires — but the annotation is
-            # the contract, and an episode arriving here should pass through as a turn
-            # rather than raise on a missing attribute.
+            # `Retrieved` is a union and only the claim arm carries provenance, so an
+            # episode has no sources to contribute and is skipped. `_rank` returns claims
+            # alone today, which is why this cannot fire from `search`; the annotation is
+            # the contract rather than the current caller, and reaching `r.claim` on an
+            # episode would raise rather than skip.
             if isinstance(r, EpisodeResult):
                 continue
             for episode_id in r.claim.sources or ():
