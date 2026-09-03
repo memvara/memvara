@@ -296,6 +296,7 @@ class HybridRetriever:
         filter_retry_multiplier: int = 10,
         w_episode: float = 0.5,
         max_episodes: int = 3,
+        episode_score_floor: float = 0.0,
         w_temporal: float = 0.0,
         w_graph: float = 0.0,
         derived_terms: "Collection[str]" = (),
@@ -338,6 +339,48 @@ class HybridRetriever:
         # a single well-worded conversation crowd out everything the store knows.
         self.w_episode = w_episode
         self.max_episodes = max_episodes
+        #: Keep an episode while it scores at least this fraction of the best one, or 0.0
+        #: to take `max_episodes` regardless. **It ships at 0.0**, which is today's
+        #: behaviour exactly.
+        #:
+        #: `max_episodes` spends one budget on every question, and questions differ in how
+        #: much evidence they need by a factor of three. Measured on LongMemEval-S, a
+        #: multi-session answer needs a median of 24 turns of gold evidence and a
+        #: single-session-assistant answer needs 8 — and both are served 15. The first is
+        #: cut mid-evidence and scores 75.5%; the second is over-served and scores 100%.
+        #:
+        #: The shape of the score curve says which case a query is in, without anyone
+        #: having to know its type. Taking the fifteenth turn's score as a fraction of the
+        #: first's, the three categories below parity sit at 0.60, 0.58 and 0.55 — still
+        #: on a plateau of comparable evidence — and the three at parity sit at 0.47, 0.39
+        #: and 0.35, well past the cliff. That ordering matches the accuracy ordering
+        #: across all six.
+        #:
+        #: So this makes `max_episodes` a ceiling rather than a target. Measured at 0.55
+        #: over 199 questions against a fixed cap of 15: accuracy 86.4% to 87.4% and
+        #: median context tokens down 10%, with multi-session and temporal reasoning
+        #: rising and the two categories already at parity unchanged. Depth ranged from 1
+        #: to 30 turns and nothing reached the ceiling, so the floor decided every query.
+        #:
+        #: **Relative, not absolute.** `min_score` already refuses evidence that is weak
+        #: in itself; this asks whether a result is weak *beside the rest of this answer*,
+        #: so a query whose whole result set scores low still keeps its plateau.
+        #: Refused outside [0, 1] rather than clamped. Above 1.0 the cutoff exceeds the
+        #: top score, so every result is filtered and the "keep the best match" fallback
+        #: returns exactly one episode — silently, on every query, for the life of the
+        #: process. A caller reading "fraction" as a percentage and passing 55 would get
+        #: one turn per query and simply worse answers. Below 0.0 takes the disabled
+        #: branch, which is as quiet in the other direction. Both mistakes leave the
+        #: caller believing something false about what retrieval will do, and clamping
+        #: would let them go on believing it.
+        if not 0.0 <= episode_score_floor <= 1.0:
+            raise ValueError(
+                f"episode_score_floor must be between 0.0 and 1.0, got "
+                f"{episode_score_floor!r}. It is a fraction of the best result's score, "
+                f"not a percentage: 0.55 keeps results scoring at least 55% of the top "
+                f"one, and 0.0 disables the floor."
+            )
+        self.episode_score_floor = episode_score_floor
         #: Weight of the **episode** temporal leg, and the switch that runs it at all.
         #: At 0.0 no time-ranked candidates are produced and `Explanation.temporal_rank`
         #: stays `None`.
@@ -1151,7 +1194,21 @@ class HybridRetriever:
         # Content hash, not `id`. See `_rank_claims` for why — the same argument, and
         # `Episode.hash` is already the content digest tier 0 dedupes on.
         out.sort(key=lambda r: (-r.score, r.episode.hash, r.episode.id))
-        return out[:self.max_episodes]
+        return self._above_floor(out)[:self.max_episodes]
+
+    def _above_floor(self, results: "list[EpisodeResult]") -> "list[EpisodeResult]":
+        """Cut the tail where the score falls off, or hand back everything.
+
+        The list arrives in descending score, so this is a prefix: the first result below
+        the floor ends it. **The best match always survives**, whatever the floor — an
+        empty answer is worse than a thin one, and a floor of 1.0 asking for exact ties
+        must not be able to empty a result set that had something in it.
+        """
+        if self.episode_score_floor <= 0.0 or not results:
+            return results
+        cutoff = results[0].score * self.episode_score_floor
+        kept = [r for r in results if r.score >= cutoff]
+        return kept or results[:1]
 
     def _hydrate_episodes(self, ids: Sequence[str]) -> dict[str, Episode]:
         """One round trip if the store offers it, N if it is a third-party one."""
