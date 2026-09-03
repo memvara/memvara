@@ -32,11 +32,8 @@ from __future__ import annotations
 import re
 from calendar import monthrange
 from datetime import datetime, timedelta, timezone
-from typing import Literal
 
-from ..types import as_utc
-
-Precision = Literal["instant", "day", "week", "month", "season", "year"]
+from ..types import Precision, as_utc
 
 #: Meteorological seasons, northern hemisphere, by the month each begins. Meteorological
 #: rather than astronomical because the boundaries are calendar dates rather than a
