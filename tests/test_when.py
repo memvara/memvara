@@ -8,8 +8,7 @@ exactly like a true one.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -124,6 +123,17 @@ def test_winter_spans_the_year_boundary() -> None:
 
 # -- future, which resolves: the resolver is temporal, not truth-semantic --------
 
+def test_this_winter_is_the_winter_the_speaker_is_standing_in() -> None:
+    """Winter starts in December and runs into the next year, so in January and February
+    the current season began *last* December. Resolving to the coming December would put
+    the boundary eleven months in the future."""
+    january = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
+    assert boundary("this winter", january) == datetime(2025, 12, 1, tzinfo=timezone.utc)
+    # December is still the winter that starts that month, not the one before it.
+    december = datetime(2026, 12, 20, 12, tzinfo=timezone.utc)
+    assert boundary("this winter", december) == datetime(2026, 12, 1, tzinfo=timezone.utc)
+
+
 def test_future_expressions_resolve_rather_than_being_refused() -> None:
     """Whether a future boundary is meaningful for a predicate is decided elsewhere;
     `reconcile._observed_at` already clamps one to the reconciliation instant."""
@@ -132,9 +142,13 @@ def test_future_expressions_resolve_rather_than_being_refused() -> None:
     assert boundary("next year") == datetime(2027, 1, 1, tzinfo=timezone.utc)
 
 
-def test_today_resolves_to_the_start_of_the_anchors_day() -> None:
-    assert boundary("today") == datetime(2026, 9, 3, tzinfo=timezone.utc)
-    assert precision("today") == "day"
+@pytest.mark.parametrize("expression", ["now", "today", "currently", "these days"])
+def test_a_present_tense_marker_declines(expression: str) -> None:
+    """These locate a claim at the speaking moment, which the anchor already is to the
+    second. Resolving them would replace a precise instant with midnight and stamp a
+    `day` precision on it — strictly less information, presented as more. `fast.py`
+    excludes them from the tail it captures, and this keeps the two tiers agreeing."""
+    assert resolve(expression, ANCHOR) is None
 
 
 # -- adversarial: everything here must decline rather than guess -----------------
@@ -162,9 +176,14 @@ def test_an_expression_it_cannot_resolve_returns_none(expression: str) -> None:
 # -- timezone --------------------------------------------------------------------
 
 def test_calendar_arithmetic_runs_in_the_anchors_timezone() -> None:
-    """22:30 in Kolkata on the 3rd is 17:00 UTC, and "yesterday" there is the 2nd in
-    Kolkata — not the 2nd in UTC, which would be a different instant."""
-    kolkata = ZoneInfo("Asia/Kolkata")
+    """22:30 at +05:30 on the 3rd is 17:00 UTC, and "yesterday" there is the 2nd in that
+    offset — not the 2nd in UTC, which is a different instant.
+
+    A fixed offset rather than `ZoneInfo("Asia/Kolkata")`: the zone's identity is not
+    what is under test, and Windows ships no system tz database, so a named zone makes
+    this a test of whether `tzdata` happens to be installed.
+    """
+    kolkata = timezone(timedelta(hours=5, minutes=30))
     anchor = datetime(2026, 9, 3, 22, 30, tzinfo=kolkata)
     assert boundary("yesterday", anchor) == datetime(2026, 9, 2, tzinfo=kolkata)
 
@@ -177,10 +196,19 @@ def test_a_naive_anchor_is_utc_which_is_the_conventions_this_library_already_has
 
 
 def test_a_dst_transition_does_not_shift_the_day_boundary() -> None:
-    """US clocks went forward on 2026-03-08. The day before it is still a whole day,
-    and midnight is still midnight, which is what `zoneinfo` arithmetic gives and a
-    24-hour subtraction does not."""
-    ny = ZoneInfo("America/New_York")
+    """US clocks went forward on 2026-03-08. The day before it is still a whole day, and
+    midnight is still midnight, which is what `zoneinfo` arithmetic gives and a 24-hour
+    subtraction does not.
+
+    This one genuinely needs a named zone, so it skips where the tz database is absent —
+    Windows ships none, and `tzdata` is not a dependency this library imposes for a
+    behaviour that only a real zone can exercise.
+    """
+    ZoneInfo = pytest.importorskip("zoneinfo").ZoneInfo
+    try:
+        ny = ZoneInfo("America/New_York")
+    except Exception:  # pragma: no cover - only where the tz database is missing
+        pytest.skip("no system tz database and no tzdata package")
     anchor = datetime(2026, 3, 9, 12, 0, tzinfo=ny)
     assert boundary("yesterday", anchor) == datetime(2026, 3, 8, tzinfo=ny)
 
@@ -208,3 +236,15 @@ def test_an_unrecognised_unit_is_kept_rather_than_guessed_at() -> None:
 def test_normalizing_nothing_gives_nothing() -> None:
     assert normalize_unit(None) is None
     assert normalize_unit("") is None
+
+
+@pytest.mark.parametrize("expression, expected", [
+    ("next summer", datetime(2027, 6, 1, tzinfo=timezone.utc)),
+    ("next winter", datetime(2026, 12, 1, tzinfo=timezone.utc)),
+    ("this summer", datetime(2026, 6, 1, tzinfo=timezone.utc)),
+])
+def test_the_coming_season_is_the_next_one_to_start(expression, expected) -> None:
+    """From September 2026: the next summer has not begun, so it is 2027's; the next
+    winter begins this December. "this summer" is the one already past this year, which
+    is what a person means by it in September."""
+    assert boundary(expression) == expected
