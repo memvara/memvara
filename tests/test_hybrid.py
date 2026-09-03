@@ -2141,3 +2141,84 @@ def test_known_at_still_wins_over_a_pinned_now(tmp_path):
         "a pinned now must not shift a query that named its own instant"
     )
     mem.close()
+
+
+# -- adaptive depth: stop at the cliff, not at a constant ------------------------
+#
+# `max_episodes` spends one budget on every question, and questions differ in how much
+# evidence they need by a factor of three. Measured on LongMemEval-S: a multi-session
+# answer needs a median of 24 turns of gold evidence and a single-session-assistant
+# answer needs 8, and both are served 15. The first is truncated mid-evidence and scores
+# 75.5%; the second is over-served and scores 100%.
+#
+# The fifteenth turn's score as a fraction of the first's separates those cases in exactly
+# accuracy order -- 0.60 for multi-session against 0.35 for assistant -- so the shape of
+# the curve says whether the cut is landing on a cliff or in the middle of the evidence.
+
+from datetime import timezone as _tz  # noqa: E402
+
+_D1 = datetime(2023, 5, 20, 1, 8, tzinfo=_tz.utc)
+_D2 = datetime(2023, 5, 29, 0, 35, tzinfo=_tz.utc)
+
+
+def test_the_episode_floor_ships_off(store, embedder) -> None:
+    for i in range(6):
+        turn(store, embedder, f"kafka pipeline ordering note {i}", EP_SCOPE, ts=_D1)
+    r = HybridRetriever(store, embedder, PredicateRegistry(), max_episodes=4)
+    assert r.episode_score_floor == 0.0
+    assert len([x for x in r.search("kafka pipeline", EP_SCOPE, k=10,
+                                    include_episodes=True)
+                if isinstance(x, EpisodeResult)]) == 4
+
+
+def test_a_plateau_is_kept_up_to_the_ceiling(store, embedder) -> None:
+    """Near-identical turns score alike, so none falls below the floor and the ceiling is
+    what stops it. This is the multi-session shape: more evidence, all of it relevant."""
+    for i in range(8):
+        turn(store, embedder, f"kafka pipeline ordering note {i}", EP_SCOPE, ts=_D1)
+    r = HybridRetriever(store, embedder, PredicateRegistry(),
+                        max_episodes=6, episode_score_floor=0.55)
+    assert len([x for x in r.search("kafka pipeline ordering", EP_SCOPE, k=20,
+                                    include_episodes=True)
+                if isinstance(x, EpisodeResult)]) == 6
+
+
+def test_a_cliff_stops_early(store, embedder) -> None:
+    """One strong match and a tail of weak ones. The tail is below the floor, so the
+    ceiling is never reached — which is where the token saving comes from."""
+    turn(store, embedder, "kafka pipeline ordering guarantees", EP_SCOPE, ts=_D1)
+    for i in range(8):
+        turn(store, embedder,
+             f"unrelated note about the quarterly planning calendar, number {i}",
+             EP_SCOPE, ts=_D2)
+    r = HybridRetriever(store, embedder, PredicateRegistry(),
+                        max_episodes=6, episode_score_floor=0.55)
+    found = [x for x in r.search("kafka pipeline ordering guarantees", EP_SCOPE, k=20,
+                                 include_episodes=True) if isinstance(x, EpisodeResult)]
+    assert 0 < len(found) < 6
+
+
+def test_the_floor_is_relative_to_the_best_match(store, embedder) -> None:
+    """Not an absolute cut. `min_score` already refuses weak evidence outright; this asks
+    a different question -- whether a result is weak *compared with what else is here* --
+    so a query whose whole result set scores low still keeps its plateau."""
+    for i in range(5):
+        turn(store, embedder, f"kafka pipeline ordering note {i}", EP_SCOPE, ts=_D1)
+    r = HybridRetriever(store, embedder, PredicateRegistry(),
+                        max_episodes=5, episode_score_floor=0.55)
+    found = [x for x in r.search("kafka", EP_SCOPE, k=20, include_episodes=True)
+             if isinstance(x, EpisodeResult)]
+    assert found, "a uniformly low-scoring set must not be emptied by a relative floor"
+    assert all(f.score >= 0.55 * found[0].score for f in found)
+
+
+def test_the_best_match_survives_any_floor(store, embedder) -> None:
+    """A floor of 1.0 keeps only exact ties with the top. It must never return nothing
+    when there was something to return: an empty answer is worse than a thin one."""
+    turn(store, embedder, "kafka pipeline ordering guarantees", EP_SCOPE, ts=_D1)
+    turn(store, embedder, "a completely unrelated remark about lunch", EP_SCOPE, ts=_D2)
+    r = HybridRetriever(store, embedder, PredicateRegistry(),
+                        max_episodes=5, episode_score_floor=1.0)
+    assert len([x for x in r.search("kafka pipeline ordering guarantees", EP_SCOPE,
+                                    k=20, include_episodes=True)
+                if isinstance(x, EpisodeResult)]) >= 1
