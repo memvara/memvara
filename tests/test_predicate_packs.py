@@ -311,11 +311,13 @@ class TestUnsupportedInterpreter:
 
 # --- the events pack ----------------------------------------------------------
 
+@needs_toml
 def test_the_events_pack_declares_event_predicates() -> None:
     names = {s.name for s in load_specs("events")}
     assert {"ran", "bought", "visited", "attended", "spent"} <= names
 
 
+@needs_toml
 def test_every_events_predicate_is_multi_valued() -> None:
     """The one rule this pack cannot get wrong.
 
@@ -335,6 +337,7 @@ def test_every_events_predicate_is_multi_valued() -> None:
     assert offenders == [], f"event predicates must be many-valued: {offenders}"
 
 
+@needs_toml
 def test_the_events_pack_declares_no_quantity_predicates() -> None:
     """A quantity rides on `amount`/`unit`, which every claim carries whatever its
     predicate. A `distance` or `cost` predicate would be a second way to say the same

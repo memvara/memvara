@@ -2262,3 +2262,98 @@ def test_the_source_spread_ships_disabled(
              if isinstance(r, EpisodeResult)]
             == [r.episode.id for r in off.search("kafka", EP_SCOPE, **q)
                 if isinstance(r, EpisodeResult)])
+
+
+# -- claims as an index into the turns behind them ------------------------------
+#
+# The read-path half of the same argument the write path makes. A claim and the turn it
+# came from currently compete for one slot, and across four benchmark arms the claim
+# loses: retrieval that spent 68-72% of its slots on claims scored below retrieval that
+# spent 53%, while accuracy tracked the number of source turns that reached the prompt.
+#
+# So a matched claim can be worth more as a pointer than as a result. `claims_as_index`
+# spends the match on the claim and the slot on its sources, which is the shape
+# Supermemory publishes: search the memories, inject the chunk behind each hit.
+
+def _sourced(store, embedder, content: str, subject: str, predicate: str, obj: str,
+             ts: datetime | None = None) -> tuple[Episode, Claim]:
+    """A turn and a claim that cites it, both retrievable."""
+    ep = turn(store, embedder, content, EP_SCOPE, **({"ts": ts} if ts else {}))
+    c = add(store, embedder, f"{subject} {predicate} {obj}", EP_SCOPE, predicate=predicate)
+    c.sources = [ep.id]
+    store.put_claim(c)
+    return ep, c
+
+
+def test_a_matched_claim_contributes_its_source_turn(store, embedder) -> None:
+    """The claim earns the slot and the turn fills it."""
+    ep, _ = _sourced(store, embedder, "We sunset the kafka pipeline at the offsite",
+                     "team", "decided", "sunset kafka")
+    retriever = HybridRetriever(store, embedder, PredicateRegistry(),
+                                max_episodes=5, claims_as_index=True)
+    found = retriever.search("kafka", EP_SCOPE, k=5, include_episodes=True)
+    assert all(isinstance(r, EpisodeResult) for r in found), \
+        "with the index on, a claim is a pointer and never a result of its own"
+    assert ep.id in {r.episode.id for r in found}
+
+
+def test_it_ships_disabled_and_changes_nothing_by_default(store, embedder) -> None:
+    _sourced(store, embedder, "We sunset the kafka pipeline at the offsite",
+             "team", "decided", "sunset kafka")
+    plain = HybridRetriever(store, embedder, PredicateRegistry(), max_episodes=5)
+    assert plain.claims_as_index is False
+    found = plain.search("kafka", EP_SCOPE, k=5, include_episodes=True)
+    assert any(not isinstance(r, EpisodeResult) for r in found), \
+        "the default must still return claims as results"
+
+
+def test_a_turn_the_episode_leg_already_found_is_not_duplicated(store, embedder) -> None:
+    """The two paths reach the same turn constantly — the episode leg by its text, the
+    claim leg through provenance. Emitting it twice would spend two slots on one turn,
+    which is the crowding this change exists to end."""
+    ep, _ = _sourced(store, embedder, "kafka pipeline ordering guarantees never held",
+                     "team", "decided", "sunset kafka")
+    retriever = HybridRetriever(store, embedder, PredicateRegistry(),
+                                max_episodes=5, claims_as_index=True)
+    found = retriever.search("kafka pipeline ordering", EP_SCOPE, k=10,
+                             include_episodes=True)
+    ids = [r.episode.id for r in found if isinstance(r, EpisodeResult)]
+    assert ids.count(ep.id) == 1
+
+
+def test_a_claim_whose_source_is_gone_contributes_nothing(store, embedder) -> None:
+    """Provenance can outlive the turn: `erase` removes a turn and leaves the claims
+    that cited it. A dangling id must drop out rather than raise inside ranking."""
+    c = add(store, embedder, "team decided sunset kafka", EP_SCOPE, predicate="decided")
+    c.sources = ["ep_does_not_exist"]
+    store.put_claim(c)
+    retriever = HybridRetriever(store, embedder, PredicateRegistry(),
+                                max_episodes=5, claims_as_index=True)
+    assert retriever.search("kafka", EP_SCOPE, k=5, include_episodes=True) == []
+
+
+def test_a_sourced_turn_says_how_it_got_there(store, embedder) -> None:
+    """A turn reached *only* through a claim may share no vocabulary with the query,
+    because the claim did the matching. That is exactly the result a reader will be
+    puzzled by, and this library's reason for having `Explanation` at all is that
+    retrieval which cannot explain itself is impossible to debug.
+
+    Tested on `_sourced` directly with no episode-leg results, because that is the only
+    way to guarantee the turn arrived by citation: when the episode leg also finds it,
+    the leg wins the tie and keeps its own explanation, which is the intended behaviour
+    and is covered by the deduplication test above.
+    """
+    ep, claim_obj = _sourced(store, embedder, "the offsite ran long",
+                             "team", "decided", "sunset kafka")
+    retriever = HybridRetriever(store, embedder, PredicateRegistry(),
+                                claims_as_index=True)
+    [carrier] = [r for r in retriever.search("sunset kafka", EP_SCOPE, k=5)
+                 if r.claim.id == claim_obj.id]
+
+    [found] = retriever._sourced([carrier], [], 5)
+    assert found.episode.id == ep.id
+    assert found.score == carrier.score
+    assert found.explain.final_score == found.score
+    assert found.explain.raw_score == found.score
+    # No leg fired: this turn was cited, not matched.
+    assert (found.explain.vector_rank, found.explain.lexical_rank) == (None, None)

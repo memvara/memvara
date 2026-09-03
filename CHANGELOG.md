@@ -11,6 +11,34 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`claims_as_index`, an opt-in that spends a matched claim on finding turns rather than
+  on a slot of its own.** With it set, and only when `include_episodes` is also set, a
+  ranked claim is replaced by the episodes its `sources` names — each inheriting the
+  claim's score, merged with the episode leg, deduplicated by episode id — and the claim
+  itself does not appear. It was the index entry.
+
+  **It ships off**, and it is a hypothesis under measurement rather than a recommendation.
+  What prompted it: a claim and the turn it came from currently compete for one slot, and
+  across four LongMemEval-S arms the claim loses. Retrieval spending 68-72% of its slots
+  on claims scored *below* retrieval spending 53%, while accuracy tracked how many source
+  turns reached the prompt — 2.2 turns at 41.8%, 6.1 at 61.0%, 10.0 at 70.5%. A turns-only
+  arm scored 46.2%, no better than leaving the claims in, so claims are not obviously
+  worth their slots and the open question is whether they are worth anything as a *route*
+  to turns.
+
+  Two properties worth knowing before switching it on. **The result can be shorter than
+  either input**, because several claims commonly cite one turn — that is the honest
+  outcome and the reason the arm measuring this reports distinct turns retrieved next to
+  accuracy. And **the inherited score is an approximation**: a claim's score measures how
+  well the claim matched and is being used to order a turn, which is wrong for a long turn
+  that produced one narrowly-matching claim. Re-scoring each sourced turn would be a second
+  pass over text the episode leg has already ranked, which is the cost this avoids.
+
+  Turns that arrive by citation carry an `Explanation` with the inherited score and every
+  leg `None`, so a reader can tell a cited turn from a matched one — such a turn may share
+  no vocabulary with the query at all. A `sources` entry naming an erased turn contributes
+  nothing rather than raising.
+
 - **Event time and quantities on the write path.** Both write tiers now resolve the
   temporal expression a turn carries and store it as `valid_from`, with the precision it
   was resolved at; and a claim can carry one measured quantity.

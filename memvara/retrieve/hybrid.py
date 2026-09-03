@@ -297,6 +297,7 @@ class HybridRetriever:
         w_episode: float = 0.5,
         max_episodes: int = 3,
         max_per_source: int = 0,
+        claims_as_index: bool = False,
         w_temporal: float = 0.0,
         w_graph: float = 0.0,
         derived_terms: "Collection[str]" = (),
@@ -360,6 +361,25 @@ class HybridRetriever:
         # reached. Raising it to 2 or 3 alongside a larger `max_episodes` is the
         # version of this idea that has not been measured yet.
         self.max_per_source = max_per_source
+        #: Spend a matched claim on finding turns rather than on a slot of its own.
+        #:
+        #: A claim and the turn it came from currently compete for one slot, and across
+        #: four LongMemEval arms the claim loses that competition: retrieval spending
+        #: 68-72% of its slots on claims scored *below* retrieval spending 53%, while
+        #: accuracy tracked how many source turns reached the prompt (2.2 turns at 41.8%,
+        #: 6.1 at 61.0%, 10.0 at 70.5%). A turns-only arm scored 46.2%, no better than
+        #: leaving the claims in — so claims are not obviously worth their slots, and the
+        #: remaining question is whether they are worth anything as a *route* to turns.
+        #:
+        #: With this on, a ranked claim is replaced by the episodes its `sources` names,
+        #: each inheriting the claim's score so the ranking is preserved rather than
+        #: recomputed, merged with the episode leg and deduplicated. The claim does not
+        #: appear: it was the index entry. This is the shape Supermemory publishes —
+        #: search the memories, inject the chunk behind each hit.
+        #:
+        #: **It ships off**, and is inert unless `include_episodes` is also set, since
+        #: without episodes there would be nothing left to return.
+        self.claims_as_index = claims_as_index
         #: Weight of the **episode** temporal leg, and the switch that runs it at all.
         #: At 0.0 no time-ranked candidates are produced and `Explanation.temporal_rank`
         #: stays `None`.
@@ -618,11 +638,12 @@ class HybridRetriever:
 
         ranked: list[Retrieved] = list(self._rank(results, depth))
         if include_episodes and wanted is None:
-            ranked = self._interleave(
-                ranked,
-                self._episodes(query, scopes, limit, valid_at, known_at, min_score,
-                               weights, now),
-                depth)
+            episodes = self._episodes(query, scopes, limit, valid_at, known_at,
+                                      min_score, weights, now)
+            if self.claims_as_index:
+                ranked = self._sourced(ranked, episodes, depth)
+            else:
+                ranked = self._interleave(ranked, episodes, depth)
         if self.reranker is not None:
             # Last, deliberately. Everything above it — fusion, the recency half-lives,
             # the per-slot diversity cap, the episode discount — is the ranking this
@@ -1304,6 +1325,65 @@ class HybridRetriever:
                 out.append(pending.pop(0))
             out.append(r)
         out.extend(pending)
+        return out[:k]
+
+    def _sourced(self, claims: "list[Retrieved]", episodes: "list[EpisodeResult]",
+                 k: int) -> "list[Retrieved]":
+        """Replace each ranked claim with the turns it was extracted from.
+
+        The claim keeps its place in the ranking and gives up its slot: every episode it
+        cites inherits its score, so the order the legs produced is preserved rather than
+        recomputed. Recomputing would mean scoring each sourced turn against the query
+        again — a second pass over text the episode leg has already ranked — which is the
+        cost this is trying to avoid.
+
+        **Inheriting the score is an approximation and worth naming.** A claim's score
+        measures how well *the claim* matched, and it is being used to order a turn. The
+        justification is that the claim was extracted from that turn, so a query the claim
+        answers is a query the turn is about; the failure mode is a long turn that
+        produced one narrowly-matching claim and now ranks on it.
+
+        Deduplication is by episode id and the episode leg wins ties, because it reached
+        the turn on the turn's own text. Several claims commonly cite one turn, so the
+        result can be *shorter* than either input — that is the honest outcome, not a bug,
+        and it is why the arm that measures this reports distinct turns retrieved
+        alongside accuracy.
+
+        A `sources` entry naming a turn that no longer exists contributes nothing.
+        `erase` removes a turn and leaves the claims that cited it, so a dangling id is a
+        normal state of the store and not a corruption to raise on.
+        """
+        seen = {e.episode.id for e in episodes}
+        wanted: dict[str, float] = {}
+        for r in claims:
+            for episode_id in getattr(r.claim, "sources", ()) or ():
+                if episode_id in seen:
+                    continue
+                # First claim to cite a turn sets its score: claims arrive in rank order,
+                # so this is the best-scoring claim that points at it.
+                wanted.setdefault(episode_id, r.score)
+
+        hydrated = self._hydrate_episodes(list(wanted)) if wanted else {}
+        out = list(episodes)
+        for episode_id, score in wanted.items():
+            episode = hydrated.get(episode_id)
+            if episode is None:
+                continue
+            # An explanation, not the default empty one. "Retrieval that cannot explain
+            # itself is impossible to debug" is this library's stated reason for having
+            # the field at all, and a turn that arrived through a claim is exactly the
+            # case a reader will be puzzled by: it may share no vocabulary with the query,
+            # because the claim extracted from it did the matching. `raw_score` and
+            # `final_score` carry the inherited value so a ranking diff still works, and
+            # every leg stays `None` because this turn won no leg — it was cited.
+            out.append(EpisodeResult(
+                episode=episode, score=score,
+                explain=Explanation(raw_score=score, final_score=score),
+            ))
+        # Content hash before id, for the reason `_episodes` states: an episode id is
+        # minted at ingest, so breaking ties on it makes the order a property of which
+        # ingest ran rather than of the data.
+        out.sort(key=lambda r: (-r.score, r.episode.hash, r.episode.id))
         return out[:k]
 
     def _rank(self, results: list[Result], k: int) -> list[Result]:
