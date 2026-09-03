@@ -1,5 +1,14 @@
 # The write-path fix was built, measured, and did not work
 
+> **Corrected the same day. Both claims in the original version were wrong.** The three
+> model-ingest arms ran with `read_max_episodes=5, read_max_per_source=1` left over from an
+> earlier experiment, while the fast-path baseline they were compared against ran on
+> `max_episodes=3` with no spread — so the comparison mixed the ingest method with a
+> retrieval setting already measured as costing points. Re-run with retrieval matched, the
+> arms differ on **at most 3 of 52 questions** and no difference reaches significance. The
+> honest result is not "worse"; it is **no measurable difference, on a sample far too small
+> to detect one.** The corrected numbers are at the end.
+
 **Date:** 2026-09-03
 **Sample:** 52 questions, stratified random across all six LongMemEval-S categories, seed
 `20260903`. Every figure below is on the same 52.
@@ -90,3 +99,51 @@ because the Postgres store silently dropped the new columns, one because `shape_
 silently dropped them from the model's reply. Both were explicit field lists that fail
 without erroring. A three-question probe found the second for nothing, and should have
 been run before the first.
+
+## Corrected result
+
+The three model-ingest arms were re-compared against a fast-path arm run through the
+**same retrieval configuration** — same `max_episodes`, same source spread — so that only
+the ingest differs. The fast-path data was already in the store, so this cost one cheap
+arm and no re-ingest.
+
+| arm | retrieval | accuracy | median ctx |
+| --- | --- | ---: | ---: |
+| fast path | cap 3, no spread *(original baseline)* | 51.9% | 775 |
+| **fast path** | **cap 5 + one per source** | **48.1%** | 1,354 |
+| gpt-5.4, profile predicates | cap 5 + one per source | 46.2% | 1,758 |
+| event schema | cap 5 + one per source | 44.2% | 1,679 |
+| event schema, claims filtered out | cap 5 + one per source | 46.2% | 1,169 |
+
+**3.8 of the ~6 points originally attributed to the ingest were the retrieval setting.**
+
+What remains is not a result. Paired against the matched control across 52 questions:
+
+| arm | wins | fast-path wins | exact p |
+| --- | ---: | ---: | ---: |
+| gpt-5.4 profile | 1 | 2 | 1.00 |
+| event schema | 0 | 2 | 0.50 |
+| turns only | 1 | 2 | 1.00 |
+
+Every arm agrees with the control on 49 or more of the 52 questions.
+
+## The design could never have answered the question
+
+At n=52 and a base rate near 48%, the 95% interval on a single arm is **±13.6 points**, and
+the smallest difference this design could detect with any confidence is roughly **19
+points**. The observed differences are 1.9, 3.9 and 1.9.
+
+The sample was sized to a gateway budget rather than to a detectable effect, and every
+conclusion drawn from it — in both directions — was beyond what it could support. The
+earlier retrieval arms are not affected by this: those ran 266 questions and moved the
+number by 20 to 38 points, which is comfortably outside the noise.
+
+## What is actually known
+
+- The write path now records event times and quantities, verified end to end in Postgres
+  (`played | tennis | 1.5 hour`, `paid | mortgage | 2023-04-01 | month`). That part works.
+- Whether it helps, hurts, or does nothing on LongMemEval is **unmeasured**. Answering it
+  needs roughly 200 questions per arm, which is four to five keys per arm at current
+  extraction cost.
+- The claim that model-based ingest is worse than the fast path is also unmeasured, and
+  was asserted twice in this document's history on evidence that did not support it.
