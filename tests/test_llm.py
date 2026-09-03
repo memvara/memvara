@@ -632,3 +632,28 @@ def test_compose_relations_reads_a_bare_map_as_well_as_the_wrapped_one() -> None
         "grandfather": 2, "uncle": 2}
     assert AnthropicLLM(client=bare).compose_relations(["father"]) == {
         "grandfather": 2, "uncle": 2}
+
+
+def test_the_durability_rule_admits_dated_and_measured_happenings() -> None:
+    """The extraction prompt used to rule events out by construction.
+
+    "Skip anything transient to the current exchange" is the rule that keeps a memory
+    store from filling with chatter, and it is right — but it also classified "I ran 30
+    minutes yesterday" as transient, so no amount of event *vocabulary* could produce an
+    event *claim*. A predicate pack supplies names; it does not supply intent.
+
+    The carve-out is deliberately conditional rather than a relaxation: a happening earns
+    durability by carrying a time or a measurement, and an undated, unmeasured one is
+    still skipped. Asserted here because the prompt is the only place this is stated and
+    a later edit could quietly drop the clause.
+    """
+    from memvara.llm.base import EXTRACT_SYSTEM
+
+    assert "transient to the current exchange" in EXTRACT_SYSTEM, \
+        "the durability rule itself must survive; this is a carve-out, not a removal"
+    assert "counts as durable when the turn gives it a time or a measured quantity" \
+        in EXTRACT_SYSTEM
+    assert "still skipped" in EXTRACT_SYSTEM, \
+        "the undated case must stay excluded, or the store fills with chatter"
+    for field in ("`when`", "`amount`/`unit`"):
+        assert field in EXTRACT_SYSTEM, f"the prompt must name {field} for it to be filled"

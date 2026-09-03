@@ -199,6 +199,11 @@ You extract durable facts from conversation turns and emit them as (subject, pre
 Rules:
 - Only extract facts that will still be worth knowing in a later, unrelated conversation. \
 Skip pleasantries, acknowledgements, questions, and anything transient to the current exchange.
+- A thing that happened counts as durable when the turn gives it a time or a measured \
+quantity: "I ran 30 minutes yesterday", "I spent $40 on groceries last week", "I finished \
+the course in March". Record those, with the time in `when` and the measurement in \
+`amount`/`unit`. An undated, unmeasured happening is transient and is still skipped - \
+"I went for a run" alone is not worth a later conversation, and "I ran 5k on Tuesday" is.
 - subject: use "user" for the person speaking, or a lowercase entity name.
 - predicate: lowercase snake_case. Reuse a predicate from the known list whenever it fits \
 - consistency matters far more than precision here, because predicates are how \
