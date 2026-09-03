@@ -122,6 +122,7 @@ transport is stdio and the configuration is entirely environment.
 | `MEMVARA_AGENT`, `MEMVARA_SESSION` | narrow further. Leave unset for durable facts — memory written at session scope is invisible to the next session. |
 | `MEMVARA_LLM` | `none` (default, offline), `anthropic` (needs `ANTHROPIC_API_KEY` and `memvara[anthropic]`), or `openai` (needs `OPENAI_API_KEY` and `memvara[openai]`). |
 | `MEMVARA_LLM_MODEL` | Model name for `MEMVARA_LLM=openai`. Unset uses the adapter's own default. Point `OPENAI_BASE_URL` at a self-hosted OpenAI-compatible server (vLLM, llama.cpp, Ollama's shim) and name its model here. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
+| `MEMVARA_LLM_MAX_CLAIMS` | Cap on the claims array for `MEMVARA_LLM=openai`. Unset means uncapped, which is right for hosted OpenAI — it closes the array itself, and OpenAI documents `maxItems` as unsupported under strict mode. Set it for a self-hosted server that constrains decoding, where an uncapped array gives the grammar no way to end a response. A positive integer; anything else is refused at startup. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_EMBEDDER` | `hashing` (default, offline, 512-dimensional), `hashing:<dim>`, `local` or `local:<model>` (needs `memvara[local-embed]`), or `auto`. See [The embedder is named, not discovered](#the-embedder-is-named-not-discovered). |
 | `MEMVARA_READ_ONLY` | `1` hides every tool that writes. |
 
@@ -135,13 +136,15 @@ a model to be talked into changing.
 `MEMVARA_LLM=openai` reaches any OpenAI-compatible endpoint, not just OpenAI's. The
 endpoint is deliberately **not** a memvara setting: the adapter builds its client through
 the official SDK, which reads `OPENAI_BASE_URL` and `OPENAI_API_KEY` from the environment
-itself. So there is one variable of memvara's own here, and it is the model name.
+itself. So memvara's own variables here are the model name and, for a server that
+constrains decoding, the claim cap.
 
 ```bash
 OPENAI_BASE_URL=http://127.0.0.1:8000/v1 \
 OPENAI_API_KEY=whatever \
 MEMVARA_LLM=openai \
 MEMVARA_LLM_MODEL=Qwen/Qwen3.5-4B-Instruct \
+MEMVARA_LLM_MAX_CLAIMS=32 \
 MEMVARA_DB=$HOME/.memvara/memory.db python3 -m memvara.server
 ```
 
@@ -149,9 +152,25 @@ MEMVARA_DB=$HOME/.memvara/memory.db python3 -m memvara.server
 to construct a client without one. A server started without it fails at startup with a
 `ConfigError` saying so, rather than on the first turn that needed extraction.
 
-`MEMVARA_LLM_MODEL` applies to the `openai` backend only. Under `MEMVARA_MODE=cloud` it is
-refused outright, along with `MEMVARA_LLM` and `MEMVARA_EMBEDDER`: extraction runs inside
-the deployment, so a model named here would be read and never used.
+**Set `MEMVARA_LLM_MAX_CLAIMS` if the server constrains decoding**, which vLLM and
+llama.cpp both do — they compile the response schema to a grammar. An uncapped claims
+array leaves "one more claim" permanently legal, so the grammar has no way to end a
+response: a model that begins restating itself runs to its token limit still emitting
+well-formed claim objects, and the reply arrives as truncated JSON that parses as nothing.
+The real claims that came before the restatements are lost with it. Measured against
+phi-4-mini through llama.cpp, one extraction in three failed this way, and a cap removed
+all of them. 32 is a reasonable starting point: above any well-formed response measured
+(19 or fewer) and below the observed runaway (past 35).
+
+Leave it unset for hosted OpenAI. That model closes the array itself, so it needs no cap,
+and OpenAI documents `maxItems` as unsupported under strict mode — where an unsupported
+keyword is rejected rather than ignored, so a cap there buys nothing and risks the call.
+An unusable value is refused at startup rather than clamped, `0` included.
+
+`MEMVARA_LLM_MODEL` and `MEMVARA_LLM_MAX_CLAIMS` apply to the `openai` backend only. Under
+`MEMVARA_MODE=cloud` both are refused outright, along with `MEMVARA_LLM` and
+`MEMVARA_EMBEDDER`: extraction runs inside the deployment, so a value named here would be
+read and never used.
 
 ### The embedder is named, not discovered
 

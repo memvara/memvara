@@ -12,8 +12,9 @@ importable from the foundation modules:
   `ClaimState`, `resolve_states()`, `state_predicate()`, `stored_state_predicate()`,
   `live_predicate()`
 - `memvara/embed/` — `Embedder` protocol, `HashingEmbedder`, `CachedEmbedder`, `default_embedder()`
-- `memvara/llm/base.py` — `LLM` protocol, `NullLLM`, `CLAIM_SCHEMA`, `PREDICATE_SCHEMA`,
-  `EXTRACT_SYSTEM`, `PREDICATE_SYSTEM`
+- `memvara/llm/base.py` — `LLM` protocol, `NullLLM`, `CLAIM_SCHEMA`, `RESOLVE_SCHEMA`,
+  `PREDICATE_SCHEMA`, `EXTRACT_SYSTEM`, `RESOLVE_SYSTEM`, `PREDICATE_SYSTEM`,
+  `MAX_CLAIMS`, `bounded_claim_schema()`
 
 ## Design invariants (do not violate)
 
