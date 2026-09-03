@@ -9,6 +9,42 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`bounded_claim_schema(max_claims)`, `OpenAILLM(max_claims=...)` and
+  `MEMVARA_LLM_MAX_CLAIMS` to reach it from a server**, for a backend that constrains
+  decoding. Unbounded, "one more claim" is permanently a legal
+  continuation, which is only safe for a model that stops on its own: a backend that
+  compiles the schema to a grammar — llama.cpp, vLLM — has no legal way to end a response
+  the grammar still permits to continue, so a model that begins restating itself runs to
+  its token limit still emitting well-formed claim objects and the reply arrives as
+  truncated JSON. Everything in that response is lost, including the real claims that came
+  before the restatements. Measured against phi-4-mini through llama.cpp, one extraction in
+  three was lost this way.
+
+  **The cap is opt-in, not part of `CLAIM_SCHEMA`, because OpenAI's strict mode rejects
+  `maxItems`** — capping the shared schema would 400 every hosted extraction in order to
+  protect a self-hosted one. The default is 32: above every well-formed response measured
+  (19 or fewer) and below the observed runaway (past 35).
+
+  `MEMVARA_LLM_MAX_CLAIMS` takes a positive integer and refuses anything else at startup
+  rather than clamping it: `0` would forbid every claim and make extraction a silent
+  no-op, and a typo falling back to uncapped would leave a grammar backend with the exact
+  failure the cap was set to prevent. Like `MEMVARA_LLM_MODEL` it is refused under
+  `MEMVARA_MODE=cloud`, where extraction runs inside the deployment and a value named here
+  would be read and never used.
+
+  Nothing changes for the hosted backends: the default is uncapped, and their request
+  bodies are byte-identical to before.
+
+### Changed
+
+- **`test_every_schema_satisfies_strict_mode` now denies the keywords strict mode
+  rejects**, not just the object-shape rules it required before. Its promise was to keep a
+  schema edit from breaking the OpenAI path, and it could not see the largest class of
+  such edits: `FakeCompletions` returns a canned payload without validating the schema, so
+  an unsupported keyword left the whole suite green and failed every real call.
+
 ## [0.10.0] — 2026-09-03
 
 ### Added

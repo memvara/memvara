@@ -3221,6 +3221,58 @@ def test_openai_backend_model_name_is_configurable(monkeypatch):
     memory.close()
 
 
+def test_the_claim_cap_reaches_the_openai_backend(monkeypatch):
+    """The cap is only reachable from a deployment if this variable carries it there.
+
+    It exists for the self-hosted case: a server that compiles the schema to a grammar
+    has no legal way to end a response an uncapped array still permits to continue, so a
+    model that begins restating itself runs to its token limit and the reply arrives as
+    truncated JSON. Measured against phi-4-mini, one extraction in three."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+        "MEMVARA_LLM_MAX_CLAIMS": "12"}))
+    schema = memory.llm._claim_schema["properties"]["claims"]
+    assert schema["maxItems"] == 12
+    memory.close()
+
+
+def test_no_cap_is_the_default_because_hosted_openai_rejects_one(monkeypatch):
+    """`maxItems` is on strict mode's unsupported keyword list, so a default cap would
+    400 every hosted extraction to protect a self-hosted one."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai"}))
+    assert "maxItems" not in memory.llm._claim_schema["properties"]["claims"]
+    memory.close()
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "3.5", "twelve"])
+def test_an_unusable_claim_cap_is_refused_at_startup(value):
+    """Refused rather than clamped or ignored. `0` would forbid every claim and make
+    extraction a silent no-op, and a typo falling back to uncapped would leave a grammar
+    backend with exactly the failure the cap was set to prevent."""
+    with pytest.raises(ConfigError, match="MEMVARA_LLM_MAX_CLAIMS"):
+        ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+                               "MEMVARA_LLM_MAX_CLAIMS": value})
+
+
+def test_cloud_mode_refuses_a_claim_cap():
+    """Same rule as the extraction model: extraction runs inside the deployment, so a cap
+    named here would be read and never used."""
+    cloud = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
+                                   "MEMVARA_LLM_MAX_CLAIMS": "12"})
+    assert cloud.llm_max_claims == 12
+    with pytest.raises(ConfigError, match="MEMVARA_LLM_MAX_CLAIMS"):
+        build_memvara(cloud)
+
+
 def test_a_missing_openai_sdk_is_a_startup_error_not_a_crash(monkeypatch):
     monkeypatch.setitem(sys.modules, "openai", None)
     with pytest.raises(ConfigError, match="needs the openai SDK"):

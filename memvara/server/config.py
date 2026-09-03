@@ -119,6 +119,14 @@ class ServerConfig:
     #: endpoint itself is not a memvara setting: `OpenAILLM`'s default client construction
     #: reads `OPENAI_BASE_URL` from the SDK's own environment handling.
     llm_model: str | None = None
+    #: Cap on the claims array for the "openai" backend, and it only matters for the
+    #: self-hosted case `llm_model` describes. A server that constrains decoding to the
+    #: schema — llama.cpp and vLLM compile it to a grammar — cannot end a response the
+    #: schema still permits to continue, so a model that begins restating itself runs to
+    #: its token limit and the reply arrives as truncated JSON that parses as nothing.
+    #: Unset leaves the array uncapped, which is right for hosted OpenAI: it closes the
+    #: array itself, and its strict mode rejects `maxItems` outright.
+    llm_max_claims: int | None = None
     #: "local" (default) opens MEMVARA_DB on disk, exactly as before this field existed.
     #: "cloud" opens no local file at all; it resolves an API key (MEMVARA_API_KEY, or
     #: the credentials file `memvara-mcp login` writes) and talks to `server_url` instead.
@@ -205,6 +213,7 @@ class ServerConfig:
             read_only=_flag(env.get("MEMVARA_READ_ONLY"), "MEMVARA_READ_ONLY"),
             llm=backend,
             llm_model=_optional(env.get("MEMVARA_LLM_MODEL")),
+            llm_max_claims=_max_claims(env.get("MEMVARA_LLM_MAX_CLAIMS")),
             embedder=_embedder_spec(env.get("MEMVARA_EMBEDDER")),
             mode=mode,
             server_url=server_url,
@@ -216,6 +225,26 @@ class ServerConfig:
     def scope_kwargs(self) -> dict[str, Any]:
         return {"tenant": self.tenant, "user": self.user, "agent": self.agent,
                 "session": self.session}
+
+
+def _max_claims(raw: str | None) -> int | None:
+    """A positive integer, or `None` for uncapped.
+
+    Refused at startup rather than clamped, because every wrong value here means
+    something an operator would want to know: `0` would forbid every claim and turn
+    extraction into a silent no-op, and a typo that fell back to uncapped would leave a
+    grammar backend with the failure the cap was set to prevent.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return None
+    if not (value.isdigit() and int(value) > 0):
+        raise ConfigError(
+            f"MEMVARA_LLM_MAX_CLAIMS={raw!r} is not a positive integer. Leave it unset "
+            "for no cap, which is what hosted models want. Set it only for a self-hosted "
+            "server that constrains decoding, where an uncapped array has no legal way to "
+            "end a response.")
+    return int(value)
 
 
 def _optional(raw: str | None) -> str | None:
@@ -313,12 +342,17 @@ def _anthropic() -> Any:
             f"MEMVARA_LLM=anthropic needs the anthropic SDK and a key: {exc}") from exc
 
 
-def _openai(model: str | None) -> Any:
+def _openai(model: str | None, max_claims: int | None = None) -> Any:
     # Imported here so the default offline configuration never touches the optional SDK.
     from ..llm.openai import OpenAILLM
 
     try:
-        return OpenAILLM(model=model) if model else OpenAILLM()
+        kwargs: dict[str, Any] = {}
+        if model:
+            kwargs["model"] = model
+        if max_claims is not None:
+            kwargs["max_claims"] = max_claims
+        return OpenAILLM(**kwargs)
     except Exception as exc:
         # Deliberately wider than ImportError. `openai.OpenAI()` refuses to construct
         # without a key, and that refusal is the SDK's own error rather than an import
@@ -374,7 +408,7 @@ def _llm(config: ServerConfig) -> Any:
     if config.llm == "anthropic":
         return _anthropic()
     if config.llm == "openai":
-        return _openai(config.llm_model)
+        return _openai(config.llm_model, config.llm_max_claims)
     raise ConfigError(
         f"MEMVARA_LLM={config.llm!r} is listed in _BACKENDS but _llm() has no branch "
         "for it, so this server cannot say which model it would extract with. This is "
@@ -406,6 +440,7 @@ _SERVER_SIDE_UNDER_CLOUD = (
     ("llm", "none", "MEMVARA_LLM", "llm"),
     ("embedder", _DEFAULT_EMBEDDER, "MEMVARA_EMBEDDER", "embedder"),
     ("llm_model", None, "MEMVARA_LLM_MODEL", "extraction model"),
+    ("llm_max_claims", None, "MEMVARA_LLM_MAX_CLAIMS", "claim cap"),
 )
 
 

@@ -12,8 +12,9 @@ importable from the foundation modules:
   `ClaimState`, `resolve_states()`, `state_predicate()`, `stored_state_predicate()`,
   `live_predicate()`
 - `memvara/embed/` — `Embedder` protocol, `HashingEmbedder`, `CachedEmbedder`, `default_embedder()`
-- `memvara/llm/base.py` — `LLM` protocol, `NullLLM`, `CLAIM_SCHEMA`, `PREDICATE_SCHEMA`,
-  `EXTRACT_SYSTEM`, `PREDICATE_SYSTEM`
+- `memvara/llm/base.py` — `LLM` protocol, `NullLLM`, `CLAIM_SCHEMA`, `RESOLVE_SCHEMA`,
+  `PREDICATE_SCHEMA`, `EXTRACT_SYSTEM`, `RESOLVE_SYSTEM`, `PREDICATE_SYSTEM`,
+  `MAX_CLAIMS`, `bounded_claim_schema()`
 
 ## Design invariants (do not violate)
 
@@ -1207,6 +1208,22 @@ Hard API requirements — these are current and getting them wrong is a 400:
   raise a clear install hint if it is missing.
 - Use `CLAIM_SCHEMA` / `PREDICATE_SCHEMA` / `EXTRACT_SYSTEM` / `PREDICATE_SYSTEM` from
   `llm/base.py` rather than redefining them.
+- **Do not add JSON Schema keywords to the shared schemas.** Strict mode rejects a long
+  list of them — `maxItems`, `minItems`, `pattern`, `minimum`, `format`,
+  `propertyNames` among others — and an unsupported keyword is a 400, not something
+  ignored, so one added keyword takes the backend off the air. `FakeCompletions` does not
+  validate the schema, so nothing in the suite catches it except the denylist in
+  `test_every_schema_satisfies_strict_mode`.
+- If your backend constrains decoding, cap the claims array with
+  `bounded_claim_schema(n)` rather than the shared `CLAIM_SCHEMA`. Unbounded, "one more
+  claim" stays legal forever and a grammar has no legal way to end a response: a model
+  that starts restating itself runs to its token limit and the reply arrives as truncated
+  JSON, losing the good claims that preceded the restatements too. A hosted model closes
+  the array itself, which is why this is opt-in — `OpenAILLM(max_claims=...)` is the seam,
+  because that backend serves both hosted OpenAI and self-hosted servers.
+- `_SCHEMA_NAMES` is keyed on the identity of the module-level schema dicts, so pass
+  `_call(..., name=...)` explicitly for any schema you build at runtime. A copy falls
+  through to `"result"`, which the API accepts, so there is nothing to notice.
 - Validate and coerce the model's output before returning: drop claims with a missing or
   out-of-range `source_index`, clamp `confidence` to `[0, 1]`, and normalize predicates to
   snake_case. The engine trusts these dicts, so this is the trust boundary.

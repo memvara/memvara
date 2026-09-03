@@ -28,6 +28,8 @@ rather than being detected by class name.
 
 from __future__ import annotations
 
+import copy
+
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence, runtime_checkable
 
@@ -144,6 +146,15 @@ class NullLLM:
 # Constrained decoding rather than "please reply with JSON": no parse-retry loop, no
 # markdown fences to strip, no partially-valid objects to defend against.
 
+#: Default ceiling for `bounded_claim_schema`. Deliberately not applied to `CLAIM_SCHEMA`
+#: itself, for the reason that function documents.
+#:
+#: 32 because a bound is there to stop a runaway, not to edit a good answer. Measured
+#: against phi-4-mini through llama.cpp on 2026-09-03: the runaway passed 35 claims, while
+#: every well-formed response produced 19 or fewer, so 32 sits above anything real and
+#: below the failure.
+MAX_CLAIMS = 32
+
 CLAIM_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -181,6 +192,37 @@ CLAIM_SCHEMA: dict[str, Any] = {
     "required": ["claims"],
     "additionalProperties": False,
 }
+
+
+def bounded_claim_schema(max_claims: int = MAX_CLAIMS) -> dict[str, Any]:
+    """`CLAIM_SCHEMA` with the claims array capped, for a backend that constrains decoding.
+
+    Unbounded, "one more claim" is forever a legal continuation, which is only safe for a
+    model that stops on its own. A backend that compiles this schema to a grammar —
+    llama.cpp, vLLM — has no legal way to end a response the grammar still permits to
+    continue: a model that starts restating itself runs to its token limit still emitting
+    well-formed claim objects, and the reply arrives as truncated JSON that parses as
+    nothing, losing the real claims that preceded the restatements along with it. Measured
+    against phi-4-mini through llama.cpp, one extraction in three was lost this way.
+
+    **The cap is opt-in rather than part of `CLAIM_SCHEMA` because OpenAI's strict-mode
+    structured output rejects `maxItems`.** It sits on the documented list of keywords
+    strict mode does not permit, alongside `minItems`, `uniqueItems` and `pattern`, and an
+    unsupported keyword is a 400 rather than something ignored — so putting the cap in the
+    shared schema would take the hosted OpenAI backend off the air in order to protect a
+    local one. `test_every_schema_satisfies_strict_mode` pins that boundary.
+
+    A hosted model closes the array itself and needs no cap; a self-hosted server reached
+    through the same `openai` backend does. That split is why this is a parameter and not
+    a constant.
+
+    What exceeding the cap costs is the backend's business rather than this function's: a
+    grammar backend stops at `max_claims`, so the tail of an unusually rich turn is lost,
+    while a backend that ignores `maxItems` is unaffected and the cap is inert.
+    """
+    schema = copy.deepcopy(CLAIM_SCHEMA)
+    schema["properties"]["claims"]["maxItems"] = max_claims
+    return schema
 
 PREDICATE_SCHEMA: dict[str, Any] = {
     "type": "object",
