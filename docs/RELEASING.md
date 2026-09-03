@@ -1,6 +1,6 @@
 # Releasing memvara
 
-PyPI has `memvara` 0.7.0 (first upload 2026-08-14, `0.1.0`). npm has `memvara` 0.1.0.
+PyPI has `memvara` 0.9.0 (first upload 2026-08-14, `0.1.0`). npm has `memvara` 0.1.1.
 
 **The two release on separate tags and this document covers both.** `v*` publishes the
 Python package through `release.yml`; `npm-v*` publishes the npm package through
