@@ -239,3 +239,24 @@ cap-15 number.
 Not done, and not to be read as done: the other 301 questions have not been run on any of
 these arms (the user's decision stands until the 199 number is where they want it); arm B is the only configuration with a replicate; and the filter has only been measured with the question in
 hand, which is the query-time design and not an ingest-time one.
+
+## Addendum, 2026-09-04 evening: the intent-routed arm, and where the proxy stops working
+
+One more arm was screened and judged after the replicate. The inclusive filter pass with the
+adaptive rendering is applied only on the 98 questions an aggregation rule fires on (how many,
+how much, total, all, every, each, list, how long, days, weeks, months, between), and arm B's
+precise pass with whole turns everywhere else. Offline it was the best profile of anything
+screened: 178 of 192 fully covered and a judged upside of +3 against arm B with no losses.
+
+| arm | run id | correct | % | median tokens | vs arm B |
+|---|---|---|---|---|---|
+| I: intent-routed filter | memvara-intent720 | 181/199 | 91.0 | 673 | 3 wins, 4 losses, net −1 |
+
+Predicted 185 (178 to 192); landed at 181, inside the range and below the adoption bar of 184.
+Of the three questions the screen said it would recover, one came in. Four judged runs of the
+mechanism now sit at 181 or 182 (B, its replicate, C + v2, I). The coverage proxy that ordered
+the earlier arms correctly no longer predicts judged movement at this level: +3 predicted, −1
+delivered. The remaining misses on the 199 are at the reader's noise floor, and further
+rendering variants are not worth judged spend. What is left to measure is the reader itself
+(several samples with a vote), the competitor through the same harness, and the other 301
+questions.
