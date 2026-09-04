@@ -13,9 +13,17 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Iterable, Literal, cast
 
 from .entities import OWNER_SEP, entity_key
+
+if TYPE_CHECKING:
+    # For annotations only. `memvara.select.base` imports `Usage` from `memvara.llm.base`,
+    # which imports `Episode` from here — so an eager import of `Selection` would be a
+    # cycle. `from __future__ import annotations` (above) already stringifies every
+    # annotation in this module, so nothing below needs `Selection` to exist at runtime.
+    from .retrieve.hybrid import Retrieved
+    from .select.base import Selection
 
 
 #: How coarse a resolved temporal boundary is. See `Claim.temporal_precision`.
@@ -901,6 +909,18 @@ class Explanation:
     #: available row looks like. `search(anchored=True)` returns only the first three.
     #: See `memvara/retrieve/anchor.py`.
     anchor: str | None = None
+    #: Whether a ranked read's model consultation named this turn. `True` it kept the
+    #: turn, `False` it saw the turn and did not, `None` the selector never saw it — a
+    #: claim (a selector sees only turns), a turn past the selector's `top_n`, a plain
+    #: read, or a ranked read the model never answered (`unconfigured`, `disabled`,
+    #: `key_rejected`, or a fallback). See `memvara.select` and `hybrid.py`'s ranked
+    #: stage.
+    selected: bool | None = None
+    #: The verbatim span the model copied out for a kept turn, set only when `selected`
+    #: is `True`. A courtesy, not the ranking: a turn the model named with a span it
+    #: could not verify as a genuine substring is still kept, with this left `None` — see
+    #: `memvara.select.model._clean_span`.
+    span: str | None = None
 
     def summary(self) -> str:
         bits = []
@@ -1030,6 +1050,31 @@ class Result:
                 f"{'+'.join(legs) or 'no-retriever'} {self.claim.id}>")
 
 
+class SearchResults(list):
+    """Everything `HybridRetriever.search` returns, plus how a ranked read went.
+
+    A list subclass rather than a wrapper, so every existing caller that indexes,
+    iterates, slices or serializes a search result keeps working unchanged and
+    `isinstance(result, list)` still holds — the only thing this adds is one attribute.
+    `selection` is `None` on a plain read and a `Selection` on any ranked one, including
+    an empty result: a ranked read that named nothing to keep still has to say what
+    happened, and an empty list has no item left to carry that on, which is why this is
+    not a per-item field.
+    """
+
+    __slots__ = ("selection",)
+
+    def __init__(self, results: "Iterable[Retrieved]" = (), *,
+                selection: "Selection | None" = None) -> None:
+        super().__init__(results)
+        self.selection = selection
+
+    # Deliberately no custom `__repr__`: `list.__repr__` prints `[]` for an empty result
+    # and the ordinary element-by-element form otherwise, which is what every existing
+    # doctest and interactive session already expects from `search()`. `.selection` is
+    # not visible in that repr — read it directly, the same way a caller reads it.
+
+
 @dataclass(frozen=True, slots=True)
 class RecallResult:
     """What `recall(with_ids=True)` returns: the prompt block, and what is in it.
@@ -1071,6 +1116,12 @@ class RecallResult:
     #: parse that prose to learn its answer was bounded would be reading a sentence
     #: written for a model.
     dropped: int = 0
+    #: How a ranked `recall(ranked=True)` call's model consultation went, or `None` on a
+    #: plain call. The same record `search()` carries on `SearchResults.selection` — see
+    #: `memvara.select.base.Selection` — so a caller of this surface reads the outcome
+    #: without parsing the trailing `RECALL_UNRANKED` line the text block ends with when
+    #: the model did not rank it.
+    selection: "Selection | None" = None
 
     def __repr__(self) -> str:
         # Not the dataclass repr: `text` is a whole system prompt, and printing one at a

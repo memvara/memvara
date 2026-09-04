@@ -114,6 +114,44 @@ class LLM(Protocol):
         ...
 
 
+@runtime_checkable
+class Chat(Protocol):
+    """A backend that can hold one unstructured system+user exchange and hand back text.
+
+    Its own protocol rather than a third method on `LLM`, for the reason `RelationComposer`
+    (`retrieve/compose.py`) is its own protocol: adding a member to a `runtime_checkable`
+    protocol breaks `isinstance` for every implementation that predates it, and a
+    downstream backend finds out when its type checker does. `LLM` calls a model for
+    exactly two things, and this is not one of them — it exists for `memvara.select`,
+    which needs a plain chat completion, not the schema-constrained extraction the two
+    `LLM` methods make.
+
+    A backend that does not have this is not broken. `ModelSelector.__init__` refuses to
+    construct on one, with a `TypeError` naming the extra to install — the same courtesy
+    `OpenAILLM._default_client` gives an absent SDK.
+    """
+
+    def chat(self, system: str, prompt: str, *, json_object: bool,
+             max_completion_tokens: int, timeout: float,
+             usage: "Usage | None" = None) -> str:
+        """One request: a system message, a user message, the reply's text back.
+
+        `json_object` asks the backend for its provider's loosest JSON-shaped response
+        mode where one exists (OpenAI's `response_format: {"type": "json_object"}`); a
+        backend with no such mode relies on the prompt asking for JSON in prose, as
+        `memvara.select`'s does, and treats the flag as informational.
+
+        `timeout` is the caller's remaining budget for this one call, in seconds — not a
+        per-socket-operation limit, the whole round trip. The caller starts and reads its
+        own clock around this call; `timeout` is a hint the backend forwards to its
+        transport, not something this method enforces itself.
+
+        Add this call's tokens to `usage` when it is not None and this backend sets
+        `reports_usage`, exactly as `extract` and `resolve_predicate` do.
+        """
+        ...
+
+
 class NullLLM:
     """No-op backend. Deterministic paths still work; extraction simply yields nothing."""
 

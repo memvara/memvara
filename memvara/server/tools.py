@@ -62,6 +62,7 @@ from ..core import Memvara, is_derived
 # lines below: it is the store's own spelling rule, and a copy of it here would be a
 # second implementation that can disagree about whether a fold happened.
 from ..schema import _slugify
+from ..select import SelectorBusy
 from ..types import (Accumulation, Claim, Collapse, Dispute, MemoryType, Retype,
                      WriteReceipt, utcnow)
 from .memory_api import MemoryAPI
@@ -280,6 +281,26 @@ _ANCHORED = {
     ),
 }
 
+#: `memory_recall` only — `memory_search` pins `include_episodes` to `False`, which a
+#: ranked call refuses outright, so the argument would always raise there.
+_RANKED = {
+    "type": "boolean",
+    "default": False,
+    "description": (
+        "Consult a model, on this server's own key, to name which of the retrieved turns "
+        "actually bear on the question, and put those first, whole, ahead of everything "
+        "else. Default false. Set it when a question is worth a model call and the "
+        "answer is likely in something that was said rather than in a stored fact; leave "
+        "it off for an ordinary turn. It needs include_episodes true and no memory_types "
+        "filter. When the server has no key on file, the operator has switched the mode "
+        "off, the provider rejected the key, or the model call failed or timed out, the "
+        "read is served in the default order and the block ends with a line saying "
+        "which of those happened — the ranking was not skipped silently. When the "
+        "server's ranked reads are already at capacity, the call fails and asks you to "
+        "retry in a few seconds; that failure costs nothing and is worth one retry."
+    ),
+}
+
 #: The same switch on `memory_ask`, described for a tool that returns readings about
 #: fact slots rather than a list of memories, and that has no `min_score` to combine with.
 _ANCHORED_ASK = {
@@ -461,15 +482,26 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
     # sent to `memory_search`, which is the id-bearing tool and says so. `with_ids`
     # stays a library API, for a programmatic caller that renders its own prompt and
     # then has to cite it.
-    return ctx.memory.recall(
-        args["query"],
-        k=args["k"],
-        min_score=args["min_score"],
-        anchored=bool(args.get("anchored", False)),
-        memory_types=_memory_types(args.get("memory_types")),
-        budget=args.get("budget"),
-        include_episodes=bool(args.get("include_episodes", False)),
-    ) or _no_match(args["query"])
+    try:
+        text = ctx.memory.recall(
+            args["query"],
+            k=args["k"],
+            min_score=args["min_score"],
+            anchored=bool(args.get("anchored", False)),
+            ranked=bool(args.get("ranked", False)),
+            memory_types=_memory_types(args.get("memory_types")),
+            budget=args.get("budget"),
+            include_episodes=bool(args.get("include_episodes", False)),
+        )
+    except SelectorBusy as exc:
+        # The one ranked-read outcome that is not served at all (see `memvara.select`):
+        # the cap is full, and the caller is asked to retry rather than shown a block in
+        # the plain order with nothing to distinguish it from an ordinary read's.
+        raise ToolError(
+            "memvara's ranked reads are at capacity right now. Retry in a few seconds, "
+            "or call memory_recall again without ranked for an ordinary read."
+        ) from exc
+    return text or _no_match(args["query"])
 
 
 #: The bracket field saying a machine derived the row: one more metadata token beside
@@ -1485,11 +1517,12 @@ TOOLS: tuple[Tool, ...] = (
             "answer. Call it at the START of a turn whenever the reply could depend on "
             "something the user told you earlier — their name, where they live or work, "
             "how they like things done, a decision they already made, a preference, a "
-            "constraint. Call it speculatively; it is cheap, local, and involves no "
-            "model. Returns numbered plain-text notes, ready to read as context, with no "
-            "scores or JSON to filter out. An empty result means nothing is stored, not "
-            "that you should try again. Prefer this over memory_search whenever the goal "
-            "is to answer the user rather than to inspect the memory itself."
+            "constraint. Call it speculatively; it is cheap and local, and involves no "
+            "model unless you set ranked on a server with a selector. Returns "
+            "numbered plain-text notes, ready to read as context, with no scores or JSON "
+            "to filter out. An empty result means nothing is stored, not that you should "
+            "try again. Prefer this over memory_search whenever the goal is to answer "
+            "the user rather than to inspect the memory itself."
         ),
         properties={
             "include_episodes": {
@@ -1537,6 +1570,7 @@ TOOLS: tuple[Tool, ...] = (
             },
             "min_score": _MIN_SCORE,
             "anchored": _ANCHORED,
+            "ranked": _RANKED,
             "memory_types": _MEMORY_TYPES_FILTER,
         },
         required=("query",),

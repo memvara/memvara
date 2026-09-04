@@ -400,6 +400,46 @@ RETRIEVAL_OBSERVATION_RANK_CORR = "retrieval.observation_rank_corr"
 #: End-to-end `search()` duration.
 RETRIEVAL_LATENCY_MS = "retrieval.latency_ms"
 
+#: One per ranked read the model **answered** — the read-side twin of `write.llm_calls`,
+#: counting model consultations rather than method invocations. Never emitted on a
+#: fallback or a read served unranked, so it does not share a name with either: this is
+#: the series a quota allowance sums, and quota sums a source by name and ignores tags.
+#: Untagged on purpose.
+RETRIEVAL_MODEL_QUERY = "retrieval.model_query"
+
+#: A ranked read served by fallback — the model call timed out, failed to connect,
+#: returned any HTTP error other than 401/403, or answered with something that was not
+#: JSON. Tagged `reason` (`timeout`, `error`, `provider`, `malformed`) and `status` (the
+#: provider's HTTP status, only when `reason` is `provider`).
+#:
+#: **A call that timed out was still made, and the provider bills it.** The customer paid
+#: for a read that came back unranked, which is why this series is read as cost as well
+#: as latency.
+RETRIEVAL_MODEL_FALLBACK = "retrieval.model_fallback"
+
+#: A ranked read the selector did not run a model for. Tagged `reason` — `unconfigured`
+#: (no `read_selector` configured), `disabled` (`admit()` refused the read; the
+#: operator's switch), `key_rejected` (the provider answered 401 or 403), or `inflight`
+#: (`admit()` raised `SelectorBusy`; the only reason among these that is not served).
+#: `key_rejected` is counted apart from `retrieval.model_fallback` on purpose: the
+#: fallback reasons are transient and a revoked key is not.
+RETRIEVAL_MODEL_REFUSED = "retrieval.model_refused"
+
+#: Tokens the selector's model call consumed, in and out. Emitted only when the `Usage`
+#: accumulator reports more than zero — `_shape.record_usage`'s rule — so a call the
+#: backend cannot measure, or one that never returned a usage block, publishes no series
+#: rather than a zero that would understate a bill in the direction that favours us.
+RETRIEVAL_TOKENS_IN = "retrieval.tokens_in"
+RETRIEVAL_TOKENS_OUT = "retrieval.tokens_out"
+
+#: The selector's model call alone, on every call that was made whatever it returned —
+#: answered, timed out, errored, or refused by the provider with 401/403. Not emitted
+#: when no call was made at all (`unconfigured`, `disabled`, `inflight`). Same rule as
+#: `write.extract_ms`: a provider timeout is latency the caller waited through, so the
+#: call that raised is counted too. `retrieval.latency_ms` minus this, on a read that
+#: carries both, is the reranker's own cost.
+RETRIEVAL_SELECT_MS = "retrieval.select_ms"
+
 #: **Live claims in the most crowded slot**, per consolidation pass. If exactly one
 #: series from this module is ever put on a dashboard, make it this one: thirteen
 #: simultaneously-live answers to "where does the user work?" was the worst defect in

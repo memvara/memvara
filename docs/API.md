@@ -40,9 +40,10 @@ mem.reset()                                       -> dict[str, int] # scope + sc
 #   valid_at=  the world clock   known_at=  the belief clock   as_of=  both at once
 # the first three also take `states=`, any non-empty subset of ("live", "ended",
 # "retired"), defaulting to ["live"]; `include_invalidated=` is its two-valued alias.
-mem.search(query, *, k=10, min_score=0.0, anchored=False, T=None, memory_types=None,
-           states=None, include_invalidated=None, include_episodes=False)
-                                                  -> list[Retrieved]
+mem.search(query, *, k=10, min_score=0.0, anchored=False, ranked=False, T=None,
+           memory_types=None, states=None, include_invalidated=None,
+           include_episodes=False)
+                                                  -> SearchResults  # a list, plus .selection
 #   anchored=True keeps only the results the query names an entity of — a claim whose
 #     subject or object the query names, or one the graph leg reached from such a
 #     claim — so a question about an entity the store has never heard of returns []
@@ -50,7 +51,12 @@ mem.search(query, *, k=10, min_score=0.0, anchored=False, T=None, memory_types=N
 #     `Explanation.anchor` (subject | object | path | None). Needs no number; combines
 #     with min_score. Against a hosted deployment it is sent only when set, so a server
 #     from before the field refuses it rather than quietly answering unfiltered.
-mem.recall(query, *, k=8, min_score=0.0, anchored=False, header=None,
+#   ranked=True runs a configured read_selector over the reranked turns and returns the
+#     ones it named first, whole, with Explanation.selected/.span set — see
+#     memvara.select. Needs include_episodes=True and no memory_types (ValueError
+#     otherwise). SearchResults.selection records what happened: None on a plain read,
+#     else an outcome of applied | fallback | unconfigured | disabled | key_rejected.
+mem.recall(query, *, k=8, min_score=0.0, anchored=False, ranked=False, header=None,
            include_episodes=False,
            episode_header=None, include_history=False, history_header=None,
            budget=None, counter=<internal>, with_ids=False)
@@ -63,9 +69,14 @@ mem.recall(query, *, k=8, min_score=0.0, anchored=False, header=None,
 #     heuristic that under-counts CJK, so a budget it meets can still overflow the
 #     real one, and code that reaches for it by name is usually code that wanted a
 #     real tokenizer.
-#   with_ids=True returns RecallResult(text, claim_ids, dropped) instead of `str`.
-#     `text` is byte-identical to what you would have got; `claim_ids` is in render
-#     order, 1:1 with the notes, so note n is claim_ids[n - 1]. Live facts only —
+#   ranked=True renders every kept turn whole, first in the turn block, ahead of the
+#     unkept turns at their usual char cut. k still bounds the facts; budget still bounds
+#     the kept turns (they arrived outside k). A block the model did not actually rank
+#     ends with a RECALL_UNRANKED line naming why; with_ids=True puts the same outcome
+#     on RecallResult.selection instead of making you parse the line.
+#   with_ids=True returns RecallResult(text, claim_ids, dropped, selection) instead of
+#     `str`. `text` is byte-identical to what you would have got; `claim_ids` is in
+#     render order, 1:1 with the notes, so note n is claim_ids[n - 1]. Live facts only —
 #     an episode has no claim id, and a past value is not the source of a
 #     present-tense answer.
 mem.get(claim_id)                                 -> Claim | None

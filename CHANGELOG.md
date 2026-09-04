@@ -11,6 +11,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`ranked=True` on `search()` and `recall()`: an opt-in read mode that consults a
+  model to name which of the reranked turns actually bear on the question**, on the
+  caller's own key. `Memvara(read_selector=ModelSelector(llm=...), read_rerank_top_n=...)`
+  configures it; every other read is unaffected, and a read that never sets `ranked=True`
+  never sees a `read_selector` mentioned, let alone called. See `memvara.select` for the
+  protocol, `HybridRetriever.search`'s docstring for the read order, and
+  `docs/superpowers/specs/2026-09-04-model-ranked-recall-design.md` for the full design.
+
+  A ranked read is one query-time chat call, billed to whichever key `read_selector`
+  was built with — memvara's own cost is unchanged, $0, because the call never reaches
+  memvara's infrastructure. `search()` returns a `SearchResults` (a `list` subclass
+  carrying `.selection`, the outcome — `applied`, `fallback`, `unconfigured`, `disabled`
+  or `key_rejected`); `recall()`'s text block ends with a `RECALL_UNRANKED` line whenever
+  the model did not actually rank it, so a caller reading the block sees the order it
+  received rather than assuming the order it asked for.
+
+  **The default read path is unchanged**: no `read_selector` configured is the shipped
+  default, `ranked` defaults to `False`, and a plain read imports nothing this adds. No
+  accuracy number is carried here — the parity run against the shipped configuration is
+  a separate, later entry.
+
 - **`bounded_claim_schema(max_claims)`, `OpenAILLM(max_claims=...)` and
   `MEMVARA_LLM_MAX_CLAIMS` to reach it from a server**, for a backend that constrains
   decoding. Unbounded, "one more claim" is permanently a legal

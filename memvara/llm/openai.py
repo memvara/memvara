@@ -86,6 +86,7 @@ class OpenAILLM:
         max_tokens: int = 8192,
         temperature: float = 0.0,
         max_claims: int | None = None,
+        base_url: str | None = None,
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens
@@ -101,11 +102,11 @@ class OpenAILLM:
         self.temperature = temperature
         self.name = f"openai/{model}"
         if client is None:
-            client = self._default_client()
+            client = self._default_client(base_url)
         self._client = client
 
     @staticmethod
-    def _default_client() -> Any:
+    def _default_client(base_url: str | None = None) -> Any:
         # Imported here, not at module scope, so `import memvara` works in the default
         # offline configuration where the SDK is not installed at all.
         try:
@@ -116,7 +117,10 @@ class OpenAILLM:
                 "OpenAILLM needs the `openai` package: pip install 'memvara[openai]'. "
                 "Pass `client=` to inject one, or use NullLLM to run without a model."
             ) from exc
-        return openai.OpenAI()
+        # `base_url` matters to the hosted service, which stores one per organisation
+        # rather than always reaching api.openai.com — an Azure or self-hosted
+        # OpenAI-compatible endpoint. `None` keeps the SDK's own default.
+        return openai.OpenAI(base_url=base_url) if base_url else openai.OpenAI()
 
     # -- request ------------------------------------------------------------
 
@@ -143,6 +147,33 @@ class OpenAILLM:
         # the refusal-to-guess live in one place so the two backends cannot drift.
         _shape.record_usage(response, usage, "prompt_tokens", "completion_tokens")
         return response
+
+    # -- Chat protocol --------------------------------------------------------
+
+    def chat(self, system: str, prompt: str, *, json_object: bool,
+             max_completion_tokens: int, timeout: float,
+             usage: Usage | None = None) -> str:
+        """Plain chat completion for `memvara.select` — no schema, no temperature.
+
+        Deliberately not routed through `_call`: `_call` hard-codes strict `json_schema`
+        and a `temperature`, and the selector's prompt was measured with neither — the
+        request this sends has to match `extract.py`'s, byte for byte in the messages and
+        exactly in these two parameters.
+        """
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_completion_tokens": max_completion_tokens,
+            "timeout": timeout,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        if json_object:
+            kwargs["response_format"] = {"type": "json_object"}
+        response = self._client.chat.completions.create(**kwargs)
+        _shape.record_usage(response, usage, "prompt_tokens", "completion_tokens")
+        return _first_text(response)
 
     # -- LLM protocol -------------------------------------------------------
 

@@ -88,7 +88,7 @@ class MemoryAPI(Protocol):
         """
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
-               anchored: bool = False,
+               anchored: bool = False, ranked: bool = False,
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False,
                budget: int | None = None) -> str:
@@ -99,6 +99,11 @@ class MemoryAPI(Protocol):
         and raises for any value other than `None`: `POST /v1/recall` renders server-side
         and takes no budget, and a ceiling silently not applied is an oversized prompt
         with nothing to notice it by.
+
+        `ranked` is declared here and not on `search` above because `memory_search` does
+        not take it (`server/tools.py`, "The MCP door" in the design spec): `_search`
+        pins `include_episodes` to `False`, which a ranked call refuses outright, so a
+        `ranked` argument on that tool would be one that always raises.
         """
 
     def get(self, claim_id: str) -> Claim | None: ...

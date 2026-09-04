@@ -217,7 +217,7 @@ class AsyncMemvara:
     # most: awaiting the wrapper would be the version you have to narrow.
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ...,
+                     anchored: bool = ..., ranked: bool = ...,
                      tenant=..., user=..., agent=..., session=...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
@@ -228,7 +228,7 @@ class AsyncMemvara:
 
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ...,
+                     anchored: bool = ..., ranked: bool = ...,
                      tenant=..., user=..., agent=..., session=...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
@@ -239,7 +239,7 @@ class AsyncMemvara:
 
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ...,
+                     anchored: bool = ..., ranked: bool = ...,
                      tenant=..., user=..., agent=..., session=...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
@@ -249,7 +249,7 @@ class AsyncMemvara:
                      include_episodes: bool) -> list[Retrieved]: ...
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
-                     anchored: bool = False,
+                     anchored: bool = False, ranked: bool = False,
                      tenant=None, user=None, agent=None, session=None,
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
@@ -260,6 +260,7 @@ class AsyncMemvara:
         """See `Memvara.search`. Encodes the query, so it belongs off the loop too."""
         return await asyncio.to_thread(
             self.memvara.search, query, k=k, min_score=min_score, anchored=anchored,
+            ranked=ranked,
             tenant=tenant,
             user=user, agent=agent, session=session, as_of=as_of, valid_at=valid_at,
             known_at=known_at, states=states,
@@ -271,7 +272,7 @@ class AsyncMemvara:
     # the promise broken where it costs most.
     @overload
     async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ...,
+                     anchored: bool = ..., ranked: bool = ...,
                      header: str | None = ..., tenant=..., user=..., agent=...,
                      session=..., memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: bool = ..., episode_header: str | None = ...,
@@ -281,7 +282,7 @@ class AsyncMemvara:
 
     @overload
     async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ...,
+                     anchored: bool = ..., ranked: bool = ...,
                      header: str | None = ..., tenant=..., user=..., agent=...,
                      session=..., memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: bool = ..., episode_header: str | None = ...,
@@ -291,7 +292,7 @@ class AsyncMemvara:
 
     @overload
     async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ...,
+                     anchored: bool = ..., ranked: bool = ...,
                      header: str | None = ..., tenant=..., user=..., agent=...,
                      session=..., memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: bool = ..., episode_header: str | None = ...,
@@ -300,7 +301,7 @@ class AsyncMemvara:
                      with_ids: bool) -> str | RecallResult: ...
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
-                     anchored: bool = False,
+                     anchored: bool = False, ranked: bool = False,
                      header: str | None = None, tenant=None, user=None, agent=None,
                      session=None, memory_types: Sequence[MemoryType] | None = None,
                      include_episodes: bool = False,
@@ -313,6 +314,7 @@ class AsyncMemvara:
         """See `Memvara.recall`."""
         return await asyncio.to_thread(
             self.memvara.recall, query, k=k, min_score=min_score, anchored=anchored,
+            ranked=ranked,
             header=header,
             tenant=tenant, user=user, agent=agent, session=session,
             memory_types=memory_types, include_episodes=include_episodes,
@@ -604,7 +606,7 @@ class AsyncScopedMemvara:
     # the one that must not be the more-convenient facade that types worse.
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ...,
+                     anchored: bool = ..., ranked: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -614,7 +616,7 @@ class AsyncScopedMemvara:
 
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ...,
+                     anchored: bool = ..., ranked: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -624,7 +626,7 @@ class AsyncScopedMemvara:
 
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ...,
+                     anchored: bool = ..., ranked: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -633,7 +635,7 @@ class AsyncScopedMemvara:
                      include_episodes: bool) -> list[Retrieved]: ...
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
-                     anchored: bool = False,
+                     anchored: bool = False, ranked: bool = False,
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
                      states: Collection[str] | None = None,
@@ -641,8 +643,8 @@ class AsyncScopedMemvara:
                      memory_types: Sequence[MemoryType] | None = None,
                      include_episodes: bool = False) -> list[Any]:
         return await self._amem.search(
-            query, k=k, min_score=min_score, anchored=anchored, as_of=as_of,
-            valid_at=valid_at,
+            query, k=k, min_score=min_score, anchored=anchored, ranked=ranked,
+            as_of=as_of, valid_at=valid_at,
             known_at=known_at, states=states,
             include_invalidated=include_invalidated,
             memory_types=memory_types, include_episodes=include_episodes, **self._kw)
@@ -650,7 +652,7 @@ class AsyncScopedMemvara:
     # The same three variants again, for the reason given on `ScopedMemvara.recall`.
     @overload
     async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ...,
+                     anchored: bool = ..., ranked: bool = ...,
                      header: str | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: bool = ..., episode_header: str | None = ...,
@@ -660,7 +662,7 @@ class AsyncScopedMemvara:
 
     @overload
     async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ...,
+                     anchored: bool = ..., ranked: bool = ...,
                      header: str | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: bool = ..., episode_header: str | None = ...,
@@ -670,7 +672,7 @@ class AsyncScopedMemvara:
 
     @overload
     async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ...,
+                     anchored: bool = ..., ranked: bool = ...,
                      header: str | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: bool = ..., episode_header: str | None = ...,
@@ -679,7 +681,7 @@ class AsyncScopedMemvara:
                      with_ids: bool) -> str | RecallResult: ...
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
-                     anchored: bool = False,
+                     anchored: bool = False, ranked: bool = False,
                      header: str | None = None,
                      memory_types: Sequence[MemoryType] | None = None,
                      include_episodes: bool = False,
@@ -690,7 +692,8 @@ class AsyncScopedMemvara:
                      counter: Callable[[str], int] = _approx_tokens,
                      with_ids: bool = False) -> Any:
         return await self._amem.recall(
-            query, k=k, min_score=min_score, anchored=anchored, header=header,
+            query, k=k, min_score=min_score, anchored=anchored, ranked=ranked,
+            header=header,
             memory_types=memory_types,
             include_episodes=include_episodes, episode_header=episode_header,
             include_history=include_history, history_header=history_header,

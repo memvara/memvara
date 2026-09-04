@@ -35,12 +35,17 @@ was being read as holding further than it does.
 
    > **Claim.** Deduplication, contradiction resolution, ranking, decay and time travel
    > are pure functions of stored state.
-   > **Scope.** The library. Only `extract()` and `resolve_predicate()` may touch a model,
-   > and both are on the write path. Nothing on the read path calls one at all — a
-   > reranker is a cross-encoder rather than a generative model, and it is off by default.
+   > **Scope.** The library, by default. Only `extract()` and `resolve_predicate()` may
+   > touch a model, and both are on the write path. Nothing on the read path calls one
+   > unless the caller opts in — a reranker is a cross-encoder rather than a generative
+   > model, and it is off by default; `search(ranked=True)` against a retriever
+   > configured with a `read_selector` (`memvara.select`) is the one opt-in exception, one
+   > chat call per read, on the caller's own key, and it changes nothing about a plain
+   > read.
    > **Sketch.** `NullLLM` is the default `llm=`, so the shipped configuration has no
-   > model to call; `HybridRetriever`, `Reconciler` and `Consolidator` take no `llm`
-   > parameter at all.
+   > model to call; `Reconciler` and `Consolidator` take no `llm` parameter at all, and
+   > `HybridRetriever` takes one only as `selector=`, which is `None` by default and
+   > consulted only on a call that passes `ranked=True`.
    > **Measured.** `bench/mem0_real.py`: 2 write-path LLM calls against mem0's 105 on the
    > same 105-turn transcript, and **identical final state on every run** where mem0's
    > differs. `tests/test_packaging.py::test_nothing_but_numpy_is_imported_while_the_

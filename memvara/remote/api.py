@@ -33,8 +33,8 @@ from typing import Any, Collection, Literal, Mapping, Sequence, overload
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import EpisodeResult, Path, Retrieved
 from ..types import (
-    Answer, Claim, Delta, Episode, MemoryType, Provenance, Result, Scope, WriteReceipt,
-    closure,
+    Answer, Claim, Delta, Episode, MemoryType, Provenance, Result, Scope, SearchResults,
+    WriteReceipt, closure,
 )
 from . import hydrate
 from .client import DEFAULT_TIMEOUT, HttpClient
@@ -308,7 +308,7 @@ class RemoteMemvara:
     # none when it was not asked for them.
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -317,7 +317,7 @@ class RemoteMemvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -326,7 +326,7 @@ class RemoteMemvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -334,7 +334,7 @@ class RemoteMemvara:
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
-               anchored: bool = False,
+               anchored: bool = False, ranked: bool = False,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -346,20 +346,27 @@ class RemoteMemvara:
         A POST for a read, as the facade defines it: the query is text somebody wrote,
         and a GET would put it in the request line, where it lands in access logs, proxy
         logs and `Referer` headers.
+
+        `ranked` is sent only when set, so a server from before the field refuses the
+        request (422) rather than answering unranked as though it had honoured it — the
+        one refusal `ranked` inherits from `anchored`, its precedent. The return value is
+        always a `SearchResults`, whose `.selection` is read off the response body's
+        `selection` and is `None` against a plain read or a server that sends none.
         """
         body = self._http.request(
             "POST", "/v1/search", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,
-                        "anchored": anchored or None,
+                        "anchored": anchored or None, "ranked": ranked or None,
                         "as_of": _iso(as_of), "valid_at": _iso(valid_at),
                         "known_at": _iso(known_at), "states": _states(states),
                         "include_invalidated": include_invalidated,
                         "memory_types": _types(memory_types),
                         "include_episodes": include_episodes}))
-        return [_hit(h) for h in body["results"]]
+        return SearchResults([_hit(h) for h in body["results"]],
+                             selection=hydrate.selection(body.get("selection")))
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
-               anchored: bool = False,
+               anchored: bool = False, ranked: bool = False,
                memory_types: Sequence[MemoryType | str] | None = None,
                include_episodes: bool = False, budget: int | None = None) -> str:
         """Retrieval already formatted for a system prompt: prose, not rows.
@@ -375,6 +382,12 @@ class RemoteMemvara:
         the finished string without writing a second implementation of it that can
         disagree. A caller who asked for a ceiling and silently did not get one ships an
         oversized prompt with nothing to notice it by.
+
+        `ranked` sends the same request `search` does and, like it, only when set. This
+        method takes no `with_ids`, so the trailing `RECALL_UNRANKED` line the server
+        renders into `text` when the model did not actually rank the read is the only
+        signal this surface carries — a caller who needs `RecallResult.selection`
+        structurally reads `RecallResponse.selection` off `/v1/recall` directly.
         """
         if budget is not None:
             raise ValueError(
@@ -384,7 +397,7 @@ class RemoteMemvara:
         body = self._http.request(
             "POST", "/v1/recall", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,
-                        "anchored": anchored or None,
+                        "anchored": anchored or None, "ranked": ranked or None,
                         "memory_types": _types(memory_types),
                         "include_episodes": include_episodes}))
         return str(body["text"])
@@ -866,7 +879,7 @@ class ScopedRemoteMemvara:
     # none when it was not asked for them.
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -875,7 +888,7 @@ class ScopedRemoteMemvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -884,7 +897,7 @@ class ScopedRemoteMemvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -892,7 +905,7 @@ class ScopedRemoteMemvara:
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
-               anchored: bool = False,
+               anchored: bool = False, ranked: bool = False,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -900,17 +913,18 @@ class ScopedRemoteMemvara:
                memory_types: Sequence[MemoryType | str] | None = None,
                include_episodes: bool = False) -> list[Any]:
         return self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
-                                anchored=anchored,
+                                anchored=anchored, ranked=ranked,
                                 valid_at=valid_at, known_at=known_at, states=states,
                                 include_invalidated=include_invalidated,
                                 memory_types=memory_types,
                                 include_episodes=include_episodes)
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
-               anchored: bool = False,
+               anchored: bool = False, ranked: bool = False,
                memory_types: Sequence[MemoryType | str] | None = None,
                include_episodes: bool = False, budget: int | None = None) -> str:
         return self._mem.recall(query, k=k, min_score=min_score, anchored=anchored,
+                                ranked=ranked,
                                 memory_types=memory_types,
                                 include_episodes=include_episodes, budget=budget)
 

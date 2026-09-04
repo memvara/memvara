@@ -30,7 +30,7 @@ from contextlib import nullcontext
 from datetime import datetime
 from functools import lru_cache
 from typing import (Any, Callable, ClassVar, Collection, Iterable, Literal, Mapping,
-                    Sequence, overload)
+                    Sequence, cast, overload)
 
 from .consolidate import Consolidator
 from .embed import Embedder, default_embedder
@@ -71,6 +71,7 @@ from .types import (
     RecallResult,
     Result,
     Scope,
+    SearchResults,
     WriteReceipt,
     as_utc,
     close_out,
@@ -1691,7 +1692,7 @@ class Memvara:
     # bool. Dropping it would turn "pass the flag through" into a type error.
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
                valid_at: datetime | None = ..., known_at: datetime | None = ...,
                states: Collection[str] | None = ...,
@@ -1701,7 +1702,7 @@ class Memvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
                valid_at: datetime | None = ..., known_at: datetime | None = ...,
                states: Collection[str] | None = ...,
@@ -1711,7 +1712,7 @@ class Memvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
                valid_at: datetime | None = ..., known_at: datetime | None = ...,
                states: Collection[str] | None = ...,
@@ -1720,7 +1721,7 @@ class Memvara:
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0, tenant=None,
-               anchored: bool = False,
+               anchored: bool = False, ranked: bool = False,
                user=None, agent=None, session=None, as_of: datetime | None = None,
                valid_at: datetime | None = None, known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -1785,11 +1786,18 @@ class Memvara:
         with it. `list[Any]` here is the implementation signature, which an overloaded
         function cannot make narrower than every variant it serves; the three overloads
         above are the surface.
+
+        `ranked=True` runs a configured `read_selector` over the reranked turns and
+        returns the ones it named first, whole — see `HybridRetriever.search` and
+        `memvara.select` for the read order and every way it can be served unranked
+        instead. It needs `include_episodes=True` and no `memory_types`, and raises
+        `ValueError` on either. Every call, ranked or not, returns a `SearchResults` — a
+        `list` with one extra attribute, `.selection`, `None` on a plain read.
         """
         scope = self._scope(tenant, user, agent, session)
         return self.reader.search(
             query, scope, k=k, as_of=as_of, valid_at=valid_at, known_at=known_at,
-            min_score=min_score, anchored=anchored,
+            min_score=min_score, anchored=anchored, ranked=ranked,
             states=resolve_states(states, include_invalidated),
             memory_types=memory_types, include_episodes=include_episodes,
         )
@@ -2110,6 +2118,21 @@ class Memvara:
         rendering bug, and a model that distrusts the framing distrusts the facts."""
         return cls.RECALL_DROPPED.format(n=n, s="" if n == 1 else "s")
 
+    #: The last line of a `ranked=True` block the model did not actually rank. In the
+    #: shape of `RECALL_DROPPED`: a model reading the block, and a person reading a
+    #: transcript, need the same signal `RECALL_DROPPED` gives for a budget cut — that
+    #: the order in front of them is not the thing they asked for, and why. `outcome` is
+    #: `Selection.outcome`: `unconfigured`, `disabled`, `key_rejected` or `fallback`.
+    #: `applied` never reaches this line — see `_unranked_line`.
+    RECALL_UNRANKED = "(model ranking not applied, showing the default order — {outcome}.)"
+
+    @classmethod
+    def _unranked_line(cls, outcome: str) -> str:
+        """`RECALL_UNRANKED` naming `outcome`. Never called with `"applied"` — the one
+        outcome a ranked block does not end with this line for, because it is the one
+        outcome that *is* the ranking the caller asked for."""
+        return cls.RECALL_UNRANKED.format(outcome=outcome)
+
     # `with_ids` decides what kind of thing comes back, so it decides the return type,
     # exactly as `include_episodes` does on `search()` — and the three variants are the
     # three there, for the third's reason as well: a wrapper holding a runtime bool
@@ -2117,7 +2140,7 @@ class Memvara:
     # arguments dict) has to be able to pass the flag through without a type error.
     @overload
     def recall(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                header: str | None = ..., tenant=..., user=..., agent=..., session=...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool = ..., episode_header: str | None = ...,
@@ -2127,7 +2150,7 @@ class Memvara:
 
     @overload
     def recall(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                header: str | None = ..., tenant=..., user=..., agent=..., session=...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool = ..., episode_header: str | None = ...,
@@ -2137,7 +2160,7 @@ class Memvara:
 
     @overload
     def recall(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                header: str | None = ..., tenant=..., user=..., agent=..., session=...,
                memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool = ..., episode_header: str | None = ...,
@@ -2146,7 +2169,7 @@ class Memvara:
                with_ids: bool) -> str | RecallResult: ...
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
-               anchored: bool = False,
+               anchored: bool = False, ranked: bool = False,
                header: str | None = None, tenant=None, user=None, agent=None,
                session=None, memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False,
@@ -2206,6 +2229,22 @@ class Memvara:
         fact its place; a turn that is twice as good an answer does, which is the whole
         reason for asking. Set `read_max_episodes=0` on the constructor to make the
         tail advisory-only, or raise `k`.
+
+        On a ranked call (below) that arithmetic still governs the claims and the
+        *unkept* turns — a kept turn is different: it arrived outside `k` (see
+        `search`'s `ranked` argument), so it never competes with a fact for a slot.
+        **`k` bounds the facts and `budget` bounds the kept turns.**
+
+        `ranked=True` runs the configured `read_selector` and renders every turn it kept
+        whole, first in the turn block, ahead of the unkept turns at their usual
+        `RECALL_EPISODE_CHARS` cut — see `HybridRetriever.search` and `memvara.select`
+        for the read order. It needs `include_episodes=True` and no `memory_types`,
+        raising `ValueError` on either, for the reason `search` does. When the model did
+        not actually rank the read — no selector configured, the operator's switch, a
+        rejected key, or a timeout or provider error — the block ends with a
+        `RECALL_UNRANKED` line naming why, so a model reading the block and a person
+        reading a transcript both see that the order in front of them is the plain one.
+        `with_ids=True` puts the same outcome on `RecallResult.selection`.
 
         `include_history=True` appends, for each fact this call already surfaced, the
         values that fact **used to have** — under their own header, after the live block.
@@ -2283,12 +2322,20 @@ class Memvara:
         >>> block.claim_ids == (mem.get_all()[0].id,)
         True
         """
-        results = self.search(query, k=k, min_score=min_score, tenant=tenant, user=user,
-                              anchored=anchored,
-                              agent=agent, session=session, memory_types=memory_types,
-                              include_episodes=include_episodes)
+        results = cast(SearchResults, self.search(
+            query, k=k, min_score=min_score, tenant=tenant, user=user,
+            anchored=anchored, ranked=ranked,
+            agent=agent, session=session, memory_types=memory_types,
+            include_episodes=include_episodes))
         claims = [r for r in results if not isinstance(r, EpisodeResult)]
-        episodes = [r for r in results if isinstance(r, EpisodeResult)]
+        # A ranked call's kept turns arrived outside `k`, already carrying
+        # `explain.selected=True`; every other episode — an unkept turn, or every episode
+        # on a plain read, where `selected` is never touched — renders as it always has.
+        kept_episodes = [r for r in results
+                         if isinstance(r, EpisodeResult) and r.explain.selected is True]
+        episodes = [r for r in results
+                   if isinstance(r, EpisodeResult) and r.explain.selected is not True]
+        selection = results.selection
         # Fetched for every claim, not just the surviving ones: the slot lookups are the
         # same ones the unbudgeted call already makes, and grouping them per claim is
         # what lets the fit below take a prefix without re-reading the store per trial.
@@ -2297,8 +2344,13 @@ class Memvara:
         headers = (header or self.RECALL_HEADER,
                    history_header or self.RECALL_HISTORY_HEADER,
                    episode_header or self.RECALL_EPISODE_HEADER)
+        # `applied` is the one outcome that *is* the ranking the caller asked for, so it
+        # is the one outcome this line does not name.
+        unranked_line = (self._unranked_line(selection.outcome)
+                         if selection is not None and selection.outcome != "applied"
+                         else None)
 
-        keep = len(claims) + len(episodes)
+        keep = len(claims) + len(kept_episodes) + len(episodes)
         if budget is not None:
             # Downwards from the whole block, not upwards from nothing, and measuring the
             # assembled string each time rather than summing per-line costs. Two reasons,
@@ -2310,36 +2362,47 @@ class Memvara:
             # costs one measurement and the answer is the largest prefix that fits.
             # Second: a caller's own tokenizer is not additive over a join, so the number
             # that has to fit is the one for the string actually returned.
-            while keep and counter(self._recall_block(claims, past, episodes, keep,
-                                                      headers)) > budget:
+            while keep and counter(self._recall_block(
+                    claims, past, kept_episodes, episodes, keep, headers,
+                    unranked_line)) > budget:
                 keep -= 1
 
-        text = self._recall_block(claims, past, episodes, keep, headers)
+        text = self._recall_block(claims, past, kept_episodes, episodes, keep, headers,
+                                  unranked_line)
         if not with_ids:
             return text
         kept = min(keep, len(claims))
         return RecallResult(
             text=text,
             claim_ids=tuple(r.claim.id for r in claims[:kept]),
-            dropped=len(claims) + len(episodes) - keep,
+            dropped=len(claims) + len(kept_episodes) + len(episodes) - keep,
+            selection=selection,
         )
 
     def _recall_block(self, claims: Sequence[Result], past: Sequence[Sequence[str]],
+                      kept_episodes: Sequence[EpisodeResult],
                       episodes: Sequence[EpisodeResult], keep: int,
-                      headers: tuple[str, str, str]) -> str:
+                      headers: tuple[str, str, str],
+                      unranked_line: str | None = None) -> str:
         """Render the first `keep` notes, and say so if that was not all of them.
 
-        The priority order is the argument order: every claim is placed before any
-        episode, so a turn can never cost a fact its place in a squeezed block — the same
-        rule the unbudgeted render already follows by putting the tail last, applied to
-        which notes survive rather than only to where they sit.
+        The priority order is the argument order: every claim is placed before any kept
+        turn, and every kept turn before any unkept one, so a turn can never cost a fact
+        its place in a squeezed block, and an unkept turn can never cost a kept one its
+        place — the same rule the unbudgeted render already follows by putting the tail
+        last, applied to which notes survive rather than only to where they sit. This is
+        `recall(ranked=True)`'s half of "k bounds the facts and budget bounds the kept
+        turns" (`search`'s docstring): the facts arrived at `k`, unaffected by ranking,
+        and only `budget` can still cut a kept turn.
 
         A section's header appears only if something under it did. A header with nothing
         beneath it tells a model there are stored facts and then shows it none, which is
         worse than the section being absent.
         """
         n = min(keep, len(claims))
-        m = max(0, keep - len(claims))
+        after_facts = max(0, keep - len(claims))
+        p = min(after_facts, len(kept_episodes))
+        m = after_facts - p
         fact_header, history_header, episode_header = headers
         lines: list[str] = []
         if n:
@@ -2350,13 +2413,20 @@ class Memvara:
         if tail:
             lines.append(history_header)
             lines += [f"- {self._safe_line(line)}" for line in tail]
-        if m:
+        if p or m:
             lines.append(episode_header)
+            # Kept turns first, whole, in reranked order — the 280-character cut does
+            # not apply to them: a cut turn is arm A's failure mode, and arm B's judged
+            # block rendered them whole. Unkept turns follow, cut as every turn a plain
+            # read renders always has been.
+            lines += [f"- {self._safe_line(r.text)}" for r in kept_episodes[:p]]
             lines += [f"- {self._safe_line(r.text, self.RECALL_EPISODE_CHARS)}"
                       for r in episodes[:m]]
-        dropped = len(claims) + len(episodes) - n - m
+        dropped = len(claims) + len(kept_episodes) + len(episodes) - n - p - m
         if dropped:
             lines.append(self._dropped_line(dropped))
+        if unranked_line is not None:
+            lines.append(unranked_line)
         return "\n".join(lines)
 
     #: Marks a note nobody stated. Written as a suffix and only on the rows that need it,
@@ -3243,7 +3313,7 @@ class ScopedMemvara:
     # and this is the one the MCP server and every integration holds.
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -3252,7 +3322,7 @@ class ScopedMemvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -3261,7 +3331,7 @@ class ScopedMemvara:
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -3269,7 +3339,7 @@ class ScopedMemvara:
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
-               anchored: bool = False,
+               anchored: bool = False, ranked: bool = False,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -3277,7 +3347,7 @@ class ScopedMemvara:
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False) -> list[Any]:
         return self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
-                                anchored=anchored,
+                                anchored=anchored, ranked=ranked,
                                 valid_at=valid_at, known_at=known_at, states=states,
                                 include_invalidated=include_invalidated,
                                 memory_types=memory_types,
@@ -3288,7 +3358,7 @@ class ScopedMemvara:
     # and reads `with_ids` out of an arguments dict, where it is a runtime `bool`.
     @overload
     def recall(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                header: str | None = ..., memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool = ..., episode_header: str | None = ...,
                include_history: bool = ..., history_header: str | None = ...,
@@ -3297,7 +3367,7 @@ class ScopedMemvara:
 
     @overload
     def recall(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                header: str | None = ..., memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool = ..., episode_header: str | None = ...,
                include_history: bool = ..., history_header: str | None = ...,
@@ -3306,7 +3376,7 @@ class ScopedMemvara:
 
     @overload
     def recall(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ...,
+               anchored: bool = ..., ranked: bool = ...,
                header: str | None = ..., memory_types: Sequence[MemoryType] | None = ...,
                include_episodes: bool = ..., episode_header: str | None = ...,
                include_history: bool = ..., history_header: str | None = ...,
@@ -3314,7 +3384,7 @@ class ScopedMemvara:
                with_ids: bool) -> str | RecallResult: ...
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
-               anchored: bool = False,
+               anchored: bool = False, ranked: bool = False,
                header: str | None = None,
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False,
@@ -3325,7 +3395,7 @@ class ScopedMemvara:
                counter: Callable[[str], int] = _approx_tokens,
                with_ids: bool = False) -> Any:
         return self._mem.recall(query, k=k, min_score=min_score, header=header,
-                                anchored=anchored,
+                                anchored=anchored, ranked=ranked,
                                 memory_types=memory_types,
                                 include_episodes=include_episodes,
                                 episode_header=episode_header,

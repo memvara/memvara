@@ -544,3 +544,80 @@ def test_the_anchor_is_read_off_the_wire_and_absent_means_the_server_did_not_say
     named, unsaid = mem.search("where do I live")
     assert named.explain.anchor == "subject"
     assert unsaid.explain.anchor is None
+
+
+# -- ranked ----------------------------------------------------------------------------
+
+
+def test_ranked_reaches_the_wire_only_when_asked_for(recorded):
+    """The same precedent `anchored` sets: omitted when false, so a server from before
+    the field is not handed a key it refuses; sent when true, so that server refuses
+    loudly (422) rather than answering unranked as though it had honoured the request."""
+    empty = {"as_of": None, "valid_at": None, "known_at": None, "states": ["live"],
+             "count": 0, "results": [], "selection": None}
+    mem = recorded(empty)
+    mem.search("q", include_episodes=True)
+    assert "ranked" not in _sent(recorded)
+    mem.search("q", include_episodes=True, ranked=True)
+    assert _sent(recorded)["ranked"] is True
+
+    mem = recorded({"text": "", "empty": True, "selection": None})
+    mem.recall("q", include_episodes=True, ranked=True)
+    assert _sent(recorded) == {"query": "q", "k": 8, "min_score": 0.0, "ranked": True,
+                               "include_episodes": True}
+
+
+def test_search_returns_search_results_with_selection_from_the_wire(recorded):
+    """`SearchResults.selection` is read off the response body, not off any one row, so
+    an empty ranked result still carries the outcome — a per-item field could not."""
+    from memvara.types import SearchResults
+
+    mem = recorded({"as_of": None, "valid_at": None, "known_at": None,
+                    "states": ["live"], "count": 0, "results": [],
+                    "selection": {"outcome": "applied", "candidates": 40, "kept": 5}})
+    hits = mem.search("q", include_episodes=True, ranked=True)
+    assert isinstance(hits, SearchResults)
+    assert hits.selection is not None
+    assert (hits.selection.outcome, hits.selection.candidates, hits.selection.kept) == (
+        "applied", 40, 5)
+
+
+def test_the_selection_is_none_against_a_server_that_sends_none(recorded):
+    """A plain read, and a server from before the field, are the same case to this
+    client: no `selection` key on the body reads as `None`, not as a decode error."""
+    mem = recorded({"as_of": None, "valid_at": None, "known_at": None,
+                    "states": ["live"], "count": 0, "results": []})
+    hits = mem.search("q")
+    assert hits.selection is None
+
+
+def test_hydrate_reads_selected_and_span_off_each_ranking(recorded):
+    """`selected` and `span` travel on the same `Ranking` object `anchor` does, so a
+    server that ranked one turn and not another says so per row."""
+    mem = recorded({"as_of": None, "valid_at": None, "known_at": None,
+                    "states": ["live"], "count": 2,
+                    "results": [{"kind": "episode", "score": 0.3,
+                                 "ranking": {**_ranking(applicable=False),
+                                            "selected": True, "span": "in Berlin"},
+                                 "episode": _episode("ep_1")},
+                                {"kind": "episode", "score": 0.2,
+                                 "ranking": {**_ranking(applicable=False),
+                                            "selected": False, "span": None},
+                                 "episode": _episode("ep_2")}],
+                    "selection": {"outcome": "applied", "candidates": 2, "kept": 1}})
+    kept, unkept = mem.search("q", include_episodes=True, ranked=True)
+    assert (kept.explain.selected, kept.explain.span) == (True, "in Berlin")
+    assert (unkept.explain.selected, unkept.explain.span) == (False, None)
+
+
+def test_hydrate_leaves_selected_and_span_none_against_a_server_from_before_the_field(
+    recorded,
+) -> None:
+    mem = recorded({"as_of": None, "valid_at": None, "known_at": None,
+                    "states": ["live"], "count": 1,
+                    "results": [{"kind": "episode", "score": 0.3,
+                                 "ranking": _ranking(applicable=False),
+                                 "episode": _episode()}]})
+    [hit] = mem.search("q", include_episodes=True)
+    assert hit.explain.selected is None
+    assert hit.explain.span is None

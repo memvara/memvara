@@ -33,11 +33,19 @@ out of that, and both are routine rather than exotic.
    `retrieve/intent.py` for what keeps every other query from paying for it. It ships at
    `w_graph=0.0`; the measurement behind that default is in `docs/BENCHMARKS.md`.
 
-Everything here is deterministic. No LLM sits on the read path, and identical inputs
-produce an identical ordering, ties included - unstable ranking makes retrieval
+Everything here is deterministic by default. No LLM sits on the read path, and identical
+inputs produce an identical ordering, ties included - unstable ranking makes retrieval
 regressions impossible to bisect. "Identical inputs" means the *content*: ties break on
 a content hash rather than on a row id, because ids are minted per ingest and an
 ordering that only holds within one store is not reproducibility, it is luck.
+
+The one opt-in exception is `search(ranked=True)` against a retriever configured with a
+`read_selector`: one model call per read, on the customer's own key, naming which of the
+reranked turns actually bear on the question. It changes nothing about a plain read - no
+`read_selector` configured, or `ranked` left at its default `False` - and everything about
+what it touches: the result carries `SearchResults.selection` saying what happened, never
+silently. See `memvara.select` and this module's `HybridRetriever.search` for the read
+order a ranked call takes.
 """
 
 from __future__ import annotations
@@ -54,15 +62,23 @@ from typing import (
 import numpy as np
 
 from ..embed.base import Embedder
+from ..llm.base import Usage
 from ..rerank import Reranker, rerank
 from ..schema import PredicateRegistry
+from ..select.base import Candidate, Selection, Selector, SelectorBusy, SelectorRefused
 from ..store.base import Store, bulk_claims, resolve_states
 from ..telemetry import (
     RETRIEVAL_LATENCY_MS,
+    RETRIEVAL_MODEL_FALLBACK,
+    RETRIEVAL_MODEL_QUERY,
+    RETRIEVAL_MODEL_REFUSED,
     RETRIEVAL_OBSERVATION_RANK_CORR,
     RETRIEVAL_QUALITY_FACTOR,
     RETRIEVAL_QUERY,
     RETRIEVAL_RESULTS,
+    RETRIEVAL_SELECT_MS,
+    RETRIEVAL_TOKENS_IN,
+    RETRIEVAL_TOKENS_OUT,
     Recorder,
     rank_correlation,
     script_of,
@@ -76,6 +92,7 @@ from ..types import (
     MemoryType,
     Result,
     Scope,
+    SearchResults,
     owner_key,
     time_axes,
     utcnow,
@@ -306,6 +323,8 @@ class HybridRetriever:
         intent_weighting: bool = True,
         reranker: "Reranker | None" = None,
         rerank_top_n: int = 20,
+        rerank_ranked_only: bool = False,
+        selector: "Selector | None" = None,
         telemetry: Recorder | None = None,
         entities: "EntityRegistry | None" = None,
     ) -> None:
@@ -448,6 +467,23 @@ class HybridRetriever:
         #: caller's `k` can be promoted into it, which is the whole point of the stage.
         self.reranker = reranker
         self.rerank_top_n = rerank_top_n
+        #: When true, a plain read (`ranked=False`) behaves exactly as it would on a
+        #: retriever with no reranker at all — gathered at depth `k`, no rerank call —
+        #: and a ranked read runs the reranker as it always has. Ships `False`, which
+        #: reranks every read exactly as before this option existed.
+        #:
+        #: The hosted service needs `True`: one `CrossEncoderReranker` sits on every
+        #: clone so a ranked read can use it, and without this switch every *plain* read
+        #: would pay the cross-encoder's cost at `rerank_top_n` for a stage nothing asked
+        #: for. See the design spec's "The option and the switch" for the full argument —
+        #: it is the depth arithmetic that changes, not only whether `rerank()` runs.
+        self.rerank_ranked_only = rerank_ranked_only
+        #: Consults a model to name which of the reranked turns actually bear on the
+        #: question, or `None` — the default, and an absence rather than a no-op: with
+        #: nothing configured `ranked=True` is refused (served unranked, outcome
+        #: `unconfigured`) rather than silently answering unranked with no explanation.
+        #: See `memvara.select` and `search`'s `ranked` argument.
+        self.selector = selector
         #: The owner's learned entity aliases, or `None`. Read by the anchoring pass so
         #: a question saying "Big Blue" names a claim filed under `ibm`; without one a
         #: key is its own only spelling, which is what an unmerged store has anyway.
@@ -469,7 +505,7 @@ class HybridRetriever:
         include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         anchored: bool = ..., include_episodes: Literal[False] = ...,
-        now: datetime | None = ...,
+        now: datetime | None = ..., ranked: bool = ...,
     ) -> list[Result]: ...
 
     @overload
@@ -480,7 +516,7 @@ class HybridRetriever:
         include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         anchored: bool = ..., include_episodes: Literal[True],
-        now: datetime | None = ...,
+        now: datetime | None = ..., ranked: bool = ...,
     ) -> list[Retrieved]: ...
 
     @overload
@@ -491,6 +527,7 @@ class HybridRetriever:
         include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         anchored: bool = ..., include_episodes: bool, now: datetime | None = ...,
+        ranked: bool = ...,
     ) -> list[Retrieved]: ...
 
     def search(
@@ -509,6 +546,7 @@ class HybridRetriever:
         anchored: bool = False,
         include_episodes: bool = False,
         now: datetime | None = None,
+        ranked: bool = False,
     ) -> list[Any]:
         """Return the top `k` results for `query`, each with a populated `Explanation`.
 
@@ -567,14 +605,32 @@ class HybridRetriever:
         implementation is `list[Any]` only because an overloaded implementation cannot
         name a return type narrower than every variant's; the overloads above are what
         a caller sees.
+
+        `ranked=True` sends the reranked turns to a configured `read_selector`, which
+        names the ones that actually bear on `query` and returns them first, whole, with
+        `Explanation.selected` and `.span` set — see `memvara.select` and the design
+        spec's "Where it sits" for the full read order. It needs `include_episodes=True`
+        and no `memory_types`, and raises `ValueError` on either contradiction, because a
+        selector with nothing to act on is not a call worth making silently. The return
+        value is always a `SearchResults`, whose `.selection` records what happened:
+        `None` on a plain read, and on a ranked one an outcome of `applied`, `fallback`,
+        `unconfigured` (no `read_selector` configured), `disabled` (the operator's
+        switch), or `key_rejected` (the provider rejected the key) — every case but
+        `applied` still returns the plain order, unranked.
         """
+        if ranked and (not include_episodes or memory_types is not None):
+            raise ValueError(
+                "ranked=True needs turns to rank: it requires include_episodes=True and "
+                "no memory_types (a type filter skips the episode leg entirely, so a "
+                "ranked call would hand the selector nothing)."
+            )
         valid_at, known_at = time_axes(as_of, valid_at, known_at)
         # Resolved once, here, and carried as a tuple from this line down. The alias is
         # a facade spelling; below it there is one parameter, so no inner call can pass
         # both and no inner call can disagree about what the flag meant.
         wanted_states = resolve_states(states, include_invalidated)
         if k <= 0:
-            return []
+            return SearchResults()
         rec = self.telemetry
         t0 = perf_counter() if rec is not None else 0.0
 
@@ -602,6 +658,15 @@ class HybridRetriever:
         now = _as_utc(known_at) if known_at is not None else (
             _as_utc(now) if now is not None else utcnow())
 
+        # `selector_ranked` is a ranked call this retriever can actually attempt — the
+        # unconfigured case (`ranked=True`, no `read_selector`) is decided the way step 1
+        # of the design spec's "Where it sits" asks: served unranked with no leg run
+        # differently, which is exactly the ordinary flow below with `reranker_active`
+        # unaffected by `rerank_ranked_only` (a ranked call always uses the configured
+        # reranker, never `None`-d by the plain-read-only switch).
+        selector_ranked = ranked and self.selector is not None
+        reranker_active = None if (self.rerank_ranked_only and not ranked) else self.reranker
+
         # Over-fetch per retriever: fusion can only rank what it was given, and a claim
         # that BM25 puts first is worthless if the vector list was cut before it and
         # the final k is small.
@@ -610,7 +675,7 @@ class HybridRetriever:
         # below the cut to have anything to promote: reranking the same `k` items the
         # caller was going to get can only reorder them, which changes what is read
         # first and cannot change what is present at all.
-        depth = k if self.reranker is None else max(k, self.rerank_top_n)
+        depth = k if reranker_active is None else max(k, self.rerank_top_n)
 
         limit = max(depth * self.candidate_multiplier, depth)
         wanted = set(memory_types) if memory_types is not None else None
@@ -637,23 +702,54 @@ class HybridRetriever:
                 query, scope, limit * self.filter_retry_multiplier, valid_at, known_at,
                 wanted_states, wanted, now, min_score, anchored, weights)
 
-        ranked: list[Retrieved] = list(self._rank(results, depth))
+        claims: list[Retrieved] = list(self._rank(results, depth))
+        selection: Selection | None = None
+        hits: list[Retrieved]
+
         if include_episodes and wanted is None:
-            ranked = self._interleave(
-                ranked,
-                self._episodes(query, scopes, limit, valid_at, known_at, min_score,
-                               weights, now),
-                depth)
-        if self.reranker is not None:
+            if selector_ranked:
+                assert self.selector is not None  # narrows for mypy; see `selector_ranked`
+                # Step 2 of "Where it sits": on a ranked call the episode leg's own cap
+                # (`max_episodes`) is lifted to `rerank_top_n`, and this pool — not
+                # `_interleave`'s cut — is what the selector's turn-ordering and admission
+                # act on below, whatever the eventual outcome.
+                episodes = self._episodes(query, scopes, limit, valid_at, known_at,
+                                          min_score, weights, now, cap=self.rerank_top_n)
+                selection, kept_turns, tail = self._run_ranked_stage(
+                    rec, self.selector, query, episodes, now)
+                merged = self._interleave(claims, tail, depth)[:k]
+                hits = [*kept_turns, *merged]
+            else:
+                if ranked:
+                    # `unconfigured`: no leg runs differently, so this is exactly the
+                    # ordinary flow below — the plain `max_episodes` cap, and (since
+                    # `reranker_active` is unaffected by `ranked` unconfigured) the same
+                    # reranker pass a plain read with this configuration would run.
+                    if rec is not None:
+                        rec.counter(RETRIEVAL_MODEL_REFUSED, reason="unconfigured")
+                    selection = Selection(outcome="unconfigured", candidates=0)
+                episodes = self._episodes(query, scopes, limit, valid_at, known_at,
+                                          min_score, weights, now, cap=self.max_episodes)
+                hits = self._interleave(claims, episodes, depth)
+        else:
+            hits = claims
+
+        if reranker_active is not None and not selector_ranked:
             # Last, deliberately. Everything above it — fusion, the recency half-lives,
             # the per-slot diversity cap, the episode discount — is the ranking this
             # library is arguing for, and the reranker is a second opinion on its head,
             # not a replacement for it. Running before the diversity pass would let a
             # model that likes one phrasing refill the slots the pass exists to spread.
-            ranked = rerank(self.reranker, query, ranked, top_n=self.rerank_top_n)[:k]
+            #
+            # Never runs for a true ranked call (`selector_ranked`): the turns were
+            # already reranked on their own inside `_run_ranked_stage`, which is the work
+            # this stage exists for, and running it again over the merged claims+turns
+            # list would spend a second cross-encoder pass — one `disabled` is specifically
+            # measured never to spend (see the design spec's outcomes).
+            hits = rerank(reranker_active, query, hits, top_n=self.rerank_top_n)[:k]
         if rec is not None:
-            self._observe(rec, query, ranked, (perf_counter() - t0) * 1000.0)
-        return ranked
+            self._observe(rec, query, hits, (perf_counter() - t0) * 1000.0)
+        return SearchResults(hits, selection=selection)
 
     # -- internals -----------------------------------------------------------
 
@@ -1114,6 +1210,8 @@ class HybridRetriever:
         min_score: float,
         weights: _Weights,
         now: datetime,
+        *,
+        cap: int | None = None,
     ) -> list[EpisodeResult]:
         """The legs over raw turns, discounted and capped.
 
@@ -1126,6 +1224,12 @@ class HybridRetriever:
         about, which is the only leg here that reads no text at all. See
         `retrieve/temporal.py` for why that one lives on this side and not on the claim
         side.
+
+        `cap` overrides `max_episodes` — a ranked call passes `rerank_top_n`, because
+        lifting only the ordinary cap would not give a selector configured for 40
+        candidates 40 turns to choose from on a tenant with ordinary claim density (see
+        the design spec's "Where it sits", step 2). `None`, the default, is every other
+        caller: a plain read.
         """
         vector_hits = self._episode_vector_search(
             query, scopes, limit, valid_at, known_at)
@@ -1194,7 +1298,125 @@ class HybridRetriever:
         # Content hash, not `id`. See `_rank_claims` for why — the same argument, and
         # `Episode.hash` is already the content digest tier 0 dedupes on.
         out.sort(key=lambda r: (-r.score, r.episode.hash, r.episode.id))
-        return self._above_floor(out)[:self.max_episodes]
+        return self._above_floor(out)[:(self.max_episodes if cap is None else cap)]
+
+    @staticmethod
+    def _select_ms(rec: "Recorder | None", t0: float) -> None:
+        """`RETRIEVAL_SELECT_MS`, on every call the ranked stage actually makes.
+
+        A separate method because every branch below emits it, including every one that
+        then raises past this frame — the model call's own latency, whatever it returned.
+        See the design spec's Counting table: this is the `write.extract_ms` rule, "a
+        provider timeout is latency the caller waited through."
+        """
+        if rec is not None:
+            rec.timing(RETRIEVAL_SELECT_MS, (perf_counter() - t0) * 1000.0)
+
+    def _run_ranked_stage(
+        self, rec: "Recorder | None", selector: Selector, query: str,
+        episodes: "list[EpisodeResult]", now: datetime,
+    ) -> "tuple[Selection, list[EpisodeResult], list[EpisodeResult]]":
+        """Admit, rerank the turns, and consult the model — steps 3 to 6 of "Where it
+        sits". `episodes` is already gathered at `rerank_top_n` and in the episode leg's
+        own score order.
+
+        Returns `(selection, kept_turns, tail)`. `kept_turns` carries `explain.selected`
+        and `.span`, in reranked order, and is empty unless `selection.outcome` is
+        `applied`. `tail` is what the caller interleaves with claims exactly as an
+        unranked read does: the reranked turn list minus whatever was kept, when the
+        reranker actually ran (every outcome but `disabled`, since admission — and so the
+        reranker call inside it — never happened there), or `episodes` unchanged when it
+        did not.
+
+        **Admission wraps the reranker call as well as the model call**, deliberately —
+        the thread the cap exists to bound is the whole ~5-6s a ranked read can hold one
+        for, not the model call alone (design spec, "The protocol": "admission has to
+        precede the cross-encoder"). `SelectorBusy` propagates after the one counter this
+        method can still emit for it — the caller's `_observe` never runs on that path, so
+        nothing else about this read is counted.
+        """
+        try:
+            with selector.admit():
+                turn_order = episodes
+                if self.reranker is not None:
+                    turn_order = rerank(self.reranker, query, list(episodes),
+                                        top_n=self.rerank_top_n)
+                scope = turn_order[:selector.top_n]
+                candidates = [
+                    Candidate(id=e.episode.id, when=e.episode.ts, text=e.episode.content)
+                    for e in scope]
+                t0 = perf_counter()
+                usage = Usage()
+                try:
+                    chosen = selector.select(query, candidates, asked_on=now, usage=usage)
+                except SelectorRefused as exc:
+                    # From `select()`: the provider answered 401 or 403. Distinct from
+                    # `disabled` below, which never reaches `select()` at all.
+                    self._select_ms(rec, t0)
+                    if rec is not None:
+                        rec.counter(RETRIEVAL_MODEL_REFUSED, reason="key_rejected")
+                    return (Selection(outcome="key_rejected", status=exc.status,
+                                      candidates=len(candidates)),
+                            [], turn_order)
+                except TimeoutError:
+                    self._select_ms(rec, t0)
+                    if rec is not None:
+                        rec.counter(RETRIEVAL_MODEL_FALLBACK, reason="timeout")
+                    return (Selection(outcome="fallback", reason="timeout",
+                                      candidates=len(candidates)),
+                            [], turn_order)
+                except ValueError:
+                    self._select_ms(rec, t0)
+                    if rec is not None:
+                        rec.counter(RETRIEVAL_MODEL_FALLBACK, reason="malformed")
+                    return (Selection(outcome="fallback", reason="malformed",
+                                      candidates=len(candidates)),
+                            [], turn_order)
+                except Exception as exc:                      # noqa: BLE001 - deliberate
+                    self._select_ms(rec, t0)
+                    status = getattr(exc, "status_code", None)
+                    reason = "provider" if status is not None else "error"
+                    if rec is not None:
+                        if status is not None:
+                            rec.counter(RETRIEVAL_MODEL_FALLBACK, reason=reason,
+                                       status=str(status))
+                        else:
+                            rec.counter(RETRIEVAL_MODEL_FALLBACK, reason=reason)
+                    return (Selection(outcome="fallback", reason=reason, status=status,
+                                      candidates=len(candidates)),
+                            [], turn_order)
+
+                self._select_ms(rec, t0)
+                if rec is not None:
+                    rec.counter(RETRIEVAL_MODEL_QUERY)
+                    if usage.reported > 0:
+                        rec.counter(RETRIEVAL_TOKENS_IN, usage.input_tokens)
+                        rec.counter(RETRIEVAL_TOKENS_OUT, usage.output_tokens)
+                spans = {s.id: s.span for s in chosen}
+                kept: list[EpisodeResult] = []
+                for e in scope:
+                    if e.episode.id in spans:
+                        e.explain.selected = True
+                        e.explain.span = spans[e.episode.id]
+                        kept.append(e)
+                    else:
+                        e.explain.selected = False
+                tail = [e for e in turn_order if e.episode.id not in spans]
+                return (Selection(outcome="applied", candidates=len(candidates),
+                                  kept=len(kept)),
+                        kept, tail)
+        except SelectorBusy:
+            if rec is not None:
+                rec.counter(RETRIEVAL_MODEL_REFUSED, reason="inflight")
+            raise
+        except SelectorRefused:
+            # Raised by `admit()` itself (or on entering the context manager it
+            # returned), before the reranker ran — the reason is `disabled`.
+            # `key_rejected` is raised from inside `select()`, caught above, and never
+            # reaches here.
+            if rec is not None:
+                rec.counter(RETRIEVAL_MODEL_REFUSED, reason="disabled")
+            return Selection(outcome="disabled", candidates=0), [], episodes
 
     def _above_floor(self, results: "list[EpisodeResult]") -> "list[EpisodeResult]":
         """Cut the tail where the score falls off, or hand back everything.
