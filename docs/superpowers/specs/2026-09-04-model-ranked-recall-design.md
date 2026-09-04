@@ -38,9 +38,11 @@ mean is inferred at 4.1 to 4.6 s and whose p95 is unknown (§2). One process-wid
 cap on ranked reads, `MEMVARA_SELECTOR_INFLIGHT`, and a 10 s deadline on the model call
 bound it (§4). Per-call cost to the customer is in §2 and §8.
 
-The design is written to the recommended answers to the five decisions in §10, pending the
-user's word. Every paragraph that depends on one says which, and what changes if it goes
-the other way. A memvara-paid allowance is phase 2, decided from thirty days of the series
+The design is written to the five decisions taken on 2026-09-04 (§10): the customer's key is
+stored per organisation; the default model is gpt-5.4-mini, with gpt-5.4 selectable; the
+free tier may set a key; counsel settles the legal position before the console field ships;
+and phase 2 is decided from thirty days of series. Every paragraph that depends on one says
+which. A memvara-paid allowance is phase 2, decided from thirty days of the series
 phase 1 emits (§9).
 
 ## 2. What is established
@@ -152,7 +154,7 @@ from memvara.select import ModelSelector
 
 mem = Memvara("memory.db",
               read_reranker=CrossEncoderReranker(), read_rerank_top_n=200,
-              read_selector=ModelSelector(llm=OpenAILLM(model="gpt-5.4", client=client),
+              read_selector=ModelSelector(llm=OpenAILLM(model="gpt-5.4-mini", client=client),
                                           top_n=40, timeout=10.0))
 block = mem.recall("what did they say about the trip", include_episodes=True, ranked=True)
 ```
@@ -690,8 +692,8 @@ This is the first model call from the production process, and it is the customer
   re-wrap, and `docs/PENDING.md:797-811`, which scopes that migration to one secret, is
   amended in Step 2a to enumerate both. `updated_at` and `updated_by` are the record of
   who set the key and when, which is the written instruction decision 4 needs. The console
-  shows a fingerprint only. The default model is gpt-5.4 and gpt-5.4-mini is selectable,
-  with the qualifier §9 gives it. A free organisation may set a key: memvara's cost is
+  shows a fingerprint only. The default model is gpt-5.4-mini and gpt-5.4 is selectable
+  (decision 2); the parity run in §6 is mini's judged run, and §6 states its offline screen. A free organisation may set a key: memvara's cost is
   thread time under the cap, and excluding free makes it the one place a visitor cannot
   see the result. There is no per-customer key plumbing today (`git grep -nEi
   'bring.your.own|byok' main` hits only CMK docs saying it is not BYO), so this is new. If
@@ -887,7 +889,8 @@ the model kept. The `arm-invariant` test in Step 3 asserts both.
 local stack; the test organisation's `org_selector_settings` row written by a script in
 `local/` that encrypts the gateway key from `/Applications/workstation/memorybench/.env.local`
 (the file `extract.py:20` reads) under the stack's `idp_key` (the console field is Step 2b
-and is not needed for this); model gpt-5.4; `MEMVARA_SELECTOR_INFLIGHT=4`;
+and is not needed for this); model gpt-5.4-mini, the default decision 2 chose;
+`MEMVARA_SELECTOR_INFLIGHT=4`;
 `read_rerank_ranked_only` **off for both runs**, so a plain read on this stack is reranked
 at depth 200 as every judged arm was (§3 says the benchmark stack leaves it false; the
 value `asgi.build()` passes in production is on, §4, and the stack's override is recorded
@@ -905,9 +908,9 @@ difference the first draft did not name — claims sharing the head with turns �
 every question in the search checkpoint is the check that it was. Three checks, in order:
 
 1. **Offline screen, no judge.** Run the harness's search stage only, with `MEMVARA_RANKED=1`
-   — 199 ranked calls through the server, about $2.25 at gpt-5.4 — and score the kept set in
-   the checkpoint against the gold labels, as `extract.py` prints: gold recall and non-gold
-   keep rate, against 0.895 and 2.5%. The scoring script is a Step 3 deliverable on the
+   — 199 ranked calls through the server, about $0.70 at gpt-5.4-mini — and score the kept
+   set in the checkpoint against the gold labels, as `extract_mini.py` prints: gold recall
+   and non-gold keep rate, against mini's offline 0.912 and 6.4% on the routed top-40. The scoring script is a Step 3 deliverable on the
    memorybench branch; today `extract.py` scores from `local/sweep/prep.pkl` through
    `sweeplib.routed_role` (`extract.py:13-33`) and nothing scores the shipped list. If recall
    falls under 0.85, stop: assistant turns are taking gold turns' slots, and routing goes
@@ -933,7 +936,13 @@ every question in the search checkpoint is the check that it was. Three checks, 
    paired gain under 8 is not evidence that the selector did anything on this list, and the
    feature does not ship on it. The ranked run's absolute score is recorded with its
    qualifiers and is the number the documentation carries; 182 is not carried anywhere
-   until the shipped path has produced it. The median context is recorded, not gated: a
+   until the shipped path has produced it, and it was gpt-5.4's number. For the mini
+   default the offline screen under arm B's rendering is 170 of 192 fully covered against
+   arm B's 172, a judged upside of −4 against arm B's labels (mini keeps two and a half
+   times as many non-gold turns, and they cost budget), so the prediction stated now for
+   the ranked run's absolute score is **178, surprised outside 171 to 185**. If it lands
+   under 171, the routed-720 level, the default goes back to gpt-5.4 (decision 2's
+   alternative) before Step 5. The median context is recorded, not gated: a
    different candidate list fills a budget differently.
 
 The plan's per-type table is the diagnostic if the gate misses: a drop concentrated in
@@ -1273,15 +1282,15 @@ dependency anywhere: the selector needs an SDK extra the hosted image already in
 ### To measure
 
 Every selector call in the parity work goes through the server on the gateway key, so it
-costs what `extract.py`'s did: about $2.25 for 199 at gpt-5.4. The screen and the ranked
+costs what `extract_mini.py`'s did: about $0.70 for 199 at gpt-5.4-mini, the default
+decision 2 chose. The screen and the ranked
 judged run share those calls, because the screen scores the search checkpoint the judged
-run then answers from (§6). So: search with the selector $2.25; answer and evaluate on it
+run then answers from (§6). So: search with the selector $0.70; answer and evaluate on it
 $1.11 (the reader and judge cost of each arm B run); the unranked twin's answer and
-evaluate $1.11, its search free. About **$4.47**. Gateway balance after the replicate was
+evaluate $1.11, its search free. About **$2.92**. Gateway balance after the replicate was
 14.61 of the 29.90 the key started with; $15.29 of the user's $20 cap is spent and $4.71
-remains under it — $0.24 to spare, thin enough that the cap is still the user's decision
-before Step 3 starts. Running the screen as a separate pass, as the first draft had it,
-would cost another $2.25 and not fit. The excerpt-cap check costs nothing.
+remains under it — $1.79 to spare. Running the screen as a separate pass, as the first
+draft had it, would cost another $0.70 and still fit; the calls are shared anyway. The excerpt-cap check costs nothing.
 
 ### To run
 
@@ -1349,9 +1358,10 @@ would cost $22.63 at gpt-5.4 against a $0 fee.
 - **The inclusive prompt and the top-60 list.** Recall 0.949 bought with precision on
   questions whose coverage was already complete: arm E's preference column fell from 10 of 12
   to 5 of 12 and the arm landed at 177, two below its predicted range.
-- **gpt-5.4-mini as the default.** Selector recall 0.912 against 0.895 at a third of the
-  cost, but a keep rate two and a half times higher and no judged end-to-end run.
-  Selectable, with that qualifier, not default (decision 2).
+- **gpt-5.4 as the default.** It holds the only judged end-to-end number, 182 twice, at
+  3.2 times mini's cost to the customer. Decision 2 makes mini the default, on its selector
+  recall of 0.912 against 0.895 at a third of the cost, and gpt-5.4 selectable; the parity
+  run (§6) is mini's judged run, and its offline screen is stated there.
 - **The v2 answer prompt.** +3 on routed-720 on its own, 181 stacked on arm B against 182:
   the gain does not stack, and the pre-registered rule leaves it at no evidence.
 - **A cross-encoder on every hosted read.** 84 ms a query at `top_n=20` against a ~3 ms
@@ -1425,34 +1435,36 @@ would cost $22.63 at gpt-5.4 against a $0 fee.
   cost of the design that keeps memvara's margin table at zero, and the phase 2 trigger is
   written on it.
 
-### Decisions only you can make
+### Decisions taken, 2026-09-04
 
-The design above assumes the recommendation on each; the paragraph that depends on one is
-tagged with its number.
+The user took the five decisions on 2026-09-04. Each is stated with the alternative it
+rejected; the paragraph that depends on one is tagged with its number.
 
 1. **Store the customer's key, or take it per request?** Store per organisation in a new
    `org_selector_settings` table — AES-256-GCM under `idp_key` (`control/idp/crypto.py`),
    or the two-value envelope with `wrapped_dek` where the organisation has a
    customer-managed key — with `updated_at` and `updated_by` as the record of the
    instruction, fingerprint only in the console; or require a per-request header and store
-   nothing. Recommendation: store. The console action is the written instruction and the
-   MCP door cannot add a second header. Assumed in §4 "Key handling", "The table", and
+   nothing. **Decided: store.** The console action is the written instruction and the
+   MCP door cannot add a second header. Applied in §4 "Key handling", "The table", and
    Steps 2a, 2b and 5.
-2. **Default model.** gpt-5.4 (only judged end-to-end number; 3.2× mini's cost, paid by the
-   customer) or mini (selector recall 0.912 vs 0.895, no judged run). Recommendation:
-   gpt-5.4 until a judged mini run exists; expose mini with its qualifier. Assumed in §4
-   "Key handling" and §6's stack.
-3. **Free tier included?** Recommendation: yes. Memvara's cost is thread time under the
-   cap; excluding it makes free the one place a visitor cannot see the result. Assumed in
+2. **Default model.** gpt-5.4 (only judged end-to-end number; 3.2 times mini's cost, paid
+   by the customer) or mini (selector recall 0.912 against 0.895, no judged run).
+   **Decided: gpt-5.4-mini as the default, gpt-5.4 selectable.** The recommendation was
+   gpt-5.4 until mini had a judged run; the decision makes the parity run in §6 that run,
+   with mini's offline screen and prediction stated there. Applied in §3's example, §4
+   "Key handling", §6's stack and §8.
+3. **Free tier included?** **Decided: yes.** Memvara's cost is thread time under the
+   cap; excluding it makes free the one place a visitor cannot see the result. Applied in
    §4 "Key handling".
 4. **Legal position, with counsel.** Whether a customer-keyed provider is the customer's
    processor (likely; no 30-day notice) or memvara's subprocessor (notice required), and
-   whether a console action satisfies "agree in writing." Recommendation: amend DPA.md and
-   SUBPROCESSORS.md in the commit that adds the key field, treat the console switch — the
-   row's `updated_by` and `updated_at` — as the instruction, and let counsel settle the
-   notice question. Step 2b waits on it; Step 2a does not.
-5. **Phase 2 trigger.** Recommendation: build the memvara-paid allowance only if, after 30
-   days, fewer than a fifth of active paid organisations have set a key while
+   whether a console action satisfies "agree in writing." **Decided: counsel settles it
+   before the console field appears.** DPA.md and SUBPROCESSORS.md change in the commit
+   that adds the key field, the console switch — the row's `updated_by` and `updated_at` —
+   is the instruction, and Step 2b waits on counsel; Step 2a does not.
+5. **Phase 2 trigger.** **Decided as stated:** build the memvara-paid allowance only if,
+   after 30 days, fewer than a fifth of active paid organisations have set a key while
    `retrieval.model_refused{reason=unconfigured}` is common. Size it from the series below,
    not from §8's table, which is kept to show why phase 1 pays nothing.
 
@@ -1478,7 +1490,8 @@ Findings not applied, or applied differently from what the review asked, and why
   on the same gateway key, so the judged run's search stage is itself 199 selector calls at
   about $2.25. The first draft's "screen or replicate but not both" was right about two
   separate passes ($5.61). §6 and §8 now share the calls between the screen and the judged
-  run and add the unranked twin, which is $4.47 — under the cap by $0.24.
+  run and add the unranked twin, which was $4.47 with gpt-5.4 as the selector — under the
+  cap by $0.24 — and is $2.92 now that decision 2 makes mini the default.
 - **Correctness review, finding 10**, the clause "likely slower than the study machine".
   Not carried. The production host's reranker time is unmeasured, and Step 5 measures it;
   nothing read here says which way it differs.
