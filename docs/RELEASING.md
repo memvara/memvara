@@ -27,15 +27,16 @@ that bumps a version and may push a branch. Approving a publish is a maintainer'
 manual step below stops at TestPyPI / `npm publish --dry-run`.
 
 npm versions are independent of the Python tag. `v0.2.1` does not imply npm `0.2.1`.
-Whether npm publishes at all is decided by one comparison: `check-npm` reads the version
-out of `npm/memvara/package.json`, asks the registry, and skips `publish-npm` if it is
-already there. A tag pushed while that file still said `0.0.1` would have been a green
-release that published nothing to npm, which was the expected first run.
+Whether npm publishes at all is decided by one comparison: `release-npm.yml`'s `version`
+job reads the version out of `npm/memvara/package.json`, asks the registry, and its
+`publish` job is skipped if that version is already there. A tag pushed while the file
+still said `0.0.1` would have been a green run that published nothing to npm, which was
+the expected first run.
 
 **Check that comparison before assuming a tag ships JavaScript.** Compare the version in
-`npm/memvara/package.json` against `npm view memvara version`: when they match, `check-npm`
-logs `SKIP` and `publish-npm` does not run. Bumping `npm/memvara/package.json` is the only
-thing that changes that.
+`npm/memvara/package.json` against `npm view memvara version`: when they match, the
+`version` job logs `SKIP` and `publish` does not run. Bumping `npm/memvara/package.json`
+is the only thing that changes that.
 
 That matters here more than a skipped job usually would. npm serves the README of the
 version it holds, so until that file moves, **a Python release that improves the README does
@@ -124,10 +125,13 @@ That push is the whole trigger. `.github/workflows/release.yml` then runs, in or
 | `version` | Refuses unless the tag, `pyproject.toml`'s `version` and `memvara/__init__.py`'s `__version__` are the same string. First and fastest, so a one-sided bump fails in seconds rather than after the matrix — or, the failure it really exists for, not at all, leaving a wheel on PyPI whose metadata disagrees with its tag. |
 | `ci` | Calls `.github/workflows/ci.yml` **on the tagged commit**: 3.10–3.13 on Linux plus macOS and Windows, coverage gated at 100%, mypy, and the no-extras import job. It calls rather than restates, so there is one matrix in this repository and it cannot drift. A tag push starts nothing else, so without this job the release would be gated on whatever CI last happened to run. |
 | `build` | `python -m build`, `twine check`, then the whole suite again *after* the build, which is the only run in which the four dist-gated tests execute at all — three in `tests/test_packaging.py` and one in `tests/test_init.py`. Then it installs the wheel into a fresh venv outside the repository and checks that the dependency set is exactly memvara and numpy, that the library works, and that `reveal_type` reports `str` rather than `Any`. |
-| `check-npm` | Reads `npm/memvara/package.json` and asks the registry whether that version already exists. Writes `npm_version` and `npm_exists`. Logs `SKIP` or `PUBLISH` in those words, so a skip is readable rather than an absent job. Does not compare the npm version to the Python tag. |
-| `build-npm` | `npm pack` once, hashes the tarball, refuses a file list that is not `package.json`'s `files`, uploads `npm-dist`. The publish job is not allowed to pack. |
 | `publish-pypi` | Uploads the artifact `build` produced — those bytes, not a rebuild — over PyPI trusted publishing. Waits for a human first; see step 4. |
-| `publish-npm` | Runs on a tag push when `npm_exists == false`. Downloads `npm-dist`, checks the SHA-256, and `npm publish`es **the tarball**. No `npm pack`, no reviewer wait. A TestPyPI dispatch does not publish npm. |
+| `publish-testpypi` | Never runs on a tag push. It runs only from **Run workflow** with the target set to `testpypi`, the rehearsal step 4 describes, and uploads the same `build` artifact to TestPyPI. |
+
+That is the whole of `release.yml`: five jobs, none of them touching npm. Pushing `v0.11.0`
+ran exactly those five and left npm alone, which is what the opening of this document
+says and what an earlier version of this table did not. The npm package has its own tag,
+its own workflow and its own table, under *The npm train* below.
 
 The runner has no `dist/`, no second checkout and no earlier build, and that is the point
 rather than a convenience. The release attempted by hand before this workflow existed ran
@@ -146,8 +150,7 @@ a document asks for.
 
 Approving is the irreversible act for PyPI. Read the `build` job's log first: it lists
 the files it built, and the version in those filenames is the one about to become
-permanent. npm does not wait here: a tag push that `check-npm` marked `PUBLISH` uploads
-after the hash check. If `check-npm` said `SKIP`, `publish-npm` does not run. Everything
+permanent. npm is not part of this run at all; see *The npm train* below. Everything
 under "Before a real publish" below still applies and none of it is checked by any job.
 
 A TestPyPI rehearsal is available and never automatic: **Actions → Release → Run workflow**,
@@ -157,6 +160,31 @@ deleted. A rehearsal wired into every tag push would burn the release's own numb
 rehearsal index, and would then fail the *second* run of that tag — turning "re-run the
 release after the upload dropped" into a red build for a reason that has nothing to do with
 the release. Rehearse on an `rc` version and keep the real number clean.
+
+### The npm train, when `npm/memvara/package.json` moves
+
+npm is released by a different tag through a different file, and nothing in the four
+steps above starts it. Bump `npm/memvara/package.json`, then tag the commit CI went green
+on with the same number:
+
+```bash
+git tag -a npm-v0.1.1 -m "memvara npm 0.1.1"
+git push origin npm-v0.1.1
+```
+
+`.github/workflows/release-npm.yml` then runs, in order:
+
+| job | what it does |
+|---|---|
+| `version` | Refuses unless the tag's number and `npm/memvara/package.json`'s `version` are the same string, for the same reason the Python `version` job exists: npm never lets a version be reused, so a tarball whose metadata disagrees with its tag is permanent. Then asks the registry whether that version already exists and logs `action: SKIP` or `action: PUBLISH` in those words, so a skip is readable rather than an absent job. |
+| `test` | `node --test` in `npm/memvara` on Node 20, 22 and 24. |
+| `build` | `npm publish --dry-run`, then `npm pack` once, hashes the tarball, refuses a file list that is not `package.json`'s `files`, and uploads the tarball with its SHA-256 as `npm-dist`. The publish job is not allowed to pack. |
+| `publish` | Runs on a tag push when `version` said `PUBLISH`, in the `npm` GitHub Environment. Downloads `npm-dist`, checks the hash, and `npm publish`es **the tarball** — the bytes `build` produced, not a rebuild — over npm trusted publishing. |
+
+Whether the `npm` environment waits for a reviewer is a setting on the environment, not
+something the workflow file states; read it there before assuming the run stops. The
+trusted-publisher registration this depends on is under *npm trusted publisher* below, and
+it names `release-npm.yml`, not `release.yml`.
 
 ---
 
@@ -454,8 +482,8 @@ name you have not published.
   `.github/workflows/release.yml` publishes over GitHub Actions' OIDC publisher and holds
   no credential at all. PyPI's publisher and the `pypi` / `testpypi` environments exist.
   The npm half is the same shape and is **not** done — the trusted publisher on the
-  package, and the `npm` GitHub Environment, above. Until they exist `publish-npm` fails
-  at the upload the first time the version is actually new, which is the right order:
+  package, and the `npm` GitHub Environment, above. Until they exist `release-npm.yml`'s
+  `publish` job fails at the upload the first time the version is actually new, which is the right order:
   machinery should not be able to grant itself permission to publish. The `npm`
   environment now exists; the trusted publisher on the package is the outstanding half,
   and `npm/memvara/package.json` is at `0.0.2`, so "the first time the version is
