@@ -9,6 +9,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-09-05
+
 ### Added
 
 - **`Memvara(read_route_roles=False)` turns off the routing a ranked read does before
