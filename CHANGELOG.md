@@ -33,9 +33,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   received rather than assuming the order it asked for.
 
   **The default read path is unchanged**: no `read_selector` configured is the shipped
-  default, `ranked` defaults to `False`, and a plain read imports nothing this adds. No
-  accuracy number is carried here — the parity run against the shipped configuration is
-  a separate, later entry.
+  default, `ranked` defaults to `False`, and a plain read imports nothing this adds.
+
+  Measured on LongMemEval-S, a 199-question stratified sample, one judged run, gpt-5.4
+  reader and judge, through the hosted service's read path with gpt-5.4-mini as the
+  selector: 177 of 199 correct (88.9%) at a median context of 549 tokens, against 135 of
+  199 (67.8%) for the same retrieval rendered without the selector at the same budget, and
+  172 of 199 for a 4,089-token control without it. Reader self-disagreement on identical
+  prompts is 7.8%, so single-run differences under about 8 questions are noise.
 
 - **`bounded_claim_schema(max_claims)`, `OpenAILLM(max_claims=...)` and
   `MEMVARA_LLM_MAX_CLAIMS` to reach it from a server**, for a backend that constrains
