@@ -1254,6 +1254,23 @@ def test_the_option_is_reachable_through_memvara_s_tuning_prefix():
     mem.close()
 
 
+def test_read_route_roles_is_reachable_through_memvara_s_tuning_prefix():
+    """`Memvara(read_route_roles=False, ...)` reaches `HybridRetriever.route_roles` the
+    same way: `_split_tuning` reads the retriever's real signature, so a rename or an
+    exclusion there would silently close this door -- this is the test that notices.
+    """
+    from memvara import Memvara
+    from memvara.llm.base import NullLLM
+
+    mem = Memvara(":memory:", user="alice", llm=NullLLM(),
+                  embedder=HashingEmbedder(), read_route_roles=False)
+    assert mem.reader.route_roles is False
+    mem.close()
+    default = Memvara(":memory:", user="alice", llm=NullLLM(), embedder=HashingEmbedder())
+    assert default.reader.route_roles is True
+    default.close()
+
+
 def test_confidence_is_clamped():
     llm = CountingLLM(claims=[
         {"subject": "user", "predicate": "likes", "object": "quarterly reviews",

@@ -715,11 +715,13 @@ def embedder() -> HashingEmbedder:
 
 def _engine(store: SQLiteStore, embedder: HashingEmbedder, selector, *,
            reranker=None, rerank_top_n: int = 20, max_episodes: int = 3,
-           rerank_ranked_only: bool = False, telemetry=None) -> HybridRetriever:
+           rerank_ranked_only: bool = False, telemetry=None,
+           route_roles: bool = True) -> HybridRetriever:
     return HybridRetriever(
         store, embedder, PredicateRegistry(), reranker=reranker,
         rerank_top_n=rerank_top_n, max_episodes=max_episodes, selector=selector,
-        rerank_ranked_only=rerank_ranked_only, telemetry=telemetry)
+        rerank_ranked_only=rerank_ranked_only, telemetry=telemetry,
+        route_roles=route_roles)
 
 
 # --- the counting fake: top_n candidates, reranked order, admission ordering ----------
@@ -1313,6 +1315,48 @@ def test_a_store_with_no_turn_of_the_routed_role_hands_over_the_other_roles(stor
     # rather than the selector being handed nothing.
     assert len(selector.seen) == 2
     assert all(c.text.startswith("assistant") for c in selector.seen)
+
+
+def test_route_roles_off_hands_the_selector_both_roles(store, embedder) -> None:
+    # Two people talking, stored as user and assistant: with routing off the selector
+    # sees the reranked window as it stands, so the second person's turns survive.
+    _turn(store, embedder, "Caroline: I went camping with my family", role="user")
+    _turn(store, embedder, "Melanie: I read Charlotte's Web while camping", role="assistant")
+    selector = FakeSelector(top_n=10)
+    r = _engine(store, embedder, selector, rerank_top_n=20, route_roles=False)
+
+    out = r.search("what did Melanie read while camping", EP_SCOPE, k=8,
+                   include_episodes=True, ranked=True)
+
+    assert sorted(c.text.split(":")[0] for c in selector.seen) == ["Caroline", "Melanie"]
+    assert out.selection is not None and out.selection.candidates == 2
+
+
+def test_route_roles_off_still_takes_top_n_from_the_reranked_list(store, embedder) -> None:
+    for i in range(4):
+        _turn(store, embedder, f"assistant {i} about kayaks", role="assistant")
+    for i in range(3):
+        _turn(store, embedder, f"user {i} about kayaks", role="user")
+    selector = FakeSelector(top_n=5)
+    r = _engine(store, embedder, selector, rerank_top_n=20, route_roles=False)
+
+    out = r.search("what did I say about kayaks", EP_SCOPE, k=8, include_episodes=True, ranked=True)
+
+    # Seven turns, a five-wide window, no routing: the window is the first five of the
+    # reranked order, whichever roles they carry.
+    assert len(selector.seen) == 5
+    assert out.selection is not None and out.selection.candidates == 5
+
+
+def test_route_roles_defaults_on(store, embedder) -> None:
+    _turn(store, embedder, "assistant one about kayaks", role="assistant")
+    _turn(store, embedder, "user one about kayaks", role="user")
+    selector = FakeSelector(top_n=10)
+    r = _engine(store, embedder, selector, rerank_top_n=20)
+
+    assert r.route_roles is True
+    r.search("what did I say about kayaks", EP_SCOPE, k=8, include_episodes=True, ranked=True)
+    assert [c.text for c in selector.seen] == ["user one about kayaks"]
 
 
 def test_top_n_is_counted_after_the_role_filter(store, embedder) -> None:
