@@ -9,7 +9,7 @@ registry.npmjs.org. Missing Node is a skip (exit 0), not a failure: the Python
 matrix has no Node, and a rehearsal you have to disable to land a commit is a
 rehearsal nobody runs.
 
-The thing it is proving is the same boundary as publish-npm: the bytes that get
+The thing it is proving is the same boundary as `release-npm.yml`'s `publish` job: the bytes that get
 `npm publish`ed are a tarball whose SHA-256 was taken before it moved, not a
 directory packed at the last second.
 """
@@ -144,7 +144,7 @@ def try_verdaccio(tarball: Path, version: str) -> bool:
             npmrc = tmp_path / "npmrc"
             npmrc.write_text(f"//{registry.split('://', 1)[1]}:_authToken=rehearsal\n")
             # `cwd` is the tarball's own directory and the argument is its bare name,
-            # because that is the shape `publish-npm` uses. Passing `str(tarball)` here
+            # because that is the shape the workflow's `publish` job uses. Passing `str(tarball)` here
             # — an absolute path — is what made this rehearsal pass while the workflow
             # failed: npm reads an absolute path as a file and a *relative* one with a
             # slash as `owner/repo`, so the two invocations were never the same test.

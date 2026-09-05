@@ -28,14 +28,14 @@ manual step below stops at TestPyPI / `npm publish --dry-run`.
 
 npm versions are independent of the Python tag. `v0.2.1` does not imply npm `0.2.1`.
 Whether npm publishes at all is decided by one comparison: `release-npm.yml`'s `version`
-job reads the version out of `npm/memvara/package.json`, asks the registry, and its
-`publish` job is skipped if that version is already there. A tag pushed while the file
+job reads the version out of `npm/memvara/package.json`, asks the registry, and skips the
+`publish` job if that version is already there. A tag pushed while the file
 still said `0.0.1` would have been a green run that published nothing to npm, which was
 the expected first run.
 
 **Check that comparison before assuming a tag ships JavaScript.** Compare the version in
 `npm/memvara/package.json` against `npm view memvara version`: when they match, the
-`version` job logs `SKIP` and `publish` does not run. Bumping `npm/memvara/package.json`
+`version` job logs `action: SKIP` and `publish` does not run. Bumping `npm/memvara/package.json`
 is the only thing that changes that.
 
 That matters here more than a skipped job usually would. npm serves the README of the
@@ -79,6 +79,9 @@ actually bumped.
 ---
 
 ## The checklist
+
+This is the Python release. npm has its own, under *The npm train* below, and nothing in
+these four steps starts it.
 
 ### 1. Bump the version in both places
 
@@ -129,9 +132,8 @@ That push is the whole trigger. `.github/workflows/release.yml` then runs, in or
 | `publish-testpypi` | Never runs on a tag push. It runs only from **Run workflow** with the target set to `testpypi`, the rehearsal step 4 describes, and uploads the same `build` artifact to TestPyPI. |
 
 That is the whole of `release.yml`: five jobs, none of them touching npm. Pushing `v0.11.0`
-ran exactly those five and left npm alone, which is what the opening of this document
-says and what an earlier version of this table did not. The npm package has its own tag,
-its own workflow and its own table, under *The npm train* below.
+ran exactly those five and left npm alone. The npm package has its own tag, its own
+workflow and its own table, under *The npm train* below.
 
 The runner has no `dist/`, no second checkout and no earlier build, and that is the point
 rather than a convenience. The release attempted by hand before this workflow existed ran
@@ -161,11 +163,13 @@ rehearsal index, and would then fail the *second* run of that tag — turning "r
 release after the upload dropped" into a red build for a reason that has nothing to do with
 the release. Rehearse on an `rc` version and keep the real number clean.
 
-### The npm train, when `npm/memvara/package.json` moves
+---
 
-npm is released by a different tag through a different file, and nothing in the four
-steps above starts it. Bump `npm/memvara/package.json`, then tag the commit CI went green
-on with the same number:
+## The npm train
+
+npm is released by a different tag through a different file, and nothing in the checklist
+above starts it. Bump `npm/memvara/package.json`, then tag the commit CI went green on
+with the same number:
 
 ```bash
 git tag -a npm-v0.1.1 -m "memvara npm 0.1.1"
@@ -181,10 +185,10 @@ git push origin npm-v0.1.1
 | `build` | `npm publish --dry-run`, then `npm pack` once, hashes the tarball, refuses a file list that is not `package.json`'s `files`, and uploads the tarball with its SHA-256 as `npm-dist`. The publish job is not allowed to pack. |
 | `publish` | Runs on a tag push when `version` said `PUBLISH`, in the `npm` GitHub Environment. Downloads `npm-dist`, checks the hash, and `npm publish`es **the tarball** — the bytes `build` produced, not a rebuild — over npm trusted publishing. |
 
-Whether the `npm` environment waits for a reviewer is a setting on the environment, not
-something the workflow file states; read it there before assuming the run stops. The
-trusted-publisher registration this depends on is under *npm trusted publisher* below, and
-it names `release-npm.yml`, not `release.yml`.
+The `npm` environment has no required reviewer (*One-time setup* below), so a tag push
+that finds a new version uploads without pausing; the approval step the Python train has
+does not exist here. The trusted-publisher registration this depends on names this file,
+and *npm trusted publisher* below says why the filename has to match exactly.
 
 ---
 
@@ -481,13 +485,12 @@ name you have not published.
 - **Trusted publishing, not a long-lived token.** Done on this side:
   `.github/workflows/release.yml` publishes over GitHub Actions' OIDC publisher and holds
   no credential at all. PyPI's publisher and the `pypi` / `testpypi` environments exist.
-  The npm half is the same shape and is **not** done — the trusted publisher on the
-  package, and the `npm` GitHub Environment, above. Until they exist `release-npm.yml`'s
-  `publish` job fails at the upload the first time the version is actually new, which is the right order:
-  machinery should not be able to grant itself permission to publish. The `npm`
-  environment now exists; the trusted publisher on the package is the outstanding half,
-  and `npm/memvara/package.json` is at `0.0.2`, so "the first time the version is
-  actually new" is the next tag. Register it before tagging.
+  The npm half is the same shape and is done too: the trusted publisher on the package
+  names `release-npm.yml` and the `npm` GitHub Environment exists (*npm trusted
+  publisher*, above), and `npm-v0.1.1` published through them. If either goes missing,
+  `release-npm.yml`'s `publish` job fails at the upload rather than finding another way
+  in, which is the right order: machinery should not be able to grant itself permission
+  to publish.
 - **Nothing from the closed side, ever.** `docs/ROADMAP.md` puts governance (PII,
   encryption, the audit chain, RBAC) and the Postgres/pgvector store in a private
   repository, and "never committed" is the actual requirement — git history is public
