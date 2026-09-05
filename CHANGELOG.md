@@ -9,6 +9,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`Memvara(read_route_roles=False)` turns off the role cut a ranked read makes before
+  the selector sees the turns.** The default stays `True`, the shipped 0.11.0 behaviour:
+  the selector sees the user's turns unless the question asks what the assistant said
+  (`memvara.retrieve.intent.routed_role`). That rule assumes the `assistant` role holds a
+  model's turns, and a store whose two roles are two people breaks it — routing deletes
+  one person's turns before the selector sees them. Measured on a 250-question LoCoMo
+  sample in the MemoryBench harness, where the harness stores the second speaker as
+  `assistant`, 109 questions lost every evidence turn this way (43 of them answered
+  correctly, against 76 of the other 141). With the option off the selector's window is
+  the reranked list as it stands. Nothing else about a ranked read changes, and a plain
+  read never consulted the rule.
+
 ### Changed
 
 - **The judged LongMemEval accuracy behind 0.11.0's `ranked=True` figure now has a full

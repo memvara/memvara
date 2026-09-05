@@ -490,7 +490,9 @@ def routed_role(query: str) -> str:
     question asks what the assistant said, else `"user"`.
 
     Model-free, like everything in this module, and for the same reason: it runs on
-    every ranked read, in front of the one model call that read makes. It exists
+    every ranked read, in front of the one model call that read makes. It assumes the
+    `assistant` role holds a model's turns; a retriever whose two roles are two people
+    turns it off with `route_roles=False` (`Memvara(read_route_roles=False)`). It exists
     because the selector's candidate list is short — `rerank_top_n` turns of which it
     sees `top_n` — and assistant turns are long and numerous, so with both roles in the
     list they take the slots the answer-bearing user turns needed. Measured on the
