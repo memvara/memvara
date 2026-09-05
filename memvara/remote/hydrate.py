@@ -36,13 +36,14 @@ from datetime import datetime
 from typing import Any
 
 from ..retrieve.traverse import Edge, Path
+from ..select.base import Selection
 from ..types import (
     LAST_OBSERVED, SALIENCE_BASE, Answer, Claim, Delta, Derivation, Episode,
     Explanation, MemoryType, Provenance, Reading, Result, Scope, WriteReceipt,
 )
 
 __all__ = ["claim", "episode", "result", "explanation", "receipt", "provenance",
-           "reading", "answer", "delta", "edge", "path", "scope"]
+           "reading", "answer", "delta", "edge", "path", "scope", "selection"]
 
 
 def _dt(value: Any) -> datetime | None:
@@ -155,9 +156,10 @@ def explanation(body: dict[str, Any] | None) -> Explanation:
     `graph_rank`, `graph_score`, `temporal_rank`, `temporal_score` and `intent` exist on
     `Explanation` but not on `Ranking` — `render.ranking` never puts them on the wire, so
     there is nothing here to read them back from; a restored `Explanation` reports them
-    at their dataclass defaults. `anchor` is read when the server sent it and left at
-    `None` when it did not, so against a server from before the field a hosted result
-    reports `None` for a reason a local one never would: the server did not say.
+    at their dataclass defaults. `anchor`, `selected` and `span` are read when the server
+    sent them and left at `None` when it did not, so against a server from before any of
+    those fields a hosted result reports `None` for a reason a local one never would: the
+    server did not say.
 
     `recency`, `confidence` and `salience` are `float` on `Explanation`, not
     `float | None` — null on the wire means "not applicable" (an episode hit), and that
@@ -175,9 +177,11 @@ def explanation(body: dict[str, Any] | None) -> Explanation:
         rerank_score=body["rerank_score"],
         raw_score=body["raw_score"],
         final_score=body["final_score"],
-        # `.get`, not `[]`: a server from before the field omits it, and a result it
-        # ranked is not malformed for having no anchor to report.
+        # `.get`, not `[]`: a server from before these fields omits them, and a result it
+        # ranked is not malformed for having nothing to report for any of the three.
         anchor=body.get("anchor"),
+        selected=body.get("selected"),
+        span=body.get("span"),
     )
     for name in ("recency", "confidence", "salience"):
         if body[name] is not None:
@@ -269,3 +273,24 @@ def path(body: dict[str, Any]) -> Path:
     return Path(nodes=tuple(body["nodes"]),
                 edges=tuple(edge(e) for e in body["edges"]),
                 score=body["score"])
+
+
+def selection(body: dict[str, Any] | None) -> Selection | None:
+    """The `Selection` a ranked read's model consultation produced, or `None`.
+
+    `None` for a plain read — `SearchResponse.selection` and `RecallResponse.selection`
+    are both null there — and for a server from before the field, which sends no
+    `selection` key at all. Those are the two cases a caller of `search()` or
+    `recall(with_ids=True)` needs to tell apart from a ranked read whose outcome was
+    something other than `applied`, and both already read as `None` here without this
+    function needing to distinguish them itself.
+    """
+    if not body:
+        return None
+    return Selection(
+        outcome=body["outcome"],
+        reason=body.get("reason"),
+        status=body.get("status"),
+        candidates=body.get("candidates", 0),
+        kept=body.get("kept", 0),
+    )

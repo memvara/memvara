@@ -389,6 +389,30 @@ def test_search_decodes_an_episode_hit_as_an_episode_not_a_claim(recorded):
     assert hits[0].episode.content == "I live in Berlin"
 
 
+def test_ranked_reaches_the_wire_only_when_asked_for(recorded):
+    """`AsyncRemoteMemvara`'s own request-building code, not shared with the sync
+    client's — the same precedent `anchored`'s async test sets."""
+    from memvara.types import SearchResults
+
+    mem = recorded({"as_of": None, "valid_at": None, "known_at": None,
+                    "states": ["live"], "count": 0, "results": [],
+                    "selection": {"outcome": "applied", "candidates": 40, "kept": 5}})
+
+    async def main():
+        plain = await mem.search("q", include_episodes=True)
+        ranked = await mem.search("q", include_episodes=True, ranked=True)
+        await mem.aclose()
+        return plain, ranked
+
+    plain, ranked = run(main())
+    sent_plain = json.loads(recorded.calls[-2].content)
+    sent_ranked = json.loads(recorded.calls[-1].content)
+    assert "ranked" not in sent_plain
+    assert sent_ranked["ranked"] is True
+    assert isinstance(ranked, SearchResults) and isinstance(plain, SearchResults)
+    assert ranked.selection is not None and ranked.selection.outcome == "applied"
+
+
 def test_recall_refuses_a_budget_rather_than_dropping_it(recorded):
     """`POST /v1/recall` renders server-side and takes no budget. A ceiling silently not
     applied is an oversized prompt with nothing to notice it by."""

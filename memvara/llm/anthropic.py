@@ -122,6 +122,28 @@ class AnthropicLLM:
         _shape.record_usage(response, usage, "input_tokens", "output_tokens")
         return response
 
+    # -- Chat protocol --------------------------------------------------------
+
+    def chat(self, system: str, prompt: str, *, json_object: bool,
+             max_completion_tokens: int, timeout: float,
+             usage: Usage | None = None) -> str:
+        """Plain chat completion for `memvara.select` — no schema, no `output_config`.
+
+        The Messages API has no `response_format` equivalent to ask for loosely-typed
+        JSON; `memvara.select`'s prompt already asks for JSON in prose, the same way it
+        does for OpenAI, so `json_object` is accepted for protocol symmetry and does not
+        change the request.
+        """
+        response = self._client.messages.create(
+            model=self.model,
+            max_tokens=max_completion_tokens,
+            timeout=timeout,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        _shape.record_usage(response, usage, "input_tokens", "output_tokens")
+        return _first_text(response)
+
     # -- LLM protocol -------------------------------------------------------
 
     def extract(

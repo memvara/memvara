@@ -7,6 +7,46 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `MemoryAPI.recall` gains `ranked`, an opt-in model-ranked read mode
+
+### What changed
+
+`search()` and `recall()` gain a keyword-only `ranked: bool = False` — see
+`memvara.select` and each method's docstring for what it does. `MemoryAPI.recall` (the
+protocol `server/tools.py` is typed against) declares it; `MemoryAPI.search` does not,
+because `memory_search` pins `include_episodes` to `False`, which `ranked=True` refuses
+outright. `Explanation` gains `selected` and `span`; `RecallResult` gains `selection`;
+`search()` now returns a `SearchResults` (a `list` subclass with one extra attribute,
+`.selection`) rather than a plain `list` — every existing caller that indexes, iterates
+or serializes the result is unaffected.
+
+### Who this changes, and in which direction
+
+**Nothing changes for a caller that never sets `ranked=True` or `read_selector=`.** The
+default is `False`, no `read_selector` is configured unless you pass one, and
+`SearchResults.selection` is `None` on every plain read — the same silence `anchored`'s
+addition kept.
+
+**If you implemented `MemoryAPI` yourself, `recall` now takes `ranked: bool = False`.**
+The `memory_recall` handler passes it on every call, so an implementation written
+against the previous protocol raises `TypeError: unexpected keyword argument 'ranked'`
+on the first call. Accept the keyword; an implementation with nothing to rank should
+raise `ValueError` if it is ever passed `True` rather than silently ignoring it, the same
+rule `anchored` set.
+
+**If you pattern-matched `search()`'s return value as `isinstance(x, list)` and stopped
+there, nothing changes** — `SearchResults` is one. If you compared it to a list literal
+with `==`, that still works too; only `repr()` differs if you relied on it printing
+exactly `[]`, which it still does, since `SearchResults` uses the plain `list` repr.
+
+### How to find your own instances
+
+```bash
+grep -rn "def search\|def recall" --include="*.py" . | grep -v "memvara/"
+```
+
+---
+
 ## `valid_from` now carries the time a turn stated, not the time it was said
 
 ### What changed

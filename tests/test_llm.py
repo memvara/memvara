@@ -114,7 +114,8 @@ def test_exported_from_the_package_without_the_sdk_installed():
     import memvara.llm as pkg
 
     assert pkg.NullLLM is NullLLM
-    assert set(pkg.__all__) == {"LLM", "NullLLM", "Usage", "AnthropicLLM", "OpenAILLM"}
+    assert set(pkg.__all__) == {
+        "LLM", "Chat", "NullLLM", "Usage", "AnthropicLLM", "OpenAILLM"}
     with pytest.raises(AttributeError):
         pkg.NotAThing
 

@@ -422,3 +422,30 @@ def test_a_chain_that_also_names_an_instant_keeps_its_second_reading() -> None:
     assert is_relational(question) is False
     assert is_relational("who is my manager's manager?") is True
     assert is_relational("what happened last March?", registry) is False
+
+
+# --- routed_role: which role's turns a ranked read hands the selector -----------------
+
+
+def test_a_plain_question_routes_to_user_turns() -> None:
+    from memvara.retrieve.intent import routed_role
+    assert routed_role("Which city did I move to last spring?") == "user"
+    assert routed_role("How many concerts have I been to this year?") == "user"
+
+
+@pytest.mark.parametrize("phrase", [
+    "you suggested", "you recommended", "you mentioned", "you told me", "you provided",
+    "you wrote", "you created", "did you say", "can you remind me", "remind me what",
+    "remind me which", "remind me who", "remind me how", "remind me of",
+])
+def test_each_assistant_phrase_routes_to_assistant_turns(phrase: str) -> None:
+    from memvara.retrieve.intent import ASSISTANT_PHRASES, routed_role
+    assert phrase in ASSISTANT_PHRASES
+    assert routed_role(f"Earlier {phrase.upper()} something about the budget?") == "assistant"
+
+
+def test_the_phrases_match_whole_words_only() -> None:
+    from memvara.retrieve.intent import routed_role
+    # "youtold" and "provided" without "you" are not the phrase; neither may fire.
+    assert routed_role("youtold me the plan") == "user"
+    assert routed_role("the shop provided a receipt") == "user"

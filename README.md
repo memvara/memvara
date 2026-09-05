@@ -486,8 +486,11 @@ flowchart TD
 ```
 
 The write path and the read path meet only at the store, and **nothing on the read path
-calls a model** — not even the optional reranker, which is a cross-encoder rather than a
-generative model. History and provenance are not a separate subsystem: they fall out of
+calls a model by default** — not even the optional reranker, which is a cross-encoder
+rather than a generative model. The one opt-in exception is `search(ranked=True)` against
+a retriever configured with a `read_selector`: one chat call per read, on the customer's
+own key, naming which of the reranked turns actually bear on the question. See
+`memvara.select`. History and provenance are not a separate subsystem: they fall out of
 the store keeping intervals and supersession pointers instead of overwriting rows.
 
 Everything replaceable is a protocol — `Store`, `Embedder`, `LLM`, `Redactor`, `Recorder` —

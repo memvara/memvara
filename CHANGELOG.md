@@ -11,6 +11,37 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`ranked=True` on `search()` and `recall()`: an opt-in read mode that consults a
+  model to name which of the reranked turns actually bear on the question**, on the
+  caller's own key. `Memvara(read_selector=ModelSelector(llm=...), read_rerank_top_n=...)`
+  configures it; every other read is unaffected, and a read that never sets `ranked=True`
+  never sees a `read_selector` mentioned, let alone called. See `memvara.select` for the
+  protocol, `HybridRetriever.search`'s docstring for the read order, and
+  `docs/superpowers/specs/2026-09-04-model-ranked-recall-design.md` for the full design.
+
+  The selector sees one role's turns: the user's, unless the question asks what the
+  assistant said (`memvara.retrieve.intent.routed_role`, fourteen phrases, model-free).
+  With both roles in its window the long assistant turns took the slots the answer-bearing
+  user turns needed — gold-turn recall 0.808 against 0.912 on the parity screen.
+
+  A ranked read is one query-time chat call, billed to whichever key `read_selector`
+  was built with — memvara's own cost is unchanged, $0, because the call never reaches
+  memvara's infrastructure. `search()` returns a `SearchResults` (a `list` subclass
+  carrying `.selection`, the outcome — `applied`, `fallback`, `unconfigured`, `disabled`
+  or `key_rejected`); `recall()`'s text block ends with a `RECALL_UNRANKED` line whenever
+  the model did not actually rank it, so a caller reading the block sees the order it
+  received rather than assuming the order it asked for.
+
+  **The default read path is unchanged**: no `read_selector` configured is the shipped
+  default, `ranked` defaults to `False`, and a plain read imports nothing this adds.
+
+  Measured on LongMemEval-S, a 199-question stratified sample, one judged run, gpt-5.4
+  reader and judge, through the hosted service's read path with gpt-5.4-mini as the
+  selector: 177 of 199 correct (88.9%) at a median context of 549 tokens, against 135 of
+  199 (67.8%) for the same retrieval rendered without the selector at the same budget, and
+  172 of 199 for a 4,089-token control without it. Reader self-disagreement on identical
+  prompts is 7.8%, so single-run differences under about 8 questions are noise.
+
 - **`bounded_claim_schema(max_claims)`, `OpenAILLM(max_claims=...)` and
   `MEMVARA_LLM_MAX_CLAIMS` to reach it from a server**, for a backend that constrains
   decoding. Unbounded, "one more claim" is permanently a legal

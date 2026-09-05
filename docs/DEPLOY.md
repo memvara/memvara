@@ -126,6 +126,13 @@ transport is stdio and the configuration is entirely environment.
 | `MEMVARA_EMBEDDER` | `hashing` (default, offline, 512-dimensional), `hashing:<dim>`, `local` or `local:<model>` (needs `memvara[local-embed]`), or `auto`. See [The embedder is named, not discovered](#the-embedder-is-named-not-discovered). |
 | `MEMVARA_READ_ONLY` | `1` hides every tool that writes. |
 
+**There is no variable here that configures a `read_selector`.** `memory_recall`'s
+`ranked` argument (see `memvara.select`) is accepted by this server regardless, and every
+call to it is served unranked — outcome `unconfigured`, the block ending with a
+`RECALL_UNRANKED` line — because nothing in phase 1 wires a selector into
+`memvara.server.config.build_memvara`. A caller that wants a ranked read runs the
+library directly and passes `read_selector=` to `Memvara(...)`.
+
 The scope is bound at startup and **cannot be changed by a tool call**. That is the
 security property of the stdio transport: the process is the user, because the client
 launched it with the user's environment, so there is no caller-supplied scope string for

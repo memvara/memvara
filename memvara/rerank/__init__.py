@@ -32,6 +32,15 @@ What keeps the default `None` is cost, not accuracy: a cross-encoder is roughly 
 query at `top_n=20` against a ~3 ms search, so with reranking on the reranker *is* the
 query latency. `docs/ROADMAP.md` carries the full table, the per-category breakdown, and
 the commands to reproduce it.
+
+A reranker orders candidates; it never drops one, and it never sees the question and the
+candidate weighed against each other by a model that can be asked to *judge*. That is a
+different stage, opt-in a level further out — `memvara.select`, a `read_selector` that
+takes a `ranked=True` read's reranked turns and names the ones that actually bear on the
+question. It builds on this package (the judged configuration reranks first, at
+`rerank_top_n=200`, then selects) rather than replacing it: the two answer different
+questions, "which order" and "which ones", and the second costs a real chat call where
+this package's most expensive backend still costs none.
 """
 
 from __future__ import annotations

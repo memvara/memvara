@@ -236,8 +236,12 @@ def test_every_tool_description_says_when_to_call_it():
 #: `memory_forget` gets two, because it refuses both of its addressing modes at once: no
 #: single call can touch all three of its properties, and the union of two can.
 _FORWARDING_CASES = {
+    # Two sets, because `ranked=True` needs `include_episodes=True` and refuses a
+    # `memory_types` filter (see `HybridRetriever.search`) — the same reason
+    # `memory_forget` below carries two.
     "memory_recall": [{"query": "anything", "memory_types": ["semantic"],
-                       "anchored": True}],
+                       "anchored": True},
+                      {"query": "anything", "ranked": True, "include_episodes": True}],
     "memory_search": [{"query": "anything", "memory_types": ["semantic"],
                        "as_of": "2024-03-01", "anchored": True}],
     "memory_neighborhood": [{"entity": "Acme", "depth": 2, "k": 5, "min_hops": 1,
@@ -999,6 +1003,81 @@ def test_recall_hands_back_no_claim_ids_and_that_is_the_decision(server):
     assert "with_ids" not in json.dumps(BY_NAME["memory_recall"].schema)
     assert "id=cl_" in text(server, "memory_search", {"query": "where do they live"}), \
         "the same claim, from the tool whose job is to be citable"
+
+
+# -- ranked --------------------------------------------------------------------
+
+from memvara.select import SelectorBusy, SelectorRefused  # noqa: E402
+
+from test_select import FakeSelector  # noqa: E402
+
+
+def test_memory_recall_takes_ranked_and_memory_search_does_not():
+    """`_search` reads `.claim` on every row and pins `include_episodes` to `False`, so
+    `ranked` on it would be an argument that always raises — see `server/memory_api.py`."""
+    assert "ranked" in BY_NAME["memory_recall"].properties
+    assert "ranked" not in BY_NAME["memory_search"].properties
+
+
+def test_the_ranked_description_names_every_outcome():
+    """The precedent is `budget` (`tools.py:1527-1536`): the trailing signal a block can
+    carry is explained in the argument that produces it."""
+    description = BY_NAME["memory_recall"].properties["ranked"]["description"]
+    for phrase in ("no key on file", "switched", "rejected the key", "timed out",
+                  "capacity", "retry"):
+        assert phrase in description, f"ranked's description must mention {phrase!r}"
+
+
+def test_a_served_unranked_block_ends_with_the_line():
+    mem = make_memory(user="alice", read_selector=FakeSelector(
+        top_n=5, select_raises=TimeoutError("late")), read_rerank_top_n=20)
+    srv = MemvaraMCPServer(mem, user="alice")
+    try:
+        text(srv, "memory_add", {"text": "I have been kayaking"})
+        body = text(srv, "memory_recall",
+                   {"query": "kayaking", "include_episodes": True, "ranked": True})
+        assert body.rstrip().endswith("fallback.)")
+    finally:
+        srv.close()
+
+
+def test_a_ranked_call_that_applied_carries_no_unranked_line():
+    mem = make_memory(user="alice",
+                      read_selector=FakeSelector(top_n=5, keep=1), read_rerank_top_n=20)
+    srv = MemvaraMCPServer(mem, user="alice")
+    try:
+        text(srv, "memory_add", {"text": "I have been kayaking"})
+        body = text(srv, "memory_recall",
+                   {"query": "kayaking", "include_episodes": True, "ranked": True})
+        assert "model ranking not applied" not in body
+    finally:
+        srv.close()
+
+
+def test_a_busy_selector_is_a_tool_error_asking_for_a_retry():
+    mem = make_memory(user="alice", read_selector=FakeSelector(
+        top_n=5, admit_raises=SelectorBusy("full")), read_rerank_top_n=20)
+    srv = MemvaraMCPServer(mem, user="alice")
+    try:
+        body, is_error = call(srv, "memory_recall",
+                              {"query": "kayaking", "include_episodes": True,
+                               "ranked": True})
+        assert is_error
+        assert "retry" in body.lower()
+    finally:
+        srv.close()
+
+
+def test_recall_without_ranked_never_touches_a_configured_selector():
+    selector = FakeSelector(top_n=5, admit_raises=SelectorRefused("disabled"))
+    mem = make_memory(user="alice", read_selector=selector, read_rerank_top_n=20)
+    srv = MemvaraMCPServer(mem, user="alice")
+    try:
+        text(srv, "memory_add", {"text": "I have been kayaking"})
+        text(srv, "memory_recall", {"query": "kayaking"})  # ranked left at its default
+        assert selector.admit_calls == 0
+    finally:
+        srv.close()
 
 
 def test_recall_and_search_report_absence_as_absence(server):

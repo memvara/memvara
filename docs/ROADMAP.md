@@ -419,6 +419,15 @@ is a claim about evidence placement and not about answer accuracy.
 
 ## Deliberately deferred
 
+**A memvara-paid allowance on ranked reads.** `search(ranked=True)` (`memvara.select`)
+puts one per-query model call on the *customer's* key, so memvara's own cost per call is
+$0 and nothing here is metered. Phase 2 — memvara fronting the call on its own key, with
+an allowance sized from usage — is deferred to thirty days of the `retrieval.model_query`
+and `retrieval.model_fallback` series a phase-1 deployment emits; see
+`docs/superpowers/specs/2026-09-04-model-ranked-recall-design.md` for the full design and
+what it watches for. Before this the per-query model call the roadmap's pricing section
+discusses below was entirely hypothetical; it is not any more, and it still is not priced.
+
 **Persisting derived relation terms.** `retrieve/compose.acquire()` pays one model call
 per vocabulary and the answer lives for the life of a `Memvara`, so a long-running server
 pays once at startup and a short script pays once per run. Making it "asked once, ever" —

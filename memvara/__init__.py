@@ -84,6 +84,7 @@ from .types import (
     RecallResult,
     Result,
     Scope,
+    SearchResults,
     WriteReceipt,
     time_axes,
     utcnow,
@@ -122,6 +123,10 @@ __all__ = [
     # `Closure` is: both are return types on four facade methods each, so a caller who
     # annotates anything cannot name them otherwise.
     "RecallResult", "Delta",
+    # What `search()` hands back — a `list` plus `.selection`, the outcome of a ranked
+    # read. Exported for the same reason: a caller who annotates the return of `search()`
+    # needs the name, whether or not they ever pass `ranked=True`.
+    "SearchResults",
     # What `ask()` hands back, and the per-slot element inside it. Exported for the same
     # reason: both are return types on four facade methods, and a `Reading` is the object
     # a caller reads `then` and `stated` off when they need the structure rather than the

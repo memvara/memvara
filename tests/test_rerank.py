@@ -402,7 +402,8 @@ def test_the_default_configuration_never_imports_a_reranker_backend() -> None:
         "mem.search('where do they live?', include_episodes=True)\n"
         "mem.close()\n"
         "watched = {'sentence_transformers', 'torch', 'transformers',\n"
-        "           'memvara.rerank.cross', 'memvara.rerank.lexical'}\n"
+        "           'memvara.rerank.cross', 'memvara.rerank.lexical',\n"
+        "           'memvara.select.model'}\n"
         "print(sorted(watched & set(sys.modules)))\n"
     )
     head = ("import sys\n"
