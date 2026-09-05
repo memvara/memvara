@@ -141,7 +141,10 @@ The list is longer than most projects publish and it is on its own page,
 3. **Entity resolution folds surface forms, not the world.** `Acme Corp` and `acme, inc.`
    collapse; `Big Blue` and `IBM` do not, unless you say so.
 4. **The published LOCOMO and LongMemEval numbers are retrieval, not answer accuracy**,
-   and must never be quoted as if they were.
+   and must never be quoted as if they were. A judged answer-accuracy number
+   now exists alongside them — 88.9% on a LongMemEval-S sample, through the shipped
+   0.11.0 read path — and it is a separate measurement, on a different sample, made with
+   a reader. See [Answer accuracy, judged, in the MemoryBench harness](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness).
 
 ## How do I get started?
 

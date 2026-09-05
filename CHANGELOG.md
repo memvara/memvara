@@ -9,6 +9,24 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Changed
+
+- **The judged LongMemEval accuracy behind 0.11.0's `ranked=True` figure now has a full
+  writeup, beside the retrieval numbers rather than instead of them.** `docs/BENCHMARKS.md`
+  gets its own section — method, the per-type breakdown, a `gpt-5.4`-selector run
+  (182/199, 91.5%) beside the shipped `gpt-5.4-mini` one, an offline screen over all 500
+  questions showing the selector is not fitted to the 199 it was scored on (93.7%/6.0% vs.
+  93.5%/6.8% gold/non-gold keep), and the per-call cost on the customer's own key (about
+  0.35 cents on `gpt-5.4-mini`, about 1.1 cents on `gpt-5.4`). `docs/FAQ.md`,
+  `docs/LIMITATIONS.md`, `docs/ROADMAP.md` and the README's benchmark table are corrected
+  to point at it instead of stating that no judged number exists. The retrieval figures
+  already published — R@12 70.4 on the LongMemEval oracle split and the rest — are
+  unchanged; they measure something else and stay as they were. No same-harness comparison
+  against Supermemory's hosted service exists yet, and the docs say so: their ingest of the
+  sample priced at about $160 and their open-source engine could not take the bulk ingest,
+  and their published 95% is Recall@15, a retrieval metric, not comparable to a judged
+  accuracy number.
+
 ## [0.11.0] — 2026-09-05
 
 ### Added

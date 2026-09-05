@@ -153,10 +153,73 @@ the normal failure mode of a self-authored benchmark, and this one hit it on the
 
 ---
 
+## Answer accuracy, judged, in the MemoryBench harness
+
+Everywhere else on this page, "measured" means retrieval — did the right evidence come
+back — because that needs no model and the reader is a shared confound either system
+would carry. This section is the one exception: an LLM judges whether the *answer* is
+right, on the shipped 0.11.0 read path, through a harness neither party controls.
+
+**Method.** LongMemEval-S, a 199-question stratified sample (seed `20260903`) of the
+public 500, run inside the [MemoryBench harness](https://github.com/supermemoryai/memorybench)
+— open source, published by Supermemory, not written for this project. Reader and judge
+are both `gpt-5.4`, and the metric is LLM-judged answer accuracy. Reader
+self-disagreement on identical prompts is **7.8%**, so a single-run difference under
+about 8 questions is noise, not a finding.
+
+**The shipped path** is memvara 0.11.0 as released, read through the hosted service with
+`ranked=True` and `gpt-5.4-mini` as the selector, billed on the customer's own key — one
+run:
+
+| path | selector | median context | correct |
+|---|---|---:|---:|
+| Shipped (0.11.0, `ranked=True`) | gpt-5.4-mini | 549 tok (p90 693) | **177 / 199 (88.9%)** |
+| Twin — same retrieval, no selector, same budget | none | 720 tok | 135 / 199 (67.8%) |
+| Control — no selector, wide budget | none | 4,089 tok | 172 / 199 (86.4%) |
+| Same retrieval, selector swapped (offline, 2 runs) | gpt-5.4 | 672 tok (both runs) | **182 / 199 (91.5%)** |
+
+The twin isolates what the selector buys at a fixed budget: paired against it, the
+shipped path answers **42 more questions correctly** on the same 199, at a quarter of the
+tokens the control needs to reach a comparable score — and still beats the control by 5.
+
+**Per type, shipped path:** single-session-user 27/28, single-session-assistant 22/22,
+single-session-preference 7/12, multi-session 45/53, temporal-reasoning 47/53,
+knowledge-update 29/31. Preference is the weak row here for the same reason it is weak in
+the retrieval table below — the golds are meta-descriptions no single turn contains — and
+it is the only row a stronger selector (`gpt-5.4`, 91.5% overall) would be worth checking
+against before trusting in production.
+
+**Off the tuning sample.** A one-run, one-sample number invites overfitting to that
+sample; the way to check is to look at what the selector keeps on data it was never tuned
+against. Screened offline over all 500 LongMemEval questions, the shipped selector keeps
+**93.7% of gold turns (819 of 874)** at a non-gold keep rate of **6.0%**. The 199-question
+sample it was scored on above reads 93.5% and 6.8% on the same two measures — close enough
+that the headline number is not an artifact of the sample it was picked to look good on.
+
+**Cost, on the customer's own provider key:** about **0.35 cents per ranked recall** with
+`gpt-5.4-mini` as the selector, about **1.1 cents** with `gpt-5.4` (3,325 prompt tokens,
+median). Memvara's own infrastructure cost is unchanged at $0 either way — the call never
+reaches it.
+
+**What this is not.** No same-harness comparison against Supermemory's own hosted service
+exists. Ingesting the 199-question sample into it was quoted at roughly $160, and their
+open-source engine could not take the bulk ingest this comparison needed, so the run was
+never completed — this is not a result being withheld, it is a result that does not
+exist. Supermemory's published 95% is also not a like-for-like number to reach for: it is
+Recall@15, a retrieval metric, and this section's numbers are judged answer accuracy.
+The two measure different things and are not comparable.
+
+The retrieval-only figures in the rest of this page — R@12 70.4 on the LongMemEval oracle
+split and the rest — are unaffected by any of the above and remain true. They are a
+different measurement, made without a reader, and the next section is exactly that one.
+
+---
+
 ## LOCOMO and LongMemEval — retrieval, measured
 
-Not answer accuracy, and **not comparable to published LOCOMO/LongMemEval scores**, which
-are end-to-end judged accuracy. This measures the thing a memory layer is actually
+Not answer accuracy — that number is judged, separately, [above](#answer-accuracy-judged-in-the-memorybench-harness)
+— and not comparable to published LOCOMO/LongMemEval scores, which are end-to-end judged
+accuracy on the full public sets. This measures the thing a memory layer is actually
 responsible for: *did retrieval surface the evidence the annotators marked?* It needs no
 model, so it runs the full question sets for nothing, and it removes the reader — which
 both systems would share anyway — as a confound.

@@ -411,9 +411,14 @@ contended developer machine; treat them as ratios rather than absolutes.) The st
 is still ~3 µs and `CoverageReranker` ~250 µs. This cost is the reason the default stays
 `None` — not the accuracy question, which is now settled.
 
-**Still not measured: whether any of this reaches an answer.** These are retrieval
-numbers. A reader model has never been run over either configuration, so "+14.4 R@1"
-is a claim about evidence placement and not about answer accuracy.
+**Still not measured for this specific comparison: whether reranking on versus off
+reaches an answer.** These are retrieval numbers, and no reader has been run over either
+configuration here, so "+14.4 R@1" is a claim about evidence placement and not about
+answer accuracy. A reader has since been run elsewhere in the read path — 0.11.0's ranked
+recall, judged on LongMemEval-S, is in
+[`docs/BENCHMARKS.md`](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness) —
+but that run does not isolate the reranker the way this section's numbers do, so it does
+not close this specific gap.
 
 ---
 
@@ -426,7 +431,12 @@ an allowance sized from usage — is deferred to thirty days of the `retrieval.m
 and `retrieval.model_fallback` series a phase-1 deployment emits; see
 `docs/superpowers/specs/2026-09-04-model-ranked-recall-design.md` for the full design and
 what it watches for. Before this the per-query model call the roadmap's pricing section
-discusses below was entirely hypothetical; it is not any more, and it still is not priced.
+discusses below was entirely hypothetical; it is not any more, and the cost on the
+customer's own key is now measured — about **0.35 cents per ranked recall** on
+`gpt-5.4-mini`, about **1.1 cents** on `gpt-5.4` (3,325 prompt tokens, median); see
+[`docs/BENCHMARKS.md`](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness).
+What memvara would charge for a phase-2 fronted allowance is a separate decision and is
+still not made.
 
 **Persisting derived relation terms.** `retrieve/compose.acquire()` pays one model call
 per vocabulary and the answer lives for the life of a `Memvara`, so a long-running server
@@ -635,9 +645,14 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
    carrying: **at this corpus size the whole-transcript arm scored 100%**, so the memory
    layer's argument here is 5.6× fewer tokens rather than a better answer; and the trap
    metric — the column a before/after claim would rest on — produced **no signal at all**,
-   because the reader never gave a superseded value. Still missing: a hosted reader, a
-   second corpus size to turn the token argument from a slope into a measurement, and any
-   comparison against mem0 on answers rather than on architecture.
+   because the reader never gave a superseded value. Still missing on *this* corpus: a
+   hosted reader behind an API, a second corpus size to turn the token argument from a
+   slope into a measurement, and any comparison against mem0 on answers rather than on
+   architecture. A hosted reader has since been run on a different corpus — 0.11.0's
+   ranked recall, judged on LongMemEval-S through the MemoryBench harness, in
+   [`docs/BENCHMARKS.md`](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness)
+   — but it says nothing about this authored support scenario, which still needs its own
+   run.
 
    What did land is the *guarded* half: `python3 demo/harness.py --reader stub` runs all
    five arms end to end in one offline, deterministic process, and
