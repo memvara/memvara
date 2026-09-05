@@ -9,6 +9,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-09-05
+
 ### Added
 
 - **`ranked=True` on `search()` and `recall()`: an opt-in read mode that consults a
@@ -75,6 +77,40 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   schema edit from breaking the OpenAI path, and it could not see the largest class of
   such edits: `FakeCompletions` returns a canned payload without validating the schema, so
   an unsupported keyword left the whole suite green and failed every real call.
+
+### Fixed
+
+- **A ranked read with `k <= 0` returned a bare `SearchResults()`, its `.selection` stuck
+  at `None` and indistinguishable from a plain read's.** The early return now only fires
+  for a plain read; a ranked call falls through to the ordinary path and reports a real
+  outcome — `unconfigured`, `disabled`, `key_rejected`, `applied` or `fallback` — the way
+  every other ranked call does.
+
+- **An unconfigured ranked read still paid for the work "unconfigured" promises to
+  skip.** With `rerank_ranked_only` set, it widened the candidate-gather depth and ran the
+  shared cross-encoder reranker anyway. Both the reranker gate and the depth calculation
+  now key off whether a selector actually ran on this call, not off the raw `ranked` flag.
+
+- **A configured selector with no reranker was starved to a `k`-sized candidate pool
+  instead of `rerank_top_n`,** because the depth calculation widened only when a reranker
+  was active. It now also widens for a real ranked call, reranker or not, since the
+  selector needs the same candidate pool either way.
+
+- **An empty candidate list still counted as `retrieval.model_query` and
+  `retrieval.select_ms`,** even though `ModelSelector.select()` never dispatches a call
+  when there is nothing to ask about. Both counters are now skipped on an empty candidate
+  list, matching the call `select()` actually made.
+
+- **A provider SDK's own timeout exception, when it is not Python's builtin
+  `TimeoutError`, was counted as `reason=error` instead of `reason=timeout`.**
+  `ModelSelector` now recognizes a deadline overrun surfaced through the SDK's exception
+  as well as through its own, so a timed-out call is billed and reported as a timeout
+  either way.
+
+- **The `memvara.select` module doctest was plain prose**, never collected by
+  `--doctest-modules`, and referenced a name the module never defined. It is now a
+  runnable example against a fake selector, so an edit that breaks the documented usage
+  fails the suite instead of passing silently.
 
 ## [0.10.0] — 2026-09-03
 
