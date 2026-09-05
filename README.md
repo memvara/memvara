@@ -664,9 +664,9 @@ heading says so.
 
 What these numbers do not cover, and every other limit this project knows about, is in
 [Limitations](https://github.com/memvara/memvara/blob/main/docs/LIMITATIONS.md) — including why the LOCOMO and LongMemEval
-retrieval figures are not answer accuracy, and why the judged accuracy figure above, real
-as it is, is one run on one sample with no same-harness comparison against another
-vendor's hosted service.
+retrieval figures are not answer accuracy, which is the one most often quoted wrongly. The
+judged accuracy figure above is one run on one sample, with no same-harness comparison
+against another vendor's hosted service.
 
 ---
 

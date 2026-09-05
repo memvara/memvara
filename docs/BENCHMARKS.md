@@ -176,31 +176,33 @@ run:
 | Shipped (0.11.0, `ranked=True`) | gpt-5.4-mini | 549 tok (p90 693) | **177 / 199 (88.9%)** |
 | Twin — same retrieval, no selector, same budget | none | 720 tok | 135 / 199 (67.8%) |
 | Control — no selector, wide budget | none | 4,089 tok | 172 / 199 (86.4%) |
-| Same retrieval, selector swapped (offline, 2 runs) | gpt-5.4 | 672 tok (both runs) | **182 / 199 (91.5%)** |
+| Selector swapped — same retrieval, rendered offline, 2 runs | gpt-5.4 | 672 tok (both runs) | **182 / 199 (91.5%)** |
 
 The twin isolates what the selector buys at a fixed budget: paired against it, the
-shipped path answers **42 more questions correctly** on the same 199, at about an eighth
-of the tokens the control needs to reach a comparable score. The 5-question gap to the
-control is inside the noise floor above: the selector matches the wide context, it does
-not beat it.
+shipped path answers **42 more questions correctly** on the same 199. Against the control
+the shipped path uses about a seventh of the tokens (549 against 4,089) and lands 5
+questions ahead, which is inside the noise floor above: the selector matches the wide
+context, it does not beat it.
 
 **Per type, shipped path:** single-session-user 27/28, single-session-assistant 22/22,
 single-session-preference 7/12, multi-session 45/53, temporal-reasoning 47/53,
 knowledge-update 29/31. Preference is the weak row here for the same reason it is weak in
-the retrieval table below — the golds are meta-descriptions no single turn contains — and
-it is the only row a stronger selector (`gpt-5.4`, 91.5% overall) would be worth checking
-against before trusting in production.
+the retrieval table below: the golds are meta-descriptions no single turn contains. It is
+the row to check before trusting the headline number in production. Whether a stronger
+selector lifts it is not known; the `gpt-5.4` run (91.5% overall) is not broken out by
+type here.
 
 **Off the tuning sample.** A one-run, one-sample number invites overfitting to that
 sample; the way to check is to look at what the selector keeps on data it was never tuned
-against. Screened offline over all 500 LongMemEval questions, the shipped selector keeps
+against. Screened over all 500 LongMemEval questions, the shipped selector keeps
 **93.7% of gold turns (819 of 874)** at a non-gold keep rate of **6.0%**. The 199-question
 sample it was scored on above reads 93.5% and 6.8% on the same two measures — close enough
 that the headline number is not an artifact of the sample it was picked to look good on.
 
-**Cost, on the customer's own provider key:** about **0.35 cents per ranked recall** with
-`gpt-5.4-mini` as the selector, about **1.1 cents** with `gpt-5.4` (3,325 prompt tokens,
-median). Memvara pays nothing for the model call: the hosted service makes it on the
+**Cost, on the customer's own provider key:** on average about **0.35 cents per ranked
+recall** with `gpt-5.4-mini` as the selector, about **1.1 cents** with `gpt-5.4`. The
+median call is cheaper, 0.27 and 0.87 cents, because the prompt distribution is
+right-skewed: median 3,325 prompt tokens, p95 14,609. Memvara pays nothing for the model call: the hosted service makes it on the
 customer's key, and the provider bills the customer.
 
 **What this is not.** No same-harness comparison against Supermemory's own hosted service
@@ -220,7 +222,7 @@ different measurement, made without a reader, and the next section is exactly th
 ## LOCOMO and LongMemEval — retrieval, measured
 
 Not answer accuracy — that number is judged, separately, [above](#answer-accuracy-judged-in-the-memorybench-harness)
-— and not comparable to published LOCOMO/LongMemEval scores, which are end-to-end judged
+— and **not comparable to published LOCOMO/LongMemEval scores**, which are end-to-end judged
 accuracy on the full public sets. This measures the thing a memory layer is actually
 responsible for: *did retrieval surface the evidence the annotators marked?* It needs no
 model, so it runs the full question sets for nothing, and it removes the reader — which

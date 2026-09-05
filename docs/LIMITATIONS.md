@@ -28,8 +28,8 @@ the date is here to be read, and to be old enough to disbelieve eventually.
   Both share one extraction oracle, so both isolate architecture from model quality — and
   neither says anything about end-to-end answer quality. That is what `demo/` is for, and
   its one run is a sanity check with an agent as the reader, not a benchmark.
-- **The LOCOMO / LongMemEval numbers `bench/locomo.py` and `bench/longmemeval.py` report
-  are retrieval, not accuracy.** They are real and they run free, but they are not the
+- **The LOCOMO / LongMemEval numbers this project's own harness reports are retrieval, not
+  accuracy.** They are real and they run free, but they are not the
   metric those papers report and must never be quoted as if they were. Closing that gap
   on *this* harness needs a reader model — a judged answer-accuracy number now exists,
   but it comes from a different harness (MemoryBench, on a LongMemEval-S sample; see

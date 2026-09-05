@@ -77,11 +77,14 @@ The suite is wired into `tests/test_bench_eval.py` as a gate rather than left as
 because everything it scores is a promise the library makes in prose and prose does not go
 red.
 
-**The half that is still open** is end-to-end judged accuracy, which does need a reader
-model and does cost money. The harness already reports a `none` / `memory` / `full`
+**The half that is still open** is end-to-end judged accuracy on this project's own
+harness, which does need a reader model and does cost money. The harness already reports a `none` / `memory` / `full`
 triple when a reader is configured, because a memory score with no reader-only floor and no
-whole-haystack ceiling beside it is uninterpretable. This remains the single most valuable
-remaining item in the repository — `demo/` built the apparatus and the corpus for it (see
+whole-haystack ceiling beside it is uninterpretable. On this harness it remains the single most
+valuable remaining item in the repository; a judged number does exist for the hosted read
+path, on LongMemEval-S through the MemoryBench harness
+([`docs/BENCHMARKS.md`](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness)),
+but not on this apparatus. `demo/` built the apparatus and the corpus for it (see
 [What is still missing](#what-is-still-missing) and
 [`demo/README.md`](../demo/README.md)), but a run with an agent in the reader's seat is a
 sanity check, not the measurement.
@@ -432,8 +435,7 @@ and `retrieval.model_fallback` series a phase-1 deployment emits; see
 `docs/superpowers/specs/2026-09-04-model-ranked-recall-design.md` for the full design and
 what it watches for. Before this the per-query model call the roadmap's pricing section
 discusses below was entirely hypothetical; it is not any more, and the cost on the
-customer's own key is now measured — about **0.35 cents per ranked recall** on
-`gpt-5.4-mini`, about **1.1 cents** on `gpt-5.4` (3,325 prompt tokens, median); see
+customer's own key is now measured, in
 [`docs/BENCHMARKS.md`](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness).
 What memvara would charge for a phase-2 fronted allowance is a separate decision and is
 still not made.
