@@ -260,3 +260,21 @@ delivered. The remaining misses on the 199 are at the reader's noise floor, and 
 rendering variants are not worth judged spend. What is left to measure is the reader itself
 (several samples with a vote), the competitor through the same harness, and the other 301
 questions.
+
+## Parity on the shipped path, 2026-09-05
+
+The mechanism as shipped in core (routing by the question's role, then the selector over the
+routed top-40 on the customer's key, gpt-5.4-mini by decision 2), run through the local stack
+with the harness rendering the server's order kept-first to 720 tokens, gpt-5.4 reader and judge.
+
+| run | run id | correct | % | median tokens | note |
+|---|---|---|---|---|---|
+| ranked, shipped path | memvara-ranked-parity2 | 177/199 | 88.9 | 549 | prediction 178 (171–185) held |
+| reranked twin, same stack, MEMVARA_RANKED off | memvara-ranked-twin | 135/199 | 67.8 | 567 | both roles at 720: the failure routing removes |
+| paired, ranked minus twin | | +42 | | | 45 wins, 3 losses, 151 ties; gate was +8 |
+
+Against the earlier arms the shipped path is +6 over routed-720 (171), +5 over the 4,089-token
+control (172), and −5 against arm B (182, gpt-5.4 as the selector on offline blocks). The
+offline screens on the shipped path, on the scorer as reviewed: unrouted 0.879 gold recall at a
+0.119 keep rate, routed 0.935 at 0.068. One judged run each; reader noise is 7.8% on identical
+prompts. Costs: routed screen $0.72, ranked judging $1.08, twin search and judging about $1.20.
