@@ -87,13 +87,10 @@ python3 release/publish_npm.py --package PATH --dry-run
 python3 release/publish_npm.py --package PATH
 ```
 
-**The first publish happened.** `memvara@0.0.1` is on the registry as a name
-reservation; there is still no JavaScript client, and `0.0.2` in this tree is the
-same reservation with a notice that says what a JavaScript reader can actually do
-(speak MCP) instead of only what they cannot. The release *process* is now the
-same tagged-commit workflow as PyPI (`.github/workflows/release.yml`): `check-npm`,
-`build-npm`, `publish-npm`. This script is the fallback for when Actions cannot
-run, and it still refuses the two `"private": true` applications — the console and
+**npm publishes from its own workflow.** An `npm-v*` tag runs
+`.github/workflows/release-npm.yml` — `version`, `test`, `build`, `publish` — and a
+`v*` tag does not touch npm at all; `docs/RELEASING.md`'s *The npm train* is the
+account. This script is the fallback for when Actions cannot run, and it still refuses the two `"private": true` applications — the console and
 the marketing site — rather than letting `npm` produce a vaguer error.
 
 An npm organisation still only reserves `@memvara/*`. The placeholder is what

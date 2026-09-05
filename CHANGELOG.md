@@ -11,6 +11,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Changed
 
+- **`docs/RELEASING.md`'s job table now describes what `release.yml` runs.** The
+  checklist's step 3 listed `check-npm`, `build-npm` and `publish-npm` as jobs a `v*` tag
+  starts. `release.yml` has not had them since npm moved to `release-npm.yml`; its five
+  jobs are `version`, `ci`, `build`, `publish-pypi` and `publish-testpypi`. The npm train
+  is its own section with its own table, every other sentence that named the old jobs
+  names the ones that exist, `release/README.md` says the same, and
+  `tests/test_npm_release.py` now pins both tables to the workflows' `jobs:` keys so the
+  tables cannot drift a third time.
 - **The judged LongMemEval accuracy behind 0.11.0's `ranked=True` figure now has a full
   writeup, beside the retrieval numbers rather than instead of them.** `docs/BENCHMARKS.md`
   gets its own section — method, the per-type breakdown, a `gpt-5.4`-selector run

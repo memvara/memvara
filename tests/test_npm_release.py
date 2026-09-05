@@ -203,6 +203,34 @@ def test_npm_releases_on_its_own_tag_and_not_the_python_one():
         assert job not in python_side
 
 
+def _jobs_of(workflow: pathlib.Path) -> list[str]:
+    """The top-level `jobs:` keys of a workflow, in file order."""
+    text = workflow.read_text(encoding="utf-8")
+    body = text.split("\njobs:\n", 1)[1]
+    return re.findall(r"^  ([a-z][a-z0-9-]*):\s*$", body, re.M)
+
+
+def _documented_jobs(heading: str) -> list[str]:
+    """The first column of the job table under `heading` in docs/RELEASING.md."""
+    releasing = (REPO / "docs" / "RELEASING.md").read_text(encoding="utf-8")
+    section = releasing.split(heading, 1)[1].split("\n## ", 1)[0]
+    return re.findall(r"^\| `([a-z][a-z0-9-]*)` \|", section, re.M)
+
+
+@pytest.mark.parametrize("workflow, heading", [
+    (PY_WORKFLOW, "### 3. Tag the commit CI went green on"),
+    (WORKFLOW, "## The npm train"),
+])
+def test_releasing_lists_exactly_the_jobs_each_workflow_has(workflow, heading):
+    """The job tables in `docs/RELEASING.md` drifted from the workflows twice: the
+    Python table kept `check-npm`, `build-npm` and `publish-npm` for a release after
+    they had moved to `release-npm.yml`, and gained `publish-testpypi` only when the
+    drift was noticed by hand. This pins each table to its workflow's `jobs:` keys, in
+    order, so adding, renaming or removing a job fails here rather than in a reader's
+    head."""
+    assert _documented_jobs(heading) == _jobs_of(workflow)
+
+
 def test_the_version_job_refuses_a_tag_that_disagrees_with_the_manifest():
     job = _job("version")
     assert "npm-v" in job
