@@ -179,8 +179,10 @@ run:
 | Same retrieval, selector swapped (offline, 2 runs) | gpt-5.4 | 672 tok (both runs) | **182 / 199 (91.5%)** |
 
 The twin isolates what the selector buys at a fixed budget: paired against it, the
-shipped path answers **42 more questions correctly** on the same 199, at a quarter of the
-tokens the control needs to reach a comparable score — and still beats the control by 5.
+shipped path answers **42 more questions correctly** on the same 199, at about an eighth
+of the tokens the control needs to reach a comparable score. The 5-question gap to the
+control is inside the noise floor above: the selector matches the wide context, it does
+not beat it.
 
 **Per type, shipped path:** single-session-user 27/28, single-session-assistant 22/22,
 single-session-preference 7/12, multi-session 45/53, temporal-reasoning 47/53,
@@ -198,8 +200,8 @@ that the headline number is not an artifact of the sample it was picked to look 
 
 **Cost, on the customer's own provider key:** about **0.35 cents per ranked recall** with
 `gpt-5.4-mini` as the selector, about **1.1 cents** with `gpt-5.4` (3,325 prompt tokens,
-median). Memvara's own infrastructure cost is unchanged at $0 either way — the call never
-reaches it.
+median). Memvara pays nothing for the model call: the hosted service makes it on the
+customer's key, and the provider bills the customer.
 
 **What this is not.** No same-harness comparison against Supermemory's own hosted service
 exists. Ingesting the 199-question sample into it was quoted at roughly $160, and their
