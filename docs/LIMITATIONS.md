@@ -6,8 +6,9 @@ the point it breaks their work, costs far more than a paragraph here.
 
 Four of these catch people first — the default embedder is lexical and Latin-only,
 extraction from arbitrary prose needs a model, entity resolution folds surface forms
-rather than the world, and the published LOCOMO and LongMemEval numbers are retrieval
-rather than answer accuracy. The [FAQ](FAQ.md#what-are-the-honest-limitations) is the
+rather than the world, and the LOCOMO and LongMemEval numbers on this project's own
+harness are retrieval rather than answer accuracy (a judged accuracy number exists too,
+made separately — see below). The [FAQ](FAQ.md#what-are-the-honest-limitations) is the
 short version if that is all you came for.
 
 Every bullet here was checked against the implementation on **2026-08-31**, and all
@@ -27,9 +28,13 @@ the date is here to be read, and to be old enough to disbelieve eventually.
   Both share one extraction oracle, so both isolate architecture from model quality — and
   neither says anything about end-to-end answer quality. That is what `demo/` is for, and
   its one run is a sanity check with an agent as the reader, not a benchmark.
-- **The LOCOMO / LongMemEval numbers above are retrieval, not accuracy.** They are real
-  and they run free, but they are not the metric those papers report and must never be
-  quoted as if they were. Closing that gap needs a reader model. Measured, on
+- **The LOCOMO / LongMemEval numbers this project's own harness reports are retrieval, not
+  accuracy.** They are real and they run free, but they are not the
+  metric those papers report and must never be quoted as if they were. Closing that gap
+  on *this* harness needs a reader model — a judged answer-accuracy number now exists,
+  but it comes from a different harness (MemoryBench, on a LongMemEval-S sample; see
+  [`docs/BENCHMARKS.md`](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness)),
+  not from either script here. Measured, on
   `claude-opus-5`: **$7–$31 for LOCOMO** and **$3–$9 for LongMemEval**, the spread being
   thinking tokens rather than answers, plus a few dollars for `--judge llm`; a
   stratified `--shuffle 7 --limit 200` sample is about a tenth of that and finishes in
@@ -48,7 +53,10 @@ the date is here to be read, and to be old enough to disbelieve eventually.
   the usable part: a *strong* score is weak evidence (contamination inflates), and a
   *weak* score is strong evidence against us. This is why the `--context none` floor is
   reported beside every score, and why a purpose-written scenario with no such confound
-  is built separately rather than instead.
+  is built separately rather than instead. This applies to the judged 88.9% in
+  `docs/BENCHMARKS.md` exactly as it applies here: `gpt-5.4` may have seen LongMemEval in
+  training, one sample and one run is not a distribution, and no same-harness comparison
+  against another vendor's hosted service has been completed to weigh it against.
 - **The vector index is exact and in-process.** A numpy matmul over the candidate set —
   correct and fast to roughly a million claims, at which point the `Store` protocol is
   where pgvector or Qdrant goes.

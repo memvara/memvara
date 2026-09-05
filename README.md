@@ -655,6 +655,7 @@ not win every category, and the table reports the ones it loses.
 | Against the real `mem0ai` package | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md#measured-against-the-real-mem0-package) |
 | The two clocks, six question families | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md#the-two-clocks-measured-synthetic-self-authored) |
 | LOCOMO and LongMemEval, retrieval | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md) |
+| LongMemEval, judged answer accuracy (0.11.0's ranked recall) | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness) |
 | Answer quality, end to end | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md#answer-quality-end-to-end-an-authored-corpus-an-agent-as-the-reader) |
 
 The harnesses are in [`bench/`](https://github.com/memvara/memvara/tree/main/bench) and [`demo/`](https://github.com/memvara/memvara/blob/main/demo/README.md), and every number is
@@ -663,8 +664,9 @@ heading says so.
 
 What these numbers do not cover, and every other limit this project knows about, is in
 [Limitations](https://github.com/memvara/memvara/blob/main/docs/LIMITATIONS.md) — including why the LOCOMO and LongMemEval
-figures are retrieval rather than answer accuracy, which is the one most often quoted
-wrongly.
+retrieval figures are not answer accuracy, which is the one most often quoted wrongly. The
+judged accuracy figure above is one run on one sample, with no same-harness comparison
+against another vendor's hosted service.
 
 ---
 
