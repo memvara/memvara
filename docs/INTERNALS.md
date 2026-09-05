@@ -40,8 +40,9 @@ was being read as holding further than it does.
    > unless the caller opts in — a reranker is a cross-encoder rather than a generative
    > model, and it is off by default; `search(ranked=True)` against a retriever
    > configured with a `read_selector` (`memvara.select`) is the one opt-in exception, one
-   > chat call per read, on the caller's own key, and it changes nothing about a plain
-   > read.
+   > chat call per read, on the caller's own key, over the turns of the role the question
+   > asks about (`retrieve.intent.routed_role`, model-free), and it changes nothing about a
+   > plain read.
    > **Sketch.** `NullLLM` is the default `llm=`, so the shipped configuration has no
    > model to call; `Reconciler` and `Consolidator` take no `llm` parameter at all, and
    > `HybridRetriever` takes one only as `selector=`, which is `None` by default and

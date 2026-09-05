@@ -1176,3 +1176,61 @@ def test_a_plain_recall_carries_no_selection() -> None:
     block = mem.recall("where do they live", with_ids=True)
 
     assert block.selection is None
+
+
+# --- routing: the selector sees one role's turns -------------------------------------
+
+
+def test_a_plain_question_hands_the_selector_only_user_turns(store, embedder) -> None:
+    _turn(store, embedder, "user one about kayaks", role="user")
+    _turn(store, embedder, "assistant one about kayaks", role="assistant")
+    _turn(store, embedder, "user two about kayaks", role="user")
+    _turn(store, embedder, "assistant two about kayaks", role="assistant")
+    selector = FakeSelector(top_n=10)
+    r = _engine(store, embedder, selector, rerank_top_n=20)
+
+    r.search("what did I say about kayaks", EP_SCOPE, k=8, include_episodes=True, ranked=True)
+
+    assert selector.select_calls == 1
+    assert len(selector.seen) == 2
+    assert all(c.text.startswith("user") for c in selector.seen)
+
+
+def test_a_question_about_what_the_assistant_said_hands_it_only_assistant_turns(store, embedder) -> None:
+    _turn(store, embedder, "user one about kayaks", role="user")
+    _turn(store, embedder, "assistant one about kayaks", role="assistant")
+    _turn(store, embedder, "user two about kayaks", role="user")
+    selector = FakeSelector(top_n=10)
+    r = _engine(store, embedder, selector, rerank_top_n=20)
+
+    r.search("you recommended something about kayaks", EP_SCOPE, k=8, include_episodes=True, ranked=True)
+
+    assert [c.text for c in selector.seen] == ["assistant one about kayaks"]
+
+
+def test_a_store_with_no_turn_of_the_routed_role_hands_over_the_other_roles(store, embedder) -> None:
+    _turn(store, embedder, "assistant one about kayaks", role="assistant")
+    _turn(store, embedder, "assistant two about kayaks", role="assistant")
+    selector = FakeSelector(top_n=10)
+    r = _engine(store, embedder, selector, rerank_top_n=20)
+
+    r.search("what did I say about kayaks", EP_SCOPE, k=8, include_episodes=True, ranked=True)
+
+    # Routed to the user's turns, of which there are none: the assistant's stand in
+    # rather than the selector being handed nothing.
+    assert len(selector.seen) == 2
+    assert all(c.text.startswith("assistant") for c in selector.seen)
+
+
+def test_top_n_is_counted_after_the_role_filter(store, embedder) -> None:
+    for i in range(4):
+        _turn(store, embedder, f"assistant {i} about kayaks", role="assistant")
+    for i in range(3):
+        _turn(store, embedder, f"user {i} about kayaks", role="user")
+    selector = FakeSelector(top_n=2)
+    r = _engine(store, embedder, selector, rerank_top_n=20)
+
+    out = r.search("what did I say about kayaks", EP_SCOPE, k=8, include_episodes=True, ranked=True)
+
+    assert len(selector.seen) == 2 and all(c.text.startswith("user") for c in selector.seen)
+    assert out.selection is not None and out.selection.candidates == 2

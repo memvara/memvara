@@ -289,7 +289,11 @@ _RANKED = {
     "description": (
         "Consult a model, on this server's own key, to name which of the retrieved turns "
         "actually bear on the question, and put those first, whole, ahead of everything "
-        "else. Default false. Set it when a question is worth a model call and the "
+        "else. Before the model sees them, the retrieved turns are narrowed to the side "
+        "of the conversation the question names — a question about something you said "
+        "before draws only from your own prior turns, everything else only from the "
+        "user's — so it never has to choose between the two. Default false. Set it when "
+        "a question is worth a model call and the "
         "answer is likely in something that was said rather than in a stored fact; leave "
         "it off for an ordinary turn. It needs include_episodes true and no memory_types "
         "filter. When the server has no key on file, the operator has switched the mode "

@@ -19,6 +19,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   protocol, `HybridRetriever.search`'s docstring for the read order, and
   `docs/superpowers/specs/2026-09-04-model-ranked-recall-design.md` for the full design.
 
+  The selector sees one role's turns: the user's, unless the question asks what the
+  assistant said (`memvara.retrieve.intent.routed_role`, fourteen phrases, model-free).
+  With both roles in its window the long assistant turns took the slots the answer-bearing
+  user turns needed — gold-turn recall 0.808 against 0.912 on the parity screen.
+
   A ranked read is one query-time chat call, billed to whichever key `read_selector`
   was built with — memvara's own cost is unchanged, $0, because the call never reaches
   memvara's infrastructure. `search()` returns a `SearchResults` (a `list` subclass

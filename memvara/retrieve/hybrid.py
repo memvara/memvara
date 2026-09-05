@@ -41,7 +41,8 @@ ordering that only holds within one store is not reproducibility, it is luck.
 
 The one opt-in exception is `search(ranked=True)` against a retriever configured with a
 `read_selector`: one model call per read, on the customer's own key, naming which of the
-reranked turns actually bear on the question. It changes nothing about a plain read - no
+reranked turns of the role the question asks about (`intent.routed_role`) actually bear
+on the question. It changes nothing about a plain read - no
 `read_selector` configured, or `ranked` left at its default `False` - and everything about
 what it touches: the result carries `SearchResults.selection` saying what happened, never
 silently. See `memvara.select` and this module's `HybridRetriever.search` for the read
@@ -100,7 +101,7 @@ from ..types import (
 from .anchor import PATH, SUBJECT, anchor_of, query_tokens
 from .analyze import analyze
 from .fusion import reciprocal_rank_fusion
-from .intent import Intent, classify
+from .intent import Intent, classify, routed_role
 from .compose import names_derived
 from .intent import is_comparison, is_relational, observed_refs
 from .intent import weights as intent_weights
@@ -1341,7 +1342,15 @@ class HybridRetriever:
                 if self.reranker is not None:
                     turn_order = rerank(self.reranker, query, list(episodes),
                                         top_n=self.rerank_top_n)
-                scope = turn_order[:selector.top_n]
+                # Step 5 of "Where it sits": the selector sees one role's turns. With
+                # both roles in a `top_n` window the long assistant turns take the slots
+                # the answer-bearing user turns needed (gold recall 0.808 against 0.912,
+                # design spec §6 check 1), so the list is cut to `routed_role`'s side
+                # before the window is taken. A store with no turn of that role at all
+                # hands over the other role's rather than nothing.
+                role = routed_role(query)
+                routed = [e for e in turn_order if e.episode.role == role]
+                scope = (routed or turn_order)[:selector.top_n]
                 candidates = [
                     Candidate(id=e.episode.id, when=e.episode.ts, text=e.episode.content)
                     for e in scope]

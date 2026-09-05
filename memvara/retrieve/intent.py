@@ -469,3 +469,41 @@ def weights(intent: Intent, *, vector: float, lexical: float, graph: float,
     m = MULTIPLIERS[intent]
     return (vector * m["vector"], lexical * m["lexical"], graph * m["graph"],
             temporal * m["temporal"])
+
+
+#: The fourteen phrases that mark a question as being about what the assistant said. The
+#: list came out of the LongMemEval work (docs/superpowers/plans/2026-09-03-intent-routed-
+#: selection-offline.md on the benchmark branch): on that data the gold turn is a user turn
+#: for 94% of questions, and an assistant turn almost only when the question asks what the
+#: assistant suggested, recommended, wrote or said. Whole words, any case.
+ASSISTANT_PHRASES: tuple[str, ...] = (
+    "you suggested", "you recommended", "you mentioned", "you told me", "you provided",
+    "you wrote", "you created", "did you say", "can you remind me", "remind me what",
+    "remind me which", "remind me who", "remind me how", "remind me of",
+)
+_ASSISTANT = re.compile("|".join(r"\b" + re.escape(p) + r"\b" for p in ASSISTANT_PHRASES),
+                        re.IGNORECASE)
+
+
+def routed_role(query: str) -> str:
+    """Which role's turns a ranked read hands the selector: `"assistant"` when the
+    question asks what the assistant said, else `"user"`.
+
+    Model-free, like everything in this module, and for the same reason: it runs on
+    every ranked read, in front of the one model call that read makes. It exists
+    because the selector's candidate list is short — `rerank_top_n` turns of which it
+    sees `top_n` — and assistant turns are long and numerous, so with both roles in the
+    list they take the slots the answer-bearing user turns needed. Measured on the
+    shipped path without this rule, gold-turn recall was 0.808 against 0.912 with it
+    (design spec §6, check 1).
+
+    >>> routed_role("What did you recommend for the trip?")
+    'user'
+    >>> routed_role("You recommended a hotel — which one?")
+    'assistant'
+    >>> routed_role("Remind me what you said about the deadline")
+    'assistant'
+    >>> routed_role("youtold me nothing")
+    'user'
+    """
+    return "assistant" if _ASSISTANT.search(query) else "user"
