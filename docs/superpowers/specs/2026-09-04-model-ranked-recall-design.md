@@ -916,11 +916,17 @@ to it.** Arm B's candidates were the routed role's top-40 — `extract.py:30-33`
 fitted to this benchmark's phrasing and its precision on real questions is unmeasured; §9),
 so the shipped path's top-40 was both roles. Check 1 on that path, run 2026-09-05 (run id
 `memvara-ranked-parity`, gpt-5.4-mini on the customer key, 199 questions), measured gold-turn
-recall **0.808** and a non-gold keep rate of 0.022, against 0.912 and 0.064 for the same
-model over the routed top-40, at $1.68 for the 199 calls — 2.4 times the estimate, because
+recall **0.808** and a non-gold keep rate of 0.022 over every turn the server returned (the
+scorer as first written), against 0.912 and 0.064 for the same model over the routed top-40,
+at $1.68 for the 199 calls — 2.4 times the estimate, because
 assistant turns are long. The floor below fired, the judged runs did not start, and the
 remedy it names shipped in core the same day (`retrieve/intent.routed_role`, §3 step 5), so
-the screen re-runs on the routed path. The other difference the first draft did not name —
+the screen re-runs on the routed path. It did, the same day: **0.935 gold recall and a 0.068
+keep rate at $0.72**, on the scorer as reviewed, which counts only the turns the selector
+saw (its `top_n` window, the population `extract.py` scored) — on that basis the unrouted
+run reads 0.879 and 0.119, so routing is worth 5.6 points of recall, half the non-gold, and
+the 2.4-times cost, and the floor is read on this basis from here on. The other difference
+the first draft did not name —
 claims sharing the head with turns — is removed by §3's design, which hands the selector the
 turn list alone; `selection.candidates` at 40 on every question in the search checkpoint is
 the check that it was. Three checks, in order:
