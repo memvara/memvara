@@ -1342,7 +1342,7 @@ def test_route_roles_off_still_takes_top_n_from_the_reranked_list(store, embedde
 
     out = r.search("what did I say about kayaks", EP_SCOPE, k=8, include_episodes=True, ranked=True)
 
-    # Seven turns, a five-wide window, no role cut: the window is the first five of the
+    # Seven turns, a five-wide window, no routing: the window is the first five of the
     # reranked order, whichever roles they carry.
     assert len(selector.seen) == 5
     assert out.selection is not None and out.selection.candidates == 5

@@ -11,7 +11,7 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
-- **`Memvara(read_route_roles=False)` turns off the role cut a ranked read makes before
+- **`Memvara(read_route_roles=False)` turns off the routing a ranked read does before
   the selector sees the turns.** The default stays `True`, the shipped 0.11.0 behaviour:
   the selector sees the user's turns unless the question asks what the assistant said
   (`memvara.retrieve.intent.routed_role`). That rule assumes the `assistant` role holds a

@@ -492,8 +492,9 @@ a retriever configured with a `read_selector`: one chat call per read, on the cu
 own key, naming which of the reranked turns actually bear on the question. See
 `memvara.select`. That call sees the user's turns unless the question asks what the
 assistant said; a store whose two roles are two people sets `read_route_roles=False` so
-neither person's turns are cut before the model sees them. History and provenance are not a separate subsystem: they fall out of
-the store keeping intervals and supersession pointers instead of overwriting rows.
+neither person's turns are cut before the model sees them. History and provenance are
+not a separate subsystem: they fall out of the store keeping intervals and supersession
+pointers instead of overwriting rows.
 
 Everything replaceable is a protocol — `Store`, `Embedder`, `LLM`, `Redactor`, `Recorder` —
 and each has a real second implementation in this repository rather than being a

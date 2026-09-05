@@ -41,8 +41,9 @@ ordering that only holds within one store is not reproducibility, it is luck.
 
 The one opt-in exception is `search(ranked=True)` against a retriever configured with a
 `read_selector`: one model call per read, on the customer's own key, naming which of the
-reranked turns of the role the question asks about (`intent.routed_role`) actually bear
-on the question. It changes nothing about a plain read - no
+reranked turns actually bear on the question — by default the turns of the role the
+question asks about (`intent.routed_role`), or the whole reranked window with
+`route_roles=False`. It changes nothing about a plain read - no
 `read_selector` configured, or `ranked` left at its default `False` - and everything about
 what it touches: the result carries `SearchResults.selection` saying what happened, never
 silently. See `memvara.select` and this module's `HybridRetriever.search` for the read
@@ -492,8 +493,8 @@ class HybridRetriever:
         #: assumes the `assistant` role holds a model's turns: long, numerous, and rarely
         #: the evidence. A store whose two roles are two people breaks that assumption,
         #: and routing then deletes one person's turns before the selector sees them; set
-        #: `read_route_roles=False` there. Measured on LoCoMo-shaped data, 109 of 250
-        #: questions lost every evidence turn to the default.
+        #: `read_route_roles=False` there. The changelog entry that added the option
+        #: carries the measurement that found this.
         self.route_roles = route_roles
         #: The owner's learned entity aliases, or `None`. Read by the anchoring pass so
         #: a question saying "Big Blue" names a claim filed under `ibm`; without one a
@@ -1371,13 +1372,10 @@ class HybridRetriever:
                 # design spec §6 check 1), so the list is cut to `routed_role`'s side
                 # before the window is taken. A store with no turn of that role at all
                 # hands over the other role's rather than nothing. `route_roles=False`
-                # skips the cut: the window is the reranked list as it stands.
-                if self.route_roles:
-                    role = routed_role(query)
-                    routed = [e for e in turn_order if e.episode.role == role]
-                    scope = (routed or turn_order)[:selector.top_n]
-                else:
-                    scope = turn_order[:selector.top_n]
+                # skips the routing: the window is the reranked list as it stands.
+                routed = ([e for e in turn_order if e.episode.role == routed_role(query)]
+                          if self.route_roles else [])
+                scope = (routed or turn_order)[:selector.top_n]
                 candidates = [
                     Candidate(id=e.episode.id, when=e.episode.ts, text=e.episode.content)
                     for e in scope]
