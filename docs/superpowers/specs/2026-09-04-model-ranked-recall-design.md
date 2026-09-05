@@ -13,7 +13,8 @@ worktree, and the code as it stands on three main branches: agent-memory `origin
 One term for the component throughout: the **selector** is the stage that hands a model
 the candidate turns and takes back the ones it names. Arm B of the benchmark is called
 "model as ranker" in the plan; that is the selector, judged offline. "Filter" below means
-`memory_types` only, and "routing" means the harness's role rule.
+`memory_types` only, and "routing" means the role rule — the harness's originally, and
+core's as well since §6's stop rule fired (§3, §9).
 
 ## 1. The answer
 
@@ -233,9 +234,19 @@ nothing changes. On a ranked call, in this order:
 4. **The turns are ordered** by the retriever's reranker over the turn list at
    `rerank_top_n`. With no reranker the turns keep the episode leg's own order — which is
    not the judged configuration, and the option's docstring says so.
-5. **The selector sees the first `top_n` turns** and names the ones it keeps. The count it
-   was handed travels on the result as `selection.candidates` (below), so a tenant whose
-   store yields fewer than `top_n` turns is visible to the caller rather than silent.
+5. **The reranked list is routed before it is cut to `top_n`.** `retrieve/intent.routed_role`
+   — model-free, the fourteen-phrase rule fitted on LongMemEval's single-session-assistant
+   phrasing (§6, §9) — says whether the question is about something the assistant said or
+   something the user said, `_run_ranked_stage` drops every turn of the other role from the
+   reranked list, and only then is the survivor list cut to `top_n`; a routed role with no
+   turns at all falls back to the other role's list rather than handing the selector
+   nothing. This is in core, not only in the harness that measured it, because the
+   candidate list matters: the offline screen over both roles' top-40 scored 0.808 gold-turn
+   recall against 0.912 for the same model over the routed role's own top-40 (§6, check 1),
+   under this design's 0.85 floor. **The selector sees the first `top_n` turns of that
+   routed list** and names the ones it keeps. The count it was handed travels on the result
+   as `selection.candidates` (below), so a tenant whose store yields fewer than `top_n`
+   turns of the routed role is visible to the caller rather than silent.
 6. **The order that comes back:** the kept turns first, in reranked order, whole, and
    **outside `k`** — then the remaining turns and the claims interleaved as today, cut to
    `depth`, then `[:k]`; then `_observe`. So `search(k=8, ranked=True)` returns up to
@@ -899,13 +910,20 @@ with the run ids). Same 199 questions, seed `20260903`, reader and judge gpt-5.4
 search, answer and evaluate stages reset, so the ingested store is the one the judged arms
 read and only the three stages under test are re-run.
 
-**One difference from arm B, stated before the run.** Arm B's candidates were the routed
-role's top-40 — `extract.py:30-33` restricted to `routed_role` before the model saw the list.
-Routing is not in core (it is fitted to this benchmark's phrasing and its precision on real
-questions is unmeasured; §9), so the shipped path's top-40 is both roles. The other
-difference the first draft did not name — claims sharing the head with turns — is removed by
-§3's design, which hands the selector the turn list alone; `selection.candidates` at 40 on
-every question in the search checkpoint is the check that it was. Three checks, in order:
+**One difference from arm B, stated before the run, and what the first run of check 1 did
+to it.** Arm B's candidates were the routed role's top-40 — `extract.py:30-33` restricted to
+`routed_role` before the model saw the list. The first Step 1 shipped without routing (it was
+fitted to this benchmark's phrasing and its precision on real questions is unmeasured; §9),
+so the shipped path's top-40 was both roles. Check 1 on that path, run 2026-09-05 (run id
+`memvara-ranked-parity`, gpt-5.4-mini on the customer key, 199 questions), measured gold-turn
+recall **0.808** and a non-gold keep rate of 0.022, against 0.912 and 0.064 for the same
+model over the routed top-40, at $1.68 for the 199 calls — 2.4 times the estimate, because
+assistant turns are long. The floor below fired, the judged runs did not start, and the
+remedy it names shipped in core the same day (`retrieve/intent.routed_role`, §3 step 5), so
+the screen re-runs on the routed path. The other difference the first draft did not name —
+claims sharing the head with turns — is removed by §3's design, which hands the selector the
+turn list alone; `selection.candidates` at 40 on every question in the search checkpoint is
+the check that it was. Three checks, in order:
 
 1. **Offline screen, no judge.** Run the harness's search stage only, with `MEMVARA_RANKED=1`
    — 199 ranked calls through the server, about $0.70 at gpt-5.4-mini — and score the kept
@@ -918,6 +936,17 @@ every question in the search checkpoint is the check that it was. Three checks, 
    rule that drops the other role from the candidate list before the selector sees it**
    (`retrieve/intent.py` is the layer). The harness's `MEMVARA_ROLE_SELECT` cannot do it:
    it runs after the server has returned its list.
+
+   **Run, and stopped.** The unrouted screen — both roles' top-40 — measured 0.808 gold
+   recall and 0.022 non-gold keep rate over the 199 questions, against mini's 0.912 and
+   0.064 on the routed top-40, under the 0.85 floor above. It cost $1.68 for the 199 calls,
+   2.4 times the $0.70 estimate, because an assistant turn runs longer than a user turn and
+   the model is billed on what it read, not on what it kept. The stop rule fired, and the
+   stated remedy is what shipped: `retrieve/intent.routed_role`, a model-free rule fitted
+   on LongMemEval's single-session-assistant phrasing, is now in core, and
+   `HybridRetriever._run_ranked_stage` filters the reranked turn list to the routed role
+   before cutting it to `top_n` (§3, "Where it sits", step 5). This screen therefore
+   re-runs on the routed candidate list before check 2 and check 3 proceed.
 2. **The unranked twin.** The same stack and list with `MEMVARA_RANKED` off, rendered
    through the same 720-token budget: the cross-encoder's order at depth 200, both roles.
    The twin must be reranked, which is why the stack runs with `read_rerank_ranked_only`
@@ -1339,10 +1368,19 @@ would cost $22.63 at gpt-5.4 against a $0 fee.
   hand; it is query-time selection, the same kind of step as the cross-encoder done by a
   stronger model, and "the cost per query is an order of magnitude above the reader's
   context". An ingest-time design is a different measurement nobody has made.
-- **Routing in core.** The rule fires on 19 of 22 assistant questions here and its
-  precision on real user text is unmeasured; a false fire costs 0.918 coverage against a 0.790
-  gain. It stays in the harness. §6's parity run is what decides whether the selector makes it
-  unnecessary, and §6 names where it goes if not.
+- **Routing in core — no longer deferred.** §6's parity run is what was to decide whether
+  the selector made this unnecessary, and it decided: check 1's offline screen over both
+  roles' top-40 measured 0.808 gold recall against 0.912 routed, under the 0.85 floor, so
+  the stop rule fired and the stated remedy shipped. `retrieve/intent.routed_role` — the
+  same fourteen-phrase rule, fitted on LongMemEval's single-session-assistant phrasing (19
+  of 22 here, 0 of 177 elsewhere in the sample) — now filters
+  `HybridRetriever._run_ranked_stage`'s candidate list by role before it is cut to `top_n`
+  (§3, step 5). What was true of the rule when it stayed in the harness is still true of it
+  in core and still worth naming: its precision on real user text, outside this benchmark's
+  phrasing, is unmeasured, and a false fire costs 0.918 coverage against a 0.790 gain, with
+  no failsafe inside the rule itself against that cost — only the caller's fallback to the
+  other role's turns when the routed one is empty (§3). §6's parity run now measures the
+  routed path rather than the harness's own role filter.
 - **The 500-question run.** The user's decision stands: not until the 199 number is where
   they want it. A 3-point non-inferiority margin needs about 489 paired questions, so the
   91.5% is a 199-question number and the docs say so.
