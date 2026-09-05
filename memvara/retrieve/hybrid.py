@@ -630,7 +630,12 @@ class HybridRetriever:
         # a facade spelling; below it there is one parameter, so no inner call can pass
         # both and no inner call can disagree about what the flag meant.
         wanted_states = resolve_states(states, include_invalidated)
-        if k <= 0:
+        # Only a plain read can shortcut here. A ranked read's outcome is never silently
+        # absent — `k <= 0` still has to say `unconfigured`, `disabled`, `key_rejected`,
+        # or run the selector and report `applied`/`fallback` — so `ranked=True` falls
+        # through to the ordinary path below rather than returning a bare
+        # `SearchResults()` with `.selection` stuck at `None`.
+        if k <= 0 and not ranked:
             return SearchResults()
         rec = self.telemetry
         t0 = perf_counter() if rec is not None else 0.0
@@ -662,21 +667,29 @@ class HybridRetriever:
         # `selector_ranked` is a ranked call this retriever can actually attempt — the
         # unconfigured case (`ranked=True`, no `read_selector`) is decided the way step 1
         # of the design spec's "Where it sits" asks: served unranked with no leg run
-        # differently, which is exactly the ordinary flow below with `reranker_active`
-        # unaffected by `rerank_ranked_only` (a ranked call always uses the configured
-        # reranker, never `None`-d by the plain-read-only switch).
+        # differently, so `reranker_active` is gated on `selector_ranked` rather than the
+        # raw `ranked` flag. An unconfigured ranked call has `selector_ranked is False`,
+        # so with `rerank_ranked_only=True` it takes the same "no reranker" branch a
+        # plain read would — "nothing is spent on it" per that step — rather than paying
+        # for a cross-encoder pass no plain read at this configuration would ever run.
         selector_ranked = ranked and self.selector is not None
-        reranker_active = None if (self.rerank_ranked_only and not ranked) else self.reranker
+        reranker_active = (None if (self.rerank_ranked_only and not selector_ranked)
+                           else self.reranker)
 
         # Over-fetch per retriever: fusion can only rank what it was given, and a claim
         # that BM25 puts first is worthless if the vector list was cut before it and
         # the final k is small.
         # How deep the pipeline ranks before the caller's `k` is applied. Identical to
-        # `k` unless a reranker is configured, in which case the stage needs candidates
-        # below the cut to have anything to promote: reranking the same `k` items the
-        # caller was going to get can only reorder them, which changes what is read
-        # first and cannot change what is present at all.
-        depth = k if reranker_active is None else max(k, self.rerank_top_n)
+        # `k` unless a reranker is configured or this is a real ranked call, in which
+        # case the stage needs candidates below the cut to have anything to promote —
+        # reranking the same `k` items the caller was going to get can only reorder
+        # them, which changes what is read first and cannot change what is present at
+        # all. `selector_ranked` widens `depth` on its own, not only through
+        # `reranker_active`, because step 2 of "Where it sits" caps `_episodes` at
+        # `rerank_top_n` on every real ranked call — the selector's candidate pool —
+        # whether or not a reranker is configured to reorder that pool first.
+        depth = (k if (not selector_ranked and reranker_active is None)
+                else max(k, self.rerank_top_n))
 
         limit = max(depth * self.candidate_multiplier, depth)
         wanted = set(memory_types) if memory_types is not None else None
@@ -1395,12 +1408,19 @@ class HybridRetriever:
                                       candidates=len(candidates)),
                             [], turn_order)
 
-                self._select_ms(rec, t0)
-                if rec is not None:
-                    rec.counter(RETRIEVAL_MODEL_QUERY)
-                    if usage.reported > 0:
-                        rec.counter(RETRIEVAL_TOKENS_IN, usage.input_tokens)
-                        rec.counter(RETRIEVAL_TOKENS_OUT, usage.output_tokens)
+                # `candidates` empty means `select()` had nothing to ask about and, by
+                # its own contract (`ModelSelector.select`), never dispatched a call —
+                # "a call we should not pay for". `RETRIEVAL_MODEL_QUERY` counts reads
+                # the model *answered* and `RETRIEVAL_SELECT_MS` counts calls that were
+                # *made*; neither happened here, so neither is emitted, even though
+                # `select()` returned normally and the outcome below is still `applied`.
+                if candidates:
+                    self._select_ms(rec, t0)
+                    if rec is not None:
+                        rec.counter(RETRIEVAL_MODEL_QUERY)
+                        if usage.reported > 0:
+                            rec.counter(RETRIEVAL_TOKENS_IN, usage.input_tokens)
+                            rec.counter(RETRIEVAL_TOKENS_OUT, usage.output_tokens)
                 spans = {s.id: s.span for s in chosen}
                 kept: list[EpisodeResult] = []
                 for e in scope:

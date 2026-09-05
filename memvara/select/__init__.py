@@ -1,10 +1,33 @@
 """Model-ranked recall: opt-in per-query model consultation on top of the reranker.
 
-    from memvara import Memvara
-    from memvara.select import ModelSelector
+A configured `read_selector` sends the reranked turns to a model that names which ones
+actually bear on the question; every other claim and turn keeps its plain order. A real
+deployment passes `ModelSelector(llm=...)`, but the example below stands in for it with
+a fake `Selector` so the doctest touches no network and needs no API key.
 
-    mem = Memvara("memory.db", read_selector=ModelSelector(llm=openai_llm, top_n=40))
-    mem.recall("what did they say about the trip", ranked=True)
+    >>> from contextlib import nullcontext
+    >>> from memvara import Memvara
+    >>> from memvara.embed import HashingEmbedder
+    >>> from memvara.select import Selected
+
+    >>> class FakeSelector:
+    ...     '''Keeps whichever candidates mention "trip" — stands in for a real model.'''
+    ...     top_n = 40
+    ...     def admit(self):
+    ...         return nullcontext()
+    ...     def select(self, question, candidates, *, asked_on=None, usage=None):
+    ...         return [Selected(id=c.id, span=None) for c in candidates
+    ...                 if "trip" in c.text]
+
+    >>> mem = Memvara(embedder=HashingEmbedder(dim=8), read_selector=FakeSelector())
+    >>> _ = mem.add("Loved the trip to Lisbon last spring", user="alice")
+    >>> _ = mem.add("Started a new job on Monday", user="alice")
+    >>> result = mem.recall("what did they say about the trip", user="alice",
+    ...                     ranked=True, include_episodes=True, with_ids=True)
+    >>> result.selection.outcome
+    'applied'
+    >>> "Loved the trip to Lisbon last spring" in result.text
+    True
 
 A default install imports none of this: `Memvara(read_selector=None)` is the default,
 and no `read_*` option calls a model unless it is explicitly configured — see

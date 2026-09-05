@@ -389,6 +389,16 @@ def test_a_connection_failure_with_no_status_propagates_unchanged() -> None:
     assert exc_info.value is original
 
 
+def test_a_backend_exception_raised_after_the_deadline_is_a_timeout_not_an_error() -> None:
+    # A provider SDK's own timeout (e.g. `openai.APITimeoutError`) does not subclass
+    # Python's builtin `TimeoutError`, so `chat()` raising late must still be
+    # reclassified rather than propagated as whatever exception type it was.
+    original = ConnectionError("stream closed")
+    llm = FakeChat(raises=original, delay=0.05)
+    with pytest.raises(TimeoutError):
+        ModelSelector(llm=llm, timeout=0.01).select("q", cands("x"))
+
+
 # --- the protocol's records and exceptions ------------------------------------------
 
 
@@ -772,6 +782,23 @@ def test_ranked_call_gathers_episodes_at_rerank_top_n_not_max_episodes(store, em
     assert len(selector.seen) == 8  # rerank_top_n, not max_episodes=2
 
 
+def test_ranked_call_widens_the_gather_depth_to_rerank_top_n_with_no_reranker(
+    store, embedder,
+) -> None:
+    # With no `read_reranker` configured, `reranker_active` used to be `None` and
+    # `depth` (and so the per-leg `limit`) stayed at `k` — far below `rerank_top_n` —
+    # so the selector's candidate pool was starved to a handful of turns even though
+    # `rerank_top_n` promised up to 50. `depth` must widen on `selector_ranked` alone.
+    _seed(store, embedder, texts=[f"kayak turn {i}" for i in range(50)])
+    selector = FakeSelector(top_n=50)
+    r = _engine(store, embedder, selector, reranker=None, rerank_top_n=50)
+
+    r.search("kayak", EP_SCOPE, k=1, include_episodes=True, ranked=True)
+
+    assert selector.select_calls == 1
+    assert len(selector.seen) == 50  # rerank_top_n, not starved by k=1
+
+
 def test_plain_call_still_caps_episodes_at_max_episodes(store, embedder) -> None:
     _seed(store, embedder, texts=[f"kayak turn {i}" for i in range(10)])
     selector = FakeSelector(top_n=8)
@@ -1004,6 +1031,25 @@ def test_unconfigured_retriever_serves_unranked_and_no_leg_runs_differently(
            == len([x for x in plain_result if isinstance(x, EpisodeResult)]) == 2)
 
 
+def test_unconfigured_ranked_read_never_calls_the_reranker_when_rerank_is_ranked_only(
+    store, embedder,
+) -> None:
+    # Production always sets `rerank_ranked_only=True`. An organisation with no
+    # `read_selector` must not pay for the cross-encoder just because a caller sent
+    # `ranked=True` — step 1 of "Where it sits" promises unconfigured spends nothing,
+    # the same guarantee `test_disabled_serves_unranked_with_no_reranker_call_and_no_
+    # select_ms` checks for the `disabled` outcome.
+    eps = _seed(store, embedder, texts=[f"kayak turn {i}" for i in range(10)])
+    reranker = ScoreReranker([e.content for e in eps])
+    r = _engine(store, embedder, selector=None, reranker=reranker, rerank_top_n=8,
+               rerank_ranked_only=True)
+
+    result = r.search("kayak", EP_SCOPE, k=5, include_episodes=True, ranked=True)
+
+    assert result.selection == Selection(outcome="unconfigured", candidates=0)
+    assert reranker.calls == [], "nothing is spent on the cross-encoder"
+
+
 def test_busy_propagates_and_emits_no_retrieval_query(store, embedder) -> None:
     _seed(store, embedder)
     selector = FakeSelector(top_n=3, admit_raises=SelectorBusy("full"))
@@ -1027,6 +1073,35 @@ def test_an_empty_ranked_result_still_carries_its_selection(store, embedder) -> 
 
     assert list(result) == []
     assert result.selection == Selection(outcome="applied", candidates=0, kept=0)
+
+
+def test_k_at_or_below_zero_still_runs_the_selector_and_carries_its_outcome(
+    store, embedder,
+) -> None:
+    # The `k <= 0` shortcut used to return before the ranked stage ever ran, handing
+    # back `.selection is None` — the plain-read shape — even though `ranked=True` was
+    # explicit and a selector was configured.
+    eps = _seed(store, embedder, texts=["alpha kayak", "beta kayak"])
+    reranker = ScoreReranker([e.content for e in eps])
+    selector = FakeSelector(top_n=2, keep=1)
+    r = _engine(store, embedder, selector, reranker=reranker, rerank_top_n=20)
+
+    result = r.search("kayak", EP_SCOPE, k=0, include_episodes=True, ranked=True)
+
+    assert result.selection is not None
+    assert result.selection.outcome == "applied"
+    assert selector.select_calls == 1
+
+
+def test_k_at_or_below_zero_on_an_unconfigured_retriever_still_says_unconfigured(
+    store, embedder,
+) -> None:
+    _seed(store, embedder, texts=["alpha kayak", "beta kayak"])
+    r = _engine(store, embedder, selector=None, rerank_top_n=20)
+
+    result = r.search("kayak", EP_SCOPE, k=0, include_episodes=True, ranked=True)
+
+    assert result.selection == Selection(outcome="unconfigured", candidates=0)
 
 
 # --- token series: only when Usage.reported > 0, and retrieval.model_query -------------
@@ -1056,6 +1131,24 @@ def test_no_token_series_when_usage_reports_nothing(store, embedder) -> None:
     assert telemetry.total(RETRIEVAL_TOKENS_IN) == 0
     assert telemetry.total(RETRIEVAL_TOKENS_OUT) == 0
     assert telemetry.total(RETRIEVAL_MODEL_QUERY) == 1
+
+
+def test_an_empty_candidate_list_counts_as_no_model_call(store, embedder) -> None:
+    # The store holds nothing, so `_run_ranked_stage` hands `select()` an empty
+    # candidate list. `ModelSelector.select()`'s own contract is that this never
+    # dispatches a call ("a call we should not pay for"), so neither
+    # `retrieval.model_query` (a read the model *answered*) nor `retrieval.select_ms`
+    # (a call that was *made*) should count it, even though the outcome is `applied`.
+    selector = FakeSelector(top_n=3)
+    telemetry = MemoryRecorder()
+    r = _engine(store, embedder, selector, rerank_top_n=20, telemetry=telemetry)
+
+    result = r.search("nothing stored here", EP_SCOPE, k=5, include_episodes=True,
+                      ranked=True)
+
+    assert result.selection == Selection(outcome="applied", candidates=0, kept=0)
+    assert telemetry.total(RETRIEVAL_MODEL_QUERY) == 0
+    assert telemetry.values(RETRIEVAL_SELECT_MS) == []
 
 
 # --- the two ValueErrors: no turns to rank ----------------------------------------------

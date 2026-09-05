@@ -180,6 +180,14 @@ class ModelSelector:
             status = getattr(exc, "status_code", None)
             if status in (401, 403):
                 raise SelectorRefused("key_rejected", status) from exc
+            if time.monotonic() > deadline:
+                # The backend's own timeout fired before ours did — an SDK-level
+                # exception (e.g. an `APITimeoutError`), not Python's builtin
+                # `TimeoutError`, so it would otherwise propagate as `exc` unchanged
+                # and be counted as `reason=error` rather than `reason=timeout`. The
+                # module docstring's "or the call failed, after the deadline" is this
+                # branch: billed either way, so it counts as a timeout either way.
+                raise TimeoutError("selector call failed after its deadline") from exc
             raise
         if time.monotonic() > deadline:
             # The call succeeded, but not within the deadline. Billed either way — see
