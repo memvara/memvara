@@ -214,7 +214,21 @@ retires a true fact and keeps answering with the false one. The fourteen slots w
 can happen: `born_in, born_on, communication_style, job_title, lives_in, located_now, mood,
 name, prefers_tool, pronouns, relationship_status, timezone, working_on, works_at`.
 
-### Four rules, three of them measured
+### Three rules, two of them measured — a fourth was measured out
+
+*Amended 2026-09-06 after the review of memvara#181.* The first draft had a subject rule,
+R2: a builtin predicate on a subject other than `user` is refused, on the reasoning that
+`works_at` on `gate` was a slot collision waiting for the speaker's real employer. The
+reasoning was wrong — `gate / works_at` and `user / works_at` are different slots and
+cannot end each other — and the rule was measured against the fixture to remove **nothing
+R3 did not** (wrong-predicate 20, duplicates 0, facts 60/90, identical with and without it),
+while it would have refused every fact about a named third party: `alice / lives_in / Porto`,
+and every claim a two-person conversation yields, the store shape `read_route_roles=False`
+exists for. Removed. The ten unkeyed claims it took, including the two plausibly-true ones
+named below, are no longer taken. R1 was also narrowed in the same review to group within a
+source turn rather than across the batch, and to keep every known predicate for a value
+rather than one — "born in Lisbon, still live in Lisbon" is two facts — refusing only the
+unknown predicates beside a known one. Neither change moved a fixture number.
 
 Each was scored against all 18 claim files from the spike (six configurations × three
 episodes, 255 claims) with the spike's own `classify()` — hit / wrong-predicate /
@@ -224,10 +238,10 @@ the three episodes as a fixture, so the numbers below are a test rather than a m
 
 | rule | wrong-predicate removed | facts lost | duplicates removed | unkeyed removed |
 |---|---:|---:|---:|---:|
-| **R1** one (subject, object) under two or more predicates in one extraction → keep one | 21 / 46 | 0 | 32 / 32 | 8 |
-| **R2** a builtin predicate on a subject other than `user` → refuse | 5 / 46 | 0 | 0 | 10 |
+| **R1** one (subject, object) under two or more predicates in one turn → keep the known ones | 21 / 46 | 0 | 32 / 32 | 8 |
+| ~~R2~~ a builtin predicate on a subject other than `user` → refuse — *removed, see above* | 5 / 46, all also R3's | 0 | 0 | 10 |
 | **R3** `lives_in`, `born_in`, `located_now` with a digit or URL in the object → refuse | 5 / 46 | 0 | 0 | 0 |
-| **R1 + R2 + R3** | **26 / 46** | **0 — 60/90 before and after** | **32 / 32** | 18 |
+| **R1 + R3** | **26 / 46** | **0 — 60/90 before and after** | **32 / 32** | 8 |
 
 **R1** is the measured failure mode itself: "forces values into whatever slot is available"
 shows up as one value wearing several predicates. When one of them is a known predicate it
@@ -235,21 +249,15 @@ is kept; otherwise the first emitted is. Three "hits" it removes are all `gate /
 Port 55434` beside an identical claim under `port` — the fact stays found, so this is
 deduplication, not loss.
 
-**R2** is the argument for predicates made into a rule. Every builtin predicate is about the
-speaker; `works_at` on subject `gate` is not a fact about the gate, it is a fact about the
-speaker filed under an entity, and the slot it would collide with is the speaker's. The ten
-unkeyed claims it removes across the arms are two distinct claims, `gate / goal / zero
-missed` and `lexical search / position / runs alongside vector leg` — both plausibly true,
-both mis-slotted, both refused. That is the precision-over-recall trade this guard makes,
-stated: a true fact under a wrong slot is worth less than the true fact already in that
-slot.
-
-**R3** is narrow on purpose: three place predicates, one pattern. Broadening it to every
-ONE-slot builtin would refuse `job_title: "Engineer II"` and `timezone: "UTC+5:30"`.
+**R3** is narrow on purpose: three place predicates, one pattern, on any subject — the
+fixture's own `gate / lives_in / Port 55434` is R3's. Broadening it to every ONE-slot
+builtin would refuse `job_title: "Engineer II"` and `timezone: "UTC+5:30"`. The pattern's
+`port` is word-bounded; the bare form the fixture was first scored with also matched Porto.
 
 **R4** is not a refusal and does not move the table. A model-proposed claim whose predicate
 is **novel** (would be acquired, not resolved) or whose predicate is a ONE-cardinality
-builtin with a digit or URL in the object is stored at `min(confidence, 0.4)`. The
+builtin — `born_on` and `timezone` excepted, whose values always carry digits — with a
+digit or URL in the object is stored at `min(confidence, 0.4)`. The
 reconciler already treats a value worth less than half the incumbent as one to store
 *beside* it rather than end it, so the effect is that pollution can be present but cannot
 retire anything. The two arm-A claims no structural rule catches — `user / goal / refuse`
