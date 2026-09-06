@@ -32,8 +32,9 @@ A model fixes it, and the model has to be one memvara pays nothing per call for.
 | predicate vocabulary adherence, with the 64-predicate list | 12/15 facts, **6 wrong-predicate claims of 36** |
 | the same, with no list | **0/15** — every subject collapses to `user` |
 
-Two of those are already shipped: `MEMVARA_LLM_MAX_CLAIMS` (memvara#168, 0.11.0) and
-`MEMVARA_LLM_EXTRACT_SYSTEM` (memvara#178, this release). Three things are not, and they are
+One of those is shipped, `MEMVARA_LLM_MAX_CLAIMS` (memvara#168, 0.11.0). One is open:
+`MEMVARA_LLM_EXTRACT_SYSTEM` (memvara#178), which has to merge, release as 0.11.2 and move
+the cloud pin before the container section below can be built. Three things are not, and they are
 this document: the model cannot run inside a request, its wrong-predicate claims cannot be
 allowed to end true facts, and nothing serves it.
 
@@ -50,9 +51,15 @@ separate worker extracts from what it stored.
 What a customer sees: a write returns as it does today. The turn is retrievable at once as
 an episode (`include_episodes`). Its claims appear later — minutes at the current write
 rate, longer under a backlog — and `memory_recall` starts answering from them then. That is
-eventual consistency on the claim layer only, and the receipt already has the field for it:
-`deferred: true` means "extraction queued, not yet run", and this is the first thing that
-makes it true on the hosted service.
+eventual consistency on the claim layer only. **The receipt does not yet say so.**
+`WriteReceipt.deferred` reads "extraction queued, not yet run", but core sets it only when a
+model call *raised* (`pipeline.py`, the `except` in `_tier2`); under `MEMVARA_LLM=none` the
+noop branch sets `unextracted` and leaves `deferred` false, so a customer reading the
+receipt sees "lost" for a turn a worker will read in five minutes. That is the one core
+change the queue needs: a `Memvara(extraction_deferred=True)` construction option — set by
+the API when a worker is deployed — under which the noop branch reports the batch on
+`deferred` instead of `unextracted`. Small, opt-in, and `deferred`'s existing docstring is
+already the right sentence.
 
 ### Core already has the primitive
 
@@ -73,7 +80,7 @@ rejected again. **Core does not record attempts on the episode, because the dura
 belongs to whatever is doing the scheduling.** This worker is that scheduler, and the
 attempt set is its one piece of state.
 
-No core change is needed for the queue.
+That option is the only core change the queue needs; everything else is already there.
 
 ### The worker: `memvara_deploy.extract`
 
@@ -109,12 +116,20 @@ A pass:
    once to Postgres.
 3. `ProjectMemories.for_tenant(tenant).reextract(episodes=ids)` — through the project's own
    vocabulary (`registry_for(category)`), with tier 1 gating and the already-extracted skip
-   still applied by core. One `extract()` call per batch.
+   still applied by core. One `extract()` call per batch. `Categories` is a Protocol; the
+   worker's implementation answers `category_for` from the control plane and `None` for
+   `selector_for`, because a process that never performs a ranked read has no business
+   loading the IdP key, a `SelectorGate` and `org_selector_settings` to build a clone.
 4. Record every id on `receipt.episode_ids` in `extraction_attempts`, with the outcome:
    `claims` (something was stored), `gated` (tier 1 dropped it — free, and never selected
    again), `empty` (the model read it and found nothing), `refused` (everything it proposed
    was rejected by a guard), `deferred` (the model call failed; **not** recorded, so it is
    retried next pass).
+   The outcome is exact per row only at `MEMVARA_EXTRACT_BATCH=1`. `WriteReceipt` carries
+   batch-level counters — `skipped`, `unextracted`, `ungrounded` — and `added` cites its
+   episodes, so at a larger batch the worker can tell how many were gated or empty but not
+   which. It then records every id that no stored claim cites as `unattributed`, and the
+   retry lever below does not reach that outcome. This is a second reason the default is 1.
 5. Stop the pass when the batch budget or `MEMVARA_EXTRACT_PASS_SECONDS` is spent, whichever
    first. Sleep the interval. Repeat.
 
@@ -141,8 +156,12 @@ CREATE TABLE IF NOT EXISTS extraction_attempts (
 )
 ```
 
-In the **memory schema**, owned by `memvara_cloud/store/postgres.py`, `SCHEMA_VERSION`
-2 → 3 — not in `memvara_jobs`, whose `job_run.detail` rule is "counts, never identities",
+In the **memory schema**, owned by `memvara_cloud/store/postgres.py`, as one more
+`CREATE TABLE IF NOT EXISTS` in `_DDL` with **no `SCHEMA_VERSION` bump**: every `_DDL`
+statement runs on every open, so an existing schema grows the table without a migration.
+The stamp exists for the case `IF NOT EXISTS` silently skips — a new column on an existing
+table — and the store's own comment beside its indexes says so. Bumping it here would also
+re-run `_backfill_folds` over every claim row for nothing. Not in `memvara_jobs`, whose `job_run.detail` rule is "counts, never identities",
 and not in `control`. It is about episodes and has to die with them: `erase_episode`,
 `erase_claim(sources=True)` and `purge` each gain one `DELETE FROM extraction_attempts`
 beside their `DELETE FROM episodes`, and the erase tests that PR #232 added for
@@ -278,8 +297,9 @@ mounted read-only, and the invocation the spike measured with, verbatim from `qu
 ```
 
 with `cpuset: "0-5"` and `mem_limit: 10g` as the spike ran it — the box reports 8 vCPUs
-over 4 cores, thread scaling was near-linear to 4 and flat after, and pinning keeps the API
-and Postgres off the model's cores. A `/health` healthcheck, `read_only`, `cap_drop: [ALL]`.
+over 4 cores and thread scaling was near-linear to 4 and flat after. The cpuset confines the
+*model* to six vCPUs; nothing pins the API or Postgres, and the spike's numbers were taken
+that way. Whether they should be pinned to `6-7` is a measurement for the container PR. A `/health` healthcheck, `read_only`, `cap_drop: [ALL]`.
 Behind a profile
 `extract`, so `memvara-provision.sh up` does not start it: it is opt-in, like
 `subscription-notify`, and for the same reason — a service the provisioning script does not
