@@ -709,9 +709,9 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
 
 Phase 4 existed because every comparative number here was self-authored. Two external papers
 bear directly on this design, and both are recorded for the same reason: they are evidence
-nobody in this repository wrote. The first appeared after `v0.1.0` and reached this project's
-thesis on its own; the second predates it and is the closest published system on the
-retrieval side.
+nobody in this repository wrote. Both predate `v0.1.0`, which the title this section used to
+carry got wrong. The first reached this project's thesis on its own; the second is the closest
+published system on the retrieval side.
 
 **"A Graph-Native Bitemporal Memory Store for Conversational AI Agents"** — Alp Niksarli and
 Gopesh Baheti, Davidson College, [arXiv:2607.26520](https://arxiv.org/abs/2607.26520)
@@ -784,17 +784,21 @@ predates this project's first release by eight months; it was read on 2026-09-06
 statement below about this repository was checked against the tree at `151d994`.
 
 What it is: memory organised into four networks (world facts, the agent's own experiences,
-opinions carrying a confidence score, and synthesised entity summaries) and three operations
-(retain, recall, reflect). Retain is narrative extraction by a model: two to five
-self-contained facts per exchange, each carrying what, when, where, who and *why*, with
-coreference resolved and relative times normalised to an occurrence interval plus a mention
-time; then entity resolution and four kinds of link built at write time (temporal, decaying
-with distance; semantic, cosine above a threshold; shared entity; and causal, extracted by
-the model). Recall runs four channels in parallel (vectors, BM25, spreading activation seeded
-from the top vector hits, and a temporal channel that parses the query into a date range and
-keeps facts whose interval overlaps it), fuses them with RRF at k=60, reranks with
-`ms-marco-MiniLM-L-6-v2`, and packs the result to a token budget. Reflect is a persona layer;
-it ran at a neutral setting for every reported number and has no bearing on a memory store.
+opinions carrying a confidence score, and entity summaries) and three operations (retain,
+recall, reflect). Retain is narrative extraction by a model: two to five self-contained facts
+per conversation, each covering a whole exchange rather than one utterance and each carrying
+what, when, where, who and *why*, with coreference resolved and relative times normalised to
+an occurrence interval plus a mention time; then entity resolution and four kinds of link
+built at write time (temporal, decaying with distance; semantic, cosine above a threshold;
+shared entity; and causal, extracted by the model). Recall runs four channels in parallel,
+channel being the paper's word for what this library calls a leg: vectors, BM25, spreading
+activation seeded from the top vector hits, and a temporal channel that parses the query into
+a date range and keeps facts whose interval overlaps it. It fuses them with RRF (the paper
+gives k=60 as an example and does not state the value it ran), reranks with
+`ms-marco-MiniLM-L-6-v2`, and packs the result to a token budget. Reflect is the
+answer-generation step, wrapped in a persona prompt. Every reported number holds the persona
+near neutral, all three parameters at 3 and bias 0.2, and nothing measures what it
+contributes; it is the reader's concern rather than a memory store's.
 
 Its scores, on LongMemEval-S over all 500 questions: 83.6% with GPT-OSS-20B doing both the
 extraction and the answering, 89.0% with OSS-120B, and 91.4% with OSS-120B building the
@@ -803,103 +807,149 @@ scores 39.0%. On LoCoMo the three configurations score 83.18, 85.67 and 89.61.
 
 **Read those scores with four things in mind.** There is no ablation anywhere in the paper,
 so nothing isolates which channel, the reranker, or the narrative extraction produced the
-gain; every attribution of a gain to a component is the authors' reading. The retrieval token
-budgets are literally `<add>` in its §7.3. The rows in its tables were judged by different
-judges: its own rows by GPT-OSS-120B, the Supermemory and Zep rows copied from Supermemory's
-report under a GPT-4o judge, and the Backboard row self-reported. And its Table 3 has no
-abstention row, although the benchmark holds 30 abstention questions; the paper does not
-say what became of them. Its judged numbers sit in the same range as this repository's one
-judged run (177/199 shipped, 182/199 with the larger selector, in `docs/BENCHMARKS.md`), and
-the two are not comparable: a different judge, a different sample and a different reader.
+gain; every attribution of a gain to a component, the ones below included, is a reading
+rather than a measurement. §7.3 never states the retrieval token budgets: where the numbers
+should be, the published text still reads `<add>`, an unfilled placeholder. Every row in its
+tables that is not the authors' own is a copied number: the LongMemEval baselines, full-context
+GPT-4o included, come from Supermemory's report under a GPT-4o judge, and the LoCoMo
+baselines are as claimed on Backboard's leaderboard; only the Hindsight rows and the
+full-context OSS-20B baseline the authors ran themselves are judged by GPT-OSS-120B. And its
+Table 3 has no abstention row, although the benchmark holds 30 abstention questions; the
+paper does not say what became of them. Its judged numbers sit in the same range as this
+repository's one judged run,
+[177/199 shipped and 182/199 with the larger selector](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness),
+and the two are not comparable: a different judge, a different sample and a different reader.
 
-**Most of its retrieval stack is already here.** BM25 and vectors fused by RRF at k=60
-(`retrieve/fusion.py`); the same cross-encoder, opt-in, measured above at +4.5 R@12; a graph
-leg seeded from the head of the fused list (`retrieve/spread.py`), shipped at `w_graph=0.0`; a
-temporal leg (`retrieve/temporal.py`), shipped at `w_temporal=0.0`; `recall(budget=)`; and a
-deterministic write-side date resolver (`write/when.py`). On the temporal model this library
-is ahead: their memory unit carries an occurrence interval and one mention time and no clock
-for when a record stopped being believed, so it cannot tell `ended` from `retired`. And the
-opinion trajectory the paper illustrates, a belief held at 0.70, reinforced to 0.85, then
-rewritten at 0.55, is exactly what `history()` records here. Hindsight adjusts the confidence
-in place and keeps only the formation time, so it loses the trajectory it draws.
+**Most of its retrieval stack is already here.** BM25 and vectors fused by RRF
+(`retrieve/fusion.py`, k=60 here); the same cross-encoder, opt-in, measured above at +4.5
+R@12; a graph leg seeded from the head of the fused list (`retrieve/spread.py`), shipped at
+`w_graph=0.0`; a temporal leg (`retrieve/temporal.py`), shipped at `w_temporal=0.0`;
+`recall(budget=)`; and a deterministic write-side date resolver (`write/when.py`). On the
+temporal model this library is ahead: their memory unit carries an occurrence interval and
+one mention time and no clock for when a record stopped being believed, so it cannot tell
+`ended` from `retired`. And the opinion trajectory the paper illustrates, an opinion held at
+0.70, reinforced to 0.85, then rewritten at 0.55, is exactly what `history()` records here.
+Hindsight adjusts the confidence in place and its opinion tuple carries one timestamp;
+whether earlier versions survive is something the paper does not say.
 
 **What is worth measuring here, in order.** None of these is queued. Each names the row it
-would move and the instrument that would show it.
+would move and the instrument that would show it, except the fifth, which is last for that
+reason. The first two share a row and are read together.
 
-1. **Render the resolved time into the indexed text.** Hindsight prefixes each fact with a
+1. **Render the turn's time into the indexed text.** Hindsight prefixes each fact with a
    human-readable time before embedding it and includes the same string in the reranker's
-   input. Here nothing that ranks can see time: `Claim.render()` is subject, predicate and
-   object; the episode FTS index holds `content` alone; `rerank/stage.py` scores
-   `item.text`. So BM25 cannot match "June 2024" in a question to a turn dated then, and the
-   cross-encoder is asked whether an undated passage answers a dated question. The change is
-   a write-time rendering of `valid_from` at the precision `when.resolve` returned, with no
-   model on the read path, so invariants 1 and 7 hold. The row is temporal-reasoning: 66.6
-   R@12 in the retrieval table and 47/53 judged. Instrument: `bench/longmemeval.py --score
-   retrieval --share-store`, with and without the reranker.
+   input. Here nothing that ranks on text can see time: the episode FTS index holds
+   `content` alone, the episode vector is encoded from `content`, `rerank/stage.py` scores
+   `item.text`, and `Claim.render()` is subject, predicate and object. So BM25 cannot match
+   "June 2024" in a question to a turn dated then, and the cross-encoder is asked whether an
+   undated passage answers a dated question. The row is temporal-reasoning,
+   [66.6 R@12 in the LongMemEval retrieval table](BENCHMARKS.md) and
+   [47/53 judged](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness), and both
+   of those runs are episode retrieval with no extraction, so the rendering that can move
+   them is of `Episode.ts`, the session date the benchmark supplies. Rendering `valid_from`
+   into claim text, at the precision `when.resolve` returned, is the same idea on the other
+   unit and is measurable only where claims exist. Deterministic and write-time, with no
+   model on the read path, so invariants 1 and 5 hold. Two costs to state before anyone
+   starts. On an existing store every episode FTS row and every episode vector has to be
+   rebuilt, through a migration and `reembed()`, and on the claim side a one-time backfill
+   is exactly the bulk FTS rewrite that `put_claim`'s own comment warns raises
+   `SQLITE_CORRUPT_VTAB` inside one transaction. And `merge_pass` compares claim text, so
+   two observations of one fact rendered at different precisions would stop merging.
+   Instrument: `bench/longmemeval.py --score retrieval --share-store`, with and without the
+   reranker.
 
-2. **Give the temporal leg an anchor read off the question.** The leg ships at zero because
-   no benchmark passes `valid_at`: `bench/evalkit.py` calls `search(question, k)`, and
-   `bench/longmemeval.py` puts the question date into the reader's prompt and nowhere else,
-   so the anchor is always *now* and the abstention floor fires on every archival turn.
-   Hindsight's temporal channel parses the query into a range and keeps facts whose
-   occurrence interval overlaps it, with a small seq2seq model as the fallback. The fallback
-   is out (invariant 1). The rule-based half already exists: `write/when.py` is the one place
-   in the library allowed to say what "last month" means, and it takes an anchor.
-   `retrieve/temporal.py`'s docstring refuses a read-path date parser because it would be a
-   second extractor with its own locale bugs; reusing the first one, gated on
-   `intent.classify()` returning `temporal`, is not that. Two things come first, measured on
-   2026-09-06 against the anchor 2023-06-01: `resolve` handles "last month", "yesterday",
-   "three weeks ago" and "in 2019", and returns `None` for "last weekend", "in March", "June
-   2024" and for any whole sentence, so it needs a phrase locator and those three forms
-   before it can read a question. And the match should be interval overlap at the precision
-   it returns, not the proximity to a point that the leg ranks on today.
+2. **Give the temporal leg an anchor.** The leg ships at zero because no benchmark passes
+   `valid_at`: `bench/evalkit.py` calls `search(question, k)`, and `bench/longmemeval.py`
+   puts the question date into the reader's prompt and nowhere else. So the anchor is always
+   *now*, every archival turn is more than a half-life, thirty days, from it, and the leg
+   abstains on every question. The first rung needs no parser: pass `valid_at=item.asked_on`
+   and measure what the anchor alone buys, with the match changed from proximity to a point
+   to overlap with an interval. Hindsight's temporal channel then parses the query into a
+   range, with a small seq2seq model as the fallback. The fallback is out (invariant 1). What
+   is left for the rule-based half is relative expressions: item 1 already gives the text
+   legs "June 2024" and "in 2019", but "last month" needs the anchor shifted, and
+   `write/when.py` is the one place allowed to say by how much. `docs/INTERNALS.md`'s
+   fourth-leg contract says the anchor is "given, never parsed", because a parser on the
+   read path is a second extractor with its own locale bugs. Reusing the one the write path
+   already trusts, gated on `intent.classify()` returning `temporal`, is a narrower thing
+   than that sentence forbids, and it would still amend the sentence, so it should be
+   written as an amendment. Measured on 2026-09-06 against the anchor 2023-06-01, `resolve`
+   handles "last month", "yesterday", "three weeks ago" and "in 2019", and returns `None`
+   for "last weekend", "in March", "June 2024" and for any whole sentence, so it needs a
+   phrase locator before it can read a question. Cost: at `w_temporal > 0` every temporal
+   or open query runs `episodes_near`, whose `ORDER BY ABS(ts - ?)` sorts everything the
+   scope matched, and today no query pays that.
 
-3. **Ask the extractor for the why.** Hindsight's extraction prompt demands motivations,
-   preferences and emotional context on every fact, and resolves "my roommate" and "Emily"
-   to one entity. Its largest per-category gain with the same 20B model is
-   single-session-preference, 20.0 to 66.7. `EXTRACT_SYSTEM` in `llm/base.py` asks for a
-   triple with `when`, `amount` and `unit` and says nothing about motivation or coreference,
-   and preference is this repository's weakest judged row, 7/12, for the reason the retrieval
-   table gives: the golds are meta-descriptions no single turn contains, and only extraction
-   can write a claim that does. The instrument is the judged MemoryBench run in
-   `docs/BENCHMARKS.md`; a retrieval R@k cannot see this row move. Since #178 a self-hosted
-   deployment can replace the instructions, so the change can be tried without touching the
-   default.
+3. **Ask the extractor for the why, after measuring extraction at all.** Hindsight's
+   extraction prompt demands motivations, preferences and emotional context on every fact,
+   and resolves "my roommate" and "Emily" to one entity. With the same 20B model,
+   single-session-preference moves from 20.0 to 66.7, one of the three categories the paper
+   names as its largest gains; the paper credits retrieval for that, not the prompt, and, as
+   above, nothing isolates either. `EXTRACT_SYSTEM` in `llm/base.py` asks for a triple with
+   `when`, `amount` and `unit` and says nothing about motivation or coreference, and
+   preference is this repository's weakest judged row,
+   [7/12](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness), for the reason
+   given there: the golds are meta-descriptions no single turn contains. That row was
+   measured through the hosted deployment, which at the time ran no extraction model, so the
+   first experiment is extraction on against extraction off with the prompt as it is; the
+   prompt's content is the second. The instrument is the judged MemoryBench run; a retrieval
+   R@k cannot see this row move. Since #178 a self-hosted deployment can replace the
+   instructions, so the second experiment needs no change to the default.
 
-4. **A same-judge comparison, which the Supermemory attempt could not get.** The stack is
-   open source. Running it through the MemoryBench harness on the 199-question seed
-   `20260903` sample with `gpt-5.4` as reader and judge puts a like-for-like number beside
-   the 177/199 above, and running memvara on the full 500 puts one beside their 83.6, 89.0
-   and 91.4. The paper's own tables mix judges; this is how to stop doing that.
+4. **A same-judge comparison, which the
+   [abandoned Supermemory run](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness)
+   could not get.** The stack is open source. Running it through the MemoryBench harness on
+   the 199-question seed `20260903` sample with `gpt-5.4` as reader and judge puts a
+   like-for-like number beside the 177/199 above, and running memvara on the full 500 puts
+   one beside their 83.6, 89.0 and 91.4. The paper's own tables mix judges; this is how to
+   stop doing that.
 
-5. **Entity summaries as a consolidation pass.** Their observation network is one
-   model-written summary per entity, regenerated in the background when a fact about the
-   entity changes, so that "tell me about Alice" costs one note rather than twelve. That is
-   not the `observation` memory type the deferred list above declines, which was a provenance
-   axis in the wrong column. It is a derived claim: `Consolidator` would gain a fourth pass
-   that takes a model, writes the summary with `Derivation.CONSOLIDATION` and `sources`
-   naming the claims it summarised, and ends it when any source ends. Off the write path, so
-   invariant 1 holds; useful only to a deployment that has a model, which on 2026-09-06 the
-   hosted one did not.
+5. **Entity summaries, and why they come last.** Hindsight keeps three to seven
+   model-written statements per entity, regenerated in the background when a new fact
+   mentioning the entity is retained, so that "tell me about Alice" costs a few lines rather
+   than twelve facts. That is a read-budget problem, and this repository's measured answer
+   to it is at read time: the selector matches the wide-context answer rate at a seventh of
+   the tokens,
+   [549 against 4,089](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness),
+   and `neighborhood()` returns the facts themselves. The summaries are not what the
+   deferred list above declines, which was `observation` as a `MemoryType`; each statement
+   would be a derived claim with `Derivation.CONSOLIDATION`. What they would cost is
+   invariant 1: its Sketch says `Consolidator` takes no `llm` parameter,
+   `docs/LIMITATIONS.md` says consolidation never needed a model, and `Sweep`'s idempotence
+   rests on every stage being a pure function of the snapshot. A model pass amends all
+   three. It would also need something that does not exist, a claim-to-claim dependency,
+   because `Claim.sources` holds episode ids and nothing ends a derived claim when the
+   claims under it end. No row and no instrument names it. If it is ever built it should be
+   written as an amendment to invariant 1, opt-in, with `None` meaning the pass does not
+   exist, the shape the reranker already uses.
 
-6. **Write-time edges that need no extraction.** Semantic links above a cosine threshold and
-   temporal links that decay with distance, built as facts are stored, are what let
-   Hindsight's graph channel run over narrative facts. Here the graph leg walks predicate
-   edges and is inert on LOCOMO by construction, 0 claims from 5,882 turns. This is the
-   second system after the Davidson paper above to build such edges, and neither ablates
-   them, so it is a hypothesis with two examples rather than a finding.
+6. **A second hop over turns, before any stored edge.** Hindsight's graph channel runs over
+   narrative facts because the edges it walks are built at write time from cosine and from
+   time, not from extracted predicates. Here the graph leg walks claims and is inert on
+   LOCOMO, [0 claims from 5,882 turns](BENCHMARKS.md).
+   The Davidson paper above proposes the same write-time edges. Storing them is not free: a
+   cosine link built as a fact is stored is a vector search per write, which
+   `consolidate/merge.py` names as the reason merging is not on the write path (tier 0
+   already runs a top-1 lookup at 0.97 for near-duplicates, which is a different lookup),
+   and an edge table is a new store surface behind a `SCHEMA_VERSION` bump. The cheaper
+   first measurement needs neither: a read-time second hop from the fused head, the vector
+   and temporal neighbours of the top-n turns, is `vector_search_episodes` and
+   `episodes_near` seeded the way `spread.py` seeds the graph leg, from the rows the other
+   legs just returned. It works on turns, and it runs on the instruments above with
+   `--share-store`. Neither paper ablates its edges, so this is a hypothesis with two
+   examples; materialise the edges only if the hop pays and latency demands it.
 
 **Not worth borrowing.** Confidence adjusted in place, for the reason above. The persona
-parameters, which are a prompt on the reader and belong to the caller, and which at their
-neutral setting contributed nothing to the paper's numbers. A seq2seq date parser on the
+parameters, a prompt on the reader that belongs to the caller. A seq2seq date parser on the
 read path. And the four networks as `MemoryType` members, which the deferred list above
 already declines as a one-way door.
 
-**One thing it says about a bet already placed.** The 83.6% is a 20B open model doing the
-extraction as well as the answering, which is evidence that the extraction layer rather than
-the frontier model carries most of the result. #179 queues extraction on a self-hosted small
-model on the same reasoning. The paper does not isolate extraction quality from anything
-else, and 20B is not 4B, so it supports the direction and says nothing about the size.
+**One thing it says about a bet already placed.** The 83.6% is the same 20B model that
+scores 39.0% on the raw transcript, so the memory stack, not the size of the model, carries
+most of the result; the paper credits retrieval, and isolates nothing further. #179 bets the
+same way on extraction alone, on a self-hosted small model. The paper does not separate
+extraction from retrieval, and 20B is not 4B, so it supports the direction and says nothing
+about the size.
 
 ---
 
