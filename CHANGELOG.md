@@ -24,6 +24,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   extraction instructions only; predicate resolution keeps its own prompt. Under
   `MEMVARA_MODE=cloud` it is refused, like `MEMVARA_LLM_MODEL` and
   `MEMVARA_LLM_MAX_CLAIMS`.
+- **`Memvara(write_extraction_deferred=True)` reports a batch that reached tier 2 with no
+  model on `WriteReceipt.deferred` instead of `unextracted`.** The default is unchanged:
+  with no model configured the content is lost and `unextracted` says so. On a deployment
+  where a separate worker reads stored turns later through `reextract()` the same batch is
+  queued, not lost, and a receipt saying "lost" sends the caller looking for a fault that
+  is not there. The option changes what the receipt says, not what is stored — the
+  episodes are committed either way and `pending_extraction()` lists them.
 
 ## [0.11.1] — 2026-09-05
 

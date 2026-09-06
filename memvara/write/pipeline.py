@@ -211,12 +211,25 @@ class WritePipeline:
                  evidence_roles: Iterable[str] | None = SalienceGate.DEFAULT_EVIDENCE_ROLES,
                  telemetry: Recorder | None = None,
                  redactor: Redactor | None = None,
-                 reject_ungrounded: bool | str = "auto") -> None:
+                 reject_ungrounded: bool | str = "auto",
+                 extraction_deferred: bool = False) -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
         self.llm = llm
         self.near_dup_threshold = near_dup_threshold
+        #: What a batch that reaches tier 2 with no model is reported as. `False`, the
+        #: default, reports it on `receipt.unextracted`: the content was accepted and
+        #: nothing will ever extract from it, which is a loss and is counted as one.
+        #: `True` reports the same batch on `receipt.deferred` and leaves `unextracted`
+        #: at zero, for a deployment where a separate worker reads stored turns later
+        #: through `reextract()` — there the turn is queued, not lost, and a receipt that
+        #: said "lost" would send the caller looking for a fault that is not there. The
+        #: option changes what is *said*, not what is stored: either way the episode is
+        #: committed and is exactly what the worker will find. Opt-in, because a caller
+        #: who never deployed a worker must keep being told the truth about the default
+        #: configuration.
+        self.extraction_deferred = bool(extraction_deferred)
         if not (reject_ungrounded is True or reject_ungrounded is False
                 or reject_ungrounded == "auto"):
             raise TypeError(
@@ -678,7 +691,12 @@ class WritePipeline:
             # genuinely reached tier 2 and yielded nothing, which is the honest thing to
             # report — silently returning an empty receipt is how the default
             # configuration reads as "your library is broken" instead of "no extractor".
-            receipt.unextracted = len(episodes)
+            # Which field says so is `extraction_deferred`'s decision: "lost", or
+            # "queued for the worker that will read it".
+            if self.extraction_deferred:
+                receipt.deferred = True
+            else:
+                receipt.unextracted = len(episodes)
             return out
 
         # One call for the whole batch, not one per turn. Turns share context, and the

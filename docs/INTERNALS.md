@@ -446,7 +446,8 @@ including `llm_calls` (0 whenever the LLM is not consulted) and `latency_ms`:
   far under the floor), so `"auto"` degrades to the strict check there.
 
 `reextract()` is `add()` with tier 0 removed, for turns already in the store: a
-deployment that ran without a model, or a batch a provider failure left `deferred`. Tier 1
+deployment that ran without a model, or a batch a provider failure left `deferred` — or
+that `extraction_deferred=True` marked so on purpose, for exactly this sweep to find. Tier 1
 runs and runs first, because the gate is free and the model is not — `add()` commits
 episodes *before* gating them, so chitchat in the store is indistinguishable from an
 unextracted fact from the outside. An episode that already has claims is skipped and
