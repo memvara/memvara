@@ -9,6 +9,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.11.3] — 2026-09-06
+
 ### Fixed
 
 - **A value of a few kilobytes no longer fails the write on a store with a btree index on
