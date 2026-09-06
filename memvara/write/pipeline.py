@@ -213,7 +213,7 @@ class WritePipeline:
                  telemetry: Recorder | None = None,
                  redactor: Redactor | None = None,
                  reject_ungrounded: bool | str = "auto",
-                 extraction_deferred: bool = False) -> None:
+                 extraction_deferred: bool = False,
                  reject_polluted: bool = True) -> None:
         self.store = store
         self.embedder = embedder
