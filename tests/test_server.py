@@ -3356,8 +3356,9 @@ def test_the_terse_claim_shape_reaches_the_openai_backend(monkeypatch):
     """The short claim shape is only reachable from a deployment through this variable.
 
     It buys latency on a CPU-hosted model by not making it type a field name and a null
-    for every value the code can already default. Measured on the shipped shape, eight
-    claims are 413 tokens against 229."""
+    for a time and a measurement the turn did not state. Eight claims serialize to 413
+    tokens under the shipped schema and 277 under this one. `memory_type` and `confidence`
+    stay required, so the assertion below is six fields rather than four."""
     import types as pytypes
 
     monkeypatch.setitem(sys.modules, "openai",
@@ -3366,7 +3367,8 @@ def test_the_terse_claim_shape_reaches_the_openai_backend(monkeypatch):
         "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
         "MEMVARA_LLM_TERSE_CLAIMS": "1"}))
     item = memory.llm._claim_schema["properties"]["claims"]["items"]
-    assert item["required"] == ["subject", "predicate", "object", "source_index"]
+    assert item["required"] == ["subject", "predicate", "object", "source_index",
+                                "memory_type", "confidence"]
     memory.close()
 
 

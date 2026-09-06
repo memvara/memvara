@@ -187,13 +187,14 @@ model. Switching to a stronger one is a reason to read `empty` turns again;
 *Amended 2026-09-06: `MEMVARA_LLM_TERSE_CLAIMS` added to the table.* It landed in core
 after this design was written and belongs to the same group as the two above it — a setting
 core refuses under cloud mode that the worker must be able to set, because the worker is the
-deployment's extraction process. It takes `polarity`, `confidence`, `when`, `amount` and
-`unit` out of the schema's `required` list, so the model stops writing a field name and a
-null for each one and `shape_claims` supplies the defaults it already documents. Eight
-claims are 413 tokens under the shipped schema and 229 under this one, which predicts 45%.
-**Measured end to end on the box it is 27%** — 2,401 output tokens against 1,756 over three
-episodes with the deployment's own prompt and vocabulary and a 12-claim cap on both arms,
-finding the same 10 of 15 key facts. Only the field names went away; the model still spends
+deployment's extraction process. It takes `polarity`, `when`, `amount` and `unit`
+out of the schema's `required` list, so the model stops writing a field name and a null for
+each one and `shape_claims` supplies the defaults it already documents. Eight
+claims are 413 tokens under the shipped schema and 277 under this one, which predicts 33%.
+A wider version, which also made `memory_type` and `confidence` optional, **measured 27% on
+the box** — 2,401 output tokens against 1,756 over three episodes with the deployment's own
+prompt and vocabulary and a 12-claim cap on both arms, finding the same 10 of 15 key facts.
+The narrower version that shipped is unmeasured and saves less. Only the field names went away; the model still spends
 tokens on values and on deciding. At production's measured 21.0 tok/s prefill and 5.53
 generation, a typical extraction goes from 98 s to 79 s, a **20% cut in wall time**.
 
@@ -211,11 +212,17 @@ cancellation into a bounded 422 s failure. The third lever is the
 client timeout itself, which is the SDK's default rather than a memvara setting and can be
 raised in the worker. That is
 throughput rather than latency — the queue above is what answers the 6-second timeout — and
-throughput is what decides how long the 1,936-episode backlog takes to clear. It carries
-one consequence worth stating beside the guard below: an omitted `confidence` lands every
-claim at `UNKNOWN_CONFIDENCE` (0.5), so R4's `min(confidence, 0.4)` still lowers a
-suspicious claim below its neighbours, but the confidence signal no longer distinguishes
-one clean claim from another. `bench/extract_cost.py` in core measures the saving and, given
+throughput is what decides how long the 1,936-episode backlog takes to clear. **Its first version also made `confidence` optional, and review found that this breaks
+R4.** `reconcile._outranked` retires an incumbent when
+`claim.confidence >= AUTHORITY_SHARE * incumbent.confidence`, `AUTHORITY_SHARE` is 0.5, and
+an omitted confidence lands at `UNKNOWN_CONFIDENCE` (0.5). With every clean claim at 0.5, a
+claim R4 discounted to 0.4 clears 0.25 and retires the true value — which is precisely the
+destructive direction R4 exists to stop, and it does not happen against a normal incumbent
+at 0.95 (0.4 < 0.475). The earlier note here said the discount "still lowers a suspicious
+claim below its neighbours", which is true about ranking and irrelevant to retirement; the
+mechanism that matters is the reconciler's threshold. `confidence` is now required under
+this option, and `memory_type` with it, since defaulting that files every episodic claim as
+a standing fact. `bench/extract_cost.py` in core measures the saving and, given
 an endpoint, whether the same facts still come back.
 
 The last three exist in core's `ServerConfig` already and are refused there under cloud mode,

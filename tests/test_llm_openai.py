@@ -26,7 +26,9 @@ from memvara.llm.base import (
     MAX_CLAIMS,
     PREDICATE_SCHEMA,
     RESOLVE_SCHEMA,
+    DECIDED_CLAIM_FIELDS,
     LOAD_BEARING_CLAIM_FIELDS,
+    OPTIONAL_CLAIM_FIELDS,
     bounded_claim_schema,
     self_hosted_claim_schema,
 )
@@ -168,7 +170,15 @@ def test_the_terse_schema_requires_only_what_cannot_be_defaulted():
     making any of them optional would turn a saved token into a lost fact."""
     schema = self_hosted_claim_schema(9)
     item = schema["properties"]["claims"]["items"]
-    assert item["required"] == list(LOAD_BEARING_CLAIM_FIELDS)
+    assert item["required"] == list(LOAD_BEARING_CLAIM_FIELDS + DECIDED_CLAIM_FIELDS)
+
+    # The three constants and the schema must agree, because a reader trusts the constants
+    # and a model obeys the schema. This is the assertion the first version of this change
+    # did not have, and its absence is how `memory_type` became optional without anyone
+    # deciding it should be: `required` was set from one constant and the docstring counted
+    # a different set, and nothing compared them.
+    declared = set(CLAIM_SCHEMA["properties"]["claims"]["items"]["properties"])
+    assert declared - set(item["required"]) == set(OPTIONAL_CLAIM_FIELDS)
     assert set(item["properties"]) == set(CLAIM_SCHEMA["properties"]["claims"]["items"]["properties"])
     assert item["additionalProperties"] is False
     assert schema["properties"]["claims"]["maxItems"] == 9
@@ -212,7 +222,7 @@ def test_terse_carries_its_own_cap_and_honours_an_explicit_one():
     sent = client.calls[0]["response_format"]["json_schema"]
     assert sent["schema"]["properties"]["claims"]["maxItems"] == MAX_CLAIMS
     assert sent["schema"]["properties"]["claims"]["items"]["required"] == list(
-        LOAD_BEARING_CLAIM_FIELDS)
+        LOAD_BEARING_CLAIM_FIELDS + DECIDED_CLAIM_FIELDS)
     assert sent["name"] == "claims"
 
     client = FakeClient({"claims": []})
@@ -230,13 +240,13 @@ def test_a_claim_that_omits_every_optional_field_still_validates():
     the exception and the reason `self_hosted_claim_schema` is a per-deployment decision:
     an omitted value lands at `UNKNOWN_CONFIDENCE`, so the claim ranks by a number nobody
     chose rather than one the model did."""
-    minimal = {"subject": "user", "predicate": "lives_in",
-               "object": "lisbon", "source_index": 0}
+    minimal = {"subject": "user", "predicate": "lives_in", "object": "lisbon",
+               "source_index": 0, "memory_type": "semantic", "confidence": 0.9}
     client = FakeClient({"claims": [minimal]})
     got = OpenAILLM(client=client, terse=True).extract(episodes("I live in Lisbon"), [])
     assert got == [{
         "subject": "user", "predicate": "lives_in", "object": "lisbon",
-        "polarity": 1, "memory_type": "semantic", "confidence": 0.5,
+        "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
         "source_index": 0, "when": None, "amount": None, "unit": None,
     }]
 

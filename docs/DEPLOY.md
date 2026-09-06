@@ -124,7 +124,7 @@ transport is stdio and the configuration is entirely environment.
 | `MEMVARA_LLM_MODEL` | Model name for `MEMVARA_LLM=openai`. Unset uses the adapter's own default. Point `OPENAI_BASE_URL` at a self-hosted OpenAI-compatible server (vLLM, llama.cpp, Ollama's shim) and name its model here. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_LLM_MAX_CLAIMS` | Cap on the claims array for `MEMVARA_LLM=openai`. Unset means uncapped, which is right for hosted OpenAI — it closes the array itself, and OpenAI documents `maxItems` as unsupported under strict mode. Set it for a self-hosted server that constrains decoding, where an uncapped array gives the grammar no way to end a response. A positive integer; anything else is refused at startup. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_LLM_EXTRACT_SYSTEM` | Path to a file holding replacement extraction instructions for `MEMVARA_LLM=openai`. Unset uses the instructions memvara ships, which is right for every hosted model. Set it for a small self-hosted model that the shipped wording talks out of extracting at all. Read only by this backend, and checked only when it runs: a file that is missing, empty, over 64 KiB or not UTF-8 is refused at startup, but under any other `MEMVARA_LLM` the variable is never read at all. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
-| `MEMVARA_LLM_TERSE_CLAIMS` | `1` asks `MEMVARA_LLM=openai` for a shorter claim shape: `polarity`, `confidence`, `when`, `amount` and `unit` become optional, so the model stops writing a field name and a null for each of them. Unset means the full shape, which is right for hosted OpenAI — its strict mode requires every declared property in `required`, so this is a 400 there. Set it for a self-hosted model whose generation speed is the bottleneck. **It changes ranking:** an omitted confidence puts every claim at 0.5. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
+| `MEMVARA_LLM_TERSE_CLAIMS` | `1` asks `MEMVARA_LLM=openai` for a shorter claim shape: `polarity`, `when`, `amount` and `unit` become optional, so the model stops writing a field name and a null for each of them. `memory_type` and `confidence` stay required, because defaulting those two is a decision rather than a formality. Unset means the full shape, which is right for hosted OpenAI — its strict mode requires every declared property in `required`, so this is a 400 there. Set it for a self-hosted model whose generation speed is the bottleneck. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_EMBEDDER` | `hashing` (default, offline, 512-dimensional), `hashing:<dim>`, `local` or `local:<model>` (needs `memvara[local-embed]`), or `auto`. See [The embedder is named, not discovered](#the-embedder-is-named-not-discovered). |
 | `MEMVARA_READ_ONLY` | `1` hides every tool that writes. |
 
@@ -205,22 +205,28 @@ confidence number for each one whether or not the turn said anything about a tim
 measurement or how sure it was. One claim comes to 52 tokens, and 44 of them are keys,
 punctuation and those nulls.
 
-`MEMVARA_LLM_TERSE_CLAIMS=1` moves `polarity`, `confidence`, `when`, `amount` and `unit`
-out of the schema's `required` list. The model may then leave them out, and memvara
+`MEMVARA_LLM_TERSE_CLAIMS=1` moves `polarity`, `when`, `amount` and `unit` out of the
+schema's `required` list. `memory_type` and `confidence` stay required on purpose: memvara
+*can* default them, but there the default is a decision rather than a formality. Without
+`memory_type` every episodic claim is filed as a standing fact and decays at the wrong
+rate. Without `confidence` every claim sits at 0.5, which defeats the pollution guard's
+discount at the reconciler's retirement threshold and would let a suspect claim retire a
+true one. The model may then leave them out, and memvara
 supplies the same defaults it already applies to a value it cannot read: an assertion
 unless `polarity` is exactly -1, and nothing for a time or a measurement the turn did not
 state.
 
-**Measured on a 4-core production box, this saves 27% of the generated tokens**: three
-episodes through phi-4-mini Q8_0 with a 12-claim cap on both arms produced 2,401 output
-tokens under the shipped schema and 1,756 under this one, finding the same 10 of 15 key
-facts either way. Prefill did not move. At that box's rates (21.0 tokens per second prefill,
-5.53 generation) a typical extraction goes from about 98 seconds to about 79.
+**Serialization predicts a 33% saving**: eight claims are 413 tokens under the shipped
+schema and 277 under this one.
 
-Serialization alone predicts 45%, and the difference matters: the model still spends tokens
-on the values and on deciding what to write, so only the field names went away. Treat 27% as
-the number for phi-4-mini and run `bench/extract_cost.py` against your own model, because
-this is a property of the model's habits rather than of the schema.
+A wider version of this option, which also made `memory_type` and `confidence` optional,
+was measured on a 4-core production box at **27% of the generated tokens, finding the same
+10 of 15 key facts** — three episodes through phi-4-mini Q8_0 with a 12-claim cap on both
+arms, 2,401 output tokens against 1,756, prefill unmoved. **The narrower option documented
+here has not been measured and saves less than that.** Treat these numbers as a ceiling and
+run `bench/extract_cost.py` against your own model: how much of the permission a model
+takes up is a property of its habits, not of the schema. The same wider schema cut 55% on
+LFM2.5-1.2B-Instruct.
 
 The long turn is where this matters most, because that is where the current setup is
 already close to failing. Generation time grows with the answer, and a long turn produces a

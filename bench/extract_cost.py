@@ -51,6 +51,7 @@ from typing import Any, Sequence
 from memvara.llm.base import (
     CLAIM_SCHEMA,
     MAX_CLAIMS,
+    OPTIONAL_CLAIM_FIELDS,
     Usage,
     bounded_claim_schema,
     self_hosted_claim_schema,
@@ -66,9 +67,11 @@ SAMPLE_CLAIM = {
     "source_index": 0, "when": None, "amount": None, "unit": None,
 }
 
-#: What `self_hosted_claim_schema` lets the model leave out. Dropping these from the
-#: sample is what the short shape looks like on the wire.
-OPTIONAL = ("polarity", "confidence", "when", "amount", "unit")
+#: What `self_hosted_claim_schema` lets the model leave out, imported rather than retyped.
+#: A hand-copied list here drifted from the schema on the day it was written — it named
+#: five fields where the schema made six optional — so the accounting half measured a
+#: shape the model was never sent.
+OPTIONAL = OPTIONAL_CLAIM_FIELDS
 
 VARIANTS: dict[str, Any] = {
     "full": CLAIM_SCHEMA,
@@ -183,8 +186,7 @@ def live(batches: Sequence[Sequence[Episode]], gold: Sequence[str],
                           f"{type(exc).__name__}")
                     claims = []
                 times.append(time.perf_counter() - t0)
-                usage.input_tokens += call.input_tokens
-                usage.output_tokens += call.output_tokens
+                usage.add(call.input_tokens, call.output_tokens)
                 worst_out = max(worst_out, call.output_tokens)
                 per_call.append(claims)
                 found += claims

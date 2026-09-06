@@ -116,18 +116,18 @@ class OpenAILLM:
         # by default because hosted OpenAI rejects `maxItems` under `strict: True` — see
         # `bounded_claim_schema`, which carries the reasoning and the measurement. Built
         # once here rather than per call, since it is the same dict every time.
-        # `terse` additionally drops the five defaultable fields out of `required`, so the
-        # model stops spending tokens on `"when":null,"amount":null,"unit":null` for every
-        # claim. Measured on the shipped shape, that is 413 tokens for eight claims against
-        # 229 — a little under half the generation, which on a CPU-hosted model is most of
-        # the wall time. `self_hosted_claim_schema` carries the measurement and the one
-        # consequence, which is that `confidence` stops being a number the model chose.
+        # `terse` additionally takes `polarity`, `when`, `amount` and `unit` out of
+        # `required`, so the model stops spending tokens on `"when":null,"amount":null,
+        # "unit":null` for every claim. Serialization puts eight claims at 413 tokens
+        # against 277; what a model actually saves is less, and is a property of its
+        # habits rather than of the schema. `self_hosted_claim_schema` carries the
+        # measurements, and the reason `memory_type` and `confidence` stay required.
         #
         # A separate argument from `max_claims` rather than a second meaning for it. Both
         # describe the same self-hosted case, but they are different trades: the cap
-        # protects against a runaway and costs nothing, while this one buys latency and
-        # moves ranking. An operator who set `MEMVARA_LLM_MAX_CLAIMS` asked for the first
-        # and must not silently receive the second.
+        # protects against a runaway and costs nothing, while this one changes what the
+        # model is asked to write. An operator who set `MEMVARA_LLM_MAX_CLAIMS` asked for
+        # the first and must not silently receive the second.
         if terse:
             self._claim_schema = self_hosted_claim_schema(
                 MAX_CLAIMS if max_claims is None else max_claims)

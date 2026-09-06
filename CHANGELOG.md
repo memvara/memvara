@@ -27,42 +27,50 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   field on every claim, so a model writes `"when":null,"amount":null,"unit":null` and a
   confidence number for each one. Most of a claim is field names: one claim serializes to
   52 tokens, of which 44 are keys, punctuation and the three forced nulls. Under this
-  option `polarity`, `confidence`, `when`, `amount` and `unit` move out of the schema's
-  `required` list, so the model may leave them out and `_shape.shape_claims` supplies the
-  defaults it already documents. Eight claims — the mean extraction on a 4-core production
-  box — are 413 tokens under the shipped schema and 229 under this one, which predicts a
-  45% saving. **Measured end to end on the production box it is 27%**: three episodes, the
-  deployment's own prompt and predicate vocabulary, a 12-claim cap on both arms, phi-4-mini
-  Q8_0 — 2,401 output tokens under the shipped schema against 1,756 under this one, and the
-  same 10 of 15 key facts found either way. The gap between 45% and 27% is that the model
-  still spends tokens on values and on deciding what to write; only the field names went
-  away. Prefill did not move (2,894 tokens on both), because the prompt is identical.
+  option `polarity`, `when`, `amount` and `unit` move out of the schema's `required` list,
+  so the model may leave them out and `_shape.shape_claims` supplies the defaults it
+  already documents. Eight claims — the mean extraction on a 4-core production
+  box — are 413 tokens under the shipped schema and 277 under this one, so serialization
+  predicts a 33% saving.
 
-  At the rates that box runs at (Q8_0, four threads, sharing the machine with the API and
-  Postgres: 21.0 tokens per second prefill and 5.53 generation) that is a typical extraction
-  going from 98 seconds to 79, a 20% cut in wall time. The long turn gains most: a
-  production call that spent 220 seconds on prefill and 333 generating 1,618 tokens took 554
-  in total against a 600-second client timeout, and 27% off generation takes it to about
-  464 — from 92% of the budget to 77%.
+  Four fields move out of `required`: `polarity`, `when`, `amount` and `unit`. Each is
+  safe because `_shape.shape_claims` already reads it with `.get()` and documents what an
+  absent value means, and because none of them carries a decision — an absent field and an
+  explicit null reach the validator as the same answer. `memory_type` and `confidence`
+  stay required even though the validator can default them, because there the default is a
+  decision. Defaulting `memory_type` files every episodic claim as a standing fact, so it
+  decays at the wrong rate and a procedural claim never reaches the standing set.
+  Defaulting `confidence` puts every claim at 0.5, and `write/reconcile.py` retires an
+  incumbent when `claim.confidence >= AUTHORITY_SHARE * incumbent.confidence` with
+  `AUTHORITY_SHARE` 0.5 — so a claim that `write/pollution.py`'s R4 discounted to 0.4
+  would clear 0.25 and retire the true value it was discounted to protect, where against a
+  normal incumbent at 0.95 it does not. That would disable the pollution guard's one
+  defence of a ONE-cardinality slot.
+
+  **On what is measured.** A wider version of this schema, which also made `memory_type`
+  and `confidence` optional, was measured on the production box at **27% of generated
+  tokens with the same 10 of 15 key facts found**: three episodes, the deployment's own
+  prompt and predicate vocabulary, a 12-claim cap on both arms, phi-4-mini Q8_0, 2,401
+  output tokens against 1,756, prefill unmoved at 2,894. That run is why the numbers here
+  are given as a ceiling rather than a promise — the measured saving fell well short of
+  what serialization predicted, because the model still spends tokens on values and on
+  deciding what to write. **The narrower schema that ships here has not been measured and
+  saves less than 27%.** How much of the permission a model takes up is a property of its
+  habits: the wider schema cut 55% on LFM2.5-1.2B-Instruct against phi-4-mini's 27%. Run
+  `bench/extract_cost.py` against your own model.
 
   It does not bound a runaway. Measured on the same box, an uncapped claims array reached
   7,197 generated tokens on a 900-character turn, ran 1,957 seconds and found 7 of 15 facts
   against the capped arm's 10. `MEMVARA_LLM_MAX_CLAIMS` is what stops that, and this option
   inherits it.
 
-  `bench/extract_cost.py` measures it, both on paper and against a real endpoint —
-  and the saving is only real if the model actually leaves the fields out, which is what
-  the live half of that harness is for.
-
   Off by default, and it is a 400 against hosted OpenAI: strict mode requires every
   declared property to appear in `required`. It is a separate switch from
   `MEMVARA_LLM_MAX_CLAIMS` rather than a second meaning for it, because the two are
-  different trades — the cap stops a runaway and costs nothing, while this buys latency
-  and changes ranking. **An omitted `confidence` lands at `UNKNOWN_CONFIDENCE` (0.5), so
-  claims written under this option rank differently from claims written without it.** On a
-  small model that self-reported number is close to noise, since it is the one field in a
-  claim that no validation can check — but the change is real, so decide it per deployment
-  rather than per call. Refused under `MEMVARA_MODE=cloud`, like every other extraction
+  different trades — the cap stops a runaway and costs nothing, while this changes what the
+  model is asked to write. Because `memory_type` and `confidence` stay required, a store
+  written with this option on holds the same claim shape as one written with it off, and
+  ranking does not move. Refused under `MEMVARA_MODE=cloud`, like every other extraction
   setting.
 
 ## [0.11.3] — 2026-09-06

@@ -137,14 +137,15 @@ class ServerConfig:
     llm_extract_system: str | None = None
     #: Ask the "openai" backend for the shorter claim shape, and again this is only for
     #: the self-hosted case `llm_model` describes. The shipped schema requires every field
-    #: on every claim, so a model writes `"when":null,"amount":null,"unit":null` and a
-    #: confidence number for each one. On a CPU-hosted model those tokens are most of the
-    #: wall time: eight claims are 413 tokens under the shipped schema and 229 under this
-    #: one. Two things to know before turning it on. It is a 400 against hosted OpenAI,
-    #: whose strict mode requires every declared property in `required`. And it stops
-    #: `confidence` being a number the model chose, so every claim lands at 0.5 and a store
-    #: written this way ranks differently from one written without it —
-    #: `llm.base.self_hosted_claim_schema` carries the detail.
+    #: on every claim, so a model writes `"when":null,"amount":null,"unit":null` for every
+    #: claim whether or not the turn stated a time or a measurement. On a CPU-hosted model
+    #: those tokens are most of the wall time: eight claims are 413 tokens under the
+    #: shipped schema and 277 under this one. `polarity`, `when`, `amount` and `unit`
+    #: become optional; `memory_type` and `confidence` stay required, because defaulting
+    #: those two is a decision rather than a formality and
+    #: `llm.base.self_hosted_claim_schema` carries the reasoning. The one thing to know
+    #: before turning it on is that it is a 400 against hosted OpenAI, whose strict mode
+    #: requires every declared property to appear in `required`.
     llm_terse_claims: bool = False
     #: "local" (default) opens MEMVARA_DB on disk, exactly as before this field existed.
     #: "cloud" opens no local file at all; it resolves an API key (MEMVARA_API_KEY, or
