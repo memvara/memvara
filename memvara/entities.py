@@ -70,6 +70,7 @@ calls.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass, replace
@@ -112,6 +113,21 @@ _CANDIDATE_LIMIT = 16
 #: carry aliases and occupy a row.
 DEFAULT_ENTITY_CAP = 5000
 
+#: Longest key `entity_key` returns, in characters. A key longer than this is cut to the
+#: words that fit and finished with a 16-character digest of the whole key, so two long
+#: values that share an opening stay two entities. The number is chosen for the stores
+#: the key is written to: Postgres refuses a btree index row over 2704 bytes, the key sits
+#: in an indexed column (`claims.object_key`) and in the entity id, and 512 characters is
+#: at most 2048 bytes of UTF-8 with room left for the owner prefix. It is well past any
+#: name a person or a company has, so a key that reaches it is a sentence used as a value,
+#: and nothing that fits under it changes: the ids already inside every `fact_key` on disk
+#: stay exactly what they were.
+ENTITY_KEY_MAX = 512
+
+#: Length of the digest that finishes a bounded key. Hex, so it is a single word to
+#: `_tokens` and the bounded key folds to itself.
+_DIGEST_CHARS = 16
+
 
 def entity_key(surface: str) -> str:
     """Deterministic identity of an entity surface form. A pure function.
@@ -131,6 +147,19 @@ def entity_key(surface: str) -> str:
     Returns "" for a surface form with no content at all, which callers read as "no
     entity here" — an empty object is meaningful for retraction, where it means "clear
     the whole slot".
+
+    The key is never longer than `ENTITY_KEY_MAX` characters. A value of a few kilobytes
+    (a pasted paragraph handed to `remember` as an object) used to fold to a key of the
+    same length, and the hosted store could not index it. Such a key is cut to the words
+    that fit and finished with a digest of the whole key, so it stays readable, stays
+    unique, and still folds to itself:
+
+    >>> long = "the customer said the renewal would be decided after the audit " * 60
+    >>> key = entity_key(long)
+    >>> len(key) <= ENTITY_KEY_MAX and entity_key(key) == key
+    True
+    >>> key.startswith("customer said the renewal")
+    True
     """
     tokens = _tokens(surface)
     if not tokens:
@@ -142,7 +171,34 @@ def entity_key(surface: str) -> str:
         tokens = kept
     if len(tokens) > 1 and tokens[0] in _ARTICLES:
         tokens = tokens[1:]
-    return " ".join(tokens)
+    key = " ".join(tokens)
+    if len(key) <= ENTITY_KEY_MAX:
+        return key
+    return _bounded(key, tokens)
+
+
+def _bounded(key: str, tokens: list[str]) -> str:
+    """Cut a key past `ENTITY_KEY_MAX` to the words that fit, plus a digest of all of it.
+
+    The result must fold to itself, because `fact_key_for` and `default_entity` both rely
+    on `entity_key` being idempotent. Two things in the fold could move a bounded key
+    on a second pass and both are removed from the prefix before it is built: a legal
+    form (kept only when the whole key was legal forms, and dropped again once the digest
+    gives the fold another word to keep) and a leading article.
+    """
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=_DIGEST_CHARS // 2).hexdigest()
+    room = ENTITY_KEY_MAX - _DIGEST_CHARS - 1
+    prefix: list[str] = []
+    used = 0
+    for tok in tokens:
+        if tok in _LEGAL_FORMS or (not prefix and tok in _ARTICLES):
+            continue
+        cost = len(tok) + (1 if prefix else 0)
+        if used + cost > room:
+            break
+        prefix.append(tok)
+        used += cost
+    return " ".join(prefix + [digest])
 
 
 def _tokens(surface: str) -> list[str]:
