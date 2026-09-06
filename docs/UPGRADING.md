@@ -7,6 +7,40 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Entity keys are bounded at 512 characters
+
+### What changed
+
+`entity_key` never returns more than `ENTITY_KEY_MAX` (512) characters. A longer key is cut
+to the words that fit and finished with a 16-character digest of the whole key. Keys that
+fit under the bound are returned exactly as before, so no existing entity id or `fact_key`
+moves.
+
+### What you will see
+
+Nothing, unless a store already holds an entity whose folded key is longer than 512
+characters. That is a value of a few kilobytes used as a subject or object, and on the
+hosted store such a write failed outright, so a store there cannot hold one. A SQLite store
+can. The next write of that value gets the bounded key, which is a new identity: the claim
+is stored as a new row beside the old one instead of reinforcing it, and the old row keeps
+answering under its old key. Nothing warns at write time.
+
+### How to find your own instances
+
+Scan the `entities` table for ids whose key part is longer than 512 characters, before
+upgrading:
+
+```sql
+SELECT id FROM entities WHERE length(id) - instr(id, char(31)) > 512;
+```
+
+An empty result means this entry does not apply to you. A row in it is a value that will
+get a new identity on its next write; re-observe it once after upgrading if you want the
+history to continue under the new key, or leave both rows if the old value will not be
+written again.
+
+---
+
 ## Model-proposed claims now pass a pollution guard, on by default
 
 ### What changed

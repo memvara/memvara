@@ -261,6 +261,22 @@ def test_a_retriever_built_without_a_registry_anchors_on_the_key_alone(mem):
                          anchored=True) == []
 
 
+LONG = ("the customer said the renewal would be decided after the audit " * 60).strip()
+
+
+def test_a_long_value_is_anchored_by_its_words_and_not_by_its_digest(mem):
+    """`entity_key` cuts a key past `ENTITY_KEY_MAX` to the words that fit plus a digest.
+    Nobody types the digest, so a question that repeats the value would never contain
+    every token of the key and the claim would never be anchored. `key_words` leaves the
+    digest out of the comparison."""
+    assert anchor_of(Claim(subject="user", predicate="notes", object=LONG),
+                     query_tokens(LONG)) == "object"
+    mem.remember("user", "notes", LONG, recorded_at=T0)
+    rows = mem.search(LONG, k=5, anchored=True)
+    assert rows and rows[0].claim.object == LONG
+    assert rows[0].explain.anchor == "object"
+
+
 # -- what the review found -----------------------------------------------------
 
 def test_a_derivation_starts_at_the_named_entity_and_not_at_its_value():

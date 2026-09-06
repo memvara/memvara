@@ -390,14 +390,19 @@ id are all built from `entity_key`, and `entity_key` never returns more than
 `ENTITY_KEY_MAX` (512) characters. A value longer than that, which in practice is a
 pasted sentence or paragraph used as an object, is folded to the words that fit plus a
 16-character digest of the whole folded key. The digest keeps two long values with the
-same opening apart, and the result folds to itself, which `fact_key_for` and
-`default_entity` depend on. The bound exists because the hosted store keeps the entity id
-and `object_key` in Postgres btree indexes, which refuse a row over 2704 bytes, and a
-3 KB value failed the whole write there on 2026-09-06. A key that fits under the bound is
-returned unchanged, so every entity id already inside a `fact_key` on disk stays what it
-was. Only values whose key was longer than 512 characters get a new identity, and a
-store that holds such a value from before this change will treat its next write as a new
-value rather than a re-observation of the old row.
+same opening apart, and the result folds to itself: folding the bounded key again returns
+the same key, which `fact_key_for` and `default_entity` depend on. The bound exists
+because the hosted store keeps the entity id, `subject_key` and `object_key` in Postgres
+btree indexes, which refuse a row over 2704 bytes, and a 3 KB value failed the whole write
+there on 2026-09-06. A key that fits under the bound is returned unchanged, so every
+entity id already inside a `fact_key` on disk stays what it was. Only values whose key
+was longer than 512 characters get a new identity, and a store that holds such a value
+from before this change will treat its next write as a new value rather than a
+re-observation of the old row. Two other places follow the bound. `split_entity` folds
+its `"{base} split {stamp}"` marker before storing it, so a split of an entity at the
+bound stays under it. And `retrieve/anchor.py` compares a question against the words of
+a key with the digest left out (`entities.key_words`), because a question repeats a
+value by its words and never by the digest.
 
 `WritePipeline` copies that list onto `WriteReceipt.closed`, where `receipt.ended` and
 `receipt.retired` split it by `Claim.state`. Anything rendering the list as one word is

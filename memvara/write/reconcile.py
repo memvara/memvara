@@ -999,6 +999,13 @@ class SplitReport:
 #: Readable on purpose, everywhere the base survives. It lands in `Claim.meta` and comes
 #: back out of `why()`, so an operator reading a split store sees "john smith split
 #: 20200101" and not a hash.
+#:
+#: The marker is passed through `entity_key` before it is stored, so it is never longer
+#: than `ENTITY_KEY_MAX`. A base that already sits at the bound would otherwise carry
+#: the marker past it. For such a base the fold cuts the marker to the words that fit plus
+#: a digest of the whole marker, so "split" and the stamp are no longer readable in it,
+#: but the stamp is still part of what the digest was taken over, so two splits of one
+#: long entity at different instants stay two identities.
 SPLIT_MARKER = "{base} split {stamp}"
 
 
@@ -1108,8 +1115,8 @@ def split_entity(reconciler: Reconciler, scope: Scope, surface: str, at: datetim
 
     # The fold, unless the surface form has nothing the fold keeps — see `SPLIT_MARKER`.
     folded = entity_key(surface)
-    marker = SPLIT_MARKER.format(base=folded or content_hash(surface),
-                                 stamp=boundary.strftime("%Y%m%d%H%M%S"))
+    marker = entity_key(SPLIT_MARKER.format(base=folded or content_hash(surface),
+                                            stamp=boundary.strftime("%Y%m%d%H%M%S")))
     for claim in earlier:
         claim.meta[SUBJECT_ENTITY] = marker
         _note(claim, t, "split", marker)

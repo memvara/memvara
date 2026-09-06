@@ -21,7 +21,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   opening stay distinct and the bounded key folds to itself. Keys that fit under the bound
   are unchanged, so no existing entity id or `fact_key` moves. A value whose key was
   already longer than 512 characters in an existing store gets a new identity on its next
-  write and is stored as a new value rather than reinforcing the old row.
+  write and is stored as a new value rather than reinforcing the old row;
+  `docs/UPGRADING.md` says how to find such rows. The split marker `split_entity` writes
+  is folded before it is stored, so a split of an entity at the bound stays under it, and
+  `anchored=True` matches a long value by its words without the digest, so a question
+  that repeats the value still anchors the claim.
 
 ## [0.11.2] — 2026-09-06
 
