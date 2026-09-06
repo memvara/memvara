@@ -789,6 +789,66 @@ see [What the fast path does not
 catch](DESIGN.md#what-the-fast-path-does-not-catch-measured). Until the offline write path extracts
 from ordinary prose, no public retrieval number can move on this.
 
+### Episode retrieval on a shared store
+
+The configuration below had never been measured before 2026-09-06, and it is the baseline
+any future change to the episode index should be read against. It is **not** comparable to
+the `66.6` temporal-reasoning figure above: that one is the `oracle` split, which hands the
+system only sessions containing the answer, while this is `s`, where 19,195 sessions are
+loaded into one store and distractors are the point.
+
+```bash
+PYTHONPATH=. python3 bench/longmemeval.py --dataset s --score retrieval \
+    --recall-at 1,5,12,20 --share-store --embedder hashing
+```
+
+Evidence recall — the annotator-marked table, indifferent to wording. 500 questions,
+199,499 turns ingested, 1,168 claims:
+
+| category | n | R@1 | R@5 | R@12 | R@20 | MRR |
+|---|---:|---:|---:|---:|---:|---:|
+| single-session-user | 64 | 12.5 | 32.8 | 46.9 | 56.2 | 23.2 |
+| single-session-assistant | 56 | 44.6 | 48.2 | 55.4 | 57.1 | 46.9 |
+| single-session-preference | 30 | 3.3 | 3.3 | 6.7 | 13.3 | 4.1 |
+| multi-session | 121 | 4.6 | 19.7 | 29.2 | 35.7 | 21.0 |
+| knowledge-update | 72 | 19.4 | 50.7 | 66.7 | 71.5 | 52.0 |
+| temporal-reasoning | 127 | 3.8 | 14.6 | 23.1 | 32.7 | 14.1 |
+| **all** | **500** | **11.7** | **25.6** | **35.1** | **41.6** | **24.6** |
+
+**`--share-store` means one store for every question**, so retrieval can reach another
+question's sessions. The harness prints that warning itself and it is repeated here: this is
+a number for comparing two builds of memvara to each other, not for quoting beside a
+published LongMemEval score.
+
+Adding the cross-encoder (`--rerank 20 --reranker cross-encoder`) takes overall R@12 from
+**35.1 to 40.1** and temporal-reasoning from **23.1 to 30.2**, on the same store. `--rerank`
+reached this runner on 2026-09-06; before that it existed only on `bench/locomo.py`, so the
+reranker had never been measured on LongMemEval at all.
+
+### Dating the episode index, which did not pay
+
+Rendering each turn's date into the text the retriever ranks — the episode FTS row, the
+episode vector and the cross-encoder's input — was built against the baseline above and
+reverted. Two formats, six arms, ingest byte-identical across all of them.
+
+What the cross-encoder is worth on temporal-reasoning R@12, by how much date text sits in
+front of the turn:
+
+| index | cross-encoder gain |
+|---|---:|
+| undated | **+7.1** |
+| `June 2023`, two tokens | +5.8 |
+| `Thursday, 15 June 2023 (2023-06-15)`, eight tokens | +4.3 |
+
+Monotonic in prefix length, which is the mechanism rather than a coincidence: BM25
+normalises for document length, so every token added to the index makes every turn a
+slightly worse match for everything, while the date tokens are matched by only a few
+questions. Overall R@12 moved +0.5 with the reranker off and −0.3 to −0.7 with it on.
+Temporal-reasoning rose at R@12 and fell at R@1, R@5, R@20 and MRR in both formats.
+
+The reasoning behind the change and what it does *not* rule out — the claim side was never
+built — are in [`docs/ROADMAP.md`](ROADMAP.md).
+
 ---
 
 ## A design comparison (synthetic, self-authored)

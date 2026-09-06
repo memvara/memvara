@@ -1,9 +1,22 @@
 # Render a turn's date into the text the retriever ranks
 
-**Status:** design, 2026-09-06. Approved by the user the same day, with four decisions taken
-explicitly: episodes only in this piece of work; the long date form; the string reaches the
-reranker but not the caller; and the fingerprint sidecar gains a text-shape version so a
-half-migrated store is detectable.
+**Status: built, measured, and reverted on 2026-09-06.** The design below was implemented in
+full and did not pay on LongMemEval-S. Overall evidence R@12 moved +0.5 with the reranker off
+and −0.3 to −0.7 with it on, and dating the index *reduced* what the cross-encoder was worth
+on temporal-reasoning from +7.1 to +5.8 (two-token form) and +4.3 (eight-token form) — a
+dose-response in prefix length, which is the BM25 length-normalisation cost predicted in "The
+cost, measured before the decision" below. The code was reverted; the numbers are in
+[`docs/BENCHMARKS.md`](../../BENCHMARKS.md#dating-the-episode-index-which-did-not-pay) and the
+reasoning in [`docs/ROADMAP.md`](../../ROADMAP.md).
+
+**The document is kept as written**, including the four decisions taken at design time
+(episodes only, the long date form, the string reaching the reranker but not the caller, and
+the fingerprint guard), because the measurement only means something next to the argument it
+tested. Two things it got wrong are corrected in place below: §2's `write/pipeline.py` row,
+and the claim that `as_utc` alone renders in UTC.
+
+**What survives the revert:** `--rerank` on `bench/longmemeval.py`, which had to be built to
+run the arms, and the first measurement of the `--share-store` episode-retrieval baseline.
 
 This is item 1 of "What is worth measuring here, in order" in
 [`docs/ROADMAP.md`](../../ROADMAP.md), which the Hindsight paper prompted. It is the first of
@@ -84,18 +97,29 @@ afterwards.
 Invariant 1 holds: this is a pure function of stored state with no model on any path.
 Determinism holds: one `ts` yields one string, on every platform.
 
-## 2. The five call sites
+## 2. The call sites
 
 | site | change |
 |---|---|
 | `store/sqlite.py:1746`, `add_episode` | index `indexed_text` rather than `content` |
 | `core.py:1208` | encode `indexed_text` |
-| `write/pipeline.py:616` | encode `indexed_text` |
+| `write/pipeline.py:616` | **unchanged** — see below |
 | `core.py:3112`, `reembed` | `lambda e: e.indexed_text` |
 | `store/sqlite.py:1241`, `_migrate_to_v3` | unchanged; v10 runs after it and rebuilds everything |
 
 `episodes.content` is never written differently. `get_episode()`, `why()`, `Result.text` and
 `EpisodeResult.text` all keep returning the raw turn, so no caller's output changes.
+
+**Correction, made while implementing this: `write/pipeline.py:616` keeps encoding
+`content`, so it is not one of the sites that changed.** Those vectors are not stored — they
+are compared against *claim* vectors in `_tier0_near_dupes`, and a claim renders without a
+date. Dating one side of that comparison moves the two apart. Measured 2026-09-06 with the
+shipped `HashingEmbedder(dim=512)` against a `near_dup_threshold` of 0.97: turn text
+identical to the claim's own rendering scores cosine 1.0000 from `content` and 0.5243 from
+`indexed_text`; a realistic restatement — "I live in Berlin." against `user lives_in
+Berlin` — goes 0.5990 to 0.2544. The prefix does not degrade tier 0, it switches it off,
+and the only symptom would be `WriteReceipt.llm_calls` no longer being zero. The comment at
+that line records the measurement.
 
 ## 3. The reranker sees it; the caller does not
 
@@ -234,6 +258,15 @@ Both belong to somebody's later work, per Karpathy §3.
 - **`add_episode` rewrites its FTS row unconditionally**, where `put_claim` skips the rewrite
   when the text has not moved — the same hazard class, and this change makes each rewrite
   slightly larger. Pre-existing and out of scope.
+- **`bench/locomo.py` has the fallback §5 removes from LongMemEval, and it is still there.**
+  `parse_sample` substitutes a synthetic monotonic date for a session whose
+  `session_N_date_time` will not parse and counts it in `Sample.undated`, so under this
+  change that invented date would be rendered into the text of every one of those turns —
+  the same defect, on the other loader. It changes no number today: the file's own docstring
+  records that all 272 session timestamps parse, and that the counter exists for the file
+  changing under us. It needs the treatment `Instance.written` gives LongMemEval, and it did
+  not get it here because that is a second loader's ingest, exclusion and reporting path with
+  its own tests, and this spec was approved naming one loader.
 - **`docs/ROADMAP.md` says the intent gate's relational vocabulary is a hand-written list and
   that deriving it from the predicate registry is "Not done, deliberately".** That is stale:
   `retrieve/intent.py` has `predicate_refs()` and `observed_refs()`, they fold on `word_stem`,
@@ -248,6 +281,12 @@ Both belong to somebody's later work, per Karpathy §3.
 4. The fingerprint version and its warning.
 5. The `bench/longmemeval.py` undated fix.
 6. The four benchmark runs, reported per category, into `docs/BENCHMARKS.md`.
+
+**Status, 2026-09-06:** steps 1 to 5 are built, with unit tests, and the documentation
+named below shipped with them. **Step 6 has not been run.** No number in this document has
+been confirmed against the benchmark, and `docs/BENCHMARKS.md` carries nothing from this
+change. The claim in §6 — that temporal-reasoning rises and no other category falls — is
+therefore still a claim, and the format stays open until it is measured.
 
 Documentation ships in the same commit as the code it describes:
 `CHANGELOG.md` for every user-visible change, `docs/UPGRADING.md` for the version bump and the
