@@ -1,0 +1,17 @@
+[
+ {
+  "name": "gate",
+  "role": "user",
+  "content": "Notes on the gate. I profile with torchlamp and I am keeping it - the alternatives were tried and none stuck, so stop proposing gprof. The gate brings up its own Postgres on port 61434 rather than 61432, since 61432 is the test suite's and sharing it knocks over whoever is running one. Take the container down with docker rm -fv, v included, or each run leaves a gigabyte of anonymous volume behind. Run it on Python 3.13: on 3.11 the tracer drops a frame when an exception crosses asyncio.to_thread and reports 99.99 percent on a line that has a real test. COVERAGE_CORE set to sysmon halves the run, eight minutes to four, with the same files, the same statements and nothing missed, so it is time saved and not accuracy spent. The console publishes itself to console.aurora-notes.dev the moment main moves, with no approval and no dry run; the API only moves when someone runs the provision script."
+ },
+ {
+  "name": "billing",
+  "role": "user",
+  "content": "Billing notes. Lemonade is the merchant of record, so tax is theirs and the rate card lives on their side. The webhook secret lives in the secrets directory, never in compose, because a secret in compose is a secret in git and one in the environment is visible in docker inspect. With the secret absent the webhook route does not mount at all, on purpose: an endpoint that could only answer 403 has taken itself off the air, and that is more honest than listening. Plan drift is refuse rather than warn, so a stale plan row halts the stack instead of quietly enforcing a limit no source file states. The free tier is 9000 memories a month, and the number enforced is the one in the quota code rather than the one on the pricing page - the two currently describe different products and need reconciling before the next deploy."
+ },
+ {
+  "name": "retrieval",
+  "role": "user",
+  "content": "Retrieval notes. The vector index is hnsw and it is off by default, which caught me out: setting the environment variable built no index and changed no plan for weeks, because compose never passed it through to the container. Embedding dimension is 384. Lexical search is bm25 and runs alongside the vector leg, not behind it. The anchored flag is the one to know: it drops any memory the query is not demonstrably about, so a question about one person stops being answered from the nearest memory about someone else. It costs recall on paraphrases, so leave it off for topic questions. The examined limit is 400000 rows per request, which bounds what one question costs rather than how fast a credential may ask - different ceilings, often confused."
+ }
+]

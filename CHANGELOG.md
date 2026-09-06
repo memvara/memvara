@@ -31,6 +31,25 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   queued, not lost, and a receipt saying "lost" sends the caller looking for a fault that
   is not there. The option changes what the receipt says, not what is stored — the
   episodes are committed either way and `pending_extraction()` lists them.
+- **`WritePipeline(reject_polluted=True)`, a guard against predicate pollution on
+  model-proposed claims — a real value filed under a slot it does not belong to.**
+  `reject_ungrounded` refuses invention and says of itself that a claim reusing real
+  vocabulary with a misattributed meaning passes clean; this is that case. Measured
+  2026-09-03 on `phi-4-mini-instruct` given the 64-predicate vocabulary: one value it had
+  found wearing several wrong predicates, `gate / lives_in / "Port 61434"` beside `endpoint`
+  and `build_status` for the same value. `Port 61434` is in the turn, so grounding passes,
+  and `lives_in` is ONE-cardinality, so storing it would *end* the true fact there. Two
+  rules refuse — one (subject, object) under several predicates in one turn keeps every
+  known predicate and drops the unknown ones beside them; a place predicate with a digit
+  or URL in the object — and a third stores a claim under a novel predicate,
+  or a ONE-slot builtin with a digit or URL in it, at `min(confidence, 0.4)`, under the
+  reconciler's half rule so it cannot retire an incumbent. Scored against the spike's 255
+  claims (`tests/fixtures/phi4_spike/`, now a test): wrong-predicate 46 → 20, duplicates
+  32 → 0, keyed facts found 60/90 before and after in every configuration. Counted on the
+  new `WriteReceipt.polluted`, with `ungrounded`'s reading rules. Runs before predicate
+  acquisition, so a refused duplicate's spelling never costs a model call. On by default;
+  `Memvara(write_reject_polluted=False)` turns it off. `remember()` and the fast path never
+  pass through it.
 
 ## [0.11.1] — 2026-09-05
 
@@ -747,11 +766,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
   The left column is `pip install memvara` and a SQLite file you own, plus `memvara-mcp`
   as a local server. The right column leads with the MCP address,
-  `https://app.memvara.dev/mcp`, approved once in a browser over OAuth so the client holds
+  `https://console.aurora-notes.dev/mcp`, approved once in a browser over OAuth so the client holds
   a revocable grant rather than a stored secret; then the Claude Code plugin, which wires
   that same URL and the skill in one step; then `pip install 'memvara[cloud]'` and
   `Memvara(api_key=…)` for your own code, with `/v1` and a bearer key for anyone not
-  writing Python. It states the free tier — 12,000 memories and one project, held rather
+  writing Python. It states the free tier — 9,000 memories and one project, held rather
   than granted monthly, plus 2,000 recalls a month that do refill, and a refusal naming
   the next plan rather than a surprise bill — read off `memvara.dev/pricing` as rendered,
   not off the source that generates it.
@@ -763,7 +782,7 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   argument and never the environment — is kept, in the hosted column.
 
   **Two things were wrong and are corrected by the move.** The editor plugin was presented
-  as a local option; it wires `https://app.memvara.dev/mcp`, and its own marketplace entry
+  as a local option; it wires `https://console.aurora-notes.dev/mcp`, and its own marketplace entry
   calls it "Hosted MCP plus the skill for using it". And the client list pointed at
   `memvara.dev/docs/agents`, a retired URL that redirects to `/docs/cloud` — so a reader
   after a *local* editor one-liner was sent to the hosted client list. The columns now
@@ -873,7 +892,7 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `_open_store` built `Memvara(path)` with no `embedder=`, so it took
   `default_embedder()` — a 384-dimensional sentence-transformers model wherever
   `memvara[local-embed]` is installed. Against a store written by the
-  512-dimensional fallback that is `EmbedderMismatchError` before the first probe
+  384-dimensional fallback that is `EmbedderMismatchError` before the first probe
   runs, which is what the tool's own documented local invocation did on a real
   store.
 
@@ -1942,7 +1961,7 @@ stopped being kept is worse than none.
 - **`npx memvara` — the npm package is a program now.** `memvara` on npm was a name
   reservation from 2026-08-14 to `0.0.3`: four keys, `implemented: false`, nothing to
   run. `0.1.0` makes it a CLI that bridges a stdio MCP client to the hosted server at
-  `app.memvara.dev/mcp`, so a JavaScript developer with **no Python at all** gets a
+  `console.aurora-notes.dev/mcp`, so a JavaScript developer with **no Python at all** gets a
   working memory in one command.
 
   Asked why this had never been built, the answer was that nobody had decided against
@@ -1954,7 +1973,7 @@ stopped being kept is worse than none.
   client library, which serves a case nobody has asked for.
 
   **The value is narrower than it looks, and saying so is part of shipping it.**
-  `app.memvara.dev/mcp` advertises standard MCP OAuth — dynamic registration, PKCE
+  `console.aurora-notes.dev/mcp` advertises standard MCP OAuth — dynamic registration, PKCE
   S256, refresh — so any client that speaks to remote servers connects directly and
   needs no bridge. This is for clients that only spawn a command over stdio. Its one
   advantage over the generic `mcp-remote` is that it needs no configuration and finds
@@ -2066,7 +2085,7 @@ stopped being kept is worse than none.
   resolution without a model, hybrid retrieval, the graph), the twelve MCP tools and
   what each is for, predicate packs, and the honest limitations — with **both** routes
   a JavaScript reader can actually take: the hosted endpoint at
-  `app.memvara.dev/mcp`, and `memvara-mcp` over stdio needing no account.
+  `console.aurora-notes.dev/mcp`, and `memvara-mcp` over stdio needing no account.
 
   The reservation notice moves to the top and stays blunt, because that is the risk a
   richer page creates: a reader who skims a product page and concludes that `npm
@@ -2193,7 +2212,7 @@ stopped being kept is worse than none.
   interface a JavaScript agent already speaks, and a JS binding would sit between
   two things that are already connected. The notice and the README now say so, and
   name both routes — `memvara-mcp` over stdio against a local file, needing no
-  account, and the hosted endpoint at `app.memvara.dev/mcp`, needing one. The
+  account, and the hosted endpoint at `console.aurora-notes.dev/mcp`, needing one. The
   README had the hosted half and not the local half, which is the half a reader
   can use in the next minute.
 
@@ -3607,14 +3626,14 @@ The long form of everything in this section is [`docs/UPGRADING.md`](docs/UPGRAD
 
   Values: `hashing` · `hashing:<dim>` · `local` · `local:<model>` · `auto`. They are
   spelled the way `EmbedderMismatchError` and `memory.db.embedder.json` already spell
-  them, so an operator **copies** rather than composes — `written by hashing:512:3-5`
-  becomes `MEMVARA_EMBEDDER=hashing:512`. An unknown value is a `ConfigError` at startup
+  them, so an operator **copies** rather than composes — `written by hashing:384:3-5`
+  becomes `MEMVARA_EMBEDDER=hashing:384`. An unknown value is a `ConfigError` at startup
   listing all five, matching `MEMVARA_LLM`.
 
   **`hashing` rather than `auto` is the fix; `auto` would only have been a workaround** —
   the defect is that the store's vector space was a property of the machine's package set,
   and only a named default removes that. A deployment with no extras that sets nothing is
-  byte-identical to before: same class, same width, same `hashing:512:3-5` fingerprint.
+  byte-identical to before: same class, same width, same `hashing:384:3-5` fingerprint.
 
   **A deployment that deliberately installed `local-embed` now fails at startup** with the
   dimension mismatch naming its own store's width, and recovers with

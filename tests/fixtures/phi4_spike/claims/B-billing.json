@@ -1,0 +1,110 @@
+[
+ {
+  "subject": "user",
+  "predicate": "settled_on",
+  "object": "Lemonade",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "stops_being",
+  "object": "tax_handling",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "lives_on",
+  "object": "rate_card",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "goes_in",
+  "object": "secrets_directory",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "never_in",
+  "object": "compose",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "shows_up_in",
+  "object": "docker_inspect",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "is_missing",
+  "object": "webhook_route",
+  "polarity": -1,
+  "memory_type": "episodic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "does_not_mount_at_all",
+  "object": "webhook_route",
+  "polarity": -1,
+  "memory_type": "episodic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "sets_to",
+  "object": "refuse",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "stops",
+  "object": "stack",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "is",
+  "object": "enforced_number",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "is_in",
+  "object": "quota_code",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1.0,
+  "source_index": 0
+ }
+]

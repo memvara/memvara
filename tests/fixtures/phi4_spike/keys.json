@@ -1,0 +1,205 @@
+{
+ "generic_predicates": [
+  "behavior",
+  "behaviour",
+  "config",
+  "default",
+  "effect",
+  "function",
+  "is",
+  "name",
+  "purpose",
+  "setting",
+  "status",
+  "type",
+  "uses",
+  "value"
+ ],
+ "facts": {
+  "gate": [
+   {
+    "fact": "profiler=torchlamp",
+    "object_re": "torchlamp",
+    "subject_re": "profiler|user|tool",
+    "predicates": [
+     "prefers",
+     "prefers_tool",
+     "profiler",
+     "uses_tool"
+    ]
+   },
+   {
+    "fact": "gate port=61434",
+    "object_re": "61434",
+    "subject_re": "port|postgres|database|gate|container",
+    "predicates": [
+     "binds_to",
+     "database_port",
+     "gate_port",
+     "hook_port_status",
+     "listens_on",
+     "port",
+     "postgres_port",
+     "runs_on_port",
+     "uses_port"
+    ]
+   },
+   {
+    "fact": "python=3.13",
+    "object_re": "3\\.13",
+    "subject_re": "python|gate|interpreter|version",
+    "predicates": [
+     "ci_equivalent_local_python_floor",
+     "live_worker_version",
+     "python_version",
+     "requires_version",
+     "runs_on",
+     "version"
+    ]
+   },
+   {
+    "fact": "coverage_core=sysmon",
+    "object_re": "sysmon",
+    "subject_re": "coverage|core|env|gate",
+    "predicates": [
+     "configuration",
+     "coverage_backend",
+     "coverage_core",
+     "env_var",
+     "sets"
+    ]
+   },
+   {
+    "fact": "console deploys to console.aurora-notes.dev",
+    "object_re": "console\\.aurora-notes\\.dev",
+    "subject_re": "console|deploy|site|dashboard",
+    "predicates": [
+     "deployment_target",
+     "deploys_to",
+     "endpoint",
+     "host",
+     "production_deployed_at",
+     "publishes_to"
+    ]
+   }
+  ],
+  "billing": [
+   {
+    "fact": "merchant of record=Lemonade",
+    "object_re": "lemonade",
+    "subject_re": "merchant|lemonade|billing|payment|vendor",
+    "predicates": [
+     "billing_provider",
+     "merchandise_of_record",
+     "merchant_of_record",
+     "payment_provider",
+     "provider",
+     "vendor"
+    ]
+   },
+   {
+    "fact": "webhook route needs secret",
+    "object_re": "webhook",
+    "subject_re": "webhook|route|secret|endpoint",
+    "predicates": [
+     "endpoint",
+     "mounts_when",
+     "requires",
+     "route_status",
+     "webhook_route",
+     "webhook_secret_location"
+    ]
+   },
+   {
+    "fact": "plan drift=refuse",
+    "object_re": "refuse",
+    "subject_re": "drift|plan|quota|stack",
+    "predicates": [
+     "configured_to",
+     "drift_policy",
+     "plan_drift",
+     "quota_plan_drift"
+    ]
+   },
+   {
+    "fact": "free tier=9000/month",
+    "object_re": "9,?000",
+    "subject_re": "free|tier|plan|quota|limit|allowance",
+    "predicates": [
+     "allowance",
+     "free_tier_limit",
+     "limit",
+     "memories_per_month",
+     "plan_limit",
+     "quota"
+    ]
+   },
+   {
+    "fact": "quota code is enforced, not the page",
+    "object_re": "quota",
+    "subject_re": "quota|code|enforcement|gate",
+    "predicates": [
+     "enforced_by",
+     "memory_policy_location",
+     "quota_source",
+     "source_of_truth"
+    ]
+   }
+  ],
+  "retrieval": [
+   {
+    "fact": "vector index=hnsw",
+    "object_re": "hnsw",
+    "subject_re": "vector|index|ann",
+    "predicates": [
+     "ann_index",
+     "index",
+     "index_type",
+     "vector_index"
+    ]
+   },
+   {
+    "fact": "embedding dim=384",
+    "object_re": "384",
+    "subject_re": "embed|dimension|vector",
+    "predicates": [
+     "dimension",
+     "embed_dim",
+     "embedding_dimension",
+     "size"
+    ]
+   },
+   {
+    "fact": "lexical=bm25",
+    "object_re": "bm25",
+    "subject_re": "lexical|search|bm25",
+    "predicates": [
+     "lexical",
+     "lexical_search",
+     "search_type"
+    ]
+   },
+   {
+    "fact": "anchored drops non-subject memories",
+    "object_re": "anchor|demonstrably|drops",
+    "subject_re": "anchor|flag|query",
+    "predicates": [
+     "anchored",
+     "drops",
+     "usage_recommendation"
+    ]
+   },
+   {
+    "fact": "examined limit=400000",
+    "object_re": "400,?000",
+    "subject_re": "examined|limit|row|request",
+    "predicates": [
+     "examined_limit",
+     "limit",
+     "max_rows",
+     "rows_per_request"
+    ]
+   }
+  ]
+ }
+}

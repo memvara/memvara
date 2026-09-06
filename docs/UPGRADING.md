@@ -7,6 +7,46 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Model-proposed claims now pass a pollution guard, on by default
+
+### What changed
+
+`WritePipeline` gained `reject_polluted`, defaulting to `True`. It sits beside
+`reject_ungrounded` and catches what that guard says it cannot: a **real** value filed under
+a slot it does not belong to. Measured on a small self-hosted model given the predicate
+vocabulary — `gate / lives_in / "Port 61434"` beside `endpoint` and `build_status` for the
+same value, one found fact forced into every available slot. `Port 61434` is in the turn,
+so grounding passes; `lives_in` is ONE-cardinality, so storing it would have ended the true
+fact there.
+
+Two rules refuse and one discounts. Within one turn, a (subject, object) pair under
+several predicates keeps every predicate the registry knows and drops the unknown ones
+beside them, or the first when it knows none. `lives_in`, `born_in` or `located_now` with a
+digit or URL in the object is refused, on any subject. And a claim under a
+novel predicate, or under a ONE-slot builtin (other than `born_on` and `timezone`) with a
+digit or URL in it, is stored at `min(confidence, 0.4)`, which the reconciler's half rule
+stores beside an incumbent rather than over it. Refusals count on the new
+`WriteReceipt.polluted`; the discount is not counted.
+
+### What you will see
+
+On a frontier model, almost nothing: the fixture that measured this is a 3.8B model's
+output, and the rules are shaped to its failure. `polluted` in a receipt is the number to
+watch. If it is non-zero on a model you trust, the claim most likely refused is an
+invented predicate beside a known one for the same value in the same turn — `employer_of_
+record` next to `works_at: Acme` — which the reconciler would otherwise have stored as a
+second slot that can never contradict the first. Facts about a named third party are not
+refused: `alice / lives_in / Porto` is Alice's own slot.
+
+### If you want the old behaviour
+
+`Memvara(write_reject_polluted=False, ...)` restores it exactly. `remember()` and the fast
+path never passed through this guard, so nothing a caller asserts directly has changed.
+`docs/INTERNALS.md` and `memvara/write/pollution.py` carry the rules and the measurement;
+`tests/test_pollution.py` holds the numbers.
+
+---
+
 ## `MemoryAPI.recall` gains `ranked`, an opt-in model-ranked read mode
 
 ### What changed
@@ -1097,7 +1137,7 @@ Coding agents that can install plugins can skip `init` for the hosted path:
 `memvara-mcp init` used to write one thing, always: a local server configuration pointed
 at a file on disk. With the optional `cloud` extra installed (`pip install
 memvara[cloud]`), it now defaults to the hosted path instead — it runs `memvara-mcp
-login`, a device-code flow against the console at `https://app.memvara.dev`, and the
+login`, a device-code flow against the console at `https://console.aurora-notes.dev`, and the
 `.mcp.json` block it writes configures the server for `mode: cloud` rather than a local
 `MEMVARA_DB`. Without the `cloud` extra, nothing about `init` changed: same files, same
 local-only output, same as every prior release.

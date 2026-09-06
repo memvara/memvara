@@ -1,0 +1,110 @@
+[
+ {
+  "subject": "vector index",
+  "predicate": "type",
+  "object": "hnsw",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1,
+  "source_index": 0
+ },
+ {
+  "subject": "vector index",
+  "predicate": "default",
+  "object": "off",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1,
+  "source_index": 0
+ },
+ {
+  "subject": "environment variable",
+  "predicate": "effect",
+  "object": "no index built",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1,
+  "source_index": 0
+ },
+ {
+  "subject": "environment variable",
+  "predicate": "effect",
+  "object": "no plan change",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1,
+  "source_index": 0
+ },
+ {
+  "subject": "environment variable",
+  "predicate": "effect",
+  "object": "compose not passed to container",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1,
+  "source_index": 0
+ },
+ {
+  "subject": "embedding dimension",
+  "predicate": "value",
+  "object": "384",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1,
+  "source_index": 0
+ },
+ {
+  "subject": "lexical search",
+  "predicate": "type",
+  "object": "bm25",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1,
+  "source_index": 0
+ },
+ {
+  "subject": "lexical search",
+  "predicate": "position",
+  "object": "runs alongside vector leg",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1,
+  "source_index": 0
+ },
+ {
+  "subject": "anchored flag",
+  "predicate": "function",
+  "object": "drops memory not demonstrably about",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1,
+  "source_index": 0
+ },
+ {
+  "subject": "anchored flag",
+  "predicate": "effect on paraphrases",
+  "object": "recall cost",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1,
+  "source_index": 0
+ },
+ {
+  "subject": "anchored flag",
+  "predicate": "usage recommendation",
+  "object": "leave off for topic questions",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1,
+  "source_index": 0
+ },
+ {
+  "subject": "examined limit",
+  "predicate": "value",
+  "object": "400000 rows",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 1,
+  "source_index": 0
+ }
+]

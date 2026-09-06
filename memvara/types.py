@@ -1463,6 +1463,16 @@ class WriteReceipt:
     #: `unextracted` if it was the only thing proposed for its turn, since `out` never
     #: received it either way -- one rejection, two honest numbers, not a double count.
     ungrounded: int = 0
+    #: Claims the extractor proposed and this write refused because the value was real
+    #: and the slot was wrong -- `WritePipeline`'s `reject_polluted`, on by default:
+    #: one value under several predicates in the same extraction, a speaker predicate
+    #: on a subject that is not the speaker, a place predicate with a port or a URL in
+    #: it. `write/pollution.py` carries the rules and the measurement. The same reading
+    #: rules as `ungrounded`: zero means nothing tripped or the option is off, and a
+    #: claim counted here also counts toward `unextracted` if it was the only thing
+    #: proposed for its turn. Not counted: claims the guard kept at a discounted
+    #: confidence, which are stored and cannot end an incumbent.
+    polluted: int = 0
     #: Turns `reextract()` was handed that already had claims citing them, and so did not
     #: read again. Always 0 from `add()`, which never sees an episode twice.
     #:
