@@ -620,6 +620,44 @@ def test_a_no_op_backend_is_not_billed_and_reports_the_loss():
     store.close()
 
 
+def test_a_no_op_backend_reports_deferred_when_a_worker_will_read_the_turns():
+    """The same batch, the other word. `unextracted` says the content is lost; on a
+    deployment where a worker runs `reextract()` over stored turns it is not lost, it is
+    queued, and a receipt saying "lost" sends the caller looking for a fault. Nothing
+    about what is stored changes — the episodes are committed either way."""
+    from memvara.llm import NullLLM
+    pipe, store, _ = build(NullLLM(), extraction_deferred=True)
+    receipt = pipe.add([ep("The quarterly review is next Tuesday."),
+                        ep("The offsite moved to the Lisbon office.")])
+    assert receipt.deferred is True
+    assert receipt.unextracted == 0
+    assert receipt.llm_calls == 0
+    assert len(receipt.episode_ids) == 2, "stored, which is what the worker reads"
+    store.close()
+
+
+def test_deferred_is_off_by_default_so_the_default_configuration_still_says_lost():
+    """A caller who never deployed a worker must keep being told the truth."""
+    from memvara.llm import NullLLM
+    pipe, store, _ = build(NullLLM())
+    receipt = pipe.add([ep("The offsite moved to the Lisbon office.")])
+    assert (receipt.deferred, receipt.unextracted) == (False, 1)
+    store.close()
+
+
+def test_the_option_reaches_the_pipeline_through_memvara_s_write_prefix():
+    """`Memvara(write_extraction_deferred=True)` is how a deployment sets it."""
+    from memvara import Memvara
+    from memvara.embed import HashingEmbedder
+    from memvara.llm import NullLLM
+    mem = Memvara(":memory:", llm=NullLLM(), embedder=HashingEmbedder(dim=32),
+                  write_extraction_deferred=True)
+    receipt = mem.add("The offsite moved to the Lisbon office.")
+    assert receipt.deferred is True and receipt.unextracted == 0
+    assert len(mem.pending_extraction()) == 1, "and the worker's query sees it"
+    mem.close()
+
+
 def test_unextracted_counts_only_the_turns_that_yielded_nothing():
     llm = CountingLLM(claims=[
         {"subject": "user", "predicate": "likes", "object": "quarterly reviews",

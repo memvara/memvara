@@ -1489,7 +1489,14 @@ class WriteReceipt:
     tokens_in: int = 0
     tokens_out: int = 0
     latency_ms: float = 0.0
-    deferred: bool = False                                 # extraction queued, not yet run
+    #: Extraction did not run on this batch and the turns are still there to be read.
+    #: Two causes, and a caller cannot tell them apart from here: the model call raised
+    #: (a provider 429 or timeout — `llm_calls` counted it and `unextracted` counts the
+    #: turns), or the pipeline was built with `extraction_deferred=True` because a
+    #: worker reads stored turns later through `reextract()` (then `unextracted` is
+    #: zero, since nothing is lost). Either way the episodes are committed and
+    #: `pending_extraction()` will list them.
+    deferred: bool = False
     #: Values this write added *beside* live values already in the same slot, because the
     #: predicate has no spec and an unspecified predicate is multi-valued. Empty on
     #: virtually every write, which is what makes a non-empty one worth reading.
