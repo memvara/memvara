@@ -206,9 +206,32 @@ It does not bound a runaway, and the same run measured what one costs: an uncapp
 array reached 7,197 generated tokens on a 900-character turn, ran 1,957 s, and found 7 of 15
 facts against the capped arm's 10, because the restatements crowd out the answer. That is
 `MEMVARA_LLM_MAX_CLAIMS` earning its place, and terse inherits it. The knob that would bound
-the runaway itself is `OpenAILLM(max_tokens=...)`, currently 8,192: twelve terse claims are
-about 344 tokens, so a cap near 2,048 keeps six times the headroom and converts a 600 s
-cancellation into a bounded 422 s failure. The third lever is the
+the runaway itself is `OpenAILLM(max_tokens=...)`, currently 8,192.
+
+**Two things about that knob were wrong when this was first written, and both were found by
+reading the code and the run logs rather than by measuring anything new.**
+
+First, a `max_tokens` truncation was silent, so lowering the budget would have made things
+worse rather than bounded. A cut-off response is unparseable JSON, `parse_json_object`
+returns `{}` for it, and `{}` shapes to an empty claim list — the same receipt a turn that
+genuinely held no facts produces (`unextracted=1`, `deferred=False`). The 600 s
+cancellation it would have replaced raises, so `WritePipeline` marks the batch `deferred`
+and the turn is tried again. The swap would have traded a loud, retried failure for a quiet,
+permanent one. This is now fixed: both backends read the provider's reason for stopping and
+raise `TruncatedResponse`, which is a prerequisite for setting any budget at all. It was
+also a live defect at 8,192 with nothing configured, since the uncapped arm reached 7,197
+generated tokens — 88% of the default.
+
+Second, 2,048 does not bound this box. Generation slows as the output grows: the 7,197-token
+call took 1,956.6 s, which is about 3.8 tok/s net of prefill, against the 5.53 the short
+calls give. At 3.8 tok/s a 2,048-token budget is 539 s of generation on its own, and adding
+the 220 s prefill measured on the 4,117-token turn puts the call at 759 s — past the 600 s
+timeout it was meant to avoid. The largest budget that fits is about 1,444 tokens; 1,024
+lands at 489 s. The "six times the headroom" figure compared 2,048 against twelve *terse*
+claims (~344 tokens) and not against this repository's own default of `MAX_CLAIMS = 32`,
+which is 1,652 tokens under the full schema — 1.24× headroom, and above what a 1,024 budget
+allows. A fixed number cannot serve both, so a budget worth setting is derived from
+`max_claims` and the schema rather than picked. The third lever is the
 client timeout itself, which is the SDK's default rather than a memvara setting and can be
 raised in the worker. That is
 throughput rather than latency — the queue above is what answers the 6-second timeout — and

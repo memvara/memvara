@@ -23,7 +23,7 @@ import re
 from typing import Any, Sequence
 
 from ..types import Episode, MemoryType
-from .base import Usage
+from .base import TruncatedResponse, Usage
 
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -315,3 +315,32 @@ def record_usage(response: Any, usage: "Usage | None",
     if got_in is None or got_out is None:
         return
     usage.add(got_in, got_out)
+
+
+def refuse_if_truncated(reason: Any, cutoff: str, *, model: str, budget: int) -> None:
+    """Raise `TruncatedResponse` when a provider says the token budget ran out.
+
+    A backend passes the value of its own field and its own name for the cutoff, because
+    those two things are the genuinely provider-specific part: OpenAI puts
+    `finish_reason` on each choice and calls a truncation `"length"`, while Anthropic
+    puts `stop_reason` on the response and calls it `"max_tokens"`. What to do about a
+    truncation is not provider-specific, so it is decided once, here, for the same reason
+    every other rule in this module is.
+
+    **A reason this cannot read is not treated as a truncation.** Absent, `None`, or a
+    name some provider adds after this was written all mean "carry on". That direction is
+    deliberate and it matches `record_usage`: guessing that an unfamiliar value means
+    "cut off" would turn a working extraction into a failed write, and a response with no
+    reason on it is a test double far more often than it is a real answer.
+
+        >>> refuse_if_truncated("stop", "length", model="gpt-4.1", budget=8192)
+        >>> refuse_if_truncated(None, "length", model="gpt-4.1", budget=8192)
+    """
+    if reason != cutoff:
+        return
+    raise TruncatedResponse(
+        f"{model} stopped generating at its {budget}-token limit, so the answer is "
+        f"incomplete and none of it can be used. Raise the backend's max_tokens above "
+        f"{budget}, or ask the model for fewer claims (MEMVARA_LLM_MAX_CLAIMS, or "
+        f"max_claims=) so its answer fits inside the budget."
+    )

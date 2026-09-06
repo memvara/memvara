@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from memvara.llm import LLM
+from memvara.llm import LLM, TruncatedResponse, Usage
 from memvara.llm.base import (
     CLAIM_SCHEMA,
     EXTRACT_SYSTEM,
@@ -32,13 +32,20 @@ from memvara.llm.base import (
     bounded_claim_schema,
     self_hosted_claim_schema,
 )
-from memvara.llm.openai import OpenAILLM, _first_text
+from memvara.llm.openai import OpenAILLM, _finish_reason, _first_text
 from memvara.types import Episode, Scope
 
 
 class FakeCompletions:
-    def __init__(self, payloads: list[object]) -> None:
+    def __init__(self, payloads: list[object], finish_reason: object = None,
+                 usage: object = None) -> None:
         self.payloads = payloads
+        # Both default to what a response carries when nobody set them: no reason on the
+        # choice and no usage block. That is what every test written before truncation
+        # was checked already assumes, and it is also the tolerant direction — an
+        # unreadable reason is not a truncation.
+        self.finish_reason = finish_reason
+        self.usage = usage
         self.calls: list[dict] = []
 
     def create(self, **kwargs):
@@ -50,14 +57,19 @@ class FakeCompletions:
             message = SimpleNamespace(content=payload, refusal=None)
         else:
             message = SimpleNamespace(content=json.dumps(payload), refusal=None)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=message,
+                                     finish_reason=self.finish_reason)],
+            usage=self.usage)
 
 
 class FakeClient:
     """Stands in for `openai.OpenAI()` and records every request verbatim."""
 
-    def __init__(self, *payloads: object) -> None:
-        self.completions = FakeCompletions(list(payloads) or [{"claims": []}])
+    def __init__(self, *payloads: object, finish_reason: object = None,
+                 usage: object = None) -> None:
+        self.completions = FakeCompletions(
+            list(payloads) or [{"claims": []}], finish_reason, usage)
         self.chat = SimpleNamespace(completions=self.completions)
 
     @property
@@ -446,3 +458,83 @@ def test_reachable_from_both_packages_without_the_sdk_installed():
     assert "OpenAILLM" in pkg.__all__ and "OpenAILLM" in memvara.__all__
     with pytest.raises(AttributeError):
         memvara.NotAThing
+
+
+# -- truncation ------------------------------------------------------------------------
+
+CUT_OFF = '{"claims": [{"subject": "user", "predicate": "lives'
+
+
+def test_a_truncated_extraction_raises_rather_than_returning_no_claims():
+    """The silence this check exists to end.
+
+    A response cut off at the token budget stops in the middle of an object, so
+    `parse_json_object` cannot read it and returns `{}`, which shapes to `[]` — the same
+    value a turn that genuinely held no claims produces. `WritePipeline` then takes its
+    success path, and the receipt it writes — `unextracted=1`, `deferred=False` — is
+    identical to the one a turn that really held no facts produces. Nothing tells a
+    worker the turn is still owed an extraction, so it is never tried again.
+    """
+    client = FakeClient(CUT_OFF, finish_reason="length")
+    with pytest.raises(TruncatedResponse):
+        OpenAILLM(client=client, model="phi-4-mini").extract(episodes("hi"), [])
+
+
+def test_the_same_text_without_a_reason_is_still_indistinguishable_from_no_claims():
+    """Why the provider's own field is the only usable signal, and the behaviour every
+    truncated response had before this. The text is identical to the test above; all
+    that differs is whether anything said the budget ran out."""
+    assert OpenAILLM(client=FakeClient(CUT_OFF)).extract(episodes("hi"), []) == []
+
+
+def test_the_message_says_which_budget_ran_out_and_what_to_change():
+    """An operator reading this in a log has two levers and needs to be told both: the
+    budget can go up, or the answer can be asked to get shorter."""
+    client = FakeClient({"claims": []}, finish_reason="length")
+    with pytest.raises(TruncatedResponse,
+                       match=r"phi-4-mini.*4096-token.*max_tokens.*max_claims"):
+        OpenAILLM(client=client, model="phi-4-mini", max_tokens=4096).extract(
+            episodes("hi"), [])
+
+
+def test_a_truncated_call_still_reports_the_tokens_it_burned():
+    """It generated every one of them, and `WritePipeline` publishes the usage of a call
+    that raised. Recording before the check is what keeps a truncation visible on the
+    bill as well as in the receipt."""
+    usage = Usage()
+    client = FakeClient(
+        {"claims": []}, finish_reason="length",
+        usage=SimpleNamespace(prompt_tokens=2894, completion_tokens=8192))
+    with pytest.raises(TruncatedResponse):
+        OpenAILLM(client=client).extract(episodes("hi"), [], usage=usage)
+    assert (usage.input_tokens, usage.output_tokens, usage.reported) == (2894, 8192, 1)
+
+
+@pytest.mark.parametrize("reason", [None, "stop", "content_filter", "LENGTH"])
+def test_only_the_provider_word_for_truncation_counts(reason):
+    """A reason this cannot read means carry on. Guessing that an unfamiliar value is a
+    truncation would turn a working extraction into a failed write, and a response with
+    no reason on it is a test double far more often than it is a real answer."""
+    client = FakeClient({"claims": [claim()]}, finish_reason=reason)
+    assert len(OpenAILLM(client=client).extract(episodes("hi"), [])) == 1
+
+
+def test_every_schema_call_is_checked_not_only_extraction():
+    """The check sits in `_call`, so predicate resolution gets it too. A truncated
+    resolution costs far less — the pipeline's acquisition guard catches it and the
+    predicate stays multi-valued, which is the safe default — but it is the same
+    silence, and one check is easier to keep true than three."""
+    client = FakeClient({"canonical": "lives_in"}, finish_reason="length")
+    with pytest.raises(TruncatedResponse):
+        OpenAILLM(client=client).resolve_predicate("resides_in", ["lives_in"])
+
+
+@pytest.mark.parametrize("response, expected, why", [
+    (SimpleNamespace(choices=[SimpleNamespace(finish_reason="length")]), "length",
+     "an SDK object"),
+    ({"choices": [{"finish_reason": "length"}]}, "length", "plain dicts"),
+    (SimpleNamespace(choices=[]), None, "no choices to read a reason from"),
+    (SimpleNamespace(choices=[SimpleNamespace()]), None, "a choice that does not say"),
+])
+def test_the_finish_reason_is_read_from_whatever_shape_arrives(response, expected, why):
+    assert _finish_reason(response) == expected, why

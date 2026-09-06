@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import LLM, Chat, NullLLM, Usage
+from .base import LLM, Chat, NullLLM, TruncatedResponse, Usage
 
 # `Usage` is exported because implementing `LLM` outside this package requires it:
 # a backend that sets `reports_usage` is handed one and has to type against it. `Chat`
 # is exported for the same reason `memvara.select.model` needs it: a third-party backend
 # that wants to work with `ModelSelector` implements this, not `LLM`.
-__all__ = ["LLM", "Chat", "NullLLM", "Usage", "AnthropicLLM", "OpenAILLM"]
+# `TruncatedResponse` is exported because a caller can be handed one: anything calling a
+# backend's `extract()` directly gets it instead of a claim list, and an exception a
+# caller cannot name is one they can only catch by catching everything.
+__all__ = [
+    "LLM", "Chat", "NullLLM", "TruncatedResponse", "Usage", "AnthropicLLM", "OpenAILLM"]
 
 
 def __getattr__(name: str) -> Any:

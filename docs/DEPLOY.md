@@ -240,6 +240,16 @@ than a memvara setting, so a deployment that wants long turns to finish can rais
 `OpenAILLM(max_tokens=...)` bounds the response itself, which is the only one of the three
 that turns a runaway into a bounded failure rather than a cancellation.
 
+Before lowering `max_tokens`, know what a response that hits it now does. The backend
+reads the provider's reason for stopping and raises `TruncatedResponse`, so the write is
+reported as `deferred` and the turn is queued again rather than recorded as a turn that
+held no facts. That check is what makes a smaller budget safe to set; without it, every
+answer the budget cut off would be stored as an empty extraction with nothing to say so.
+It also means a budget set too low converts a slow turn into a turn that never lands,
+however many times it is retried, so pick the number against a measured response length —
+`bench/extract_cost.py` prints the largest generated response per arm in its `max out`
+column — rather than against an estimate.
+
 Two things to know before setting it. It is a 400 against hosted OpenAI, whose strict mode
 requires every declared property to appear in `required` — the same trade `maxItems` makes.
 And **it changes how claims rank**: an omitted confidence lands at 0.5 rather than at a

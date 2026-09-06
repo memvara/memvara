@@ -67,6 +67,12 @@ def _first_text(response: Any) -> str:
     return str(_get(message, "content") or "")
 
 
+def _finish_reason(response: Any) -> Any:
+    """Why generation stopped, off the first choice, or `None` if it does not say."""
+    choices = _get(response, "choices") or []
+    return _get(choices[0], "finish_reason") if choices else None
+
+
 def _get(obj: Any, name: str) -> Any:
     """Attribute or key, whichever this object has."""
     if isinstance(obj, dict):
@@ -184,6 +190,19 @@ class OpenAILLM:
         # OpenAI names the same two quantities differently from Anthropic; the reading and
         # the refusal-to-guess live in one place so the two backends cannot drift.
         _shape.record_usage(response, usage, "prompt_tokens", "completion_tokens")
+        # After the usage, not before. A truncated call generated every one of those
+        # tokens and is billed for them, and `WritePipeline` publishes what a call that
+        # raised had reported — so recording first is what keeps a truncation visible on
+        # the bill as well as in the receipt.
+        #
+        # Here rather than in `_first_text`, which `chat()` also uses: a truncation is a
+        # fact about the request this method made, and `chat()` sets its own budget per
+        # call. It also does not need this — `memvara.select` raises a `ValueError` when
+        # a reply will not parse, so a cut-off selector answer is already loud. Silence
+        # is specific to the schema path, where an unparseable answer becomes an empty
+        # claim list that reads exactly like a turn holding no claims.
+        _shape.refuse_if_truncated(
+            _finish_reason(response), "length", model=self.model, budget=self.max_tokens)
         return response
 
     # -- Chat protocol --------------------------------------------------------

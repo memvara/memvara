@@ -66,6 +66,30 @@ class Usage:
         self.reported += 1
 
 
+class TruncatedResponse(RuntimeError):
+    """The model stopped because it hit its token budget, so its answer is incomplete.
+
+    Raised by a backend instead of being returned, because once an incomplete answer has
+    been parsed there is nothing left to tell it apart from a complete one. Constrained
+    decoding ends a cut-off response in the middle of an object, `parse_json_object`
+    cannot read that and returns `{}`, and `{}` shapes to an empty claim list — exactly
+    the value a turn that genuinely held no claims produces. `WritePipeline` then takes
+    its success path and counts the turn in `unextracted` — the same number a turn that
+    really held no facts produces — while `deferred` stays false. So the receipt for a
+    cut-off answer is identical to the receipt for an empty one, and nothing tells a
+    worker the turn is still owed an extraction.
+
+    Raising puts the call on the failure path `WritePipeline` already has, which counts
+    the turns in `unextracted` *and* marks the batch `deferred`. That second field is the
+    one that separates the two cases, and a worker reading it knows to try the turn
+    again.
+
+    This is a `RuntimeError` because there is nothing for a caller to validate or to
+    retry differently. Either the budget goes up or the answer has to get shorter, and
+    both of those are configuration.
+    """
+
+
 @runtime_checkable
 class LLM(Protocol):
     name: str

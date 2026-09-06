@@ -7,6 +7,48 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A truncated model answer now fails the write instead of extracting nothing
+
+### What changed
+
+`OpenAILLM` and `AnthropicLLM` now read the provider's reason for stopping and raise
+`memvara.llm.TruncatedResponse` when the model ran out of token budget mid-answer. Before,
+neither backend read that field at all.
+
+### What you will see
+
+Writes that used to come back with no claims now come back marked `deferred`, if and only
+if the model was cut off. `WriteReceipt.unextracted` counted those turns before and still
+does; what is new is `deferred=True` beside it, which is the field that separates "the
+model was cut off" from "this turn held no facts". Both looked the same before.
+
+A caller that uses `Memvara.add()` sees no exception — `WritePipeline` catches it, exactly
+as it already catches a provider timeout. A caller that invokes `OpenAILLM.extract()` or
+`AnthropicLLM.extract()` directly now gets `TruncatedResponse` where it used to get `[]`.
+`bench/` scripts and any harness of your own that calls a backend straight are the cases to
+check.
+
+The tokens a truncated call burned are still reported on the receipt. The check runs after
+the usage is recorded, so a truncation stays visible on the bill.
+
+### How to find your own instances
+
+If writes start reporting `deferred` after upgrading, the model is hitting its budget and
+was hitting it before — you were just not being told. Two things fix it, and they pull in
+opposite directions:
+
+```python
+OpenAILLM(model="...", max_claims=12)   # ask for a shorter answer
+OpenAILLM(model="...", max_tokens=16384)  # give it more room
+```
+
+`MEMVARA_LLM_MAX_CLAIMS` is the server-side name of the first. Prefer it: an unbounded
+claims array is what produces a runaway in the first place, because a grammar has no legal
+way to end a response that keeps restating itself. Raising `max_tokens` buys room for a
+longer answer and does nothing about a model that will not stop.
+
+---
+
 ## Entity keys are bounded at 512 characters
 
 ### What changed
