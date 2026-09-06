@@ -100,6 +100,14 @@ class OpenAILLM:
         # An override rather than a rewrite, because the shipped wording is right for the
         # models it was written for and a small-model accommodation applied to every
         # provider is a change nobody asked for.
+        #
+        # `or` rather than `is not None`, so an empty string means "use the shipped
+        # prompt" here. That is deliberately *not* what the server does: it refuses an
+        # empty file, because an operator who named one meant to change something. The two
+        # answers differ because the inputs do — a caller passing `""` in Python has an
+        # object it can inspect, and sending a model an empty system message is never what
+        # it wanted. A caller that must distinguish "unset" from "empty" should not
+        # compute the argument down to a string first.
         self._extract_system = extract_system or EXTRACT_SYSTEM
         # Cap the claims array, for a self-hosted server reached through this backend. Off
         # by default because hosted OpenAI rejects `maxItems` under `strict: True` — see

@@ -256,23 +256,56 @@ def _max_claims(raw: str | None) -> int | None:
     return int(value)
 
 
+#: Most a prompt file may hold. `EXTRACT_SYSTEM` is about 2 KB, so this is generous by a
+#: factor of thirty and still small enough that the wrong path is caught rather than
+#: loaded. Without a ceiling, `read()` on a mistyped path — a log, a dataset, a model file
+#: sitting in the next directory along — pulls the whole thing into memory and then ships
+#: it as the system message on every extraction.
+_MAX_EXTRACT_SYSTEM_BYTES = 64 * 1024
+
+
 def _read_extract_system(path: str | None) -> str | None:
     """The replacement extraction instructions named by `MEMVARA_LLM_EXTRACT_SYSTEM`.
 
-    Unreadable and empty are both refused at startup rather than falling back to the
+    Every way this can go wrong is refused at startup rather than falling back to the
     shipped prompt. A deployment that named this file meant to change what the model is
     told, and quietly not changing it is the failure that looks like success: the server
     starts, extraction runs, and the only symptom is claims that do not arrive.
+
+    "Every way" is wider than it first looks, and the reason is the deployment this
+    variable exists for. A self-hosted box keeps prompt files and multi-gigabyte model
+    weights within a path typo of each other, so the wrong file here is not hypothetical:
+    it is binary (`UnicodeDecodeError`, which is **not** an `OSError` and would otherwise
+    escape as a traceback naming no variable), or it is enormous, or it is a directory.
+    Each is caught and named.
+
+    Read as `utf-8-sig` so a file written by an editor that emits a byte-order mark does
+    not start the system prompt with an invisible character. `str.strip()` would not
+    remove it — `\ufeff` is not whitespace — and nothing downstream would show it.
+
+    Only the "openai" backend consults this, so a bad path under `MEMVARA_LLM=anthropic`
+    is never reached and never refused. `docs/DEPLOY.md` says so; the alternative is
+    validating a file this process has no intention of using.
     """
     if path is None:
         return None
     try:
-        with open(path, encoding="utf-8") as handle:
+        size = os.path.getsize(path)
+        if size > _MAX_EXTRACT_SYSTEM_BYTES:
+            raise ConfigError(
+                f"MEMVARA_LLM_EXTRACT_SYSTEM={path!r} is {size} bytes, over the "
+                f"{_MAX_EXTRACT_SYSTEM_BYTES} this accepts. A system prompt is kilobytes, "
+                "so a file this size is a path pointing at something else.")
+        with open(path, encoding="utf-8-sig") as handle:
             text = handle.read().strip()
     except OSError as exc:
         raise ConfigError(
             f"MEMVARA_LLM_EXTRACT_SYSTEM={path!r} cannot be read: {exc}. Unset it to use "
             "the extraction instructions memvara ships.") from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(
+            f"MEMVARA_LLM_EXTRACT_SYSTEM={path!r} is not UTF-8 text: {exc}. This wants the "
+            "prompt itself, not a model file.") from exc
     if not text:
         raise ConfigError(
             f"MEMVARA_LLM_EXTRACT_SYSTEM={path!r} is empty. A model told nothing extracts "
