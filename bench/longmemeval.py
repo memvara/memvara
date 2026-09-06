@@ -347,14 +347,22 @@ def build_memory(user: str, budget: ek.RetrievalBudget, llm: Any = None,
     `build_memory(qid, budget)` is a documented two-argument call; `main()` always
     passes one.
     """
-    # The episode cap rises with `rerank_top_n`, exactly as in `locomo.build_memory`:
-    # the reranker can only reorder what it was handed, so a cap below `--rerank N`
-    # would silently make `--rerank 50` mean `--rerank 20` and the row would be
-    # attributed to the larger window.
-    episodes = max(read_k or budget.k, rerank_top_n)
+    # The episode cap rises with the reranker's window, exactly as in
+    # `locomo.build_memory`: the reranker can only reorder what it was handed, so a cap
+    # below `--rerank N` would silently make `--rerank 50` mean `--rerank 20` and the row
+    # would be attributed to the larger window.
+    #
+    # `window` is resolved once and both settings read it, so the two cannot disagree.
+    # Computing the cap from the caller's `rerank_top_n` while passing `rerank_top_n or
+    # 20` to the reader reintroduced that gap by another route: a caller handing over a
+    # reranker with `rerank_top_n=0` got a 20-candidate window over a pool capped at
+    # `budget.k`, which is the same silent narrowing in the other direction. The window
+    # is 0 when no reranker was given, because a stage that does not exist has no window.
+    window = (rerank_top_n or 20) if reranker is not None else 0
+    episodes = max(read_k or budget.k, window)
     return Memvara(user=user, llm=llm if llm is not None else NullLLM(),
                   embedder=embedder, read_max_episodes=episodes,
-                  read_reranker=reranker, read_rerank_top_n=rerank_top_n or 20,
+                  read_reranker=reranker, read_rerank_top_n=window or 20,
                   read_w_graph=w_graph, read_w_temporal=w_temporal)
 
 
@@ -712,11 +720,20 @@ def main(argv: Sequence[str] | None = None,
     # say which reranker ran, over how deep a window, is not comparable to the row above
     # it. `--rerank 0` is the shipped default and prints "off" rather than nothing, so a
     # baseline row states its configuration as explicitly as a reranked one.
+    #
+    # The name comes from the reranker itself rather than from the flags, which is the
+    # difference between recording a configuration and recording a request. Every
+    # reranker sets `name` to something that identifies it exactly —
+    # `cross-encoder:cross-encoder/ms-marco-MiniLM-L-6-v2`, `coverage:1` — so a run that
+    # took `--rerank-model`'s default still writes down which model that was. Printing
+    # the flag instead would log "default model", and the default is free to change in a
+    # later release, leaving an archived log that cannot be attributed to anything.
+    # `bench/locomo.py` reads `name` for this reason and the two runners must agree.
     reranker = ek.build_reranker(args)
     out(f"  --rerank {args.rerank}: "
-        + (f"{type(reranker).__name__}"
-           + (f" ({args.rerank_model or 'default model'})"
-              if args.reranker == "cross-encoder" else "")
+        + (f"{args.reranker} reranker "
+           f"({getattr(reranker, 'name', type(reranker).__name__)}) over the top "
+           f"{args.rerank} fused candidates, cut to k afterwards"
            if reranker is not None else "off (the shipped default)"))
 
     if args.score == "retrieval":

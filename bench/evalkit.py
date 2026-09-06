@@ -2420,6 +2420,24 @@ def build_reranker(args: Any) -> Any:
     in the same paragraph had been produced by different vector legs.
     """
     if not args.rerank:
+        # `--reranker` and `--rerank-model` do nothing without a window to rerank, so
+        # accepting them here and returning `None` would run the baseline and let the
+        # operator write the result down as a row for the model they named. That is the
+        # failure `add_rerank_arguments` describes, and it is worth an error rather than
+        # a warning: a warning scrolls past in a run that prints a page of tables, and
+        # the number it produces is wrong in the direction that looks reasonable.
+        # `--reranker` has a default, so only an explicit value is a request.
+        asked = [flag for flag, given in (("--reranker", args.reranker != "coverage"),
+                                          ("--rerank-model", bool(args.rerank_model)))
+                 if given]
+        if asked:
+            verb = "need" if len(asked) > 1 else "needs"
+            raise SystemExit(
+                f"{' and '.join(asked)} {verb} --rerank N, which sets how many "
+                "candidates the reranker sees. Without it no reranker runs at all, and "
+                "the run would measure the shipped baseline under the name of the model "
+                "you asked for."
+            )
         return None
     from memvara.rerank import CoverageReranker, NullReranker
 

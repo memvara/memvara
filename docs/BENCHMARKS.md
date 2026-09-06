@@ -813,7 +813,14 @@ Evidence recall — the annotator-marked table, indifferent to wording. 500 ques
 | multi-session | 121 | 4.6 | 19.7 | 29.2 | 35.7 | 21.0 |
 | knowledge-update | 72 | 19.4 | 50.7 | 66.7 | 71.5 | 52.0 |
 | temporal-reasoning | 127 | 3.8 | 14.6 | 23.1 | 32.7 | 14.1 |
+| abstention | 30 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
 | **all** | **500** | **11.7** | **25.6** | **35.1** | **41.6** | **24.6** |
+
+The `abstention` row is 30 questions that have no answer in the haystack, so there is no
+evidence to retrieve and 0.0 is the correct score rather than a failure. It is listed
+because the harness reports it separately and never folds it into the type it was drawn
+from, and because leaving it out would make the six named categories sum to 470 against an
+`all` row of 500.
 
 **`--share-store` means one store for every question**, so retrieval can reach another
 question's sessions. The harness prints that warning itself and it is repeated here: this is
