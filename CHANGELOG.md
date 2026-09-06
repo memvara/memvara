@@ -22,6 +22,32 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `docs/BENCHMARKS.md` carries the baseline table, which is the first measurement of the
   `--share-store` episode-retrieval configuration.
 
+- **`OpenAILLM(terse=True)` and `MEMVARA_LLM_TERSE_CLAIMS` ask for a shorter claim shape,
+  for a self-hosted model that is slow to generate.** The shipped schema requires every
+  field on every claim, so a model writes `"when":null,"amount":null,"unit":null` and a
+  confidence number for each one. Most of a claim is field names: one claim serializes to
+  52 tokens, of which 44 are keys, punctuation and the three forced nulls. Under this
+  option `polarity`, `confidence`, `when`, `amount` and `unit` move out of the schema's
+  `required` list, so the model may leave them out and `_shape.shape_claims` supplies the
+  defaults it already documents. Eight claims — the mean extraction on a 4-core production
+  box — are 413 tokens under the shipped schema and 229 under this one, which is 45% off
+  the generated tokens. Prefill is unchanged, because the prompt is identical. Against that
+  box's measured speeds an extraction goes from 43.9 seconds to 30.6, a 30% cut in wall
+  time. `bench/extract_cost.py` measures it, both on paper and against a real endpoint —
+  and the saving is only real if the model actually leaves the fields out, which is what
+  the live half of that harness is for.
+
+  Off by default, and it is a 400 against hosted OpenAI: strict mode requires every
+  declared property to appear in `required`. It is a separate switch from
+  `MEMVARA_LLM_MAX_CLAIMS` rather than a second meaning for it, because the two are
+  different trades — the cap stops a runaway and costs nothing, while this buys latency
+  and changes ranking. **An omitted `confidence` lands at `UNKNOWN_CONFIDENCE` (0.5), so
+  claims written under this option rank differently from claims written without it.** On a
+  small model that self-reported number is close to noise, since it is the one field in a
+  claim that no validation can check — but the change is real, so decide it per deployment
+  rather than per call. Refused under `MEMVARA_MODE=cloud`, like every other extraction
+  setting.
+
 ## [0.11.3] — 2026-09-06
 
 ### Fixed

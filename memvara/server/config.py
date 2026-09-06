@@ -135,6 +135,17 @@ class ServerConfig:
     #: because a multi-paragraph prompt in an environment variable is unreadable in
     #: `docker inspect` and unmaintainable in a compose file.
     llm_extract_system: str | None = None
+    #: Ask the "openai" backend for the shorter claim shape, and again this is only for
+    #: the self-hosted case `llm_model` describes. The shipped schema requires every field
+    #: on every claim, so a model writes `"when":null,"amount":null,"unit":null` and a
+    #: confidence number for each one. On a CPU-hosted model those tokens are most of the
+    #: wall time: eight claims are 413 tokens under the shipped schema and 229 under this
+    #: one. Two things to know before turning it on. It is a 400 against hosted OpenAI,
+    #: whose strict mode requires every declared property in `required`. And it stops
+    #: `confidence` being a number the model chose, so every claim lands at 0.5 and a store
+    #: written this way ranks differently from one written without it —
+    #: `llm.base.self_hosted_claim_schema` carries the detail.
+    llm_terse_claims: bool = False
     #: "local" (default) opens MEMVARA_DB on disk, exactly as before this field existed.
     #: "cloud" opens no local file at all; it resolves an API key (MEMVARA_API_KEY, or
     #: the credentials file `memvara-mcp login` writes) and talks to `server_url` instead.
@@ -223,6 +234,8 @@ class ServerConfig:
             llm_model=_optional(env.get("MEMVARA_LLM_MODEL")),
             llm_max_claims=_max_claims(env.get("MEMVARA_LLM_MAX_CLAIMS")),
             llm_extract_system=_optional(env.get("MEMVARA_LLM_EXTRACT_SYSTEM")),
+            llm_terse_claims=_flag(
+                env.get("MEMVARA_LLM_TERSE_CLAIMS"), "MEMVARA_LLM_TERSE_CLAIMS"),
             embedder=_embedder_spec(env.get("MEMVARA_EMBEDDER")),
             mode=mode,
             server_url=server_url,
@@ -409,7 +422,7 @@ def _anthropic() -> Any:
 
 
 def _openai(model: str | None, max_claims: int | None = None,
-            extract_system: str | None = None) -> Any:
+            extract_system: str | None = None, terse: bool = False) -> Any:
     # Imported here so the default offline configuration never touches the optional SDK.
     from ..llm.openai import OpenAILLM
 
@@ -422,6 +435,12 @@ def _openai(model: str | None, max_claims: int | None = None,
             kwargs["max_claims"] = max_claims
         if system is not None:
             kwargs["extract_system"] = system
+        # Sent only when asked for, so a server that never set the variable makes the same
+        # request it made before this option existed — byte for byte, including the schema
+        # object identity `test_the_shared_claim_schema_stays_uncapped_for_the_hosted_path`
+        # pins.
+        if terse:
+            kwargs["terse"] = True
         return OpenAILLM(**kwargs)
     except Exception as exc:
         # Deliberately wider than ImportError. `openai.OpenAI()` refuses to construct
@@ -479,7 +498,7 @@ def _llm(config: ServerConfig) -> Any:
         return _anthropic()
     if config.llm == "openai":
         return _openai(config.llm_model, config.llm_max_claims,
-                       config.llm_extract_system)
+                       config.llm_extract_system, config.llm_terse_claims)
     raise ConfigError(
         f"MEMVARA_LLM={config.llm!r} is listed in _BACKENDS but _llm() has no branch "
         "for it, so this server cannot say which model it would extract with. This is "
@@ -513,6 +532,7 @@ _SERVER_SIDE_UNDER_CLOUD = (
     ("llm_model", None, "MEMVARA_LLM_MODEL", "extraction model"),
     ("llm_max_claims", None, "MEMVARA_LLM_MAX_CLAIMS", "claim cap"),
     ("llm_extract_system", None, "MEMVARA_LLM_EXTRACT_SYSTEM", "extraction prompt"),
+    ("llm_terse_claims", False, "MEMVARA_LLM_TERSE_CLAIMS", "claim shape"),
 )
 
 

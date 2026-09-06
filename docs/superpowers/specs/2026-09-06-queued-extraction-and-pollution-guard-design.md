@@ -182,10 +182,30 @@ model. Switching to a stronger one is a reason to read `empty` turns again;
 | `MEMVARA_EXTRACT_PASS_SECONDS` | `1500` | budget per pass, so a pass ends before the next is due |
 | `MEMVARA_LLM_MAX_CLAIMS` | unset | passed to `OpenAILLM(max_claims=…)`; `12` on phi-4-mini |
 | `MEMVARA_LLM_EXTRACT_SYSTEM` | unset | a path, passed as `OpenAILLM(extract_system=…)` |
+| `MEMVARA_LLM_TERSE_CLAIMS` | unset | passed to `OpenAILLM(terse=…)`; halves the generated tokens per claim |
 
-The last two exist in core's `ServerConfig` already and are refused there under cloud mode,
+*Amended 2026-09-06: `MEMVARA_LLM_TERSE_CLAIMS` added to the table.* It landed in core
+after this design was written and belongs to the same group as the two above it — a setting
+core refuses under cloud mode that the worker must be able to set, because the worker is the
+deployment's extraction process. It takes `polarity`, `confidence`, `when`, `amount` and
+`unit` out of the schema's `required` list, so the model stops writing a field name and a
+null for each one and `shape_claims` supplies the defaults it already documents. Eight
+claims are 413 tokens under the shipped schema and 229 under this one. Working that through
+the box's own numbers — 39.5 tok/s prefill and 13.3 generation at Q4_K_M `-t 4`, against a
+production mean of 558 prompt and 396 generated tokens — an extraction goes from 43.9 s to
+30.6 s, a **30% cut in wall time**. The 45% saving is on generation alone, and prefill is
+unchanged because the prompt is identical. That is
+throughput rather than latency — the queue above is what answers the 6-second timeout — and
+throughput is what decides how long the 1,936-episode backlog takes to clear. It carries
+one consequence worth stating beside the guard below: an omitted `confidence` lands every
+claim at `UNKNOWN_CONFIDENCE` (0.5), so R4's `min(confidence, 0.4)` still lowers a
+suspicious claim below its neighbours, but the confidence signal no longer distinguishes
+one clean claim from another. `bench/extract_cost.py` in core measures the saving and, given
+an endpoint, whether the same facts still come back.
+
+The last three exist in core's `ServerConfig` already and are refused there under cloud mode,
 for a reason that does not apply here: the worker *is* the deployment's extraction process.
-`memvara_deploy.settings` gains both, and `asgi._llm` is factored so the API and the worker
+`memvara_deploy.settings` gains all three, and `asgi._llm` is factored so the API and the worker
 build the backend from one function — the API with `MEMVARA_LLM=none`, the worker with
 `openai` — rather than two copies that drift.
 

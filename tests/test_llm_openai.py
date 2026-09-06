@@ -26,7 +26,9 @@ from memvara.llm.base import (
     MAX_CLAIMS,
     PREDICATE_SCHEMA,
     RESOLVE_SCHEMA,
+    LOAD_BEARING_CLAIM_FIELDS,
     bounded_claim_schema,
+    self_hosted_claim_schema,
 )
 from memvara.llm.openai import OpenAILLM, _first_text
 from memvara.types import Episode, Scope
@@ -153,6 +155,90 @@ def test_the_shared_claim_schema_stays_uncapped_for_the_hosted_path():
     sent = client.calls[0]["response_format"]["json_schema"]
     assert sent["schema"] is CLAIM_SCHEMA
     assert "maxItems" not in sent["schema"]["properties"]["claims"]
+
+
+def test_the_terse_schema_requires_only_what_cannot_be_defaulted():
+    """The shorter claim shape declares all ten fields and requires the four load-bearing ones.
+
+    Declaring them all is what keeps a model that *does* send `confidence` understood:
+    `additionalProperties` is False, so a field dropped from `properties` rather than from
+    `required` would make the response ungrammatical instead of shorter. And the four that
+    stay are exactly the four `_shape.shape_claims` refuses to invent — it drops a claim
+    with no `source_index`, subject, predicate or object rather than guessing one, so
+    making any of them optional would turn a saved token into a lost fact."""
+    schema = self_hosted_claim_schema(9)
+    item = schema["properties"]["claims"]["items"]
+    assert item["required"] == list(LOAD_BEARING_CLAIM_FIELDS)
+    assert set(item["properties"]) == set(CLAIM_SCHEMA["properties"]["claims"]["items"]["properties"])
+    assert item["additionalProperties"] is False
+    assert schema["properties"]["claims"]["maxItems"] == 9
+
+    # A copy, like `bounded_claim_schema`'s. The shared schema is what the hosted path
+    # sends, and narrowing its `required` in place would take that path off the air.
+    assert CLAIM_SCHEMA["properties"]["claims"]["items"]["required"][0] == "subject"
+    assert len(CLAIM_SCHEMA["properties"]["claims"]["items"]["required"]) == 10
+
+
+def test_the_terse_schema_is_deliberately_not_valid_under_strict_mode():
+    """It must never reach hosted OpenAI, and this pins why rather than trusting a comment.
+
+    Strict mode requires every declared property to appear in `required`. That is the
+    whole point of this schema, so it is a 400 on the hosted path — the same boundary
+    `maxItems` draws for `bounded_claim_schema`, and the reason both are opt-in. If a
+    later edit ever makes this assertion fail, the schema has stopped saving tokens."""
+    item = self_hosted_claim_schema()["properties"]["claims"]["items"]
+    assert set(item["required"]) != set(item["properties"])
+
+
+def test_terse_is_off_by_default_so_the_hosted_request_is_unchanged():
+    """A server that never asked for the short shape sends the shared schema by identity.
+
+    Identity rather than equality, because `_SCHEMA_NAMES` is keyed on the id() of the
+    module-level dicts: an equal copy would be sent under the name "result", which the API
+    accepts and nothing notices."""
+    client = FakeClient({"claims": []})
+    OpenAILLM(client=client).extract(episodes("hi"), [])
+    assert client.calls[0]["response_format"]["json_schema"]["schema"] is CLAIM_SCHEMA
+
+
+def test_terse_carries_its_own_cap_and_honours_an_explicit_one():
+    """`terse` implies a bounded array even when `max_claims` was never set.
+
+    Both belong to the same self-hosted case, and a grammar built from an uncapped array
+    has no legal way to stop. Turning on the short shape without inheriting the cap would
+    trade the truncation defect back in for the latency it just bought."""
+    client = FakeClient({"claims": []})
+    OpenAILLM(client=client, terse=True).extract(episodes("hi"), [])
+    sent = client.calls[0]["response_format"]["json_schema"]
+    assert sent["schema"]["properties"]["claims"]["maxItems"] == MAX_CLAIMS
+    assert sent["schema"]["properties"]["claims"]["items"]["required"] == list(
+        LOAD_BEARING_CLAIM_FIELDS)
+    assert sent["name"] == "claims"
+
+    client = FakeClient({"claims": []})
+    OpenAILLM(client=client, terse=True, max_claims=5).extract(episodes("hi"), [])
+    assert client.calls[0]["response_format"]["json_schema"][
+        "schema"]["properties"]["claims"]["maxItems"] == 5
+
+
+def test_a_claim_that_omits_every_optional_field_still_validates():
+    """The safety proof for the short shape: what the model stops sending, the code supplies.
+
+    This is the test that says the change is safe to ship. Each default is the one
+    `_shape.shape_claims` already documented — an assertion unless `polarity` is exactly
+    -1, and `None` for a time and a measurement the turn did not state. `confidence` is
+    the exception and the reason `self_hosted_claim_schema` is a per-deployment decision:
+    an omitted value lands at `UNKNOWN_CONFIDENCE`, so the claim ranks by a number nobody
+    chose rather than one the model did."""
+    minimal = {"subject": "user", "predicate": "lives_in",
+               "object": "lisbon", "source_index": 0}
+    client = FakeClient({"claims": [minimal]})
+    got = OpenAILLM(client=client, terse=True).extract(episodes("I live in Lisbon"), [])
+    assert got == [{
+        "subject": "user", "predicate": "lives_in", "object": "lisbon",
+        "polarity": 1, "memory_type": "semantic", "confidence": 0.5,
+        "source_index": 0, "when": None, "amount": None, "unit": None,
+    }]
 
 
 def test_a_cap_is_opt_in_and_rides_on_the_request_under_its_own_name():

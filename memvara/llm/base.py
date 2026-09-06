@@ -262,6 +262,66 @@ def bounded_claim_schema(max_claims: int = MAX_CLAIMS) -> dict[str, Any]:
     schema["properties"]["claims"]["maxItems"] = max_claims
     return schema
 
+
+#: The claim fields nothing downstream can supply a default for. `_shape.shape_claims`
+#: drops a claim missing any of these rather than repairing it: without `source_index` the
+#: claim cannot be traced back to a turn, and without a subject, predicate and object
+#: there is no fact to store. Every other field in `CLAIM_SCHEMA` already has a documented
+#: fallback in that function, which is what makes `self_hosted_claim_schema` safe.
+LOAD_BEARING_CLAIM_FIELDS = ("subject", "predicate", "object", "source_index")
+
+
+def self_hosted_claim_schema(max_claims: int = MAX_CLAIMS) -> dict[str, Any]:
+    """`bounded_claim_schema`, with the fields the model may leave out taken out of `required`.
+
+    On a CPU-hosted model, generating the response is most of the wall time, and most of
+    what gets generated is field names rather than facts. Measured against the shipped
+    shape: one claim serializes to 52 tokens, of which 44 are keys, punctuation and the
+    three forced nulls. A typical extraction on the production box emits seven or eight
+    claims, which is 413 tokens against a measured mean of 396. The same eight claims
+    under this schema are 229 tokens: 45% fewer tokens to generate, and prefill unchanged
+    because the prompt does not move. On the box those speeds were measured on, that is an
+    extraction going from 43.9 seconds to 30.6 — a 30% cut in wall time, not a 45% one,
+    because prefill is the other third of it.
+
+    Both numbers are a prediction until a model is measured against them. The schema makes
+    the fields optional; it cannot make a model use the permission, and one that keeps
+    emitting `"when":null` out of habit saves nothing. `bench/extract_cost.py` is the
+    harness that settles it.
+
+    Five fields move out of `required`, and each one is safe because `shape_claims`
+    already reads it with `.get()` and documents what an absent value means. `polarity`
+    defaults to 1, since anything that is not an explicit -1 is an assertion. `when`,
+    `amount` and `unit` default to `None`, which is what the shipped schema spells as an
+    explicit null on the common turn that states no time and no measurement.
+
+    **`confidence` is the one field whose behaviour changes, and it changes ranking.**
+    `clamp_confidence` returns `UNKNOWN_CONFIDENCE` for a value it cannot read, so an
+    omitted confidence puts every claim at 0.5 instead of a number the model chose. On a
+    small model that number is close to noise — the field is the one thing in a claim that
+    no validation can check — but a store written under this schema ranks differently from
+    one written without it, and mixing the two within a tenant is what would make that
+    visible. Decide it per deployment rather than per call.
+
+    Opt-in for the same reason `bounded_claim_schema` is. OpenAI's strict mode requires
+    every declared property to appear in `required`, so this schema is a 400 on the hosted
+    path rather than something that degrades quietly. `additionalProperties` stays False
+    and every property stays declared, so a model that does send `confidence` is still
+    understood — the fields become optional, not forbidden.
+
+        >>> schema = self_hosted_claim_schema(8)
+        >>> schema["properties"]["claims"]["maxItems"]
+        8
+        >>> schema["properties"]["claims"]["items"]["required"]
+        ['subject', 'predicate', 'object', 'source_index']
+        >>> len(schema["properties"]["claims"]["items"]["properties"])
+        10
+    """
+    schema = bounded_claim_schema(max_claims)
+    schema["properties"]["claims"]["items"]["required"] = list(LOAD_BEARING_CLAIM_FIELDS)
+    return schema
+
+
 PREDICATE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
