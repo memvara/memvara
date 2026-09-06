@@ -24,6 +24,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   as well, and the tokens the truncated call burned are still reported because the usage is
   recorded before the check.
 
+  `import_mem0(..., extract=True)` gained the same guard `WritePipeline` already had, and
+  `ImportReceipt` gained an `unextracted` field to report it. A chunk whose extraction call
+  fails is counted there and the import continues; before, any failure on that path — a
+  provider timeout as much as a truncation — ended the import part-way through a history
+  and returned no receipt at all.
+
   This was reachable at the shipped default. `max_tokens` is 8,192 and a measured
   extraction on a 4-core box generated 7,197 tokens from a 900-character turn — 88% of the
   budget — when the claims array was left unbounded. Setting `MEMVARA_LLM_MAX_CLAIMS` is

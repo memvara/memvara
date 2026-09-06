@@ -28,6 +28,13 @@ as it already catches a provider timeout. A caller that invokes `OpenAILLM.extra
 `bench/` scripts and any harness of your own that calls a backend straight are the cases to
 check.
 
+`import_mem0(..., extract=True)` is the one such caller inside memvara, and it gained the
+same guard in this change: a chunk whose extraction call fails is counted in the new
+`ImportReceipt.unextracted` and the import carries on to the next chunk. Without that, a
+single truncated answer part-way through a long history would have ended the whole import
+and returned no receipt at all. If you see `unextracted` above zero after an import, the
+notes are stored and those turns still need phase 2 run over them.
+
 The tokens a truncated call burned are still reported on the receipt. The check runs after
 the usage is recorded, so a truncation stays visible on the bill.
 

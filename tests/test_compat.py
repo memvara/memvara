@@ -40,6 +40,7 @@ from memvara.compat import (
 from memvara.compat._notes import ensure_note_predicate
 from memvara.compat.mem0 import _memory_type, _reject_entity_kwargs
 from memvara.compat.mem0_import import _confidence, _parse_ts
+from memvara.llm import TruncatedResponse
 
 TZ = timezone.utc
 T0 = datetime(2024, 1, 1, tzinfo=TZ)
@@ -654,6 +655,44 @@ def test_extraction_turns_notes_into_triples_that_still_trace_to_mem0(mem, histo
     # And the structured claim still points at the episode holding the mem0 row's text.
     trace = mem.why(live["lives_in"].id)
     assert [e.content for e in trace.episodes] == ["Lives in Lisbon"]
+
+
+def test_one_failed_chunk_does_not_cost_the_rest_of_the_import(mem, history_db):
+    """An import is one long pass over a whole history, so a chunk that fails must not
+    abort it. The turns that chunk covered are counted in `unextracted` — the notes are
+    already stored, and structured claims are what they did not get.
+
+    `TruncatedResponse` is the case that made this urgent: a model whose answer is cut
+    off at its token budget used to return an empty list here and the loop moved on
+    silently. It raises now, so without this guard the whole import would end mid-way
+    and the caller would get an exception instead of a receipt.
+    """
+    class HalfFailing(FakeLLM):
+        """Fails the first chunk only. `FakeLLM.extract` does its own counting, so this
+        counts the call it never delegates and leaves the rest alone."""
+
+        def extract(self, episodes, known_predicates):
+            if self.calls == 0:
+                self.calls += 1
+                raise TruncatedResponse("phi-4-mini stopped at its 8192-token limit")
+            return FakeLLM.extract(self, episodes, known_predicates)
+
+    llm = HalfFailing({
+        "Acme": [{"subject": "user", "predicate": "works_at", "object": "Acme"}]})
+    receipt = import_mem0(mem, history_db=history_db, extract=True, llm=llm,
+                          batch_size=1)
+
+    assert receipt.unextracted == 1, "the failed chunk's turn, and only it"
+    assert receipt.extracted == 1, "every later chunk still ran"
+    assert receipt.llm_calls == llm.calls, "a call that raised was still a call"
+    assert "unextracted=1" in str(receipt), "a receipt nobody reads cannot report a loss"
+
+
+def test_a_clean_import_reports_nothing_unextracted(mem, history_db):
+    llm = FakeLLM({"Lisbon": [
+        {"subject": "user", "predicate": "lives_in", "object": "Lisbon"}]})
+    assert import_mem0(mem, history_db=history_db, extract=True,
+                       llm=llm).unextracted == 0
 
 
 def test_extraction_defaults_to_the_memvaras_own_model(mem, history_db):

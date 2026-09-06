@@ -223,8 +223,9 @@ also a live defect at 8,192 with nothing configured, since the uncapped arm reac
 generated tokens — 88% of the default.
 
 Second, 2,048 does not bound this box. Generation slows as the output grows: the 7,197-token
-call took 1,956.6 s, which is about 3.8 tok/s net of prefill, against the 5.53 the short
-calls give. At 3.8 tok/s a 2,048-token budget is 539 s of generation on its own, and adding
+call took 1,956.6 s, and its share of the arm's 2,894 input tokens is about 965, which is 46 s
+of prefill at the measured 21.0 tok/s. That leaves 1,911 s of generation for 7,197 tokens, or
+**3.8 tok/s**, against the 5.53 the short calls give. At 3.8 tok/s a 2,048-token budget is 539 s of generation on its own, and adding
 the 220 s prefill measured on the 4,117-token turn puts the call at 759 s — past the 600 s
 timeout it was meant to avoid. The largest budget that fits is about 1,444 tokens; 1,024
 lands at 489 s. The "six times the headroom" figure compared 2,048 against twelve *terse*

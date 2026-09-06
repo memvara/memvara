@@ -201,6 +201,14 @@ class OpenAILLM:
         # a reply will not parse, so a cut-off selector answer is already loud. Silence
         # is specific to the schema path, where an unparseable answer becomes an empty
         # claim list that reads exactly like a turn holding no claims.
+        #
+        # That equivalence is strong rather than total, and the gap is worth naming: a
+        # reply cut off at a point where the JSON happens to be complete would parse, and
+        # `select` would return fewer results than the model meant to send without
+        # anything noticing. It needs the model to close its own array and then be cut
+        # off, which is not a shape a truncation produces, so this is a known residual
+        # rather than a defect. `MAX_COMPLETION_TOKENS` is 400 and the measured replies
+        # fit well inside it.
         _shape.refuse_if_truncated(
             _finish_reason(response), "length", model=self.model, budget=self.max_tokens)
         return response

@@ -327,6 +327,12 @@ def refuse_if_truncated(reason: Any, cutoff: str, *, model: str, budget: int) ->
     truncation is not provider-specific, so it is decided once, here, for the same reason
     every other rule in this module is.
 
+    Every call a backend makes through its `_call` reaches this, not extraction alone —
+    predicate resolution and `compose_relations` too — so the message names raising the
+    budget first and scopes the claims cap to the call it actually applies to. An
+    operator reading this out of a `DerivedTermsUnavailable` warning must not be sent to
+    tune a setting that does nothing for the call that failed.
+
     **A reason this cannot read is not treated as a truncation.** Absent, `None`, or a
     name some provider adds after this was written all mean "carry on". That direction is
     deliberate and it matches `record_usage`: guessing that an unfamiliar value means
@@ -341,6 +347,6 @@ def refuse_if_truncated(reason: Any, cutoff: str, *, model: str, budget: int) ->
     raise TruncatedResponse(
         f"{model} stopped generating at its {budget}-token limit, so the answer is "
         f"incomplete and none of it can be used. Raise the backend's max_tokens above "
-        f"{budget}, or ask the model for fewer claims (MEMVARA_LLM_MAX_CLAIMS, or "
-        f"max_claims=) so its answer fits inside the budget."
+        f"{budget}, or ask for a shorter answer — on an extraction that means capping "
+        f"the claims array with MEMVARA_LLM_MAX_CLAIMS (or max_claims=)."
     )
