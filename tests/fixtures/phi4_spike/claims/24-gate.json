@@ -1,0 +1,164 @@
+[
+ {
+  "subject": "user",
+  "predicate": "prefers",
+  "object": "torchlamp",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "gate",
+  "predicate": "lives_in",
+  "object": "Port 61434",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "gate",
+  "predicate": "depends_on",
+  "object": "Port 61432",
+  "polarity": -1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "live_worker_version",
+  "object": "Python 3.13",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "gate",
+  "predicate": "hook_verdict",
+  "object": "COVERAGE_CORE",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "console",
+  "predicate": "production_deployed_at",
+  "object": "console.aurora-notes.dev",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "hook_port_status",
+  "object": "Port 61434",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "gate",
+  "predicate": "version",
+  "object": "Python 3.13",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "gate",
+  "predicate": "goal",
+  "object": "zero missed",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "gate",
+  "predicate": "endpoint",
+  "object": "Port 61434",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "gate",
+  "predicate": "build_status",
+  "object": "Port 61434",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "gate",
+  "predicate": "hook_port_status",
+  "object": "Port 61434",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "gate",
+  "predicate": "live_commit",
+  "object": "Port 61434",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "gate",
+  "predicate": "status",
+  "object": "Port 61434",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "gate",
+  "predicate": "endpoint",
+  "object": "Port 61434",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "gate",
+  "predicate": "hook_port_status",
+  "object": "Port 61434",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "gate",
+  "predicate": "live_commit",
+  "object": "Port 61434",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "gate",
+  "predicate": "status",
+  "object": "Port 61434",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ }
+]

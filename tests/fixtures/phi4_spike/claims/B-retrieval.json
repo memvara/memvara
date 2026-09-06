@@ -1,0 +1,92 @@
+[
+ {
+  "subject": "user",
+  "predicate": "uses",
+  "object": "vector index",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "sets",
+  "object": "environment variable",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "observes",
+  "object": "no index change",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "confuses",
+  "object": "costs and speed ceilings",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "knows",
+  "object": "anchored flag",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "advises",
+  "object": "anchored flag",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "sets",
+  "object": "embedding dimension",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "uses",
+  "object": "lexical search",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "configures",
+  "object": "anchored flag",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "sets",
+  "object": "examined limit",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ }
+]

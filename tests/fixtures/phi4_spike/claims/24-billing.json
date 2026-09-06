@@ -1,0 +1,173 @@
+[
+ {
+  "subject": "user",
+  "predicate": "prefers",
+  "object": "secrets directory",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "hook_verdict",
+  "object": "endpoint",
+  "polarity": -1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "goal",
+  "object": "refuse",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "live_worker_version",
+  "object": "9000 memories a month",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "pricing_decisions_still_owed",
+  "object": "rate card",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "merchandise_of_record",
+  "object": "Lemonade",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "production_deployed_at",
+  "object": "secrets directory",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "endpoint",
+  "object": "webhook route",
+  "polarity": -1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "production_host",
+  "object": "stale plan row",
+  "polarity": -1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "memory_policy_location",
+  "object": "quota code",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "pricing_decisions_still_owed",
+  "object": "pricing page",
+  "polarity": -1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "product_type",
+  "object": "Lemonade",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "verify_judge_report_is_current",
+  "object": "Plan drift",
+  "polarity": 1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "stack",
+  "object": "stale plan row",
+  "polarity": -1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "endpoint",
+  "object": "webhook route",
+  "polarity": -1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "production_host",
+  "object": "stale plan row",
+  "polarity": -1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "memory_policy_location",
+  "object": "quota code",
+  "polarity": -1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "pricing_decisions_still_owed",
+  "object": "rate card",
+  "polarity": -1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "product_type",
+  "object": "Lemonade",
+  "polarity": -1,
+  "memory_type": "semantic",
+  "confidence": 1.0,
+  "source_index": 0
+ }
+]

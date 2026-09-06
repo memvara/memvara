@@ -58,6 +58,7 @@ from ..embed.base import Embedder
 from ..llm._shape import finite_amount
 from ..llm.base import LLM, Usage
 from ..redact import Redactor, redact_claim, redact_episode
+from . import pollution
 from ..schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
 from ..store.base import Store
 from ..telemetry import (
@@ -213,6 +214,7 @@ class WritePipeline:
                  redactor: Redactor | None = None,
                  reject_ungrounded: bool | str = "auto",
                  extraction_deferred: bool = False) -> None:
+                 reject_polluted: bool = True) -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
@@ -230,6 +232,13 @@ class WritePipeline:
         #: who never deployed a worker must keep being told the truth about the default
         #: configuration.
         self.extraction_deferred = bool(extraction_deferred)
+        #: On by default, like `reject_ungrounded` and for its reason: the destructive
+        #: direction is storing, because a wrong-predicate claim in a ONE-cardinality slot
+        #: ends the true fact that was there. `write/pollution.py` carries the rules and
+        #: the measurement; only model-proposed claims pass through it. Off is for a
+        #: deployment on a frontier model that measures a false-positive rate it dislikes
+        #: — the option exists so that measurement can be made.
+        self.reject_polluted = bool(reject_polluted)
         if not (reject_ungrounded is True or reject_ungrounded is False
                 or reject_ungrounded == "auto"):
             raise TypeError(
@@ -735,6 +744,12 @@ class WritePipeline:
         if rec is not None:
             rec.timing(WRITE_EXTRACT_MS, (perf_counter() - extract_t0) * 1000.0)
         receipt.llm_calls += 1
+        if self.reject_polluted:
+            # Before acquisition, deliberately: a predicate that only ever appeared on a
+            # claim R1 refused as a duplicate of a known one must not be acquired — that
+            # would spend a model call registering the pollution's spelling.
+            raw, refused, _ = pollution.guard(raw, self.registry)
+            receipt.polluted += refused
         # Acquisition shares the accumulator: the caller is billed for a write, not for a
         # round trip, and a novel surface form costing a second call is part of the same
         # write. Reported after it, so those tokens are inside the total.

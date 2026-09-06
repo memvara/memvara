@@ -1,0 +1,74 @@
+[
+ {
+  "subject": "user",
+  "predicate": "prefers_profiler",
+  "object": "torchlamp",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "experiences_exception",
+  "object": "asyncio.to_thread",
+  "polarity": -1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "configures_gate_port",
+  "object": "61434",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "manages_docker_volume",
+  "object": "anonymous_volume",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "uses_python_version",
+  "object": "Python 3.13",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "observes_performance_improvement",
+  "object": "COVERAGE_CORE to sysmon",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "automatically_deploys_console",
+  "object": "console.aurora-notes.dev",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ },
+ {
+  "subject": "user",
+  "predicate": "controls_API_provisioning",
+  "object": "provision script",
+  "polarity": 1,
+  "memory_type": "episodic",
+  "confidence": 0.5,
+  "source_index": 0
+ }
+]

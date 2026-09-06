@@ -444,6 +444,23 @@ including `llm_calls` (0 whenever the LLM is not consulted) and `latency_ms`:
   fails open, keeping the claim and warning once. Under the default `HashingEmbedder`
   nothing is ever rescued (n-gram cosines on zero-overlap pairs measure 0.0–0.11,
   far under the floor), so `"auto"` degrades to the strict check there.
+- **`reject_polluted`** (default `True`) is the other guard, and it catches what
+  `reject_ungrounded` says it cannot: a real value under a slot it does not belong to.
+  `write/pollution.py` carries the rules and the measurement. Within one turn, one
+  (subject, object) under several predicates keeps every known predicate and drops the
+  unknown ones beside them — the measured small-model failure, a found value forced into
+  every available slot; a place predicate with a digit or URL in the object is refused, on
+  any subject. Deliberately no rule about the subject: a speaker predicate on a named third
+  party is that party's own slot, and a first draft that refused it was measured to catch
+  nothing the place rule did not. A further rule stores a claim under a novel
+  predicate, or a ONE-slot builtin (less `born_on` and `timezone`) with a digit or URL in
+  it, at `min(confidence, 0.4)`, so the reconciler's half rule stores it beside the
+  incumbent rather than ending it. Runs on `_tier2`'s raw output **before** predicate
+  acquisition, so a refused duplicate's spelling is never acquired. Counted on
+  `receipt.polluted`; a turn whose only claims were refused also counts on `unextracted`.
+  Held to its measurement by `tests/test_pollution.py` over the 255-claim fixture:
+  wrong-predicate 46 → 20, duplicates 32 → 0, keyed facts found unchanged at 60/90 in
+  every configuration.
 
 `reextract()` is `add()` with tier 0 removed, for turns already in the store: a
 deployment that ran without a model, or a batch a provider failure left `deferred` — or
