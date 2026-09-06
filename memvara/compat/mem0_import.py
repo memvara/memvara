@@ -243,6 +243,12 @@ class ImportReceipt:
     skipped: int = 0         # memories already in the store (see `skip_existing`)
     ignored: int = 0         # rows carrying no usable text, and events we do not model
     extracted: int = 0       # phase-2 structured claims
+    #: Imported turns whose phase-2 extraction call failed — a provider timeout or rate
+    #: limit, or a model whose answer was cut off by its token budget. The notes
+    #: themselves are already stored; what these turns did not get is structured claims.
+    #: Non-zero means the import finished but is incomplete, so re-run phase 2 for them.
+    #: Named to match `WriteReceipt.unextracted`, which counts the same loss on a write.
+    unextracted: int = 0
     llm_calls: int = 0       # phase-2 model calls; phase 1 is always 0
     #: Phase-2 tokens, when the configured backend reports them (`LLM.reports_usage`);
     #: 0 when it does not, which is indistinguishable from an import that made no calls.
@@ -261,7 +267,8 @@ class ImportReceipt:
             f"<ImportReceipt {self.memories} memories from {self.events} events: "
             f"+{self.claims} ~{self.updated} -{self.deleted} dup={self.duplicates} "
             f"skip={self.skipped} ignored={self.ignored} "
-            f"extracted={self.extracted} llm={self.llm_calls}; "
+            f"extracted={self.extracted} unextracted={self.unextracted} "
+            f"llm={self.llm_calls}; "
             f"{len(self.contested)} slots hold more than one live value>"
         )
 
@@ -546,8 +553,24 @@ def _extract(mem: Memvara, sources: Sequence[Episode], llm: LLM, batch_size: int
     usage = Usage() if getattr(llm, "reports_usage", False) else None
     for start in range(0, len(sources), batch_size):
         chunk = list(sources[start:start + batch_size])
-        raw = llm.extract(chunk, vocabulary) if usage is None else llm.extract(
-            chunk, vocabulary, usage=usage)
+        try:
+            raw = llm.extract(chunk, vocabulary) if usage is None else llm.extract(
+                chunk, vocabulary, usage=usage)
+        except Exception:
+            # One chunk's failure must not cost the whole import. Phase 1 has already
+            # written every note, so the import's own work is safe; what this chunk
+            # loses is the structured claims for its turns, and the receipt is the only
+            # place that can say so. `WritePipeline` puts the same guard around its own
+            # extract call, and it matters more here: an import is one long pass over a
+            # whole history, so aborting in the middle leaves the caller with no receipt
+            # at all and no way to tell how far it got.
+            #
+            # Counted as a call because it was one. A provider that timed out after
+            # generating still billed for it, and `usage` already carries whatever the
+            # backend reported before it raised.
+            receipt.llm_calls += 1
+            receipt.unextracted += len(chunk)
+            continue
         receipt.llm_calls += 1
         for item in raw:
             claim = _triple(mem, item, chunk, extractor)

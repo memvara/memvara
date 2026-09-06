@@ -1264,6 +1264,16 @@ Hard API requirements — these are current and getting them wrong is a 400:
   JSON, losing the good claims that preceded the restatements too. A hosted model closes
   the array itself, which is why this is opt-in — `OpenAILLM(max_claims=...)` is the seam,
   because that backend serves both hosted OpenAI and self-hosted servers.
+- **Raise `TruncatedResponse` when the provider says the token budget ran out**, by
+  calling `_shape.refuse_if_truncated(reason, cutoff, model=..., budget=...)` with your
+  own field's value and your own provider's word for it. This is not optional politeness:
+  truncated JSON does not parse, `parse_json_object` returns `{}` for it, and `{}` shapes
+  to an empty claim list — so without this a cut-off answer produces the same receipt as a
+  turn that held no facts and the turn is never extracted again. Call it *after*
+  `record_usage`, because a truncated call generated every token it is billed for and
+  `WritePipeline` publishes the usage of a call that raised. A reason your backend cannot
+  read must not count as a truncation; guessing turns a working extraction into a failed
+  write.
 - `_SCHEMA_NAMES` is keyed on the identity of the module-level schema dicts, so pass
   `_call(..., name=...)` explicitly for any schema you build at runtime. A copy falls
   through to `"result"`, which the API accepts, so there is nothing to notice.

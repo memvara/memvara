@@ -26,6 +26,13 @@ from .base import (
 )
 
 
+def _stop_reason(response: Any) -> Any:
+    """Why generation stopped, or `None` if the response does not say."""
+    if isinstance(response, dict):
+        return response.get("stop_reason")
+    return getattr(response, "stop_reason", None)
+
+
 def _first_text(response: Any) -> str:
     """The first text block of a Messages response.
 
@@ -120,6 +127,12 @@ class AnthropicLLM:
             },
         )
         _shape.record_usage(response, usage, "input_tokens", "output_tokens")
+        # See `openai.py`'s `_call` for why this follows the usage rather than preceding
+        # it, and why `chat()` does not need it. Anthropic reports the same event on the
+        # response itself rather than per choice, and names it `"max_tokens"`.
+        _shape.refuse_if_truncated(
+            _stop_reason(response), "max_tokens", model=self.model,
+            budget=self.max_tokens)
         return response
 
     # -- Chat protocol --------------------------------------------------------

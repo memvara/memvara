@@ -18,9 +18,11 @@ two halves, and the first needs no server at all:
 turn is. Generation time grows with the answer, so a turn of a few thousand tokens produces
 an answer of one or two thousand and takes minutes. A measured production call on a
 4,117-token turn generated 1,618 tokens and took 554 seconds, against the 600-second
-timeout the OpenAI SDK applies by default — and `OpenAILLM` sets `max_tokens=8192`, so
-nothing else stops a long response. A cancelled call is a turn that was not extracted and
-gets tried again next pass. That is why this harness reports the worst call and the largest
+timeout the OpenAI SDK applies by default — and `OpenAILLM` sets `max_tokens=8192`, so a
+long response runs until one of those two stops it. Either way the turn was not extracted
+and gets tried again next pass: a cancellation raises out of the SDK, and a response cut
+off at the budget raises `TruncatedResponse`. Both land in this harness's `CALL FAILED`
+line, which names the exception so you can tell them apart. That is why this harness reports the worst call and the largest
 response beside the medians: a schema that improves the mean and still loses the long turn
 has not helped.
 
@@ -142,7 +144,8 @@ def live(batches: Sequence[Sequence[Episode]], gold: Sequence[str],
     # The client is built here rather than left to `OpenAILLM` so the timeout can be
     # raised. The SDK's default is 600 s, and the uncapped `full` arm can exceed it: with
     # no `maxItems` the grammar has no legal way to end the response, so a model that
-    # starts restating itself runs to `max_tokens` (8,192). Measured on the production box
+    # starts restating itself runs to `max_tokens` (8,192) — where it now raises
+    # `TruncatedResponse` rather than returning an answer nothing can read. Measured on the production box
     # on 2026-09-06, the full arm passed 2,700 generated tokens on a 900-character turn
     # and was cancelled at 600 s. That cancellation is the behaviour `max_claims` exists
     # to prevent, so the bench has to be able to outlast it in order to show it.

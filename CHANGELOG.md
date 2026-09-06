@@ -9,6 +9,35 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A model that hits its token limit mid-answer now fails the write instead of silently
+  extracting nothing.** `OpenAILLM` and `AnthropicLLM` read the provider's own reason for
+  stopping — `finish_reason == "length"` and `stop_reason == "max_tokens"` — and raise
+  `memvara.llm.TruncatedResponse`. Neither backend read that field before, and the
+  consequence was invisible: constrained decoding ends a cut-off response in the middle of
+  an object, `parse_json_object` cannot read that and returns `{}`, and `{}` shapes to an
+  empty claim list. The receipt for a truncated answer was therefore identical to the
+  receipt for a turn that genuinely held no facts — `unextracted=1`, `deferred=False` — so
+  nothing told a worker the turn still needed extracting and it was never tried again.
+  Raising puts the call on `WritePipeline`'s existing failure path, which sets `deferred`
+  as well, and the tokens the truncated call burned are still reported because the usage is
+  recorded before the check.
+
+  `import_mem0(..., extract=True)` gained the same guard `WritePipeline` already had, and
+  `ImportReceipt` gained an `unextracted` field to report it. A chunk whose extraction call
+  fails is counted there and the import continues; before, any failure on that path — a
+  provider timeout as much as a truncation — ended the import part-way through a history
+  and returned no receipt at all.
+
+  This was reachable at the shipped default. `max_tokens` is 8,192 and a measured
+  extraction on a 4-core box generated 7,197 tokens from a 900-character turn — 88% of the
+  budget — when the claims array was left unbounded. Setting `MEMVARA_LLM_MAX_CLAIMS` is
+  still the way to stop a runaway; this change is what makes one visible when it happens
+  anyway. A reason the check cannot read — absent, `None`, or a word a provider adds later
+  — is not treated as a truncation, which keeps an unfamiliar value from turning a working
+  extraction into a failed write.
+
 ### Added
 
 - **`bench/longmemeval.py` gained `--rerank`, `--reranker` and `--rerank-model`.** They
