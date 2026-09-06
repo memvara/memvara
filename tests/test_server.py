@@ -3352,6 +3352,80 @@ def test_cloud_mode_refuses_a_claim_cap():
         build_memvara(cloud)
 
 
+def test_the_terse_claim_shape_reaches_the_openai_backend(monkeypatch):
+    """The short claim shape is only reachable from a deployment through this variable.
+
+    It buys latency on a CPU-hosted model by not making it type a field name and a null
+    for a time and a measurement the turn did not state. Eight claims serialize to 413
+    tokens under the shipped schema and 277 under this one. `memory_type` and `confidence`
+    stay required, so the assertion below is six fields rather than four."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+        "MEMVARA_LLM_TERSE_CLAIMS": "1"}))
+    item = memory.llm._claim_schema["properties"]["claims"]["items"]
+    assert item["required"] == ["subject", "predicate", "object", "source_index",
+                                "memory_type", "confidence"]
+    memory.close()
+
+
+def test_the_full_claim_shape_is_the_default_because_hosted_openai_requires_it(monkeypatch):
+    """Strict mode requires every declared property in `required`, so a default short
+    shape would 400 every hosted extraction in order to speed up a self-hosted one. The
+    same trade `maxItems` makes, and the reason both are opt-in rather than automatic."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai"}))
+    item = memory.llm._claim_schema["properties"]["claims"]["items"]
+    assert len(item["required"]) == 10
+    memory.close()
+
+
+def test_the_claim_cap_and_the_terse_shape_are_separate_switches(monkeypatch):
+    """Setting the cap must not silently turn on the short shape.
+
+    Both serve the same self-hosted deployment, but they are different trades. The cap
+    stops a runaway and costs nothing. The short shape buys latency and changes ranking,
+    because an omitted `confidence` puts every claim at 0.5 rather than at a number the
+    model chose. An operator who asked for the first has not asked for the second."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+        "MEMVARA_LLM_MAX_CLAIMS": "12"}))
+    item = memory.llm._claim_schema["properties"]["claims"]["items"]
+    assert len(item["required"]) == 10
+    memory.close()
+
+
+@pytest.mark.parametrize("value", ["maybe", "2", "yes please"])
+def test_an_unusable_terse_flag_is_refused_at_startup(value):
+    """Refused rather than read as false. A typo falling through to the full shape would
+    leave an operator believing they had halved their generation time when they had not,
+    and the only symptom is a latency number nobody is watching."""
+    with pytest.raises(ConfigError, match="MEMVARA_LLM_TERSE_CLAIMS"):
+        ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+                               "MEMVARA_LLM_TERSE_CLAIMS": value})
+
+
+def test_cloud_mode_refuses_the_terse_claim_shape():
+    """Same rule as the cap and the extraction model: extraction runs inside the
+    deployment, so a claim shape named here would be read and never used."""
+    cloud = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
+                                   "MEMVARA_LLM_TERSE_CLAIMS": "true"})
+    assert cloud.llm_terse_claims is True
+    with pytest.raises(ConfigError, match="MEMVARA_LLM_TERSE_CLAIMS"):
+        build_memvara(cloud)
+
+
 def test_replacement_extraction_instructions_are_read_from_the_named_file(
         monkeypatch, tmp_path):
     """The file's text reaches the backend, so a self-hosted deployment can change what

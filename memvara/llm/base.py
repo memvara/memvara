@@ -262,6 +262,104 @@ def bounded_claim_schema(max_claims: int = MAX_CLAIMS) -> dict[str, Any]:
     schema["properties"]["claims"]["maxItems"] = max_claims
     return schema
 
+
+#: The claim fields nothing downstream can supply a default for. `_shape.shape_claims`
+#: drops a claim missing any of these rather than repairing it: without `source_index` the
+#: claim cannot be traced back to a turn, and without a subject, predicate and object
+#: there is no fact to store.
+LOAD_BEARING_CLAIM_FIELDS = ("subject", "predicate", "object", "source_index")
+
+#: Fields `shape_claims` *can* default but that `self_hosted_claim_schema` keeps required
+#: anyway, because the default is a decision rather than a formality.
+#:
+#: `memory_type` says whether a claim is a durable fact, something that happened, or a
+#: standing instruction. Absent, it becomes `semantic` for everything — so an episodic
+#: claim decays at the slow rate a standing fact deserves, and a procedural one never
+#: reaches the standing set `memory_standing` returns. Four tokens is not worth that.
+#:
+#: `confidence` is kept for a sharper reason, found in review. An omitted value becomes
+#: `UNKNOWN_CONFIDENCE` (0.5), and under this schema that would be the routine case rather
+#: than the malformed-response edge case `reconcile.AUTHORITY_SHARE` was calibrated
+#: against. `reconcile._outranked` retires an incumbent when
+#: `claim.confidence >= AUTHORITY_SHARE * incumbent.confidence`, so with every clean claim
+#: at 0.5 a claim that `write/pollution.py`'s R4 discounted to 0.4 clears
+#: `0.5 * 0.5 = 0.25` and retires the true value it was discounted to protect. Against a
+#: normal incumbent at 0.95 it does not (0.4 < 0.475). Making confidence optional would
+#: therefore disable the pollution guard's one defence of a ONE-cardinality slot, which is
+#: the failure `write/pollution.py`'s docstring calls the destructive direction.
+DECIDED_CLAIM_FIELDS = ("memory_type", "confidence")
+
+#: What the model may leave out: a polarity that is an assertion unless it says otherwise,
+#: and a time and a measurement the turn did not state. None of the four carries a
+#: decision, so a default is the same answer the model would have given.
+OPTIONAL_CLAIM_FIELDS = ("polarity", "when", "amount", "unit")
+
+
+def self_hosted_claim_schema(max_claims: int = MAX_CLAIMS) -> dict[str, Any]:
+    """`bounded_claim_schema`, with the fields the model may leave out taken out of `required`.
+
+    On a CPU-hosted model, generating the response is most of the wall time, and much of
+    what gets generated is field names rather than facts. Measured against the shipped
+    shape: one claim serializes to 52 tokens, of which 44 are keys, punctuation and the
+    three forced nulls.
+
+    **Four fields move out of `required`: `polarity`, `when`, `amount` and `unit`.** Each
+    is safe because `shape_claims` already reads it with `.get()` and documents what an
+    absent value means, and because none of the four carries a decision. `polarity`
+    defaults to 1, since anything that is not an explicit -1 is an assertion. `when`,
+    `amount` and `unit` default to `None`, which is what the shipped schema spells as an
+    explicit null on the common turn that states no time and no measurement. An absent
+    field and an explicit null reach `shape_claims` as the same answer.
+
+    `memory_type` and `confidence` stay required even though `shape_claims` can default
+    them, because there the default is a decision rather than a formality.
+    `DECIDED_CLAIM_FIELDS` carries the reasoning; the short version is that defaulting
+    `memory_type` files every episodic claim as a standing fact, and defaulting
+    `confidence` puts every claim at 0.5, which defeats the pollution guard's R4 discount
+    at `reconcile.AUTHORITY_SHARE` and lets a polluted claim retire a true one.
+
+    **On the saving, and what is and is not measured.** Serialization predicts 33%: eight
+    claims are 413 tokens under the shipped schema and 277 under this one. A wider version
+    of this schema, which also made `memory_type` and `confidence` optional, was measured
+    end to end on the production box at **27% of generated tokens, with the same 10 of 15
+    key facts found** — three episodes, the deployment's own prompt and predicate
+    vocabulary, a 12-claim cap on both arms, phi-4-mini Q8_0. That run showed the
+    measured saving falls well short of what serialization predicts, because the model
+    still spends tokens on values and on deciding what to write.
+
+    **This narrower schema has not been measured, and its saving is smaller than 27%.**
+    Treat the numbers here as a ceiling and run `bench/extract_cost.py` against your own
+    model, because how much of the permission a model takes up is a property of its habits
+    rather than of the schema. Measured on LFM2.5-1.2B-Instruct the wider schema cut 55%
+    where phi-4-mini cut 27%.
+
+    **It does not bound a runaway, and nothing here should be read as claiming it does.**
+    Measured on the same box, an *uncapped* claims array reached 7,197 generated tokens on
+    a 900-character turn, ran for 1,957 seconds, and found 7 of 15 facts against the capped
+    arm's 10 — the restatements crowd out the answer. A fixed fraction of a runaway is
+    still a runaway. `bounded_claim_schema` is what stops it, which is why this function
+    builds on it rather than beside it.
+
+    Opt-in for the same reason `bounded_claim_schema` is. OpenAI's strict mode requires
+    every declared property to appear in `required`, so this schema is a 400 on the hosted
+    path rather than something that degrades quietly. `additionalProperties` stays False
+    and every property stays declared, so a model that does send `confidence` is still
+    understood — the fields become optional, not forbidden.
+
+        >>> schema = self_hosted_claim_schema(8)
+        >>> schema["properties"]["claims"]["maxItems"]
+        8
+        >>> schema["properties"]["claims"]["items"]["required"]
+        ['subject', 'predicate', 'object', 'source_index', 'memory_type', 'confidence']
+        >>> len(schema["properties"]["claims"]["items"]["properties"])
+        10
+    """
+    schema = bounded_claim_schema(max_claims)
+    schema["properties"]["claims"]["items"]["required"] = list(
+        LOAD_BEARING_CLAIM_FIELDS + DECIDED_CLAIM_FIELDS)
+    return schema
+
+
 PREDICATE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {

@@ -124,6 +124,7 @@ transport is stdio and the configuration is entirely environment.
 | `MEMVARA_LLM_MODEL` | Model name for `MEMVARA_LLM=openai`. Unset uses the adapter's own default. Point `OPENAI_BASE_URL` at a self-hosted OpenAI-compatible server (vLLM, llama.cpp, Ollama's shim) and name its model here. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_LLM_MAX_CLAIMS` | Cap on the claims array for `MEMVARA_LLM=openai`. Unset means uncapped, which is right for hosted OpenAI — it closes the array itself, and OpenAI documents `maxItems` as unsupported under strict mode. Set it for a self-hosted server that constrains decoding, where an uncapped array gives the grammar no way to end a response. A positive integer; anything else is refused at startup. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_LLM_EXTRACT_SYSTEM` | Path to a file holding replacement extraction instructions for `MEMVARA_LLM=openai`. Unset uses the instructions memvara ships, which is right for every hosted model. Set it for a small self-hosted model that the shipped wording talks out of extracting at all. Read only by this backend, and checked only when it runs: a file that is missing, empty, over 64 KiB or not UTF-8 is refused at startup, but under any other `MEMVARA_LLM` the variable is never read at all. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
+| `MEMVARA_LLM_TERSE_CLAIMS` | `1` asks `MEMVARA_LLM=openai` for a shorter claim shape: `polarity`, `when`, `amount` and `unit` become optional, so the model stops writing a field name and a null for each of them. `memory_type` and `confidence` stay required, because defaulting those two is a decision rather than a formality. Unset means the full shape, which is right for hosted OpenAI — its strict mode requires every declared property in `required`, so this is a 400 there. Set it for a self-hosted model whose generation speed is the bottleneck. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_EMBEDDER` | `hashing` (default, offline, 512-dimensional), `hashing:<dim>`, `local` or `local:<model>` (needs `memvara[local-embed]`), or `auto`. See [The embedder is named, not discovered](#the-embedder-is-named-not-discovered). |
 | `MEMVARA_READ_ONLY` | `1` hides every tool that writes. |
 
@@ -145,7 +146,7 @@ a model to be talked into changing.
 endpoint is deliberately **not** a memvara setting: the adapter builds its client through
 the official SDK, which reads `OPENAI_BASE_URL` and `OPENAI_API_KEY` from the environment
 itself. So memvara's own variables here are the model name, the claim cap for a server
-that constrains decoding, and the extraction instructions themselves.
+that constrains decoding, the extraction instructions themselves, and the claim shape.
 
 ```bash
 OPENAI_BASE_URL=http://127.0.0.1:8000/v1 \
@@ -154,6 +155,7 @@ MEMVARA_LLM=openai \
 MEMVARA_LLM_MODEL=Qwen/Qwen3.5-4B-Instruct \
 MEMVARA_LLM_MAX_CLAIMS=32 \
 MEMVARA_LLM_EXTRACT_SYSTEM=$HOME/.memvara/extract.txt \
+MEMVARA_LLM_TERSE_CLAIMS=1 \
 MEMVARA_DB=$HOME/.memvara/memory.db python3 -m memvara.server
 ```
 
@@ -194,10 +196,62 @@ It replaces the extraction instructions only. Predicate resolution — deciding 
 new surface form is an existing predicate or a genuinely new one — keeps its own prompt,
 which this accommodation was never measured against.
 
-`MEMVARA_LLM_MODEL`, `MEMVARA_LLM_MAX_CLAIMS` and `MEMVARA_LLM_EXTRACT_SYSTEM` apply to the
-`openai` backend only. Under `MEMVARA_MODE=cloud` all three are refused outright, along
-with `MEMVARA_LLM` and `MEMVARA_EMBEDDER`: extraction runs inside the deployment, so a
-value named here would be read and never used.
+### Set `MEMVARA_LLM_TERSE_CLAIMS` if generation is the bottleneck
+
+On a CPU-hosted model, generating the response is most of the wall time, and most of what
+gets generated is field names rather than facts. The shipped schema requires all ten fields
+on every claim, so the model writes `"when":null,"amount":null,"unit":null` and a
+confidence number for each one whether or not the turn said anything about a time, a
+measurement or how sure it was. One claim comes to 52 tokens, and 44 of them are keys,
+punctuation and those nulls.
+
+`MEMVARA_LLM_TERSE_CLAIMS=1` moves `polarity`, `when`, `amount` and `unit` out of the
+schema's `required` list. `memory_type` and `confidence` stay required on purpose: memvara
+*can* default them, but there the default is a decision rather than a formality. Without
+`memory_type` every episodic claim is filed as a standing fact and decays at the wrong
+rate. Without `confidence` every claim sits at 0.5, which defeats the pollution guard's
+discount at the reconciler's retirement threshold and would let a suspect claim retire a
+true one. The model may then leave them out, and memvara
+supplies the same defaults it already applies to a value it cannot read: an assertion
+unless `polarity` is exactly -1, and nothing for a time or a measurement the turn did not
+state.
+
+**Serialization predicts a 33% saving**: eight claims are 413 tokens under the shipped
+schema and 277 under this one.
+
+A wider version of this option, which also made `memory_type` and `confidence` optional,
+was measured on a 4-core production box at **27% of the generated tokens, finding the same
+10 of 15 key facts** — three episodes through phi-4-mini Q8_0 with a 12-claim cap on both
+arms, 2,401 output tokens against 1,756, prefill unmoved. **The narrower option documented
+here has not been measured and saves less than that.** Treat these numbers as a ceiling and
+run `bench/extract_cost.py` against your own model: how much of the permission a model
+takes up is a property of its habits, not of the schema. The same wider schema cut 55% on
+LFM2.5-1.2B-Instruct.
+
+The long turn is where this matters most, because that is where the current setup is
+already close to failing. Generation time grows with the answer, and a long turn produces a
+long answer: a measured call on a 4,117-token turn spent 220 seconds on prefill and 333
+generating 1,618 tokens, 554 in total, against the 600-second timeout the OpenAI SDK
+applies by default. `max_tokens` is 8,192, so nothing in memvara stops a long response
+first. A cancelled call is a turn that was not extracted and will be tried again, so on
+that turn the shorter shape buys reliability rather than speed. Two other levers apply to
+the same call and are worth knowing about: the client timeout is the SDK's default rather
+than a memvara setting, so a deployment that wants long turns to finish can raise it; and
+`OpenAILLM(max_tokens=...)` bounds the response itself, which is the only one of the three
+that turns a runaway into a bounded failure rather than a cancellation.
+
+Two things to know before setting it. It is a 400 against hosted OpenAI, whose strict mode
+requires every declared property to appear in `required` — the same trade `maxItems` makes.
+And **it changes how claims rank**: an omitted confidence lands at 0.5 rather than at a
+number the model chose, so a store written with this option ranks differently from one
+written without it. On a small model that number is close to noise, since confidence is the
+one field in a claim nothing downstream can check, but the change is real. Decide it once
+per deployment rather than turning it on and off.
+
+`MEMVARA_LLM_MODEL`, `MEMVARA_LLM_MAX_CLAIMS`, `MEMVARA_LLM_EXTRACT_SYSTEM` and
+`MEMVARA_LLM_TERSE_CLAIMS` apply to the `openai` backend only. Under `MEMVARA_MODE=cloud`
+all four are refused outright, along with `MEMVARA_LLM` and `MEMVARA_EMBEDDER`: extraction
+runs inside the deployment, so a value named here would be read and never used.
 
 ### The embedder is named, not discovered
 

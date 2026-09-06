@@ -31,12 +31,14 @@ from . import _shape
 from .base import (
     CLAIM_SCHEMA,
     EXTRACT_SYSTEM,
+    MAX_CLAIMS,
     PREDICATE_SCHEMA,
     PREDICATE_SYSTEM,
     RESOLVE_SCHEMA,
     RESOLVE_SYSTEM,
     Usage,
     bounded_claim_schema,
+    self_hosted_claim_schema,
 )
 
 #: `json_schema` requires a name. It is echoed back in nothing we read, but the API
@@ -88,6 +90,7 @@ class OpenAILLM:
         max_claims: int | None = None,
         base_url: str | None = None,
         extract_system: str | None = None,
+        terse: bool = False,
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens
@@ -113,8 +116,24 @@ class OpenAILLM:
         # by default because hosted OpenAI rejects `maxItems` under `strict: True` — see
         # `bounded_claim_schema`, which carries the reasoning and the measurement. Built
         # once here rather than per call, since it is the same dict every time.
-        self._claim_schema = (
-            CLAIM_SCHEMA if max_claims is None else bounded_claim_schema(max_claims))
+        # `terse` additionally takes `polarity`, `when`, `amount` and `unit` out of
+        # `required`, so the model stops spending tokens on `"when":null,"amount":null,
+        # "unit":null` for every claim. Serialization puts eight claims at 413 tokens
+        # against 277; what a model actually saves is less, and is a property of its
+        # habits rather than of the schema. `self_hosted_claim_schema` carries the
+        # measurements, and the reason `memory_type` and `confidence` stay required.
+        #
+        # A separate argument from `max_claims` rather than a second meaning for it. Both
+        # describe the same self-hosted case, but they are different trades: the cap
+        # protects against a runaway and costs nothing, while this one changes what the
+        # model is asked to write. An operator who set `MEMVARA_LLM_MAX_CLAIMS` asked for
+        # the first and must not silently receive the second.
+        if terse:
+            self._claim_schema = self_hosted_claim_schema(
+                MAX_CLAIMS if max_claims is None else max_claims)
+        else:
+            self._claim_schema = (
+                CLAIM_SCHEMA if max_claims is None else bounded_claim_schema(max_claims))
         # Extraction is a parsing task, not a creative one, and the same turn arriving
         # twice should produce the same claim rather than two spellings of it that the
         # reconciler then has to treat as competing values.
