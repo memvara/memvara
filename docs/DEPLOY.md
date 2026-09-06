@@ -123,6 +123,7 @@ transport is stdio and the configuration is entirely environment.
 | `MEMVARA_LLM` | `none` (default, offline), `anthropic` (needs `ANTHROPIC_API_KEY` and `memvara[anthropic]`), or `openai` (needs `OPENAI_API_KEY` and `memvara[openai]`). |
 | `MEMVARA_LLM_MODEL` | Model name for `MEMVARA_LLM=openai`. Unset uses the adapter's own default. Point `OPENAI_BASE_URL` at a self-hosted OpenAI-compatible server (vLLM, llama.cpp, Ollama's shim) and name its model here. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_LLM_MAX_CLAIMS` | Cap on the claims array for `MEMVARA_LLM=openai`. Unset means uncapped, which is right for hosted OpenAI — it closes the array itself, and OpenAI documents `maxItems` as unsupported under strict mode. Set it for a self-hosted server that constrains decoding, where an uncapped array gives the grammar no way to end a response. A positive integer; anything else is refused at startup. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
+| `MEMVARA_LLM_EXTRACT_SYSTEM` | Path to a file holding replacement extraction instructions for `MEMVARA_LLM=openai`. Unset uses the instructions memvara ships, which is right for every hosted model. Set it for a small self-hosted model that the shipped wording talks out of extracting at all. Read only by this backend, and checked only when it runs: a file that is missing, empty, over 64 KiB or not UTF-8 is refused at startup, but under any other `MEMVARA_LLM` the variable is never read at all. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_EMBEDDER` | `hashing` (default, offline, 512-dimensional), `hashing:<dim>`, `local` or `local:<model>` (needs `memvara[local-embed]`), or `auto`. See [The embedder is named, not discovered](#the-embedder-is-named-not-discovered). |
 | `MEMVARA_READ_ONLY` | `1` hides every tool that writes. |
 
@@ -143,8 +144,8 @@ a model to be talked into changing.
 `MEMVARA_LLM=openai` reaches any OpenAI-compatible endpoint, not just OpenAI's. The
 endpoint is deliberately **not** a memvara setting: the adapter builds its client through
 the official SDK, which reads `OPENAI_BASE_URL` and `OPENAI_API_KEY` from the environment
-itself. So memvara's own variables here are the model name and, for a server that
-constrains decoding, the claim cap.
+itself. So memvara's own variables here are the model name, the claim cap for a server
+that constrains decoding, and the extraction instructions themselves.
 
 ```bash
 OPENAI_BASE_URL=http://127.0.0.1:8000/v1 \
@@ -152,6 +153,7 @@ OPENAI_API_KEY=whatever \
 MEMVARA_LLM=openai \
 MEMVARA_LLM_MODEL=Qwen/Qwen3.5-4B-Instruct \
 MEMVARA_LLM_MAX_CLAIMS=32 \
+MEMVARA_LLM_EXTRACT_SYSTEM=$HOME/.memvara/extract.txt \
 MEMVARA_DB=$HOME/.memvara/memory.db python3 -m memvara.server
 ```
 
@@ -174,10 +176,28 @@ and OpenAI documents `maxItems` as unsupported under strict mode — where an un
 keyword is rejected rather than ignored, so a cap there buys nothing and risks the call.
 An unusable value is refused at startup rather than clamped, `0` included.
 
-`MEMVARA_LLM_MODEL` and `MEMVARA_LLM_MAX_CLAIMS` apply to the `openai` backend only. Under
-`MEMVARA_MODE=cloud` both are refused outright, along with `MEMVARA_LLM` and
-`MEMVARA_EMBEDDER`: extraction runs inside the deployment, so a value named here would be
-read and never used.
+**Set `MEMVARA_LLM_EXTRACT_SYSTEM` if a small model extracts nothing.** The instructions
+memvara ships close by saying an empty list is a correct answer and the common case. That
+is true, and a model that can weigh salience across a long turn needs to hear it, or it
+invents a fact from every pleasantry. A small model reads the same sentence as permission:
+measured 2026-09-03, phi-4-mini-instruct through llama.cpp returned an empty list for
+every input past roughly 1,300 tokens, and removing that one sentence recovered extraction
+on the same prompt and episodes. The variable takes a **path**, not the text — a
+multi-paragraph prompt in an environment variable is unreadable in `docker inspect` and
+unmaintainable in a compose file. Start from `EXTRACT_SYSTEM` in `memvara/llm/base.py` and
+change as little as you can; the field descriptions in it are what make a claim land in
+the right column. A file that cannot be read, or that is empty, is refused at startup
+rather than falling back to the shipped prompt, because a deployment that named it meant
+to change what the model is told and silently not changing it looks exactly like success.
+
+It replaces the extraction instructions only. Predicate resolution — deciding whether a
+new surface form is an existing predicate or a genuinely new one — keeps its own prompt,
+which this accommodation was never measured against.
+
+`MEMVARA_LLM_MODEL`, `MEMVARA_LLM_MAX_CLAIMS` and `MEMVARA_LLM_EXTRACT_SYSTEM` apply to the
+`openai` backend only. Under `MEMVARA_MODE=cloud` all three are refused outright, along
+with `MEMVARA_LLM` and `MEMVARA_EMBEDDER`: extraction runs inside the deployment, so a
+value named here would be read and never used.
 
 ### The embedder is named, not discovered
 

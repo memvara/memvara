@@ -9,6 +9,22 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`OpenAILLM(extract_system=...)` and `MEMVARA_LLM_EXTRACT_SYSTEM` replace the
+  extraction instructions, for a self-hosted small model.** The instructions memvara ships
+  close by saying an empty list is a correct answer and the common case. That is true, and
+  a model that can weigh salience across a long turn needs to hear it. A small model reads
+  it as permission: measured 2026-09-03, phi-4-mini-instruct through llama.cpp returned an
+  empty list for every input past roughly 1,300 tokens, and removing that one sentence
+  recovered extraction on the same prompt and episodes. Unset keeps the shipped prompt, so
+  nothing changes for a hosted model. The environment variable takes a **path**, and a file
+  that cannot be read or that is empty is refused at startup rather than falling back —
+  a deployment that named it meant to change what the model is told. It replaces the
+  extraction instructions only; predicate resolution keeps its own prompt. Under
+  `MEMVARA_MODE=cloud` it is refused, like `MEMVARA_LLM_MODEL` and
+  `MEMVARA_LLM_MAX_CLAIMS`.
+
 ## [0.11.1] — 2026-09-05
 
 ### Added

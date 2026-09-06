@@ -181,6 +181,43 @@ def test_the_default_cap_sits_between_a_real_answer_and_the_runaway():
     assert 19 < MAX_CLAIMS < 35
 
 
+def test_replacement_extraction_instructions_reach_the_request():
+    """`extract_system` is how a self-hosted small model gets a prompt it can follow.
+
+    `EXTRACT_SYSTEM` ends by saying an empty list is a correct answer and the common case.
+    That is true, and a model that can weigh salience across a long turn needs to hear it.
+    Measured 2026-09-03, phi-4-mini-instruct read it as permission and returned nothing at
+    all on inputs past roughly 1,300 tokens, on the same prompt and episodes; removing the
+    sentence recovered extraction. The override carries only the system message, so the
+    user prompt and the schema are the shipped ones either way."""
+    client = FakeClient({"claims": []})
+    OpenAILLM(client=client, extract_system="Only the facts.").extract(episodes("hi"), [])
+    call = client.calls[0]
+    assert call["messages"][0] == {"role": "system", "content": "Only the facts."}
+    assert call["messages"][1]["content"] != "Only the facts."
+    assert call["response_format"]["json_schema"]["schema"] is CLAIM_SCHEMA
+
+
+def test_the_shipped_extraction_instructions_are_the_default():
+    """Absent and empty both mean "use what memvara ships", so a caller that computes the
+    override and gets nothing does not send a model an empty system message."""
+    for override in (None, ""):
+        client = FakeClient({"claims": []})
+        OpenAILLM(client=client, extract_system=override).extract(episodes("hi"), [])
+        assert client.calls[0]["messages"][0]["content"] == EXTRACT_SYSTEM
+
+
+def test_replacing_the_extraction_prompt_leaves_predicate_resolution_alone():
+    """The override is scoped to extraction. `resolve_predicate` decides whether a surface
+    form is an existing predicate or a new one, and it is not the call the small-model
+    accommodation was measured against — sending it a prompt written for extraction would
+    change a second behaviour nobody asked to change."""
+    client = FakeClient({"predicate": "works_at", "is_new": False})
+    OpenAILLM(client=client, extract_system="Only the facts.").resolve_predicate(
+        "employed_by", ["works_at"])
+    assert client.calls[0]["messages"][0]["content"] != "Only the facts."
+
+
 def test_the_system_prompt_and_temperature_ride_on_the_request():
     """Temperature 0 because extraction is parsing, not writing: the same turn twice
     should give one claim, not two spellings the reconciler treats as competing."""

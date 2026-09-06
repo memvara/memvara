@@ -3352,6 +3352,126 @@ def test_cloud_mode_refuses_a_claim_cap():
         build_memvara(cloud)
 
 
+def test_replacement_extraction_instructions_are_read_from_the_named_file(
+        monkeypatch, tmp_path):
+    """The file's text reaches the backend, so a self-hosted deployment can change what
+    the model is told without a fork. Measured 2026-09-03: phi-4-mini returned nothing on
+    inputs past roughly 1,300 tokens until `EXTRACT_SYSTEM`'s closing sentence went."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    prompt = tmp_path / "extract.txt"
+    prompt.write_text("  Only the facts.\n", encoding="utf-8")
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+        "MEMVARA_LLM_EXTRACT_SYSTEM": str(prompt)}))
+    assert memory.llm._extract_system == "Only the facts."
+    memory.close()
+
+
+def test_the_shipped_extraction_instructions_are_the_default(monkeypatch):
+    """Unset means memvara's own prompt, which is what every hosted deployment wants."""
+    import types as pytypes
+
+    from memvara.llm.base import EXTRACT_SYSTEM
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai"}))
+    assert memory.llm._extract_system == EXTRACT_SYSTEM
+    memory.close()
+
+
+def test_an_unreadable_extraction_prompt_is_refused_at_startup(tmp_path):
+    """Refused rather than falling back to the shipped prompt. A deployment that named
+    this file meant to change what the model is told, and quietly not changing it is the
+    failure that looks like success: the server starts, extraction runs, and the only
+    symptom is claims that never arrive."""
+    with pytest.raises(ConfigError, match="MEMVARA_LLM_EXTRACT_SYSTEM"):
+        build_memvara(ServerConfig.from_env({
+            "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+            "MEMVARA_LLM_EXTRACT_SYSTEM": str(tmp_path / "absent.txt")}))
+
+
+def test_an_empty_extraction_prompt_is_refused_at_startup(tmp_path):
+    """A model told nothing extracts nothing, and an empty file is far more likely to be
+    a truncated write or a bad mount than a deliberate instruction."""
+    prompt = tmp_path / "extract.txt"
+    prompt.write_text("   \n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="MEMVARA_LLM_EXTRACT_SYSTEM"):
+        build_memvara(ServerConfig.from_env({
+            "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+            "MEMVARA_LLM_EXTRACT_SYSTEM": str(prompt)}))
+
+
+def test_a_binary_extraction_prompt_is_refused_as_a_config_error(tmp_path):
+    """A model file, not a prompt — the mistake this deployment is one path typo away from,
+    because a self-hosted box keeps GGUF weights and prompt files in adjacent directories.
+
+    `UnicodeDecodeError` is not an `OSError`, so without its own handler it escapes as a
+    traceback naming no variable, which is the opposite of what a startup refusal is for."""
+    weights = tmp_path / "Phi-4-mini-instruct.Q8_0.gguf"
+    weights.write_bytes(b"GGUF\x00\x03\x00\x00\x00\xff\xfe\xfd")
+    with pytest.raises(ConfigError, match="not UTF-8"):
+        build_memvara(ServerConfig.from_env({
+            "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+            "MEMVARA_LLM_EXTRACT_SYSTEM": str(weights)}))
+
+
+def test_an_oversized_extraction_prompt_is_refused_before_it_is_read(tmp_path):
+    """A system prompt is kilobytes. Without a ceiling, a path pointing at a log or a
+    dataset is read whole into memory and then sent as the system message on every
+    extraction — valid UTF-8, so neither of the other guards would fire."""
+    from memvara.server.config import _MAX_EXTRACT_SYSTEM_BYTES
+
+    haystack = tmp_path / "messages.log"
+    haystack.write_text("x" * (_MAX_EXTRACT_SYSTEM_BYTES + 1), encoding="utf-8")
+    with pytest.raises(ConfigError, match="over the"):
+        build_memvara(ServerConfig.from_env({
+            "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+            "MEMVARA_LLM_EXTRACT_SYSTEM": str(haystack)}))
+
+
+def test_a_byte_order_mark_does_not_reach_the_system_prompt(monkeypatch, tmp_path):
+    """`str.strip()` would leave it: U+FEFF is not whitespace. An editor that writes one
+    would otherwise start every system message with an invisible character that shows up
+    in no diff and no log the operator would think to check."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    prompt = tmp_path / "extract.txt"
+    prompt.write_bytes("\ufeffOnly the facts.".encode("utf-8"))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+        "MEMVARA_LLM_EXTRACT_SYSTEM": str(prompt)}))
+    assert memory.llm._extract_system == "Only the facts."
+    memory.close()
+
+
+def test_a_directory_named_as_the_extraction_prompt_is_refused(tmp_path):
+    """`IsADirectoryError` is an `OSError`, so this rides the existing handler — pinned
+    because it is the likeliest typo of all, a path that stops one segment short."""
+    with pytest.raises(ConfigError, match="cannot be read"):
+        build_memvara(ServerConfig.from_env({
+            "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+            "MEMVARA_LLM_EXTRACT_SYSTEM": str(tmp_path)}))
+
+
+def test_cloud_mode_refuses_a_replacement_extraction_prompt(tmp_path):
+    """Same rule as the extraction model and the claim cap: extraction runs inside the
+    deployment, so a prompt named here would be read and never used."""
+    prompt = tmp_path / "extract.txt"
+    prompt.write_text("Only the facts.", encoding="utf-8")
+    cloud = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
+                                   "MEMVARA_LLM_EXTRACT_SYSTEM": str(prompt)})
+    assert cloud.llm_extract_system == str(prompt)
+    with pytest.raises(ConfigError, match="MEMVARA_LLM_EXTRACT_SYSTEM"):
+        build_memvara(cloud)
+
+
 def test_a_missing_openai_sdk_is_a_startup_error_not_a_crash(monkeypatch):
     monkeypatch.setitem(sys.modules, "openai", None)
     with pytest.raises(ConfigError, match="needs the openai SDK"):
