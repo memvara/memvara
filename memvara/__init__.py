@@ -34,7 +34,7 @@ What it does differently from mem0 and friends:
 
 from .aio import AsyncMemvara, AsyncScopedMemvara
 from .consolidate import Consolidator
-from .entities import EntityRegistry, EntityResolution, EntitySpec, entity_key
+from .entities import ENTITY_KEY_MAX, EntityRegistry, EntityResolution, EntitySpec, entity_key
 from .redact import PatternRedactor, Redactor
 from .core import (
     DegradedExtractionWarning,
@@ -149,7 +149,7 @@ __all__ = [
     "HybridRetriever", "Retrieved", "EpisodeResult",
     # multi-hop traversal. `Path` is a chain of claims, not a filesystem path.
     "GraphTraverser", "Path", "Edge", "HOP_DAMPING",
-    "EntityRegistry", "EntityResolution", "EntitySpec", "entity_key",
+    "EntityRegistry", "EntityResolution", "EntitySpec", "ENTITY_KEY_MAX", "entity_key",
     "backfill_entities",
     # The other direction: `learn_alias` says two spellings are one thing, and this says
     # one spelling has been two. Exported with its report type for `backfill_entities`'

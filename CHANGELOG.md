@@ -9,6 +9,24 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A value of a few kilobytes no longer fails the write on a store with a btree index on
+  the entity id.** `entity_key` folded the whole text into the key, so a pasted paragraph
+  used as an object became a 3 KB entity id and a 3 KB `object_key`, and Postgres refused
+  the row (`index row size 3104 exceeds btree version 4 maximum 2704 for index
+  "entities_pkey"`, seen on the hosted service on 2026-09-06). The key is now bounded at
+  `ENTITY_KEY_MAX` (512 characters): a longer key is cut to the words that fit and
+  finished with a 16-character digest of the whole key, so two long values that share an
+  opening stay distinct and the bounded key folds to itself. Keys that fit under the bound
+  are unchanged, so no existing entity id or `fact_key` moves. A value whose key was
+  already longer than 512 characters in an existing store gets a new identity on its next
+  write and is stored as a new value rather than reinforcing the old row;
+  `docs/UPGRADING.md` says how to find such rows. The split marker `split_entity` writes
+  is folded before it is stored, so a split of an entity at the bound stays under it, and
+  `anchored=True` matches a long value by its words without the digest, so a question
+  that repeats the value still anchors the claim.
+
 ## [0.11.2] — 2026-09-06
 
 ### Added

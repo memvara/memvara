@@ -70,6 +70,7 @@ calls.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass, replace
@@ -112,6 +113,29 @@ _CANDIDATE_LIMIT = 16
 #: carry aliases and occupy a row.
 DEFAULT_ENTITY_CAP = 5000
 
+#: Longest key `entity_key` returns, in characters. A key longer than this is cut to the
+#: words that fit and finished with a 16-character digest of the whole key, so two long
+#: values that share an opening stay two entities. The number is chosen for the stores
+#: the key is written to. Postgres refuses a btree index row over 2704 bytes, and the key
+#: sits in three indexed places: the entity id, which also carries the owner, and
+#: `claims.subject_key` and `claims.object_key`, which the hosted store indexes together
+#: with the tenant and the predicate. 512 characters is at most 2048 bytes of UTF-8, which
+#: leaves room for the other columns in each of those indexes. It is well past any name a
+#: person or a company has, so a key that reaches it is a sentence used as a value, and
+#: nothing that fits under it changes: the ids already inside every `fact_key` on disk
+#: stay exactly what they were.
+ENTITY_KEY_MAX = 512
+
+#: Length of the digest that finishes a bounded key. Hex, so it is a single word to
+#: `_tokens` and the bounded key folds to itself. 16 hex characters is 64 bits, and two
+#: long values from one owner collide only if they share the same 64-bit digest, which
+#: needs on the order of four billion long values before it becomes likely.
+_DIGEST_CHARS = 16
+
+#: What the digest at the end of a bounded key looks like. `key_words` uses it to give
+#: a reader the words of a key without the digest.
+_DIGEST = re.compile(r"[0-9a-f]{" + str(_DIGEST_CHARS) + r"}")
+
 
 def entity_key(surface: str) -> str:
     """Deterministic identity of an entity surface form. A pure function.
@@ -131,6 +155,20 @@ def entity_key(surface: str) -> str:
     Returns "" for a surface form with no content at all, which callers read as "no
     entity here" — an empty object is meaningful for retraction, where it means "clear
     the whole slot".
+
+    The key is never longer than `ENTITY_KEY_MAX` characters. A value of a few kilobytes
+    (a pasted paragraph handed to `remember` as an object) used to fold to a key of the
+    same length, and the hosted store could not index it. Such a key is cut to the words
+    that fit and finished with a digest of the whole key, so it stays readable, stays
+    unique, and still folds to itself (folding the key again returns the same key, which
+    `fact_key_for` and `default_entity` rely on):
+
+    >>> long = "the customer said the renewal would be decided after the audit " * 60
+    >>> key = entity_key(long)
+    >>> len(key) <= ENTITY_KEY_MAX and entity_key(key) == key
+    True
+    >>> key.startswith("customer said the renewal")
+    True
     """
     tokens = _tokens(surface)
     if not tokens:
@@ -142,7 +180,63 @@ def entity_key(surface: str) -> str:
         tokens = kept
     if len(tokens) > 1 and tokens[0] in _ARTICLES:
         tokens = tokens[1:]
-    return " ".join(tokens)
+    key = " ".join(tokens)
+    if len(key) <= ENTITY_KEY_MAX:
+        return key
+    return _bounded(key, tokens)
+
+
+def _bounded(key: str, tokens: list[str]) -> str:
+    """Cut a key past `ENTITY_KEY_MAX` to the words that fit, plus a digest of all of it.
+
+    Folding the result must return it unchanged, because `fact_key_for` and
+    `default_entity` both rely on that. So the prefix never keeps a legal-form word or a
+    leading article: `entity_key` would strip either of them on the second pass, once the
+    digest is there as another word to keep. A legal-form word only reaches this function
+    when every word of the surface was one, and the same goes for a leading article, so
+    both cases leave no words at all, and the key is the bare digest. A surface whose
+    first word alone is longer than the room ends the same way.
+
+    >>> len(_bounded(" ".join(["inc"] * 200), ["inc"] * 200)) == _DIGEST_CHARS
+    True
+    """
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=_DIGEST_CHARS // 2).hexdigest()
+    room = ENTITY_KEY_MAX - _DIGEST_CHARS - 1
+    prefix: list[str] = []
+    used = 0
+    for tok in tokens:
+        if tok in _LEGAL_FORMS or (not prefix and tok in _ARTICLES):
+            continue
+        cost = len(tok) + (1 if prefix else 0)
+        if used + cost > room:
+            break
+        prefix.append(tok)
+        used += cost
+    return " ".join(prefix + [digest])
+
+
+def key_words(key: str) -> list[str]:
+    """The words of a key a reader could have typed: every word, minus the digest that
+    finishes a bounded key.
+
+    A retriever matching a question against a key needs every word of the key in the
+    question. Nobody types the digest, so a bounded key would never match. The digest is
+    recognised by its shape, 16 hex characters at the end after at least one word, which
+    means a short key that happens to end in 16 hex characters is also matched on its
+    other words alone. That makes anchoring slightly looser for such a key and nothing
+    else.
+
+    >>> key_words("acme")
+    ['acme']
+    >>> key_words(entity_key("the customer said the renewal would be decided " * 40))[:3]
+    ['customer', 'said', 'the']
+    >>> key_words(entity_key("the customer said the renewal would be decided " * 40))[-1]
+    'renewal'
+    """
+    parts = key.split()
+    if len(parts) > 1 and _DIGEST.fullmatch(parts[-1]):
+        return parts[:-1]
+    return parts
 
 
 def _tokens(surface: str) -> list[str]:

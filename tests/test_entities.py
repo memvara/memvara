@@ -20,6 +20,7 @@ from memvara import Memvara, NullLLM
 from memvara.embed import HashingEmbedder
 from memvara.entities import (
     DEFAULT_ENTITY_CAP,
+    ENTITY_KEY_MAX,
     EntityRegistry,
     EntitySpec,
     entity_id,
@@ -1119,3 +1120,108 @@ def test_splitting_the_same_surface_twice_changes_nothing_the_second_time():
         acme = [c for c in mem.get_all() if c.object == "Acme"][0]
         assert acme.subject_key == "john smith split 20200101000000"
         assert len(acme.meta[ENTITY_REKEY]) == 1, "stamped once, not twice"
+
+
+# --- the fold is bounded ------------------------------------------------------
+#
+# The hosted store keeps every entity id in a Postgres btree, and a btree row may not be
+# longer than 2704 bytes. An object of a few kilobytes — a pasted paragraph handed to
+# `remember` as a value — folded to a key of the same length and took the whole write
+# down with `index row size 3104 exceeds btree version 4 maximum 2704 for index
+# "entities_pkey"` (app.memvara.dev, 2026-09-06). The key also sits in `claims.object_key`,
+# which the same store indexes, so the bound belongs on the fold and not on the id.
+
+LONG_A = ("the customer said the renewal would be decided after the audit " * 60).strip()
+LONG_B = LONG_A[:-5] + "later"        # same first 3,000 characters, different ending
+
+
+def test_a_short_fold_is_not_touched_by_the_bound():
+    # Ids of existing entities are baked into every fact_key on disk. The bound may
+    # change only keys that could never have been written to the hosted store.
+    assert entity_key("Acme, Inc.") == "acme"
+    assert entity_key("Grüner & Sohn Bestattungen GmbH") == "gruner sohn bestattungen"
+    assert entity_key("x" * ENTITY_KEY_MAX) == "x" * ENTITY_KEY_MAX
+
+
+def test_a_long_fold_is_bounded():
+    assert len(LONG_A) > ENTITY_KEY_MAX
+    key = entity_key(LONG_A)
+    assert len(key) <= ENTITY_KEY_MAX
+    # Readable: it starts with the words the surface starts with.
+    assert key.startswith("customer said the renewal would be decided after the audit")
+
+
+def test_two_long_surfaces_with_one_prefix_keep_different_identities():
+    assert entity_key(LONG_A) != entity_key(LONG_B)
+
+
+def test_a_bounded_fold_is_idempotent_and_deterministic():
+    # `fact_key_for` and `default_entity` fold a key that is already folded and expect
+    # it back unchanged; a bounded key that moved on the second fold would give one value
+    # two identities.
+    for surface in (LONG_A, LONG_B):
+        key = entity_key(surface)
+        assert len(key) <= ENTITY_KEY_MAX
+        assert entity_key(key) == key
+        assert entity_key(surface) == key
+
+
+def _is_bare_digest(key: str) -> bool:
+    return len(key) == 16 and all(ch in "0123456789abcdef" for ch in key)
+
+
+def test_an_all_legal_form_name_bounds_to_a_bare_digest():
+    # Short, "inc" keeps its own identity (see `entity_key`). Long, every word would be
+    # stripped by the second fold once the digest is there, so none is kept: the key is
+    # the digest alone, and folding it again returns it.
+    key = entity_key("inc co ltd " * 200)
+    assert _is_bare_digest(key) and entity_key(key) == key
+
+
+def test_an_all_article_name_bounds_to_a_bare_digest():
+    key = entity_key("the " * 400)
+    assert _is_bare_digest(key) and entity_key(key) == key
+
+
+def test_a_single_word_too_long_to_fit_bounds_to_a_bare_digest():
+    key = entity_key("a" * 5000)
+    assert _is_bare_digest(key) and entity_key(key) == key
+
+
+def test_a_split_of_a_long_entity_stays_under_the_bound():
+    """`split_entity` writes `"{base} split {stamp}"` into `subject_key`, and a base that
+    already sits at the bound would carry the marker past it. The marker is folded before
+    it is stored, so it fits, folds to itself, and is not the entity it was split from."""
+    with _hr() as mem:
+        mem.remember(LONG_A, "works_at", "Acme", valid_from=J18, recorded_at=J18)
+        mem.remember(LONG_A, "works_at", "Globex", valid_from=J26, recorded_at=J26)
+        report = split_entity(mem.writer.reconciler, SCOPE_HR, LONG_A, J20, dry_run=False)
+        assert report.moved == 1
+
+        moved = [c for c in mem.get_all() if c.object == "Acme"][0].subject_key
+        assert len(moved) <= ENTITY_KEY_MAX
+        assert entity_key(moved) == moved
+        assert moved != entity_key(LONG_A)
+        assert [c.subject_key for c in mem.get_all() if c.object == "Globex"] == [entity_key(LONG_A)]
+
+
+def test_a_long_object_round_trips_through_remember():
+    """The shape of the production failure: a paragraph as the value of a claim. It must
+    be stored, found again by its text, reinforced rather than duplicated on a second
+    write, and leave an entity id short enough for any store to index."""
+    mem = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+    first = mem.remember("user", "notes", LONG_A)
+    assert len(first.added) == 1
+    assert first.added[0].object == LONG_A          # the value itself is not shortened
+
+    again = mem.remember("user", "notes", LONG_A)
+    assert again.added == [] and again.reinforced   # same identity, so a re-observation
+
+    hits = mem.search("renewal decided after the audit", k=5)
+    assert any(h.claim.object == LONG_A for h in hits)
+
+    ids = [i for i, _, _ in mem.store.all_entities("default")]
+    longest = max(len(i.encode("utf-8")) for i in ids)
+    assert longest <= len(entity_id(OWNER, "").encode("utf-8")) + ENTITY_KEY_MAX * 4
+    assert longest < 2704, "an id this long cannot be a Postgres btree row"
+    mem.close()

@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from typing import Callable, Iterable
 
-from ..entities import POSSESSIVE, entity_key
+from ..entities import POSSESSIVE, entity_key, key_words
 from ..types import SELF_SUBJECT, Claim
 
 #: The three ways a result can be tied to the question, as `Explanation.anchor` reports
@@ -122,7 +122,9 @@ def anchor_of(claim: Claim, tokens: frozenset[str],
         if end == SUBJECT and key == SELF_SUBJECT and tokens & SELF_PRONOUNS:
             return end
         for spelling in spellings(key):
-            parts = spelling.split()
+            # `key_words` leaves out the digest that finishes a bounded key; a question
+            # that repeats a long value names it by its words, never by the digest.
+            parts = key_words(spelling)
             if parts and tokens.issuperset(parts):
                 return end
     return None
