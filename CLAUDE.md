@@ -145,6 +145,41 @@ still has to run. Rewriting the prose around an example does not exempt it from 
 diffed in seven plugin repositories. Converting its prose is a real change in all of them, so
 do it deliberately and in its own commit, never as a drive-by while editing something else.
 
+## Write plainly, and run only the checks a docs-only change can move
+
+**Every sentence must be understood on the first read by someone who has no context.** This
+applies to documentation, dashboard panel descriptions, metric help strings, code comments,
+docstrings, commit messages, PR bodies and replies to the user. Write the way you would
+explain something to a colleague across a desk: a full sentence with a clear subject and
+verb, saying what the thing is and then what it means for the reader. For example, write
+"This is a count only; no project name is shown", not "A count and never a name".
+
+The short, clever style you will see in older files here is not the target. It comes from
+three places, and knowing them helps you resist it:
+
+1. The existing prose in this and the sibling memvara repositories (operations docs,
+   READMEs, test docstrings, old commit messages) is written in that style. Those files
+   are being converted. Do not copy their voice because it is around you.
+2. The memories stored in Memvara by earlier sessions were written in the same style.
+   Treat them as notes about facts, not as a writing sample.
+3. Your own earlier text in the session. If you notice you wrote a clever sentence,
+   rewrite it before moving on.
+
+How to check: read the sentence back. If a colleague would need to hear it twice, rewrite it.
+
+**A change that touches only prose runs only the checks it can affect.** Do not run the full
+gate for a documentation change; a prose edit cannot move a test suite, and the gate here
+takes about nine minutes. Run the type check if a typed file changed and the specific test
+file that reads the changed document (for example the test that parses a dashboard JSON or
+a queries file), and quote its "N passed" line in the PR body. A code change still gets the
+full gate.
+
+Both rules were stated by the user on 2026-09-06. The first after quoting a dashboard panel
+description an agent had written and asking "from where are you getting that you need to
+write like this?"; the second as "Don't run the gate just for the document update". The
+same section is in the `memvara`, `memvara-cloud` and `memvara-web` repositories and in the
+user's global `CLAUDE.md`.
+
 ## More than one agent may be working in this checkout at once
 
 Assume files you did not touch are somebody else's unfinished work, and that they have no
