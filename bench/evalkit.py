@@ -2388,6 +2388,73 @@ def build_embedder(name: str) -> Any:
     return CachedEmbedder(HashingEmbedder(dim=BASELINE_EMBED_DIM))
 
 
+def add_rerank_arguments(parser: Any) -> None:
+    """`--rerank`, `--reranker` and `--rerank-model`, for a runner that wants them.
+
+    Not in `add_common_arguments` because not every runner has a read path to rerank,
+    and a flag that is accepted and ignored is worse than one that is absent: `--rerank
+    20` printed nowhere and applied to nothing is how a table of reranker rows gets
+    written from runs that never reranked.
+    """
+    parser.add_argument("--rerank", type=int, default=0, metavar="N",
+                        help="rerank the top N fused candidates (0 = off, the default)")
+    parser.add_argument("--reranker", default="coverage",
+                        choices=["coverage", "null", "cross-encoder"],
+                        help="which reranker --rerank uses; cross-encoder needs "
+                             "pip install 'memvara[rerank]' and downloads a model")
+    parser.add_argument("--rerank-model", default="", metavar="ID",
+                        help="cross-encoder model id (default: "
+                             "cross-encoder/ms-marco-MiniLM-L-6-v2). Only meaningful "
+                             "with --reranker cross-encoder.")
+
+
+def build_reranker(args: Any) -> Any:
+    """`None` unless `--rerank N` was asked for, which is the shipped default.
+
+    Imported here rather than at module scope for the reason the library itself does it:
+    naming `CrossEncoderReranker` must not import torch into a run that is not using it.
+
+    Lives in `evalkit` rather than in one runner because both need it and the numbers
+    are meant to be read side by side. `--embedder` is the precedent and the warning:
+    while it existed on one runner only, a LOCOMO figure and a LongMemEval figure quoted
+    in the same paragraph had been produced by different vector legs.
+    """
+    if not args.rerank:
+        # `--reranker` and `--rerank-model` do nothing without a window to rerank, so
+        # accepting them here and returning `None` would run the baseline and let the
+        # operator write the result down as a row for the model they named. That is the
+        # failure `add_rerank_arguments` describes, and it is worth an error rather than
+        # a warning: a warning scrolls past in a run that prints a page of tables, and
+        # the number it produces is wrong in the direction that looks reasonable.
+        # `--reranker` has a default, so only an explicit value is a request.
+        asked = [flag for flag, given in (("--reranker", args.reranker != "coverage"),
+                                          ("--rerank-model", bool(args.rerank_model)))
+                 if given]
+        if asked:
+            verb = "need" if len(asked) > 1 else "needs"
+            raise SystemExit(
+                f"{' and '.join(asked)} {verb} --rerank N, which sets how many "
+                "candidates the reranker sees. Without it no reranker runs at all, and "
+                "the run would measure the shipped baseline under the name of the model "
+                "you asked for."
+            )
+        return None
+    from memvara.rerank import CoverageReranker, NullReranker
+
+    if args.reranker == "null":
+        return NullReranker()
+    if args.reranker == "cross-encoder":
+        from memvara.rerank import DEFAULT_MODEL, CrossEncoderReranker
+
+        # `--rerank-model` exists because "does reranking help" and "does *this model*
+        # help" are different questions, and a harness that can only ask the first will
+        # answer the second by accident. A cross-encoder trained on web-search passage
+        # ranking is not obviously the right judge of whether a conversational turn
+        # states a fact about a person.
+        return CrossEncoderReranker(args.rerank_model or DEFAULT_MODEL)
+    return CoverageReranker()
+
+
 def build_plan(args: Any) -> RetrievalPlan:
     ks = tuple(int(k) for k in str(args.recall_at).split(",") if k.strip())
     if not ks or any(k < 1 for k in ks):

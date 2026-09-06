@@ -9,6 +9,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`bench/longmemeval.py` gained `--rerank`, `--reranker` and `--rerank-model`.** They
+  existed only on `bench/locomo.py`, so the cross-encoder had never been measured on
+  LongMemEval at all. `build_reranker` and the flag definitions now live in
+  `bench/evalkit.py` where both runners share them; `bench/locomo.py` behaves exactly as
+  before. Both runners print which reranker ran and over how deep a window, unconditionally,
+  because a reranked row that does not state its configuration is not comparable to the row
+  above it. Measured on the LongMemEval-S store: the cross-encoder takes overall evidence
+  R@12 from 35.1 to 40.1 and temporal-reasoning from 23.1 to 30.2.
+  `docs/BENCHMARKS.md` carries the baseline table, which is the first measurement of the
+  `--share-store` episode-retrieval configuration.
+
 ## [0.11.3] — 2026-09-06
 
 ### Fixed

@@ -2129,3 +2129,54 @@ def _run_cli(main, argv) -> str:
 
 def _shuffle_warning_in(text: str) -> bool:
     return "grouped by question type" in text
+
+
+class _RerankArgs:
+    """The three flags `ek.build_reranker` reads, with argparse's own defaults."""
+
+    def __init__(self, rerank=0, reranker="coverage", rerank_model=""):
+        self.rerank = rerank
+        self.reranker = reranker
+        self.rerank_model = rerank_model
+
+
+def test_no_reranker_unless_a_window_was_asked_for():
+    """`--rerank 0` is the shipped default and builds no stage at all."""
+    assert ek.build_reranker(_RerankArgs()) is None
+
+
+@pytest.mark.parametrize("kwargs, named", [
+    ({"reranker": "cross-encoder"}, "--reranker"),
+    ({"rerank_model": "BAAI/bge-reranker-base"}, "--rerank-model"),
+    ({"reranker": "null", "rerank_model": "X"}, "--reranker and --rerank-model"),
+])
+def test_asking_for_a_reranker_without_a_window_is_refused(kwargs, named):
+    """The flags cannot be accepted and dropped, which is the whole point of them.
+
+    Returning `None` here would run the shipped baseline while the operator believed
+    they were measuring the model they named, and the resulting number is wrong in the
+    direction that looks reasonable. The message has to name the flags that were
+    ignored, because that is what tells the reader which of their arguments did nothing.
+    """
+    with pytest.raises(SystemExit) as raised:
+        ek.build_reranker(_RerankArgs(**kwargs))
+    assert named in str(raised.value)
+    assert "--rerank N" in str(raised.value)
+
+
+def test_the_default_reranker_choice_alone_is_not_a_request():
+    """`--reranker` has a default, so only an explicit value counts as asking for one.
+
+    Without this the plain `--rerank 0` run above would raise, because argparse fills
+    `reranker` in whether or not anybody typed it.
+    """
+    assert ek.build_reranker(_RerankArgs(reranker="coverage")) is None
+
+
+def test_every_reranker_reports_a_name_that_identifies_it():
+    """The banners print `name`, so a run records which model it used rather than that
+    a default was taken. A reranker without one would log its class and lose the model
+    id, which is unrecoverable once the default changes in a later release."""
+    coverage = ek.build_reranker(_RerankArgs(rerank=20, reranker="coverage"))
+    null = ek.build_reranker(_RerankArgs(rerank=20, reranker="null"))
+    assert getattr(coverage, "name", None) and getattr(null, "name", None)

@@ -832,31 +832,73 @@ one mention time and no clock for when a record stopped being believed, so it ca
 Hindsight adjusts the confidence in place and its opinion tuple carries one timestamp;
 whether earlier versions survive is something the paper does not say.
 
-**What is worth measuring here, in order.** None of these is queued. Each names the row it
-would move and the instrument that would show it, except the fifth, which is last for that
-reason. The first two share a row and are read together.
+**What is worth measuring here, in order.** Each names the row it would move and the
+instrument that would show it, except the fifth, which is last for that reason. The first
+two share a row and are read together. **The first has since been built and declined on the
+measurement**, which is why it now reads longer than the rest; none of the others is
+queued.
 
-1. **Render the turn's time into the indexed text.** Hindsight prefixes each fact with a
-   human-readable time before embedding it and includes the same string in the reranker's
-   input. Here nothing that ranks on text can see time: the episode FTS index holds
-   `content` alone, the episode vector is encoded from `content`, `rerank/stage.py` scores
-   `item.text`, and `Claim.render()` is subject, predicate and object. So BM25 cannot match
-   "June 2024" in a question to a turn dated then, and the cross-encoder is asked whether an
-   undated passage answers a dated question. The row is temporal-reasoning,
-   [66.6 R@12 in the LongMemEval retrieval table](BENCHMARKS.md) and
-   [47/53 judged](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness), and both
-   of those runs are episode retrieval with no extraction, so the rendering that can move
-   them is of `Episode.ts`, the session date the benchmark supplies. Rendering `valid_from`
-   into claim text, at the precision `when.resolve` returned, is the same idea on the other
-   unit and is measurable only where claims exist. Deterministic and write-time, with no
-   model on the read path, so invariants 1 and 5 hold. Two costs to state before anyone
-   starts. On an existing store every episode FTS row and every episode vector has to be
-   rebuilt, through a migration and `reembed()`, and on the claim side a one-time backfill
-   is exactly the bulk FTS rewrite that `put_claim`'s own comment warns raises
-   `SQLITE_CORRUPT_VTAB` inside one transaction. And `merge_pass` compares claim text, so
-   two observations of one fact rendered at different precisions would stop merging.
-   Instrument: `bench/longmemeval.py --score retrieval --share-store`, with and without the
-   reranker.
+1. **Render the turn's time into the indexed text — built, measured, and declined.** This
+   was the first of these six to be built, on 2026-09-06, and it did not pay. The entry is
+   kept in full rather than deleted because the idea is an obvious one that will occur to
+   somebody again, and what it costs to test is a day.
+
+   The reasoning was sound and is still worth stating. Nothing that ranks on text can see
+   time: the episode FTS index holds `content` alone, the episode vector is encoded from
+   `content`, and `rerank/stage.py` scores `item.text`. So BM25 cannot match "June 2024" in
+   a question to a turn dated then, and the cross-encoder is asked whether an undated
+   passage answers a dated question. Hindsight prefixes each fact with a human-readable
+   time before embedding it and puts the same string in the reranker's input.
+
+   **What was built.** `Episode.indexed_text`, a schema-10 migration rebuilding
+   `episodes_fts` over the dated text, the three episode-vector call sites, an accessor so
+   the cross-encoder scored the same string, and a fingerprint guard for a store that
+   upgraded without `reembed()`. Two date formats were tried.
+
+   **What was measured.** Six arms on LongMemEval-S, all 500 questions,
+   `--score retrieval --share-store --embedder hashing`, baseline and change run on the
+   same harness so the library was the only variable. Ingest was byte-identical across
+   arms: 199,499 turns, 19,195 sessions, 1,168 claims. Evidence recall, R@12:
+
+   | | baseline | `June 2023` | `Thursday, 15 June 2023 (2023-06-15)` |
+   |---|---:|---:|---:|
+   | all, reranker off | 35.1 | 35.6 | 35.6 |
+   | all, cross-encoder | 40.1 | 39.4 | 39.8 |
+   | temporal-reasoning, reranker off | 23.1 | 24.0 | 24.4 |
+   | temporal-reasoning, cross-encoder | 30.2 | 29.8 | 28.7 |
+
+   Temporal-reasoning rose at R@12 and fell at R@1, R@5, R@20 and MRR, in both formats. A
+   category that moves at one depth out of five has not moved.
+
+   **The finding that reproduces, and the reason to stop.** What the cross-encoder is worth
+   on temporal-reasoning R@12, by how much date text sits in front of the turn:
+
+   | index | cross-encoder gain |
+   |---|---:|
+   | undated | **+7.1** |
+   | `June 2023`, two tokens | +5.8 |
+   | `Thursday, 15 June 2023 (2023-06-15)`, eight tokens | +4.3 |
+
+   Monotonic in prefix length. BM25 normalises for document length, so every token added
+   here makes every turn a slightly worse match for everything, and the date tokens are
+   matched by only a few questions. The prefix also crowds out the turn's own content in a
+   20-candidate reranker window. Both effects run against the change, and together they
+   exceed what dating buys. Predicted before the run, too: on a synthetic corpus the long
+   prefix compressed the BM25 score separation between a strong and a weak match by 38%.
+
+   **What this does and does not rule out.** It rules out prefixing the *episode* index on
+   this corpus, at day and month granularity, with and without the cross-encoder. It says
+   nothing about rendering `valid_from` into *claim* text, which was never built — the
+   corpora that produce judged numbers here barely extract, and `merge_pass` compares claim
+   text through `_blocking_key` and a 0.97 cosine, so two precisions of one fact would stop
+   merging. It also says nothing about a corpus where questions name dates far more often
+   than LongMemEval's do.
+
+   The work was reverted. What survives is `--rerank` on `bench/longmemeval.py`, which had
+   to be built to run the arms at all, and the baseline table in
+   [`docs/BENCHMARKS.md`](BENCHMARKS.md#episode-retrieval-on-a-shared-store), which is the
+   first measurement of this configuration.
+
 
 2. **Give the temporal leg an anchor.** The leg ships at zero because no benchmark passes
    `valid_at`: `bench/evalkit.py` calls `search(question, k)`, and `bench/longmemeval.py`

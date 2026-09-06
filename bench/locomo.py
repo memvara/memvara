@@ -693,30 +693,6 @@ def report(
 # --- CLI ------------------------------------------------------------------------
 
 
-def build_reranker(args: argparse.Namespace) -> Any:
-    """`None` unless `--rerank N` was asked for, which is the shipped default.
-
-    Imported here rather than at module scope for the reason the library itself does it:
-    naming `CrossEncoderReranker` must not import torch into a run that is not using it.
-    """
-    if not args.rerank:
-        return None
-    from memvara.rerank import CoverageReranker, NullReranker
-
-    if args.reranker == "null":
-        return NullReranker()
-    if args.reranker == "cross-encoder":
-        from memvara.rerank import DEFAULT_MODEL, CrossEncoderReranker
-
-        # `--rerank-model` exists because "does reranking help" and "does *this model*
-        # help" are different questions, and a harness that can only ask the first will
-        # answer the second by accident. A cross-encoder trained on web-search passage
-        # ranking is not obviously the right judge of whether a conversational turn
-        # states a fact about a person.
-        return CrossEncoderReranker(args.rerank_model or DEFAULT_MODEL)
-    return CoverageReranker()
-
-
 def main(argv: Sequence[str] | None = None,
          out: Callable[[str], None] = print) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -727,16 +703,7 @@ def main(argv: Sequence[str] | None = None,
     # Off by default, and the default is the configuration every published number in
     # the README was produced with. `--rerank N` is the A/B: same corpus, same queries,
     # same seed, one stage added.
-    parser.add_argument("--rerank", type=int, default=0, metavar="N",
-                        help="rerank the top N fused candidates (0 = off, the default)")
-    parser.add_argument("--reranker", default="coverage",
-                        choices=["coverage", "null", "cross-encoder"],
-                        help="which reranker --rerank uses; cross-encoder needs "
-                             "pip install 'memvara[rerank]' and downloads a model")
-    parser.add_argument("--rerank-model", default="", metavar="ID",
-                        help="cross-encoder model id (default: "
-                             "cross-encoder/ms-marco-MiniLM-L-6-v2). Only meaningful "
-                             "with --reranker cross-encoder.")
+    ek.add_rerank_arguments(parser)
     args = parser.parse_args(argv)
 
     if args.download:
@@ -775,7 +742,7 @@ def main(argv: Sequence[str] | None = None,
     # is not stated is not reproducible, and this one used to be decided by whether
     # sentence-transformers happened to be installed.
     out(f"\n  --embedder {args.embedder}: {embedder_name(embedder)}")
-    reranker = build_reranker(args)
+    reranker = ek.build_reranker(args)
     if reranker is not None:
         out(f"  --rerank {args.rerank}: {args.reranker} reranker "
             f"({getattr(reranker, 'name', type(reranker).__name__)}) over the top "

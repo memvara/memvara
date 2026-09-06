@@ -327,7 +327,8 @@ def fixture() -> list[Instance]:
 
 def build_memory(user: str, budget: ek.RetrievalBudget, llm: Any = None,
                  read_k: int | None = None, embedder: Any = None,
-                 w_graph: float = 0.0, w_temporal: float = 0.0) -> Memvara:
+                 w_graph: float = 0.0, w_temporal: float = 0.0,
+                 reranker: Any = None, rerank_top_n: int = 0) -> Memvara:
     """One store, scoped to a user.
 
     `read_max_episodes=k` for the same reason as in `bench/locomo.py`: raw turns are
@@ -346,8 +347,22 @@ def build_memory(user: str, budget: ek.RetrievalBudget, llm: Any = None,
     `build_memory(qid, budget)` is a documented two-argument call; `main()` always
     passes one.
     """
+    # The episode cap rises with the reranker's window, exactly as in
+    # `locomo.build_memory`: the reranker can only reorder what it was handed, so a cap
+    # below `--rerank N` would silently make `--rerank 50` mean `--rerank 20` and the row
+    # would be attributed to the larger window.
+    #
+    # `window` is resolved once and both settings read it, so the two cannot disagree.
+    # Computing the cap from the caller's `rerank_top_n` while passing `rerank_top_n or
+    # 20` to the reader reintroduced that gap by another route: a caller handing over a
+    # reranker with `rerank_top_n=0` got a 20-candidate window over a pool capped at
+    # `budget.k`, which is the same silent narrowing in the other direction. The window
+    # is 0 when no reranker was given, because a stage that does not exist has no window.
+    window = (rerank_top_n or 20) if reranker is not None else 0
+    episodes = max(read_k or budget.k, window)
     return Memvara(user=user, llm=llm if llm is not None else NullLLM(),
-                  embedder=embedder, read_max_episodes=read_k or budget.k,
+                  embedder=embedder, read_max_episodes=episodes,
+                  read_reranker=reranker, read_rerank_top_n=window or 20,
                   read_w_graph=w_graph, read_w_temporal=w_temporal)
 
 
@@ -409,6 +424,8 @@ def run(
     share_store: bool = False,
     embedder: Any = None,
     w_graph: float = 0.0,
+    reranker: Any = None,
+    rerank_top_n: int = 0,
 ) -> tuple[list[ek.QuestionResult], ek.IngestStats, ek.RetrievalStats, ek.TokenLedger]:
     budget = budget or ek.RetrievalBudget()
     ledger = ledger or ek.TokenLedger()
@@ -416,7 +433,8 @@ def run(
 
     if share_store:
         shared = build_memory("shared", budget, llm, embedder=embedder,
-                              w_graph=w_graph)
+                              w_graph=w_graph, reranker=reranker,
+                              rerank_top_n=rerank_top_n)
         # Sessions are deduplicated by their dataset id, so a session that appears in
         # several questions' haystacks is written once. Whether that actually saves
         # anything depends on how much the haystacks overlap in `longmemeval_s`, which
@@ -444,7 +462,8 @@ def run(
 
     for item in items:
         mem = build_memory(item.qid, budget, llm, embedder=embedder,
-                           w_graph=w_graph)
+                           w_graph=w_graph, reranker=reranker,
+                           rerank_top_n=rerank_top_n)
         try:
             stats = ek.ingest(mem, item.sessions)
             stats.undated_turns = item.undated
@@ -511,6 +530,8 @@ def run_retrieval(
     embedder: Any = None,
     w_graph: float = 0.0,
     w_temporal: float = 0.0,
+    reranker: Any = None,
+    rerank_top_n: int = 0,
 ) -> tuple[list[ek.RetrievalScore], ek.IngestStats, ek.RetrievalStats, Counter]:
     """`run()`'s ingest and retrieval, scored with no reader and no judge."""
     budget = budget or ek.RetrievalBudget()
@@ -522,7 +543,8 @@ def run_retrieval(
     if share_store:
         shared = build_memory("shared", budget, llm, read_k=plan.depth(budget),
                               embedder=embedder, w_graph=w_graph,
-                              w_temporal=w_temporal)
+                              w_temporal=w_temporal, reranker=reranker,
+                              rerank_top_n=rerank_top_n)
         labels: dict[str, str] = {}
         seen: set[str] = set()
         try:
@@ -546,7 +568,8 @@ def run_retrieval(
     for item in items:
         mem = build_memory(item.qid, budget, llm, read_k=plan.depth(budget),
                            w_graph=w_graph, w_temporal=w_temporal,
-                           embedder=embedder)
+                           embedder=embedder, reranker=reranker,
+                           rerank_top_n=rerank_top_n)
         per_item: dict[str, str] = {}
         try:
             stats = ek.ingest(mem, item.sessions, per_item)
@@ -654,6 +677,7 @@ def main(argv: Sequence[str] | None = None,
          out: Callable[[str], None] = print) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ek.add_common_arguments(parser)
+    ek.add_rerank_arguments(parser)
     parser.add_argument("--dataset", default="oracle", choices=sorted(DATASET_ALIASES),
                         help="oracle (15 MB, easy) | s (277 MB, standard) | m (2.7 GB)")
     parser.add_argument("--share-store", action="store_true",
@@ -692,11 +716,32 @@ def main(argv: Sequence[str] | None = None,
     embedder = ek.build_embedder(args.embedder)
     out(f"\n  --embedder {args.embedder}: {embedder_name(embedder)}")
 
+    # Printed unconditionally too, and for the same reason: a reranker row that does not
+    # say which reranker ran, over how deep a window, is not comparable to the row above
+    # it. `--rerank 0` is the shipped default and prints "off" rather than nothing, so a
+    # baseline row states its configuration as explicitly as a reranked one.
+    #
+    # The name comes from the reranker itself rather than from the flags, which is the
+    # difference between recording a configuration and recording a request. Every
+    # reranker sets `name` to something that identifies it exactly —
+    # `cross-encoder:cross-encoder/ms-marco-MiniLM-L-6-v2`, `coverage:1` — so a run that
+    # took `--rerank-model`'s default still writes down which model that was. Printing
+    # the flag instead would log "default model", and the default is free to change in a
+    # later release, leaving an archived log that cannot be attributed to anything.
+    # `bench/locomo.py` reads `name` for this reason and the two runners must agree.
+    reranker = ek.build_reranker(args)
+    out(f"  --rerank {args.rerank}: "
+        + (f"{args.reranker} reranker "
+           f"({getattr(reranker, 'name', type(reranker).__name__)}) over the top "
+           f"{args.rerank} fused candidates, cut to k afterwards"
+           if reranker is not None else "off (the shipped default)"))
+
     if args.score == "retrieval":
         plan = ek.build_plan(args)
         scores, ingest_stats, read_stats, excluded = run_retrieval(
             items, budget=budget, plan=plan, share_store=args.share_store,
-            embedder=embedder, w_graph=args.w_graph, w_temporal=args.w_temporal)
+            embedder=embedder, w_graph=args.w_graph, w_temporal=args.w_temporal,
+            reranker=reranker, rerank_top_n=args.rerank)
         out(ek.retrieval_report(
             scores, ingest_stats, read_stats,
             title=f"LongMemEval ({args.dataset})", plan=plan, budget=budget,
@@ -719,6 +764,7 @@ def main(argv: Sequence[str] | None = None,
         source=ek.ContextSource(args.context),
         ledger=ek.build_ledger(args, reader), stem=ek.build_stemmer(args),
         share_store=args.share_store, embedder=embedder, w_graph=args.w_graph,
+        reranker=reranker, rerank_top_n=args.rerank,
     )
     if getattr(reader, "dumping", False):
         # No answers exist yet, so every result is empty. Printing the table would
