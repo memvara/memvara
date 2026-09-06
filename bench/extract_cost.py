@@ -14,6 +14,16 @@ two halves, and the first needs no server at all:
               schema, and report wall time, reported tokens, claims returned and — if you
               pass `--gold` — how many of the facts you expected came back.
 
+**Give it a long turn.** The mean call is not where a self-hosted model fails; the long
+turn is. Generation time grows with the answer, so a turn of a few thousand tokens produces
+an answer of one or two thousand and takes minutes. A measured production call on a
+4,117-token turn generated 1,618 tokens and took 554 seconds, against the 600-second
+timeout the OpenAI SDK applies by default — and `OpenAILLM` sets `max_tokens=8192`, so
+nothing else stops a long response. A cancelled call is a turn that was not extracted and
+gets tried again next pass. That is why this harness reports the worst call and the largest
+response beside the medians: a schema that improves the mean and still loses the long turn
+has not helped.
+
 The second half is the one that decides anything. The accounting half predicts a saving;
 only the live half says whether the model still finds the same facts once it stops being
 told to fill in every field. Those are different questions and a smaller, faster response
@@ -111,29 +121,78 @@ def load_batches(path: str) -> list[list[Episode]]:
 
 
 def live(batches: Sequence[Sequence[Episode]], gold: Sequence[str],
-         predicates: Sequence[str], model: str, base_url: str, reps: int) -> None:
-    """The same episodes through each schema, against a real endpoint."""
+         predicates: Sequence[str], model: str, base_url: str, reps: int,
+         max_claims: int = MAX_CLAIMS, extract_system: str | None = None,
+         out: str | None = None, timeout: float | None = None) -> None:
+    """The same episodes through each schema, against a real endpoint.
+
+    `max_claims` and `extract_system` exist so the run can be made identical to a
+    deployment's. A bench that uses the shipped prompt against a server configured with a
+    replacement one has measured a configuration nobody runs, and on a small model that is
+    not a detail — the shipped wording's closing sentence is what made phi-4-mini return
+    an empty list on a long turn.
+    """
+    import openai
+
     from memvara.llm.openai import OpenAILLM
 
+    # The client is built here rather than left to `OpenAILLM` so the timeout can be
+    # raised. The SDK's default is 600 s, and the uncapped `full` arm can exceed it: with
+    # no `maxItems` the grammar has no legal way to end the response, so a model that
+    # starts restating itself runs to `max_tokens` (8,192). Measured on the production box
+    # on 2026-09-06, the full arm passed 2,700 generated tokens on a 900-character turn
+    # and was cancelled at 600 s. That cancellation is the behaviour `max_claims` exists
+    # to prevent, so the bench has to be able to outlast it in order to show it.
+    def client_for() -> Any:
+        kwargs: dict[str, Any] = {"base_url": base_url}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return openai.OpenAI(**kwargs)
+
+    # Per call rather than per arm: a flat list loses which turn each claim came from,
+    # and a claim can only be scored against the gold for its own turn. Call `k` is
+    # `batches[k % len(batches)]`, so the caller can put the episode back.
+    captured: dict[str, list[list[dict[str, Any]]]] = {}
+
     print(f"\n=== live: {model} at {base_url} ===\n")
-    print(f"  {'schema':<10}{'p50 s':>8}{'max s':>8}{'in':>8}{'out':>8}"
+    print(f"  {'schema':<10}{'p50 s':>8}{'max s':>8}{'in':>8}{'out':>8}{'max out':>9}"
           f"{'claims':>8}{'gold':>8}")
     for name in VARIANTS:
-        llm = OpenAILLM(model=model, base_url=base_url,
-                        max_claims=MAX_CLAIMS if name != "full" else None,
-                        terse=(name == "terse"))
+        llm = OpenAILLM(model=model, client=client_for(),
+                        max_claims=max_claims if name != "full" else None,
+                        terse=(name == "terse"), extract_system=extract_system)
         times: list[float] = []
         usage = Usage()
+        # Per call as well as accumulated, because the largest response is the number that
+        # decides whether a long turn survives the client timeout, and a mean hides it.
+        worst_out = 0
         found: list[dict[str, Any]] = []
+        per_call: list[list[dict[str, Any]]] = []
         for _ in range(reps):
             for batch in batches:
+                call = Usage()
                 t0 = time.perf_counter()
-                found += llm.extract(batch, predicates, usage=usage)
+                try:
+                    claims = llm.extract(batch, predicates, usage=call)
+                except Exception as exc:
+                    # Reported rather than raised. A cancelled call is a real outcome —
+                    # in production it is a turn that was not extracted and gets retried
+                    # next pass — and losing the other arms' numbers to it would hide the
+                    # very thing that went wrong.
+                    print(f"      CALL FAILED after {time.perf_counter() - t0:.0f}s: "
+                          f"{type(exc).__name__}")
+                    claims = []
                 times.append(time.perf_counter() - t0)
+                usage.input_tokens += call.input_tokens
+                usage.output_tokens += call.output_tokens
+                worst_out = max(worst_out, call.output_tokens)
+                per_call.append(claims)
+                found += claims
         hits = sum(
             any(g.lower() in str(c["object"]).lower() for c in found) for g in gold)
         print(f"  {name:<10}{statistics.median(times):>8.1f}{max(times):>8.1f}"
               f"{usage.input_tokens // reps:>8}{usage.output_tokens // reps:>8}"
+              f"{worst_out:>9}"
               f"{len(found) // reps:>8}{f'{hits}/{len(gold)}' if gold else '-':>8}")
         # The distinct claims, because the table above cannot show a well-formed claim
         # that is false — `gate / lives_in / "Port 55434"` counts as a claim and, if its
@@ -144,6 +203,14 @@ def live(batches: Sequence[Sequence[Episode]], gold: Sequence[str],
         for triple in dict.fromkeys(
                 (c["subject"], c["predicate"], c["object"]) for c in found):
             print("      {} / {} / {}".format(*triple))
+        captured[name] = per_call
+    if out:
+        # The claims themselves, so the run can be scored again later by something other
+        # than the substring screen above — the fixture's own scorer, for instance. A
+        # latency table that is not paired with a recall number decides nothing.
+        with open(out, "w") as fh:
+            json.dump(captured, fh, indent=1)
+        print(f"\n  claims written to {out}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -157,6 +224,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--predicates", help="JSON list of known predicates to send")
     ap.add_argument("--model", default="phi-4-mini-instruct")
     ap.add_argument("--base-url", default="http://127.0.0.1:8080/v1")
+    ap.add_argument("--max-claims", type=int, default=MAX_CLAIMS,
+                    help="cap on the claims array for the capped and terse arms; match "
+                         "your deployment's MEMVARA_LLM_MAX_CLAIMS")
+    ap.add_argument("--extract-system", help="file holding replacement extraction "
+                                             "instructions; match your deployment's "
+                                             "MEMVARA_LLM_EXTRACT_SYSTEM")
+    ap.add_argument("--out", help="write the claims from each arm to this JSON file")
+    ap.add_argument("--timeout", type=float,
+                    help="client timeout in seconds. The SDK default is 600, which the "
+                         "uncapped arm can exceed; raise it to see what the runaway "
+                         "actually costs, or leave it to reproduce production's failure.")
     ap.add_argument("--reps", type=int, default=3,
                     help="passes over the episodes. Latency here is bimodal, so one "
                          "sample proves nothing — the max column is the one to read.")
@@ -167,7 +245,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         live(load_batches(args.episodes),
              json.load(open(args.gold)) if args.gold else [],
              json.load(open(args.predicates)) if args.predicates else [],
-             args.model, args.base_url, args.reps)
+             args.model, args.base_url, args.reps, args.max_claims,
+             open(args.extract_system).read() if args.extract_system else None,
+             args.out, args.timeout)
     else:
         print("\n  No --episodes given, so nothing was measured against a model. The "
               "accounting above predicts a saving; only a live run says whether the "

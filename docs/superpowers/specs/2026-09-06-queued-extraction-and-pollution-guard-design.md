@@ -190,11 +190,26 @@ core refuses under cloud mode that the worker must be able to set, because the w
 deployment's extraction process. It takes `polarity`, `confidence`, `when`, `amount` and
 `unit` out of the schema's `required` list, so the model stops writing a field name and a
 null for each one and `shape_claims` supplies the defaults it already documents. Eight
-claims are 413 tokens under the shipped schema and 229 under this one. Working that through
-the box's own numbers — 39.5 tok/s prefill and 13.3 generation at Q4_K_M `-t 4`, against a
-production mean of 558 prompt and 396 generated tokens — an extraction goes from 43.9 s to
-30.6 s, a **30% cut in wall time**. The 45% saving is on generation alone, and prefill is
-unchanged because the prompt is identical. That is
+claims are 413 tokens under the shipped schema and 229 under this one, which predicts 45%.
+**Measured end to end on the box it is 27%** — 2,401 output tokens against 1,756 over three
+episodes with the deployment's own prompt and vocabulary and a 12-claim cap on both arms,
+finding the same 10 of 15 key facts. Only the field names went away; the model still spends
+tokens on values and on deciding. At production's measured 21.0 tok/s prefill and 5.53
+generation, a typical extraction goes from 98 s to 79 s, a **20% cut in wall time**.
+
+The long turn gains most and there it is a reliability fix. The 4,117-token call that spent
+220 s on prefill and 333 s generating 1,618 tokens, 554 s in total against the SDK's default
+600 s timeout, comes to about 464 s — 92% of the budget down to 77%.
+
+It does not bound a runaway, and the same run measured what one costs: an uncapped claims
+array reached 7,197 generated tokens on a 900-character turn, ran 1,957 s, and found 7 of 15
+facts against the capped arm's 10, because the restatements crowd out the answer. That is
+`MEMVARA_LLM_MAX_CLAIMS` earning its place, and terse inherits it. The knob that would bound
+the runaway itself is `OpenAILLM(max_tokens=...)`, currently 8,192: twelve terse claims are
+about 344 tokens, so a cap near 2,048 keeps six times the headroom and converts a 600 s
+cancellation into a bounded 422 s failure. The third lever is the
+client timeout itself, which is the SDK's default rather than a memvara setting and can be
+raised in the worker. That is
 throughput rather than latency — the queue above is what answers the 6-second timeout — and
 throughput is what decides how long the 1,936-episode backlog takes to clear. It carries
 one consequence worth stating beside the guard below: an omitted `confidence` lands every

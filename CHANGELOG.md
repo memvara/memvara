@@ -30,10 +30,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   option `polarity`, `confidence`, `when`, `amount` and `unit` move out of the schema's
   `required` list, so the model may leave them out and `_shape.shape_claims` supplies the
   defaults it already documents. Eight claims — the mean extraction on a 4-core production
-  box — are 413 tokens under the shipped schema and 229 under this one, which is 45% off
-  the generated tokens. Prefill is unchanged, because the prompt is identical. Against that
-  box's measured speeds an extraction goes from 43.9 seconds to 30.6, a 30% cut in wall
-  time. `bench/extract_cost.py` measures it, both on paper and against a real endpoint —
+  box — are 413 tokens under the shipped schema and 229 under this one, which predicts a
+  45% saving. **Measured end to end on the production box it is 27%**: three episodes, the
+  deployment's own prompt and predicate vocabulary, a 12-claim cap on both arms, phi-4-mini
+  Q8_0 — 2,401 output tokens under the shipped schema against 1,756 under this one, and the
+  same 10 of 15 key facts found either way. The gap between 45% and 27% is that the model
+  still spends tokens on values and on deciding what to write; only the field names went
+  away. Prefill did not move (2,894 tokens on both), because the prompt is identical.
+
+  At the rates that box runs at (Q8_0, four threads, sharing the machine with the API and
+  Postgres: 21.0 tokens per second prefill and 5.53 generation) that is a typical extraction
+  going from 98 seconds to 79, a 20% cut in wall time. The long turn gains most: a
+  production call that spent 220 seconds on prefill and 333 generating 1,618 tokens took 554
+  in total against a 600-second client timeout, and 27% off generation takes it to about
+  464 — from 92% of the budget to 77%.
+
+  It does not bound a runaway. Measured on the same box, an uncapped claims array reached
+  7,197 generated tokens on a 900-character turn, ran 1,957 seconds and found 7 of 15 facts
+  against the capped arm's 10. `MEMVARA_LLM_MAX_CLAIMS` is what stops that, and this option
+  inherits it.
+
+  `bench/extract_cost.py` measures it, both on paper and against a real endpoint —
   and the saving is only real if the model actually leaves the fields out, which is what
   the live half of that harness is for.
 

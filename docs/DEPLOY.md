@@ -209,9 +209,30 @@ punctuation and those nulls.
 out of the schema's `required` list. The model may then leave them out, and memvara
 supplies the same defaults it already applies to a value it cannot read: an assertion
 unless `polarity` is exactly -1, and nothing for a time or a measurement the turn did not
-state. Eight claims — the mean extraction measured on a 4-core box — go from 413 tokens to
-229. `bench/extract_cost.py` measures this for your own schema and, given an endpoint, your
-own model.
+state.
+
+**Measured on a 4-core production box, this saves 27% of the generated tokens**: three
+episodes through phi-4-mini Q8_0 with a 12-claim cap on both arms produced 2,401 output
+tokens under the shipped schema and 1,756 under this one, finding the same 10 of 15 key
+facts either way. Prefill did not move. At that box's rates (21.0 tokens per second prefill,
+5.53 generation) a typical extraction goes from about 98 seconds to about 79.
+
+Serialization alone predicts 45%, and the difference matters: the model still spends tokens
+on the values and on deciding what to write, so only the field names went away. Treat 27% as
+the number for phi-4-mini and run `bench/extract_cost.py` against your own model, because
+this is a property of the model's habits rather than of the schema.
+
+The long turn is where this matters most, because that is where the current setup is
+already close to failing. Generation time grows with the answer, and a long turn produces a
+long answer: a measured call on a 4,117-token turn spent 220 seconds on prefill and 333
+generating 1,618 tokens, 554 in total, against the 600-second timeout the OpenAI SDK
+applies by default. `max_tokens` is 8,192, so nothing in memvara stops a long response
+first. A cancelled call is a turn that was not extracted and will be tried again, so on
+that turn the shorter shape buys reliability rather than speed. Two other levers apply to
+the same call and are worth knowing about: the client timeout is the SDK's default rather
+than a memvara setting, so a deployment that wants long turns to finish can raise it; and
+`OpenAILLM(max_tokens=...)` bounds the response itself, which is the only one of the three
+that turns a runaway into a bounded failure rather than a cancellation.
 
 Two things to know before setting it. It is a 400 against hosted OpenAI, whose strict mode
 requires every declared property to appear in `required` — the same trade `maxItems` makes.

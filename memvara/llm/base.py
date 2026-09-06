@@ -274,34 +274,57 @@ LOAD_BEARING_CLAIM_FIELDS = ("subject", "predicate", "object", "source_index")
 def self_hosted_claim_schema(max_claims: int = MAX_CLAIMS) -> dict[str, Any]:
     """`bounded_claim_schema`, with the fields the model may leave out taken out of `required`.
 
-    On a CPU-hosted model, generating the response is most of the wall time, and most of
+    On a CPU-hosted model, generating the response is most of the wall time, and much of
     what gets generated is field names rather than facts. Measured against the shipped
     shape: one claim serializes to 52 tokens, of which 44 are keys, punctuation and the
-    three forced nulls. A typical extraction on the production box emits seven or eight
-    claims, which is 413 tokens against a measured mean of 396. The same eight claims
-    under this schema are 229 tokens: 45% fewer tokens to generate, and prefill unchanged
-    because the prompt does not move. On the box those speeds were measured on, that is an
-    extraction going from 43.9 seconds to 30.6 — a 30% cut in wall time, not a 45% one,
-    because prefill is the other third of it.
+    three forced nulls.
 
-    Both numbers are a prediction until a model is measured against them. The schema makes
-    the fields optional; it cannot make a model use the permission, and one that keeps
-    emitting `"when":null` out of habit saves nothing. `bench/extract_cost.py` is the
-    harness that settles it.
+    **Measured end to end on the production box, this saves 27% of the generated tokens.**
+    Three episodes, the deployment's own prompt and predicate vocabulary, a 12-claim cap on
+    both arms, phi-4-mini Q8_0: 2,401 output tokens under the shipped schema against 1,756
+    under this one, and the same 10 of 15 key facts found either way. Prefill did not move —
+    2,894 tokens on both — because the prompt is identical.
 
-    Five fields move out of `required`, and each one is safe because `shape_claims`
-    already reads it with `.get()` and documents what an absent value means. `polarity`
-    defaults to 1, since anything that is not an explicit -1 is an assertion. `when`,
-    `amount` and `unit` default to `None`, which is what the shipped schema spells as an
-    explicit null on the common turn that states no time and no measurement.
+    Serialization alone predicts 45%, and the gap between that and 27% is the honest
+    correction: the model still spends tokens on the values and on deciding what to write,
+    and only the field names went away. Take 27% as the number and re-measure with
+    `bench/extract_cost.py` for any other model, because it is a property of the model's
+    habits and not of the schema.
+
+    At the rates production runs at — Q8_0, four threads, sharing the box with the API and
+    Postgres, 21.0 tokens per second prefill and 5.53 generation — 27% off generation is a
+    typical extraction going from 98 seconds to 79, a 20% cut in wall time. Those are
+    measured production rates, not `llama-bench` figures, which are roughly twice as fast
+    because the bench runs with everything else stopped on a short context.
+
+    **The long turn gains most, and there it is a reliability fix rather than a speedup.** A
+    production call on a 4,117-token turn spent 220 seconds on prefill and 333 generating
+    1,618 tokens, 554 in total, against the OpenAI SDK's default 600-second client timeout;
+    `max_tokens` is 8,192, so nothing in this library stops a long response first. 27% off
+    generation takes that call to about 464 seconds — from 92% of the timeout budget to
+    77%. A cancelled call is a turn deferred and retried next pass.
+
+    **It does not bound a runaway, and nothing here should be read as claiming it does.**
+    Measured on the same box, an *uncapped* claims array reached 7,197 generated tokens on a
+    900-character turn, ran for 1,957 seconds, and found 7 of 15 facts against the capped
+    arm's 10 — the restatements crowd out the answer. A fixed fraction of a runaway is still
+    a runaway. `bounded_claim_schema` is what stops it, which is why this function builds on
+    it rather than beside it.
+
+    Five fields move out of `required`, and each one is safe because `shape_claims` already
+    reads it with `.get()` and documents what an absent value means. `polarity` defaults to
+    1, since anything that is not an explicit -1 is an assertion. `when`, `amount` and
+    `unit` default to `None`, which is what the shipped schema spells as an explicit null on
+    the common turn that states no time and no measurement.
 
     **`confidence` is the one field whose behaviour changes, and it changes ranking.**
     `clamp_confidence` returns `UNKNOWN_CONFIDENCE` for a value it cannot read, so an
     omitted confidence puts every claim at 0.5 instead of a number the model chose. On a
     small model that number is close to noise — the field is the one thing in a claim that
     no validation can check — but a store written under this schema ranks differently from
-    one written without it, and mixing the two within a tenant is what would make that
-    visible. Decide it per deployment rather than per call.
+    one written without it. `write/pollution.py`'s R4 still sorts a discounted claim below a
+    clean one, at 0.4 against 0.5, on a narrower margin than before. Decide it per
+    deployment rather than per call.
 
     Opt-in for the same reason `bounded_claim_schema` is. OpenAI's strict mode requires
     every declared property to appear in `required`, so this schema is a 400 on the hosted
