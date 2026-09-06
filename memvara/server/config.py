@@ -127,6 +127,14 @@ class ServerConfig:
     #: Unset leaves the array uncapped, which is right for hosted OpenAI: it closes the
     #: array itself, and its strict mode rejects `maxItems` outright.
     llm_max_claims: int | None = None
+    #: Path to a file holding replacement extraction instructions for the "openai"
+    #: backend — again the self-hosted case `llm_model` describes. The shipped
+    #: `EXTRACT_SYSTEM` ends by saying an empty list is a correct answer and the common
+    #: case; a small model reads that as permission and returns nothing on a long turn.
+    #: `OpenAILLM.__init__` carries the measurement. A path rather than the text itself,
+    #: because a multi-paragraph prompt in an environment variable is unreadable in
+    #: `docker inspect` and unmaintainable in a compose file.
+    llm_extract_system: str | None = None
     #: "local" (default) opens MEMVARA_DB on disk, exactly as before this field existed.
     #: "cloud" opens no local file at all; it resolves an API key (MEMVARA_API_KEY, or
     #: the credentials file `memvara-mcp login` writes) and talks to `server_url` instead.
@@ -214,6 +222,7 @@ class ServerConfig:
             llm=backend,
             llm_model=_optional(env.get("MEMVARA_LLM_MODEL")),
             llm_max_claims=_max_claims(env.get("MEMVARA_LLM_MAX_CLAIMS")),
+            llm_extract_system=_optional(env.get("MEMVARA_LLM_EXTRACT_SYSTEM")),
             embedder=_embedder_spec(env.get("MEMVARA_EMBEDDER")),
             mode=mode,
             server_url=server_url,
@@ -245,6 +254,30 @@ def _max_claims(raw: str | None) -> int | None:
             "server that constrains decoding, where an uncapped array has no legal way to "
             "end a response.")
     return int(value)
+
+
+def _read_extract_system(path: str | None) -> str | None:
+    """The replacement extraction instructions named by `MEMVARA_LLM_EXTRACT_SYSTEM`.
+
+    Unreadable and empty are both refused at startup rather than falling back to the
+    shipped prompt. A deployment that named this file meant to change what the model is
+    told, and quietly not changing it is the failure that looks like success: the server
+    starts, extraction runs, and the only symptom is claims that do not arrive.
+    """
+    if path is None:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read().strip()
+    except OSError as exc:
+        raise ConfigError(
+            f"MEMVARA_LLM_EXTRACT_SYSTEM={path!r} cannot be read: {exc}. Unset it to use "
+            "the extraction instructions memvara ships.") from exc
+    if not text:
+        raise ConfigError(
+            f"MEMVARA_LLM_EXTRACT_SYSTEM={path!r} is empty. A model told nothing extracts "
+            "nothing; unset it to use the extraction instructions memvara ships.")
+    return text
 
 
 def _optional(raw: str | None) -> str | None:
@@ -342,16 +375,20 @@ def _anthropic() -> Any:
             f"MEMVARA_LLM=anthropic needs the anthropic SDK and a key: {exc}") from exc
 
 
-def _openai(model: str | None, max_claims: int | None = None) -> Any:
+def _openai(model: str | None, max_claims: int | None = None,
+            extract_system: str | None = None) -> Any:
     # Imported here so the default offline configuration never touches the optional SDK.
     from ..llm.openai import OpenAILLM
 
+    system = _read_extract_system(extract_system)
     try:
         kwargs: dict[str, Any] = {}
         if model:
             kwargs["model"] = model
         if max_claims is not None:
             kwargs["max_claims"] = max_claims
+        if system is not None:
+            kwargs["extract_system"] = system
         return OpenAILLM(**kwargs)
     except Exception as exc:
         # Deliberately wider than ImportError. `openai.OpenAI()` refuses to construct
@@ -408,7 +445,8 @@ def _llm(config: ServerConfig) -> Any:
     if config.llm == "anthropic":
         return _anthropic()
     if config.llm == "openai":
-        return _openai(config.llm_model, config.llm_max_claims)
+        return _openai(config.llm_model, config.llm_max_claims,
+                       config.llm_extract_system)
     raise ConfigError(
         f"MEMVARA_LLM={config.llm!r} is listed in _BACKENDS but _llm() has no branch "
         "for it, so this server cannot say which model it would extract with. This is "
@@ -441,6 +479,7 @@ _SERVER_SIDE_UNDER_CLOUD = (
     ("embedder", _DEFAULT_EMBEDDER, "MEMVARA_EMBEDDER", "embedder"),
     ("llm_model", None, "MEMVARA_LLM_MODEL", "extraction model"),
     ("llm_max_claims", None, "MEMVARA_LLM_MAX_CLAIMS", "claim cap"),
+    ("llm_extract_system", None, "MEMVARA_LLM_EXTRACT_SYSTEM", "extraction prompt"),
 )
 
 

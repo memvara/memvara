@@ -87,9 +87,20 @@ class OpenAILLM:
         temperature: float = 0.0,
         max_claims: int | None = None,
         base_url: str | None = None,
+        extract_system: str | None = None,
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens
+        # Replacement extraction instructions, for the same self-hosted case `max_claims`
+        # serves. `EXTRACT_SYSTEM` closes by saying an empty list is a correct answer and
+        # the common case, which is true and is what a model able to weigh salience across
+        # a long turn needs to hear. A small one reads it as permission: measured
+        # 2026-09-03, phi-4-mini-instruct returned nothing at all on inputs past roughly
+        # 1,300 tokens until that sentence was removed, on the same prompt and episodes.
+        # An override rather than a rewrite, because the shipped wording is right for the
+        # models it was written for and a small-model accommodation applied to every
+        # provider is a change nobody asked for.
+        self._extract_system = extract_system or EXTRACT_SYSTEM
         # Cap the claims array, for a self-hosted server reached through this backend. Off
         # by default because hosted OpenAI rejects `maxItems` under `strict: True` — see
         # `bounded_claim_schema`, which carries the reasoning and the measurement. Built
@@ -184,7 +195,7 @@ class OpenAILLM:
         if not episodes:
             return []  # nothing to extract from, and a call we should not pay for
         response = self._call(
-            EXTRACT_SYSTEM,
+            self._extract_system,
             _shape.extract_prompt(episodes, known_predicates),
             self._claim_schema,
             usage,
