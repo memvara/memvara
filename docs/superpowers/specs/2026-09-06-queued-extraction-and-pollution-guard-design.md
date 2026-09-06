@@ -133,7 +133,7 @@ A pass:
 5. Stop the pass when the batch budget or `MEMVARA_EXTRACT_PASS_SECONDS` is spent, whichever
    first. Sleep the interval. Repeat.
 
-**Batch of one, by default.** Tier 2 batches every surviving episode into one model call,
+**Batch of one, by default.** Tier 2 batches every surviving episode into a single extraction call,
 which is right for a hosted model and wrong here: the spike's empty-list failure begins at
 about 1,300 prompt tokens, and two conversational turns plus the vocabulary is already
 there. One episode per call keeps the prompt where the model was measured to work. A
