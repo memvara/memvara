@@ -9,6 +9,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.11.2] — 2026-09-06
+
 ### Added
 
 - **`OpenAILLM(extract_system=...)` and `MEMVARA_LLM_EXTRACT_SYSTEM` replace the
