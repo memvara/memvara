@@ -185,6 +185,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Documentation
 
+- **The pull request body never names the model that reviewed it.** `CLAUDE.md` and
+  `plugin-claude.md` used to say "say which model reviewed" when the session could not
+  switch models. The body now says only that the review ran, at what effort, and what it
+  found, because no AI or model name may reach GitHub, whether the session or a subagent
+  writes the body. `plugin-claude.md` carries the same wording to the seven plugin
+  repositories.
+
 - **`CLAUDE.md` and `plugin-claude.md` carry the Karpathy guidelines in full, not a
   shortened copy.** Both files had trimmed the four rules from the upstream source,
   multica-ai/andrej-karpathy-skills, when they were merged in: section 1 was missing its

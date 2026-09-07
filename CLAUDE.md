@@ -83,10 +83,12 @@ to know you exist.
 Open the pull request, then review it with `/code-review high <PR number>`, then fix what the
 review found. In that order, and all of it before anybody merges. Run it on the latest Sonnet,
 `claude-sonnet-5` today; the command takes no model argument, so switch the session model
-first, and say which model reviewed if you cannot switch. Use `high`, or `max` for a large or
-load-bearing change; `ultra` is user-triggered and an agent cannot launch it. Fix everything
-it finds on the same branch, then re-run the gate, and write the reason in the body where a
-finding is wrong. Nothing the review publishes may carry an AI attribution.
+first. Use `high`, or `max` for a large or load-bearing change; `ultra` is user-triggered and
+an agent cannot launch it. Fix everything it finds on the same branch, then re-run the gate,
+and write the reason in the body where a finding is wrong. The pull request body says the
+review ran, at what effort, and what it found. It never names the model that reviewed, and
+nothing the review publishes may carry an AI attribution. That holds for a subagent that
+writes the body as much as for the session that opened the pull request.
 [Full rule.](docs/claude/working-here.md#a-pr-you-opened-gets-a-code-review-before-it-is-merged)
 
 ## What you learn here goes in Memvara
