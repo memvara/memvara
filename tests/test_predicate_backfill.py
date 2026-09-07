@@ -160,6 +160,30 @@ def test_without_a_mapping_the_pass_applies_what_the_registry_resolves(rec, stor
     assert store.get_claim(untouched.id).predicate == "likes"
 
 
+def test_a_mapping_moves_only_the_predicates_it_names(rec, store):
+    # `payroll_at` was aliased earlier and one claim was written under the raw name
+    # since. A pass for a different merge must not count or move it.
+    rec.registry.learn_alias("works_at", "payroll_at")
+    leftover = _write(store, "payroll_at", "Initech", 30)
+    wanted = _write(store, "hired_by", "Globex", 20)
+    report = backfill_predicates(rec, "acme", aliases={"hired_by": "works_at"},
+                                 dry_run=False)
+    assert report.moved == 1
+    assert store.get_claim(wanted.id).predicate == "works_at"
+    assert store.get_claim(leftover.id).predicate == "payroll_at"
+
+
+def test_a_mapping_may_name_several_merges_at_once(rec, store):
+    a = _write(store, "hired_by", "Globex", 30)
+    b = _write(store, "fond_of", "tea", 20)
+    report = backfill_predicates(rec, "acme",
+                                 aliases={"hired_by": "works_at", "fond_of": "likes"},
+                                 dry_run=False)
+    assert report.moved == 2
+    assert {store.get_claim(a.id).predicate, store.get_claim(b.id).predicate} == {
+        "works_at", "likes"}
+
+
 def test_a_mapping_is_normalized_before_it_is_applied(rec, store):
     moved = _write(store, "hired_by", "Globex", 20)
     backfill_predicates(rec, "acme", aliases={"hired_by": "Works At"}, dry_run=False)
@@ -243,11 +267,22 @@ def test_merge_predicate_registers_an_unknown_canonical_as_multi_valued(mem):
     assert mem.registry.normalize("known_bug") == "known_defect"
 
 
-def test_merge_predicate_refuses_a_name_that_is_already_the_same_slot(mem):
-    with pytest.raises(ValueError, match="already normalizes"):
+def test_merge_predicate_refuses_one_name_spelled_twice(mem):
+    with pytest.raises(ValueError, match="are the same predicate name"):
         mem.merge_predicate("Works At", "works_at")
     with pytest.raises(ValueError, match="must both name"):
         mem.merge_predicate("", "works_at")
+
+
+def test_merge_predicate_repairs_an_alias_the_registry_already_knows(mem):
+    # The write path learns an alias from a model and moves nothing. The claim filed
+    # under the raw spelling before that is exactly what the repair is for.
+    stranded = mem.remember("user", "hired_by", "Globex").added[0]
+    mem.registry.learn_alias("works_at", "hired_by")
+    assert mem.registry.normalize("hired_by") == "works_at"
+    report = mem.merge_predicate("hired_by", "works_at", dry_run=False)
+    assert report.moved == 1
+    assert mem.get(stranded.id).predicate == "works_at"
 
 
 def test_merge_predicate_scopes_to_the_named_tenant(mem):

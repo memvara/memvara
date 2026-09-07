@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
@@ -170,7 +170,7 @@ class ServerConfig:
     #: reasons before answering: a Qwen3 server needs
     #: `{"chat_template_kwargs": {"enable_thinking": false}}` or it spends the token
     #: budget thinking and returns an empty message. Unset sends nothing.
-    llm_extra_body: dict[str, Any] | None = None
+    llm_extra_body: dict[str, Any] | None = field(default=None, hash=False)
     #: Ask the model, after each memory_remember that closed nothing, whether the new
     #: fact is a newer version of one of its nearest neighbours, and say so on the
     #: receipt. Off by default: it is up to three model calls per write, and it needs a
@@ -239,6 +239,16 @@ class ServerConfig:
                 "works offline, but stores only the sentence forms the deterministic "
                 "extractor recognises.")
 
+        advise = _flag(env.get("MEMVARA_ADVISE_REPLACEMENTS"), "MEMVARA_ADVISE_REPLACEMENTS")
+        if advise and backend == "none" and mode != "cloud":
+            # Refused for the reason the cloud-mode refusals exist: a setting that is read
+            # and never used tells the operator something false in silence. Advice needs
+            # a model to ask, and `none` has none.
+            raise ConfigError(
+                "MEMVARA_ADVISE_REPLACEMENTS=1 needs a model to ask, and MEMVARA_LLM is "
+                "'none'. Set MEMVARA_LLM=anthropic or MEMVARA_LLM=openai, or unset "
+                "MEMVARA_ADVISE_REPLACEMENTS.")
+
         predicates = (env.get("MEMVARA_PREDICATES") or "").strip()
         if predicates:
             # Read now and discard the result: a typo in a pack name or an unreadable file
@@ -269,8 +279,7 @@ class ServerConfig:
             llm_max_tokens=_max_tokens(env.get("MEMVARA_LLM_MAX_TOKENS")),
             llm_extra_body=_json_object(
                 env.get("MEMVARA_LLM_EXTRA_BODY"), "MEMVARA_LLM_EXTRA_BODY"),
-            advise_replacements=_flag(
-                env.get("MEMVARA_ADVISE_REPLACEMENTS"), "MEMVARA_ADVISE_REPLACEMENTS"),
+            advise_replacements=advise,
             embedder=_embedder_spec(env.get("MEMVARA_EMBEDDER")),
             mode=mode,
             server_url=server_url,

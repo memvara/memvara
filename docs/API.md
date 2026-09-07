@@ -136,6 +136,8 @@ mem.merge_predicate(surface, canonical, *, dry_run=True) -> MergeReport
 #   an older value on a single-valued predicate closes. Dry-run by default, and a
 #   dry run teaches nothing. `backfill_predicates(mem.writer.reconciler, tenant,
 #   aliases=...)` is the pass underneath it, for an operator applying a mapping.
+#   Like the two repairs above, this runs against the local engine only; a hosted
+#   deployment has no endpoint for it yet.
 
 # maintenance
 mem.consolidate()                                 -> dict[str, int]

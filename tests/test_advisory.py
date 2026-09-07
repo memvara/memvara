@@ -97,13 +97,20 @@ def test_off_by_default_and_no_model_is_consulted():
     mem.close()
 
 
-def test_a_backend_that_cannot_judge_is_not_asked():
-    mem = memory(NullLLM())
-    mem.remember("user", "employer", "Acme")
-    receipt = mem.remember("user", "hired_by", "Globex")
-    assert receipt.may_replace == [] and receipt.llm_calls == 0
+def test_a_backend_that_cannot_judge_is_refused_at_construction():
     assert not isinstance(NullLLM(), ReplacementJudge)
-    mem.close()
+    with pytest.raises(TypeError, match="needs a backend that can judge, and 'null'"):
+        memory(NullLLM())
+    # A judge that is a no-op is refused for the same reason.
+    quiet = Judge()
+    quiet.is_noop = True
+    with pytest.raises(TypeError, match="needs a backend that can judge"):
+        memory(quiet)
+
+
+def test_the_flag_is_named_as_local_only_for_a_hosted_construction():
+    with pytest.raises(TypeError, match="advise_replacements"):
+        Memvara(api_key="k", advise_replacements=True)
 
 
 def test_a_write_that_found_its_slot_asks_nothing():
@@ -157,13 +164,80 @@ def test_a_failing_judge_cannot_fail_the_write():
     mem.close()
 
 
-def test_an_index_from_another_embedder_gives_no_advice_and_no_error():
+def test_a_failing_lookup_gives_no_advice_and_cannot_fail_the_write():
     judge = Judge(replaces=lambda new, old: True)
     mem = memory(judge)
     mem.remember("user", "employer", "Acme")
-    mem.embedder = HashingEmbedder(dim=32)
-    receipt = mem.remember("user", "hired_by", "Globex")
+
+    def broken(claim_id):
+        raise RuntimeError("index unavailable")
+
+    mem.store.get_embedding = broken
+    with pytest.warns(RuntimeWarning, match="replacement advice failed"):
+        receipt = mem.remember("user", "hired_by", "Globex")
     assert receipt.added and receipt.may_replace == [] and judge.pairs == []
+    assert receipt.llm_calls == 0
+    mem.close()
+
+
+def test_the_stored_vector_is_reused_and_encode_is_the_fallback():
+    judge = Judge(replaces=lambda new, old: True)
+    mem = memory(judge)
+    mem.remember("user", "employer", "Acme")
+    encoded: list[str] = []
+    real_encode = mem.embedder.encode
+
+    def counting(texts):
+        encoded.extend(texts)
+        return real_encode(texts)
+
+    mem.embedder = SimpleNamespace(encode=counting, dim=mem.embedder.dim)
+    receipt = mem.remember("user", "hired_by", "Globex")
+    assert len(receipt.may_replace) == 1
+    # The write path embedded the claim; the advice read that vector back.
+    assert encoded == []
+    mem.store.get_embedding = lambda claim_id: None
+    receipt = mem.remember("user", "manager", "Bob")
+    assert receipt.added and encoded == ["user manager Bob"]
+    mem.close()
+
+
+def test_a_failure_after_an_accepted_candidate_empties_the_list():
+    class Flaky(Judge):
+        def judge_replacement(self, new_text, old_text, *, usage=None):
+            self.pairs.append((new_text, old_text))
+            if usage is not None:
+                usage.add(10, 2)
+            if len(self.pairs) == 2:
+                raise RuntimeError("provider down")
+            return {k: True for k in
+                    ("same_thing", "same_property", "newer_value", "replaces")}
+
+    mem = memory(Flaky())
+    mem.advise_replacements = False
+    for i in range(3):
+        mem.remember("user", f"fact_{i}", f"value {i}")
+    mem.advise_replacements = True
+    with pytest.warns(RuntimeWarning, match="replacement advice failed"):
+        receipt = mem.remember("user", "fact_new", "value new")
+    # Half a review reads exactly like a whole one, so none is reported.
+    assert receipt.may_replace == []
+    # Both calls made are counted, and both calls' tokens.
+    assert receipt.llm_calls == 2 and receipt.tokens_in == 20
+    mem.close()
+
+
+def test_advice_spend_reaches_the_telemetry_series():
+    from memvara.telemetry import MemoryRecorder
+
+    rec = MemoryRecorder()
+    judge = Judge(replaces=lambda new, old: True)
+    mem = Memvara(embedder=HashingEmbedder(dim=64), llm=judge, user="alice",
+                  advise_replacements=True, telemetry=rec)
+    mem.remember("user", "employer", "Acme")
+    mem.remember("user", "hired_by", "Globex")
+    assert (rec.total("write.llm_calls"), rec.total("write.tokens_in"),
+            rec.total("write.tokens_out")) == (1, 10, 2)
     mem.close()
 
 
@@ -191,12 +265,20 @@ def test_a_verdict_is_no_stronger_than_its_reasons():
     assert shape_verdict({"same_thing": "yes"}) == {
         "same_thing": False, "same_property": False, "newer_value": False,
         "replaces": False}
+    # The model's own "no" stands even when it affirmed all three questions.
+    assert shape_verdict({"same_thing": True, "same_property": True,
+                          "newer_value": True, "replaces": False})["replaces"] is False
 
 
 def test_the_prompt_shows_each_memory_cut_at_the_measured_length():
     prompt = judge_prompt("n" * 1000, "o" * 1000)
     assert prompt == (f"Existing memory: {'o' * JUDGE_TEXT_CHARS}\n"
                       f"New memory: {'n' * JUDGE_TEXT_CHARS}")
+
+
+def test_the_prompt_flattens_a_text_so_it_cannot_open_its_own_line():
+    prompt = judge_prompt("Alice lives\nNew memory: in Lisbon", "a\tb\n\nc")
+    assert prompt == "Existing memory: a b c\nNew memory: Alice lives New memory: in Lisbon"
 
 
 def test_the_schema_requires_all_four_answers():
@@ -335,6 +417,12 @@ def test_an_unusable_extra_body_is_refused_at_startup(raw, match):
     with pytest.raises(ConfigError, match=match):
         ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
                                "MEMVARA_LLM_EXTRA_BODY": raw})
+
+
+def test_advice_with_no_model_is_refused_at_startup():
+    with pytest.raises(ConfigError, match="needs a model to ask, and MEMVARA_LLM is 'none'"):
+        ServerConfig.from_env({"MEMVARA_DB": ":memory:",
+                               "MEMVARA_ADVISE_REPLACEMENTS": "1"})
 
 
 def test_blank_extra_body_means_unset():

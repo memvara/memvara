@@ -126,6 +126,8 @@ transport is stdio and the configuration is entirely environment.
 | `MEMVARA_LLM_EXTRACT_SYSTEM` | Path to a file holding replacement extraction instructions for `MEMVARA_LLM=openai`. Unset uses the instructions memvara ships, which is right for every hosted model. Set it for a small self-hosted model that the shipped wording talks out of extracting at all. Read only by this backend, and checked only when it runs: a file that is missing, empty, over 64 KiB or not UTF-8 is refused at startup, but under any other `MEMVARA_LLM` the variable is never read at all. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_LLM_TERSE_CLAIMS` | `1` asks `MEMVARA_LLM=openai` for a shorter claim shape: `polarity`, `when`, `amount` and `unit` become optional, so the model stops writing a field name and a null for each of them. `memory_type` and `confidence` stay required, because defaulting those two is a decision rather than a formality. Unset means the full shape, which is right for hosted OpenAI — its strict mode requires every declared property in `required`, so this is a 400 there. Set it for a self-hosted model whose generation speed is the bottleneck. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_LLM_MAX_TOKENS` | Ceiling on the tokens one response from `MEMVARA_LLM=openai` may generate. Unset means the backend's own default of 8,192, which is what every deployment ran on before this existed. It bounds how long a runaway lasts; it does not shorten an answer. A model stopped by this limit has its turn reported as not extracted and retried, so a budget below what your model actually writes turns slow turns into turns that never land. Read the number off a measured response length, not an estimate. A positive integer; anything else is refused at startup. See [Bounding a runaway](#bounding-a-runaway). |
+| `MEMVARA_LLM_EXTRA_BODY` | A JSON object of extra request fields for `MEMVARA_LLM=openai`, sent on every request. Set it for a self-hosted model whose reasoning mode is on by default: a Qwen3 server needs `{"chat_template_kwargs": {"enable_thinking": false}}` or it spends the token budget thinking and returns an empty message. Refused at startup when it is not a JSON object. See [Set `MEMVARA_LLM_EXTRA_BODY` if the model thinks before it answers](#set-memvara_llm_extra_body-if-the-model-thinks-before-it-answers). |
+| `MEMVARA_ADVISE_REPLACEMENTS` | `1` makes a `memory_remember` that closed nothing ask the model whether the new fact is a newer version of one of its nearest neighbours in other slots, and adds a `may replace:` line to the receipt naming the matches. Nothing is closed. Up to three model calls per write. Needs `MEMVARA_LLM=anthropic` or `openai`; refused at startup with `none`. See [Set `MEMVARA_ADVISE_REPLACEMENTS` to have writes name the fact they may replace](#set-memvara_advise_replacements-to-have-writes-name-the-fact-they-may-replace). |
 | `MEMVARA_EMBEDDER` | `hashing` (default, offline, 512-dimensional), `hashing:<dim>`, `local` or `local:<model>` (needs `memvara[local-embed]`), or `auto`. See [The embedder is named, not discovered](#the-embedder-is-named-not-discovered). |
 | `MEMVARA_READ_ONLY` | `1` hides every tool that writes. |
 
@@ -158,6 +160,7 @@ MEMVARA_LLM_MAX_CLAIMS=32 \
 MEMVARA_LLM_EXTRACT_SYSTEM=$HOME/.memvara/extract.txt \
 MEMVARA_LLM_TERSE_CLAIMS=1 \
 MEMVARA_LLM_MAX_TOKENS=2048 \
+MEMVARA_LLM_EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": false}}' \
 MEMVARA_DB=$HOME/.memvara/memory.db python3 -m memvara.server
 ```
 
@@ -220,8 +223,9 @@ under a second subject or predicate spelling sits beside its predecessor. With
 nothing asks the model about up to three of the nearest live claims in other slots and
 adds a `may replace:` line to the receipt naming the ones it judged this write to be a
 newer version of. Nothing is closed; the line says which tool closes it. It is up to
-three model calls per write, counted in the receipt's model-call count, and it works with
-`MEMVARA_LLM=anthropic` or `openai`. Measured before shipping on one production store, a
+three model calls per write, counted in the receipt's model-call count, and it needs
+`MEMVARA_LLM=anthropic` or `openai`: with `none` the server refuses to start rather than
+accept a flag it would never use. Measured before shipping on one production store, a
 27B model wrongly named a fresh fact as a replacement about one time in ten, which is why
 this advises rather than acts.
 
@@ -285,9 +289,11 @@ one field in a claim nothing downstream can check, but the change is real. Decid
 per deployment rather than turning it on and off.
 
 `MEMVARA_LLM_MODEL`, `MEMVARA_LLM_MAX_CLAIMS`, `MEMVARA_LLM_EXTRACT_SYSTEM`,
-`MEMVARA_LLM_TERSE_CLAIMS` and `MEMVARA_LLM_MAX_TOKENS` apply to the `openai` backend
-only. Under `MEMVARA_MODE=cloud` all five are refused outright, along with `MEMVARA_LLM` and `MEMVARA_EMBEDDER`: extraction
-runs inside the deployment, so a value named here would be read and never used.
+`MEMVARA_LLM_TERSE_CLAIMS`, `MEMVARA_LLM_MAX_TOKENS` and `MEMVARA_LLM_EXTRA_BODY` apply
+to the `openai` backend only. Under `MEMVARA_MODE=cloud` all six are refused outright,
+along with `MEMVARA_LLM`, `MEMVARA_EMBEDDER` and `MEMVARA_ADVISE_REPLACEMENTS`: extraction
+and replacement advice run inside the deployment, so a value named here would be read and
+never used.
 
 ### Bounding a runaway
 

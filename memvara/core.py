@@ -45,9 +45,9 @@ from .embed.fingerprint import (
 from .llm import LLM, NullLLM, ReplacementJudge, Usage
 from .redact import Redactor, redact_episode
 from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retrieved
-from .schema import Cardinality, PredicateRegistry
+from .schema import Cardinality, PredicateRegistry, _slugify
 from .store import SQLiteStore, Store, bulk_claims, resolve_states
-from .telemetry import Recorder
+from .telemetry import WRITE_LLM_CALLS, WRITE_TOKENS_IN, WRITE_TOKENS_OUT, Recorder
 from dataclasses import replace
 
 from .types import (
@@ -638,7 +638,8 @@ class Memvara:
     #: `redactor` is deliberately absent and stays accepted. It rewrites text on the way
     #: out, before anything leaves this process, which is the one privacy control that
     #: matters *more* against a hosted deployment than against a local file.
-    _LOCAL_ONLY = ("path", "store", "embedder", "llm", "registry", "telemetry")
+    _LOCAL_ONLY = ("path", "store", "embedder", "llm", "registry", "telemetry",
+                   "advise_replacements")
 
     #: The prefixes `_split_tuning` routes to the write, read and graph subsystems. Every
     #: one of those subsystems runs server-side against a hosted deployment, so the
@@ -786,6 +787,15 @@ class Memvara:
         #: `ReplacementJudge`; with any other backend the flag does nothing.
         self.advise_replacements = advise_replacements
         self._warned_advice = False
+        if advise_replacements and (
+                not isinstance(self.llm, ReplacementJudge) or self.llm.is_noop):
+            # Refused here rather than skipped at write time: a flag that is read and
+            # never used tells the caller something false in silence, and every write
+            # would look like a write the model found nothing to say about.
+            raise TypeError(
+                "advise_replacements=True needs a backend that can judge, and "
+                f"{self.llm.name!r} cannot. Pass llm=OpenAILLM(...) or "
+                "llm=AnthropicLLM(...), or leave advise_replacements off.")
         self.registry = registry if registry is not None else PredicateRegistry()
         # Rehydrate anything a previous process paid a model to classify. Without this
         # the schema is process-local, so every restart re-pays classification and, worse,
@@ -1413,49 +1423,62 @@ class Memvara:
         is why this fills a list and calls nothing.
 
         Never raises: the claim is already written, and a failed suggestion must not
-        turn a durable write into an exception the caller retries. A backend failure
-        counts as the model call it was and warns once per instance.
+        turn a durable write into an exception the caller retries. Any failure, in the
+        lookup or in the judge, warns once per instance and leaves `may_replace` empty,
+        even when an earlier candidate had already been accepted: half a review reads
+        exactly like a whole one, and the caller cannot tell which it got. A judge call
+        that raised is still counted as the model call it was.
         """
-        judge = self.llm
-        if not isinstance(judge, ReplacementJudge) or judge.is_noop:
-            return
+        # The constructor refused any backend that cannot judge.
+        judge = cast(ReplacementJudge, self.llm)
         new = receipt.added[0]
+        rec = self.telemetry
+        calls_before = receipt.llm_calls
+        tokens_before = (receipt.tokens_in, receipt.tokens_out)
         try:
-            vec = self.embedder.encode([new.text])[0]
+            # The write path embedded this claim moments ago; read the vector back rather
+            # than paying a hosted embedder for the same text twice.
+            vec = self.store.get_embedding(new.id)
+            if vec is None:
+                vec = self.embedder.encode([new.text])[0]
             # Twice the budget, because the new claim itself and its own slot-mates are
             # among the nearest and are dropped below.
             hits = self.store.vector_search(vec, scope.ancestors(), ADVISORY_CANDIDATES * 2,
                                             valid_at=now, known_at=now)
-        except ValueError:
-            # The index was built by a different embedder. Retrieval reports that where
-            # it matters; a suggestion is not the place to fail a write over it.
-            return
-        candidates: list[Claim] = []
-        for claim_id, _score in hits:
-            old = self.store.get_claim(claim_id)
+            found = self.store.get_claims([claim_id for claim_id, _score in hits])
             # Same slot means the reconciler already compared them, and decided.
-            if old is None or old.fact_key == new.fact_key:
-                continue
-            candidates.append(old)
-        for old in candidates[:ADVISORY_CANDIDATES]:
-            usage = Usage() if judge.reports_usage else None
-            receipt.llm_calls += 1
-            try:
-                verdict = judge.judge_replacement(new.text, old.text, usage=usage)
-            except Exception as exc:
-                if not self._warned_advice:
-                    self._warned_advice = True
-                    warnings.warn(
-                        f"replacement advice failed ({exc}); the write succeeded and "
-                        "this receipt carries no may_replace entries", RuntimeWarning,
-                        stacklevel=3)
-                return
-            finally:
-                if usage is not None and usage.reported:
-                    receipt.tokens_in += usage.input_tokens
-                    receipt.tokens_out += usage.output_tokens
-            if verdict.get("replaces"):
-                receipt.may_replace.append(old)
+            candidates = [c for claim_id, _score in hits
+                          if (c := found.get(claim_id)) is not None
+                          and c.fact_key != new.fact_key][:ADVISORY_CANDIDATES]
+            # `getattr`, as the pipeline does: a judge that never said it reports usage
+            # is not handed an accumulator it may not accept.
+            reports = bool(getattr(judge, "reports_usage", False))
+            for old in candidates:
+                usage = Usage() if reports else None
+                receipt.llm_calls += 1
+                try:
+                    verdict = judge.judge_replacement(new.text, old.text, usage=usage)
+                finally:
+                    if usage is not None and usage.reported:
+                        receipt.tokens_in += usage.input_tokens
+                        receipt.tokens_out += usage.output_tokens
+                if verdict.get("replaces"):
+                    receipt.may_replace.append(old)
+        except Exception as exc:
+            receipt.may_replace.clear()
+            if not self._warned_advice:
+                self._warned_advice = True
+                warnings.warn(
+                    f"replacement advice failed ({exc}); the write succeeded and this "
+                    "receipt carries no may_replace entries", RuntimeWarning,
+                    stacklevel=3)
+        finally:
+            # The same three series the pipeline publishes for extraction, so a
+            # dashboard that bills model use sees this spend too.
+            if rec is not None:
+                rec.counter(WRITE_LLM_CALLS, receipt.llm_calls - calls_before)
+                rec.counter(WRITE_TOKENS_IN, receipt.tokens_in - tokens_before[0])
+                rec.counter(WRITE_TOKENS_OUT, receipt.tokens_out - tokens_before[1])
 
     @staticmethod
     def _cite(claim: Claim, sources: Sequence[str | Episode] | None) -> list[Episode]:
@@ -3237,17 +3260,25 @@ class Memvara:
         multi-valued predicate, so the replay folds duplicates but closes nothing. Use
         `MEMVARA_PREDICATES` or `registry.learn` first when it should be single-valued.
 
+        Safe to run for an alias the registry already knows, including one the write
+        path learned from a model: the registry is left as it is and the claims still
+        filed under the old spelling are moved. That is the common repair, because a
+        model-learned alias redirects future writes and moves nothing.
+
         Ids survive, nothing is deleted, and each moved claim carries a dated
         `predicate_rekey` note that `why()` shows, so the change is attributable.
         """
         t = tenant if tenant is not None else self.default_scope.tenant
         registry = self.registry
         target = registry.normalize(canonical)
-        source = registry.normalize(surface)
+        # The slug, not the normalized form: a claim's predicate is the name the registry
+        # returned when it was written, so a store written before an alias was learned
+        # holds the raw slug, and that is the name the claims are filed under.
+        source = _slugify(surface)
         if not source or not target:
             raise ValueError("surface and canonical must both name a predicate")
         if source == target:
-            raise ValueError(f"{surface!r} already normalizes to {canonical!r}")
+            raise ValueError(f"{surface!r} and {canonical!r} are the same predicate name")
         if not dry_run:
             if not registry.known(target):
                 registry.learn(target, Cardinality.MANY)

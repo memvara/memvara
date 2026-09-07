@@ -910,7 +910,10 @@ class MergeReport:
 
     scanned: int = 0
     moved: int = 0       # claims whose predicate was rewritten onto its canonical name
-    written: int = 0     # claims whose stored row was rewritten
+    #: Rows rewritten on a real run: the movers and the live claims in the slots they
+    #: landed in. Unlike `RekeyReport.written`, which is every claim scanned, this is
+    #: the part of the store the pass touched, not the part it read.
+    written: int = 0
     merged: int = 0      # claims folded into an earlier claim of the same value
     retired: int = 0     # claims superseded by the rebuilt chain
     dry_run: bool = True
@@ -938,11 +941,12 @@ def backfill_predicates(reconciler: Reconciler, tenant: str, *,
     names was the usual reason a newer value never superseded an older one.
 
     `aliases` maps a surface predicate onto the canonical one it should be filed under.
-    With it, the pass applies exactly that mapping and touches the registry not at all,
-    which is what makes a dry run dry: `Memvara.merge_predicate` calls this once with the
-    mapping to report, and only then learns the alias for real. Without it, the pass
-    applies whatever the registry resolves today, which is what an operator wants after
-    loading a declared vocabulary (`MEMVARA_PREDICATES`) over a store that guessed.
+    With it, the pass moves only claims whose predicate is a key of that mapping and
+    touches the registry not at all, which is what makes a dry run dry:
+    `Memvara.merge_predicate` calls this once with the mapping to report, and only then
+    learns the alias for real. Without it, the pass applies whatever the registry
+    resolves today to every claim, which is what an operator wants after loading a
+    declared vocabulary (`MEMVARA_PREDICATES`) over a store that guessed.
 
     **This rewrites history, and that is the entire reason it is a separate function
     with `dry_run=True` as its default.** After it, claims that coexisted under two names
@@ -972,9 +976,13 @@ def backfill_predicates(reconciler: Reconciler, tenant: str, *,
     registry = reconciler.registry
 
     def target_of(predicate: str) -> str:
-        if aliases is not None:
-            return registry.normalize(aliases.get(predicate, predicate))
-        return registry.normalize(predicate)
+        if aliases is None:
+            return registry.normalize(predicate)
+        mapped = aliases.get(predicate)
+        # Not `normalize(predicate)`: a claim outside the mapping is outside this pass,
+        # even when the registry would fold it. Otherwise a dry run for one merge would
+        # count, and a real run would move, the leftovers of every alias learned before.
+        return registry.normalize(mapped) if mapped is not None else predicate
 
     claims = sorted(
         reconciler.store.iter_claims(tenant, include_invalidated=True),
@@ -1000,16 +1008,15 @@ def backfill_predicates(reconciler: Reconciler, tenant: str, *,
             live.setdefault(claim.fact_key, []).append(claim)
 
     slots = {key: group for key, group in live.items() if key in touched_slots}
-    before = {c.id: (c.invalidated_at, c.invalidated_by, c.valid_to, c.observation_count)
-              for group in slots.values() for c in group}
     _replay(slots, registry, t, report, PREDICATE_REKEY)
-    displaced = [c for group in slots.values() for c in group
-                 if (c.invalidated_at, c.invalidated_by, c.valid_to,
-                     c.observation_count) != before[c.id]]
 
     if not dry_run:
+        # Every mover, and every live claim in a slot a mover landed in. A few of the
+        # latter were not displaced by the replay and are rewritten unchanged; a slot is
+        # small, and that costs less than keeping a list of which fields `_replay` may
+        # touch in step with `_replay` itself.
         to_write = {c.id: c for c in moved}
-        to_write.update((c.id, c) for c in displaced)
+        to_write.update((c.id, c) for group in slots.values() for c in group)
         batch = getattr(reconciler.store, "batch", None)
         with (batch() if batch is not None else nullcontext()):
             for claim in to_write.values():
@@ -1060,7 +1067,7 @@ def _note(claim: Claim, at: datetime, reason: str, other: str,
         {"at": at.timestamp(), "reason": reason, "claim": other})
 
 
-def _fold_into(keeper: Claim, loser: Claim, at: datetime, key: str = ENTITY_REKEY) -> None:
+def _fold_into(keeper: Claim, loser: Claim, at: datetime, key: str) -> None:
     """Two claims that turn out to assert the same thing become one.
 
     Invalidated in *transaction* time only, exactly as consolidation's merge does:
@@ -1075,7 +1082,7 @@ def _fold_into(keeper: Claim, loser: Claim, at: datetime, key: str = ENTITY_REKE
     _note(keeper, at, "absorbed", loser.id, key)
 
 
-def _supersede(older: Claim, newer: Claim, at: datetime, key: str = ENTITY_REKEY) -> None:
+def _supersede(older: Claim, newer: Claim, at: datetime, key: str) -> None:
     """One link of a rebuilt chain: the older value ends where the newer one begins.
 
     The exact mirror of `_fold_into`, and the pair is worth reading together — they are

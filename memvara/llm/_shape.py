@@ -176,17 +176,22 @@ JUDGE_TEXT_CHARS = 400
 
 
 def judge_prompt(new_text: str, old_text: str) -> str:
-    return (f"Existing memory: {old_text[:JUDGE_TEXT_CHARS]}\n"
-            f"New memory: {new_text[:JUDGE_TEXT_CHARS]}")
+    # Flattened onto one line each, because a stored text is caller-supplied and a
+    # newline inside it would let a memory open its own "New memory:" line.
+    old = " ".join(old_text.split())[:JUDGE_TEXT_CHARS]
+    new = " ".join(new_text.split())[:JUDGE_TEXT_CHARS]
+    return f"Existing memory: {old}\nNew memory: {new}"
 
 
 def shape_verdict(parsed: dict[str, Any]) -> dict[str, bool]:
     """Four booleans, and a verdict no stronger than its three reasons.
 
     A missing or non-boolean answer reads as False, because False is the answer that
-    closes nothing. `replaces` is recomputed from the three questions rather than
-    trusted: a model that says "replaces" while denying one of its own premises has
-    contradicted itself, and the direction that loses nothing is to disbelieve it.
+    closes nothing. `replaces` is True only when the model said so *and* affirmed all
+    three questions: a model that says "replaces" while denying one of its own premises
+    has contradicted itself, and the direction that loses nothing is to disbelieve it.
+    The model's own "no" is kept for the same reason. This is the rule the 9% false-close
+    figure was measured under.
     """
     out = {key: parsed.get(key) is True
            for key in ("same_thing", "same_property", "newer_value", "replaces")}
