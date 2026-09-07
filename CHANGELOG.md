@@ -62,7 +62,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   non-numeric are refused at startup, and `MEMVARA_MODE=cloud` refuses the variable
   outright as it already does for the other four `MEMVARA_LLM_*` settings.
 
-
 - **`bench/longmemeval.py` gained `--rerank`, `--reranker` and `--rerank-model`.** They
   existed only on `bench/locomo.py`, so the cross-encoder had never been measured on
   LongMemEval at all. `build_reranker` and the flag definitions now live in

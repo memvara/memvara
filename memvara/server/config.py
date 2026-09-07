@@ -281,7 +281,12 @@ def _max_tokens(raw: str | None) -> int | None:
     value = (raw or "").strip()
     if not value:
         return None
-    if not (value.isdigit() and int(value) > 0):
+    # `isascii()` as well as `isdigit()`, because `isdigit()` is true for about 128
+    # characters `int()` then refuses — superscripts like "²⁰⁴⁸" among them. Without it
+    # the `and` short-circuits into `int()` and a `ValueError` escapes, and `cli.py`
+    # catches only `ConfigError`, so the operator gets a traceback where this module
+    # promises a sentence telling them what to do.
+    if not (value.isascii() and value.isdigit() and int(value) > 0):
         raise ConfigError(
             f"MEMVARA_LLM_MAX_TOKENS={raw!r} is not a positive integer. Leave it unset "
             "for the backend default of 8192. Set it to bound how long one runaway "
@@ -302,7 +307,9 @@ def _max_claims(raw: str | None) -> int | None:
     value = (raw or "").strip()
     if not value:
         return None
-    if not (value.isdigit() and int(value) > 0):
+    # `isascii()` for the reason `_max_tokens` gives: this pattern was copied from here,
+    # and the escaping `ValueError` was found there and is the same bug in both.
+    if not (value.isascii() and value.isdigit() and int(value) > 0):
         raise ConfigError(
             f"MEMVARA_LLM_MAX_CLAIMS={raw!r} is not a positive integer. Leave it unset "
             "for no cap, which is what hosted models want. Set it only for a self-hosted "

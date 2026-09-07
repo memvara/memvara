@@ -3332,11 +3332,16 @@ def test_no_cap_is_the_default_because_hosted_openai_rejects_one(monkeypatch):
     memory.close()
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "abc", "3.5", "twelve"])
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "3.5", "twelve",
+                                   "\u00b9\u00b2", "\u0661\u0662"])
 def test_an_unusable_claim_cap_is_refused_at_startup(value):
     """Refused rather than clamped or ignored. `0` would forbid every claim and make
     extraction a silent no-op, and a typo falling back to uncapped would leave a grammar
-    backend with exactly the failure the cap was set to prevent."""
+    backend with exactly the failure the cap was set to prevent.
+
+    The last two cover the `str.isdigit()` trap that `_max_tokens` documents: superscript
+    "\u00b9\u00b2" satisfied `isdigit()` and then made `int()` raise, so a `ValueError` escaped a
+    module whose whole contract is to fail with a sentence."""
     with pytest.raises(ConfigError, match="MEMVARA_LLM_MAX_CLAIMS"):
         ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
                                "MEMVARA_LLM_MAX_CLAIMS": value})
@@ -3468,12 +3473,22 @@ def test_the_budget_and_the_claim_cap_are_separate_switches(monkeypatch):
     memory.close()
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "2048 tokens", "2.5", "lots"])
+@pytest.mark.parametrize("value", ["0", "-1", "2048 tokens", "2.5", "lots",
+                                   "0x10", "2_048", "\u00b2\u2070\u2074\u2078",
+                                   "\u0662\u0660\u0664\u0668"])
 def test_an_unusable_response_budget_is_refused_at_startup(value):
     """Refused rather than clamped or ignored. A typo falling back to 8,192 would leave
     an operator believing they had bounded a runaway they had not — and `0` is the sharp
     one: it truncates every response, and a truncation is now reported as a turn that
-    was not extracted, so the server would defer every write it made."""
+    was not extracted, so the server would defer every write it made.
+
+    The last two are the ones that made this list longer than it looks. `str.isdigit()`
+    is true for about 128 characters `int()` then refuses — superscript "\u00b2\u2070\u2074\u2078" here — so
+    the check short-circuited into `int()` and let a `ValueError` escape, and `cli.py`
+    catches only `ConfigError`. An operator got a traceback where this module promises a
+    sentence. Arabic-indic "\u0662\u0660\u0664\u0668" is the other half: `int()` reads it as 2048, so it was
+    accepted, and a value nobody can grep for is a paste accident rather than a
+    setting."""
     with pytest.raises(ConfigError, match="MEMVARA_LLM_MAX_TOKENS"):
         ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
                                "MEMVARA_LLM_MAX_TOKENS": value})

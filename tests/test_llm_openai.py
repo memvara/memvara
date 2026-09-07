@@ -460,6 +460,32 @@ def test_reachable_from_both_packages_without_the_sdk_installed():
         memvara.NotAThing
 
 
+
+def test_the_budget_is_sent_on_the_request_not_only_stored_on_the_backend():
+    """The link nothing pinned. `max_tokens` is the only lever that bounds how long a
+    runaway runs, and a deployment sets it through `MEMVARA_LLM_MAX_TOKENS` — but every
+    test of that variable asserted the attribute on the constructed object, which stays
+    true if `_call` stops sending it. OpenAI names the field `max_completion_tokens`, so
+    this also pins the rename that `max_tokens` would silently fail under."""
+    client = FakeClient({"claims": []})
+    OpenAILLM(client=client, max_tokens=2048).extract(episodes("hi"), [])
+    assert client.calls[0]["max_completion_tokens"] == 2048
+
+
+def test_the_default_budget_is_sent_when_nobody_sets_one():
+    client = FakeClient({"claims": []})
+    OpenAILLM(client=client).extract(episodes("hi"), [])
+    assert client.calls[0]["max_completion_tokens"] == 8192
+
+
+def test_the_budget_the_truncation_message_names_is_the_one_that_was_sent():
+    """The number in the message has to be the number that bounded the call, or an
+    operator raises a limit that was never the one they hit."""
+    client = FakeClient({"claims": []}, finish_reason="length")
+    with pytest.raises(TruncatedResponse, match="4096-token"):
+        OpenAILLM(client=client, max_tokens=4096).extract(episodes("hi"), [])
+    assert client.calls[0]["max_completion_tokens"] == 4096
+
 # -- truncation ------------------------------------------------------------------------
 
 CUT_OFF = '{"claims": [{"subject": "user", "predicate": "lives'
