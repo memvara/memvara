@@ -101,6 +101,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   budget thinking and returns an empty message. The variable takes a JSON object and is
   refused at startup when it is not one.
 
+- **`recall(valid_at=)` and `memory_recall(valid_at=)`.** The prompt-shaped read can be
+  asked about a day: the block is what we believe today was true then, the default
+  header names the day, and `include_history=True` lists only values that had ended by
+  then. Passing the instant also anchors the time-ranked retrieval leg, which otherwise
+  measures distance from now. Only the world clock: `as_of` stays off `recall()`, because
+  it rewinds belief and would render a record retired since that day into a prompt, and
+  `memory_recall` refuses it as an unknown argument. Against a hosted deployment
+  `RemoteMemvara.recall(valid_at=...)` raises, as `budget` does, because `POST /v1/recall`
+  has no time axis yet. `MemoryAPI.recall` declares the parameter.
 - **`bench/longmemeval.py` gained `--rerank`, `--reranker` and `--rerank-model`.** They
   existed only on `bench/locomo.py`, so the cross-encoder had never been measured on
   LongMemEval at all. `build_reranker` and the flag definitions now live in

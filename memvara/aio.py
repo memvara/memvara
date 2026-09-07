@@ -279,6 +279,7 @@ class AsyncMemvara:
                      include_episodes: bool = ..., episode_header: str | None = ...,
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
+                     valid_at: datetime | None = ...,
                      with_ids: Literal[False] = ...) -> str: ...
 
     @overload
@@ -289,6 +290,7 @@ class AsyncMemvara:
                      include_episodes: bool = ..., episode_header: str | None = ...,
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
+                     valid_at: datetime | None = ...,
                      with_ids: Literal[True]) -> RecallResult: ...
 
     @overload
@@ -299,6 +301,7 @@ class AsyncMemvara:
                      include_episodes: bool = ..., episode_header: str | None = ...,
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
+                     valid_at: datetime | None = ...,
                      with_ids: bool) -> str | RecallResult: ...
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
@@ -311,6 +314,7 @@ class AsyncMemvara:
                      history_header: str | None = None,
                      budget: int | None = None,
                      counter: Callable[[str], int] = _approx_tokens,
+                     valid_at: datetime | None = None,
                      with_ids: bool = False) -> Any:
         """See `Memvara.recall`."""
         return await asyncio.to_thread(
@@ -321,7 +325,7 @@ class AsyncMemvara:
             memory_types=memory_types, include_episodes=include_episodes,
             episode_header=episode_header, include_history=include_history,
             history_header=history_header, budget=budget, counter=counter,
-            with_ids=with_ids)
+            valid_at=valid_at, with_ids=with_ids)
 
     async def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
                   min_score: float = 0.0, anchored: bool = False, tenant=None, user=None,
@@ -667,6 +671,7 @@ class AsyncScopedMemvara:
                      include_episodes: bool = ..., episode_header: str | None = ...,
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
+                     valid_at: datetime | None = ...,
                      with_ids: Literal[False] = ...) -> str: ...
 
     @overload
@@ -677,6 +682,7 @@ class AsyncScopedMemvara:
                      include_episodes: bool = ..., episode_header: str | None = ...,
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
+                     valid_at: datetime | None = ...,
                      with_ids: Literal[True]) -> RecallResult: ...
 
     @overload
@@ -687,6 +693,7 @@ class AsyncScopedMemvara:
                      include_episodes: bool = ..., episode_header: str | None = ...,
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
+                     valid_at: datetime | None = ...,
                      with_ids: bool) -> str | RecallResult: ...
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
@@ -699,6 +706,7 @@ class AsyncScopedMemvara:
                      history_header: str | None = None,
                      budget: int | None = None,
                      counter: Callable[[str], int] = _approx_tokens,
+                     valid_at: datetime | None = None,
                      with_ids: bool = False) -> Any:
         return await self._amem.recall(
             query, k=k, min_score=min_score, anchored=anchored, ranked=ranked,
@@ -706,7 +714,8 @@ class AsyncScopedMemvara:
             memory_types=memory_types,
             include_episodes=include_episodes, episode_header=episode_header,
             include_history=include_history, history_header=history_header,
-            budget=budget, counter=counter, with_ids=with_ids, **self._kw)
+            budget=budget, counter=counter, valid_at=valid_at, with_ids=with_ids,
+            **self._kw)
 
     async def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
                   min_score: float = 0.0, anchored: bool = False) -> Answer:

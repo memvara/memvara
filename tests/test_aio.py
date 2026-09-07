@@ -199,6 +199,25 @@ def test_the_write_surface(amem):
     run(main())
 
 
+def test_recall_forwards_valid_at_on_both_async_surfaces(amem):
+    """`valid_at` reaches `Memvara.recall` from the async client and its scoped view."""
+    from datetime import datetime, timezone
+
+    async def main():
+        await amem.remember("user", "lives_in", "Berlin",
+                            valid_from=datetime(2020, 1, 1, tzinfo=timezone.utc))
+        await amem.remember("user", "lives_in", "Lisbon",
+                            valid_from=datetime(2024, 1, 1, tzinfo=timezone.utc))
+        day = datetime(2022, 6, 1, tzinfo=timezone.utc)
+        then = await amem.recall("where do they live", valid_at=day)
+        assert "Berlin" in then and "Lisbon" not in then
+        assert then.splitlines()[0].startswith("Known about the user as things were on 2022-06-01")
+        view = amem.scope(agent="a1")
+        assert "Berlin" in await view.recall("where do they live", valid_at=day)
+
+    run(main())
+
+
 def test_the_read_surface(amem):
     async def main():
         await amem.add("We decided to sunset the kafka pipeline at the offsite")

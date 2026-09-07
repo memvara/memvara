@@ -370,14 +370,19 @@ class RemoteMemvara:
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                anchored: bool = False, ranked: bool = False,
                memory_types: Sequence[MemoryType | str] | None = None,
-               include_episodes: bool = False, budget: int | None = None) -> str:
+               include_episodes: bool = False, budget: int | None = None,
+               valid_at: datetime | None = None) -> str:
         """Retrieval already formatted for a system prompt: prose, not rows.
 
         Narrower than `search` in the two ways the facade is narrow, and neither is an
         oversight. No time travel, because a prompt assembled out of what was believed
         last March is a hazard rather than an audit trail. No `states`, because rendering
         a retired record into a system prompt is an un-delete: the agent acts on a fact
-        that was withdrawn.
+        that was withdrawn. The local `Memvara.recall` takes `valid_at`, the world clock
+        alone, which reaches no retired record; `POST /v1/recall` has no time axis yet,
+        so `valid_at` is refused here the way `budget` is: the MCP server passes it on
+        every `memory_recall` call, and a dated read silently answered with the present
+        is a wrong prompt with nothing to notice it by.
 
         `budget` is refused rather than ignored. `POST /v1/recall` renders server-side
         and takes no budget, and this client cannot re-derive the local truncation from
@@ -396,6 +401,11 @@ class RemoteMemvara:
                 "recall(budget=...) is not available against a hosted deployment: "
                 "POST /v1/recall renders the block server-side and takes no budget. Use "
                 "a smaller k, or render your own block from search().")
+        if valid_at is not None:
+            raise ValueError(
+                "recall(valid_at=...) is not available against a hosted deployment: "
+                "POST /v1/recall has no time axis. Use search(valid_at=...) and render "
+                "your own block, or ask the deployment for the dated read.")
         body = self._http.request(
             "POST", "/v1/recall", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,
@@ -924,11 +934,13 @@ class ScopedRemoteMemvara:
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                anchored: bool = False, ranked: bool = False,
                memory_types: Sequence[MemoryType | str] | None = None,
-               include_episodes: bool = False, budget: int | None = None) -> str:
+               include_episodes: bool = False, budget: int | None = None,
+               valid_at: datetime | None = None) -> str:
         return self._mem.recall(query, k=k, min_score=min_score, anchored=anchored,
                                 ranked=ranked,
                                 memory_types=memory_types,
-                                include_episodes=include_episodes, budget=budget)
+                                include_episodes=include_episodes, budget=budget,
+                                valid_at=valid_at)
 
     def get(self, claim_id: str) -> Claim | None:
         return self._mem.get(claim_id)

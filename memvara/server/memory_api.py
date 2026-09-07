@@ -91,7 +91,8 @@ class MemoryAPI(Protocol):
                anchored: bool = False, ranked: bool = False,
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False,
-               budget: int | None = None) -> str:
+               budget: int | None = None,
+               valid_at: datetime | None = None) -> str:
         """Retrieval already rendered for a system prompt.
 
         `budget` is declared because `_recall` passes it on every call, as `None` unless
@@ -99,6 +100,12 @@ class MemoryAPI(Protocol):
         and raises for any value other than `None`: `POST /v1/recall` renders server-side
         and takes no budget, and a ceiling silently not applied is an oversized prompt
         with nothing to notice it by.
+
+        `valid_at` is declared for the same reason and refused the same way against a
+        hosted deployment: `POST /v1/recall` has no time axis, and a dated read that
+        silently answered with the present would be a wrong prompt. Only `valid_at`,
+        never `as_of`: `memory_recall` renders into a prompt, and rewinding the belief
+        clock would render records retired since.
 
         `ranked` is declared here and not on `search` above because `memory_search` does
         not take it (`server/tools.py`, "The MCP door" in the design spec): `_search`

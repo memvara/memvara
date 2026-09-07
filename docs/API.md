@@ -63,9 +63,12 @@ mem.search(query, *, k=10, min_score=0.0, anchored=False, ranked=False, T=None,
 mem.recall(query, *, k=8, min_score=0.0, anchored=False, ranked=False, header=None,
            include_episodes=False,
            episode_header=None, include_history=False, history_header=None,
-           budget=None, counter=<internal>, with_ids=False)
+           budget=None, counter=<internal>, valid_at=None, with_ids=False)
                                                   -> str | RecallResult
-#   no `T=`, no `states=`, no `include_invalidated=` — deliberately; see recall() below
+#   valid_at= only: the world clock. No `as_of=`, no `known_at=`, no `states=`, no
+#     `include_invalidated=` — deliberately; see recall() below. With valid_at the
+#     default header names the day, and include_history lists only values that had
+#     ended by then.
 #   budget= caps the block by size rather than by count: `k` bounds how many notes,
 #     this bounds how much text. Notes drop whole and the block says how many did not
 #     fit. `counter=` is any `(str) -> int`; pass `tiktoken`'s or Anthropic's to
@@ -165,8 +168,10 @@ nothing else in this API composes it.
 retrieved data rather than instructions, and flattens each claim to a single line — a
 memory whose text contains newlines and a fake section header cannot forge prompt
 structure around itself. Its signature is explicit rather than `**kwargs` for the same
-reason: the time and state keywords are not reachable from here, and `include_history=True`
-is the one bounded exception — see
+reason: the belief clock and the state keywords are not reachable from here. `valid_at=`
+is, because it moves the world clock only and so reaches no retired record; the block it
+renders is what we believe today was true on that day, under a header that names the
+day. `include_history=True` is the one bounded exception on the state side — see
 [What a prompt block may carry from the past](DESIGN.md#what-a-prompt-block-may-carry-from-the-past).
 
 ### Two meanings of "delete", kept apart
@@ -261,9 +266,10 @@ an `AttributeError` at the call site and a mypy error before that, where a metho
 raised would compile, ship and fail in production. The same rule decides which *arguments*
 exist. `recall()` takes no `with_ids`, because `POST /v1/recall` returns a rendered string
 and carries no ids at all; `get_all()` takes no `memory_types`, because the endpoint has no
-such filter and would answer with an unfiltered page. `budget` is the one refusal rather
-than omission: it stays in `recall()`'s signature so that `None` works, and a value raises
-`ValueError`, because a budget silently ignored is an oversized prompt with no signal.
+such filter and would answer with an unfiltered page. `budget` and `valid_at` are the two
+refusals rather than omissions: both stay in `recall()`'s signature so that `None` works,
+and a value raises `ValueError`, because a budget silently ignored is an oversized prompt
+with no signal, and a dated read silently answered with the present is a wrong one.
 
 Two divergences are real and worth knowing before you write against them:
 

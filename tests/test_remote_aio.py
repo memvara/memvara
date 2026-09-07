@@ -413,6 +413,19 @@ def test_ranked_reaches_the_wire_only_when_asked_for(recorded):
     assert ranked.selection is not None and ranked.selection.outcome == "applied"
 
 
+def test_recall_refuses_valid_at_rather_than_answering_with_the_present(recorded):
+    """The async twin of the sync refusal: `POST /v1/recall` has no time axis."""
+    from datetime import datetime, timezone
+    mem = recorded({"text": "x", "empty": False})
+
+    async def main():
+        with pytest.raises(ValueError, match="valid_at"):
+            await mem.recall("q", valid_at=datetime(2020, 6, 1, tzinfo=timezone.utc))
+        await mem.aclose()
+
+    run(main())
+
+
 def test_recall_refuses_a_budget_rather_than_dropping_it(recorded):
     """`POST /v1/recall` renders server-side and takes no budget. A ceiling silently not
     applied is an oversized prompt with nothing to notice it by."""

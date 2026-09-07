@@ -189,6 +189,18 @@ def test_recall_reaches_the_recall_endpoint_and_returns_the_rendered_text(record
     assert isinstance(text, str) and "Berlin" in text
 
 
+def test_recall_refuses_valid_at_rather_than_answering_with_the_present(recorded):
+    """`POST /v1/recall` has no time axis. The MCP server passes `valid_at` on every
+    `memory_recall` call, so a value must raise: a dated read silently answered with the
+    present is a wrong prompt with nothing to notice it by."""
+    from datetime import datetime, timezone
+    mem = recorded({"text": "x", "empty": False})
+    with pytest.raises(ValueError) as caught:
+        mem.recall("q", valid_at=datetime(2020, 6, 1, tzinfo=timezone.utc))
+    assert "valid_at" in str(caught.value)
+    assert not recorded.calls, "refused before any request was sent"
+
+
 def test_recall_refuses_a_budget_rather_than_dropping_it(recorded):
     """The endpoint renders server-side and takes no budget. Ignoring one would ship an
     oversized prompt with nothing to notice it by."""

@@ -344,8 +344,9 @@ past the correction; `valid_at=June` is how you see it. `as_of` is exact sugar f
 picking one.
 
 Eight reads take all three — `search`, `get_all`, `count`, `history`, `why`, `produced`,
-`neighborhood`, `paths_between`. `recall()`, `get()` and `since()` take none of them, and
-`ask()` spells it `at=`.
+`neighborhood`, `paths_between`. `recall()` takes `valid_at=` alone, because its output is
+a prompt and the world clock is the one that reaches no retired record. `get()` and
+`since()` take none of them, and `ask()` spells it `at=`.
 
 `ask()` composes the difference into an answer, which is the question the two clocks exist
 for:

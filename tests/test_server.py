@@ -1080,6 +1080,50 @@ def test_recall_without_ranked_never_touches_a_configured_selector():
         srv.close()
 
 
+def test_recall_takes_valid_at_and_the_header_names_the_day(server):
+    """The prompt-shaped read can be asked about a day. The header says which day, so
+    the model cannot read a 2019 city as the current one."""
+    text(server, "memory_remember", {"predicate": "works_at", "object": "Acme",
+                                     "true_since": "2019-03-04T00:00:00Z"})
+    text(server, "memory_remember", {"predicate": "works_at", "object": "Globex",
+                                     "true_since": "2024-01-01T00:00:00Z"})
+
+    now = text(server, "memory_recall", {"query": "where do they work"})
+    assert "Globex" in now and "Acme" not in now
+    assert now.splitlines()[0] == Memvara.RECALL_HEADER
+
+    then = text(server, "memory_recall",
+                {"query": "where do they work", "valid_at": "2020-06-01"})
+    assert "Acme" in then and "Globex" not in then
+    assert then.splitlines()[0] == Memvara.RECALL_HEADER_AT.format(day="2020-06-01")
+
+
+def test_recall_refuses_as_of_and_names_the_tool_that_takes_it(server):
+    """`as_of` rewinds belief, so a record retired since would be rendered into a prompt
+    as a fact. It is refused as an unknown argument, and the tool description sends a
+    model to memory_search for what this system used to believe."""
+    body, is_error = call(server, "memory_recall",
+                          {"query": "where do they work", "as_of": "2020-06-01"})
+    assert is_error and "as_of" in body
+    description = next(t for t in TOOLS if t.name == "memory_recall").description
+    assert "valid_at" in description and "as_of" in description
+    assert "valid_at" in next(t for t in TOOLS if t.name == "memory_recall").properties
+    assert "as_of" not in next(t for t in TOOLS if t.name == "memory_recall").properties
+
+
+def test_recall_at_a_day_leaves_a_forgotten_record_out(server):
+    """The security property, from the tool: what we retracted is absent from a dated
+    read exactly as it is from a present one."""
+    text(server, "memory_remember", {"predicate": "plan", "object": "Gold",
+                                     "true_since": "2019-01-01T00:00:00Z"})
+    rows = text(server, "memory_search", {"query": "plan"})
+    claim_id = re.search(r"id=(cl_[0-9a-f]+)", rows).group(1)
+    text(server, "memory_forget", {"claim_id": claim_id})
+
+    then = text(server, "memory_recall", {"query": "what plan", "valid_at": "2020-06-01"})
+    assert "Gold" not in then
+
+
 def test_recall_and_search_report_absence_as_absence(server):
     for name in ("memory_recall", "memory_search"):
         body = text(server, name, {"query": "my mother's maiden name"})

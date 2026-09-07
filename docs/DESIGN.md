@@ -435,8 +435,12 @@ filter is `state == "ended"`, never `state != "live"`.
 That bound is why this can exist at all on a surface that otherwise refuses to render
 anything non-live: `recall()` takes no `as_of`, no `states=` and no `include_invalidated=`,
 because `states=["retired"]` would build a prompt out of nothing but the records we
-stopped believing. Time travel and audit reads stay on `search()`, where they are an
-explicit choice. [SECURITY.md](../SECURITY.md#the-prompt-injection-surface-in-recall) treats
+stopped believing, and `as_of` would rewind belief to a day on which a since-retired
+record was still believed. Belief travel and audit reads stay on `search()`, where they
+are an explicit choice. `recall(valid_at=T)` is allowed by the same test: it moves the
+world clock only, so the block is what we believe *today* was true on T, a retired
+record is as absent as from a present read, the default header names the day, and with
+`include_history=True` the tail lists only values that had ended by T. [SECURITY.md](../SECURITY.md#the-prompt-injection-surface-in-recall) treats
 reaching a retired claim through `recall(include_history=True)` as an in-scope
 vulnerability, and
 `tests/test_api.py::test_recall_can_carry_the_past_of_a_fact_without_carrying_a_retired_one`

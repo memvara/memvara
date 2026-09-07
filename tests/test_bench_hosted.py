@@ -783,7 +783,8 @@ class RemoteShaped:
                 if score >= min_score][:k]
 
     def recall(self, query, *, k=8, min_score=0.0, anchored=False, ranked=False,
-               memory_types=None, include_episodes=False, budget=None):
+               memory_types=None, include_episodes=False, budget=None,
+               valid_at=None):
         self.recall_calls.append({"k": k, "min_score": min_score})
         return "MEMORY\n- a rendered memory"
 
