@@ -24,13 +24,15 @@ things here are genuinely OpenAI-specific and neither is optional:
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from ..types import Episode
 from . import _shape
 from .base import (
     CLAIM_SCHEMA,
     EXTRACT_SYSTEM,
+    JUDGE_SCHEMA,
+    JUDGE_SYSTEM,
     MAX_CLAIMS,
     PREDICATE_SCHEMA,
     PREDICATE_SYSTEM,
@@ -47,6 +49,7 @@ _SCHEMA_NAMES = {
     id(CLAIM_SCHEMA): "claims",
     id(RESOLVE_SCHEMA): "predicate_resolution",
     id(PREDICATE_SCHEMA): "predicate_spec",
+    id(JUDGE_SCHEMA): "replacement_verdict",
 }
 
 
@@ -97,9 +100,17 @@ class OpenAILLM:
         base_url: str | None = None,
         extract_system: str | None = None,
         terse: bool = False,
+        extra_body: Mapping[str, Any] | None = None,
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens
+        # Provider-specific request fields the SDK does not name, sent on every request
+        # as the SDK's `extra_body`. The case it exists for is a self-hosted model that
+        # reasons before it answers: a Qwen3 server needs
+        # `{"chat_template_kwargs": {"enable_thinking": false}}` or it spends the whole
+        # token budget thinking and returns an empty message. `None` sends nothing, so a
+        # caller who never set it makes the same request as before this option existed.
+        self.extra_body = dict(extra_body) if extra_body else None
         # Replacement extraction instructions, for the same self-hosted case `max_claims`
         # serves. `EXTRACT_SYSTEM` closes by saying an empty list is a correct answer and
         # the common case, which is true and is what a model able to weigh salience across
@@ -170,15 +181,15 @@ class OpenAILLM:
 
     def _call(self, system: str, prompt: str, schema: dict[str, Any],
               usage: Usage | None = None, *, name: str | None = None) -> Any:
-        response = self._client.chat.completions.create(
-            model=self.model,
-            max_completion_tokens=self.max_tokens,
-            temperature=self.temperature,
-            messages=[
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_completion_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
-            response_format={
+            "response_format": {
                 "type": "json_schema",
                 "json_schema": {
                     "name": name or _SCHEMA_NAMES.get(id(schema), "result"),
@@ -186,7 +197,10 @@ class OpenAILLM:
                     "schema": schema,
                 },
             },
-        )
+        }
+        if self.extra_body is not None:
+            kwargs["extra_body"] = self.extra_body
+        response = self._client.chat.completions.create(**kwargs)
         # OpenAI names the same two quantities differently from Anthropic; the reading and
         # the refusal-to-guess live in one place so the two backends cannot drift.
         _shape.record_usage(response, usage, "prompt_tokens", "completion_tokens")
@@ -236,6 +250,8 @@ class OpenAILLM:
         }
         if json_object:
             kwargs["response_format"] = {"type": "json_object"}
+        if self.extra_body is not None:
+            kwargs["extra_body"] = self.extra_body
         response = self._client.chat.completions.create(**kwargs)
         _shape.record_usage(response, usage, "prompt_tokens", "completion_tokens")
         return _first_text(response)
@@ -274,6 +290,15 @@ class OpenAILLM:
         prompt = f"predicate: {_shape.snake_case(predicate)}\nexample usage: {example}"
         response = self._call(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA, usage)
         return _shape.spec_fields(_shape.parse_json_object(_first_text(response)))
+
+    # -- ReplacementJudge protocol -------------------------------------------
+
+    def judge_replacement(self, new_text: str, old_text: str,
+                          *, usage: Usage | None = None) -> dict[str, bool]:
+        """Is `new_text` a newer version of `old_text`? See `JUDGE_SYSTEM`."""
+        response = self._call(
+            JUDGE_SYSTEM, _shape.judge_prompt(new_text, old_text), JUDGE_SCHEMA, usage)
+        return _shape.shape_verdict(_shape.parse_json_object(_first_text(response)))
 
     def __repr__(self) -> str:
         return f"<OpenAILLM {self.model}>"

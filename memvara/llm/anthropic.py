@@ -16,6 +16,8 @@ from . import _shape
 from .base import (
     CLAIM_SCHEMA,
     EXTRACT_SYSTEM,
+    JUDGE_SCHEMA,
+    JUDGE_SYSTEM,
     PREDICATE_SCHEMA,
     PREDICATE_SYSTEM,
     COMPOSE_SCHEMA,
@@ -203,3 +205,12 @@ class AnthropicLLM:
         prompt = f"predicate: {_shape.snake_case(predicate)}\nexample usage: {example}"
         response = self._call(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA, usage)
         return _shape.spec_fields(_shape.parse_json_object(_first_text(response)))
+
+    # -- ReplacementJudge protocol -------------------------------------------
+
+    def judge_replacement(self, new_text: str, old_text: str,
+                          *, usage: Usage | None = None) -> dict[str, bool]:
+        """Is `new_text` a newer version of `old_text`? See `JUDGE_SYSTEM`."""
+        response = self._call(
+            JUDGE_SYSTEM, _shape.judge_prompt(new_text, old_text), JUDGE_SCHEMA, usage)
+        return _shape.shape_verdict(_shape.parse_json_object(_first_text(response)))

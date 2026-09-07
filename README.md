@@ -425,6 +425,24 @@ volatility = "fast"     # static | slow | fast -> 36500 | 730 | 7 day half-life
 A declaration outranks a guess, so a pack corrects a store that already classified
 something wrongly rather than only shaping a fresh one.
 
+### Merge the spellings a store already has
+
+Two sessions that store the same fact under `known_bug` and `known_defect` get two slots,
+so the newer value never supersedes the older one. `merge_predicate` repairs that: it
+teaches the registry that one name is another, re-files every claim already stored under
+the old name, and replays the slot so duplicates fold and older values close.
+
+```python
+mem.merge_predicate("known_bug", "known_defect")               # dry run: what would move
+mem.merge_predicate("known_bug", "known_defect", dry_run=False)
+```
+
+Ids survive, nothing is deleted, and each moved claim carries a dated note that `why()`
+shows. For a fact stored under a spelling nobody has merged yet, a server with a model can
+say so at write time: `MEMVARA_ADVISE_REPLACEMENTS=1` makes `remember()` ask the model
+whether the new fact is a newer version of one of its nearest neighbours, and the receipt
+names the matches without closing anything.
+
 [Contradiction resolution](https://github.com/memvara/memvara/blob/main/docs/concepts/contradiction-resolution.md)
 
 ---

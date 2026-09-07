@@ -119,7 +119,8 @@ def test_exported_from_the_package_without_the_sdk_installed():
 
     assert pkg.NullLLM is NullLLM
     assert set(pkg.__all__) == {
-        "LLM", "Chat", "NullLLM", "TruncatedResponse", "Usage", "AnthropicLLM",
+        "LLM", "Chat", "NullLLM", "ReplacementJudge", "TruncatedResponse", "Usage",
+        "AnthropicLLM",
         "OpenAILLM"}
     with pytest.raises(AttributeError):
         pkg.NotAThing

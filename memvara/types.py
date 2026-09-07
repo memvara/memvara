@@ -134,6 +134,10 @@ SUBJECT_ENTITY = "subject_entity"
 OBJECT_ENTITY = "object_entity"
 #: Timestamped record of every backfill that changed a claim's place in history.
 ENTITY_REKEY = "entity_rekey"
+#: Timestamped record of every predicate merge that moved a claim to another slot:
+#: which predicate it was filed under, which one it is filed under now, and when.
+#: Written by `backfill_predicates`, the predicate twin of the entity backfill.
+PREDICATE_REKEY = "predicate_rekey"
 
 # --- closure witness ------------------------------------------------------------
 #: Timestamped record of every closure applied to a claim: which clock stopped, when, and
@@ -166,7 +170,8 @@ CLOSURE = "closure"
 #: internal bookkeeping back as user data. Defined here, beside the five constants, so
 #: adding a sixth cannot leave one of those two surfaces behind.
 RESERVED_META = frozenset({
-    SALIENCE_BASE, LAST_OBSERVED, SUBJECT_ENTITY, OBJECT_ENTITY, ENTITY_REKEY, CLOSURE,
+    SALIENCE_BASE, LAST_OBSERVED, SUBJECT_ENTITY, OBJECT_ENTITY, ENTITY_REKEY,
+    PREDICATE_REKEY, CLOSURE,
 })
 
 #: Decimal places kept on a stored salience. Salience is a ranking weight, not an
@@ -1544,6 +1549,15 @@ class WriteReceipt:
     #: `already-known 1` either way, which is what let a correction look like a no-op
     #: while it raised the confidence of the filing it was trying to fix.
     retyped: list[Retype] = field(default_factory=list)
+    #: Live claims in *other* slots that a model judged this write to be a newer version
+    #: of. Advice, not action: nothing here was closed. The deterministic contradiction
+    #: check only ever competes claims that share a slot, so a fact stored under a second
+    #: subject or predicate spelling sits beside its predecessor forever; this is the
+    #: write path saying "these may be the same fact" so the caller can decide. Filled
+    #: only by `Memvara(advise_replacements=True)` with a backend that implements
+    #: `ReplacementJudge`, and only on a write that added something and closed nothing.
+    #: Each model consultation counts in `llm_calls`.
+    may_replace: list[Claim] = field(default_factory=list)
 
     # --- the two halves of `closed` -------------------------------------------
     # Derived rather than stored, so they cannot disagree with the claims themselves.

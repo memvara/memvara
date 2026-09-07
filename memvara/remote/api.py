@@ -4,8 +4,10 @@ Not a `Store` and not a subclass of `Memvara`. The engine runs server-side; this
 turns a method call into one `/v1` request and hydrates what comes back into the same
 dataclasses the local engine returns, so calling code cannot tell which it holds.
 
-**What is absent is absent, not raising.** `reembed`, `pending_extraction`, `reextract`
-and `reset` have no endpoint, so they are not methods here. A caller reaching for one gets
+**What is absent is absent, not raising.** `reembed`, `pending_extraction`, `reextract`,
+`reset` and `merge_predicate` have no endpoint, so they are not methods here, and there
+is no `advise_replacements=`: replacement advice is the deployment's to give, and this
+client renders it when a receipt carries it. A caller reaching for one gets
 an `AttributeError` at the call site and mypy catches it before that — where a method that
 raised would compile, ship, and fail in production.
 

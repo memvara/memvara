@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
@@ -165,6 +165,17 @@ class ServerConfig:
     #: `max out` column. Measured on a 4-core box with a 12-claim cap, the worst call
     #: generated 814 tokens.
     llm_max_tokens: int | None = None
+    #: Extra request fields for the "openai" backend, as a JSON object sent on every
+    #: request through the SDK's `extra_body`. This is for a self-hosted model that
+    #: reasons before answering: a Qwen3 server needs
+    #: `{"chat_template_kwargs": {"enable_thinking": false}}` or it spends the token
+    #: budget thinking and returns an empty message. Unset sends nothing.
+    llm_extra_body: dict[str, Any] | None = field(default=None, hash=False)
+    #: Ask the model, after each memory_remember that closed nothing, whether the new
+    #: fact is a newer version of one of its nearest neighbours, and say so on the
+    #: receipt. Off by default: it is up to three model calls per write, and it needs a
+    #: backend that can judge (`anthropic` and `openai` both can; `none` cannot).
+    advise_replacements: bool = False
     #: "local" (default) opens MEMVARA_DB on disk, exactly as before this field existed.
     #: "cloud" opens no local file at all; it resolves an API key (MEMVARA_API_KEY, or
     #: the credentials file `memvara-mcp login` writes) and talks to `server_url` instead.
@@ -228,6 +239,16 @@ class ServerConfig:
                 "works offline, but stores only the sentence forms the deterministic "
                 "extractor recognises.")
 
+        advise = _flag(env.get("MEMVARA_ADVISE_REPLACEMENTS"), "MEMVARA_ADVISE_REPLACEMENTS")
+        if advise and backend == "none" and mode != "cloud":
+            # Refused for the reason the cloud-mode refusals exist: a setting that is read
+            # and never used tells the operator something false in silence. Advice needs
+            # a model to ask, and `none` has none.
+            raise ConfigError(
+                "MEMVARA_ADVISE_REPLACEMENTS=1 needs a model to ask, and MEMVARA_LLM is "
+                "'none'. Set MEMVARA_LLM=anthropic or MEMVARA_LLM=openai, or unset "
+                "MEMVARA_ADVISE_REPLACEMENTS.")
+
         predicates = (env.get("MEMVARA_PREDICATES") or "").strip()
         if predicates:
             # Read now and discard the result: a typo in a pack name or an unreadable file
@@ -256,6 +277,9 @@ class ServerConfig:
             llm_terse_claims=_flag(
                 env.get("MEMVARA_LLM_TERSE_CLAIMS"), "MEMVARA_LLM_TERSE_CLAIMS"),
             llm_max_tokens=_max_tokens(env.get("MEMVARA_LLM_MAX_TOKENS")),
+            llm_extra_body=_json_object(
+                env.get("MEMVARA_LLM_EXTRA_BODY"), "MEMVARA_LLM_EXTRA_BODY"),
+            advise_replacements=advise,
             embedder=_embedder_spec(env.get("MEMVARA_EMBEDDER")),
             mode=mode,
             server_url=server_url,
@@ -294,6 +318,21 @@ def _max_tokens(raw: str | None) -> int | None:
             "budget under what your model actually writes truncates every one of those "
             "turns, and a truncated turn is retried rather than stored.")
     return int(value)
+def _json_object(raw: str | None, name: str) -> dict[str, Any] | None:
+    """A JSON object, or `None` when the variable is unset or blank."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError as exc:
+        raise ConfigError(f"{name} is not valid JSON: {exc}") from None
+    if not isinstance(parsed, dict):
+        raise ConfigError(
+            f"{name} must be a JSON object such as "
+            '{"chat_template_kwargs": {"enable_thinking": false}}, not '
+            f"{type(parsed).__name__}.")
+    return parsed
 
 
 def _max_claims(raw: str | None) -> int | None:
@@ -472,7 +511,8 @@ def _anthropic() -> Any:
 
 def _openai(model: str | None, max_claims: int | None = None,
             extract_system: str | None = None, terse: bool = False,
-            max_tokens: int | None = None) -> Any:
+            max_tokens: int | None = None,
+            extra_body: Mapping[str, Any] | None = None) -> Any:
     # Imported here so the default offline configuration never touches the optional SDK.
     from ..llm.openai import OpenAILLM
 
@@ -495,6 +535,8 @@ def _openai(model: str | None, max_claims: int | None = None,
         # before the option existed, rather than the same number passed explicitly.
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if extra_body is not None:
+            kwargs["extra_body"] = extra_body
         return OpenAILLM(**kwargs)
     except Exception as exc:
         # Deliberately wider than ImportError. `openai.OpenAI()` refuses to construct
@@ -553,7 +595,7 @@ def _llm(config: ServerConfig) -> Any:
     if config.llm == "openai":
         return _openai(config.llm_model, config.llm_max_claims,
                        config.llm_extract_system, config.llm_terse_claims,
-                       config.llm_max_tokens)
+                       config.llm_max_tokens, config.llm_extra_body)
     raise ConfigError(
         f"MEMVARA_LLM={config.llm!r} is listed in _BACKENDS but _llm() has no branch "
         "for it, so this server cannot say which model it would extract with. This is "
@@ -589,6 +631,8 @@ _SERVER_SIDE_UNDER_CLOUD = (
     ("llm_extract_system", None, "MEMVARA_LLM_EXTRACT_SYSTEM", "extraction prompt"),
     ("llm_terse_claims", False, "MEMVARA_LLM_TERSE_CLAIMS", "claim shape"),
     ("llm_max_tokens", None, "MEMVARA_LLM_MAX_TOKENS", "response budget"),
+    ("llm_extra_body", None, "MEMVARA_LLM_EXTRA_BODY", "request body"),
+    ("advise_replacements", False, "MEMVARA_ADVISE_REPLACEMENTS", "replacement advice"),
 )
 
 
@@ -661,5 +705,6 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         # an MCP client can only set environment variables, so a server-backed store was
         # pinned to the builtins and everything outside them accumulated silently.
         registry=_registry(config),
+        advise_replacements=config.advise_replacements,
         **config.scope_kwargs,
     )

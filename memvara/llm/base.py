@@ -176,6 +176,29 @@ class Chat(Protocol):
         ...
 
 
+@runtime_checkable
+class ReplacementJudge(Protocol):
+    """A backend that can say whether one memory is a newer version of another.
+
+    Its own protocol rather than a fourth method on `LLM`, for the reason `Chat` is:
+    adding a member to a `runtime_checkable` protocol breaks `isinstance` for every
+    implementation that predates it. `Memvara.remember` checks for this protocol and
+    asks nothing of a backend that lacks it, so a third-party `LLM` keeps working and
+    simply gives no replacement advice.
+    """
+
+    def judge_replacement(self, new_text: str, old_text: str,
+                          *, usage: "Usage | None" = None) -> dict[str, bool]:
+        """Compare one new memory with one existing memory.
+
+        Returns the four booleans `JUDGE_SCHEMA` names: `same_thing`, `same_property`,
+        `newer_value` and `replaces`. `replaces` is the verdict, and a backend must
+        return it True only when the other three are True. `Memvara.remember` reports a
+        True verdict as advice on the receipt; it closes nothing itself.
+        """
+        ...
+
+
 class NullLLM:
     """No-op backend. Deterministic paths still work; extraction simply yields nothing."""
 
@@ -510,6 +533,54 @@ volatility: "static" never changes (born_in). "slow" changes over years (works_a
 
 memory_type: "semantic" for facts, "episodic" for events, "procedural" for behavioral \
 preferences directed at an assistant."""
+
+JUDGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        # Three questions before the verdict, and all four required. Measured on
+        # 1,276 claims from one production store (2026-09-06): asked for the verdict
+        # alone, models of every size closed facts that were merely related; asked the
+        # three questions first, a 27B model wrongly closed 9% of fresh facts and a 4B
+        # model 35-50%. The questions are what make the verdict readable afterwards.
+        "same_thing": {"type": "boolean"},
+        "same_property": {"type": "boolean"},
+        "newer_value": {"type": "boolean"},
+        "replaces": {"type": "boolean"},
+    },
+    "required": ["same_thing", "same_property", "newer_value", "replaces"],
+    "additionalProperties": False,
+}
+
+JUDGE_SYSTEM = """\
+You maintain a long-term memory store. When a new memory arrives, you compare it with \
+ONE existing memory and decide whether the new memory is a newer version of the \
+existing one, so that the existing one should be closed.
+
+Answer three questions separately, then the verdict:
+1. same_thing: are both memories about the same specific thing (the same person, \
+component, file, setting, task)? Two different components of one project are not the \
+same thing.
+2. same_property: do both memories describe the same property or aspect of that thing \
+(its location, its status, its value, its owner)? A memory about where something runs \
+and a memory about what it costs are different properties.
+3. newer_value: does the new memory give a different value for that property, so the \
+existing value can no longer be current? The same value restated is not newer.
+
+replaces is true only when all three are true.
+
+Most new memories replace nothing: they add a fact beside the existing ones. Closing a \
+memory that is still true loses information; leaving a stale one open costs only a \
+little confusion. When unsure, answer false.
+
+Examples.
+Existing: Alice lives in Berlin. New: Alice lives in Lisbon. -> same_thing true, \
+same_property true, newer_value true, replaces true.
+Existing: Alice lives in Berlin. New: Alice works at Globex. -> same_thing true, \
+same_property false, replaces false.
+Existing: the API server has 8 GB of memory. New: the database server has 24 GB of \
+memory. -> same_thing false, replaces false.
+Existing: the build uses 4 threads. New: the build uses 4 threads and takes 73 seconds. \
+-> same_thing true, same_property true, newer_value false, replaces false."""
 
 PREDICATE_SYSTEM = """\
 You classify a relational predicate so a memory system knows how to store it.

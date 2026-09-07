@@ -63,13 +63,14 @@ from __future__ import annotations
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from ..entities import EntityRegistry, entity_key
 from ..schema import PredicateRegistry
 from ..store.base import Store
 from ..types import (
     ENTITY_REKEY,
+    PREDICATE_REKEY,
     MAX_SALIENCE,
     OBJECT_ENTITY,
     SUBJECT_ENTITY,
@@ -892,31 +893,7 @@ def backfill_entities(reconciler: Reconciler, tenant: str, *, dry_run: bool = Tr
         if claim.is_live(t):
             slots.setdefault(claim.fact_key, []).append(claim)
 
-    for group in slots.values():
-        functional = reconciler.registry.spec(group[0].predicate).functional
-        by_value: dict[str, Claim] = {}
-        current: Claim | None = None
-        for claim in group:
-            keeper = by_value.get(claim.value_key)
-            if keeper is not None:
-                _fold_into(keeper, claim, t)
-                report.merged += 1
-                continue
-            if functional and current is not None:
-                # Valid time moves to the newer claim's recording instant, which is when
-                # the slot would have changed hands had the identities been right at the
-                # time. Dating it `now` instead would claim we believed two employers
-                # simultaneously for however long the store is old. Transaction time does
-                # not move at all: this is a supersession being reconstructed, and the
-                # rebuilt chain has to have the shape `Reconciler` would have written.
-                _supersede(current, claim, as_utc(claim.recorded_at))
-                report.retired += 1
-                # No longer a live occupant, so a *later* claim of that same value is a
-                # return to a previous employer and must supersede in its turn — not
-                # fold into a claim we stopped believing two steps ago.
-                by_value.pop(current.value_key, None)
-            by_value[claim.value_key] = claim
-            current = claim
+    _replay(slots, reconciler.registry, t, report, ENTITY_REKEY)
 
     if not dry_run:
         batch = getattr(reconciler.store, "batch", None)
@@ -927,13 +904,170 @@ def backfill_entities(reconciler: Reconciler, tenant: str, *, dry_run: bool = Tr
     return report
 
 
-def _note(claim: Claim, at: datetime, reason: str, other: str) -> None:
+@dataclass(slots=True)
+class MergeReport:
+    """What a `backfill_predicates` pass did, or would do."""
+
+    scanned: int = 0
+    moved: int = 0       # claims whose predicate was rewritten onto its canonical name
+    #: Rows rewritten on a real run: the movers and the live claims in the slots they
+    #: landed in. Unlike `RekeyReport.written`, which is every claim scanned, this is
+    #: the part of the store the pass touched, not the part it read.
+    written: int = 0
+    merged: int = 0      # claims folded into an earlier claim of the same value
+    retired: int = 0     # claims superseded by the rebuilt chain
+    dry_run: bool = True
+
+    def __str__(self) -> str:
+        return (f"<MergeReport scanned={self.scanned} moved={self.moved} "
+                f"written={self.written} merged={self.merged} retired={self.retired}"
+                f"{' dry-run' if self.dry_run else ''}>")
+
+    __repr__ = __str__
+
+
+def backfill_predicates(reconciler: Reconciler, tenant: str, *,
+                        aliases: Mapping[str, str] | None = None,
+                        dry_run: bool = True,
+                        now: datetime | None = None) -> MergeReport:
+    """Move claims filed under a merged-away predicate onto the predicate it merged into.
+
+    This is the predicate twin of `backfill_entities`, and it exists for the same reason.
+    `PredicateRegistry.learn_alias` applies from the moment it is learned: the next write
+    of `known_bug` lands in the `known_defect` slot, and every claim already filed under
+    `known_bug` stays where it was, invisible to the contradiction check and to
+    `history()` of the slot it belongs in. Measured on one production store, 599 distinct
+    predicates covered 1,276 claims, and two sessions storing the same fact under two
+    names was the usual reason a newer value never superseded an older one.
+
+    `aliases` maps a surface predicate onto the canonical one it should be filed under.
+    With it, the pass moves only claims whose predicate is a key of that mapping and
+    touches the registry not at all, which is what makes a dry run dry:
+    `Memvara.merge_predicate` calls this once with the mapping to report, and only then
+    learns the alias for real. Without it, the pass applies whatever the registry
+    resolves today to every claim, which is what an operator wants after loading a
+    declared vocabulary (`MEMVARA_PREDICATES`) over a store that guessed.
+
+    **This rewrites history, and that is the entire reason it is a separate function
+    with `dry_run=True` as its default.** After it, claims that coexisted under two names
+    supersede each other under one, and `history()` of the canonical slot shows a past it
+    did not show before. Nothing is deleted and every id survives. Run it dry, read the
+    report, then run it for real.
+
+    The procedure:
+
+    1. Rewrite the predicate on every claim filed under a merged-away name, retired ones
+       included, so the slot's history moves with its present. The natural-language
+       rendering is rewritten only where it was the automatic rendering of the triple; a
+       rendering the caller supplied is theirs to keep, as `Reconciler._canonicalize`
+       decides at write time.
+    2. Replay the *live* claims of every slot that received a moved claim, in
+       `(recorded_at, id)` order, exactly as `backfill_entities` does. Duplicates fold
+       into the earliest; on a single-valued predicate the rest form a chain. Slots no
+       claim moved into are left alone, so the pass changes nothing it was not asked to.
+    3. Stamp each moved claim with a dated `PREDICATE_REKEY` record naming both
+       predicates, and each claim the replay displaced with the usual note, so `why()` can
+       say why history changed.
+
+    Claim ids are preserved throughout, for `backfill_entities`' reason.
+    """
+    t = now or utcnow()
+    report = MergeReport(dry_run=dry_run)
+    registry = reconciler.registry
+
+    def target_of(predicate: str) -> str:
+        if aliases is None:
+            return registry.normalize(predicate)
+        mapped = aliases.get(predicate)
+        # Not `normalize(predicate)`: a claim outside the mapping is outside this pass,
+        # even when the registry would fold it. Otherwise a dry run for one merge would
+        # count, and a real run would move, the leftovers of every alias learned before.
+        return registry.normalize(mapped) if mapped is not None else predicate
+
+    claims = sorted(
+        reconciler.store.iter_claims(tenant, include_invalidated=True),
+        key=lambda c: (as_utc(c.recorded_at), c.id),
+    )
+    moved: list[Claim] = []
+    touched_slots: set[str] = set()
+    live: dict[str, list[Claim]] = {}
+    for claim in claims:
+        report.scanned += 1
+        canonical = target_of(claim.predicate)
+        if canonical and canonical != claim.predicate:
+            rendered = claim.text.strip() == claim.render().strip()
+            claim.meta.setdefault(PREDICATE_REKEY, []).append(
+                {"at": t.timestamp(), "from": claim.predicate, "to": canonical})
+            claim.predicate = canonical
+            if rendered:
+                claim.text = claim.render()
+            moved.append(claim)
+            report.moved += 1
+            touched_slots.add(claim.fact_key)
+        if claim.is_live(t):
+            live.setdefault(claim.fact_key, []).append(claim)
+
+    slots = {key: group for key, group in live.items() if key in touched_slots}
+    _replay(slots, registry, t, report, PREDICATE_REKEY)
+
+    if not dry_run:
+        # Every mover, and every live claim in a slot a mover landed in. A few of the
+        # latter were not displaced by the replay and are rewritten unchanged; a slot is
+        # small, and that costs less than keeping a list of which fields `_replay` may
+        # touch in step with `_replay` itself.
+        to_write = {c.id: c for c in moved}
+        to_write.update((c.id, c) for group in slots.values() for c in group)
+        batch = getattr(reconciler.store, "batch", None)
+        with (batch() if batch is not None else nullcontext()):
+            for claim in to_write.values():
+                reconciler.store.put_claim(claim)
+                report.written += 1
+    return report
+
+
+def _replay(slots: Mapping[str, list[Claim]], registry: PredicateRegistry, t: datetime,
+            report: "RekeyReport | MergeReport", key: str) -> None:
+    """Rebuild each slot's supersession chain from its live claims, in recording order.
+
+    Shared by both backfills so the chain they rebuild has one shape. `key` is the
+    `meta` key the displacement notes are written under, so `why()` can attribute a
+    closure to the pass that made it.
+    """
+    for group in slots.values():
+        functional = registry.spec(group[0].predicate).functional
+        by_value: dict[str, Claim] = {}
+        current: Claim | None = None
+        for claim in group:
+            keeper = by_value.get(claim.value_key)
+            if keeper is not None:
+                _fold_into(keeper, claim, t, key)
+                report.merged += 1
+                continue
+            if functional and current is not None:
+                # Valid time moves to the newer claim's recording instant, which is when
+                # the slot would have changed hands had the identities been right at the
+                # time. Dating it `now` instead would claim we believed two employers
+                # simultaneously for however long the store is old. Transaction time does
+                # not move at all: this is a supersession being reconstructed, and the
+                # rebuilt chain has to have the shape `Reconciler` would have written.
+                _supersede(current, claim, as_utc(claim.recorded_at), key)
+                report.retired += 1
+                # No longer a live occupant, so a *later* claim of that same value is a
+                # return to a previous employer and must supersede in its turn — not
+                # fold into a claim we stopped believing two steps ago.
+                by_value.pop(current.value_key, None)
+            by_value[claim.value_key] = claim
+            current = claim
+
+
+def _note(claim: Claim, at: datetime, reason: str, other: str,
+          key: str = ENTITY_REKEY) -> None:
     """Record that a backfill moved this claim, and what it was moved against."""
-    claim.meta.setdefault(ENTITY_REKEY, []).append(
+    claim.meta.setdefault(key, []).append(
         {"at": at.timestamp(), "reason": reason, "claim": other})
 
 
-def _fold_into(keeper: Claim, loser: Claim, at: datetime) -> None:
+def _fold_into(keeper: Claim, loser: Claim, at: datetime, key: str) -> None:
     """Two claims that turn out to assert the same thing become one.
 
     Invalidated in *transaction* time only, exactly as consolidation's merge does:
@@ -944,11 +1078,11 @@ def _fold_into(keeper: Claim, loser: Claim, at: datetime) -> None:
     keeper.observation_count += loser.observation_count
     loser.invalidated_at = at
     loser.invalidated_by = keeper.id
-    _note(loser, at, "merged", keeper.id)
-    _note(keeper, at, "absorbed", loser.id)
+    _note(loser, at, "merged", keeper.id, key)
+    _note(keeper, at, "absorbed", loser.id, key)
 
 
-def _supersede(older: Claim, newer: Claim, at: datetime) -> None:
+def _supersede(older: Claim, newer: Claim, at: datetime, key: str) -> None:
     """One link of a rebuilt chain: the older value ends where the newer one begins.
 
     The exact mirror of `_fold_into`, and the pair is worth reading together — they are
@@ -963,7 +1097,7 @@ def _supersede(older: Claim, newer: Claim, at: datetime) -> None:
     edge = max(at, as_utc(older.valid_from))
     if older.valid_to is None or older.valid_to > edge:
         older.valid_to = edge
-    _note(older, at, "superseded", newer.id)
+    _note(older, at, "superseded", newer.id, key)
 
 
 @dataclass(slots=True)
