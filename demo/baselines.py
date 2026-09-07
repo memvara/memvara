@@ -106,13 +106,11 @@ from memvara import (  # noqa: E402
     LLM,
     Claim,
     DegradedExtractionWarning,
-    EpisodeResult,
     HashingEmbedder,
     Memvara,
     NullLLM,
     PredicateRegistry,
     PredicateSpec,
-    Retrieved,
 )
 from memvara.schema import BUILTIN_PREDICATES, Cardinality, Volatility  # noqa: E402
 
@@ -719,44 +717,6 @@ def slot_values(mem: Memvara, subject: str, predicate: str, *,
                   if c.subject == subject and c.predicate == predicate)
 
 
-def render_recall(results: Sequence[Retrieved]) -> str:
-    """`recall()`'s exact output, from results this arm had to fetch itself.
-
-    A reimplementation of eight lines of `Memvara.recall`, and it is here under protest:
-    `recall()` takes no `valid_at=`, deliberately — time travel and audit reads are kept
-    on `search()` where they are an explicit choice — so an arm that must answer a
-    historical question at a named world-time cannot use it. Re-rendering is the cost of
-    that refusal.
-
-    Byte-identical to `recall()` is not an aspiration here, it is asserted:
-    `test_the_structured_arms_rendering_is_byte_identical_to_recall` runs both over the
-    whole corpus and compares. If the library's formatter changes and this does not, the
-    demo fails rather than quietly measuring a formatter this repository does not ship.
-    """
-    claims = [r for r in results if not isinstance(r, EpisodeResult)]
-    episodes = [r for r in results if isinstance(r, EpisodeResult)]
-    lines: list[str] = []
-    if claims:
-        lines.append(Memvara.RECALL_HEADER)
-        # The suffix comes from the library rather than being spelled again here. This
-        # function exists under protest already; a second copy of a rule about provenance
-        # is exactly what the byte-identity test is policing.
-        lines += [f"- {_flatten(r.text)}{Memvara._derived_suffix(r.claim)}"
-                  for r in claims]
-    if episodes:
-        lines.append(Memvara.RECALL_EPISODE_HEADER)
-        lines += [f"- {_flatten(r.text, Memvara.RECALL_EPISODE_CHARS)}" for r in episodes]
-    return "\n".join(lines)
-
-
-def _flatten(text: str, limit: int | None = None) -> str:
-    """`Memvara._safe_line`, restated. Stored text cannot forge a header or a bullet."""
-    flat = " ".join(str(text).split()).lstrip("-*•# ").strip()
-    if limit is not None and len(flat) > limit:
-        flat = flat[:limit - 1].rstrip() + "…"
-    return flat
-
-
 def memvara_structured(question: Question, turns: Sequence[Turn], *, k: int = DEFAULT_K,
                        max_chars: int = MAX_CONTEXT_CHARS, llm: LLM | None = None,
                        dim: int = EMBED_DIM,
@@ -787,9 +747,10 @@ def memvara_structured(question: Question, turns: Sequence[Turn], *, k: int = DE
     mem, degraded = build_memory(seen, llm=llm, dim=dim, max_episodes=k,
                                  registry=registry)
     apply_facts(mem, visible_facts(question, facts))
-    results = mem.search(question.text, k=k, valid_at=question.about,
-                         include_episodes=True)
-    text = clip(render_recall(results), max_chars)
+    # `recall(valid_at=)` is the read an integration would make for a question about the
+    # past, so the arm makes the same one: a dated question gets the dated header.
+    text = clip(mem.recall(question.text, k=k, valid_at=question.about,
+                           include_episodes=True), max_chars)
     return Context(arm="memvara_structured", text=text, turns_visible=len(seen),
                    items_used=count_entries(text), degraded=degraded)
 

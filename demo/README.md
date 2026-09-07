@@ -379,20 +379,18 @@ stopped believing the transposed number *this afternoon* rather than on 13 Febru
 every `known_at=` audit over the correction would be wrong. It refuses loudly if a
 correction finds anything other than exactly one standing value.
 
-The structured arm is also the only one that spends `Question.about`, as `search(valid_at=)`.
-Nothing parses a date out of question prose: where `about` is `None` the read is at the
-present, which is what `recall()` does.
+The structured arm is also the only one that spends `Question.about`, as
+`recall(valid_at=)`. Nothing parses a date out of question prose: where `about` is `None`
+the read is at the present, which is what `recall()` does without it.
 
-### One rendering, asserted rather than hoped
+### One rendering
 
-The `memvara` arm calls `recall()` directly, because `recall()` is what an integration
-drops into a prompt and its headers, flattening and claims-before-episodes ordering are
-part of what is being measured. The structured arm cannot: `recall()` takes no `valid_at=`,
-deliberately, so an arm answering a historical question at a named world-time has to
-re-render `search()` results itself. `render_recall` is that re-render, and
-`test_the_structured_arms_rendering_is_byte_identical_to_recall` runs both over the whole
-corpus and compares — so if the library's formatter changes and the demo does not, the
-demo fails rather than quietly measuring a formatter this repository does not ship.
+Both memvara arms call `recall()` directly, because `recall()` is what an integration
+drops into a prompt, and its headers, flattening and claims-before-episodes ordering are
+part of what is being measured. The structured arm passes `valid_at=question.about`, so
+a historical question is answered from the block `recall()` renders for that day, under
+the header that names it. The demo used to re-render `search()` results itself for that
+case, because `recall()` had no `valid_at=`; it no longer needs to, so it does not.
 
 ---
 

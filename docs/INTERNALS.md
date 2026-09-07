@@ -778,6 +778,7 @@ implementation side of the same rule.
 ```python
 class Memvara:
     RECALL_HEADER: str            # frames the live block as data, not instructions
+    RECALL_HEADER_AT: str         # the same, naming the day, for recall(valid_at=)
     RECALL_HISTORY_HEADER: str    # "No longer true — ..." in the first three words
     RECALL_EPISODE_HEADER: str    # says "said", not "true"
     RECALL_EPISODE_CHARS: int     # 280 — a pasted stack trace cannot become the prompt
@@ -786,10 +787,10 @@ class Memvara:
     def recall(self, query, *, k=8, min_score=0.0, header=None, ...,
                include_episodes=False, episode_header=None,
                include_history=False, history_header=None,
-               budget=None, counter=_approx_tokens,
+               budget=None, counter=_approx_tokens, valid_at=None,
                with_ids=False) -> str | RecallResult
     def _past_by_claim(self, claims, tenant=None, user=None, agent=None,
-                       session=None) -> list[list[str]]
+                       session=None, *, before=None) -> list[list[str]]
 ```
 
 `recall()` must:
@@ -798,8 +799,9 @@ class Memvara:
   `search()` would expose `as_of`, `states` and `include_invalidated` here, and the latter
   two resurrect retired claims into a live prompt — an un-delete reachable by anyone who
   can influence a parameter. `states=["retired"]` is the sharper form: a prompt built from
-  nothing but the records we stopped believing. Time travel and audit reads stay on
-  `search()`;
+  nothing but the records we stopped believing. `valid_at` is the one time keyword it
+  takes, because it moves the world clock only and reaches no retired claim; the belief
+  clock and audit reads stay on `search()`;
 - flatten every rendered line through `_safe_line`, which collapses whitespace, strips
   leading list and heading markers, and maps `[`/`]` to their fullwidth forms
   (`_FORGEABLE`), so stored text cannot open its own bullet list, repeat a header, or

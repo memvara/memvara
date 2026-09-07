@@ -128,14 +128,23 @@ defences, all in `memvara/core.py`, all worth attacking:
   goes through this one function, so that is the one place the character set lives.
   Episodes are additionally truncated, so a pasted stack trace cannot become the whole
   prompt.
-- **`RECALL_HEADER` and `RECALL_EPISODE_HEADER`** frame the block as retrieved data rather
-  than instructions, and the episode header says "said", not "true".
+- **`RECALL_HEADER`, `RECALL_HEADER_AT` and `RECALL_EPISODE_HEADER`** frame the block as
+  retrieved data rather than instructions. The dated header names the day a `valid_at=`
+  read describes, so a block about the past cannot be read as the present, and the
+  episode header says "said", not "true".
 - **The signature is explicit rather than `**kwargs`**, so `states`, `include_invalidated`
   and `as_of` are not reachable from `recall()`. `include_invalidated=True` would resurrect
   retired claims into a live prompt — an un-delete reachable by anyone who can influence a
   parameter. `states=["retired"]` is the sharper form of the same attack: where
   `include_invalidated=True` at least returns live claims alongside the dead ones,
   `states=["retired"]` builds a prompt out of nothing *but* records we stopped believing.
+  `as_of` is the quiet form: it rewinds the belief clock, so a record retired since that
+  day is believed again for the length of the prompt. `valid_at` *is* reachable, on
+  `recall()` and on `memory_recall`, and is safe by the same test: it moves the world
+  clock only, the belief clock stays at now, and a retired record is as absent from a
+  dated read as from a present one.
+  `tests/test_api.py::test_recall_at_a_past_day_reaches_no_retired_claim` holds all
+  three states in one slot to hold that line.
 - **`include_history=True` is the one bounded exception, and the bound is the whole
   point.** It renders non-live claims, so it is the same door — but only `ended` ones,
   never `retired`. That is not a tidying rule: an `ended` value is the fact's own past and

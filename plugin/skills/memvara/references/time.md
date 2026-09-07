@@ -14,7 +14,9 @@ On the **library and REST**:
   alongside either axis raises rather than picking one.
 
 On **MCP**: `memory_search` takes `as_of` and `valid_at`, not `known_at`.
-Passing both of the two it has is refused.
+Passing both of the two it has is refused. `memory_recall` takes `valid_at`
+only, and its header then names the day; it refuses `as_of`, because its
+output is a prompt and rewinding belief would put a since-retired record in it.
 
 Reach for `valid_at`. Asking about someone's earlier city, job or year is
 asking about the world, and `as_of` answers something else: it rewinds
@@ -52,8 +54,9 @@ values and the gap between them. Answering it with `valid_at` alone hides the
 very thing being asked about, because `valid_at` is written from today and a
 later correction is already folded in.
 
-So: `memory_recall` for what is the case, `memory_search` with `valid_at` for
-one past reading, `memory_history` for the versions of a single fact with ids
+So: `memory_recall` for what is the case, `memory_recall` with `valid_at` for
+what was the case on a day, `memory_search` with `valid_at` for one past
+reading with ids, `memory_history` for the versions of a single fact with ids
 to act on, and this when someone is holding an old answer and wants to know why
 it no longer matches.
 

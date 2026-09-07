@@ -762,39 +762,21 @@ def test_the_structured_arm_reads_at_valid_at_only_where_the_scenario_set_about(
     assert "The account is on the Starter plan." in claim_lines(structured(current).text)
 
 
-def test_the_structured_arms_rendering_is_byte_identical_to_recall():
-    """`recall()` takes no `valid_at=`, so the arm renders `search()` itself. Pin the two.
-
-    Re-rendering would otherwise be measuring a formatter this repository does not ship.
-    Compared over every fixture question, with episodes on, so the header text, the bullet,
-    the flattening and the 280-character episode truncation are all in the comparison.
+def test_the_structured_arm_is_the_librarys_own_dated_read():
+    """The arm calls `recall(valid_at=question.about)` rather than re-rendering `search()`
+    results, so what it measures is the block an integration would drop into a prompt for
+    a question about the past. The dated header is the visible half of that: a block of
+    facts about March that does not say so reads as the present, and the arm's prompt for
+    a historical question must carry the day. A present-tense question keeps the plain
+    header, so a reader comparing the two arms on a current question sees no difference
+    introduced by the arm itself.
     """
-    for q in QUESTIONS:
-        mem = fixture_store(q)
-        results = mem.search(q.text, k=bl.DEFAULT_K, include_episodes=True)
-        assert bl.render_recall(results) == mem.recall(q.text, k=bl.DEFAULT_K,
-                                                       include_episodes=True), q.id
-
-
-def test_a_long_turn_is_truncated_by_the_arms_rendering_exactly_as_recall_truncates_it():
-    """The episode cap is the half of the rendering the corpus above never reaches.
-
-    `recall()` caps a raw turn at `RECALL_EPISODE_CHARS` so that a pasted stack trace
-    cannot evict the facts, and truncation is where two implementations of one format are
-    most likely to drift — an off-by-one in the ellipsis, or the cap applied before the
-    flattening instead of after. Every turn in the fixture corpus is short, so the branch
-    is reached with a turn that is not.
-    """
-    long_turn = Turn(at(1, 5), "user", "The gearbox " + "rattles and hums " * 40)
-    assert len(long_turn.text) > Memvara.RECALL_EPISODE_CHARS
-    q = Question("q", at(8, 1), "What is wrong with the gearbox?", "rattles", None,
-                 "current")
-    mem, _ = bl.build_memory([long_turn], max_episodes=bl.DEFAULT_K,
-                             registry=FIXTURE_REGISTRY)
-
-    rendered = bl.render_recall(mem.search(q.text, k=bl.DEFAULT_K, include_episodes=True))
-    assert rendered == mem.recall(q.text, k=bl.DEFAULT_K, include_episodes=True)
-    assert rendered.endswith("…")
+    historical, current = QUESTIONS[1], QUESTIONS[0]
+    assert historical.about is not None and current.about is None
+    dated = structured(historical).text
+    assert dated.startswith("Known about the user as things were on 15 March")
+    assert Memvara.RECALL_HEADER not in dated
+    assert structured(current).text.startswith(Memvara.RECALL_HEADER)
 
 
 def test_the_structured_arm_is_capped_and_budgeted_like_every_other_retrieval_arm():

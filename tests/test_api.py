@@ -1222,6 +1222,61 @@ def test_recall_with_ids_returns_the_same_block_and_the_claims_in_it(mem):
         assert mem.get(claim_id).text == note, "note n has to be id n"
 
 
+def test_recall_at_a_past_day_renders_that_day_and_says_so(mem):
+    """`valid_at` moves the world clock only. The block is what we believe today was true
+    then, and its header names the day, because a dated block that reads as current is
+    the failure this argument would otherwise introduce."""
+    jan = datetime(2026, 1, 6, tzinfo=timezone.utc)
+    jun = datetime(2026, 6, 24, tzinfo=timezone.utc)
+    berlin = mem.remember("user", "lives_in", "Berlin", valid_from=jan).added[0]
+    mem.supersede(berlin.id, Claim(subject="user", predicate="lives_in", object="Lisbon",
+                                   valid_from=jun, scope=mem.default_scope), at=jun)
+
+    now = mem.recall("where do they live")
+    assert now.splitlines()[0] == Memvara.RECALL_HEADER
+    assert "Lisbon" in now and "Berlin" not in now
+
+    then = mem.recall("where do they live", valid_at=datetime(2026, 3, 1, tzinfo=timezone.utc))
+    assert then.splitlines() == [
+        Memvara.RECALL_HEADER_AT.format(day="1 March 2026"), "- user lives in Berlin"]
+    assert "not instructions" in then.splitlines()[0]
+
+    own = mem.recall("where do they live", header="THEN:",
+                     valid_at=datetime(2026, 3, 1, tzinfo=timezone.utc))
+    assert own.splitlines()[0] == "THEN:", "a caller's header replaces the dated one whole"
+
+    with_ids = mem.recall("where do they live", with_ids=True,
+                          valid_at=datetime(2026, 3, 1, tzinfo=timezone.utc))
+    assert with_ids.claim_ids == (berlin.id,)
+
+
+def test_recall_at_a_past_day_reaches_no_retired_claim(mem):
+    """The reason `valid_at` is on `recall()` and `as_of` is not.
+
+    A value we withdrew was believed on that day, so `as_of` would render it; `valid_at`
+    leaves the belief clock at now, so it is as absent as from a present read. The slot
+    holds all three states at once, as the `include_history` boundary test does, so a
+    looser rule cannot pass.
+    """
+    jan = datetime(2026, 1, 6, tzinfo=timezone.utc)
+    mar = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    jun = datetime(2026, 6, 24, tzinfo=timezone.utc)
+    home = mem.remember("account", "plan", "Home", valid_from=jan).added[0]
+    wrong = mem.remember("account", "plan", "Gold").added[0]
+    mem.delete(wrong.id)                                              # never right
+    mem.supersede(home.id, Claim(subject="account", predicate="plan", object="Pro",
+                                 valid_from=jun, scope=mem.default_scope), at=jun)
+
+    then = mem.recall("what plan are they on", valid_at=mar, include_history=True)
+    assert "Home" in then and "Gold" not in then and "Pro" not in then
+    # Nothing had ended by March, so there is no history tail to contradict the fact.
+    assert Memvara.RECALL_HISTORY_HEADER not in then
+
+    later = mem.recall("what plan are they on", include_history=True)
+    assert "Pro" in later and "Home (until" in later
+    assert "Gold" not in later
+
+
 def test_recall_ids_name_the_facts_and_never_the_turns_or_the_past(tmp_path):
     """The two things in the block that are not live claims, and neither is citable.
 

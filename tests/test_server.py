@@ -1080,6 +1080,66 @@ def test_recall_without_ranked_never_touches_a_configured_selector():
         srv.close()
 
 
+def test_recall_takes_valid_at_and_the_header_names_the_day(server):
+    """The prompt-shaped read can be asked about a day. The header says which day, so
+    the model cannot read a 2019 city as the current one."""
+    text(server, "memory_remember", {"predicate": "works_at", "object": "Acme",
+                                     "true_since": "2019-03-04T00:00:00Z"})
+    text(server, "memory_remember", {"predicate": "works_at", "object": "Globex",
+                                     "true_since": "2024-01-01T00:00:00Z"})
+
+    now = text(server, "memory_recall", {"query": "where do they work"})
+    assert "Globex" in now and "Acme" not in now
+    assert now.splitlines()[0] == Memvara.RECALL_HEADER
+
+    then = text(server, "memory_recall",
+                {"query": "where do they work", "valid_at": "2020-06-01"})
+    assert "Acme" in then and "Globex" not in then
+    assert then.splitlines()[0] == Memvara.RECALL_HEADER_AT.format(day="1 June 2020")
+
+
+def test_recall_refuses_as_of_and_names_the_tool_that_takes_it(server):
+    """`as_of` rewinds belief, so a record retired since would be rendered into a prompt
+    as a fact. The refusal says why and names both the keyword this tool does take and
+    the tool that takes `as_of`, so a model is not left guessing from "unknown argument"
+    (`_suggest` finds no spelling near "as_of"). The schema declares `as_of` for the same
+    reason: a model reads the description before it calls."""
+    body, is_error = call(server, "memory_recall",
+                          {"query": "where do they work", "as_of": "2020-06-01"})
+    assert is_error
+    assert "as_of" in body and "valid_at" in body and "memory_search" in body
+    assert "retired" in body
+    tool = next(t for t in TOOLS if t.name == "memory_recall")
+    assert "valid_at" in tool.description and "as_of" in tool.description
+    assert "valid_at" in tool.properties
+    assert "memory_search" in tool.properties["as_of"]["description"]
+
+
+def test_a_dated_recall_that_matches_nothing_says_which_day_it_looked_at(server):
+    """An empty dated block is not "nothing is recorded": the fact may be stored and
+    simply not have held on that day. The miss says so, or a model reads the present
+    tense wording and stops looking for something the store does have."""
+    text(server, "memory_remember", {"predicate": "plan", "object": "Gold",
+                                     "true_since": "2026-06-01"})
+    body = text(server, "memory_recall", {"query": "what plan are they on",
+                                          "valid_at": "2026-01-15"})
+    assert "2026-01-15" in body and "Gold" not in body
+    assert "Nothing is recorded" not in body
+
+
+def test_recall_at_a_day_leaves_a_forgotten_record_out(server):
+    """The security property, from the tool: what we retracted is absent from a dated
+    read exactly as it is from a present one."""
+    text(server, "memory_remember", {"predicate": "plan", "object": "Gold",
+                                     "true_since": "2019-01-01T00:00:00Z"})
+    rows = text(server, "memory_search", {"query": "plan"})
+    claim_id = re.search(r"id=(cl_[0-9a-f]+)", rows).group(1)
+    text(server, "memory_forget", {"claim_id": claim_id})
+
+    then = text(server, "memory_recall", {"query": "what plan", "valid_at": "2020-06-01"})
+    assert "Gold" not in then
+
+
 def test_recall_and_search_report_absence_as_absence(server):
     for name in ("memory_recall", "memory_search"):
         body = text(server, name, {"query": "my mother's maiden name"})
@@ -3077,7 +3137,7 @@ def test_read_only_explains_itself_rather_than_erroring(read_only):
 def test_unknown_argument_suggests_the_real_one(server):
     body, is_error = call(server, "memory_recall", {"query": "x", "kk": 3})
     assert is_error and "did you mean 'k'" in body
-    assert "Accepted: anchored, budget, include_episodes, k, memory_types" in body
+    assert "Accepted: anchored, as_of, budget, include_episodes, k, memory_types" in body
 
 
 def test_missing_required_argument(server):
