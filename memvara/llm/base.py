@@ -351,11 +351,23 @@ def self_hosted_claim_schema(max_claims: int = MAX_CLAIMS) -> dict[str, Any]:
     measured saving falls well short of what serialization predicts, because the model
     still spends tokens on values and on deciding what to write.
 
-    **This narrower schema has not been measured, and its saving is smaller than 27%.**
-    Treat the numbers here as a ceiling and run `bench/extract_cost.py` against your own
-    model, because how much of the permission a model takes up is a property of its habits
-    rather than of the schema. Measured on LFM2.5-1.2B-Instruct the wider schema cut 55%
-    where phi-4-mini cut 27%.
+    **This schema is now measured: it cut 12% of the generated tokens and found the same
+    10 of 15 key facts** — 2,401 output tokens against 2,103, the same three episodes,
+    the deployment's own prompt and predicate vocabulary, a 12-claim cap on both arms,
+    phi-4-mini Q8_0 on a 4-core box. Wall time moved much less than tokens did, 155.9 s
+    to 149.9 s at the median, because prefill is unchanged and dominates a short call.
+
+    So the measured saving is roughly a third of what serialization predicts, and the
+    reason is that only the field names went away: the model still spends tokens on
+    values and on deciding what to write. The wider version of this schema, which also
+    made `memory_type` and `confidence` optional, measured 27% on the same episodes —
+    the extra 15 points were the confidence number and the memory type, and both are
+    load-bearing, which is why they stayed required.
+
+    Run `bench/extract_cost.py` against your own model rather than taking 12% as a
+    promise: how much of the permission a model takes up is a property of its habits, not
+    of the schema. Measured on LFM2.5-1.2B-Instruct the wider schema cut 55% where
+    phi-4-mini cut 27%.
 
     **It does not bound a runaway, and nothing here should be read as claiming it does.**
     Measured on the same box, an *uncapped* claims array reached 7,197 generated tokens on

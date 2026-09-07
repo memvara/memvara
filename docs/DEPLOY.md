@@ -125,6 +125,7 @@ transport is stdio and the configuration is entirely environment.
 | `MEMVARA_LLM_MAX_CLAIMS` | Cap on the claims array for `MEMVARA_LLM=openai`. Unset means uncapped, which is right for hosted OpenAI — it closes the array itself, and OpenAI documents `maxItems` as unsupported under strict mode. Set it for a self-hosted server that constrains decoding, where an uncapped array gives the grammar no way to end a response. A positive integer; anything else is refused at startup. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_LLM_EXTRACT_SYSTEM` | Path to a file holding replacement extraction instructions for `MEMVARA_LLM=openai`. Unset uses the instructions memvara ships, which is right for every hosted model. Set it for a small self-hosted model that the shipped wording talks out of extracting at all. Read only by this backend, and checked only when it runs: a file that is missing, empty, over 64 KiB or not UTF-8 is refused at startup, but under any other `MEMVARA_LLM` the variable is never read at all. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_LLM_TERSE_CLAIMS` | `1` asks `MEMVARA_LLM=openai` for a shorter claim shape: `polarity`, `when`, `amount` and `unit` become optional, so the model stops writing a field name and a null for each of them. `memory_type` and `confidence` stay required, because defaulting those two is a decision rather than a formality. Unset means the full shape, which is right for hosted OpenAI — its strict mode requires every declared property in `required`, so this is a 400 there. Set it for a self-hosted model whose generation speed is the bottleneck. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
+| `MEMVARA_LLM_MAX_TOKENS` | Ceiling on the tokens one response from `MEMVARA_LLM=openai` may generate. Unset means the backend's own default of 8,192, which is what every deployment ran on before this existed. It bounds how long a runaway lasts; it does not shorten an answer. A model stopped by this limit has its turn reported as not extracted and retried, so a budget below what your model actually writes turns slow turns into turns that never land. Read the number off a measured response length, not an estimate. A positive integer; anything else is refused at startup. See [Bounding a runaway](#bounding-a-runaway). |
 | `MEMVARA_EMBEDDER` | `hashing` (default, offline, 512-dimensional), `hashing:<dim>`, `local` or `local:<model>` (needs `memvara[local-embed]`), or `auto`. See [The embedder is named, not discovered](#the-embedder-is-named-not-discovered). |
 | `MEMVARA_READ_ONLY` | `1` hides every tool that writes. |
 
@@ -156,6 +157,7 @@ MEMVARA_LLM_MODEL=Qwen/Qwen3.5-4B-Instruct \
 MEMVARA_LLM_MAX_CLAIMS=32 \
 MEMVARA_LLM_EXTRACT_SYSTEM=$HOME/.memvara/extract.txt \
 MEMVARA_LLM_TERSE_CLAIMS=1 \
+MEMVARA_LLM_MAX_TOKENS=2048 \
 MEMVARA_DB=$HOME/.memvara/memory.db python3 -m memvara.server
 ```
 
@@ -219,14 +221,19 @@ state.
 **Serialization predicts a 33% saving**: eight claims are 413 tokens under the shipped
 schema and 277 under this one.
 
-A wider version of this option, which also made `memory_type` and `confidence` optional,
-was measured on a 4-core production box at **27% of the generated tokens, finding the same
-10 of 15 key facts** — three episodes through phi-4-mini Q8_0 with a 12-claim cap on both
-arms, 2,401 output tokens against 1,756, prefill unmoved. **The narrower option documented
-here has not been measured and saves less than that.** Treat these numbers as a ceiling and
-run `bench/extract_cost.py` against your own model: how much of the permission a model
-takes up is a property of its habits, not of the schema. The same wider schema cut 55% on
-LFM2.5-1.2B-Instruct.
+**Measured, it cuts 12%, and finds the same facts.** Three episodes through phi-4-mini
+Q8_0 on a 4-core box with a 12-claim cap on both arms: 2,401 output tokens against 2,103,
+and 10 of 15 key facts either way. Wall time moved much less than tokens did — 155.9 s to
+149.9 s at the median — because prefill is unchanged and dominates a call this short.
+
+So the measured saving is about a third of what serialization predicts. Only the field
+names went away; the model still spends tokens on values and on deciding what to write. A
+wider version of this option, which also made `memory_type` and `confidence` optional,
+measured 27% on the same episodes — but those two fields are load-bearing, and the reason
+they stayed required is in `llm/base.py`. Run `bench/extract_cost.py` against your own
+model rather than taking 12% as a promise: how much of the permission a model takes up is
+a property of its habits, not of the schema. The wider schema cut 55% on
+LFM2.5-1.2B-Instruct where phi-4-mini cut 27%.
 
 The long turn is where this matters most, because that is where the current setup is
 already close to failing. Generation time grows with the answer, and a long turn produces a
@@ -240,15 +247,7 @@ than a memvara setting, so a deployment that wants long turns to finish can rais
 `OpenAILLM(max_tokens=...)` bounds the response itself, which is the only one of the three
 that turns a runaway into a bounded failure rather than a cancellation.
 
-Before lowering `max_tokens`, know what a response that hits it now does. The backend
-reads the provider's reason for stopping and raises `TruncatedResponse`, so the write is
-reported as `deferred` and the turn is queued again rather than recorded as a turn that
-held no facts. That check is what makes a smaller budget safe to set; without it, every
-answer the budget cut off would be stored as an empty extraction with nothing to say so.
-It also means a budget set too low converts a slow turn into a turn that never lands,
-however many times it is retried, so pick the number against a measured response length —
-`bench/extract_cost.py` prints the largest generated response per arm in its `max out`
-column — rather than against an estimate.
+`MEMVARA_LLM_MAX_TOKENS` is the third lever and has its own section below.
 
 Two things to know before setting it. It is a 400 against hosted OpenAI, whose strict mode
 requires every declared property to appear in `required` — the same trade `maxItems` makes.
@@ -258,10 +257,61 @@ written without it. On a small model that number is close to noise, since confid
 one field in a claim nothing downstream can check, but the change is real. Decide it once
 per deployment rather than turning it on and off.
 
-`MEMVARA_LLM_MODEL`, `MEMVARA_LLM_MAX_CLAIMS`, `MEMVARA_LLM_EXTRACT_SYSTEM` and
-`MEMVARA_LLM_TERSE_CLAIMS` apply to the `openai` backend only. Under `MEMVARA_MODE=cloud`
-all four are refused outright, along with `MEMVARA_LLM` and `MEMVARA_EMBEDDER`: extraction
+`MEMVARA_LLM_MODEL`, `MEMVARA_LLM_MAX_CLAIMS`, `MEMVARA_LLM_EXTRACT_SYSTEM`,
+`MEMVARA_LLM_TERSE_CLAIMS` and `MEMVARA_LLM_MAX_TOKENS` apply to the `openai` backend
+only. Under `MEMVARA_MODE=cloud` all five are refused outright, along with `MEMVARA_LLM` and `MEMVARA_EMBEDDER`: extraction
 runs inside the deployment, so a value named here would be read and never used.
+
+### Bounding a runaway
+
+`MEMVARA_LLM_MAX_TOKENS` sets the largest response one extraction may generate. Unset it
+is 8,192, which is `OpenAILLM`'s own default and what every deployment has been running
+on.
+
+**It bounds how long a runaway lasts. It does not shorten an answer, and it does not
+rescue a turn.** A model stopped by this limit stops mid-sentence, so what comes back is
+JSON that ends in the middle of an object. memvara reads the provider's reason for
+stopping and raises, which means the write reports the turn as not extracted and defers
+it for another pass — the same outcome as a provider timeout. Nothing is stored from that
+call. A smaller number therefore buys one thing: the runaway ends in four minutes rather
+than thirty, and the worker moves on to the next turn.
+
+**`MEMVARA_LLM_MAX_CLAIMS` is what actually shortens an answer**, and on a server that
+constrains decoding it is the setting that matters. An uncapped claims array gives the
+grammar no legal way to end a response, so a model that begins restating itself keeps
+going; capped, it stops because it has written the claims it was allowed. Measured on a
+4-core box, the uncapped arm reached 7,197 generated tokens and 1,957 seconds on a
+900-character turn and found 7 of 15 key facts, against 814 tokens and 165 seconds for the
+same turn under a 12-claim cap, which found 10. Set the cap first. The budget is a
+backstop for the case where the cap is not enough or is not set.
+
+**Pick the number from a measured response, not an estimate.** `bench/extract_cost.py`
+prints the largest response each arm generated, in its `max out` column; run it against
+your own model and take that number with room above it. The risk of guessing runs one way
+and it is not obvious: a budget under what your model actually writes truncates those
+turns *deterministically*, so every retry truncates too and the turn never lands. Too high
+merely wastes time on a call that was going to fail anyway.
+
+On the box these numbers come from, a 12-claim cap put the worst response at 814 tokens,
+so 2,048 leaves about two and a half times the headroom while cutting the worst case from
+8,192. That is an illustration of the method, not a recommended default — how much of the
+permission a model takes up is a property of its habits.
+
+**The real ceiling is the smaller of this budget and what is left of the model's context
+window**, and no memvara setting can raise the second one. A measured run against a server
+started with `-c 8192` and a 965-token prompt truncated at 7,197 generated tokens, which is
+the context running out rather than the budget: the server reports it the same way, and
+memvara raises either way. Setting `MEMVARA_LLM_MAX_TOKENS` above what the context allows
+therefore does nothing. If long turns need longer answers, `-c` on the inference server is
+the setting to change, and it costs memory per token of KV cache.
+
+**A runaway is deterministic, which is the argument for capping claims rather than
+budgets.** In that same run the uncapped arm was given three ordinary turns of 750 to 900
+characters, three times each. One of the three ran the model out of context on every one of
+its attempts — same turn, same failure, nine calls in, three truncations, about 2,020
+seconds each. A turn like that is not retried into success; it needs the claims array
+capped, or it needs a different model. What the budget decides is only how much time each
+doomed attempt costs before the worker moves on.
 
 ### The embedder is named, not discovered
 

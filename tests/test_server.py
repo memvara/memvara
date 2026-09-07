@@ -3426,6 +3426,69 @@ def test_cloud_mode_refuses_the_terse_claim_shape():
         build_memvara(cloud)
 
 
+def test_the_response_budget_reaches_the_openai_backend(monkeypatch):
+    """`OpenAILLM(max_tokens=...)` existed but nothing could set it from a deployment, so
+    the one lever that bounds how long a runaway runs was reachable only from Python."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+        "MEMVARA_LLM_MAX_TOKENS": "2048"}))
+    assert memory.llm.max_tokens == 2048
+    memory.close()
+
+
+def test_the_budget_is_the_backends_own_default_when_nobody_sets_it(monkeypatch):
+    """Unset means the request this server made before the option existed. 8,192 is
+    `OpenAILLM`'s default and every deployment has been running on it."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai"}))
+    assert memory.llm.max_tokens == 8192
+    memory.close()
+
+
+def test_the_budget_and_the_claim_cap_are_separate_switches(monkeypatch):
+    """They bound different things and only one of them shortens an answer. The cap tells
+    the model to write fewer claims; the budget stops it mid-sentence, which now raises
+    rather than storing a partial answer. Setting one must not imply the other."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+        "MEMVARA_LLM_MAX_CLAIMS": "12"}))
+    assert memory.llm.max_tokens == 8192, "a cap must not also move the budget"
+    memory.close()
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "2048 tokens", "2.5", "lots"])
+def test_an_unusable_response_budget_is_refused_at_startup(value):
+    """Refused rather than clamped or ignored. A typo falling back to 8,192 would leave
+    an operator believing they had bounded a runaway they had not — and `0` is the sharp
+    one: it truncates every response, and a truncation is now reported as a turn that
+    was not extracted, so the server would defer every write it made."""
+    with pytest.raises(ConfigError, match="MEMVARA_LLM_MAX_TOKENS"):
+        ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+                               "MEMVARA_LLM_MAX_TOKENS": value})
+
+
+def test_cloud_mode_refuses_the_response_budget():
+    """Same rule as the cap, the model and the claim shape: extraction runs inside the
+    deployment, so a budget named here would be read and never used."""
+    cloud = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
+                                   "MEMVARA_LLM_MAX_TOKENS": "2048"})
+    assert cloud.llm_max_tokens == 2048
+    with pytest.raises(ConfigError, match="MEMVARA_LLM_MAX_TOKENS"):
+        build_memvara(cloud)
+
+
 def test_replacement_extraction_instructions_are_read_from_the_named_file(
         monkeypatch, tmp_path):
     """The file's text reaches the backend, so a self-hosted deployment can change what
