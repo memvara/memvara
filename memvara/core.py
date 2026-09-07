@@ -42,7 +42,7 @@ from .embed.fingerprint import (
     stored_dim,
     write_fingerprint,
 )
-from .llm import LLM, NullLLM
+from .llm import LLM, NullLLM, ReplacementJudge, Usage
 from .redact import Redactor, redact_episode
 from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retrieved
 from .schema import Cardinality, PredicateRegistry
@@ -81,6 +81,7 @@ from .types import (
     utcnow,
 )
 from .write import WritePipeline
+from .write.reconcile import MergeReport, backfill_predicates
 
 #: `meta` keys the engine owns. They are ordinary dict keys on a persisted JSON column,
 #: so `remember(**meta)` reached every one of them — and two are not inert. Reinforcement
@@ -593,6 +594,13 @@ def is_derived(claim: Claim) -> bool:
     return not (claim.derivation is Derivation.USER and claim.extractor in ("", "api"))
 
 
+#: Nearest live claims `remember()` asks the judge about when replacement advice is on.
+#: Three, because retrieval put the claim a write actually replaced in the top three
+#: 58% of the time on one production store and in the top ten only 71%, and each one
+#: past the third is a model call that mostly says "no".
+ADVISORY_CANDIDATES = 3
+
+
 class Memvara:
     """Bitemporal memory for agents.
 
@@ -712,6 +720,7 @@ class Memvara:
         telemetry: Recorder | None = None,
         redactor: Redactor | None = None,
         reembed: bool = False,
+        advise_replacements: bool = False,
         **tuning: Any,
     ) -> None:
         # Present so that a local construction that named them still binds. `__new__`
@@ -770,6 +779,13 @@ class Memvara:
         # library must be fully usable with no API key. What is *not* on purpose is
         # doing that silently — see `_warn_if_degraded`.
         self.llm = llm if llm is not None else NullLLM()
+        #: Ask the model, on each `remember()` that closed nothing, whether the new fact
+        #: is a newer version of one of its nearest live neighbours, and report the
+        #: matches on the receipt as `may_replace`. Off by default because it is up to
+        #: three model calls per write. It needs a backend that implements
+        #: `ReplacementJudge`; with any other backend the flag does nothing.
+        self.advise_replacements = advise_replacements
+        self._warned_advice = False
         self.registry = registry if registry is not None else PredicateRegistry()
         # Rehydrate anything a previous process paid a model to classify. Without this
         # the schema is process-local, so every restart re-pays classification and, worse,
@@ -1375,8 +1391,71 @@ class Memvara:
         # `memory_type` rather than the resolved type on the claim: passing the resolved
         # one would make every write an assertion, including the ones that only took the
         # predicate's default, and the default is not an opinion. See `Reconciler._retype`.
-        return self._write_claim(claim, sources, close=closure(close),
-                                 asserted_type=memory_type)
+        receipt = self._write_claim(claim, sources, close=closure(close),
+                                    asserted_type=memory_type)
+        # Only a write that landed beside everything: one that closed a predecessor has
+        # already found its slot, and one that added nothing was already known.
+        if self.advise_replacements and receipt.added and not receipt.closed:
+            self._advise_replacements(receipt, scope, now)
+        return receipt
+
+    def _advise_replacements(self, receipt: WriteReceipt, scope: Scope,
+                             now: datetime) -> None:
+        """Fill `receipt.may_replace` from the nearest live claims in other slots.
+
+        The deterministic check competes claims that share a `fact_key`, so a fact
+        stored under `known_bug` never displaces the same fact stored under
+        `known_defect`, and the store keeps both. Measured on one production store,
+        retrieval put the claim a write actually replaced among the three nearest live
+        claims 58% of the time, and a pairwise judge with the three questions in
+        `JUDGE_SYSTEM` wrongly named a fresh fact as a replacement 9% of the time on a
+        27B model. That is good enough to *suggest* and not good enough to close, which
+        is why this fills a list and calls nothing.
+
+        Never raises: the claim is already written, and a failed suggestion must not
+        turn a durable write into an exception the caller retries. A backend failure
+        counts as the model call it was and warns once per instance.
+        """
+        judge = self.llm
+        if not isinstance(judge, ReplacementJudge) or judge.is_noop:
+            return
+        new = receipt.added[0]
+        try:
+            vec = self.embedder.encode([new.text])[0]
+            # Twice the budget, because the new claim itself and its own slot-mates are
+            # among the nearest and are dropped below.
+            hits = self.store.vector_search(vec, scope.ancestors(), ADVISORY_CANDIDATES * 2,
+                                            valid_at=now, known_at=now)
+        except ValueError:
+            # The index was built by a different embedder. Retrieval reports that where
+            # it matters; a suggestion is not the place to fail a write over it.
+            return
+        candidates: list[Claim] = []
+        for claim_id, _score in hits:
+            old = self.store.get_claim(claim_id)
+            # Same slot means the reconciler already compared them, and decided.
+            if old is None or old.fact_key == new.fact_key:
+                continue
+            candidates.append(old)
+        for old in candidates[:ADVISORY_CANDIDATES]:
+            usage = Usage() if judge.reports_usage else None
+            receipt.llm_calls += 1
+            try:
+                verdict = judge.judge_replacement(new.text, old.text, usage=usage)
+            except Exception as exc:
+                if not self._warned_advice:
+                    self._warned_advice = True
+                    warnings.warn(
+                        f"replacement advice failed ({exc}); the write succeeded and "
+                        "this receipt carries no may_replace entries", RuntimeWarning,
+                        stacklevel=3)
+                return
+            finally:
+                if usage is not None and usage.reported:
+                    receipt.tokens_in += usage.input_tokens
+                    receipt.tokens_out += usage.output_tokens
+            if verdict.get("replaces"):
+                receipt.may_replace.append(old)
 
     @staticmethod
     def _cite(claim: Claim, sources: Sequence[str | Episode] | None) -> list[Episode]:
@@ -3139,6 +3218,44 @@ class Memvara:
             write(item.id, vector)
         return len(items)
 
+    def merge_predicate(self, surface: str, canonical: str, *,
+                        tenant: str | None = None, dry_run: bool = True,
+                        now: datetime | None = None) -> MergeReport:
+        """Say that predicate `surface` is another name for `canonical`, and move the
+        claims already filed under it.
+
+        Two sessions that store the same fact under `known_bug` and `known_defect` get
+        two slots, so the newer value never supersedes the older one. This repairs that
+        in two steps. It teaches the registry the alias, so every write from now on
+        lands in the `canonical` slot. Then it runs `backfill_predicates`, which moves
+        the claims already filed under `surface`, retired ones included, and replays
+        each slot that received one so duplicates fold and older values close.
+
+        A dry run touches neither the registry nor the store. It reports what a real
+        run would move, which is the number to read before deciding. `canonical` is
+        registered on the real run if the registry does not know it yet, as a
+        multi-valued predicate, so the replay folds duplicates but closes nothing. Use
+        `MEMVARA_PREDICATES` or `registry.learn` first when it should be single-valued.
+
+        Ids survive, nothing is deleted, and each moved claim carries a dated
+        `predicate_rekey` note that `why()` shows, so the change is attributable.
+        """
+        t = tenant if tenant is not None else self.default_scope.tenant
+        registry = self.registry
+        target = registry.normalize(canonical)
+        source = registry.normalize(surface)
+        if not source or not target:
+            raise ValueError("surface and canonical must both name a predicate")
+        if source == target:
+            raise ValueError(f"{surface!r} already normalizes to {canonical!r}")
+        if not dry_run:
+            if not registry.known(target):
+                registry.learn(target, Cardinality.MANY)
+            spec = registry.learn_alias(target, source)
+            self.writer._persist(spec, t)                              # noqa: SLF001
+        return backfill_predicates(self.writer.reconciler, t, aliases={source: target},
+                                   dry_run=dry_run, now=now)
+
     def consolidate(self, *, tenant: str | None = None) -> dict[str, int]:
         """Decay salience, merge near-duplicates, promote repeated events to facts."""
         return self.consolidator.run(tenant if tenant is not None else self.default_scope.tenant)
@@ -3473,6 +3590,11 @@ class ScopedMemvara:
 
     def consolidate(self) -> dict[str, int]:
         return self._mem.consolidate(tenant=self.scope.tenant)
+
+    def merge_predicate(self, surface: str, canonical: str, *, dry_run: bool = True,
+                        now: datetime | None = None) -> MergeReport:
+        return self._mem.merge_predicate(surface, canonical, tenant=self.scope.tenant,
+                                         dry_run=dry_run, now=now)
 
     def stats(self) -> dict[str, int]:
         return self._mem.stats(tenant=self.scope.tenant)

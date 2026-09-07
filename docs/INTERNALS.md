@@ -433,7 +433,14 @@ class WritePipeline:
 ```
 
 `add()` runs the tiers in order and must populate every field of `WriteReceipt`,
-including `llm_calls` (0 whenever the LLM is not consulted) and `latency_ms`:
+including `llm_calls` (0 whenever the LLM is not consulted) and `latency_ms`. One field
+the pipeline never fills is `may_replace`: `Memvara.remember` fills it after the write,
+and only when the instance was built with `advise_replacements=True`, the backend
+implements `llm.ReplacementJudge`, and the write added a claim without closing one. It
+asks the judge about up to `ADVISORY_CANDIDATES` of the nearest live claims in *other*
+slots, counts each consultation in `llm_calls`, and closes nothing. A judge that raises
+warns once per instance and leaves the list empty; the claim is already durable and a
+suggestion must not turn it into an exception the caller retries.
 
 - **Tier 0 (no LLM):** store the episode; skip content-hash duplicates
   (`store.find_episode_by_hash`). For surviving episodes, embed and check near-duplicates

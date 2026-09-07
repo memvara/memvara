@@ -92,6 +92,23 @@ undeclared predicate decays at the slow default — a two-year half-life — so
 a fact that changed this morning still ranks as fresh long after it stopped
 being true, and nothing ever reports it.
 
+## "may replace: [id] ..."
+
+This line appears only on a server whose operator turned
+`MEMVARA_ADVISE_REPLACEMENTS` on. It means the store could not compare your
+new fact with the named one itself, because the two are filed under
+different names, and the model thinks yours is the newer version. The
+model is wrong about one time in ten, so read the named fact before acting,
+then pick the closure the line offers:
+
+- The world moved and yours is the current value: `memory_end` the named id.
+- The old record was never right: `memory_forget` it.
+- Both hold, or they are about different things: do nothing.
+
+If the same two spellings keep producing this line, the fix is on the
+server: `merge_predicate` folds one predicate name onto the other and moves
+the claims already filed under it. Tell them; it is not a tool.
+
 ## Carry the turn ids forward
 
 Half the dispute sequence above runs on the excerpt: step 3 puts it in front

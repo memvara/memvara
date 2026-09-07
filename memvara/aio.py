@@ -71,6 +71,7 @@ from typing import Any, Callable, Collection, Literal, Sequence, overload
 from .core import Memvara, Messages, ScopedMemvara, _approx_tokens
 from .embed import Embedder
 from .retrieve import Path, Retrieved
+from .write.reconcile import MergeReport
 from .types import (Answer, Claim, Delta, Episode, ErasureProof, MemoryType,
                     Provenance, RecallResult, Result, Scope, WriteReceipt)
 
@@ -439,6 +440,14 @@ class AsyncMemvara:
         return await asyncio.to_thread(
             self.memvara.reembed, embedder, batch_size=batch_size)
 
+    async def merge_predicate(self, surface: str, canonical: str, *,
+                              tenant: str | None = None, dry_run: bool = True,
+                              now: datetime | None = None) -> MergeReport:
+        """See `Memvara.merge_predicate`. Off the loop: it walks the whole claim table."""
+        return await asyncio.to_thread(
+            self.memvara.merge_predicate, surface, canonical, tenant=tenant,
+            dry_run=dry_run, now=now)
+
     async def stats(self, *, tenant: str | None = None) -> dict[str, int]:
         """See `Memvara.stats`."""
         return await asyncio.to_thread(self.memvara.stats, tenant=tenant)
@@ -773,6 +782,12 @@ class AsyncScopedMemvara:
 
     async def consolidate(self) -> dict[str, int]:
         return await self._amem.consolidate(tenant=self.scope.tenant)
+
+    async def merge_predicate(self, surface: str, canonical: str, *,
+                              dry_run: bool = True,
+                              now: datetime | None = None) -> MergeReport:
+        return await self._amem.merge_predicate(
+            surface, canonical, tenant=self.scope.tenant, dry_run=dry_run, now=now)
 
     async def stats(self) -> dict[str, int]:
         return await self._amem.stats(tenant=self.scope.tenant)

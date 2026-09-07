@@ -61,6 +61,45 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   response each arm generated in its `max out` column. A positive integer; `0` and anything
   non-numeric are refused at startup, and `MEMVARA_MODE=cloud` refuses the variable
   outright as it already does for the other four `MEMVARA_LLM_*` settings.
+- **`Memvara.merge_predicate(surface, canonical)` and `backfill_predicates()` move the
+  claims already filed under a merged-away predicate.** `PredicateRegistry.learn_alias`
+  applies from the moment it is learned: the next write of `known_bug` lands in the
+  `known_defect` slot, and every claim already stored under `known_bug` stays where it was,
+  invisible to the contradiction check and to `history()` of the slot it belongs in. On
+  one production store, 599 distinct predicates covered 1,276 claims, and two sessions
+  storing the same fact under two names was the usual reason a newer value never
+  superseded an older one. `merge_predicate` teaches the alias, persists it, and runs
+  `backfill_predicates`, the predicate twin of `backfill_entities`: every claim under the
+  old name is re-filed, retired ones included, and each slot that received one is replayed
+  in recording order so duplicates fold and older values on a single-valued predicate
+  close at the instant the newer one was recorded. Dry-run by default and it teaches
+  nothing on a dry run; it returns a `MergeReport` saying what would move. Ids survive,
+  nothing is deleted, and each moved claim carries a dated `predicate_rekey` note that
+  `why()` shows. Available on `ScopedMemvara` and `AsyncMemvara` too.
+
+- **`Memvara(advise_replacements=True)` and `MEMVARA_ADVISE_REPLACEMENTS=1` add
+  replacement advice to `remember()`.** The deterministic contradiction check only ever
+  competes claims that share a slot, so a fact stored under a second subject or predicate
+  spelling sits beside its predecessor for good. With this on, a `remember()` that added
+  a claim and closed nothing asks the model about up to three of the nearest live claims
+  in other slots, and names the ones it judged this write to be a newer version of in
+  `WriteReceipt.may_replace`. Advice, not action: nothing is closed. The MCP receipt
+  renders it as a `may replace:` line that says which closure to pick, and the
+  `memory_remember` description tells the model what the line means. Off by default,
+  because it is up to three model calls per write, each counted in `llm_calls`. Measured
+  on one production store before shipping: a 27B model wrongly named a fresh fact as a
+  replacement 9% of the time and a 4B model 35 to 50%, which is why it suggests rather
+  than closes, and why the prompt asks three questions before the verdict.
+
+- **`ReplacementJudge`, a new protocol in `memvara.llm`, with `judge_replacement` on
+  `OpenAILLM` and `AnthropicLLM`.** Its own protocol rather than a new `LLM` method, so a
+  third-party backend written against `LLM` keeps working and simply gives no advice.
+
+- **`OpenAILLM(extra_body=...)` and `MEMVARA_LLM_EXTRA_BODY` send provider-specific
+  request fields.** A self-hosted Qwen3 server needs
+  `{"chat_template_kwargs": {"enable_thinking": false}}` or it spends the whole token
+  budget thinking and returns an empty message. The variable takes a JSON object and is
+  refused at startup when it is not one.
 
 - **`bench/longmemeval.py` gained `--rerank`, `--reranker` and `--rerank-model`.** They
   existed only on `bench/locomo.py`, so the cross-encoder had never been measured on

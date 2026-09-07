@@ -212,6 +212,12 @@ way, and a repair that saw less than the read would fix something other than wha
 operator was looking at. Dry-run by default and stamped for `why()`, exactly as the
 backfill is.
 
+Predicates have the same gap and the same repair. `PredicateRegistry.learn_alias` says
+two names are one slot from now on, and `backfill_predicates()`, reached through
+`Memvara.merge_predicate()`, re-files the claims already stored under the old name and
+replays the slot they land in. Same rules: dry-run by default, ids preserved, every moved
+claim stamped with a dated `predicate_rekey` note.
+
 Neither is a detector, and for `split_entity` that is the interesting half: nothing in the
 data separates one person changing jobs after eight years from two people sharing a name.
 Not the gap — `works_at` decays *slow*, a two-year half-life, so eight years is four of

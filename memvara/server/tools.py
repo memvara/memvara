@@ -775,7 +775,23 @@ def _receipt_summary(ctx: ToolContext, receipt: WriteReceipt) -> list[str]:
         lines.append(_collapsed_note(receipt.collapsed))
     if receipt.retyped:
         lines.append(_retyped_note(receipt.retyped))
+    if receipt.may_replace:
+        lines.append(_may_replace_note(receipt.may_replace))
     return lines
+
+
+def _may_replace_note(claims: Sequence[Claim]) -> str:
+    """Name the facts in other slots a model judged this write to be a newer version of.
+
+    Advice, in the exact words the closures use. The write ended nothing: the old fact
+    is still live, and only the caller can say whether the world moved (memory_end), the
+    old record was wrong (memory_forget), or both facts hold and nothing should change.
+    Read the old text before deciding, because the judge is wrong about one in ten.
+    """
+    named = ", ".join(f"[{c.id}] {safe_line(c.text)}" for c in claims)
+    return (f"may replace: {named}. Nothing was ended. If this write is the newer "
+            "version of that fact, call memory_end with its claim_id; if the old record "
+            "was never right, call memory_forget instead; if both hold, do nothing.")
 
 
 def _unextracted_note(ctx: ToolContext, count: int) -> str:
@@ -1956,7 +1972,11 @@ TOOLS: tuple[Tool, ...] = (
             "memory_forget as well, which is the tool that says the record was wrong. "
             "The one case where it ends nothing is a write you marked as a guess: see "
             "confidence, and read the receipt, which names both values when that "
-            "happens. "
+            "happens. A receipt line starting 'may replace:' is advice from a model on "
+            "a server that has one: the new fact landed beside a fact stored under a "
+            "different subject or predicate spelling, and nothing was ended. Read the "
+            "named fact and decide: memory_end if the world moved, memory_forget if the "
+            "old record was wrong, nothing if both hold. "
             "Example: subject 'user', predicate 'lives_in', object 'Lisbon'. If the "
             "fact did not start being true at this moment — you are recording something "
             "from earlier in the session, from a log, or from what the user just told "

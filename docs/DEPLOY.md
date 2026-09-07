@@ -198,6 +198,33 @@ It replaces the extraction instructions only. Predicate resolution — deciding 
 new surface form is an existing predicate or a genuinely new one — keeps its own prompt,
 which this accommodation was never measured against.
 
+### Set `MEMVARA_LLM_EXTRA_BODY` if the model thinks before it answers
+
+A Qwen3 server, and any other model with a reasoning mode that is on by default, spends
+the response budget thinking and returns an empty message under a JSON schema. The
+switch that turns it off is a request field the OpenAI SDK does not name, so it goes in
+the SDK's `extra_body`:
+
+```bash
+MEMVARA_LLM_EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": false}}'
+```
+
+The variable takes a JSON object and is sent on every request this backend makes. A
+value that is not valid JSON, or is JSON but not an object, is refused at startup.
+
+### Set `MEMVARA_ADVISE_REPLACEMENTS` to have writes name the fact they may replace
+
+The contradiction check only ever competes claims that share a slot, so a fact stored
+under a second subject or predicate spelling sits beside its predecessor. With
+`MEMVARA_ADVISE_REPLACEMENTS=1`, a `memory_remember` that added a claim and closed
+nothing asks the model about up to three of the nearest live claims in other slots and
+adds a `may replace:` line to the receipt naming the ones it judged this write to be a
+newer version of. Nothing is closed; the line says which tool closes it. It is up to
+three model calls per write, counted in the receipt's model-call count, and it works with
+`MEMVARA_LLM=anthropic` or `openai`. Measured before shipping on one production store, a
+27B model wrongly named a fresh fact as a replacement about one time in ten, which is why
+this advises rather than acts.
+
 ### Set `MEMVARA_LLM_TERSE_CLAIMS` if generation is the bottleneck
 
 On a CPU-hosted model, generating the response is most of the wall time, and most of what

@@ -207,6 +207,9 @@ def receipt(body: dict[str, Any]) -> WriteReceipt:
         llm_calls=body["llm_calls"],
         latency_ms=body["latency_ms"],
         deferred=body["deferred"],
+        # `.get`: a deployment older than replacement advice sends no such key, and an
+        # absent list means what an empty one means, that nothing was suggested.
+        may_replace=[claim(c) for c in body.get("may_replace", ())],
     )
 
 

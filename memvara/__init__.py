@@ -97,7 +97,9 @@ from .write import (
     UnembeddableTextWarning,
     WritePipeline,
 )
-from .write.reconcile import SplitReport, backfill_entities, split_entity
+from .write.reconcile import (
+    MergeReport, SplitReport, backfill_entities, backfill_predicates, split_entity,
+)
 
 __version__ = "0.11.3"
 
@@ -156,6 +158,10 @@ __all__ = [
     # reason — an operator reaching for one reaches for the other, and a caller reading
     # the result has to be able to name it.
     "split_entity", "SplitReport",
+    # The predicate twin of `backfill_entities`: after `PredicateRegistry.learn_alias`
+    # says two predicate names are one slot, this moves the claims already filed under
+    # the old name. Exported with its report type for the same reason.
+    "backfill_predicates", "MergeReport",
     "Recorder", "NullRecorder", "MemoryRecorder",
     "Redactor", "PatternRedactor", "Consolidator",
     # relevance floors are measured per deployment, never assumed

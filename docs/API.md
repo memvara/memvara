@@ -21,6 +21,10 @@ mem.add(messages, *, role="user", ts=None)        -> WriteReceipt
 mem.remember(subject, predicate, obj, *, valid_from=, valid_to=, recorded_at=, sources=,
              text=, confidence=, memory_type=, polarity=, extractor=, **meta)
                                                   -> WriteReceipt
+#   With `Memvara(advise_replacements=True)` and a backend that implements
+#   `llm.ReplacementJudge`, a write that closed nothing fills `receipt.may_replace`
+#   with the nearest live claims in other slots the model judged it to be a newer
+#   version of. Advice only; nothing is closed. Up to three model calls per write.
 mem.supersede(old_claim_id, new_claim, *, at=, sources=)   -> WriteReceipt
 
 # retire — reversible, keeps history
@@ -124,6 +128,14 @@ split_entity(mem.writer.reconciler, scope, surface, at)    -> SplitReport
 #   Re-stamps the earlier claims onto a distinct identity and undoes the supersessions
 #   that crossed the boundary. Retirements move but are never un-retired: ending a
 #   claim is something the write path inferred, retiring one is a caller's statement.
+
+mem.merge_predicate(surface, canonical, *, dry_run=True) -> MergeReport
+#   The predicate twin. `registry.learn_alias` only redirects future writes; this
+#   teaches the alias, persists it, and re-files every claim already stored under
+#   `surface` into the `canonical` slot, replaying that slot so duplicates fold and
+#   an older value on a single-valued predicate closes. Dry-run by default, and a
+#   dry run teaches nothing. `backfill_predicates(mem.writer.reconciler, tenant,
+#   aliases=...)` is the pass underneath it, for an operator applying a mapping.
 
 # maintenance
 mem.consolidate()                                 -> dict[str, int]

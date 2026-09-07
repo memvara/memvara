@@ -169,6 +169,31 @@ def resolve_prompt(surface: str, offered: Sequence[str]) -> str:
     )
 
 
+#: Characters of each memory shown to the judge. The median stored object is 37 words,
+#: and the pairwise prompt was measured at this cut; a longer text is a longer bill, not
+#: a better answer.
+JUDGE_TEXT_CHARS = 400
+
+
+def judge_prompt(new_text: str, old_text: str) -> str:
+    return (f"Existing memory: {old_text[:JUDGE_TEXT_CHARS]}\n"
+            f"New memory: {new_text[:JUDGE_TEXT_CHARS]}")
+
+
+def shape_verdict(parsed: dict[str, Any]) -> dict[str, bool]:
+    """Four booleans, and a verdict no stronger than its three reasons.
+
+    A missing or non-boolean answer reads as False, because False is the answer that
+    closes nothing. `replaces` is recomputed from the three questions rather than
+    trusted: a model that says "replaces" while denying one of its own premises has
+    contradicted itself, and the direction that loses nothing is to disbelieve it.
+    """
+    out = {key: parsed.get(key) is True
+           for key in ("same_thing", "same_property", "newer_value", "replaces")}
+    out["replaces"] = all(out.values())
+    return out
+
+
 def compose_prompt(predicates: Sequence[str]) -> str:
     return f"predicates:\n{', '.join(predicates) or '(none)'}"
 
