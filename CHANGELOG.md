@@ -197,6 +197,25 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `plugin-claude.md` carries the same restoration, so it reaches the seven plugin
   repositories that compose their `CLAUDE.md` from it.
 
+- **The Claude context is split so that a session loads the rules it needs and not the
+  whole history behind them.** `CLAUDE.md` went from 379 lines to 233 and now carries each
+  working rule in one to four sentences under the heading it already used, the Karpathy
+  guidelines unchanged, and an index table. The full text of every rule, with the incident
+  that produced it, moved to `docs/claude/working-here.md`, and nine pages under
+  `docs/claude/` describe one subsystem each with the exact files, classes and functions
+  they name. Three files under `.claude/rules/` carry a `paths:` list in their front matter
+  and are loaded only when a matching file is read: the tool descriptions rule on
+  `memvara/server/tools.py`, the vendored-skill rule on `memvara/skills/` and `plugin/`,
+  and the doctest rule on the package's Python files. Nothing was dropped; every rule,
+  number and trap in the old file is in one of the three places.
+
+  `plugin-claude.md` was shortened in place from 324 lines to 249, because it is copied
+  whole into the seven repositories in `plugin-repos.txt` and so cannot point at a file
+  that does not travel with it. Its first line, its single `@@LOCAL@@` splice point and the
+  Karpathy guidelines are unchanged. `.gitignore` now ignores the contents of `.claude/`
+  rather than the directory itself, so that `.claude/rules/` can be committed while a
+  workstation's own settings stay ignored.
+
 ## [0.11.3] — 2026-09-06
 
 ### Fixed

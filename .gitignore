@@ -6,7 +6,14 @@ __pycache__/
 
 # Local editor/agent scratch. `.claude/launch.json` names an absolute path on one
 # machine, so it is configuration for a workstation rather than for the project.
-.claude/
+#
+# `.claude/rules/` is the exception and is committed. Those files are project instructions
+# that Claude Code loads only when a file matching their `paths:` globs is read, so they are
+# part of the repository's documentation rather than one workstation's settings. Git cannot
+# re-include a path inside an excluded directory, which is why the first line ignores the
+# directory's contents rather than the directory itself.
+.claude/*
+!.claude/rules/
 
 # Secrets never belong in a repository, and this one is Apache-2.0 and public: a commit
 # here is a disclosure, not a mistake to be fixed by a later commit. Listed even though
