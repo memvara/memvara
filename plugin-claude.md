@@ -129,8 +129,10 @@ request merges unreviewed, which is the case this rule exists for.
 
 Run it on the latest Sonnet, `claude-sonnet-5` today. The command takes an effort level, a
 target, and `--comment` or `--fix`, but no model argument, so it runs on whatever the session
-model is. Switch the model before the review and back afterwards, and where you cannot switch
-say which model reviewed in the pull request body. Use `high`, not `ultra`, which is
+model is. Switch the model before the review and back afterwards. The pull request body says
+the review ran, at what effort, and what it found; it never names the model, and no AI
+attribution of any kind reaches GitHub, whether the session or a subagent writes the body.
+Use `high`, not `ultra`, which is
 user-triggered and billed and which an agent cannot launch; reach for `max` on a large or
 load-bearing change.
 

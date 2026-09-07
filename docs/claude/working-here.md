@@ -212,9 +212,11 @@ change with fresh eyes.
 **Run it on the latest Sonnet, which is `claude-sonnet-5` today.** The `/code-review` command
 takes an effort level, a target, and `--comment` or `--fix`. It takes **no model argument**,
 so the review runs on whatever the session model is. Switch the model before the review and
-back afterwards, using the app's model picker or `/model` in a terminal session. In a session
-where you cannot switch, say which model reviewed in the pull request body rather than
-letting a reader assume.
+back afterwards, using the app's model picker or `/model` in a terminal session. The pull
+request body says the review ran, at what effort, and what it found. It never names the
+model, and no AI attribution of any kind reaches GitHub, whether the session or a subagent
+writes the body. Decided 2026-09-07, when review sections naming the model were found in
+pull request bodies across the memvara repositories and scrubbed.
 
 **Use `high`, not `ultra`.** The `ultra` level is user-triggered and billed, an agent cannot
 launch it, and attempting it wastes a turn. Reach for `max` instead when the change is large
