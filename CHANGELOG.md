@@ -60,7 +60,7 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   truncates too and the turn never lands. `bench/extract_cost.py` prints the largest
   response each arm generated in its `max out` column. A positive integer; `0` and anything
   non-numeric are refused at startup, and `MEMVARA_MODE=cloud` refuses the variable
-  outright as it already does for the other four `MEMVARA_LLM_*` settings.
+  outright as it already does for the other five `MEMVARA_LLM_*` settings.
 - **`Memvara.merge_predicate(surface, canonical)` and `backfill_predicates()` move the
   claims already filed under a merged-away predicate.** `PredicateRegistry.learn_alias`
   applies from the moment it is learned: the next write of `known_bug` lands in the
