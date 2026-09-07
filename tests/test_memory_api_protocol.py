@@ -36,7 +36,9 @@ from memvara.server.memory_api import MemoryAPI
 #: repository root today and from a packaged tree tomorrow, and a test that reads the
 #: wrong `tools.py` — or no file at all — asserts nothing while passing.
 TOOLS_PY = Path(__file__).resolve().parent.parent / "memvara" / "server" / "tools.py"
-TOOLS_SOURCE = TOOLS_PY.read_text()
+# `encoding="utf-8"` for the reason `test_config_cloud.py` gives where it reads this same
+# way: the platform default is cp1252 on Windows CI and these sources are UTF-8.
+TOOLS_SOURCE = TOOLS_PY.read_text(encoding="utf-8")
 
 CALLED = set(re.findall(r"ctx\.memory\.([a-z_]+)", TOOLS_SOURCE))
 
