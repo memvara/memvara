@@ -3332,11 +3332,16 @@ def test_no_cap_is_the_default_because_hosted_openai_rejects_one(monkeypatch):
     memory.close()
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "abc", "3.5", "twelve"])
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "3.5", "twelve",
+                                   "\u00b9\u00b2", "\u0661\u0662"])
 def test_an_unusable_claim_cap_is_refused_at_startup(value):
     """Refused rather than clamped or ignored. `0` would forbid every claim and make
     extraction a silent no-op, and a typo falling back to uncapped would leave a grammar
-    backend with exactly the failure the cap was set to prevent."""
+    backend with exactly the failure the cap was set to prevent.
+
+    The last two cover the `str.isdigit()` trap that `_max_tokens` documents: superscript
+    "\u00b9\u00b2" satisfied `isdigit()` and then made `int()` raise, so a `ValueError` escaped a
+    module whose whole contract is to fail with a sentence."""
     with pytest.raises(ConfigError, match="MEMVARA_LLM_MAX_CLAIMS"):
         ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
                                "MEMVARA_LLM_MAX_CLAIMS": value})
@@ -3423,6 +3428,79 @@ def test_cloud_mode_refuses_the_terse_claim_shape():
                                    "MEMVARA_LLM_TERSE_CLAIMS": "true"})
     assert cloud.llm_terse_claims is True
     with pytest.raises(ConfigError, match="MEMVARA_LLM_TERSE_CLAIMS"):
+        build_memvara(cloud)
+
+
+def test_the_response_budget_reaches_the_openai_backend(monkeypatch):
+    """`OpenAILLM(max_tokens=...)` existed but nothing could set it from a deployment, so
+    the one lever that bounds how long a runaway runs was reachable only from Python."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+        "MEMVARA_LLM_MAX_TOKENS": "2048"}))
+    assert memory.llm.max_tokens == 2048
+    memory.close()
+
+
+def test_the_budget_is_the_backends_own_default_when_nobody_sets_it(monkeypatch):
+    """Unset means the request this server made before the option existed. 8,192 is
+    `OpenAILLM`'s default and every deployment has been running on it."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai"}))
+    assert memory.llm.max_tokens == 8192
+    memory.close()
+
+
+def test_the_budget_and_the_claim_cap_are_separate_switches(monkeypatch):
+    """They bound different things and only one of them shortens an answer. The cap tells
+    the model to write fewer claims; the budget stops it mid-sentence, which now raises
+    rather than storing a partial answer. Setting one must not imply the other."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+        "MEMVARA_LLM_MAX_CLAIMS": "12"}))
+    assert memory.llm.max_tokens == 8192, "a cap must not also move the budget"
+    memory.close()
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "2048 tokens", "2.5", "lots",
+                                   "0x10", "2_048", "\u00b2\u2070\u2074\u2078",
+                                   "\u0662\u0660\u0664\u0668"])
+def test_an_unusable_response_budget_is_refused_at_startup(value):
+    """Refused rather than clamped or ignored. A typo falling back to 8,192 would leave
+    an operator believing they had bounded a runaway they had not — and `0` is the sharp
+    one: it truncates every response, and a truncation is now reported as a turn that
+    was not extracted, so the server would defer every write it made.
+
+    The last two are the ones that made this list longer than it looks. `str.isdigit()`
+    is true for about 128 characters `int()` then refuses — superscript "\u00b2\u2070\u2074\u2078" here — so
+    the check short-circuited into `int()` and let a `ValueError` escape, and `cli.py`
+    catches only `ConfigError`. An operator got a traceback where this module promises a
+    sentence. Arabic-indic "\u0662\u0660\u0664\u0668" is the other half: `int()` reads it as 2048, so it was
+    accepted, and a value nobody can grep for is a paste accident rather than a
+    setting."""
+    with pytest.raises(ConfigError, match="MEMVARA_LLM_MAX_TOKENS"):
+        ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+                               "MEMVARA_LLM_MAX_TOKENS": value})
+
+
+def test_cloud_mode_refuses_the_response_budget():
+    """Same rule as the cap, the model and the claim shape: extraction runs inside the
+    deployment, so a budget named here would be read and never used."""
+    cloud = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
+                                   "MEMVARA_LLM_MAX_TOKENS": "2048"})
+    assert cloud.llm_max_tokens == 2048
+    with pytest.raises(ConfigError, match="MEMVARA_LLM_MAX_TOKENS"):
         build_memvara(cloud)
 
 

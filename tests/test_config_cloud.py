@@ -175,7 +175,11 @@ def test_no_cloud_path_anywhere_constructs_an_engine_over_a_remote_store():
 
     import memvara.server.config as config_module
 
-    tree = ast.parse(Path(config_module.__file__).read_text())
+    # `encoding="utf-8"` because this reads a source file, and `read_text()` without it
+    # uses the platform default — cp1252 on Windows CI, which cannot decode most of what
+    # this repository writes. The file is UTF-8 by declaration; reading it as anything
+    # else is wrong wherever it happens to succeed.
+    tree = ast.parse(Path(config_module.__file__).read_text(encoding="utf-8"))
     imported = {alias.name for node in ast.walk(tree)
                 if isinstance(node, (ast.Import, ast.ImportFrom))
                 for alias in node.names}

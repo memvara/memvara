@@ -9,7 +9,58 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A model that hits its token limit mid-answer now fails the write instead of silently
+  extracting nothing.** `OpenAILLM` and `AnthropicLLM` read the provider's own reason for
+  stopping — `finish_reason == "length"` and `stop_reason == "max_tokens"` — and raise
+  `memvara.llm.TruncatedResponse`. Neither backend read that field before, and the
+  consequence was invisible: constrained decoding ends a cut-off response in the middle of
+  an object, `parse_json_object` cannot read that and returns `{}`, and `{}` shapes to an
+  empty claim list. The receipt for a truncated answer was therefore identical to the
+  receipt for a turn that genuinely held no facts — `unextracted=1`, `deferred=False` — so
+  nothing told a worker the turn still needed extracting and it was never tried again.
+  Raising puts the call on `WritePipeline`'s existing failure path, which sets `deferred`
+  as well, and the tokens the truncated call burned are still reported because the usage is
+  recorded before the check.
+
+  `import_mem0(..., extract=True)` gained the same guard `WritePipeline` already had, and
+  `ImportReceipt` gained an `unextracted` field to report it. A chunk whose extraction call
+  fails is counted there and the import continues; before, any failure on that path — a
+  provider timeout as much as a truncation — ended the import part-way through a history
+  and returned no receipt at all.
+
+  This was reachable at the shipped default. `max_tokens` is 8,192 and a measured
+  extraction on a 4-core box generated 7,197 tokens from a 900-character turn — 88% of the
+  budget — when the claims array was left unbounded. Setting `MEMVARA_LLM_MAX_CLAIMS` is
+  still the way to stop a runaway; this change is what makes one visible when it happens
+  anyway. A reason the check cannot read — absent, `None`, or a word a provider adds later
+  — is not treated as a truncation, which keeps an unfamiliar value from turning a working
+  extraction into a failed write.
+
 ### Added
+
+- **`MEMVARA_LLM_MAX_TOKENS` bounds how long one runaway extraction can run.** It sets the
+  largest response `MEMVARA_LLM=openai` may generate; unset it stays at `OpenAILLM`'s own
+  default of 8,192, so no existing deployment changes. `OpenAILLM(max_tokens=...)` has
+  always existed — what was missing is that nothing could set it from a deployment, so the
+  only lever that bounds a runaway was reachable from Python and not from a compose file.
+
+  It bounds a runaway; it does not shorten an answer. A model stopped by this limit stops
+  mid-sentence, and memvara now raises on that rather than storing the unreadable
+  remainder, so the turn is reported unextracted and deferred. What a smaller number buys
+  is that the runaway ends in minutes instead of half an hour and the worker moves on.
+  `MEMVARA_LLM_MAX_CLAIMS` is what actually shortens an answer, and on a server that
+  constrains decoding it is still the setting that matters — measured on a 4-core box, an
+  uncapped array reached 7,197 tokens and 1,957 s and found 7 of 15 key facts, against 814
+  tokens and 165 s under a 12-claim cap, which found 10.
+
+  **Set it from a measured response length rather than an estimate.** A budget under what
+  the model actually writes truncates those turns deterministically, so every retry
+  truncates too and the turn never lands. `bench/extract_cost.py` prints the largest
+  response each arm generated in its `max out` column. A positive integer; `0` and anything
+  non-numeric are refused at startup, and `MEMVARA_MODE=cloud` refuses the variable
+  outright as it already does for the other four `MEMVARA_LLM_*` settings.
 
 - **`bench/longmemeval.py` gained `--rerank`, `--reranker` and `--rerank-model`.** They
   existed only on `bench/locomo.py`, so the cross-encoder had never been measured on
@@ -54,8 +105,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   output tokens against 1,756, prefill unmoved at 2,894. That run is why the numbers here
   are given as a ceiling rather than a promise — the measured saving fell well short of
   what serialization predicted, because the model still spends tokens on values and on
-  deciding what to write. **The narrower schema that ships here has not been measured and
-  saves less than 27%.** How much of the permission a model takes up is a property of its
+  deciding what to write. **The narrower schema that ships here is now measured too: it
+  cuts 12% and finds the same 10 of 15 key facts** — 2,401 output tokens against 2,103 over
+  the same episodes, with wall time moving from 155.9 s to 149.9 s at the median, since
+  prefill is unchanged and dominates a call this short. The 15 points between the two
+  versions were the confidence number and the memory type, and both stayed required for
+  the reasons above. How much of the permission a model takes up is a property of its
   habits: the wider schema cut 55% on LFM2.5-1.2B-Instruct against phi-4-mini's 27%. Run
   `bench/extract_cost.py` against your own model.
 

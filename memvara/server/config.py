@@ -147,6 +147,24 @@ class ServerConfig:
     #: before turning it on is that it is a 400 against hosted OpenAI, whose strict mode
     #: requires every declared property to appear in `required`.
     llm_terse_claims: bool = False
+    #: Ceiling on the tokens the "openai" backend lets one response generate. Unset keeps
+    #: `OpenAILLM`'s own default of 8,192, which is what every deployment ran on before
+    #: this existed.
+    #:
+    #: It bounds how long a runaway can last; it does not prevent one. A model that hits
+    #: this stops mid-answer, and the backend raises `TruncatedResponse` because a cut-off
+    #: response parses as nothing — so the turn is reported unextracted and deferred, not
+    #: stored with fewer claims. That makes a smaller number a way to fail faster, never
+    #: a way to get a shorter answer. `MEMVARA_LLM_MAX_CLAIMS` is what actually shortens
+    #: one, and on a server that constrains decoding it is the setting that matters.
+    #:
+    #: **Set too low, this converts a slow turn into one that never lands.** The failure
+    #: is deterministic — the same turn truncates on every retry — so a queue re-runs it
+    #: forever. Pick the number from a measured response length rather than an estimate:
+    #: `bench/extract_cost.py` prints the largest response each arm generated in its
+    #: `max out` column. Measured on a 4-core box with a 12-claim cap, the worst call
+    #: generated 814 tokens.
+    llm_max_tokens: int | None = None
     #: "local" (default) opens MEMVARA_DB on disk, exactly as before this field existed.
     #: "cloud" opens no local file at all; it resolves an API key (MEMVARA_API_KEY, or
     #: the credentials file `memvara-mcp login` writes) and talks to `server_url` instead.
@@ -237,6 +255,7 @@ class ServerConfig:
             llm_extract_system=_optional(env.get("MEMVARA_LLM_EXTRACT_SYSTEM")),
             llm_terse_claims=_flag(
                 env.get("MEMVARA_LLM_TERSE_CLAIMS"), "MEMVARA_LLM_TERSE_CLAIMS"),
+            llm_max_tokens=_max_tokens(env.get("MEMVARA_LLM_MAX_TOKENS")),
             embedder=_embedder_spec(env.get("MEMVARA_EMBEDDER")),
             mode=mode,
             server_url=server_url,
@@ -250,6 +269,33 @@ class ServerConfig:
                 "session": self.session}
 
 
+def _max_tokens(raw: str | None) -> int | None:
+    """A positive integer, or `None` for the backend's own default.
+
+    Refused rather than clamped, for the reason `_max_claims` is: a value that fell back
+    to the default would leave an operator believing they had bounded a runaway they had
+    not. `0` is refused for a sharper reason than "not positive" — it would truncate every
+    response at once, and since a truncation now raises, that is not a quiet no-op but a
+    server whose every write reports the turn unextracted.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return None
+    # `isascii()` as well as `isdigit()`, because `isdigit()` is true for about 128
+    # characters `int()` then refuses — superscripts like "²⁰⁴⁸" among them. Without it
+    # the `and` short-circuits into `int()` and a `ValueError` escapes, and `cli.py`
+    # catches only `ConfigError`, so the operator gets a traceback where this module
+    # promises a sentence telling them what to do.
+    if not (value.isascii() and value.isdigit() and int(value) > 0):
+        raise ConfigError(
+            f"MEMVARA_LLM_MAX_TOKENS={raw!r} is not a positive integer. Leave it unset "
+            "for the backend default of 8192. Set it to bound how long one runaway "
+            "response can run — and read it off a measured response length, because a "
+            "budget under what your model actually writes truncates every one of those "
+            "turns, and a truncated turn is retried rather than stored.")
+    return int(value)
+
+
 def _max_claims(raw: str | None) -> int | None:
     """A positive integer, or `None` for uncapped.
 
@@ -261,7 +307,9 @@ def _max_claims(raw: str | None) -> int | None:
     value = (raw or "").strip()
     if not value:
         return None
-    if not (value.isdigit() and int(value) > 0):
+    # `isascii()` for the reason `_max_tokens` gives: this pattern was copied from here,
+    # and the escaping `ValueError` was found there and is the same bug in both.
+    if not (value.isascii() and value.isdigit() and int(value) > 0):
         raise ConfigError(
             f"MEMVARA_LLM_MAX_CLAIMS={raw!r} is not a positive integer. Leave it unset "
             "for no cap, which is what hosted models want. Set it only for a self-hosted "
@@ -423,7 +471,8 @@ def _anthropic() -> Any:
 
 
 def _openai(model: str | None, max_claims: int | None = None,
-            extract_system: str | None = None, terse: bool = False) -> Any:
+            extract_system: str | None = None, terse: bool = False,
+            max_tokens: int | None = None) -> Any:
     # Imported here so the default offline configuration never touches the optional SDK.
     from ..llm.openai import OpenAILLM
 
@@ -442,6 +491,10 @@ def _openai(model: str | None, max_claims: int | None = None,
         # pins.
         if terse:
             kwargs["terse"] = True
+        # Same rule as `terse`: absent means the request is the one this server made
+        # before the option existed, rather than the same number passed explicitly.
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
         return OpenAILLM(**kwargs)
     except Exception as exc:
         # Deliberately wider than ImportError. `openai.OpenAI()` refuses to construct
@@ -499,7 +552,8 @@ def _llm(config: ServerConfig) -> Any:
         return _anthropic()
     if config.llm == "openai":
         return _openai(config.llm_model, config.llm_max_claims,
-                       config.llm_extract_system, config.llm_terse_claims)
+                       config.llm_extract_system, config.llm_terse_claims,
+                       config.llm_max_tokens)
     raise ConfigError(
         f"MEMVARA_LLM={config.llm!r} is listed in _BACKENDS but _llm() has no branch "
         "for it, so this server cannot say which model it would extract with. This is "
@@ -534,6 +588,7 @@ _SERVER_SIDE_UNDER_CLOUD = (
     ("llm_max_claims", None, "MEMVARA_LLM_MAX_CLAIMS", "claim cap"),
     ("llm_extract_system", None, "MEMVARA_LLM_EXTRACT_SYSTEM", "extraction prompt"),
     ("llm_terse_claims", False, "MEMVARA_LLM_TERSE_CLAIMS", "claim shape"),
+    ("llm_max_tokens", None, "MEMVARA_LLM_MAX_TOKENS", "response budget"),
 )
 
 

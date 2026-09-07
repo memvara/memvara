@@ -23,7 +23,7 @@ import re
 from typing import Any, Sequence
 
 from ..types import Episode, MemoryType
-from .base import Usage
+from .base import TruncatedResponse, Usage
 
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -315,3 +315,38 @@ def record_usage(response: Any, usage: "Usage | None",
     if got_in is None or got_out is None:
         return
     usage.add(got_in, got_out)
+
+
+def refuse_if_truncated(reason: Any, cutoff: str, *, model: str, budget: int) -> None:
+    """Raise `TruncatedResponse` when a provider says the token budget ran out.
+
+    A backend passes the value of its own field and its own name for the cutoff, because
+    those two things are the genuinely provider-specific part: OpenAI puts
+    `finish_reason` on each choice and calls a truncation `"length"`, while Anthropic
+    puts `stop_reason` on the response and calls it `"max_tokens"`. What to do about a
+    truncation is not provider-specific, so it is decided once, here, for the same reason
+    every other rule in this module is.
+
+    Every call a backend makes through its `_call` reaches this, not extraction alone —
+    predicate resolution and `compose_relations` too — so the message names raising the
+    budget first and scopes the claims cap to the call it actually applies to. An
+    operator reading this out of a `DerivedTermsUnavailable` warning must not be sent to
+    tune a setting that does nothing for the call that failed.
+
+    **A reason this cannot read is not treated as a truncation.** Absent, `None`, or a
+    name some provider adds after this was written all mean "carry on". That direction is
+    deliberate and it matches `record_usage`: guessing that an unfamiliar value means
+    "cut off" would turn a working extraction into a failed write, and a response with no
+    reason on it is a test double far more often than it is a real answer.
+
+        >>> refuse_if_truncated("stop", "length", model="gpt-4.1", budget=8192)
+        >>> refuse_if_truncated(None, "length", model="gpt-4.1", budget=8192)
+    """
+    if reason != cutoff:
+        return
+    raise TruncatedResponse(
+        f"{model} stopped generating at its {budget}-token limit, so the answer is "
+        f"incomplete and none of it can be used. Raise the backend's max_tokens above "
+        f"{budget}, or ask for a shorter answer — on an extraction that means capping "
+        f"the claims array with MEMVARA_LLM_MAX_CLAIMS (or max_claims=)."
+    )

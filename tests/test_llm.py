@@ -11,8 +11,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from memvara.llm import LLM, AnthropicLLM, NullLLM
+from memvara.llm import LLM, AnthropicLLM, NullLLM, TruncatedResponse
 from memvara.llm import _shape
+from memvara.llm.anthropic import _stop_reason
 from memvara.llm.base import (
     CLAIM_SCHEMA,
     EXTRACT_SYSTEM,
@@ -26,8 +27,11 @@ from memvara.types import Episode, Scope
 
 
 class FakeMessages:
-    def __init__(self, payloads: list[object]) -> None:
+    def __init__(self, payloads: list[object], stop_reason: str = "end_turn") -> None:
         self.payloads = payloads
+        # A model that finished its answer, which is what every test here but the
+        # truncation ones is about.
+        self.stop_reason = stop_reason
         self.calls: list[dict] = []
 
     def create(self, **kwargs):
@@ -39,14 +43,14 @@ class FakeMessages:
             blocks = []
         else:
             blocks = [SimpleNamespace(type="text", text=json.dumps(payload))]
-        return SimpleNamespace(content=blocks, stop_reason="end_turn")
+        return SimpleNamespace(content=blocks, stop_reason=self.stop_reason)
 
 
 class FakeClient:
     """Stands in for `anthropic.Anthropic()` and records every request verbatim."""
 
-    def __init__(self, *payloads: object) -> None:
-        self.messages = FakeMessages(list(payloads) or [{"claims": []}])
+    def __init__(self, *payloads: object, stop_reason: str = "end_turn") -> None:
+        self.messages = FakeMessages(list(payloads) or [{"claims": []}], stop_reason)
 
     @property
     def calls(self) -> list[dict]:
@@ -115,7 +119,8 @@ def test_exported_from_the_package_without_the_sdk_installed():
 
     assert pkg.NullLLM is NullLLM
     assert set(pkg.__all__) == {
-        "LLM", "Chat", "NullLLM", "Usage", "AnthropicLLM", "OpenAILLM"}
+        "LLM", "Chat", "NullLLM", "TruncatedResponse", "Usage", "AnthropicLLM",
+        "OpenAILLM"}
     with pytest.raises(AttributeError):
         pkg.NotAThing
 
@@ -748,3 +753,31 @@ def test_an_unconvertible_amount_does_not_cost_the_whole_batch() -> None:
     [got] = shape_claims({"claims": [dict(base, amount=huge)]}, 1)
     assert (got["amount"], got["unit"]) == (None, None)
     assert got["object"] == "5k", "the claim itself must survive a bad quantity"
+
+
+# -- truncation ------------------------------------------------------------------------
+
+
+def test_a_truncated_response_raises_rather_than_returning_no_claims():
+    """The same silence `test_llm_openai.py` describes at length, under this provider's
+    name for it. Anthropic reports it as `stop_reason="max_tokens"` on the response
+    rather than per choice, which is the whole of the difference."""
+    client = FakeClient({"claims": [claim()]}, stop_reason="max_tokens")
+    with pytest.raises(TruncatedResponse, match=r"claude-opus-5.*8192-token"):
+        AnthropicLLM(client=client).extract(episodes("hi"), [])
+
+
+@pytest.mark.parametrize("reason", ["end_turn", "stop_sequence", "tool_use"])
+def test_a_model_that_finished_its_answer_does_not_raise(reason):
+    client = FakeClient({"claims": [claim()]}, stop_reason=reason)
+    assert AnthropicLLM(client=client).extract(episodes("hi"), []) == [claim()]
+
+
+@pytest.mark.parametrize("response, expected, why", [
+    (SimpleNamespace(stop_reason="max_tokens"), "max_tokens", "an SDK object"),
+    ({"stop_reason": "max_tokens"}, "max_tokens", "a plain dict"),
+    (SimpleNamespace(), None, "a response that does not say"),
+    ({}, None, "a dict that does not say"),
+])
+def test_the_stop_reason_is_read_from_whatever_shape_arrives(response, expected, why):
+    assert _stop_reason(response) == expected, why
