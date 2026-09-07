@@ -183,6 +183,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   ranking does not move. Refused under `MEMVARA_MODE=cloud`, like every other extraction
   setting.
 
+### Documentation
+
+- **`CLAUDE.md` and `plugin-claude.md` carry the Karpathy guidelines in full, not a
+  shortened copy.** Both files had trimmed the four rules from the upstream source,
+  multica-ai/andrej-karpathy-skills, when they were merged in: section 1 was missing its
+  "Before implementing:" lead-in, section 2 was missing "Ask yourself:", section 3 was not
+  split into a when-editing-existing-code list and a when-your-changes-create-orphans
+  list, and section 4 was missing the plan template and the sentence about strong success
+  criteria letting you loop independently while weak criteria require constant
+  clarification. Restoring the wording changes nothing about which rules apply here; it
+  only makes the text match what a session reading the upstream skill would see.
+  `plugin-claude.md` carries the same restoration, so it reaches the seven plugin
+  repositories that compose their `CLAUDE.md` from it.
+
 ## [0.11.3] — 2026-09-06
 
 ### Fixed
