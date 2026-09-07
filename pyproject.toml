@@ -118,8 +118,10 @@ artifacts = ["memvara/skills/**/*.md", "memvara/packs/*.toml"]
 # JavaScript name-reservation package, it has nothing to do with installing this library,
 # and shipping it inside the Python sdist would be a small piece of nonsense that nobody
 # would notice until they went looking for why the tarball has a package.json in it.
+# `.claude/rules/` holds project instructions for Claude Code, committed on purpose, and
+# has no place in a Python distribution either.
 [tool.hatch.build.targets.sdist]
-exclude = ["npm"]
+exclude = ["npm", ".claude"]
 
 [tool.coverage.run]
 source = ["memvara"]

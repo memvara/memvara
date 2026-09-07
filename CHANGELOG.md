@@ -183,6 +183,39 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   ranking does not move. Refused under `MEMVARA_MODE=cloud`, like every other extraction
   setting.
 
+### Documentation
+
+- **`CLAUDE.md` and `plugin-claude.md` carry the Karpathy guidelines in full, not a
+  shortened copy.** Both files had trimmed the four rules from the upstream source,
+  multica-ai/andrej-karpathy-skills, when they were merged in: section 1 was missing its
+  "Before implementing:" lead-in, section 2 was missing "Ask yourself:", section 3 was not
+  split into a when-editing-existing-code list and a when-your-changes-create-orphans
+  list, and section 4 was missing the plan template and the sentence about strong success
+  criteria letting you loop independently while weak criteria require constant
+  clarification. Restoring the wording changes nothing about which rules apply here; it
+  only makes the text match what a session reading the upstream skill would see.
+  `plugin-claude.md` carries the same restoration, so it reaches the seven plugin
+  repositories that compose their `CLAUDE.md` from it.
+
+- **The Claude context is split so that a session loads the rules it needs and not the
+  whole history behind them.** `CLAUDE.md` went from 379 lines to 233 and now carries each
+  working rule in one to four sentences under the heading it already used, the Karpathy
+  guidelines unchanged, and an index table. The full text of every rule, with the incident
+  that produced it, moved to `docs/claude/working-here.md`, and nine pages under
+  `docs/claude/` describe one subsystem each with the exact files, classes and functions
+  they name. Three files under `.claude/rules/` carry a `paths:` list in their front matter
+  and are loaded only when a matching file is read: the tool descriptions rule on
+  `memvara/server/tools.py`, the vendored-skill rule on `memvara/skills/` and `plugin/`,
+  and the doctest rule on the package's Python files. Nothing was dropped; every rule,
+  number and trap in the old file is in one of the three places.
+
+  `plugin-claude.md` was shortened in place from 324 lines to 249, because it is copied
+  whole into the seven repositories in `plugin-repos.txt` and so cannot point at a file
+  that does not travel with it. Its first line, its single `@@LOCAL@@` splice point and the
+  Karpathy guidelines are unchanged. `.gitignore` now ignores the contents of `.claude/`
+  rather than the directory itself, so that `.claude/rules/` can be committed while a
+  workstation's own settings stay ignored.
+
 ## [0.11.3] — 2026-09-06
 
 ### Fixed

@@ -1,277 +1,112 @@
 # Working in this repository
 
-`CONTRIBUTING.md` has the setup, the gates and the scope rules, and it is the file to read
-before writing code. This one covers the things that are about *working here* rather
-than about the code, all of which have cost real time, and closes with the general
-coding guidelines this project has adopted.
+This file holds the rules a reviewer must be able to enforce on any pull request, in short
+form. `docs/claude/working-here.md` has the full text of each one with the incident that
+produced it, and `docs/claude/README.md` indexes everything else — one page per subsystem,
+plus the rule files that load themselves — in the table at the bottom of this file.
+`CONTRIBUTING.md` has the setup, the gates and the scope rules; read it before writing code.
 
-## Files you need to keep but must not commit go in `local/`
+## Files you need to keep but must not commit go in local/
 
-`local/` at the root is ignored, whole. Put anything there that you will want again and
-that must never reach a commit: a script you ran by hand, an API response captured as
-evidence, a harness that reproduces the bug you are chasing, a report you are still
-drafting. `git status` stays quiet and no `git add` can reach it.
-
-Use it, because both of the obvious alternatives fail, in opposite directions:
-
-- **A temporary directory is deleted without warning.** That is what temporary means. A
-  sibling repository lost the only copy of a provisioning script exactly this way — it was
-  written to a session scratchpad, described in a handoff note as "copy it somewhere
-  durable first", and the directory was empty before anybody did.
-- **An untracked file at the repository root is one that gets committed.** Not by you — by
-  the next `git add -A` that runs in this checkout, under somebody else's message.
-
-`local/` is outside the build as well as outside the commit: `pyproject.toml` builds the
-sdist from what VCS does not ignore, and `testpaths` is `["tests", "memvara"]`, so nothing
-there is collected, packaged or type-checked.
-
-Two things do not belong in it. **Never a credential** — ignored is not encrypted, and
-this repository is public, so the cost of a mistake here is disclosure rather than
-cleanup. And **never the deliverable**: if the work is meant to ship it belongs in a
-commit on a branch. `local/` is where a file goes to be kept, and also where it goes to be
-forgotten.
+The `local` directory at the repository root is ignored, whole. Put anything there that you
+will want again and that must never reach a commit: a script you ran by hand, a captured API
+response, a bug harness, a draft. Never a credential, because ignored is not encrypted and
+this repository is public. Never the deliverable either: work meant to ship belongs in a
+commit on a branch.
+[Full rule.](docs/claude/working-here.md#files-you-need-to-keep-but-must-not-commit-go-in-local)
 
 ## Documentation ships in the same commit as the code
 
-When you change behaviour, update everything that describes it in the same commit. Not in
-a follow-up PR, not in a note for later, not in a "docs to update" list at the end of a
-handoff. A deferred documentation change is not a smaller version of the work — it is a
-different piece of work, one that nobody has been assigned and that no test will fail
-over.
-
-The failure is quiet and it compounds. Documentation that is wrong is worse than
-documentation that is missing: missing docs send a reader to the code, wrong docs send
-them somewhere confidently and let them act on it. The person who pays is never the
-author — it is whoever reads it next, without the context that would let them notice.
-
-"Everything that describes it" is more places than anyone remembers, so work the real
-inventory out by looking rather than by trusting this list. It runs to at least
-`README.md`, `CHANGELOG.md` (every user-visible change), `docs/UPGRADING.md` when
-behaviour changes under someone, `docs/INTERNALS.md`, and the packaged skill at
-`memvara/skills/memvara/SKILL.md`, which states outright that it does not repeat what a
-tool description says — so text moving between the two has to move in both.
-`CONTRIBUTING.md` states the same duty from the other end, and names the documents that
-make specific, checkable claims.
-
-Two more places are easy to miss, and both are particular to this repository.
-
-1. **The tool descriptions in `memvara/server/tools.py` are documentation that a model
-   reads at runtime**, not prose for a human. Wrong text there does not confuse a reader
-   who can go and check — it misleads an agent that cannot. Read how the existing ones
-   are written before adding to them. The precedent worth studying is the distinction
-   between *ending* a fact and *retiring* it: `"ended"` says the world changed,
-   `"retired"` says the record was wrong, and the module docstring calls it the one
-   mistake here that cannot be found by reading the data afterwards. It has already gone
-   wrong once — a write receipt reported `retired 1` for a fact that had merely stopped
-   being true, leaving a model reading its own memory tool with three names for two
-   events. Imprecise wording there does not read badly. It makes an agent record a false
-   reason for a change that nothing downstream can detect.
-2. **Docstrings run as tests.** `pyproject.toml` sets `testpaths = ["tests", "memvara"]`
-   with `--doctest-modules`, so a stale example in a docstring fails the suite rather
-   than rotting quietly. That is the one corner of documentation here that defends
-   itself. Everywhere else, nothing will catch you.
-
-If a change genuinely cannot carry its documentation — the doc lives in another
-repository, or the decision is not final — say so in the PR body, name the file, and open
-an issue. That is a deferral somebody can see. A silent one is a defect with a delay on
-it.
+When you change behaviour, update everything that describes it in the same commit — not in a
+follow-up pull request and not in a list at the end of a handoff. Work the inventory out by
+looking; it runs to at least `README.md`, `CHANGELOG.md`, `docs/UPGRADING.md`,
+`docs/INTERNALS.md` and the packaged skill at `memvara/skills/memvara/SKILL.md`. Wrong
+documentation is worse than missing documentation: missing documentation sends a reader to
+the code, wrong documentation sends them somewhere confidently. If a change genuinely cannot
+carry its documentation, say so in the pull request body, name the file, and open an issue. A
+deferral somebody can see is fine; a silent one is a defect with a delay on it. Two easily
+missed places have their own rule files, loaded when you open the file they are about:
+`.claude/rules/tool-descriptions.md` and `.claude/rules/doctests.md`.
+[Full rule.](docs/claude/working-here.md#documentation-ships-in-the-same-commit-as-the-code)
 
 ## How to write
 
-This section governs prose: documentation, comments, docstrings, commit subjects, PR bodies,
-and the tool descriptions the MCP server hands to a model at runtime. It **replaces** the
-voice in the existing files rather than describing it. Those files are being converted, so do
-not treat them as the target to match — see the amendment to §3 below.
+This governs all prose: documentation, comments, docstrings, commit subjects, pull request
+bodies, and the tool descriptions the MCP server hands to a model at runtime. It replaces the
+voice in the existing files rather than describing it, so those files are not the target.
 
-The method is **meaning first, then structure, then wording**. Work out what something
-actually means before deciding how to say it. Do not take the phrases from an existing doc, an
-issue, or an earlier commit message and rearrange them, because that produces text that is
-topically correct and communicates nothing. If the wording you started from is awkward,
-discard it and write the sentence again from the meaning.
-
-**Lead with the answer.** State the conclusion, then explain it. A paragraph that builds
-toward a point the reader could have had in the first sentence has wasted their time.
-
-**Write sentences a competent person would say out loud.** Read it back. If it sounds strange,
-rewrite it. Prefer active voice, keep every pronoun's referent obvious, and do not stack nouns
-into chains.
-
-**Prefer simple words when they are accurate.** "Use", not "leverage" or "utilize". Never pick
-a more sophisticated word to sound more capable, and never simplify to the point where the
-sentence stops being true.
-
-**Cut filler.** Every sentence should carry something. Drop "It is important to note that",
-"It is worth mentioning", "There are several considerations to take into account", and the
-habit of stating a claim and then restating its cost.
-
-**Do not compress until the text turns cryptic.** "Nothing was written to the ledger, so the
-balance never updated" is right. "Ledger had no writes therefore balance absent" is not.
-Concise is not the same as incomplete.
-
-**Use one term per concept.** A `session ID` does not become an "interaction identifier" three
-lines later. This matters more here than in most repositories, because `ended`, `retired` and
-`erased` name three different things and that difference is the product.
-
-**Match your confidence to the evidence.** "This means" for something established, "this
-likely means" for a strong inference, "this could mean" for a possibility, and say plainly
-when you do not have enough information to tell. Do not hedge a fact you have verified.
-
-**Write so both an engineer and an executive can follow it in one pass.** Keep the technical
-depth and make it accessible instead of removing it. Where a term is load-bearing and not
-obvious, explain it in a clause and move on. Do not write two versions unless asked.
-
-**Preserve meaning when you rewrite.** Improving a sentence must not change the technical
-relationship it describes. Watch for this while converting the existing docs: the old voice
-buries real distinctions inside clever constructions, and a fluent rewrite can quietly drop
-one.
-
-### Where this bites in this repository
-
-**Commit subjects and PR titles.** The existing ones are declarative sentences naming the
-false belief the code held — "A value that replaces nothing looks exactly like a value that
-replaced something". They read well and they do not say what changed. Say what changed, in a
-normal sentence, and put the reasoning in the body where there is room for it.
-
-**Tool descriptions in `memvara/server/tools.py` are the exemption.** "Prefer simple words"
-never outranks precision there. A model reading them cannot go and check, and the
-`ended` / `retired` distinction has already been got wrong once in a write receipt. Plain is
-good; vague is a defect. The same applies to `CHANGELOG.md` entries describing a behaviour
-change somebody will act on.
-
-**Docstrings execute.** `pyproject.toml` sets `--doctest-modules`, so a rewritten example
-still has to run. Rewriting the prose around an example does not exempt it from the suite.
-
-**The packaged skill is vendored downstream.** `memvara/skills/memvara/` is pinned by sha and
-diffed in seven plugin repositories. Converting its prose is a real change in all of them, so
-do it deliberately and in its own commit, never as a drive-by while editing something else.
+Work out what something means before deciding how to say it, and lead with the answer. Write
+sentences a competent person would say out loud, prefer simple words when they are accurate,
+and cut filler — but do not compress until the text turns cryptic. Use one term per concept,
+which matters more here than in most repositories because `ended`, `retired` and `erased` name
+three different things and that difference is the product. Match your confidence to the
+evidence, keep the technical depth while making it readable in one pass, and do not change
+the technical relationship a sentence describes while improving it. Commit subjects and pull
+request titles say what changed, in a normal sentence, with the reasoning in the body. Tool
+descriptions in `memvara/server/tools.py` are the one exemption: precision outranks plain
+wording.
+[Full rule, with the four places it bites here.](docs/claude/working-here.md#how-to-write)
 
 ## Write plainly, and run only the checks a docs-only change can move
 
-**Every sentence must be understood on the first read by someone who has no context.** This
-applies to documentation, dashboard panel descriptions, metric help strings, code comments,
-docstrings, commit messages, PR bodies and replies to the user. Write the way you would
-explain something to a colleague across a desk: a full sentence with a clear subject and
-verb, saying what the thing is and then what it means for the reader. For example, write
-"This is a count only; no project name is shown", not "A count and never a name".
+Every sentence must be understood on the first read by someone with no context: a full
+sentence with a clear subject and verb, saying what the thing is and then what it means for
+the reader. Read it back and rewrite anything a colleague would need to hear twice. The
+clipped style of the older files here is not the target.
 
-The short, clever style you will see in older files here is not the target. It comes from
-three places, and knowing them helps you resist it:
-
-1. The existing prose in this and the sibling memvara repositories (operations docs,
-   READMEs, test docstrings, old commit messages) is written in that style. Those files
-   are being converted. Do not copy their voice because it is around you.
-2. The memories stored in Memvara by earlier sessions were written in the same style.
-   Treat them as notes about facts, not as a writing sample.
-3. Your own earlier text in the session. If you notice you wrote a clever sentence,
-   rewrite it before moving on.
-
-How to check: read the sentence back. If a colleague would need to hear it twice, rewrite it.
-
-**A change that touches only prose runs only the checks it can affect.** Do not run the full
-gate for a documentation change; a prose edit cannot move a test suite, and the gate here
-takes about nine minutes. Run the type check if a typed file changed and the specific test
-file that reads the changed document (for example the test that parses a dashboard JSON or
-a queries file), and quote its "N passed" line in the PR body. A code change still gets the
-full gate.
-
-Both rules were stated by the user on 2026-09-06. The first after quoting a dashboard panel
-description an agent had written and asking "from where are you getting that you need to
-write like this?"; the second as "Don't run the gate just for the document update". The
-same section is in the `memvara`, `memvara-cloud` and `memvara-web` repositories and in the
-user's global `CLAUDE.md`.
+A change that touches only prose runs only the checks it can affect. Do not run the full gate
+for a documentation change; it takes about nine minutes and a prose edit cannot move a test
+suite. Run the type check if a typed file changed, and the specific tests that read the
+changed document, and quote their "N passed" lines in the pull request body. A code change
+still gets the full gate.
+[Full rule.](docs/claude/working-here.md#write-plainly-and-run-only-the-checks-a-docs-only-change-can-move)
 
 ## More than one agent may be working in this checkout at once
 
-Assume files you did not touch are somebody else's unfinished work, and that they have no
-way to know you exist.
+Assume files you did not touch are somebody else's unfinished work, and that they have no way
+to know you exist.
 
-1. **Commit files by name.** Never `git add -A`, `git add .`, or `git commit -a`. If you
-   cannot list what you are committing, you do not know what you are committing.
+1. **Commit files by name.** Never `git add -A`, `git add .`, or `git commit -a`.
 2. **Never `git stash`, `git checkout <file>`, `git restore` or `git reset` a file you did
-   not edit.** Each silently destroys uncommitted work, and `git checkout <file>` restores
-   from HEAD rather than from your last edit — it has eaten an uncommitted rewrite here.
-3. **Work on a branch and open a PR.** `main` is where sessions collide; a branch is yours.
-4. **Before editing a file you did not create, run `git status`.** A file already modified
-   is one somebody is in the middle of. If your change needs it, say what edit you need
-   rather than making it.
+   not edit.** Each silently destroys uncommitted work.
+3. **Work on a branch and open a pull request.** The `main` branch is where sessions collide.
+4. **Before editing a file you did not create, run `git status`.** A file already modified is
+   one somebody is in the middle of; say what edit you need rather than making it.
 5. **Never overwrite a document you did not write.** Append, or pick a distinct filename.
-6. **Use a private `COVERAGE_FILE`.** Two concurrent runs clobber a shared `.coverage`,
-   and the report that comes out of that is wrong in the direction that looks fine.
+6. **Use a private `COVERAGE_FILE`.** Two concurrent runs clobber a shared coverage file and
+   the report is wrong in the direction that looks fine.
+
+[Full rule.](docs/claude/working-here.md#more-than-one-agent-may-be-working-in-this-checkout-at-once)
 
 ## A PR you opened gets a code review before it is merged
 
-Open the pull request, then review it, then fix what the review found. In that order, and
-all of it before anybody merges.
-
-```bash
-/code-review high <PR number>
-```
-
-The window is narrow at both ends. Run it against a working tree you have not pushed and
-you have reviewed something no reviewer will ever see. Skip it and the PR merges
-unreviewed, which is the case this rule exists for — nothing else in the process looks at
-the change with fresh eyes.
-
-**Run it on the latest Sonnet, `claude-sonnet-5` today.** `/code-review` takes an effort
-level, a target, and `--comment` / `--fix`. It takes **no model argument**, so the review
-runs on whatever the session model is: switch it (the app's model picker, or `/model` in a
-terminal session) before the review and back afterwards. In a session where you cannot
-switch, say which model reviewed in the PR body rather than letting a reader assume.
-
-**`high`, not `ultra`.** `ultra` is user-triggered and billed, an agent cannot launch it,
-and attempting it wastes a turn. Reach for `max` instead when the change is large or lands
-on something load-bearing.
-
-**Fix everything it finds, on the same branch, then re-run the gate.** `--fix` applies
-findings to the working tree, so the commit and the push are still yours to make. Where a
-finding is wrong, write the reason in the PR body: a disagreement recorded is a decision,
-and a finding dropped in silence is a defect with a delay on it.
-
-**Nothing the review publishes may carry an AI attribution.** `--comment` posts to the PR
-under the account running it, and the marketplace `code-review` plugin — present under
-`~/.claude/plugins/marketplaces/` and deliberately not enabled — ends every comment it
-writes with a "Generated with Claude Code" line. The rule against that is absolute and
-lives in `~/.claude/CLAUDE.md`. Prefer `--fix` and a summary in your own words; if you do
-post, read what you are posting first.
+Open the pull request, then review it with `/code-review high <PR number>`, then fix what the
+review found. In that order, and all of it before anybody merges. Run it on the latest Sonnet,
+`claude-sonnet-5` today; the command takes no model argument, so switch the session model
+first, and say which model reviewed if you cannot switch. Use `high`, or `max` for a large or
+load-bearing change; `ultra` is user-triggered and an agent cannot launch it. Fix everything
+it finds on the same branch, then re-run the gate, and write the reason in the body where a
+finding is wrong. Nothing the review publishes may carry an AI attribution.
+[Full rule.](docs/claude/working-here.md#a-pr-you-opened-gets-a-code-review-before-it-is-merged)
 
 ## What you learn here goes in Memvara
 
 Memvara is the memory store for work in this repository, reached through the plugin's MCP
-server. Recall from it at the start of a turn whenever the answer could depend on something
-established earlier, and write back what a session a week from now would be sorry to have
-lost. Do not write to Claude Code's file-based memory directory; it was migrated into Memvara
-on 2026-08-23 and a second store nothing reconciles is worse than one.
+server. Recall from it whenever the answer could depend on something established earlier,
+write back what a session a week from now would be sorry to have lost, and do not write to
+Claude Code's file-based memory directory.
 
-Two mechanics decide whether a write survives, and both fail quietly.
+Three mechanics decide whether a write survives, and all three fail quietly. Write triples
+with `memory_remember` rather than prose, because this deployment has no extraction model.
+Pass `role="system"` for a transcript, a log or a paste, because the deterministic matcher
+still runs on every user-role turn and will record a quoted first-person sentence as a fact
+about whoever pasted it. Set `true_since` whenever the fact became true before now.
 
-**Write triples, not prose.** This deployment runs with no extraction model, which
-`memory_stats` reports as `fast-path-only`. A paragraph handed to `memory_add` that matches
-none of the fixed sentence forms yields no fact. `memory_remember` with an explicit subject,
-predicate and object needs no model and cannot mis-parse.
-
-**That is not the same as `memory_add` being inert, and reading it that way cost a real
-stored name here.** The deterministic matcher runs on every `role="user"` turn whatever
-`MEMVARA_LLM` says, searches rather than anchors, and strips quotation marks before it
-looks — so a first-person sentence quoted inside a log or a docstring is written down as a
-fact about whoever pasted it, at a confidence that supersedes what they stated themselves.
-On 2026-08-26 a pasted log quoting `write/fast.py`'s own docstring did exactly that. Pass
-`role="system"` for a transcript, a log or a paste; see the `role` description for the
-whole of it.
-
-**Set `true_since` when the fact became true before now.** Backfilling a finding from last
-week without it records a claim that was never true across its own interval, and the store
-then answers historical questions wrongly with no symptom at write time.
-
-The conventions already in the store are worth matching rather than reinventing: `user` for
-standing instructions, and a component key — `memvara_cloud`, `memvara_web`, `agent-memory` —
-for a fact about the code. This matters more here than the tidiness of it: the graph leg pays
-off in proportion to how often one claim's object is another's subject, so a claim whose
-subject is not `user` is the thing that makes the store answer a question two hops deep.
-
-Correcting a claim is three different writes and they record different reasons. A value that
-was right and has been overtaken is a `memory_remember`; one that was right and has stopped
-being true is a `memory_end` at the instant it stopped; one that was never right is a
-`memory_forget`. None of them deletes anything, so never report a retirement as a deletion.
+Correcting a claim is three different writes that record different reasons: `memory_remember`
+for a value that has been overtaken, `memory_end` for one that has stopped being true, and
+`memory_forget` for one that was never right. None of them deletes anything, so never report a
+retirement as a deletion.
+[Full rule.](docs/claude/working-here.md#what-you-learn-here-goes-in-memvara)
 
 ---
 
@@ -285,11 +120,13 @@ They are merged here rather than vendored as a second skill: they govern how wor
 *in* this repository, and shipping them inside the plugin would hand every memvara user a
 third-party skill they did not install.
 
-**Tradeoff:** these bias toward caution over speed. For trivial tasks, use judgment.
+**Tradeoff:** these guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
 ## 1. Think before coding
 
 **Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
 
 - State your assumptions explicitly. If uncertain, ask.
 - If multiple interpretations exist, present them — don't pick silently.
@@ -306,11 +143,13 @@ third-party skill they did not install.
 - No error handling for impossible scenarios.
 - If you write 200 lines and it could be 50, rewrite it.
 
-Ask: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
 
 ## 3. Surgical changes
 
 **Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
 
 - Don't "improve" adjacent code, comments, or formatting.
 - Don't refactor things that aren't broken.
@@ -318,20 +157,34 @@ Ask: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
   [How to write](#how-to-write) instead — the voice in the existing files is being replaced,
   not matched.
 - If you notice unrelated dead code, mention it — don't delete it.
-- Remove imports, variables and functions that *your* changes orphaned; leave
-  pre-existing dead code alone unless asked.
 
-The test: every changed line should trace directly to the request.
+When your changes create orphans:
+
+- Remove imports, variables and functions that *your* changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: every changed line should trace directly to the user's request.
 
 ## 4. Goal-driven execution
 
 **Define success criteria. Loop until verified.**
 
+Transform tasks into verifiable goals:
+
 - "Add validation" → "write tests for invalid inputs, then make them pass"
 - "Fix the bug" → "write a test that reproduces it, then make it pass"
 - "Refactor X" → "ensure tests pass before and after"
 
-For multi-step work, state the plan as steps with their checks, then run it.
+For multi-step tasks, state a brief plan:
+
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require
+constant clarification.
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due
 to overcomplication, and clarifying questions arriving before implementation rather than
@@ -359,3 +212,22 @@ Not decoration — each of these has already cost time here.
 **documentation ships in the same commit as the code**, per the section above. Updating
 `README.md`, `CHANGELOG.md`, `docs/UPGRADING.md`, `docs/INTERNALS.md` or a tool description
 alongside a behaviour change *is* the surgical change, not scope creep.
+
+---
+
+# Where the rest of the context lives
+
+`docs/claude/README.md` is this table with more detail behind it.
+
+| If the task touches | Read first | Primary code |
+|---|---|---|
+| Claims, slots, the two clocks, ending against retiring against erasing | `docs/claude/memory-model.md` | `memvara/core.py`, `memvara/types.py`, `memvara/store/` |
+| Writing memory: the gate, extraction, contradiction handling | `docs/claude/write-pipeline.md` | `memvara/write/`, `memvara/llm/` |
+| Reading memory: search, recall, ranking, reranking | `docs/claude/retrieval.md` | `memvara/retrieve/`, `memvara/rerank/`, `memvara/embed/` |
+| The MCP server, its tools, how a deployment is configured | `docs/claude/mcp-server.md` | `memvara/server/` |
+| The hosted client and its relation to memvara-cloud | `docs/claude/remote-and-cloud.md` | `memvara/remote/` |
+| Background maintenance, predicate vocabularies, the graph leg | `docs/claude/consolidation-and-graph.md` | `memvara/consolidate/`, `memvara/packs/`, `memvara/retrieve/traverse.py` |
+| Counters, benchmark scripts, the demo harness | `docs/claude/telemetry-and-benchmarks.md` | `memvara/telemetry.py`, `bench/`, `demo/` |
+| Cutting a release, the npm bridge, the seven plugin repositories | `docs/claude/release-and-plugins.md` | `release/`, `npm/`, `plugin/`, `scripts/sync_plugin_repos.py` |
+| How work is done here, with the incident behind each rule | `docs/claude/working-here.md` | none — this is process |
+| Nothing; these load themselves | `.claude/rules/tool-descriptions.md` on `memvara/server/tools.py`; `.claude/rules/packaged-skill.md` on `memvara/skills/**` and `plugin/**`; `.claude/rules/doctests.md` on `memvara/**/*.py` | as listed |
