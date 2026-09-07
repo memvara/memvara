@@ -17,9 +17,11 @@ carries no ids at all; a `with_ids=True` that quietly returned no ids would be w
 the `TypeError` a caller gets instead. `get_all()` takes no `memory_types`, because
 `GET /v1/memories` has no such filter and FastAPI drops an unknown query parameter in
 silence — the caller would get an unfiltered page with nothing saying the filter was
-ignored. `budget` is the one exception and it is a refusal rather than an omission: it is
-in the signature so that `None` (what every current caller passes) works, and a value
-raises, because a budget silently ignored is an oversized prompt with no signal.
+ignored. `budget` and `valid_at` are the two exceptions, and each is a refusal rather
+than an omission: it is in the signature so that `None` (what every current caller
+passes) works, and a value raises. A budget silently ignored is an oversized prompt with
+no signal, and a day silently ignored is a block about the present handed to a question
+about the past.
 
 Two write divergences that are real and documented rather than hidden. `consolidate()`
 returns a job handle rather than per-operation counts, because the endpoint answers 202
@@ -405,7 +407,7 @@ class RemoteMemvara:
             raise ValueError(
                 "recall(valid_at=...) is not available against a hosted deployment: "
                 "POST /v1/recall has no time axis. Use search(valid_at=...) and render "
-                "your own block, or ask the deployment for the dated read.")
+                "your own block.")
         body = self._http.request(
             "POST", "/v1/recall", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,

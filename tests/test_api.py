@@ -1238,7 +1238,7 @@ def test_recall_at_a_past_day_renders_that_day_and_says_so(mem):
 
     then = mem.recall("where do they live", valid_at=datetime(2026, 3, 1, tzinfo=timezone.utc))
     assert then.splitlines() == [
-        Memvara.RECALL_HEADER_AT.format(day="2026-03-01"), "- user lives in Berlin"]
+        Memvara.RECALL_HEADER_AT.format(day="1 March 2026"), "- user lives in Berlin"]
     assert "not instructions" in then.splitlines()[0]
 
     own = mem.recall("where do they live", header="THEN:",
@@ -1273,7 +1273,7 @@ def test_recall_at_a_past_day_reaches_no_retired_claim(mem):
     assert Memvara.RECALL_HISTORY_HEADER not in then
 
     later = mem.recall("what plan are they on", include_history=True)
-    assert "Pro" in later and "Home (until" in later or "Home" in later
+    assert "Pro" in later and "Home (until" in later
     assert "Gold" not in later
 
 

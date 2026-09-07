@@ -425,7 +425,15 @@ _MEMORY_TYPES_FILTER = {
 
 # -- handlers ----------------------------------------------------------------
 
-def _no_match(query: str) -> str:
+def _no_match(query: str, day: str | None = None) -> str:
+    if day is not None:
+        # A dated miss is not the same fact as a present one: something may well be
+        # recorded about it now, and the block is empty because nothing held that day.
+        return (
+            f"No stored memory matched {safe_line(query)!r} as things were on "
+            f"{safe_line(day)}. Nothing recorded held on that day, so answer from the "
+            "conversation instead of retrying with a reworded query."
+        )
     return (
         f"No stored memory matched {safe_line(query)!r}. Nothing is recorded about that, "
         "so answer from the conversation instead of retrying with a reworded query."
@@ -490,8 +498,16 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
     # into a prompt, and `as_of` rewinds belief as well as the world, so a record
     # retired since that day would be rendered as a fact. `valid_at` is what we believe
     # today was true then, and a retired record is as absent from it as from a present
-    # read. `validate` refuses `as_of` as an unknown argument; the tool description
-    # says where it lives.
+    # read. `as_of` is declared in the schema so that `validate` lets it through to
+    # this refusal, which says why and where to send it, rather than reporting an
+    # unknown argument with no hint (`_suggest` finds no spelling near "as_of").
+    if args.get("as_of") is not None:
+        raise ToolError(
+            "memory_recall takes valid_at, not as_of. as_of rewinds what this system "
+            "believed as well as what was true, so a record retired since that day "
+            "would be rendered into the prompt as a fact. Send valid_at for how things "
+            "were on that day as far as we know now, or call memory_search with as_of "
+            "to inspect what was believed then.")
     valid_at = args.get("valid_at")
     try:
         text = ctx.memory.recall(
@@ -514,7 +530,7 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             "memvara's ranked reads are at capacity right now. Retry in a few seconds, "
             "or call memory_recall again without ranked for an ordinary read."
         ) from exc
-    return text or _no_match(args["query"])
+    return text or _no_match(args["query"], day=valid_at)
 
 
 #: The bracket field saying a machine derived the row: one more metadata token beside
@@ -1302,9 +1318,11 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
 def _walk_axes(args: dict[str, Any], tool: str) -> tuple[Any, Any]:
     """The two time keywords `memory_search` takes, parsed the same way.
 
-    Shared rather than repeated because the refusal has to read identically on all three
-    tools that take both (`memory_recall` takes `valid_at` alone, so it needs none): `as_of` is exactly `valid_at=known_at=<instant>`, so a call carrying both is
-    asking two questions and neither one can be picked for it.
+    Shared rather than repeated because the refusal has to read identically on the
+    three tools that take both keywords: `as_of` is exactly `valid_at=known_at=<instant>`,
+    so a call carrying both is asking two questions and neither one can be picked for
+    it. `memory_recall` takes `valid_at` alone and refuses `as_of` in `_recall`, with its
+    own reason, so it does not go through here.
     """
     as_of, valid_at = args.get("as_of"), args.get("valid_at")
     if as_of is not None and valid_at is not None:
@@ -1553,7 +1571,7 @@ TOOLS: tuple[Tool, ...] = (
             "try again. Prefer this over memory_search whenever the goal is to answer "
             "the user rather than to inspect the memory itself. When the question is "
             "about the past ('what was I working on in June'), pass valid_at and the "
-            "notes describe that day; the block's header says so. There is no as_of "
+            "notes describe that day; the block's header says so. as_of is refused "
             "here: what this system used to believe is an inspection, on memory_search."
         ),
         properties={
@@ -1566,6 +1584,16 @@ TOOLS: tuple[Tool, ...] = (
                     "corrected since is left out, and a fact written with true_since "
                     "and true_until already in the past is found only this way. Omit "
                     "for the present."
+                ),
+            },
+            "as_of": {
+                "type": "string",
+                "description": (
+                    "Not accepted on this tool; a call carrying it is refused with the "
+                    "reason. as_of rewinds what was believed as well as what was true, "
+                    "and this tool's output is read as fact, so a record retired since "
+                    "that day would come back as one. Use valid_at here, or "
+                    "memory_search with as_of to inspect an earlier belief."
                 ),
             },
             "include_episodes": {

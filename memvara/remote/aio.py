@@ -222,7 +222,7 @@ class AsyncRemoteMemvara:
             raise ValueError(
                 "recall(valid_at=...) is not available against a hosted deployment: "
                 "POST /v1/recall has no time axis. Use search(valid_at=...) and render "
-                "your own block, or ask the deployment for the dated read.")
+                "your own block.")
         body = await self._http.request(
             "POST", "/v1/recall", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,

@@ -187,6 +187,28 @@ def test_a_cloud_server_lists_the_same_tools_a_local_one_does(deployment):
         server.close()
 
 
+def test_a_dated_recall_against_a_hosted_deployment_is_refused_as_a_tool_error(deployment):
+    """End to end through the real client: `memory_recall` with `valid_at` on a cloud
+    server reaches `RemoteMemvara.recall`, which raises because `POST /v1/recall` has no
+    time axis. The model has to see that as this tool's error, with the reason, and not
+    as a dropped keyword answered with the present. No request leaves the process: the
+    refusal is before the transport."""
+    import json
+
+    server = MemvaraMCPServer(build_memvara(_cloud()), user="alice")
+    try:
+        line = server.handle_line(json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "memory_recall",
+                       "arguments": {"query": "what plan", "valid_at": "2026-03-01"}}}))
+        body = json.loads(line)["result"]
+        assert body["isError"] is True
+        text = body["content"][0]["text"]
+        assert "valid_at" in text and "time axis" in text
+    finally:
+        server.close()
+
+
 def test_cloud_mode_without_httpx_fails_where_the_configuration_was_made(monkeypatch):
     """The one reason a cloud server still cannot start, and it lands as a startup error
     rather than a traceback.

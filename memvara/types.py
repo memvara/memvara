@@ -1093,7 +1093,8 @@ class RecallResult:
     second answer matched the first.
 
     **`claim_ids` is in render order and 1:1 with the claim notes**, so note *n* of the
-    block under `Memvara.RECALL_HEADER` is `claim_ids[n - 1]`. Nothing else in the block
+    block under the fact header (`Memvara.RECALL_HEADER`, or `RECALL_HEADER_AT` for a
+    `valid_at=` read) is `claim_ids[n - 1]`. Nothing else in the block
     is covered, and both omissions are deliberate: an episode is a verbatim turn rather
     than a claim and has no claim id to give, and a past value under
     `RECALL_HISTORY_HEADER` is a fact's *former* value, so citing it as the source of a

@@ -15,7 +15,7 @@ On the **library and REST**:
 
 On **MCP**: `memory_search` takes `as_of` and `valid_at`, not `known_at`.
 Passing both of the two it has is refused. `memory_recall` takes `valid_at`
-only, and its header then names the day; it has no `as_of`, because its
+only, and its header then names the day; it refuses `as_of`, because its
 output is a prompt and rewinding belief would put a since-retired record in it.
 
 Reach for `valid_at`. Asking about someone's earlier city, job or year is

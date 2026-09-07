@@ -1095,20 +1095,36 @@ def test_recall_takes_valid_at_and_the_header_names_the_day(server):
     then = text(server, "memory_recall",
                 {"query": "where do they work", "valid_at": "2020-06-01"})
     assert "Acme" in then and "Globex" not in then
-    assert then.splitlines()[0] == Memvara.RECALL_HEADER_AT.format(day="2020-06-01")
+    assert then.splitlines()[0] == Memvara.RECALL_HEADER_AT.format(day="1 June 2020")
 
 
 def test_recall_refuses_as_of_and_names_the_tool_that_takes_it(server):
     """`as_of` rewinds belief, so a record retired since would be rendered into a prompt
-    as a fact. It is refused as an unknown argument, and the tool description sends a
-    model to memory_search for what this system used to believe."""
+    as a fact. The refusal says why and names both the keyword this tool does take and
+    the tool that takes `as_of`, so a model is not left guessing from "unknown argument"
+    (`_suggest` finds no spelling near "as_of"). The schema declares `as_of` for the same
+    reason: a model reads the description before it calls."""
     body, is_error = call(server, "memory_recall",
                           {"query": "where do they work", "as_of": "2020-06-01"})
-    assert is_error and "as_of" in body
-    description = next(t for t in TOOLS if t.name == "memory_recall").description
-    assert "valid_at" in description and "as_of" in description
-    assert "valid_at" in next(t for t in TOOLS if t.name == "memory_recall").properties
-    assert "as_of" not in next(t for t in TOOLS if t.name == "memory_recall").properties
+    assert is_error
+    assert "as_of" in body and "valid_at" in body and "memory_search" in body
+    assert "retired" in body
+    tool = next(t for t in TOOLS if t.name == "memory_recall")
+    assert "valid_at" in tool.description and "as_of" in tool.description
+    assert "valid_at" in tool.properties
+    assert "memory_search" in tool.properties["as_of"]["description"]
+
+
+def test_a_dated_recall_that_matches_nothing_says_which_day_it_looked_at(server):
+    """An empty dated block is not "nothing is recorded": the fact may be stored and
+    simply not have held on that day. The miss says so, or a model reads the present
+    tense wording and stops looking for something the store does have."""
+    text(server, "memory_remember", {"predicate": "plan", "object": "Gold",
+                                     "true_since": "2026-06-01"})
+    body = text(server, "memory_recall", {"query": "what plan are they on",
+                                          "valid_at": "2026-01-15"})
+    assert "2026-01-15" in body and "Gold" not in body
+    assert "Nothing is recorded" not in body
 
 
 def test_recall_at_a_day_leaves_a_forgotten_record_out(server):
@@ -3121,7 +3137,7 @@ def test_read_only_explains_itself_rather_than_erroring(read_only):
 def test_unknown_argument_suggests_the_real_one(server):
     body, is_error = call(server, "memory_recall", {"query": "x", "kk": 3})
     assert is_error and "did you mean 'k'" in body
-    assert "Accepted: anchored, budget, include_episodes, k, memory_types" in body
+    assert "Accepted: anchored, as_of, budget, include_episodes, k, memory_types" in body
 
 
 def test_missing_required_argument(server):

@@ -7,6 +7,36 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `MemoryAPI.recall` gains `valid_at`, the world clock
+
+### What changed
+
+`recall()` takes a keyword-only `valid_at: datetime | None = None`. It reads the block as
+things were on that day, as far as we know today, under a header that names the day.
+`MemoryAPI.recall`, the protocol `server/tools.py` is typed against, declares it, and the
+`memory_recall` handler passes it on every call, as `None` when the model sent none.
+
+### Who this changes, and in which direction
+
+**Nothing changes for a caller of `Memvara.recall()` that never passes it.** The default
+is `None`, and a call without it renders exactly what it rendered before.
+
+**If you implemented `MemoryAPI` yourself, `recall` now takes `valid_at`.** An
+implementation written against the previous protocol raises `TypeError: unexpected
+keyword argument 'valid_at'` on the first `memory_recall` call. Accept the keyword. If
+your backend cannot read at a past day, raise `ValueError` when the value is not `None`
+rather than ignoring it: a block about the present returned for a question about the
+past is wrong with nothing in the output that says so. `RemoteMemvara.recall` does
+exactly that, because `POST /v1/recall` has no time axis.
+
+### How to find your own instances
+
+```bash
+grep -rn "def recall" --include="*.py" . | grep -v "memvara/"
+```
+
+---
+
 ## A truncated model answer now fails the write instead of extracting nothing
 
 ### What changed

@@ -128,8 +128,10 @@ defences, all in `memvara/core.py`, all worth attacking:
   goes through this one function, so that is the one place the character set lives.
   Episodes are additionally truncated, so a pasted stack trace cannot become the whole
   prompt.
-- **`RECALL_HEADER` and `RECALL_EPISODE_HEADER`** frame the block as retrieved data rather
-  than instructions, and the episode header says "said", not "true".
+- **`RECALL_HEADER`, `RECALL_HEADER_AT` and `RECALL_EPISODE_HEADER`** frame the block as
+  retrieved data rather than instructions. The dated header names the day a `valid_at=`
+  read describes, so a block about the past cannot be read as the present, and the
+  episode header says "said", not "true".
 - **The signature is explicit rather than `**kwargs`**, so `states`, `include_invalidated`
   and `as_of` are not reachable from `recall()`. `include_invalidated=True` would resurrect
   retired claims into a live prompt — an un-delete reachable by anyone who can influence a

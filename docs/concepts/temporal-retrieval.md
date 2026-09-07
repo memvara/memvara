@@ -92,9 +92,12 @@ Three things it does deliberately:
 - **It labels itself as data, not instructions.** A retrieved memory is untrusted text.
 - **It flattens each claim to a single line**, so a memory whose text contains newlines
   and a fake section header cannot forge prompt structure around itself.
-- **It has no time or state keywords.** Its signature is explicit rather than
-  `**kwargs` for exactly that reason: a prompt block silently rendered from a past instant
-  is a bug you cannot see in the output. `include_history=True` is the one bounded
+- **It has one time keyword, `valid_at`, and no state keywords.** Its signature is
+  explicit rather than `**kwargs` for exactly that reason: a prompt block silently
+  rendered from a past belief is a bug you cannot see in the output. `valid_at` is safe
+  because it moves the world clock only, so it reaches no retired record, and the default
+  header names the day so the block cannot pass for the present. `include_history=True`
+  is the one bounded
   exception — it appends, under its own header, the values each surfaced fact *used to*
   have. See
   [What a prompt block may carry from the past](../DESIGN.md#what-a-prompt-block-may-carry-from-the-past).

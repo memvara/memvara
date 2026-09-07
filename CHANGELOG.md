@@ -104,12 +104,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 - **`recall(valid_at=)` and `memory_recall(valid_at=)`.** The prompt-shaped read can be
   asked about a day: the block is what we believe today was true then, the default
   header names the day, and `include_history=True` lists only values that had ended by
-  then. Passing the instant also anchors the time-ranked retrieval leg, which otherwise
-  measures distance from now. Only the world clock: `as_of` stays off `recall()`, because
-  it rewinds belief and would render a record retired since that day into a prompt, and
-  `memory_recall` refuses it as an unknown argument. Against a hosted deployment
-  `RemoteMemvara.recall(valid_at=...)` raises, as `budget` does, because `POST /v1/recall`
-  has no time axis yet. `MemoryAPI.recall` declares the parameter.
+  then. Retrieval is `search(valid_at=)`'s: the candidates are the claims that were
+  true on that day. Only the world clock: `as_of` stays off `recall()`, because it
+  rewinds belief and would render a record retired since that day into a prompt.
+  `memory_recall` refuses `as_of` with a message that says why and points at `valid_at`
+  and `memory_search`, and a dated read that matches nothing says which day it looked
+  at. Against a hosted deployment `RemoteMemvara.recall(valid_at=...)` raises, as
+  `budget` does, because `POST /v1/recall` has no time axis yet. `MemoryAPI.recall`
+  declares the parameter; `docs/UPGRADING.md` says what that means for an
+  implementation of your own.
+- **The demo's structured arm reads with `recall(valid_at=)`.** It used to re-render
+  `search()` results itself because `recall()` had no time keyword. `demo.baselines.
+  render_recall` is gone with the reason for it, and a historical question's prompt now
+  carries the dated header.
 - **`bench/longmemeval.py` gained `--rerank`, `--reranker` and `--rerank-model`.** They
   existed only on `bench/locomo.py`, so the cross-encoder had never been measured on
   LongMemEval at all. `build_reranker` and the flag definitions now live in

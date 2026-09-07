@@ -211,7 +211,7 @@ def test_recall_forwards_valid_at_on_both_async_surfaces(amem):
         day = datetime(2022, 6, 1, tzinfo=timezone.utc)
         then = await amem.recall("where do they live", valid_at=day)
         assert "Berlin" in then and "Lisbon" not in then
-        assert then.splitlines()[0].startswith("Known about the user as things were on 2022-06-01")
+        assert then.splitlines()[0].startswith("Known about the user as things were on 1 June 2022")
         view = amem.scope(agent="a1")
         assert "Berlin" in await view.recall("where do they live", valid_at=day)
 
