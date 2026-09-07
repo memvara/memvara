@@ -273,27 +273,8 @@ being true is a `memory_end`, at the instant it stopped. One that was never righ
 
 ## Where the Karpathy guidelines bite hardest in this repository
 
-The four guidelines are in `CLAUDE.md` in full. Each of the three collisions below has
-already cost time here.
-
-- **Guidelines 1 and 2 against what is already decided.** `docs/INTERNALS.md` states the
-  invariants and why each one holds. `docs/ROADMAP.md` keeps a *Deliberately deferred* list
-  precisely so that considered-and-declined stops reading as not-yet-done. The tests explain
-  their reasoning at paragraph length. A proposal written without reading those three is
-  usually a rebuild of something already here: a plugin-side predicate-router design was cut
-  by three quarters on exactly this discovery. "Think before coding" means reading them, not
-  merely pausing.
-- **Guideline 3 against the packaged skill.** `memvara/skills/memvara/` is vendored into
-  seven downstream plugin repositories that pin it by commit sha and diff against it in CI.
-  An unrequested formatting improvement there is a change in all of them.
-- **Guideline 4 against silent failures.** This library's own telemetry module exists because
-  a red-team review classified six of eleven long-horizon failure modes as silent. "Verify"
-  therefore means comparing an output — a count, a series, a diff — never that a command
-  exited 0.
-
-Guideline 3 has one local amendment here, and it makes the rule stricter rather than looser:
-documentation ships in the same commit as the code. Updating `README.md`, `CHANGELOG.md`,
-`docs/UPGRADING.md`, `docs/INTERNALS.md` or a tool description alongside a behaviour change
-is the surgical change, not scope creep.
+The four guidelines, the subsection "Where they bite hardest in this repository" and the
+amendment that documentation ships in the same commit are in `CLAUDE.md` in full and are not
+repeated here.
 
 Next: [the context index](README.md), or the page for the subsystem you are changing.

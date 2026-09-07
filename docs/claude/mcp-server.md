@@ -50,9 +50,11 @@ the same skill into those clients' skill directories, and `--skill-only` skips t
 `memvara-mcp login --project NAME` is the separate path for cloud mode; it writes an API key
 that `MEMVARA_MODE=cloud` then uses.
 
-## Configuration, in one place
+## Configuration
 
-Every setting is an environment variable read by `memvara/server/config.py`.
+`docs/DEPLOY.md` has the full table, with defaults and which combinations are refused; keep
+that table as the source and this paragraph as the map. Every setting is an environment
+variable read by `memvara/server/config.py`.
 `MEMVARA_MODE` chooses local or cloud. `MEMVARA_DB` is the SQLite path, required in local
 mode. `MEMVARA_TENANT`, `MEMVARA_USER`, `MEMVARA_AGENT` and `MEMVARA_SESSION` bind the scope.
 `MEMVARA_LLM` chooses the extraction backend from `none`, `anthropic` and `openai`, with the

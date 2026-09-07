@@ -10,9 +10,11 @@ answer quality with no error, no exception and nothing in any log.
 
 ## Where the code is
 
-- Telemetry: `memvara/telemetry.py` — the `Recorder` protocol, `NullRecorder` (the default),
-  `MemoryRecorder`, `series_names()`, `rank_correlation()`, `script_of()`. The module
-  docstring lists the six silent failures and the series that catches each.
+- Telemetry: `memvara/telemetry.py` — the `Recorder` protocol, `NullRecorder` (discards
+  everything, and is not the default), `MemoryRecorder`, `series_names()`,
+  `rank_correlation()`, `script_of()`. The module docstring lists the six silent failures
+  from the red-team review, the seventh that arrived with the redaction seam, and the series
+  that catches each.
 - Retrieval and ranking benchmarks: `bench/locomo.py`, `bench/longmemeval.py`,
   `bench/twowiki.py`, `bench/multihop.py`, `bench/temporal.py`.
 - Comparison and cost: `bench/compare.py`, `bench/mem0_real.py`, `bench/baseline.py`,
@@ -33,9 +35,10 @@ answer quality with no error, no exception and nothing in any log.
 
 ## How the pieces fit
 
-Telemetry is opt-in and off by default. `NullRecorder` is what a store gets unless a
-deployment passes one, so the fast path stays fast and nothing is written anywhere the
-operator did not ask for. `WriteReceipt` and `Explanation` already answer "what did this call
+Telemetry is opt-in and off by default. A store's `telemetry` is `None` unless a deployment
+passes a recorder, and `None` skips the recording call entirely; that is the fast path.
+`NullRecorder` is a recorder that discards everything, correct but not free, and its own
+docstring says so. Nothing is written anywhere the operator did not ask for. `WriteReceipt` and `Explanation` already answer "what did this call
 do?" precisely; telemetry answers the aggregate question "is this store getting worse?",
 which is the one that matters over a year and the one nothing else can see.
 

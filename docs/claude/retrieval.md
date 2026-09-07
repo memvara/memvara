@@ -83,7 +83,8 @@ JSON, under a header that names the text as data rather than instruction.
 - **The graph leg seeds on content, never on ids.** `spread.seed_keys()` re-sorts on
   `value_key`, because a claim id is a `uuid4` and seeding off it would make the walk a
   property of which ingest ran.
-- **A filter and a limit may not live in different layers.** Scope and state filtering happen
+- **A filter and a limit may not live in different layers** (design invariant 7 in
+  `docs/INTERNALS.md`, which carries the measurements). Scope and state filtering happen
   in the store, not in a comprehension afterwards, or the top of the list is silently wrong.
   `HybridRetriever` filters `memory_types` after fusion on purpose and pays for it with a
   bounded retry when the pool came back full.

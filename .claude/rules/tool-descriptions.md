@@ -20,7 +20,9 @@ describing a behaviour change somebody will act on.
 
 ## The precedent to study: ending, retiring and erasing
 
-Three words name three different events, and the difference is the product.
+Three words name three different events, and the difference is the product. The full
+definitions, with the functions that write each state, are in `docs/claude/memory-model.md`;
+this is the short form a model needs, and the two must say the same thing.
 
 - **Ended** says the world changed. The fact was true and has stopped being true, closed at
   the instant it stopped. It keeps answering questions about the period it held.

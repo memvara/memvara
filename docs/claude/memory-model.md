@@ -69,6 +69,11 @@ The distinction is the product, and it appears in three places that must agree.
 - **Erased** is the only one that removes bytes. `erase()` deletes the row and its residue,
   and `prove_erased()` returns an `ErasureProof` with per-table counts as evidence.
 
+The MCP tool descriptions in `memvara/server/tools.py` state the same three words for a
+model that cannot read this page; `.claude/rules/tool-descriptions.md` covers that side and
+the write receipt that once got it wrong. If the definitions above change, change them there
+in the same commit.
+
 `CLOSURES` in `memvara/types.py` is the pair `("ended", "retired")`, and `close_out()` is the
 one function that applies either. Choosing the wrong one records a false reason for the
 change, and nothing downstream can detect it afterwards.

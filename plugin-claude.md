@@ -23,11 +23,12 @@ to paragraphs, and test names alone tell you whether a behaviour is deliberate.
 This has a measured cost. A predicate-router design written in one of these repositories was
 cut by three quarters on a second pass, because reading the core would have shown that the
 mechanism already existed as a `registry` parameter on the constructor, that the many-values
-default was deliberate and documented, that the contradiction report already shipped, and
-that the inference the plan rested on had been rejected in a test: two live values in one
-slot can be a contradiction or perfectly correct, the rows are identical, and the difference
-is intent, which is not a property of the row. The checklist at the end of this file is what
-would have caught it before a word was written.
+default was deliberate and documented, that the contradiction report already shipped as
+`types.Accumulation` plus `_receipt_summary`, and that the inference the plan rested on had
+been rejected in a test: two live values in one slot can be a contradiction
+(`quota_gate/status`) or perfectly correct (`agent-memory/rejected`), the rows are
+identical, and the difference is intent, which is not a property of the row. The checklist
+at the end of this file is what would have caught it before a word was written.
 
 ## The skill is vendored. Do not edit it here.
 
@@ -70,11 +71,13 @@ someone finds a background process they were told would not exist.
 Almost every defect found here on 2026-08-25 was the same shape and none raised: a claim and
 the guard that checks it, frozen together, agreeing with each other while both were wrong,
 reported honestly to a channel nobody reads. Four in one day. The skill lock and the vendored
-copy agreed for five commits while the library moved, because the drift test compared the copy
-against the sha the copy itself named. The memvara-web tool count and its test agreed while the
-site said ten and the endpoint served twelve. The skill sync workflow failed nightly for four
-days, in a scheduled run's log. The drift check printed an HTTP 403 instead of checking and the
-job went green. All four were unheard, which is harder to notice than silent, because the
+copy agreed for five commits while the library moved, because the drift test,
+`test_matches_library_at_lock_sha`, compared the copy against the sha the copy itself named.
+The memvara-web tool count and its `test/tool-count.test.ts` agreed while the site said ten
+and the endpoint served twelve, with `memory_neighborhood` and `memory_paths` never counted
+at all. The skill sync workflow failed nightly for four days, in a scheduled run's log. The
+drift check printed `drift NOT checked: HTTP Error 403` instead of checking and the job went
+green. All four were unheard, which is harder to notice than silent, because the
 honesty makes it look handled. Eight rules follow.
 
 - **A guard compares a claim against its referent, never against a copy of itself.** The
@@ -85,20 +88,21 @@ honesty makes it look handled. Eight rules follow.
 - **State it positively: the correct value must be present.** A guard spelled "the page does
   not state the wrong count" passes on a page that has stopped stating anything at all, so a
   guard a deletion satisfies has quietly stopped guarding. (Stated without quoting a wrong
-  count, deliberately: the guard that scans every markdown file here cannot tell an
-  illustrative count from a claim, and it caught this section as it was being written.)
+  count, deliberately: `test_no_other_count_is_stated_anywhere` scans every markdown file in
+  this repository and cannot tell an illustrative count from a claim, and it caught this
+  section as it was being written.)
 - **Prove the guard can fail before believing it passes.** Break the thing it watches and
   watch it go red. Every guard added that day was sabotaged first, and three were found broken
   by that step alone: the drift check skipped on CI, the only place it runs, because the
   pinned library checkout could not resolve the remote default branch; its skip path fired on
-  a certificate verification failure, so on any Mac it reported the library unreachable while
-  the library was fine; and a test suite for the sources probe stubbed the method under test,
+  `CERTIFICATE_VERIFY_FAILED`, so on any Mac it reported the library unreachable while the
+  library was fine; and a test suite for the sources probe stubbed the method under test,
   so deleting the probe left every test green. A passing run does not distinguish "the code
   works" from "the check never ran".
-- **A hand-maintained list of what is covered is itself unguarded.** One page stated the tool
-  count three times and was absent from the guard's list of prose files, so it was free to say
-  any number. Removing a file from that list produced fifteen passing tests and no failure.
-  Check the list against the tree.
+- **A hand-maintained list of what is covered is itself unguarded.** One page in
+  memvara-web, `AgentSetup.tsx`, stated the tool count three times and was absent from the
+  guard's `PROSE` list, so it was free to say any number. Removing a file from that list produced fifteen
+  passing tests and no failure. Check the list against the tree.
 - **A skip is not a pass, and neither is a truncated tail.** "OK (skipped=1)" is not "OK".
   Read the verdict line and all of it. Piping through `tail -3 | head -2` swallowed a failure
   twice in one day, and once nearly shipped six red pull requests on a "Ran 15 tests" line
@@ -147,6 +151,7 @@ Prefer `--fix` and a summary in your own words; if you do post, read it first.
 3. Check `docs/ROADMAP.md` — *Deliberately deferred*, then *What is still missing*.
 4. Check `docs/INTERNALS.md` for the invariant you are about to cross.
 5. Then write the plan, and say which of the four you checked.
+
 ---
 
 # Karpathy guidelines

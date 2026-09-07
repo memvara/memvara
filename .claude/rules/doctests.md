@@ -36,5 +36,5 @@ change to a file the doctest collector reads.
 To run just the doctests for one module:
 
 ```bash
-python3 -m pytest -q --doctest-modules memvara/write/reconcile.py
+python3 -m pytest -q --doctest-modules memvara/types.py
 ```
