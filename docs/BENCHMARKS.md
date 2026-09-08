@@ -752,6 +752,67 @@ that also names an instant keeps the walk) changes which questions walk and not 
 `bench/multihop.py` at 1,000 staff is byte-identical before and after, because its
 questions already name their predicates in the stored form.
 
+### Anchoring on public questions, with a holdout split
+
+The section above measures anchoring on six negatives this repository wrote. `bench/anchoring.py`
+measures it on a thousand it did not.
+
+Nothing in it is authored. 2WikiMultihopQA is loaded as `bench/twowiki.py` loads it, the
+questions are split, and only the first half's triples are written. A question from the
+held-out half is then a real question from a public set whose facts the store genuinely does
+not hold. One filter keeps that honest: 2Wiki reuses entities heavily, so a held-out question
+counts as a negative only when it names no entity the store holds at all — refusing a question
+about somebody the store knows would be wrong rather than right.
+
+3,000 questions ingested, 1,000 of them scored for cost, 332 negatives. Every arm reads at a
+pinned instant, and the table is identical on repeat.
+
+```
+  configuration          k  answer found  correctly silent
+  shipped                5         49.8%              0.0%
+  shipped               12         55.3%              0.0%
+  shipped               25         57.6%              0.0%
+  anchored               5         39.0%            100.0%
+  anchored              12         39.1%            100.0%
+  anchored              25         39.1%            100.0%
+  anchored + graph leg   5         53.8%            100.0%
+  anchored + graph leg  12         53.9%            100.0%
+  anchored + graph leg  25         54.1%            100.0%
+```
+
+**The shipped configuration is silent on none of them, and anchoring is silent on all of
+them.** Every one of the 332 questions the store was never told the answer to comes back with
+rows by default, at relevances that look like any other match; with `anchored` set, none of
+them does. That is the behaviour anchoring exists to produce, and this is the first
+measurement of it on questions written by somebody else.
+
+**Anchoring alone costs about a sixth of the legitimate answers**, and the graph leg pays most
+of it back: 39.1% against 53.9% at k=12, where the shipped figure is 55.5%. A 2Wiki question
+names entities the anchor then has to match, and a question whose answer sits one hop away
+reaches it through the entity the question does name. At k=5 the pair is ahead of the shipped
+configuration on both columns at once.
+
+**The recovery is a property of this corpus, not of the setting, and that is the condition to
+read the table under.** 2Wiki loads clean triples through `remember()`, so its join rate is
+high and the walk has somewhere to go. On a store whose claims all hang off one subject —
+what `memory_stats` calls a star, and what one user's own sentences produce — the walk has
+nowhere to go and pays nothing back. A deployment should read its own join rate before reading
+these numbers as advice, which is why neither setting ships on.
+
+**100% is a statement about this filter, not about abstention in general.** These negatives
+name no entity the store holds, which is the case anchoring is built to catch and the reason
+it catches all of them at every depth. The case it does not catch is a question that names an
+entity the store *does* hold and asks about an attribute it does not — the reporting service's
+authentication strategy, in the Agent Memory Benchmark's wording. Nothing here measures that,
+and anchoring is not the mechanism that would answer it.
+
+An earlier version of this table read 42.0% to 50.6% instead, from a negative set of 1,018.
+That filter decided "the question names this entity" by substring, where the mechanism it was
+measuring folds the entity to a key and requires every word of the key to appear as a token.
+The looser rule let 686 answerable questions into the negative set; they anchored, returned
+rows, and were counted as failures to abstain. `negatives()` now calls the same
+`entity_key` / `key_words` / `query_tokens` path that `anchor_of` does.
+
 ### The temporal leg, and the abstention that is the actual finding
 
 `w_temporal > 0` adds a fourth leg over **raw turns**: the ones nearest in time to the
