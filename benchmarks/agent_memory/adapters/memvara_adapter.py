@@ -324,5 +324,8 @@ def build_anchored(**kwargs: object) -> MemvaraMemory:
     it — and the walk earns that point back by reaching the same row through the entity
     the question does name. Turning the graph leg on alone changes nothing here.
     """
-    return MemvaraMemory(anchored=True, w_graph=1.0,  # type: ignore[arg-type]
-                         **kwargs)
+    # The ignore sits on the `**kwargs` line because that is the argument mypy objects to:
+    # `build`'s signature widens every keyword to `object`, which cannot satisfy `path: str`.
+    # `build` above carries the same ignore for the same reason.
+    return MemvaraMemory(anchored=True, w_graph=1.0,
+                         **kwargs)  # type: ignore[arg-type]
