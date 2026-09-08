@@ -160,6 +160,14 @@ path — the issue's own measurement is that the answer is already retrieved and
 consumes the pair — so that row is the adapter's to change, and `docs/BENCHMARKS.md`
 carries every measurement.
 
+Six negatives is a thin base for a claim, and they are ours. `bench/anchoring.py` puts the
+same question to a thousand negatives drawn from public data — held-out 2WikiMultihopQA
+questions naming no entity the store holds — and the shipped configuration answers **every
+one of them**, silent on 0.0% at every depth. Anchoring alone costs about a sixth of the
+legitimate answers there and the graph leg pays most of it back, but only because 2Wiki's
+join rate is high enough for a walk to go anywhere. That condition is the reason both
+settings still ship off rather than a reason they should.
+
 `docs/benchmarks/agent-memory-benchmark.md` is the public report and
 `benchmarks/agent_memory/README.md` the methodology. What this does **not** close is
 [4b](#4b-locomo-and-longmemeval-done-for-retrieval-not-for-accuracy)'s open half: every

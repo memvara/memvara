@@ -752,6 +752,56 @@ that also names an instant keeps the walk) changes which questions walk and not 
 `bench/multihop.py` at 1,000 staff is byte-identical before and after, because its
 questions already name their predicates in the stored form.
 
+### Anchoring on public questions, with a holdout split
+
+The section above measures anchoring on six negatives this repository wrote. `bench/anchoring.py`
+measures it on a thousand it did not.
+
+Nothing in it is authored. 2WikiMultihopQA is loaded as `bench/twowiki.py` loads it, the
+questions are split, and only the first half's triples are written. A question from the
+held-out half is then a real question from a public set whose facts the store genuinely does
+not hold. One filter keeps that honest: 2Wiki reuses entities heavily, so a held-out question
+counts as a negative only when it names no entity the store holds at all — refusing a question
+about somebody the store knows would be wrong rather than right.
+
+3,000 questions ingested, 1,000 of them scored for cost, 1,018 negatives. Identical on repeat.
+
+```
+  configuration              k   answer found   correctly silent
+  shipped                    5          49.9%               0.0%
+  shipped                   12          55.5%               0.0%
+  shipped                   25          57.6%               0.0%
+  anchored                   5          39.0%              50.6%
+  anchored                  12          39.1%              46.8%
+  anchored                  25          39.1%              42.0%
+  anchored + graph leg       5          53.8%              50.6%
+  anchored + graph leg      12          53.9%              46.8%
+  anchored + graph leg      25          54.1%              42.0%
+```
+
+**The shipped configuration is silent on none of them, at any depth.** It returns rows for
+every one of the 1,018 questions it was never told the answer to, at relevances that look like
+any other match. That is the behaviour anchoring exists to change, and this is the first
+measurement of it on questions written by somebody else.
+
+**Anchoring alone costs about a sixth of the legitimate answers**, and the graph leg pays most
+of it back: 39.1% against 53.9% at k=12, where the shipped figure is 55.5%. A 2Wiki question
+names entities the anchor then has to match, and a question whose answer sits one hop away
+reaches it through the entity the question does name. At k=5 the pair is ahead of the shipped
+configuration on both columns at once.
+
+**The recovery is a property of this corpus, not of the setting, and that is the condition to
+read the table under.** 2Wiki loads clean triples through `remember()`, so its join rate is
+high and the walk has somewhere to go. On a store whose claims all hang off one subject —
+what `memory_stats` calls a star, and what one user's own sentences produce — the walk has
+nowhere to go and pays nothing back. A deployment should read its own join rate before reading
+these numbers as advice, which is why neither setting ships on.
+
+The abstention column falls as `k` rises, from 50.6% at k=5 to 42.0% at k=25, because a deeper
+read gives more rows a chance to satisfy the anchor. It never approaches 100%: a question that
+names an entity the store holds but asks about an attribute it does not is not caught here,
+and anchoring is not the mechanism that would catch it.
+
 ### The temporal leg, and the abstention that is the actual finding
 
 `w_temporal > 0` adds a fourth leg over **raw turns**: the ones nearest in time to the
