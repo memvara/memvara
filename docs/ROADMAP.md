@@ -235,14 +235,32 @@ list.
   traverser is called. Every multiplier that is not a gate is 1.0 and stays 1.0 until a
   per-category sweep moves it.
 
-  **Its relational vocabulary is a hand-written list and it is too narrow, measured.** On
-  `bench/multihop.py` the gate routes two of the three question families past the walk —
-  "who founded the company that X works at" contains no word in it — so the shipped
-  configuration scores exactly what plain `search` scores and the leg's whole gain is
+  **Its relational vocabulary was a hand-written list and it was too narrow, measured.**
+  On `bench/multihop.py` the gate routed two of the three question families past the walk
+  — "who founded the company that X works at" contained no word in it — so the shipped
+  configuration scored exactly what plain `search` scores and the leg's whole gain was
   gated away. `works at` and `founded` are relations by any reading and both are
-  predicates in the store's own registry, so **deriving the markers from the registry is
-  the fix**. Not done, deliberately: widening the list by hand against a benchmark this
-  repository wrote is how a classifier gets fitted to its own corpus.
+  predicates in the store's own registry, so the fix was to derive the markers from the
+  registry rather than to widen the list by hand, because widening it against a benchmark
+  this repository wrote is how a classifier gets fitted to its own corpus.
+
+  **That fix has landed. The gate is now right in principle and badly calibrated**, which
+  is a better position than the one above and not the finished one. `intent.predicate_refs`
+  counts how many distinct predicates a question names, folded onto canonical names and
+  matched as phrases over content tokens, and two of them is a chain; naming an instant no
+  longer switches the walk off. Declared vocabulary alone was not enough, because
+  `PredicateRegistry.learn()` runs only from the LLM-assisted resolution in
+  `write/pipeline.py`, so an offline store declares nothing and the rule sees the 23
+  builtins — `intent.observed_refs` therefore reads the vocabulary off the candidate rows
+  the lookup legs have already returned, which takes `bench/twowiki.py`'s chained questions
+  from 29.1% to 35.4% with flat questions unchanged. What is still gated is one family, and
+  it is morphology rather than vocabulary: the store holds `founded_by` and the question
+  says "founded the", so the phrase never matches. A stemmer would close that gap; a longer
+  word list would close it only here. What the gate still costs is measured: as shipped the
+  leg takes `bench/multihop.py` from 2.9% to 6.4% at k=12, against 2.9% to 20.0% with the
+  gate off. The numbers, and the condition under which a deployment should turn
+  `intent_weighting` off with the leg on, are in
+  [`docs/BENCHMARKS.md`](BENCHMARKS.md#the-graph-leg-and-what-it-costs-on-the-corpora-above).
 - **Token accounting** — `WriteReceipt.tokens_in`/`tokens_out`, `LLM.Usage` with a
   caller-allocated accumulator, and the `write.tokens_in` / `write.tokens_out` /
   `write.extract_ms` series. `llm_calls` was the only cost signal and cannot be billed on:
