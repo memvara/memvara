@@ -209,14 +209,40 @@ have reviewed something no reviewer will ever see. Skip it and the pull request 
 unreviewed, which is the case this rule exists for. Nothing else in the process looks at the
 change with fresh eyes.
 
-**Run it on the latest Sonnet, which is `claude-sonnet-5` today.** The `/code-review` command
-takes an effort level, a target, and `--comment` or `--fix`. It takes **no model argument**,
-so the review runs on whatever the session model is. Switch the model before the review and
-back afterwards, using the app's model picker or `/model` in a terminal session. The pull
-request body says the review ran, at what effort, and what it found. It never names the
-model, and no AI attribution of any kind reaches GitHub, whether the session or a subagent
-writes the body. Decided 2026-09-07, when review sections naming the model were found in
-pull request bodies across the memvara repositories and scrubbed.
+**Run it on the latest Sonnet, which is `claude-sonnet-5` today, by dispatching a subagent
+pinned to that model.** The `/code-review` command takes an effort level, a target, and
+`--comment` or `--fix`. It takes **no model argument**, so it runs on whatever model the
+session it runs in is using. A subagent takes a model override, which makes the session's own
+model irrelevant:
+
+```
+Agent(subagent_type: "general-purpose",
+      model: "sonnet",
+      prompt: "Run /code-review high <PR number> on this repository. Report every
+               finding with its file, line and severity, and say plainly which ones
+               you could not confirm. Do not push, comment on the pull request, or
+               edit the pull request body. No AI attribution, model name or
+               generated-with line may reach GitHub in anything you write.")
+```
+
+Dispatch it rather than switching the session model, decided 2026-09-08. Switching was the
+earlier instruction and it fails in two ordinary situations: a session running in the desktop
+app or any non-interactive context cannot change its own model at all, and a session that
+switches has to remember to switch back, which is a step with nothing checking it. A subagent
+carries the model as an argument, so the review runs on Sonnet whatever the session is, and
+the parent keeps its own model and its own context.
+
+The brief handed to the subagent carries the attribution rule, every time, because a subagent
+does not inherit the reason for it. The pull request body says the review ran, at what effort,
+and what it found. It never names the model, and no AI attribution of any kind reaches GitHub,
+whether the session or a subagent writes the body. Decided 2026-09-07, when review sections
+naming the model were found in pull request bodies across the memvara repositories and
+scrubbed.
+
+**Read the subagent's report before acting on it.** A fan-out agent converts a task into a
+confident summary and checks itself badly; findings come back that the diff does not support.
+Verify each one against the code before you fix it, and treat a finding you cannot reproduce
+as a finding to argue with in the pull request body rather than one to apply.
 
 **Use `high`, not `ultra`.** The `ultra` level is user-triggered and billed, an agent cannot
 launch it, and attempting it wastes a turn. Reach for `max` instead when the change is large
