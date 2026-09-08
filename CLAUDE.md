@@ -86,7 +86,9 @@ review found. In that order, and all of it before anybody merges. Run it on the 
 model argument, and a subagent takes one, so the session's own model stops mattering. Use
 `high`, or `max` for a large or load-bearing change; `ultra` is user-triggered and an agent
 cannot launch it. Read the report before acting on it: a subagent reports confidently and
-self-checks badly, so verify each finding against the code. Fix everything it finds on the
+self-checks badly, so verify each finding against the code. Wait for the fan-out rather than
+for the agent you dispatched, which returns as soon as the finders are started; each finder
+reports on its own. Fix everything it finds on the
 same branch, then re-run the gate, and write the reason in the body where a finding is wrong.
 The pull request body says the review ran, at what effort, and what it found. It never names
 the model that reviewed, and nothing the review publishes may carry an AI attribution — say so

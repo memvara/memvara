@@ -244,6 +244,21 @@ confident summary and checks itself badly; findings come back that the diff does
 Verify each one against the code before you fix it, and treat a finding you cannot reproduce
 as a finding to argue with in the pull request body rather than one to apply.
 
+**The findings arrive from the fan-out, not from the agent you dispatched.** `/code-review`
+splits into several finder agents, and the agent holding the command returns as soon as it has
+started them — twice on 2026-09-08 it reported that the review had begun and nothing else,
+including the run whose brief told it not to. Each finder reports separately, so wait for
+those rather than for the one you dispatched, and expect the same finding from more than one
+of them. If your session cannot send a follow-up message to a subagent, an agent that returns
+early cannot be resumed at all; relaunching is the only option, and the findings already in
+hand stay good.
+
+**Run the checks CI runs, not the ones you remember.** The gate in `CONTRIBUTING.md` is
+`mypy -p memvara`, and `.github/workflows/ci.yml` runs a second pass,
+`mypy benchmarks/agent_memory --ignore-missing-imports`, that the first does not cover. On
+2026-09-08 a pull request went up with a local gate reported green and that second pass
+failing on the branch. Read the workflow file before you claim a gate passed.
+
 **Use `high`, not `ultra`.** The `ultra` level is user-triggered and billed, an agent cannot
 launch it, and attempting it wastes a turn. Reach for `max` instead when the change is large
 or lands on something load-bearing.
