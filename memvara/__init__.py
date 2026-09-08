@@ -79,6 +79,7 @@ from .types import (
     ErasureProof,
     Explanation,
     MemoryType,
+    ObjectKind,
     Provenance,
     Reading,
     RecallResult,
@@ -107,7 +108,7 @@ __all__ = [
     "Memvara", "ScopedMemvara", "AsyncMemvara", "AsyncScopedMemvara",
     # data model
     "Claim", "Episode", "Scope", "Result", "Explanation", "Provenance",
-    "WriteReceipt", "MemoryType", "Derivation", "utcnow", "time_axes",
+    "WriteReceipt", "MemoryType", "ObjectKind", "Derivation", "utcnow", "time_axes",
     # One entry of `WriteReceipt.accumulated`: a value written beside values already live
     # in the same slot, under a predicate whose cardinality nobody has declared. Exported
     # because a caller reading that field needs to be able to name its element type.

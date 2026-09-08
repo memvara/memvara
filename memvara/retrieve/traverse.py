@@ -49,7 +49,8 @@ from typing import Callable, NamedTuple, Sequence
 
 from ..schema import PredicateRegistry
 from ..store.base import Store
-from ..types import Claim, Scope, as_utc, default_entity, time_axes, utcnow
+from ..types import (Claim, ObjectKind, Scope, as_utc, default_entity,
+                     time_axes, utcnow)
 from .scoring import recency_factor
 
 #: What one more hop costs, as a multiplier on the path's score.
@@ -780,11 +781,22 @@ class GraphTraverser:
           which everything is connected to everything.
         * **A self-loop.** Dropped as an optimization only: its far end is the node the
           walk is standing on, so the cycle check would discard it one step later.
+        * **A value object.** `memvara version 17` states a scalar, so following it would
+          arrive at every other claim about the string `17` and report a version and an
+          age as the same thing. `None` is admitted rather than dropped: it marks a claim
+          written before the classification rule existed, and refusing those would switch
+          off a graph that was walking the day before the upgrade.
+
+        `_WALKABLE` in `store/sqlite.py` is these four rules as SQL, and the two have to
+        say the same thing: it is what `connectivity()` counts, so a rule in one and not
+        the other makes the reported join rate promise hops the walk will not take.
         """
         wanted = {k for k in keys if k}
         out: dict[str, list[Edge]] = {}
         for claim in self._visible(scope, sorted(wanted), predicates, pin):
             if claim.polarity <= 0:
+                continue
+            if claim.object_kind is ObjectKind.VALUE:
                 continue
             subject, obj = claim.subject_key, claim.object_key
             if not subject or not obj or subject == obj:

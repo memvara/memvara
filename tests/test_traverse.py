@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from conftest import entity_registry
+
 from memvara import Memvara, NullLLM
 from memvara.aio import AsyncMemvara
 from memvara.embed import HashingEmbedder
@@ -43,6 +45,8 @@ def walker(store):
 @pytest.fixture()
 def mem():
     with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64), tenant="acme",
+                 registry=entity_registry("reports_to", "works_at",
+                                          "employed_by_company", "lives_in"),
                  user="alice") as m:
         yield m
 

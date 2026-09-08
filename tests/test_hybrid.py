@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
+from conftest import entity_registry
+
 from memvara.embed import HashingEmbedder
 from memvara.retrieve import (
     CLAIM,
@@ -1936,7 +1938,11 @@ def _joined_store(tmp_path, star: bool):
     """A store that chains, or one that does not, and a retriever with the leg on."""
     from memvara import Memvara
     from memvara.llm import NullLLM
-    mem = Memvara(":memory:", llm=NullLLM(), embedder=HashingEmbedder(dim=64))
+    # `uses` and `configured_in` have to be declared entity-valued or their objects are
+    # scalars, no claim carries an edge, and "a store that chains" would not chain — the
+    # gate under test would then be measuring the vocabulary rather than the store shape.
+    mem = Memvara(":memory:", llm=NullLLM(), embedder=HashingEmbedder(dim=64),
+                  registry=entity_registry("uses", "configured_in", "lives_in"))
     mem.remember("user", "uses", "pytest")
     if star:
         mem.remember("user", "lives_in", "Delhi")
@@ -2060,7 +2066,8 @@ def test_each_tenant_is_measured_on_its_own(tmp_path):
     the fact that a neighbour's store is a star."""
     from memvara import Memvara
     from memvara.llm import NullLLM
-    mem = Memvara(":memory:", llm=NullLLM(), embedder=HashingEmbedder(dim=64))
+    mem = Memvara(":memory:", llm=NullLLM(), embedder=HashingEmbedder(dim=64),
+                  registry=entity_registry("uses", "configured_in", "lives_in"))
     mem.remember("user", "uses", "pytest", tenant="star")
     mem.remember("user", "lives_in", "Delhi", tenant="star")
     mem.remember("user", "uses", "pytest", tenant="web")

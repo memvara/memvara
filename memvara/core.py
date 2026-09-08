@@ -3125,7 +3125,14 @@ class Memvara:
                      session=None) -> list[Path]:
         """What is around `entity`: the best paths of `min_hops` to `depth` hops out of it.
 
-        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> from memvara.schema import (BUILTIN_PREDICATES, PredicateRegistry,
+        ...                             PredicateSpec)
+        >>> def walkable(*names):   # a relation carries an edge only if declared
+        ...     return PredicateRegistry(BUILTIN_PREDICATES + tuple(
+        ...         PredicateSpec(n, object_type=("entity",), graph=True)
+        ...         for n in names))
+        >>> mem = Memvara(llm=NullLLM(), user="alice",
+        ...                registry=walkable("reports_to", "works_at"))
         >>> _ = mem.remember("Alice", "reports_to", "Dana")
         >>> _ = mem.remember("Dana", "works_at", "Acme, Inc.")
         >>> for path in mem.neighborhood("Alice"):
@@ -3170,7 +3177,14 @@ class Memvara:
                       session=None) -> list[Path]:
         """How two entities are connected: the best chains of at most `depth` hops.
 
-        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> from memvara.schema import (BUILTIN_PREDICATES, PredicateRegistry,
+        ...                             PredicateSpec)
+        >>> def walkable(*names):   # a relation carries an edge only if declared
+        ...     return PredicateRegistry(BUILTIN_PREDICATES + tuple(
+        ...         PredicateSpec(n, object_type=("entity",), graph=True)
+        ...         for n in names))
+        >>> mem = Memvara(llm=NullLLM(), user="alice",
+        ...                registry=walkable("reports_to", "works_at"))
         >>> _ = mem.remember("Alice", "reports_to", "Dana")
         >>> _ = mem.remember("Dana", "works_at", "Acme")
         >>> mem.paths_between("Alice", "Acme")[0].render()
@@ -3370,7 +3384,14 @@ class Memvara:
         "joinable_claims": 0}`; a backend without `connectivity` says nothing at all, and
         a caller that read a missing key as zero would report a star it never measured.
 
-        >>> mem = Memvara(":memory:", llm=NullLLM())
+        >>> from memvara.schema import (BUILTIN_PREDICATES, PredicateRegistry,
+        ...                             PredicateSpec)
+        >>> def walkable(*names):   # a relation carries an edge only if declared
+        ...     return PredicateRegistry(BUILTIN_PREDICATES + tuple(
+        ...         PredicateSpec(n, object_type=("entity",), graph=True)
+        ...         for n in names))
+        >>> mem = Memvara(":memory:", llm=NullLLM(),
+        ...                registry=walkable("uses", "configured_in"))
         >>> _ = mem.remember("user", "uses", "pytest")
         >>> mem.connectivity()
         {'live_claims': 1, 'joinable_claims': 0}

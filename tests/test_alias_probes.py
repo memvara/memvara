@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from conftest import entity_registry
+
 from memvara import Memvara, NullLLM
 from memvara.aio import AsyncMemvara
 from memvara.embed import HashingEmbedder
@@ -37,6 +39,7 @@ T1 = datetime(2024, 6, 1, tzinfo=timezone.utc)
 @pytest.fixture()
 def mem():
     with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64), tenant="acme",
+                 registry=entity_registry(),
                  user="alice") as m:
         yield m
 
@@ -285,7 +288,8 @@ def test_an_alias_learned_in_one_tenant_does_not_fold_another_tenants_probe():
     """Identity is owner-scoped — `owner_key` is tenant plus user — and a probe is
     resolved under the *reader's* owner, the same one `Reconciler._stamp` wrote with.
     One tenant deciding two names are one thing must not decide it for another."""
-    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64)) as mem:
+    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64),
+                 registry=entity_registry()) as mem:
         mem.remember("IBM", "headquartered_in", "Yorktown", tenant="t_a", user="alice")
         learn(mem, "IBM", "Big Blue", scope=Scope("t_a", "alice"))
 
@@ -298,7 +302,8 @@ def test_an_alias_learned_in_one_tenant_does_not_fold_another_tenants_probe():
 
 
 def test_an_alias_learned_by_one_user_does_not_fold_a_siblings_probe():
-    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64), tenant="acme") as mem:
+    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64), tenant="acme",
+                 registry=entity_registry()) as mem:
         mem.remember("IBM", "headquartered_in", "Yorktown", user="alice")
         learn(mem, "IBM", "Big Blue")
 
@@ -313,7 +318,8 @@ def test_an_alias_learned_in_one_tenant_does_not_join_another_tenants_route():
     further. Identical graphs in two tenants, and only the tenant that learned the merge
     is connected — the alias is what joins the two halves, so a probe that could reach
     across owners would be inventing a connection out of a sibling's decision."""
-    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64)) as mem:
+    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64),
+                 registry=entity_registry()) as mem:
         for tenant in ("t_a", "t_b"):
             mem.remember("Dana", "works_at", "IBM", tenant=tenant, user="alice")
         learn(mem, "IBM", "Big Blue", scope=Scope("t_a", "alice"))

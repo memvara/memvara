@@ -12,6 +12,7 @@ from memvara.embed import HashingEmbedder
 from memvara.store import (STATES, SQLStore, SQLiteStore, live_predicate,
                            state_predicate, stored_state_predicate)
 from memvara.store.base import Store
+from memvara.store.sqlite import _WALKABLE as _WALKABLE_SQL
 from memvara.store.sqlite import SCHEMA_VERSION
 from memvara.types import Claim, Derivation, Episode, MemoryType, Scope
 
@@ -2857,3 +2858,91 @@ def test_the_migration_is_a_no_op_on_a_fresh_file(tmp_path):
         assert "traversal_cost" in columns
     finally:
         store.close()
+
+
+# --- object kind, and the graph edges that depend on it --------------------------------
+
+
+def _v10_claims_ddl() -> str:
+    """The claims table as version 10 shaped it: today's, minus `object_kind`.
+
+    Derived from `SCHEMA` rather than pasted, so this cannot drift into testing a table
+    no version of memvara ever wrote. `ALTER TABLE ... DROP COLUMN` is not an option: it
+    re-parses the stored DDL, and dropping the last column leaves the comment above it
+    dangling, which SQLite rejects as incomplete input.
+    """
+    from memvara.store import sqlite as sq
+
+    body = sq.SCHEMA.split("CREATE TABLE IF NOT EXISTS claims (", 1)[1]
+    body = body.split("\n);", 1)[0]
+    kept = [ln for ln in body.splitlines()
+            if "object_kind" not in ln and "Version 11" not in ln
+            and not ln.strip().startswith("-- classification rule")]
+    # Drop the rest of the version-11 comment block and the now-trailing comma.
+    kept = [ln for ln in kept if not ln.strip().startswith("--")
+            or "Version 9" in ln or "answer for them" in ln]
+    text = "\n".join(kept).rstrip().rstrip(",")
+    return f"CREATE TABLE claims ({text}\n);"
+
+
+def test_a_version_10_file_gains_object_kind_and_keeps_its_claims(tmp_path):
+    """The upgrade must not switch off a graph that was walking yesterday.
+
+    Nothing backfills the column, and nothing could: the kind is read from the predicate's
+    declared object_type, and which vocabulary a deployment loads is environment rather
+    than data, so a backfill would make two machines disagree about one file. The claim
+    written before the rule therefore keeps `object_kind IS NULL`, and `_WALKABLE` admits
+    it.
+    """
+    path = str(tmp_path / "v10.db")
+    conn = sqlite3.connect(path)
+    conn.executescript(_v10_claims_ddl())
+    conn.execute("PRAGMA user_version = 10")
+    conn.commit()
+    conn.close()
+
+    store = SQLiteStore(path)
+    try:
+        columns = {r["name"] for r in store._db.execute("PRAGMA table_info(claims)")}
+        assert "object_kind" in columns
+        assert int(store._db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
+    finally:
+        store.close()
+
+
+def test_the_object_kind_migration_is_a_no_op_on_a_fresh_file(tmp_path):
+    """Running it twice is the test: a second ALTER for a column that exists would raise."""
+    store = SQLiteStore(str(tmp_path / "fresh.db"))
+    try:
+        store._migrate_to_v11()
+        store._migrate_to_v11()
+        columns = {r["name"] for r in store._db.execute("PRAGMA table_info(claims)")}
+        assert "object_kind" in columns
+    finally:
+        store.close()
+
+
+def test_a_value_object_is_not_a_graph_edge_but_an_unclassified_one_still_is(store):
+    """`_WALKABLE` and `GraphTraverser._edges` have to agree, and this pins the SQL half.
+
+    Three claims that are otherwise identical in shape: one classified as an entity, one
+    as a value, one written before the rule existed. Only the value is refused.
+    """
+    from memvara.types import ObjectKind
+
+    def put(cid, subj, obj, kind):
+        c = claim(id=cid, subject=subj, predicate="depends_on", object=obj)
+        c.object_kind = kind
+        store.put_claim(c)
+
+    put("cl_ent", "alpha", "beta", ObjectKind.ENTITY)
+    put("cl_val", "gamma", "delta", ObjectKind.VALUE)
+    put("cl_old", "epsilon", "zeta", None)
+
+    walkable = {
+        r["id"] for r in store._db.execute(
+            "SELECT id FROM claims WHERE " + _WALKABLE_SQL.format(a="claims"))
+    }
+    assert "cl_ent" in walkable
+    assert "cl_old" in walkable, "a claim written before the rule keeps its edges"
+    assert "cl_val" not in walkable
