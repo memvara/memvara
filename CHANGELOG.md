@@ -11,6 +11,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **A claim's object records whether it names a thing or holds a scalar.** `ObjectKind` is
+  `ENTITY` or `VALUE`, decided at write time from the predicate's declared `object_type`,
+  and only an entity object can be one end of a graph edge. `memvara version 17` therefore
+  stops connecting to every other claim about the string `17`. `SCHEMA_VERSION` moves from
+  10 to 11 for the nullable column.
+
+  `None` is a third state, and it is what makes the upgrade safe: it means the claim was
+  written before this rule existed, and both the SQL gate and the graph walker admit it, so
+  an upgrade does not switch off a graph that was working the day before. Nothing backfills
+  it and nothing could — the kind comes from the predicate's declared `object_type`, and
+  which vocabulary a deployment loads is environment rather than data, so a backfill would
+  make two machines disagree about what one file says.
+
 - **`bench/predicate_audit.py` and `bench/packs/twowiki.toml`.** The audit reports which of a
   corpus's relations a vocabulary declares, splitting them three ways: entity-valued,
   declared-as-value, and undeclared. The first two both carry no graph edge and only the
