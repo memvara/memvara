@@ -124,8 +124,10 @@ def render(report: dict[str, object], top: int) -> None:
           f"{report['projected_share']:.1%}")
     if undeclared:
         print(f"\n  the {min(top, len(undeclared))} costliest undeclared relations:")
-        for relation, n in undeclared[:top]:
-            print(f"    {n:>7,}  {relation}")
+        # `evalkit.render_table` rather than a hand-rolled column, so this matches every
+        # other bench script and sizes itself to the data instead of to a guessed width.
+        print(ek.render_table(["relation", "triples"],
+                              [(r, f"{n:,}") for r, n in undeclared[:top]]))
     else:
         print("\n  no gap: every relation in this corpus carries a declaration.")
 

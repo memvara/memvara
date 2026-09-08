@@ -674,3 +674,98 @@ class TestPredicateAudit:
         report = self._audit(Counter(), None, tmp_path)
         assert report["projected_share"] == 0.0
         assert report["asserted"] == 0
+
+
+def test_the_accepted_pack_keys_track_the_spec_they_build() -> None:
+    """`_PREDICATE_KEYS` and `PredicateSpec`'s fields are two lists nothing forces to agree.
+
+    Adding a field to the spec without adding its key here rejects a valid pack with "which
+    this version does not understand", and the trail from that message leads to a different
+    file than the one that was edited. Deriving the set from `dataclasses.fields` was the
+    obvious fix and is the wrong one: it would silently expose every future internal field
+    to TOML, which is a quieter failure than the loud one it prevents. So the set stays
+    explicit and this test makes drift impossible — a new field has to be deliberately
+    accepted or deliberately excluded, and either way somebody edits this line and says
+    which.
+
+    `learned` is the one exclusion: a pack declares predicates, so everything it loads is by
+    definition declared, and letting a file assert `learned = true` would let it claim its
+    own declarations were guesses.
+    """
+    from dataclasses import fields
+
+    from memvara.schema import _PREDICATE_KEYS
+
+    assert _PREDICATE_KEYS == {f.name for f in fields(PredicateSpec)} - {"learned"}
+
+
+@needs_toml
+class TestTypeNamesAreCaseInsensitive:
+    """A capital letter used to turn a value into an entity, silently.
+
+    Every other declared name in a pack is case-insensitive, because `_coerce_enum` folds
+    cardinality, volatility and both memory types. Type names were not, so `VALUE_TYPE` was
+    compared against the author's exact spelling: `object_type = ["Person", "Value"]` with
+    `graph = true` passed the loader's own "a value carries no edge" check, because "Value"
+    is not "value", and `objects_are_entities` then reported true. A predicate marked as
+    holding scalars became entity-valued with no error anywhere — the false join this
+    feature exists to prevent, reached through capitalisation.
+    """
+
+    def _spec(self, tmp_path, body: str):
+        path = tmp_path / "case.toml"
+        path.write_text(body, encoding="utf-8")
+        spec, = load_specs(str(path))
+        return spec
+
+    def test_a_capitalised_value_type_still_means_value(self, tmp_path):
+        spec = self._spec(tmp_path, '[[predicate]]\nname="holds"\ncardinality="many"\n'
+                                    'volatility="slow"\nobject_type=["Value"]\n')
+        assert spec.object_type == ("value",)
+        assert spec.objects_are_entities is False
+
+    def test_a_capitalised_value_type_is_refused_alongside_graph(self, tmp_path):
+        """The regression. This pack used to load, and produced a traversable predicate
+        whose objects its author had declared to be scalars."""
+        with pytest.raises(PredicatePackError, match="cannot both be true"):
+            self._spec(tmp_path, '[[predicate]]\nname="holds"\ncardinality="many"\n'
+                                 'volatility="slow"\nobject_type=["Person","Value"]\n'
+                                 'graph=true\n')
+
+    def test_entity_type_names_fold_too(self, tmp_path):
+        """So that two packs naming the same type differently declare the same type."""
+        spec = self._spec(tmp_path, '[[predicate]]\nname="depends_on"\ncardinality="many"\n'
+                                    'volatility="slow"\nsubject_type=[" Project "]\n'
+                                    'object_type=["Software"]\ngraph=true\n')
+        assert spec.subject_type == ("project",)
+        assert spec.object_type == ("software",)
+        assert spec.objects_are_entities is True
+
+    def test_aliases_are_not_folded(self, tmp_path):
+        """They name predicates, not types, and `normalize()` already owns that spelling
+        rule. A second, quieter one in front of it would be the drift this avoids."""
+        spec = self._spec(tmp_path, '[[predicate]]\nname="x"\ncardinality="many"\n'
+                                    'volatility="slow"\naliases=["Git_State"]\n')
+        assert spec.aliases == ("Git_State",)
+
+
+@needs_toml
+def test_an_inverse_without_an_edge_to_reverse_is_refused(tmp_path):
+    """A full inverse pair on a predicate nothing can walk.
+
+    `inverse` names the reverse of an edge, so a predicate with `graph = false` has no edge
+    for it to reverse and the declaration resolves to nothing a walk could use — the same
+    "looks present in the file, does nothing at runtime" this loader refuses everywhere
+    else.
+
+    Deliberately *not* the same as a mixed `object_type`, which is refused only alongside
+    `graph`. A mixture means something: `prefers` holds `postgresql` and `plain` alike,
+    resolves to a value, and is the documented shape for a predicate that takes either. An
+    inverse with no edge means nothing at all.
+    """
+    path = tmp_path / "inv.toml"
+    path.write_text('[[predicate]]\nname="owned_by"\ncardinality="one"\n'
+                    'volatility="slow"\ninverse="owns"\ninverse_cardinality="many"\n',
+                    encoding="utf-8")
+    with pytest.raises(PredicatePackError, match="no edge"):
+        load_specs(str(path))

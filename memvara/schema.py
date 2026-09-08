@@ -95,11 +95,16 @@ class PredicateSpec:
     # retire `works_at` even though the predicate names differ.
     supersedes: tuple[str, ...] = ()
     learned: bool = False  # True if acquired at runtime rather than declared up front
-    # The graph declaration. All six are appended rather than inserted because callers
-    # build a spec positionally — `_p` below, and the store's row reader — and are
-    # declaration-only: nothing infers them, and a learned predicate leaves them at these
-    # defaults, which say "takes values, walks nowhere". That default is the safe
-    # direction. A predicate wrongly left non-traversable costs a join somebody can add
+    # The graph declaration. Appended rather than inserted, because a positional caller
+    # reads fields by position and every one of them sits before these: the tests build a
+    # spec from a two- or three-argument prefix, and `_p` below used to pass six. `_p` now
+    # passes keywords, so appending is a convention rather than a load-bearing constraint —
+    # but inserting into the middle would still silently rebind a test's `Volatility` to
+    # whatever now occupies slot three, and a frozen dataclass type-checks none of it.
+    #
+    # All six are declaration-only: nothing infers them, and a learned predicate leaves
+    # them at these defaults, which say "takes values, walks nowhere". That default is the
+    # safe direction. A predicate wrongly left non-traversable costs a join somebody can add
     # later by declaring it; one wrongly made traversable connects claims that share a
     # string, and degrades retrieval without ever reporting an error.
     subject_type: tuple[str, ...] = ()
@@ -156,7 +161,9 @@ def _p(
     mtype: MemoryType = MemoryType.SEMANTIC,
     supersedes: tuple[str, ...] = (),
 ) -> PredicateSpec:
-    return PredicateSpec(name, card, vol, mtype, tuple(aliases), supersedes)
+    return PredicateSpec(name=name, cardinality=card, volatility=vol,
+                         memory_type=mtype, aliases=tuple(aliases),
+                         supersedes=supersedes)
 
 
 # A starter schema for the personal-assistant domain. Deliberately small: it is meant to
@@ -681,20 +688,35 @@ _PREDICATE_KEYS = frozenset({
 })
 
 
-def _string_tuple(entry: dict, key: str, name: str, path: Path) -> tuple[str, ...]:
+def _string_tuple(entry: dict, key: str, name: str, path: Path, *,
+                  fold: bool = False) -> tuple[str, ...]:
     """A list-of-strings field, refusing a bare string.
 
     TOML makes `object_type = "software"` and `object_type = ["software"]` both easy to
     write and only one of them right. Accepting the first by wrapping it would be kinder
     for exactly one release, until somebody wrote `aliases = "a, b"` and got one alias
     with a comma in it.
+
+    `fold` lowercases and strips, and the two type fields pass it. Every other declared
+    name in this file is already case-insensitive — `_coerce_enum` does
+    `str(value).strip().lower()` for cardinality, volatility and both memory types — so a
+    type name that was not would be the one field where capitalisation changed meaning.
+    It changed it in the worst available direction: `object_type = ["Person", "Value"]`
+    with `graph = true` loaded without complaint, because `"Value" != VALUE_TYPE`, and
+    then reported `objects_are_entities` as true. A predicate its author had marked as
+    holding scalars was silently classified as entity-valued, which is the false join
+    this whole feature exists to prevent, arrived at through a capital letter.
+
+    Aliases and `supersedes` are deliberately not folded. They name predicates rather
+    than types, and predicate names have their own resolution in `normalize()`; folding
+    them here would put a second, quieter spelling rule in front of it.
     """
     raw = entry.get(key, ())
     if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
         raise PredicatePackError(
             f"predicate {name!r} in {path} has {key}={raw!r}. It takes a list of "
             f'strings, as in {key} = ["software", "service"].')
-    return tuple(str(item) for item in raw)
+    return tuple(str(item).strip().lower() if fold else str(item) for item in raw)
 
 
 def _graph_declaration(entry: dict, name: str, path: Path) -> dict:
@@ -704,8 +726,8 @@ def _graph_declaration(entry: dict, name: str, path: Path) -> dict:
     the failure mode a vocabulary has that a code path does not: it is read once at
     startup, by no one.
     """
-    subject_type = _string_tuple(entry, "subject_type", name, path)
-    object_type = _string_tuple(entry, "object_type", name, path)
+    subject_type = _string_tuple(entry, "subject_type", name, path, fold=True)
+    object_type = _string_tuple(entry, "object_type", name, path, fold=True)
     graph = entry.get("graph", False)
     if not isinstance(graph, bool):
         raise PredicatePackError(
@@ -739,6 +761,17 @@ def _graph_declaration(entry: dict, name: str, path: Path) -> dict:
         raise PredicatePackError(
             f"predicate {name!r} in {path} declares inverse_cardinality without an "
             "inverse for it to describe.")
+    if inverse and not graph:
+        # An inverse names the reverse of an edge, and a predicate with `graph = false`
+        # has no edge to reverse, so the whole pair resolves to nothing a walk can use.
+        # This is the same refusal as the others here and not the same as a mixed
+        # `object_type`, which is refused only alongside `graph`: a mixture *means*
+        # something — `prefers` holds `postgresql` and `plain` alike, resolves to a value,
+        # and is a documented shape. An inverse without an edge means nothing at all.
+        raise PredicatePackError(
+            f"predicate {name!r} in {path} declares inverse={inverse!r} but not "
+            "graph = true. An inverse is the reverse of an edge, and this predicate has "
+            "no edge, so nothing would ever walk either direction.")
 
     cost = entry.get("traversal_cost", 1.0)
     if isinstance(cost, bool) or not isinstance(cost, (int, float)):
