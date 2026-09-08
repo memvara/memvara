@@ -130,12 +130,12 @@ verdict.
 
 The result is the reason it earns a line here rather than a bullet in the README:
 
-| | memvara | vector-rag | naive |
-|---|---:|---:|---:|
-| overall | **92.0%** | 89.0% | 50.0% |
-| temporal | **100.0%** | 91.5% | 34.0% |
-| retrieval | 64.3% | **71.4%** | 64.3% |
-| irrelevance | 50.0% | 50.0% | 50.0% |
+| | memvara | memvara-anchored | vector-rag | naive |
+|---|---:|---:|---:|---:|
+| overall | 92.0% | **94.0%** | 89.0% | 50.0% |
+| temporal | **100.0%** | **100.0%** | 91.5% | 34.0% |
+| retrieval | 64.3% | 64.3% | **71.4%** | 64.3% |
+| irrelevance | 50.0% | **83.3%** | 50.0% | 50.0% |
 
 **Three points separate memvara from a baseline built out of numpy**, and the whole of the
 lead is the `temporal` dimension — where the four questions that separate them are the four
@@ -146,13 +146,19 @@ coincide, a single-clock store is exactly right. memvara **loses** `retrieval`, 
 and the core weaknesses behind them are tracked in
 [#129](https://github.com/memvara/memvara/issues/129).
 
-The `irrelevance` half has a core answer now, and the table above does not show it because
-the shipped adapter does not use it: `search(anchored=True)` keeps only the rows the
-question names an entity of, or that the graph leg reached from one, and through the
-adapter with that flag set `irrelevance` goes 3/6 → 5/6 at both configurations. The
-`multi_hop` half does not move from anything in the read path — the issue's own
-measurement is that the answer is already retrieved and nothing consumes the pair — so
-that row is the adapter's to change, and `docs/BENCHMARKS.md` carries both measurements.
+The `irrelevance` half has an answer, and it is the fourth column. `memvara-anchored` is
+the same library and the same adapter with `anchored=True` on every read and the graph leg
+at `read_w_graph=1.0`: anchoring keeps only the rows the question names an entity of, or
+that the walk reached from one, which takes `irrelevance` 3/6 → 5/6, and the walk is what
+stops anchoring costing a retrieval question whose answer shares no entity with it. It is
+published as a system of its own rather than as a change to the `memvara` column, because
+a number somebody has quoted should keep meaning what it meant, and because neither switch
+is a default this package can pick for a store it cannot see. A deployment can now set both
+from the environment — `MEMVARA_ANCHORED` and `MEMVARA_READ_W_GRAPH` — which before this
+was possible only from Python. The `multi_hop` half does not move from anything in the read
+path — the issue's own measurement is that the answer is already retrieved and nothing
+consumes the pair — so that row is the adapter's to change, and `docs/BENCHMARKS.md`
+carries every measurement.
 
 `docs/benchmarks/agent-memory-benchmark.md` is the public report and
 `benchmarks/agent_memory/README.md` the methodology. What this does **not** close is

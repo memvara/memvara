@@ -4404,3 +4404,117 @@ def test_anchored_recall_says_nothing_about_a_stranger_and_search_agrees(server)
         server, "memory_ask", {"question": "where does Oscar live", "anchored": True})
     assert "Lisbon" in text(server, "memory_ask",
                             {"question": "where does Ivan live", "anchored": True})
+
+
+# -- the read configuration a deployment can choose ---------------------------
+
+def test_the_graph_leg_can_be_switched_on_from_the_environment():
+    """`read_w_graph` existed as a constructor argument and no deployment could set it.
+
+    A client launches this server with an environment block and nothing else, so a
+    retrieval leg reachable only from Python is a leg no MCP deployment can run — which
+    is what `docs/BENCHMARKS.md` measures the graph leg to be worth on a store that holds
+    relations, and what the hosted product could not turn on.
+    """
+    memory = build_memvara(ServerConfig.from_env(
+        {"MEMVARA_DB": ":memory:", "MEMVARA_READ_W_GRAPH": "1.0"}))
+    assert memory.reader.w_graph == 1.0
+    memory.close()
+
+
+def test_the_graph_leg_is_off_when_nobody_asks_for_it():
+    """Unset is the configuration every deployment has been running, and stays it. The
+    weight ships at 0.0 because the right value depends on how much graph the store
+    holds, which is a measurement about the deployment and not one this package can make
+    for it."""
+    memory = build_memvara(ServerConfig.from_env({"MEMVARA_DB": ":memory:"}))
+    assert memory.reader.w_graph == 0.0
+    memory.close()
+
+
+@pytest.mark.parametrize("value", ["-1", "-0.5", "lots", "1.0.0", "1,0",
+                                   "\u0661", "nan", "inf"])
+def test_an_unusable_graph_weight_is_refused_at_startup(value):
+    """Refused rather than ignored, for the reason every other setting here is: a typo
+    that fell back to 0.0 would leave an operator believing they had switched the leg on.
+
+    `nan` and `inf` are the sharp ones. Both are what `float()` returns for those words,
+    and both reach the fusion arithmetic: `inf` makes every walked claim outrank
+    everything the other legs found, and `nan` makes every comparison false, so the
+    ranking silently becomes insertion order. Arabic-indic "\u0661" is refused for the
+    reason `MEMVARA_LLM_MAX_TOKENS` refuses it: `float()` reads it as 1.0, so it would be
+    accepted, and a setting nobody can grep for is a paste accident rather than a choice.
+
+    An empty value is not in this list. It means the variable was set to nothing, which
+    is the same as not setting it, and the leg stays off.
+    """
+    with pytest.raises(ConfigError, match="MEMVARA_READ_W_GRAPH"):
+        ServerConfig.from_env({"MEMVARA_DB": ":memory:",
+                               "MEMVARA_READ_W_GRAPH": value})
+
+
+def test_cloud_mode_refuses_the_graph_weight():
+    """Same rule as the extraction settings, and the same reason: retrieval runs inside
+    the deployment, so a weight named here would be read and never used."""
+    cloud = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
+                                   "MEMVARA_READ_W_GRAPH": "1.0"})
+    assert cloud.read_w_graph == 1.0
+    with pytest.raises(ConfigError, match="MEMVARA_READ_W_GRAPH"):
+        build_memvara(cloud)
+
+
+def test_a_deployment_can_make_anchoring_the_default():
+    """`anchored` was reachable only when the model remembered to pass it, which on the
+    question it exists for is exactly when the model has no reason to.
+
+    A question about somebody the store has never heard of looks like any other question
+    from the caller's side. `MEMVARA_ANCHORED=1` makes not-answering the default for that
+    deployment, which is the behaviour `docs/BENCHMARKS.md` measures as two of three open
+    negatives caught.
+    """
+    srv = MemvaraMCPServer(make_memory(user="alice"), user="alice", anchored=True)
+    try:
+        text(srv, "memory_remember", {"subject": "Ivan", "predicate": "lives_in",
+                                      "object": "Lisbon"})
+        assert "No stored memory matched" in text(
+            srv, "memory_recall", {"query": "where does Oscar live"})
+        assert "No stored memory matched" in text(
+            srv, "memory_search", {"query": "where does Oscar live"})
+        assert "Nothing in this scope matches" in text(
+            srv, "memory_ask", {"question": "where does Oscar live"})
+        assert "Lisbon" in text(srv, "memory_recall", {"query": "where does Ivan live"})
+    finally:
+        srv.close()
+
+
+def test_a_call_can_still_widen_a_server_that_anchors_by_default():
+    """The setting moves the default and takes nothing away. A topic-style question that
+    names no entity is the case anchoring drops, and a caller that knows it is asking one
+    says so."""
+    srv = MemvaraMCPServer(make_memory(user="alice"), user="alice", anchored=True)
+    try:
+        text(srv, "memory_remember", {"subject": "Ivan", "predicate": "lives_in",
+                                      "object": "Lisbon"})
+        assert "Lisbon" in text(srv, "memory_recall",
+                                {"query": "where does Oscar live", "anchored": False})
+    finally:
+        srv.close()
+
+
+def test_a_server_that_anchors_by_default_says_so_in_the_tool_it_offers():
+    """The description is what a model reads before it decides what to pass, so a server
+    whose default is true cannot offer text that says "Default false". Both read tools
+    and `memory_ask` carry the sentence, and all three have to move together."""
+    on = MemvaraMCPServer(make_memory(user="alice"), user="alice", anchored=True)
+    off = MemvaraMCPServer(make_memory(user="alice"), user="alice")
+    try:
+        for name in ("memory_recall", "memory_search", "memory_ask"):
+            anchored_on = on._tools[name].properties["anchored"]
+            anchored_off = off._tools[name].properties["anchored"]
+            assert anchored_on["default"] is True
+            assert anchored_off["default"] is False
+            assert "Default true on this server." in anchored_on["description"]
+            assert "Default false." in anchored_off["description"]
+    finally:
+        on.close()
+        off.close()

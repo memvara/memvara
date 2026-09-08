@@ -28,7 +28,8 @@ from .protocol import (
     success,
 )
 from .memory_api import MemoryAPI
-from .tools import TOOLS, Tool, ToolContext, ToolError, safe_detail
+from .tools import (TOOLS, Tool, ToolContext, ToolError, anchoring_by_default,
+                    safe_detail)
 
 if TYPE_CHECKING:
     # For the annotation alone. `memvara.remote.api` reaches back into
@@ -146,7 +147,8 @@ class MemvaraMCPServer:
 
     def __init__(self, memory: "Memvara | RemoteMemvara", *, tenant: str | None = None,
                  user: str | None = None, agent: str | None = None,
-                 session: str | None = None, read_only: bool = False) -> None:
+                 session: str | None = None, read_only: bool = False,
+                 anchored: bool = False) -> None:
         self._memory = memory
         extractor, credential_is_read_only = _service_facts(memory)
         #: **OR-ed, never overridden.** A server configured read-only stays read-only
@@ -158,6 +160,7 @@ class MemvaraMCPServer:
             memory=_bind(memory, tenant=tenant, user=user, agent=agent, session=session),
             extractor=extractor,
             read_only=self.read_only,
+            anchored=anchored,
         )
         #: Fixed at startup, because that is when the deployment's answer is known — and
         #: `self.read_only` rather than the `read_only` argument, so a read-only credential
@@ -165,8 +168,14 @@ class MemvaraMCPServer:
         #: hides its write tools rather than listing and refusing them: a tool a model can
         #: see is a tool it will spend a turn calling, and "you may not" teaches it nothing
         #: it can act on. A 403 from the deployment teaches it even less.
+        #: `anchoring_by_default` first, so the `anchored` argument a model reads is
+        #: described with the default this server will actually apply. Fixed at startup
+        #: like the read-only filter below it, and for the same reason: both are
+        #: decisions the operator made before the first tool call.
         self._tools: dict[str, Tool] = {
-            t.name: t for t in TOOLS if not (self.read_only and t.writes)
+            t.name: t
+            for t in (anchoring_by_default(TOOLS) if anchored else TOOLS)
+            if not (self.read_only and t.writes)
         }
         #: Negotiated at `initialize`. Recorded rather than enforced: rejecting calls
         #: that arrive before the handshake would add a failure mode that fires only for

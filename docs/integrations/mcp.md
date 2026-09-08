@@ -61,6 +61,14 @@ model to be talked into changing.
 
 `MEMVARA_READ_ONLY=1` hides every tool that writes.
 
+`MEMVARA_ANCHORED=1` makes the three read tools answer only from memories the question is
+demonstrably about, so a question about an entity this store has never heard of returns
+nothing rather than the nearest memory about somebody else. `MEMVARA_READ_W_GRAPH=1.0`
+switches on the retrieval leg that walks out of the entities a question names, which is
+what lets an anchored read still reach a fact the question reaches only through another
+one. Both ship off; [`docs/DEPLOY.md`](../DEPLOY.md#choosing-how-this-server-reads) has the
+measurements and the case for each.
+
 ## The fourteen tools
 
 | Tool | What it does |

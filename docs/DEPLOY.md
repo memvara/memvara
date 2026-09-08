@@ -130,6 +130,8 @@ transport is stdio and the configuration is entirely environment.
 | `MEMVARA_ADVISE_REPLACEMENTS` | `1` makes a `memory_remember` that closed nothing ask the model whether the new fact is a newer version of one of its nearest neighbours in other slots, and adds a `may replace:` line to the receipt naming the matches. Nothing is closed. Up to three model calls per write. Needs `MEMVARA_LLM=anthropic` or `openai`; refused at startup with `none`. See [Set `MEMVARA_ADVISE_REPLACEMENTS` to have writes name the fact they may replace](#set-memvara_advise_replacements-to-have-writes-name-the-fact-they-may-replace). |
 | `MEMVARA_EMBEDDER` | `hashing` (default, offline, 512-dimensional), `hashing:<dim>`, `local` or `local:<model>` (needs `memvara[local-embed]`), or `auto`. See [The embedder is named, not discovered](#the-embedder-is-named-not-discovered). |
 | `MEMVARA_READ_ONLY` | `1` hides every tool that writes. |
+| `MEMVARA_READ_W_GRAPH` | Weight on the graph leg of retrieval, which walks out of the entities the vector and lexical legs just named. Unset means `0.0`, the leg switched off, which is what every deployment has run. Set `1.0` to give it the same weight as the other two legs. A store that holds no relations pays nothing for switching it on, because the walk does not run when there is nothing to walk. A finite number of zero or more; anything else is refused at startup. See [Choosing how this server reads](#choosing-how-this-server-reads). |
+| `MEMVARA_ANCHORED` | `1` makes `anchored` true by default on `memory_recall`, `memory_search` and `memory_ask`, so a question about an entity the store has never heard of returns nothing instead of the nearest memory about somebody else. Each call can still pass `anchored` itself, either way, and the tool descriptions this server offers say which default is in force. Unset means false, which is what every deployment has run. See [Choosing how this server reads](#choosing-how-this-server-reads). |
 
 **There is no variable here that configures a `read_selector`.** `memory_recall`'s
 `ranked` argument (see `memvara.select`) is accepted by this server regardless, and every
@@ -345,6 +347,40 @@ its attempts — same turn, same failure, nine calls in, three truncations, abou
 seconds each. A turn like that is not retried into success; it needs the claims array
 capped, or it needs a different model. What the budget decides is only how much time each
 doomed attempt costs before the worker moves on.
+
+### Choosing how this server reads
+
+Two settings decide how much work a read does, and both ship off. Everything below is
+measured on the Agent Memory Benchmark, whose report is
+[`docs/benchmarks/agent-memory-benchmark.md`](benchmarks/agent-memory-benchmark.md).
+
+`MEMVARA_ANCHORED=1` is the one to reach for first. Without it, a question about somebody
+the store has never heard of is answered from the nearest memory about somebody else, at a
+relevance score that looks like any other match — which is the worst thing a memory server
+can hand a model, because nothing downstream can tell that answer from a real one. With it,
+that question returns nothing. On the benchmark's six questions about facts the store was
+never told, it answers 3 of 6 correctly without anchoring and 5 of 6 with it.
+
+What it costs is a memory the question names only by a paraphrase of its subject: "the
+coverage threshold" does not name a memory filed under `coverage_gate`. So a deployment
+whose questions are topic-shaped rather than entity-shaped should leave it off, and a
+caller that knows it is asking a topic question can pass `anchored: false` on the call.
+
+`MEMVARA_READ_W_GRAPH=1.0` switches on the third retrieval leg, which walks out of the
+entities the other two legs just named. Alone it changes nothing on that benchmark. Its
+job here is to pay for anchoring: anchoring on its own drops a question whose answer shares
+no entity with it — "in which city is Bob's employer headquartered", answered by a fact
+about the employer — and the walk reaches that same fact through Bob, who *is* named. Set
+together, the two take the benchmark from 92.0% to 94.0% with no dimension falling.
+
+A store with no relations in it pays nothing for the leg, because the walk does not run
+when there is nothing to walk. A store full of them pays for every temporal or open query,
+so measure rather than assume.
+
+Neither is a default this package can pick for you, which is why both ship off: what the
+graph leg is worth depends on how much graph your store holds, and whether anchoring is
+right depends on whether your questions name entities. [`docs/BENCHMARKS.md`](BENCHMARKS.md)
+has the measurements on both sides.
 
 ### The embedder is named, not discovered
 

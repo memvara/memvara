@@ -53,7 +53,7 @@ different names rather than a flag.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence, cast
 
@@ -68,7 +68,8 @@ from ..types import (Accumulation, Claim, Collapse, Dispute, MemoryType, Retype,
 from .memory_api import MemoryAPI
 from .validate import ToolError, validate
 
-__all__ = ["TOOLS", "Tool", "ToolContext", "ToolError", "safe_detail", "safe_line"]
+__all__ = ["TOOLS", "Tool", "ToolContext", "ToolError", "anchoring_by_default",
+           "safe_detail", "safe_line"]
 
 #: Framing for any block of stored claims. `Memvara.recall` applies its own; this is for
 #: the tools that render results themselves. It names the text below it as data, which
@@ -202,9 +203,32 @@ class ToolContext:
     memory: MemoryAPI
     extractor: str = "unknown"
     read_only: bool = False
+    #: What `anchored` means when a call does not say. False is the behaviour every
+    #: deployment had before `MEMVARA_ANCHORED` existed; a server that sets it true is
+    #: one whose operator decided that answering about the wrong entity is worse than
+    #: not answering, and every call can still pass `anchored` itself either way.
+    anchored: bool = False
 
 
 Handler = Callable[[ToolContext, dict[str, Any]], str]
+
+
+def anchoring_by_default(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
+    """The same tools, described for a server whose `anchored` default is true.
+
+    The description is the only thing a model has when it decides what to pass, so a
+    server that has moved the default cannot hand out text that says "Default false" —
+    that is not a stale comment a reader can go and check, it is a caller being told the
+    opposite of what will happen. `TOOLS` stays a module constant and this returns a new
+    tuple, because the default belongs to one server and the table is shared.
+    """
+    swapped = {id(_ANCHORED): _ANCHORED_ON, id(_ANCHORED_ASK): _ANCHORED_ASK_ON}
+    return tuple(
+        replace(tool, properties={
+            name: swapped.get(id(spec), spec) for name, spec in tool.properties.items()
+        }) if any(id(spec) in swapped for spec in tool.properties.values()) else tool
+        for tool in tools
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +343,42 @@ _ANCHORED_ASK = {
         "narrated, confidently, from the nearest slot it has. With it that question "
         "answers that nothing matches. It also skips a slot the question names only by a "
         "paraphrase of its subject, so leave it off for a topic-style question."
+    ),
+}
+
+#: What the two dicts above become on a server whose operator set `MEMVARA_ANCHORED`.
+#: Written out rather than substituted into, because the sentence a model needs is not
+#: the same one with a word swapped: on a server that anchors by default the decision in
+#: front of the caller is when to *widen*, and that is the advice these say.
+_ANCHORED_ON = {
+    "type": "boolean",
+    "default": True,
+    "description": (
+        "Return only memories the query is demonstrably about: a memory whose subject or "
+        "object the query names, or one reached by walking the graph out of such a "
+        "memory. Default true on this server. Leave it alone for a question about a "
+        "specific person, service or ticket, where a memory about a stranger is worse "
+        "than no answer. Pass false to widen a topic-style question that names nothing "
+        "in particular, because anchoring also drops a memory the query names only by a "
+        "paraphrase of its subject ('the coverage threshold' for a memory filed under "
+        "coverage_gate). It needs no number, unlike min_score, and the two can be "
+        "combined."
+    ),
+}
+
+#: The same, for `memory_ask`.
+_ANCHORED_ASK_ON = {
+    "type": "boolean",
+    "default": True,
+    "description": (
+        "Answer only from fact slots the question is demonstrably about: a slot whose "
+        "subject or object the question names, or one reached by walking the graph out "
+        "of such a slot. Default true on this server. Leave it alone for a question "
+        "about a specific person, service or ticket: without anchoring, a question about "
+        "an entity this store has never heard of is still narrated, confidently, from "
+        "the nearest slot it has. Pass false for a topic-style question, because "
+        "anchoring also skips a slot the question names only by a paraphrase of its "
+        "subject."
     ),
 }
 
@@ -457,7 +517,7 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
         args["query"],
         k=args["k"],
         min_score=args["min_score"],
-        anchored=bool(args.get("anchored", False)),
+        anchored=bool(args.get("anchored", ctx.anchored)),
         memory_types=_memory_types(args.get("memory_types")),
         as_of=_timestamp(as_of, "memory_search.as_of") if as_of is not None else None,
         valid_at=(_timestamp(valid_at, "memory_search.valid_at")
@@ -514,7 +574,7 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             args["query"],
             k=args["k"],
             min_score=args["min_score"],
-            anchored=bool(args.get("anchored", False)),
+            anchored=bool(args.get("anchored", ctx.anchored)),
             ranked=bool(args.get("ranked", False)),
             memory_types=_memory_types(args.get("memory_types")),
             budget=args.get("budget"),
@@ -672,7 +732,7 @@ def _ask(ctx: ToolContext, args: dict[str, Any]) -> str:
     answer = ctx.memory.ask(
         args["question"],
         at=_timestamp(at, "memory_ask.at") if at is not None else None,
-        k=args["k"], anchored=bool(args.get("anchored", False)))
+        k=args["k"], anchored=bool(args.get("anchored", ctx.anchored)))
     if not answer.readings:
         return (f"Nothing in this scope matches: {safe_line(args['question'])}. "
                 "memory_search with a shorter query will say whether the store holds "

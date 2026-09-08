@@ -40,6 +40,37 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`MEMVARA_ANCHORED` and `MEMVARA_READ_W_GRAPH` let a deployment choose how the server
+  reads.** Both were constructor arguments and neither could be set from an environment
+  block, so every MCP deployment ran one configuration and had no way to change it.
+
+  `MEMVARA_ANCHORED=1` makes `anchored` true by default on `memory_recall`,
+  `memory_search` and `memory_ask`. A question about an entity the store has never heard
+  of then returns nothing, instead of the nearest memory about somebody else at a relevance
+  that looks like any other match. Each call can still pass `anchored` itself, either way,
+  and a server with the setting on offers a tool description that says the default is true
+  — the description is what a model reads before it decides what to pass, so it cannot be
+  left saying the opposite of what will happen.
+
+  `MEMVARA_READ_W_GRAPH` is the weight on the graph leg of retrieval, which walks out of
+  the entities the vector and lexical legs just named. A finite number of zero or more;
+  `nan`, `inf`, a negative number, and a value spelled in non-ASCII digits are refused at
+  startup rather than clamped. Under `MEMVARA_MODE=cloud` it is refused outright, like the
+  extraction settings, because retrieval runs inside the deployment and a setting that is
+  read and never used tells an operator something false in silence.
+
+  Both ship off, which is the configuration every deployment has been running. Measured
+  together on the Agent Memory Benchmark they take the overall score from 92.0% to 94.0%
+  and questions about facts the store was never told from 3 of 6 to 5 of 6, with no
+  dimension falling; neither is a default this package can pick, because what the graph leg
+  is worth depends on how much graph a store holds and whether anchoring is right depends
+  on whether the questions name entities. `docs/DEPLOY.md` has the trade in full.
+
+- **`--system memvara-anchored` publishes that configuration in the Agent Memory
+  Benchmark.** Same library, same adapter, the two switches on. It is a system of its own
+  rather than a change to `--system memvara`, which still means the library's shipped
+  defaults, so a result somebody has already quoted keeps meaning what it meant.
+
 - **`MEMVARA_LLM_MAX_TOKENS` bounds how long one runaway extraction can run.** It sets the
   largest response `MEMVARA_LLM=openai` may generate; unset it stays at `OpenAILLM`'s own
   default of 8,192, so no existing deployment changes. `OpenAILLM(max_tokens=...)` has

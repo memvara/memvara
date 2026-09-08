@@ -13,7 +13,7 @@ rule is in a file you can read.
 
 ```bash
 git clone https://github.com/memvara/memvara && cd memvara && pip install -e .
-python -m benchmarks.agent_memory --system memvara --system naive --system vector-rag --compare
+python -m benchmarks.agent_memory --system memvara --system memvara-anchored --system naive --system vector-rag --compare
 ```
 
 ---
@@ -161,30 +161,46 @@ Measured at the commit this document landed in. Python 3.13.14, macOS arm64, `nu
 
 | System | Overall | current_state | temporal | knowledge_time | contradiction | provenance | retrieval | irrelevance |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| memvara 0.9.0 | **92.0%** | 100.0% | **100.0%** | 100.0% | 100.0% | 100.0% | 64.3% | 50.0% |
+| memvara-anchored 0.11.3 | **94.0%** | 100.0% | **100.0%** | 100.0% | 100.0% | 100.0% | 64.3% | **83.3%** |
+| memvara 0.11.3 | 92.0% | 100.0% | **100.0%** | 100.0% | 100.0% | 100.0% | 64.3% | 50.0% |
 | vector-rag 1.0 | 89.0% | 100.0% | 91.5% | 100.0% | 100.0% | 100.0% | **71.4%** | 50.0% |
 | naive 1.0 | 50.0% | 100.0% | 34.0% | 42.9% | 60.0% | 54.5% | 64.3% | 50.0% |
 
+`memvara` is the library's shipped defaults. `memvara-anchored` is the same library with
+two switches on — `anchored` and the graph leg — and it is a separate system here rather
+than a replacement for the row above, so that a number somebody has already quoted keeps
+meaning what it meant. [What the two switches do](#the-two-switches-and-what-they-buy)
+says which one buys what, and neither is a default the package can pick for a store it
+cannot see.
+
+The `memvara` and `memvara-anchored` rows were measured at 0.11.3; the two baselines are
+unchanged since they were written. Re-running the three original systems at 0.11.3
+reproduced every figure in this table exactly, which is why only the version label moved.
+
 By category:
 
-| Category | memvara | vector-rag | naive | n |
-|---|---:|---:|---:|---:|
-| current_state | 100.0% | 100.0% | 100.0% | 10 |
-| historical_state | **100.0%** | 85.2% | 33.3% | 27 |
-| change_detection | 100.0% | 100.0% | 27.3% | 11 |
-| change_time | 100.0% | 100.0% | 44.4% | 9 |
-| knowledge_time | 100.0% | 100.0% | 42.9% | 7 |
-| provenance | 100.0% | 100.0% | 54.5% | 11 |
-| contradiction | 100.0% | 100.0% | 60.0% | 5 |
-| multi_hop | 16.7% | **33.3%** | **33.3%** | 6 |
-| distractor | 100.0% | 100.0% | 87.5% | 8 |
-| negative | 50.0% | 50.0% | 50.0% | 6 |
+| Category | memvara | memvara-anchored | vector-rag | naive | n |
+|---|---:|---:|---:|---:|---:|
+| current_state | 100.0% | 100.0% | 100.0% | 100.0% | 10 |
+| historical_state | **100.0%** | **100.0%** | 85.2% | 33.3% | 27 |
+| change_detection | 100.0% | 100.0% | 100.0% | 27.3% | 11 |
+| change_time | 100.0% | 100.0% | 100.0% | 44.4% | 9 |
+| knowledge_time | 100.0% | 100.0% | 100.0% | 42.9% | 7 |
+| provenance | 100.0% | 100.0% | 100.0% | 54.5% | 11 |
+| contradiction | 100.0% | 100.0% | 100.0% | 60.0% | 5 |
+| multi_hop | 16.7% | 16.7% | **33.3%** | **33.3%** | 6 |
+| distractor | 100.0% | 100.0% | 100.0% | 87.5% | 8 |
+| negative | 50.0% | **83.3%** | 50.0% | 50.0% | 6 |
+
+`negative` is the only row that moves between the two memvara configurations. Every other
+row is identical, including the two memvara loses.
 
 Cost and latency from the same runs:
 
 | System | LLM calls | texts embedded | rows stored | write, per event | query, mean | query p95 |
 |---|---:|---:|---:|---:|---:|---:|
 | memvara | 0 | 520 | 241 | 0.8 – 2.9 ms | 0.9 – 2.6 ms | 2 – 15 ms |
+| memvara-anchored | 0 | 536 | 241 | 0.8 – 2.9 ms | 0.9 – 2.6 ms | 2 – 15 ms |
 | vector-rag | 0 | 279 | 262 | 0.02 – 0.25 ms | 0.09 – 0.51 ms | 0.3 – 1.5 ms |
 | naive | 0 | 0 | **193** | 0.007 – 0.016 ms | 0.02 – 0.03 ms | 0.1 – 0.2 ms |
 
@@ -276,20 +292,43 @@ does. memvara ships `neighborhood()` and `paths_between()` and this adapter uses
 A graph-aware adapter would very likely do better — nobody has measured that, so nothing
 here claims it.
 
-**One dimension currently discriminates nothing.** All three systems score 50% on
-`irrelevance`, failing the same three questions the same way: asked about a fact they were
-never told, each answers from the nearest match instead of abstaining. That row describes
-a shared gap in the field rather than a difference between these systems, and until either
-a system improves or the questions get harder it carries no information.
+**One dimension used to discriminate nothing, and one system now moves it.** At their
+default settings all three systems score 50% on `irrelevance`, failing the same three
+questions the same way: asked about a fact they were never told, each answers from the
+nearest match instead of abstaining. That is a shared gap in the field rather than a
+difference between the systems, and it is what the fourth row above changes.
 
-memvara has since grown the way to abstain, and this table does not show it because the
-adapter does not use it. `search(anchored=True)` returns only the rows the question names
-an entity of, or that the graph leg reached from one; with the adapter passing that flag,
-`irrelevance` measures 5/6 at both the shipped configuration and `read_w_graph=1.0`, and
-overall 93.0% and 94.0%. At the shipped defaults it also costs one `multi_hop` question
-that plain search answered by vocabulary alone, which the graph leg recovers. The
-adapter is left as published so that the row above stays comparable across the three
-systems; `docs/BENCHMARKS.md` in the repository carries the measurement.
+### The two switches, and what they buy
+
+`memvara-anchored` is the library with `anchored=True` on every read and the graph leg at
+`read_w_graph=1.0`. It scores 83.3% on `irrelevance`, 5 of the 6 questions about facts the
+store was never told, and 94.0% overall. Nothing else in the table moves: `retrieval` stays
+64.3%, `multi_hop` stays 16.7%, and the two categories memvara loses it still loses.
+
+**Anchoring is what abstains.** `search(anchored=True)` keeps only the rows whose subject
+or object the question names, or that the graph leg reached by walking out of such a row.
+*Where does Oscar live* returns nothing, because no stored row is about Oscar. *Which
+region is Project Chronos deployed to* returns nothing, because "project" alone does not
+name `Project Atlas` — and that is the question the benchmark singled out, since the wrong
+answer scores 0.450 and outranks two genuine ones, so no score threshold reaches it. The
+third question is correctly not caught: the store does hold rows about the reporting
+service, and telling those from an answer about its authentication strategy is a judgement
+about the predicate, which anchoring does not make.
+
+**The graph leg is what pays for it.** Switched on alone it changes nothing here. Its job
+in this pair is one question anchoring would otherwise lose: *in which city is Bob's
+employer headquartered* is answered by a fact about Globex, which shares no entity with the
+question, so anchoring discards it — and the walk out of Bob reaches the same fact through
+`works_at`, marks it as reached by a path, and the filter keeps it.
+
+**What anchoring costs is a question that names nothing.** It also drops a memory the
+question names only by a paraphrase of its subject, which is why it is a separate system
+here and not the shipped default: whether the trade is right depends on whether your
+questions name entities, and no package can answer that about a store it cannot see.
+
+**`multi_hop` still discriminates nothing, and neither switch touches it.** The answer is
+already retrieved — rank 1 for the Atlas question — and the adapter takes the top-ranked
+slot and stops. That row is the adapter's to change, not the read path's.
 
 **These numbers replace an earlier set, and the reason is worth reading.** An earlier run
 had memvara at 90.0% overall and 50.0% on `retrieval`. Investigating that loss found two
@@ -313,7 +352,7 @@ git clone https://github.com/memvara/memvara && cd memvara
 pip install -e .
 
 # the table above
-python -m benchmarks.agent_memory --system memvara --system naive --system vector-rag --compare
+python -m benchmarks.agent_memory --system memvara --system memvara-anchored --system naive --system vector-rag --compare
 
 # every wrong answer, with the fact's real history beside it
 python -m benchmarks.agent_memory --system memvara --show-failures
