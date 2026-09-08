@@ -83,12 +83,24 @@ undoes a closure that crossed the boundary, and writes a dated `ENTITY_REKEY` re
 `memvara/store/sqlite.py:653` already gates traversal on `polarity > 0`, both keys non-empty,
 and subject differing from object. A typed walk needs the declaration, not the plumbing.
 
+### What has been built since
+
+Step 2 of the sequence — the predicate schema fields — is implemented in pull request #200,
+which adds `subject_type`, `object_type`, `graph`, `inverse`, `inverse_cardinality` and
+`traversal_cost` to `PredicateSpec`, along with `objects_are_entities` and the persistence
+that keeps a declaration alive across a restart. Section 4 below describes that step as
+proposed, which is what it was when this document was written; read it as the specification
+that pull request implements rather than as work still outstanding.
+
 ## The store today
 
-`memory_stats` against tenant `prj_3c04449a3d9947f7b9bbbafb1d51d052` reports 1416 live claims
-and a **join rate of 0.6%** — 8 claims whose object is the subject of another claim.
+`memory_stats` against tenant `prj_3c04449a3d9947f7b9bbbafb1d51d052` on 2026-09-08 reported
+1416 live claims and a **join rate of 0.6%** — 8 claims whose object is the subject of another
+claim. The live-claim count drifts, because the store is written to continuously; a re-run the
+same afternoon read 1441. The number that matters is the second one, and it does not drift:
+**8 joinable, in both readings.** Connectivity is not slowly improving on its own.
 
-`Memvara.connectivity()` at `memvara/core.py:3354` records the comparison the graph leg was
+`Memvara.connectivity()` at `memvara/core.py:3353` records the comparison the graph leg was
 measured against: on a 40.6%-joinable corpus the leg gains 13 points on chained questions, and
 on a 0.0%-joinable one it loses 1.6. At 0.6% the leg runs and returns nothing.
 
@@ -98,7 +110,7 @@ Three subject conventions are live at once, and none knows about the others.
 |---|---|---|
 | `user` | the model, through `memory_remember` | `user prefers_prose plain` |
 | the git remote's basename | the capture hook, via `project_subject()` at `plugin/hooks/lib/extract.py:267` | `memvara-cloud deploys_to fly.io` |
-| `project:<absolute path>` | the model, following the note at `plugin/hooks/recall.py:622` | `project:/Applications/workstation/agent-memory uses postgres` |
+| `project:<absolute path>` | the model, following the note at `plugin/hooks/recall.py:618` | `project:/Applications/workstation/agent-memory uses postgres` |
 
 The third is per-machine and per-worktree, so it is unstable as well as wrong.
 
@@ -687,8 +699,14 @@ those fields, so the pack depended on a later step. The order below fixes it.
    decision 3 every 2Wiki object becomes a VALUE and the corpus drops from 40.6% joinable to
    zero. Without the pack the primary regression test reports that the graph leg stopped
    working, correctly and for reasons unrelated to whether this design is good.
-4. **Entity representation** — the `object_kind` column and the `subject_type` /
-   `object_type` columns on claims (decisions 1 and 2), with the `fact_key` rehash they imply.
+4. **Entity representation and the slot key** — the `object_kind` column and the
+   `subject_type` / `object_type` columns on claims (decisions 1 and 2), with the `fact_key`
+   rehash they imply. **This step also takes the `Scope` shape change from decision 4**, even
+   though nothing uses the project element until item 12. `fact_key` is
+   `content_hash(owner_key(scope), …)`, so the scope shape and the entity type feed the same
+   hash; splitting them across two steps would rehash the whole table twice, which is the
+   cost decision 4 exists to avoid. What lands later is the traversal policy and the
+   configuration channel, not the key.
 5. **Object classification** — predicate-declared, undeclared defaults to VALUE (decision 3).
 6. **Entity resolution boundary** — `EntityCandidate`, resolution confidence, provenance
    (sections 2 and 8).
@@ -700,10 +718,11 @@ those fields, so the pack depended on a later step. The order below fixes it.
 10. **The adversarial corpus**, ingested through `add()` so classification and resolution
     actually run (decision 6).
 11. **Shadow promotion** (decision 5), which needs items 1 and 10 before it means anything.
-12. **Project scope** (decision 4) — the fifth `Scope` element, the traversal policy, and the
-    configuration channel the hosted plugin lacks.
+12. **Project scope behaviour** (decision 4) — the traversal policy and the configuration
+    channel the hosted plugin lacks. The fifth `Scope` element itself lands at item 4, with
+    the other half of the one rehash; this item is what starts using it.
 13. **Migration and rollout** (section 11), including retiring `project:<absolute path>` and
-    fixing the note at `plugin/hooks/recall.py:622`.
+    fixing the note at `plugin/hooks/recall.py:618`.
 14. **Typed disambiguation** (section 9).
 
 ## The six decisions
