@@ -604,3 +604,73 @@ class TestTwoWikiPack:
         offenders = [s.name for s in self._specs().values()
                      if s.cardinality is not Cardinality.MANY]
         assert offenders == [], offenders
+
+
+@needs_toml
+class TestPredicateAudit:
+    """`bench.predicate_audit.audit`, which encodes decision 3's classification rule.
+
+    Tested despite living in `bench/` — which coverage does not measure and pytest does not
+    collect by default — because its first version got this wrong in the direction that
+    hides the answer. It reported declared-as-value and undeclared together, so a pack that
+    covered every relation still showed a large "gap" made entirely of dates it had
+    deliberately declared as values. The counts here are synthetic; the corpus measurement
+    is the script's job.
+    """
+
+    @staticmethod
+    def _audit(counts, pack_body: str | None, tmp_path):
+        import bench.predicate_audit as pa
+        from memvara.schema import BUILTIN_PREDICATES
+
+        specs = ()
+        if pack_body is not None:
+            path = tmp_path / "p.toml"
+            path.write_text(pack_body, encoding="utf-8")
+            specs = load_specs(str(path))
+        return pa.audit(counts, PredicateRegistry(BUILTIN_PREDICATES + specs))
+
+    def test_it_separates_declared_values_from_undeclared(self, tmp_path):
+        """The distinction the first version lost. Both carry no edge; only one is a gap."""
+        from collections import Counter
+
+        pack = ('[[predicate]]\nname="ships_on"\ncardinality="many"\nvolatility="static"\n'
+                'object_type=["value"]\n\n'
+                '[[predicate]]\nname="depends_on"\ncardinality="many"\nvolatility="slow"\n'
+                'object_type=["software"]\ngraph=true\n')
+        report = self._audit(Counter({"depends_on": 10, "ships_on": 5, "invented_by": 2}),
+                             pack, tmp_path)
+        assert report["declared"] == [("depends_on", 10)]
+        assert report["values"] == [("ships_on", 5)]
+        assert report["undeclared"] == [("invented_by", 2)]
+        assert report["entity_valued"] == 10
+        assert report["projected_share"] == 10 / 17
+
+    def test_an_undeclared_corpus_can_carry_no_edge_at_all(self, tmp_path):
+        """The measurement the whole step exists for, in miniature."""
+        from collections import Counter
+
+        report = self._audit(Counter({"director": 7, "mother": 3}), None, tmp_path)
+        assert report["declared"] == []
+        assert report["projected_share"] == 0.0
+        assert report["undeclared"] == [("director", 7), ("mother", 3)]
+
+    def test_a_relation_is_audited_under_the_name_it_is_stored_as(self, tmp_path):
+        """`bench/twowiki.py` folds every relation through the registry as it loads, so
+        auditing the raw spelling would report a working declaration as missing. This is the
+        alias case that made three of 2Wiki's relations look undeclared."""
+        from collections import Counter
+
+        pack = ('[[predicate]]\nname="born_in"\ncardinality="many"\nvolatility="static"\n'
+                'aliases=["birthplace","place_of_birth"]\n'
+                'object_type=["place"]\ngraph=true\n')
+        report = self._audit(Counter({"place_of_birth": 9}), pack, tmp_path)
+        assert report["declared"] == [("place_of_birth", 9)]
+        assert report["undeclared"] == []
+
+    def test_an_empty_corpus_does_not_divide_by_zero(self, tmp_path):
+        from collections import Counter
+
+        report = self._audit(Counter(), None, tmp_path)
+        assert report["projected_share"] == 0.0
+        assert report["asserted"] == 0
