@@ -326,6 +326,15 @@ question names only by a paraphrase of its subject, which is why it is a separat
 here and not the shipped default: whether the trade is right depends on whether your
 questions name entities, and no package can answer that about a store it cannot see.
 
+**Six negatives is a thin base, and they are ours.** Every question in this dataset was
+written here, so the `negative` row above rests on six cases of our own choosing.
+`bench/anchoring.py` in the same repository puts the same question to 332 negatives drawn
+from public data — held-out 2WikiMultihopQA questions naming no entity the store holds — and
+the two configurations separate completely there as well: the shipped one returns rows for
+every one of them, and anchoring returns rows for none, at three retrieval depths. That run
+is reported in [`docs/BENCHMARKS.md`](../BENCHMARKS.md), and it is the evidence to read if
+you find six questions too few to believe.
+
 **`multi_hop` still discriminates nothing, and neither switch touches it.** The answer is
 already retrieved — rank 1 for the Atlas question — and the adapter takes the top-ranked
 slot and stops. That row is the adapter's to change, not the read path's.

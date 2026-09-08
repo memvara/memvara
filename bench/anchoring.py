@@ -99,8 +99,9 @@ def negatives(held: Sequence[tw.Sample], stored: Sequence[tw.Sample]) -> list[tw
     side: it matches "Mark" inside "Denmark", and it misses "Atlas Project" for a key stored
     as "project atlas". Either disagreement puts questions in this set that the filter under
     test would have anchored, which moves the column this script exists to report. Measured
-    on the shipped split: the substring version admitted 1,018 negatives and the folded one
-    admits 332, and the extra 686 were questions the store could answer.
+    on the shipped split, the two rules disagree both ways and their sets are not nested:
+    substring matching called 698 questions negatives that the folded rule says name a
+    stored entity, and threw away 12 that it says do not. 1,018 negatives against 332.
 
     One branch of `anchor_of` is deliberately not mirrored. It also anchors a claim whose
     subject is the self subject, `user`, when the question uses a first-person pronoun, with

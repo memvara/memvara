@@ -231,7 +231,11 @@ than the total:
   and the third is correctly not caught: the store does hold rows about the entity that
   question names, so refusing it would be a judgement about the predicate rather than
   about the entity. `--system memvara` is left at the defaults so the like-for-like
-  comparison stays available, which is the reason the two are separate systems.
+  comparison stays available, which is the reason the two are separate systems. Six questions
+  is a thin base for that row and all six were written here, so `bench/anchoring.py` in the
+  same repository repeats the measurement against 332 negatives drawn from public data and
+  finds the same separation: the shipped configuration answers all of them, anchoring answers
+  none.
 - **`naive` scores 100% on current state.** It is not bad at memory. It is bad at *time*,
   and the benchmark's job is to say which.
 
