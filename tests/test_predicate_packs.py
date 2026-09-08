@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +27,10 @@ from memvara.schema import (BUILTIN_PREDICATES, Cardinality, PredicatePackError,
                             PredicateRegistry, PredicateSpec, Volatility,
                             available_packs, load_all_specs, load_specs)
 from memvara.server.config import ConfigError, ServerConfig, build_memvara
+
+#: Resolved from this file rather than the working directory, because pytest
+#: is run from wherever the caller happened to be.
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def _env(tmp_path, **extra):
@@ -505,3 +510,97 @@ class TestGraphDeclarationRefusals:
                 'graph_traversable=true\n')
         with pytest.raises(PredicatePackError, match="graph_traversable"):
             load_specs(_pack(tmp_path, body))
+
+
+# --- overriding a builtin, and the benchmark vocabulary -------------------------------
+
+
+@needs_toml
+def test_declaring_a_builtin_name_replaces_it_and_drops_its_aliases(tmp_path):
+    """The trap that cost a measurement to find, pinned so it cannot cost another.
+
+    A declared spec *replaces* the builtin of the same name rather than extending it, so an
+    override that omits `aliases` silently discards them. Declaring a bare `born_on` to give
+    it an `object_type` therefore stops `date_of_birth` folding onto it, and the relation it
+    was declared for goes from resolved to unknown *because* it was declared.
+
+    Nothing warns. The failure is a declaration that looks present in the file, resolves to
+    nothing at runtime, and shows up only as connectivity that never appears.
+    """
+    from memvara.schema import BUILTIN_PREDICATES
+
+    builtin, = [s for s in BUILTIN_PREDICATES if s.name == "born_on"]
+    assert "date_of_birth" in builtin.aliases, "fixture assumes the builtin carries it"
+
+    bare = tmp_path / "bare.toml"
+    bare.write_text('[[predicate]]\nname="born_on"\ncardinality="many"\n'
+                    'volatility="static"\nobject_type=["value"]\n', encoding="utf-8")
+    registry = PredicateRegistry(BUILTIN_PREDICATES + load_specs(str(bare)))
+    assert registry.normalize("date_of_birth") != "born_on", (
+        "if this now folds, the replace-not-extend behaviour changed and the twowiki pack's "
+        "repeated alias lists are no longer load-bearing")
+
+    kept = tmp_path / "kept.toml"
+    kept.write_text('[[predicate]]\nname="born_on"\ncardinality="many"\n'
+                    'volatility="static"\nobject_type=["value"]\n'
+                    'aliases=["birthday","date_of_birth","dob"]\n', encoding="utf-8")
+    restored = PredicateRegistry(BUILTIN_PREDICATES + load_specs(str(kept)))
+    assert restored.normalize("date_of_birth") == "born_on"
+    assert restored.spec("born_on").objects_are_entities is False
+
+
+@needs_toml
+class TestTwoWikiPack:
+    """`bench/packs/twowiki.toml`, which is a prerequisite rather than an enhancement.
+
+    Without it every one of 2WikiMultihopQA's 31,120 evidence triples is value-valued once
+    the classification rule reaches retrieval, and the graph benchmark reports that the graph
+    stopped working. These check the pack's shape; `bench/predicate_audit.py` is what checks
+    it against the corpus, and needs the dataset to do so.
+    """
+
+    @staticmethod
+    def _specs():
+        path = ROOT / "bench" / "packs" / "twowiki.toml"
+        assert path.is_file(), f"the benchmark vocabulary is missing from {path}"
+        return {s.name: s for s in load_specs(str(path))}
+
+    def test_it_loads_and_declares_every_relation_once(self):
+        specs = self._specs()
+        assert len(specs) == 34, "the corpus has 34 relations; the audit script counts them"
+
+    def test_the_date_relations_take_values_and_walk_nowhere(self):
+        """9,854 of the corpus's 31,120 triples, and the reason they are values is the whole
+        classification rule: declaring them entity-valued would connect every person born in
+        1935 to every work published in 1935."""
+        specs = self._specs()
+        for name in ("born_on", "date_of_death", "publication_date", "inception"):
+            assert specs[name].objects_are_entities is False, name
+            assert specs[name].graph is False, name
+
+    def test_every_traversable_relation_declares_an_entity_object(self):
+        specs = self._specs()
+        for spec in specs.values():
+            if spec.graph:
+                assert spec.objects_are_entities, spec.name
+
+    def test_the_three_overridden_builtins_keep_their_aliases(self):
+        """The pack replaces three builtins to give them an object_type. Replacing drops
+        aliases, and `bench/twowiki.py` folds every relation through the registry as it
+        loads, so without these the corpus spellings resolve to nothing."""
+        from memvara.schema import BUILTIN_PREDICATES
+
+        builtins = {s.name: s for s in BUILTIN_PREDICATES}
+        specs = self._specs()
+        for name in ("born_on", "born_in", "works_at"):
+            assert set(builtins[name].aliases) <= set(specs[name].aliases), (
+                f"{name} drops an alias its builtin carries; the corpus spelling for it "
+                "will resolve to nothing")
+
+    def test_nothing_supersedes(self):
+        """The corpus is a static set of gold evidence loaded in one pass, so a `one`
+        declaration would make a second true value retire the first and delete evidence the
+        benchmark scores its own recall against. A film has several directors."""
+        offenders = [s.name for s in self._specs().values()
+                     if s.cardinality is not Cardinality.MANY]
+        assert offenders == [], offenders

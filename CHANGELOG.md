@@ -11,6 +11,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`bench/predicate_audit.py` and `bench/packs/twowiki.toml`.** The audit reports which of a
+  corpus's relations a vocabulary declares, splitting them three ways: entity-valued,
+  declared-as-value, and undeclared. The first two both carry no graph edge and only the
+  third is a gap, so reporting them together would hide the only number that is actionable.
+  Measured against 2WikiMultihopQA, the 23 builtins declare none of its 34 Wikidata
+  relations, so under the classification rule above every one of its 31,120 evidence triples
+  becomes value-valued and the corpus goes from 40.6% joinable to zero. The pack closes that
+  to no gap and 68.3% of triples able to carry an edge; the remaining third is four date
+  relations that are values on purpose. Neither file ships in the wheel — a vocabulary about
+  Wikidata biography belongs to the benchmark, not to a user's store.
+
 - **A predicate can declare its graph behaviour.** `PredicateSpec` gains six
   declaration-only fields — `subject_type`, `object_type`, `graph`, `inverse`,
   `inverse_cardinality` and `traversal_cost` — and a TOML vocabulary can set all of them.
