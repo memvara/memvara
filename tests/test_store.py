@@ -2750,3 +2750,110 @@ def test_omittable_names_every_member_a_backend_may_actually_leave_out():
     from memvara.store.remote import RemoteStore
     for cls in (SQLiteStore, RemoteStore):
         assert not [m for m in members if not hasattr(cls, m)]
+
+
+# --- the predicate graph declaration ---------------------------------------------------
+
+
+_V9_PREDICATES = """
+CREATE TABLE predicates (
+    tenant TEXT NOT NULL, name TEXT NOT NULL, cardinality TEXT NOT NULL,
+    volatility TEXT NOT NULL, memory_type TEXT NOT NULL,
+    aliases TEXT NOT NULL DEFAULT '[]', supersedes TEXT NOT NULL DEFAULT '[]',
+    learned INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (tenant, name));
+INSERT INTO predicates VALUES ('t','works_at','one','slow','semantic','[]','[]',1);
+PRAGMA user_version = 9;
+"""
+
+
+def test_a_graph_declaration_survives_a_restart(tmp_path):
+    """The reason these columns exist at all.
+
+    `put_spec` persists whatever spec it is handed, and a *declared* predicate reaches it
+    whenever an alias is learned for one. Rehydration only protects a declared spec from a
+    persisted *learned* one, so a declared spec written back without its graph fields
+    would be reloaded as non-traversable and would overwrite the declaration. The store
+    would stop walking edges it walked yesterday, with no error and nothing in the file
+    saying why. Asserted on the whole spec rather than field by field, so a seventh field
+    added later cannot be forgotten here.
+    """
+    from memvara.schema import Cardinality, PredicateSpec, Volatility
+
+    path = str(tmp_path / "specs.db")
+    spec = PredicateSpec("depends_on", Cardinality.MANY, Volatility.SLOW,
+                         subject_type=("project",), object_type=("software",), graph=True,
+                         inverse="depended_on_by", inverse_cardinality=Cardinality.MANY,
+                         traversal_cost=0.5)
+    first = SQLiteStore(path)
+    first.put_spec(spec, "t")
+    first.close()
+
+    second = SQLiteStore(path)
+    try:
+        assert [s for s in second.all_specs("t") if s.name == "depends_on"] == [spec]
+    finally:
+        second.close()
+
+
+def test_a_spec_with_no_inverse_round_trips_as_none(tmp_path):
+    """The nullable half. Stored as SQL NULL rather than an empty string, because an
+    empty inverse and no inverse would otherwise be two spellings of one state."""
+    from memvara.schema import PredicateSpec
+
+    path = str(tmp_path / "plain.db")
+    spec = PredicateSpec("version", object_type=("value",), learned=True)
+    first = SQLiteStore(path)
+    first.put_spec(spec, "t")
+    first.close()
+
+    second = SQLiteStore(path)
+    try:
+        back, = [s for s in second.all_specs("t") if s.name == "version"]
+        assert back == spec
+        assert back.inverse is None and back.inverse_cardinality is None
+        assert back.objects_are_entities is False
+    finally:
+        second.close()
+
+
+def test_a_version_9_file_gains_the_columns_and_keeps_its_rows(tmp_path):
+    """Nothing is backfilled, and that is not an omission: these columns are declared by a
+    vocabulary rather than derived from anything the row already holds, so no function of
+    the existing columns could fill them. The defaults say "takes values, walks nowhere",
+    which is what an undeclared predicate means and the safe reading for a row whose pack
+    is no longer loaded."""
+    path = str(tmp_path / "old.db")
+    conn = sqlite3.connect(path)
+    conn.executescript(_V9_PREDICATES)
+    conn.commit()
+    conn.close()
+
+    store = SQLiteStore(path)
+    try:
+        columns = {r["name"] for r in store._db.execute("PRAGMA table_info(predicates)")}
+        assert {"subject_type", "object_type", "graph", "inverse",
+                "inverse_cardinality", "traversal_cost"} <= columns
+        assert int(store._db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
+
+        survivor, = [s for s in store.all_specs("t") if s.name == "works_at"]
+        assert survivor.learned is True
+        assert survivor.graph is False
+        assert survivor.objects_are_entities is False
+        assert survivor.traversal_cost == 1.0
+    finally:
+        store.close()
+
+
+def test_the_migration_is_a_no_op_on_a_fresh_file(tmp_path):
+    """Shape-driven like every migration here, so a brand-new database that already has
+    the columns from the schema passes through untouched. Running it twice is the test:
+    a second ALTER TABLE for a column that exists would raise."""
+    path = str(tmp_path / "fresh.db")
+    store = SQLiteStore(path)
+    try:
+        store._migrate_to_v10()
+        store._migrate_to_v10()
+        columns = {r["name"] for r in store._db.execute("PRAGMA table_info(predicates)")}
+        assert "traversal_cost" in columns
+    finally:
+        store.close()

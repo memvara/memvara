@@ -344,3 +344,164 @@ def test_the_events_pack_declares_no_quantity_predicates() -> None:
     thing, and the two would drift."""
     names = {s.name for s in load_specs("events")}
     assert not ({"distance", "duration", "cost", "weight", "count"} & names)
+
+
+# --- the graph declaration ------------------------------------------------------------
+#
+# A vocabulary is read once, at startup, by nobody. That makes every way for a pack to
+# look declarative and do nothing a silent failure, and it is why the loader refuses more
+# than it used to. These pin each refusal, and the classification rule the whole design
+# rests on: an undeclared predicate takes values, and a value carries no edge.
+
+
+def _pack(tmp_path, body: str):
+    path = tmp_path / "graph.toml"
+    path.write_text(body, encoding="utf-8")
+    return str(path)
+
+
+_TRAVERSABLE = """
+[[predicate]]
+name = "depends_on"
+cardinality = "many"
+volatility = "slow"
+subject_type = ["project", "software"]
+object_type = ["software", "service"]
+graph = true
+inverse = "depended_on_by"
+inverse_cardinality = "many"
+traversal_cost = 0.5
+"""
+
+
+class TestGraphDeclarationDefaults:
+    def test_a_spec_declares_no_graph_behaviour_unless_asked(self):
+        """The defaults are the classification rule, not merely empty values.
+
+        `objects_are_entities` is False here, which is what makes an undeclared predicate
+        take values. Connectivity is opt-in, and this is the line that makes it so.
+        """
+        spec = PredicateSpec(name="anything")
+        assert (spec.subject_type, spec.object_type) == ((), ())
+        assert spec.graph is False
+        assert spec.inverse is None and spec.inverse_cardinality is None
+        assert spec.traversal_cost == 1.0
+        assert spec.objects_are_entities is False
+
+    def test_every_builtin_takes_values(self):
+        """The 23 builtins predate the graph and declare nothing about it, so none of
+        them is traversable. Asserted because the opposite would be invisible: a builtin
+        that quietly resolved as entity-valued would put edges in every store on earth."""
+        assert not [s.name for s in BUILTIN_PREDICATES if s.objects_are_entities]
+        assert not [s.name for s in BUILTIN_PREDICATES if s.graph]
+
+    def test_a_mixed_object_type_resolves_to_values(self):
+        """`prefers` legitimately holds `postgresql` and `plain` alike, so its
+        declaration cannot decide per claim. The undecidable case takes the safe
+        direction: connectivity lost is recoverable by declaring more precisely, a false
+        join is not."""
+        spec = PredicateSpec(name="prefers", object_type=("software", "value"))
+        assert spec.objects_are_entities is False
+
+
+@needs_toml
+class TestGraphDeclarationLoading:
+    def test_a_pack_can_declare_every_graph_field(self, tmp_path):
+        spec, = load_specs(_pack(tmp_path, _TRAVERSABLE))
+        assert spec.subject_type == ("project", "software")
+        assert spec.object_type == ("software", "service")
+        assert spec.graph is True
+        assert spec.inverse == "depended_on_by"
+        assert spec.inverse_cardinality is Cardinality.MANY
+        assert spec.traversal_cost == 0.5
+        assert spec.objects_are_entities is True
+        assert spec.learned is False
+
+    def test_the_shipped_packs_still_load(self):
+        """They predate the graph fields and declare none of them. A loader that had made
+        any of the new keys required would fail here rather than in a deployment."""
+        for name in available_packs():
+            specs = load_specs(name)
+            assert specs
+            assert not any(s.graph for s in specs)
+
+
+@needs_toml
+class TestGraphDeclarationRefusals:
+    """Each of these is a pack that would otherwise load and do nothing."""
+
+    def test_graph_without_object_type_is_refused(self, tmp_path):
+        body = '[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\ngraph=true\n'
+        with pytest.raises(PredicatePackError, match="no object_type"):
+            load_specs(_pack(tmp_path, body))
+
+    def test_graph_with_a_value_object_is_refused(self, tmp_path):
+        """A scalar is not a thing to walk to, so `graph` and a value object type cannot
+        both be true. Left to resolve silently, this is the false-join failure the whole
+        classification rule exists to prevent."""
+        body = ('[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\n'
+                'graph=true\nobject_type=["software","value"]\n')
+        with pytest.raises(PredicatePackError, match="cannot both be true"):
+            load_specs(_pack(tmp_path, body))
+
+    def test_a_non_boolean_graph_is_refused(self, tmp_path):
+        body = ('[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\n'
+                'graph="yes"\n')
+        with pytest.raises(PredicatePackError, match="not a boolean"):
+            load_specs(_pack(tmp_path, body))
+
+    def test_an_inverse_without_its_cardinality_is_refused(self, tmp_path):
+        """The two sides are not symmetric — `owned_by` holds one value and `owns` holds
+        many — so a walk that assumed the forward cardinality would treat true facts as
+        competing answers to one question and end all but the last."""
+        body = ('[[predicate]]\nname="owned_by"\ncardinality="one"\nvolatility="slow"\n'
+                'inverse="owns"\n')
+        with pytest.raises(PredicatePackError, match="without inverse_cardinality"):
+            load_specs(_pack(tmp_path, body))
+
+    def test_an_inverse_cardinality_without_an_inverse_is_refused(self, tmp_path):
+        body = ('[[predicate]]\nname="x"\ncardinality="one"\nvolatility="slow"\n'
+                'inverse_cardinality="many"\n')
+        with pytest.raises(PredicatePackError, match="without an inverse"):
+            load_specs(_pack(tmp_path, body))
+
+    def test_an_empty_inverse_is_read_as_no_inverse(self, tmp_path):
+        body = ('[[predicate]]\nname="x"\ncardinality="one"\nvolatility="slow"\n'
+                'inverse="   "\n')
+        spec, = load_specs(_pack(tmp_path, body))
+        assert spec.inverse is None
+
+    @pytest.mark.parametrize("value", ['"heavy"', "true"])
+    def test_a_non_numeric_traversal_cost_is_refused(self, tmp_path, value):
+        """`true` is included because a bool is an int in Python, so a naive numeric check
+        would accept `traversal_cost = true` and store an edge weight of 1."""
+        body = ('[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\n'
+                f'traversal_cost={value}\n')
+        with pytest.raises(PredicatePackError, match="not a\n?\\s*number"):
+            load_specs(_pack(tmp_path, body))
+
+    @pytest.mark.parametrize("value", ["0", "-1.5"])
+    def test_a_non_positive_traversal_cost_is_refused(self, tmp_path, value):
+        body = ('[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\n'
+                f'traversal_cost={value}\n')
+        with pytest.raises(PredicatePackError, match="above zero"):
+            load_specs(_pack(tmp_path, body))
+
+    @pytest.mark.parametrize("key", ["object_type", "subject_type", "aliases",
+                                     "supersedes"])
+    def test_a_bare_string_where_a_list_belongs_is_refused(self, tmp_path, key):
+        """Wrapping it would be kinder for exactly one release, until somebody wrote
+        `aliases = "a, b"` and got one alias with a comma in it."""
+        body = ('[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\n'
+                f'{key}="software"\n')
+        with pytest.raises(PredicatePackError, match="takes a list of strings"):
+            load_specs(_pack(tmp_path, body))
+
+    def test_an_unrecognised_key_is_refused(self, tmp_path):
+        """The refusal this set exists for. `graph_traversable = true` is the plausible
+        typo, and ignoring it would leave the predicate non-traversable, the store with no
+        edges, and nothing anywhere saying why."""
+        body = ('[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\n'
+                'graph_traversable=true\n')
+        with pytest.raises(PredicatePackError, match="graph_traversable"):
+            load_specs(_pack(tmp_path, body))

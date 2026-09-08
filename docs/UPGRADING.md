@@ -7,6 +7,39 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Predicates can declare their graph behaviour
+
+### What changed
+
+`PredicateSpec` gains six declaration-only fields: `subject_type`, `object_type`, `graph`,
+`inverse`, `inverse_cardinality` and `traversal_cost`. A TOML vocabulary can set all six,
+and `PredicateSpec.objects_are_entities` reads `object_type` to say whether this
+predicate's objects name things or are scalars.
+
+`SCHEMA_VERSION` moves from 9 to 10, adding six columns to the `predicates` table. An older
+file upgrades in place on open.
+
+### Who this changes, and in which direction
+
+**Nothing about an existing store's behaviour changes.** The defaults mean "takes values,
+walks nowhere", which is exactly what every predicate meant before these fields existed,
+and nothing yet consumes them. No claim is touched and no migration backfills anything —
+these are declared by a vocabulary, not derived from data, so there is nothing to derive.
+
+**Your existing packs keep loading.** Every new key is optional. The shipped `engineering`,
+`decisions` and `events` packs declare none of them.
+
+**A pack with a key this version does not recognise now fails to load**, where it used to
+be ignored. That is the one behaviour change and it is deliberate: a pack is read once, at
+startup, by nobody, so a misspelled key is a declaration that silently does nothing. If a
+vocabulary of yours carried an extra key as a note to a reader, move it to a `#` comment.
+
+**A build older than this cannot open a file this one has upgraded.** The usual one-way
+schema door; the store refuses rather than corrupting. Take a copy first if you may need to
+roll back.
+
+---
+
 ## `MemoryAPI.recall` gains `valid_at`, the world clock
 
 ### What changed

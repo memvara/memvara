@@ -72,6 +72,16 @@ HALF_LIFE_DAYS: dict[Volatility, float] = {
     Volatility.FAST: 7.0,        # 1w
 }
 
+#: The object type meaning "a scalar, not a reference to a thing". A predicate whose
+#: `object_type` contains it takes values, and a value never forms a graph edge: `17` as
+#: a version must not connect to `17` as an age. Spelled as an ordinary type rather than
+#: a separate flag so that one field answers "what may this predicate's object be", and
+#: so a predicate that takes either — `prefers` holds `postgresql` and `plain` alike —
+#: says so in the same place. A declaration that mixes it with an entity type cannot
+#: decide per claim, so `objects_are_entities` reads the mixture as a value: connectivity
+#: lost is recoverable by declaring more precisely, a false join is not.
+VALUE_TYPE = "value"
+
 
 @dataclass(frozen=True, slots=True)
 class PredicateSpec:
@@ -85,6 +95,28 @@ class PredicateSpec:
     # retire `works_at` even though the predicate names differ.
     supersedes: tuple[str, ...] = ()
     learned: bool = False  # True if acquired at runtime rather than declared up front
+    # The graph declaration. All six are appended rather than inserted because callers
+    # build a spec positionally — `_p` below, and the store's row reader — and are
+    # declaration-only: nothing infers them, and a learned predicate leaves them at these
+    # defaults, which say "takes values, walks nowhere". That default is the safe
+    # direction. A predicate wrongly left non-traversable costs a join somebody can add
+    # later by declaring it; one wrongly made traversable connects claims that share a
+    # string, and degrades retrieval without ever reporting an error.
+    subject_type: tuple[str, ...] = ()
+    object_type: tuple[str, ...] = ()
+    graph: bool = False
+    inverse: str | None = None
+    #: Declared beside `inverse` because the two sides are not symmetric: `owned_by` holds
+    #: one value and `owns` holds many. A traversal that walked an inverse while assuming
+    #: the forward cardinality would treat several true facts as competing answers to one
+    #: question and end all but the last, so the pack loader refuses `inverse` without it.
+    inverse_cardinality: "Cardinality | None" = None
+    #: Room for edge strength in ranking, consumed by `retrieve/spread.rank_paths`.
+    #: Nothing weights by it yet; the field exists so that a vocabulary written now does
+    #: not have to be rewritten when weighting arrives. `depends_on` is a strong edge and
+    #: a hypothetical `mentioned` is a weak one, and no vocabulary that cannot say so can
+    #: express the difference.
+    traversal_cost: float = 1.0
 
     @property
     def half_life_days(self) -> float:
@@ -93,6 +125,27 @@ class PredicateSpec:
     @property
     def functional(self) -> bool:
         return self.cardinality is Cardinality.ONE
+
+    @property
+    def objects_are_entities(self) -> bool:
+        """Whether this predicate's objects name things, so a claim can carry an edge.
+
+        False for an undeclared predicate, which is the whole of the classification rule:
+        a predicate nothing has declared takes values. False too for a declaration that
+        mixes `VALUE_TYPE` with an entity type, because such a predicate cannot decide per
+        claim and the undecidable case resolves the safe way.
+
+        >>> PredicateSpec("depends_on", object_type=("software",)).objects_are_entities
+        True
+        >>> PredicateSpec("version", object_type=(VALUE_TYPE,)).objects_are_entities
+        False
+        >>> PredicateSpec("prefers").objects_are_entities
+        False
+        >>> PredicateSpec("prefers", object_type=("software", VALUE_TYPE)
+        ...               ).objects_are_entities
+        False
+        """
+        return bool(self.object_type) and VALUE_TYPE not in self.object_type
 
 
 def _p(
@@ -614,6 +667,95 @@ def _coerce_enum(enum: "type[Enum]", value: object, field: str, name: str) -> An
         ) from None
 
 
+#: Every key a `[[predicate]]` table may carry. An unrecognised key is refused rather
+#: than ignored, which is a change from the loader's first version and is the point of
+#: this set. A pack now declares graph behaviour, and a graph declaration that does
+#: nothing is invisible: writing `graph_traversable = true` instead of `graph = true`
+#: would leave the predicate non-traversable, the store with no edges, and nothing
+#: anywhere saying why. Refusing costs a typo one clear error; ignoring costs a silent
+#: zero somebody debugs from the other end.
+_PREDICATE_KEYS = frozenset({
+    "name", "cardinality", "volatility", "memory_type", "aliases", "supersedes",
+    "subject_type", "object_type", "graph", "inverse", "inverse_cardinality",
+    "traversal_cost",
+})
+
+
+def _string_tuple(entry: dict, key: str, name: str, path: Path) -> tuple[str, ...]:
+    """A list-of-strings field, refusing a bare string.
+
+    TOML makes `object_type = "software"` and `object_type = ["software"]` both easy to
+    write and only one of them right. Accepting the first by wrapping it would be kinder
+    for exactly one release, until somebody wrote `aliases = "a, b"` and got one alias
+    with a comma in it.
+    """
+    raw = entry.get(key, ())
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        raise PredicatePackError(
+            f"predicate {name!r} in {path} has {key}={raw!r}. It takes a list of "
+            f'strings, as in {key} = ["software", "service"].')
+    return tuple(str(item) for item in raw)
+
+
+def _graph_declaration(entry: dict, name: str, path: Path) -> dict:
+    """The five graph fields, checked against each other rather than only in isolation.
+
+    Each refusal here is a way for a pack to look declarative and do nothing, which is
+    the failure mode a vocabulary has that a code path does not: it is read once at
+    startup, by no one.
+    """
+    subject_type = _string_tuple(entry, "subject_type", name, path)
+    object_type = _string_tuple(entry, "object_type", name, path)
+    graph = entry.get("graph", False)
+    if not isinstance(graph, bool):
+        raise PredicatePackError(
+            f"predicate {name!r} in {path} has graph={graph!r}, which is not a boolean. "
+            "Write graph = true or graph = false.")
+
+    if graph and not object_type:
+        raise PredicatePackError(
+            f"predicate {name!r} in {path} declares graph = true but no object_type. A "
+            "traversable predicate has to say what its objects are, because an object "
+            "with no declared type is read as a value and a value carries no edge.")
+    if graph and VALUE_TYPE in object_type:
+        raise PredicatePackError(
+            f"predicate {name!r} in {path} declares graph = true and object_type "
+            f"containing {VALUE_TYPE!r}. A value is a scalar, not a thing to walk to, so "
+            "the two cannot both be true. Drop the value type, or drop graph.")
+
+    inverse = entry.get("inverse")
+    inverse = str(inverse).strip() if inverse is not None else None
+    inverse_cardinality = (
+        _coerce_enum(Cardinality, entry["inverse_cardinality"], "inverse_cardinality", name)
+        if "inverse_cardinality" in entry else None)
+    if inverse and inverse_cardinality is None:
+        raise PredicatePackError(
+            f"predicate {name!r} in {path} declares inverse={inverse!r} without "
+            "inverse_cardinality. The two sides are not symmetric — owned_by holds one "
+            "value and owns holds many — so a walk that assumed this predicate's own "
+            "cardinality would treat true facts as competing answers and end all but "
+            "the last.")
+    if inverse_cardinality is not None and not inverse:
+        raise PredicatePackError(
+            f"predicate {name!r} in {path} declares inverse_cardinality without an "
+            "inverse for it to describe.")
+
+    cost = entry.get("traversal_cost", 1.0)
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        raise PredicatePackError(
+            f"predicate {name!r} in {path} has traversal_cost={cost!r}, which is not a "
+            "number.")
+    if not cost > 0:
+        raise PredicatePackError(
+            f"predicate {name!r} in {path} has traversal_cost={cost!r}. It weights an "
+            "edge in ranking, so it has to be above zero; a zero or negative cost is a "
+            "way of spelling 'not traversable', which is what graph = false says.")
+
+    return {"subject_type": subject_type, "object_type": object_type, "graph": graph,
+            "inverse": inverse or None, "inverse_cardinality": inverse_cardinality,
+            "traversal_cost": float(cost)}
+
+
 def load_specs(source: str) -> tuple[PredicateSpec, ...]:
     """Read one declared vocabulary: a shipped pack name, or a path to a TOML file.
 
@@ -675,6 +817,14 @@ def load_specs(source: str) -> tuple[PredicateSpec, ...]:
                 "point of the file — an omitted field would silently take the "
                 "unregistered default this pack exists to replace.") from None
 
+        unknown = sorted(set(entry) - _PREDICATE_KEYS)
+        if unknown:
+            allowed = ", ".join(sorted(_PREDICATE_KEYS))
+            raise PredicatePackError(
+                f"predicate {name!r} in {path} has {', '.join(repr(k) for k in unknown)}, "
+                f"which this version does not understand. A key nothing reads is a "
+                f"declaration that silently does nothing. Known keys: {allowed}.")
+
         memory_type = (_coerce_enum(MemoryType, entry["memory_type"], "memory_type", name)
                        if "memory_type" in entry else MemoryType.SEMANTIC)
         specs.append(PredicateSpec(
@@ -682,12 +832,13 @@ def load_specs(source: str) -> tuple[PredicateSpec, ...]:
             cardinality=cardinality,
             volatility=volatility,
             memory_type=memory_type,
-            aliases=tuple(str(a) for a in entry.get("aliases", ())),
-            supersedes=tuple(str(s) for s in entry.get("supersedes", ())),
+            aliases=_string_tuple(entry, "aliases", name, path),
+            supersedes=_string_tuple(entry, "supersedes", name, path),
             # Declared, not learned. The distinction is load-bearing: `Memvara` refuses to
             # let a persisted *learned* spec overwrite a declared one, which is what makes
             # a pack able to correct a store that already guessed wrong.
             learned=False,
+            **_graph_declaration(entry, name, path),
         ))
     return tuple(specs)
 

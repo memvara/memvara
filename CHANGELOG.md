@@ -9,6 +9,48 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **A predicate can declare its graph behaviour.** `PredicateSpec` gains six
+  declaration-only fields — `subject_type`, `object_type`, `graph`, `inverse`,
+  `inverse_cardinality` and `traversal_cost` — and a TOML vocabulary can set all of them.
+  `PredicateSpec.objects_are_entities` reads `object_type` to say whether a predicate's
+  objects name things or are scalars, and it is False for any predicate nobody has
+  declared. That default is the classification rule rather than an empty value: a value
+  wrongly treated as an entity creates false joins that degrade retrieval invisibly, while
+  an entity wrongly treated as a value costs a join that a later declaration recovers.
+  Connectivity is therefore opt-in. The reserved object type `value` names a scalar, and a
+  declaration mixing it with an entity type resolves to a value, because such a predicate
+  cannot decide per claim.
+
+  `inverse_cardinality` is declared beside `inverse` rather than inferred, because the two
+  sides are not symmetric — `owned_by` holds one value and `owns` holds many — and a walk
+  that assumed the forward cardinality would treat several true facts as competing answers
+  to one question and end all but the last.
+
+  Nothing consumes these yet. They exist first so that a vocabulary written now does not
+  have to be rewritten later, and because everything that declares anything needs them to
+  exist before it can be written. `SCHEMA_VERSION` moves from 9 to 10 to persist them:
+  `put_spec` stores whatever spec it is handed, a *declared* predicate reaches it whenever
+  an alias is learned for one, and rehydration only protects a declared spec from a
+  persisted *learned* one. Without the columns, a graph declaration would be dropped on
+  that write and the next start would rehydrate the predicate as non-traversable — a store
+  that quietly stops walking edges it walked yesterday. Nothing is backfilled, because
+  these are declared rather than derived and no function of the existing columns could
+  fill them.
+
+### Changed
+
+- **A predicate vocabulary with an unrecognised key is now refused rather than ignored.**
+  A pack is read once, at startup, by nobody, so a key nothing reads is a declaration that
+  silently does nothing — `graph_traversable = true` instead of `graph = true` would leave
+  the predicate non-traversable, the store with no edges, and nothing anywhere saying why.
+  The same reasoning refuses `graph = true` without an `object_type` or with a `value`
+  object type, a `traversal_cost` at or below zero, an `inverse` without its cardinality,
+  and a bare string where a list of strings belongs. Every shipped pack still loads, and
+  every new key is optional. If one of your vocabularies carries an extra key as a note to
+  a reader, move it to a `#` comment.
+
 ### Fixed
 
 - **A model that hits its token limit mid-answer now fails the write instead of silently
