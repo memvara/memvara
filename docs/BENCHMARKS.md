@@ -704,10 +704,11 @@ competing facts.
 subject or object key, every content token present — or that the graph leg reached by
 walking out of such a row, and `Explanation.anchor` reports which on every result
 (`memvara/retrieve/anchor.py`). It is the answer to the `irrelevance` half of
-[#129](https://github.com/memvara/memvara/issues/129), and it is measured here rather than
-in the published table because the shipped adapter does not set the flag; the rows below
-come from the same adapter with one keyword added to its `search()` call, over dataset v1,
-byte-identical on repeat.
+[#129](https://github.com/memvara/memvara/issues/129). The rows below come from the same
+adapter at four settings of the two switches, over dataset v1, byte-identical on repeat.
+The bottom row is now published as its own system, `--system memvara-anchored`, beside the
+default one — `--system memvara` still means the library's shipped defaults, so the number
+somebody may already have quoted keeps meaning what it meant.
 
 ```
   configuration                 overall  retrieval  irrelevance  multi_hop  negative
@@ -735,6 +736,13 @@ same row and marks it `"path"`, so the filter keeps it. That is the shape the tw
 of the issue share: on a negative "the top hit is not about what you asked" means *never
 told*, and on a chain it means *one more hop*, and the path anchor is what tells them
 apart.
+
+A deployment can now reach that bottom row without writing Python. `MEMVARA_ANCHORED=1`
+makes `anchored` the default on the three read tools of an MCP server, and
+`MEMVARA_READ_W_GRAPH=1.0` switches on the leg that pays for it; before those existed both
+switches were constructor arguments, so every MCP deployment — the hosted product included
+— ran the top row and had no way not to. `docs/DEPLOY.md` has the operator's version of
+the trade.
 
 `multi_hop` does not move from anything in the read path, and the issue's own measurement
 says why: the answer is already retrieved — rank 1 for the Atlas question at the shipped

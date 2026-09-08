@@ -62,8 +62,10 @@ mode. `MEMVARA_TENANT`, `MEMVARA_USER`, `MEMVARA_AGENT` and `MEMVARA_SESSION` bi
 `MEMVARA_LLM_TERSE_CLAIMS`, `MEMVARA_LLM_EXTRACT_SYSTEM` and `MEMVARA_LLM_EXTRA_BODY`
 variables tuning it. `MEMVARA_EMBEDDER` chooses the embedder. `MEMVARA_PREDICATES` loads
 declared vocabularies. `MEMVARA_READ_ONLY` hides every tool that writes.
-`MEMVARA_ADVISE_REPLACEMENTS` turns on replacement advice. `MEMVARA_API_KEY` and
-`MEMVARA_SERVER_URL` are the cloud credentials.
+`MEMVARA_ADVISE_REPLACEMENTS` turns on replacement advice. `MEMVARA_ANCHORED` makes
+`anchored` the default on the three read tools, and `MEMVARA_READ_W_GRAPH` sets the weight
+on the graph leg of retrieval — the two settings that decide how this server reads, both
+off by default. `MEMVARA_API_KEY` and `MEMVARA_SERVER_URL` are the cloud credentials.
 
 ## Invariants and assumptions
 

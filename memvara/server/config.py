@@ -14,6 +14,7 @@ failed launch and the message below immediately.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -193,6 +194,27 @@ class ServerConfig:
     #: alone — which is what every server-backed store had before this field existed,
     #: and why a predicate outside them accumulated instead of superseding.
     predicates: str = ""
+    #: Weight on the graph leg of retrieval, which walks out of the entities the vector
+    #: and lexical legs just named. `Memvara(read_w_graph=...)` has always taken it and no
+    #: deployment could set it, because an MCP client launches this server with an
+    #: environment block and nothing else.
+    #:
+    #: It ships at 0.0, which is the configuration every deployment has been running.
+    #: What the leg is worth depends on how much graph the store holds, and
+    #: `docs/BENCHMARKS.md` measures the two directions: on relationship questions over a
+    #: store full of extracted relations it is worth a great deal, and on a store whose
+    #: writes extract almost nothing it is inert. A store that holds no relations pays
+    #: nothing for switching it on, because the walk does not run when there is nothing
+    #: to walk.
+    read_w_graph: float = 0.0
+    #: Make `anchored` true by default on this server's three read tools, so a question
+    #: the store has nothing about returns nothing instead of the nearest memory about
+    #: somebody else. Each call can still pass `anchored` itself, either way.
+    #:
+    #: Off by default, because anchoring also drops a memory a question names only by a
+    #: paraphrase of its subject, and whether that trade is right depends on what the
+    #: deployment's questions look like. `docs/BENCHMARKS.md` measures both sides of it.
+    anchored: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ServerConfig":
@@ -285,6 +307,8 @@ class ServerConfig:
             server_url=server_url,
             api_key=api_key,
             predicates=predicates,
+            read_w_graph=_weight(env.get("MEMVARA_READ_W_GRAPH")),
+            anchored=_flag(env.get("MEMVARA_ANCHORED"), "MEMVARA_ANCHORED"),
         )
 
     @property
@@ -493,6 +517,39 @@ def _flag(raw: str | None, name: str) -> bool:
         f"{', '.join(sorted(_TRUE))} or {', '.join(sorted(_FALSE - {''}))}.")
 
 
+def _weight(raw: str | None) -> float:
+    """A finite weight of zero or more, or 0.0 when nobody set one.
+
+    Refused rather than clamped or ignored, like every other setting here: a typo that
+    fell back to 0.0 would leave an operator believing they had switched the graph leg on
+    and reading a report that says it changed nothing.
+
+    `nan` and `inf` are refused by name because `float()` accepts both and each breaks
+    the fusion arithmetic in a way no error would report. `inf` puts every walked claim
+    ahead of everything the other legs found; `nan` makes every comparison false, so the
+    ranking quietly becomes the order the candidates happened to arrive in.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return 0.0
+    # NaN stands for "did not parse" as well as for the literal word, because all three
+    # rejections earn the same sentence and `math.isfinite` already has to run. The ASCII
+    # check comes first because `float()` reads Arabic-indic and every other decimal digit
+    # Unicode defines, so "\u0661" would be accepted as 1.0 — and a setting nobody can grep
+    # for is a paste accident rather than a choice.
+    try:
+        value = float(text) if text.isascii() else float("nan")
+    except ValueError:
+        value = float("nan")
+    if not math.isfinite(value) or value < 0:
+        raise ConfigError(
+            f"MEMVARA_READ_W_GRAPH={raw!r} is not a weight. Give a finite number of zero "
+            "or more: 0 switches the graph leg off, which is the default, and 1.0 gives "
+            "it the same weight as the vector and lexical legs. See docs/BENCHMARKS.md "
+            "for what it is worth on a store that holds relations.")
+    return value
+
+
 def _anthropic() -> Any:
     # Imported here so the default offline configuration never touches the optional SDK.
     from ..llm.anthropic import AnthropicLLM
@@ -633,6 +690,7 @@ _SERVER_SIDE_UNDER_CLOUD = (
     ("llm_max_tokens", None, "MEMVARA_LLM_MAX_TOKENS", "response budget"),
     ("llm_extra_body", None, "MEMVARA_LLM_EXTRA_BODY", "request body"),
     ("advise_replacements", False, "MEMVARA_ADVISE_REPLACEMENTS", "replacement advice"),
+    ("read_w_graph", 0.0, "MEMVARA_READ_W_GRAPH", "retriever"),
 )
 
 
@@ -706,5 +764,10 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         # pinned to the builtins and everything outside them accumulated silently.
         registry=_registry(config),
         advise_replacements=config.advise_replacements,
+        # Explicit at its own default, like `llm` and `embedder` above and for a related
+        # reason: this is the one line that says which retrieval legs this store reads
+        # with, and a reader of this function should not have to know that
+        # `HybridRetriever`'s own default happens to agree.
+        read_w_graph=config.read_w_graph,
         **config.scope_kwargs,
     )

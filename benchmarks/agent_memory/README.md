@@ -3,7 +3,7 @@
 A reproducible test of whether a memory system gets **changing** facts right.
 
 ```bash
-python -m benchmarks.agent_memory --system memvara --system naive --system vector-rag --compare
+python -m benchmarks.agent_memory --system memvara --system memvara-anchored --system naive --system vector-rag --compare
 ```
 
 Offline, no API key, no download, about a second per system. The dataset is committed
@@ -170,7 +170,8 @@ another repository is benchmarked without forking this one.
 |---|---|
 | `naive` | A dictionary of current values, overwritten on each write, with the source kept beside it. What most agent memory actually is. |
 | `vector-rag` | Retrieval over the whole write log, with **one clock**. Keeps every observation, indexes each sentence, and answers a question about a past instant with the most recent write it had received by then. The strongest baseline that is not bitemporal. |
-| `memvara` | This repository's library, through its public API — `remember()`, `history()`, `search()`, `why()`. |
+| `memvara` | This repository's library at its shipped defaults, through its public API — `remember()`, `history()`, `search()`, `why()`. |
+| `memvara-anchored` | The same library and the same adapter, with two switches on: `anchored=True` on every read, and the graph leg at `read_w_graph=1.0`. A separate system rather than a change to the row above, so a published number keeps meaning what it meant. |
 
 Neither baseline is a strawman. `vector-rag` gets current state, provenance, change time
 and knowledge time completely right, and reconstructs history correctly wherever a fact was
@@ -223,13 +224,14 @@ than the total:
   ships `neighborhood()` and `paths_between()` and this adapter uses neither. A
   graph-aware adapter would very likely do better; nobody has measured that, so nothing
   here claims it.
-- **`irrelevance` is 50% for all three, so it currently discriminates nothing.** Every
-  system answers the three open negative questions from the nearest match rather than
-  abstaining. That is a real and shared failure — memvara's own `search()` documentation
-  warns about exactly it — and a category where three systems tie is not yet earning its
-  place. See *Limitations*. memvara's `search(anchored=True)` can now abstain, and this
-  adapter deliberately does not pass it, so the row stays a like-for-like comparison;
-  `docs/BENCHMARKS.md` in the repository carries what it measures with the flag set.
+- **`irrelevance` is 50% at every system's defaults, and one configuration moves it.**
+  Each system answers the three open negative questions from the nearest match rather than
+  abstaining — a real and shared failure, which memvara's own `search()` documentation
+  warns about. `--system memvara-anchored` scores 83.3% there, catching two of the three,
+  and the third is correctly not caught: the store does hold rows about the entity that
+  question names, so refusing it would be a judgement about the predicate rather than
+  about the entity. `--system memvara` is left at the defaults so the like-for-like
+  comparison stays available, which is the reason the two are separate systems.
 - **`naive` scores 100% on current state.** It is not bad at memory. It is bad at *time*,
   and the benchmark's job is to say which.
 
@@ -336,7 +338,7 @@ for and are missing rather than declined:
 
 ```bash
 # everything, all three systems, side by side
-python -m benchmarks.agent_memory --system memvara --system naive --system vector-rag --compare
+python -m benchmarks.agent_memory --system memvara --system memvara-anchored --system naive --system vector-rag --compare
 
 # fast enough to run while you work: 40 questions, spread across all ten categories
 python -m benchmarks.agent_memory --system memvara --quick

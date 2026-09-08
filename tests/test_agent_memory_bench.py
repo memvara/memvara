@@ -480,7 +480,8 @@ def test_dimension_totals_add_up_to_the_overall_total(data):
 
 # --- the adapter interface --------------------------------------------------
 
-@pytest.mark.parametrize("name", ["naive", "vector-rag", "memvara"])
+@pytest.mark.parametrize("name",
+                         ["naive", "vector-rag", "memvara", "memvara-anchored"])
 def test_every_shipped_adapter_satisfies_the_protocol(name):
     system = registry.build(name)
     try:
@@ -488,6 +489,28 @@ def test_every_shipped_adapter_satisfies_the_protocol(name):
         assert isinstance(system.name, str) and isinstance(system.version, str)
     finally:
         system.close()
+
+
+def test_the_two_memvara_systems_are_told_apart_by_the_name_they_record():
+    """The result file records `system`, and the published tables have a row for each of
+    these. Two configurations that both called themselves "memvara" would be
+    indistinguishable in a saved result, which is the one thing a benchmark's output has
+    to survive.
+
+    `--system memvara` is the library's shipped defaults and must stay that way: it is the
+    number other systems are compared against, and a published result whose meaning
+    changed underneath it is worse than no result.
+    """
+    default = registry.build("memvara")
+    anchored = registry.build("memvara-anchored")
+    try:
+        assert default.name == "memvara"
+        assert anchored.name == "memvara-anchored"
+        assert (default._anchored, default._w_graph) == (False, 0.0)
+        assert (anchored._anchored, anchored._w_graph) == (True, 1.0)
+    finally:
+        default.close()
+        anchored.close()
 
 
 #: `four` was wrong in five documents at once, propagated out of `adapters/base.py`'s

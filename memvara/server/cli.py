@@ -63,6 +63,17 @@ client, not run interactively. Configured entirely by environment:
                      ship with the package; see docs/INTERNALS.md for the file
                      format. Needs Python 3.11+, where tomllib arrives.
   MEMVARA_READ_ONLY   '1' to hide every tool that writes.
+  MEMVARA_READ_W_GRAPH  weight on the graph leg of retrieval, which walks out of
+                     the entities the other legs just named. Unset means 0.0, the
+                     leg off, which is what every deployment has run. 1.0 gives it
+                     the same weight as the vector and lexical legs. A store with
+                     no relations in it pays nothing for switching it on.
+  MEMVARA_ANCHORED    '1' to answer only from memories the question is demonstrably
+                     about, by default, on all three read tools. A question about
+                     an entity this store has never heard of then returns nothing
+                     rather than the nearest memory about somebody else. Each call
+                     can still pass anchored itself. See docs/DEPLOY.md for what it
+                     costs on a question that names no entity.
 
 The scope above is bound at startup and cannot be changed by a tool call, which is
 what stops a model reaching another user's memory.
@@ -164,7 +175,8 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
               "than editing code. See docs/DEPLOY.md.", file=err)
         return 2
 
-    server = MemvaraMCPServer(memory, read_only=config.read_only, **config.scope_kwargs)
+    server = MemvaraMCPServer(memory, read_only=config.read_only,
+                              anchored=config.anchored, **config.scope_kwargs)
     try:
         server.serve(sys.stdin if stdin is None else stdin, out)
     finally:

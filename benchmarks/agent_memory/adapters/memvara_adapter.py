@@ -92,9 +92,21 @@ class MemvaraMemory:
     name = "memvara"
     version = memvara_version
 
-    def __init__(self, path: str = ":memory:", user: str = "benchmark") -> None:
+    def __init__(self, path: str = ":memory:", user: str = "benchmark", *,
+                 anchored: bool = False, w_graph: float = 0.0) -> None:
         self._path = path
         self._user = user
+        #: Both off here, so `--system memvara` is the library's shipped defaults and the
+        #: published row keeps meaning what it has always meant. `--system
+        #: memvara-anchored` sets both; `build_anchored` below says what that measures
+        #: and why it is a second row rather than a change to this one.
+        self._anchored = anchored
+        self._w_graph = w_graph
+        #: Overrides the class attribute when either switch is on, because the result
+        #: file records this string and two runs of different configurations that both
+        #: called themselves "memvara" could not be told apart afterwards.
+        if anchored or w_graph:
+            self.name = "memvara-anchored"
         self._mem: Memvara | None = None
         self._single: dict[str, bool] = {}
         self._embedder: _CountingEmbedder | None = None
@@ -120,7 +132,8 @@ class MemvaraMemory:
         # extract from, only structured facts to record.
         self._embedder = _CountingEmbedder(HashingEmbedder(dim=EMBED_DIM))
         self._mem = Memvara(self._path, user=self._user, registry=registry,
-                            embedder=self._embedder, llm=NullLLM())
+                            embedder=self._embedder, llm=NullLLM(),
+                            read_w_graph=self._w_graph)
         self._reads = 0
 
     # -- write --------------------------------------------------------------
@@ -173,7 +186,8 @@ class MemvaraMemory:
         """
         past = ask.known_at is not None or ask.at < ask.evaluated_at
         states = ["live", "ended", "retired"] if past else None
-        hits = self.mem.search(question, k=SEARCH_K, states=states)
+        hits = self.mem.search(question, k=SEARCH_K, states=states,
+                               anchored=self._anchored)
         return (hits[0].claim.subject, hits[0].claim.predicate) if hits else None
 
     def _first_source(self, claim: Claim) -> str | None:
@@ -291,3 +305,27 @@ class MemvaraMemory:
 
 def build(**kwargs: object) -> MemvaraMemory:
     return MemvaraMemory(**kwargs)  # type: ignore[arg-type]
+
+
+def build_anchored(**kwargs: object) -> MemvaraMemory:
+    """memvara with anchoring and the graph leg on, as a system of its own.
+
+    This is a second row rather than a change to the one above, and the reason is what
+    the benchmark is for. `--system memvara` has to keep meaning the library's shipped
+    defaults, because that is the number a reader compares against another system and a
+    result whose meaning changed underneath it is worse than no result. This configuration
+    is the one an application should choose when a wrong entity is worse than no answer,
+    and `docs/BENCHMARKS.md` measures it: overall 92.0% to 94.0%, and `irrelevance` 50.0%
+    to 83.3%, because the store stops answering questions about people it has never heard
+    of from the nearest memory about somebody else.
+
+    Both switches are needed and neither is enough. Anchoring alone costs a point of
+    `retrieval` — it discards a lucky hit on a question whose answer shares no entity with
+    it — and the walk earns that point back by reaching the same row through the entity
+    the question does name. Turning the graph leg on alone changes nothing here.
+    """
+    # The ignore sits on the `**kwargs` line because that is the argument mypy objects to:
+    # `build`'s signature widens every keyword to `object`, which cannot satisfy `path: str`.
+    # `build` above carries the same ignore for the same reason.
+    return MemvaraMemory(anchored=True, w_graph=1.0,
+                         **kwargs)  # type: ignore[arg-type]
