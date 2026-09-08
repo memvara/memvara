@@ -668,37 +668,43 @@ silently create a supersession.
 
 ## Sequenced changes
 
-Nothing depends on anything later in the list. None of it is written.
+Nothing depends on anything later in the list.
 
-1. **Benchmark harness, and a predicate pack for every benchmark corpus.** The pack is a
-   prerequisite, not a nicety: `BUILTIN_PREDICATES` holds 23 personal-assistant predicates and
-   none of 2Wiki's Wikidata relations — `director`, `mother`, `spouse`, `composer` are all
-   undeclared — so under decision 3 every 2Wiki object becomes a VALUE and the corpus drops
-   from 40.6% joinable to zero. Without the pack the primary regression test reports that the
-   graph leg stopped working, correctly and for reasons unrelated to whether this design is
-   good. Gold path labels, entity-collision counting and the baseline connectivity numbers
-   belong here too. First, because otherwise several major pieces get built with no way to
-   attribute an improvement or a regression to any of them.
-2. **Entity representation** — the `object_kind` column and the `subject_type` / `object_type`
-   columns (decisions 1 and 2), with the `fact_key` rehash they imply.
-3. **Predicate schema fields** — `graph`, `inverse` with both cardinalities, `traversal_cost`
-   (section 4).
-4. **Object classification** — predicate-declared, undeclared defaults to VALUE (decision 3).
-5. **Entity resolution boundary** — `EntityCandidate`, resolution confidence, provenance
+An earlier draft of this list had step 1 writing a predicate pack for the benchmark corpora.
+That was wrong: a pack cannot declare `object_type` or `graph` until `PredicateSpec` carries
+those fields, so the pack depended on a later step. The order below fixes it.
+
+1. **Baseline measurement and the harness.** Record connectivity before anything changes,
+   and build the gold-path labelling and entity-collision counting that decision 6 needs.
+   This depends on nothing and must come first, because otherwise several major pieces get
+   built with no way to attribute an improvement or a regression to any of them.
+2. **Predicate schema fields** — `subject_type`, `object_type`, `graph`, `inverse` with both
+   sides' cardinality, and `traversal_cost` (section 4). Depends on nothing. Everything that
+   declares anything needs these to exist first.
+3. **A predicate pack for every benchmark corpus.** A prerequisite, not a nicety:
+   `BUILTIN_PREDICATES` holds 23 personal-assistant predicates and none of 2Wiki's Wikidata
+   relations — `director`, `mother`, `spouse`, `composer` are all undeclared — so under
+   decision 3 every 2Wiki object becomes a VALUE and the corpus drops from 40.6% joinable to
+   zero. Without the pack the primary regression test reports that the graph leg stopped
+   working, correctly and for reasons unrelated to whether this design is good.
+4. **Entity representation** — the `object_kind` column and the `subject_type` /
+   `object_type` columns on claims (decisions 1 and 2), with the `fact_key` rehash they imply.
+5. **Object classification** — predicate-declared, undeclared defaults to VALUE (decision 3).
+6. **Entity resolution boundary** — `EntityCandidate`, resolution confidence, provenance
    (sections 2 and 8).
-6. **Server-side invariants** (section 10), which items 2 to 5 make expressible.
-7. **Canonical project identity**, with host-specific case rules (section 7).
-8. **Tool description and packaged skill** (`memvara/server/tools.py:337`,
+7. **Server-side invariants** (section 10), which items 2 to 6 make expressible.
+8. **Canonical project identity**, with host-specific case rules (section 7).
+9. **Tool description and packaged skill** (`memvara/server/tools.py:337`,
    `memvara/skills/memvara/SKILL.md`). Cheap and effective, but guidance only, and
    deliberately after the enforcement it complements.
-9. **The adversarial corpus**, ingested through `add()` so classification and resolution
-   actually run (decision 6).
-10. **Shadow promotion** (decision 5), which needs items 1 and 9 before it means anything.
-11. **Project scope** (decision 4) — the fifth `Scope` element, the traversal policy, and the
+10. **The adversarial corpus**, ingested through `add()` so classification and resolution
+    actually run (decision 6).
+11. **Shadow promotion** (decision 5), which needs items 1 and 10 before it means anything.
+12. **Project scope** (decision 4) — the fifth `Scope` element, the traversal policy, and the
     configuration channel the hosted plugin lacks.
-12. **Migration and rollout** (section 11), including retiring `project:<absolute path>` and
+13. **Migration and rollout** (section 11), including retiring `project:<absolute path>` and
     fixing the note at `plugin/hooks/recall.py:622`.
-13. **Typed disambiguation** (section 9).
+14. **Typed disambiguation** (section 9).
 
 ## The six decisions
 
