@@ -293,9 +293,14 @@ per deployment rather than turning it on and off.
 `MEMVARA_LLM_MODEL`, `MEMVARA_LLM_MAX_CLAIMS`, `MEMVARA_LLM_EXTRACT_SYSTEM`,
 `MEMVARA_LLM_TERSE_CLAIMS`, `MEMVARA_LLM_MAX_TOKENS` and `MEMVARA_LLM_EXTRA_BODY` apply
 to the `openai` backend only. Under `MEMVARA_MODE=cloud` all six are refused outright,
-along with `MEMVARA_LLM`, `MEMVARA_EMBEDDER` and `MEMVARA_ADVISE_REPLACEMENTS`: extraction
-and replacement advice run inside the deployment, so a value named here would be read and
-never used.
+along with `MEMVARA_LLM`, `MEMVARA_EMBEDDER`, `MEMVARA_ADVISE_REPLACEMENTS` and
+`MEMVARA_READ_W_GRAPH`: extraction, replacement advice and retrieval all run inside the
+deployment, so a value named here would be read and never used.
+
+`MEMVARA_ANCHORED` is the exception, and it works under `MEMVARA_MODE=cloud` like any other
+mode. It is not a setting the deployment holds: it changes the default on an argument this
+process sends with each call, and the hosted facade takes that argument the same way a local
+store does.
 
 ### Bounding a runaway
 

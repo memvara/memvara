@@ -4463,6 +4463,33 @@ def test_cloud_mode_refuses_the_graph_weight():
         build_memvara(cloud)
 
 
+def test_cloud_mode_accepts_anchoring_and_it_reaches_the_deployment():
+    """The mirror of the graph weight's refusal, and the asymmetry is the point.
+
+    `read_w_graph` configures a retriever that exists only in the local engine, so naming it
+    under cloud mode is refused. `anchored` is an argument this process sends with each
+    call, and the hosted facade takes it exactly as a local store does, so it must be
+    accepted here rather than refused by symmetry. Without this test, adding `anchored` to
+    `_SERVER_SIDE_UNDER_CLOUD` — the obvious-looking tidy-up — would silently take
+    anchoring away from every cloud deployment, and every other test would still pass.
+    """
+    cloud = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
+                                   "MEMVARA_ANCHORED": "1"})
+    assert cloud.anchored is True
+    import inspect
+
+    from memvara.remote.api import RemoteMemvara
+
+    memory = build_memvara(cloud)          # refusing this is the regression guarded against
+    try:
+        assert isinstance(memory, RemoteMemvara)
+        # The other half of the claim: the facade takes the argument, so the setting is
+        # not merely accepted here and then dropped on the way out.
+        assert "anchored" in inspect.signature(memory.search).parameters
+    finally:
+        memory.close()
+
+
 def test_a_deployment_can_make_anchoring_the_default():
     """`anchored` was reachable only when the model remembered to pass it, which on the
     question it exists for is exactly when the model has no reason to.
@@ -4499,6 +4526,37 @@ def test_a_call_can_still_widen_a_server_that_anchors_by_default():
                                 {"query": "where does Oscar live", "anchored": False})
     finally:
         srv.close()
+
+
+def test_a_fourth_anchored_tool_without_replacement_text_is_a_startup_error():
+    """The failure this guard replaces is the silent one, and it is the exact defect
+    `anchoring_by_default` exists to prevent.
+
+    A tool that grows an `anchored` argument and has no description written for a server
+    that anchors by default would otherwise pass through untouched: it would keep telling
+    a model the default is false while the server applies true. Nothing downstream can
+    detect that, because the description is read by a model rather than by a person. The
+    error names the tool instead.
+    """
+    from memvara.server.tools import anchoring_by_default
+
+    grown = replace(TOOLS[0], name="memory_elsewhere",
+                    properties={"anchored": {"type": "boolean", "default": False}})
+    with pytest.raises(KeyError, match="memory_elsewhere"):
+        anchoring_by_default((grown,))
+
+
+def test_a_tool_that_does_not_take_anchored_is_handed_back_unchanged():
+    """Most of the table has no `anchored` argument, and the rewrite must not touch it —
+    identity, so a reader can see that nothing was copied."""
+    from memvara.server.tools import anchoring_by_default
+
+    untouched = [t for t in TOOLS if "anchored" not in t.properties]
+    assert untouched, "the table should still hold tools that do not anchor"
+    rewritten = anchoring_by_default(TOOLS)
+    for before in untouched:
+        after = next(t for t in rewritten if t.name == before.name)
+        assert after is before
 
 
 def test_a_server_that_anchors_by_default_says_so_in_the_tool_it_offers():

@@ -160,7 +160,6 @@ class MemvaraMCPServer:
             memory=_bind(memory, tenant=tenant, user=user, agent=agent, session=session),
             extractor=extractor,
             read_only=self.read_only,
-            anchored=anchored,
         )
         #: Fixed at startup, because that is when the deployment's answer is known — and
         #: `self.read_only` rather than the `read_only` argument, so a read-only credential
@@ -168,10 +167,15 @@ class MemvaraMCPServer:
         #: hides its write tools rather than listing and refusing them: a tool a model can
         #: see is a tool it will spend a turn calling, and "you may not" teaches it nothing
         #: it can act on. A 403 from the deployment teaches it even less.
-        #: `anchoring_by_default` first, so the `anchored` argument a model reads is
-        #: described with the default this server will actually apply. Fixed at startup
-        #: like the read-only filter below it, and for the same reason: both are
-        #: decisions the operator made before the first tool call.
+        #: `anchoring_by_default` rewrites the `anchored` argument's schema, and that
+        #: schema is the whole mechanism: `validate` fills a declared default before the
+        #: handler runs, so a table saying `"default": True` is what makes an unqualified
+        #: call anchor. Carrying the flag on `ToolContext` as well was tried and removed —
+        #: it never ran, because `validate` had already filled the argument, and
+        #: `validate.py` says why that is the right shape: a default documented in one
+        #: place and implemented in another is a default that eventually disagrees with
+        #: itself. Fixed at startup like the read-only filter below it, and for the same
+        #: reason: both are decisions the operator made before the first tool call.
         self._tools: dict[str, Tool] = {
             t.name: t
             for t in (anchoring_by_default(TOOLS) if anchored else TOOLS)

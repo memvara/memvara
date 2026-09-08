@@ -203,11 +203,6 @@ class ToolContext:
     memory: MemoryAPI
     extractor: str = "unknown"
     read_only: bool = False
-    #: What `anchored` means when a call does not say. False is the behaviour every
-    #: deployment had before `MEMVARA_ANCHORED` existed; a server that sets it true is
-    #: one whose operator decided that answering about the wrong entity is worse than
-    #: not answering, and every call can still pass `anchored` itself either way.
-    anchored: bool = False
 
 
 Handler = Callable[[ToolContext, dict[str, Any]], str]
@@ -222,13 +217,26 @@ def anchoring_by_default(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
     opposite of what will happen. `TOOLS` stays a module constant and this returns a new
     tuple, because the default belongs to one server and the table is shared.
     """
-    swapped = {id(_ANCHORED): _ANCHORED_ON, id(_ANCHORED_ASK): _ANCHORED_ASK_ON}
-    return tuple(
-        replace(tool, properties={
-            name: swapped.get(id(spec), spec) for name, spec in tool.properties.items()
-        }) if any(id(spec) in swapped for spec in tool.properties.values()) else tool
-        for tool in tools
-    )
+    swapped = {"memory_search": _ANCHORED_ON, "memory_recall": _ANCHORED_ON,
+               "memory_ask": _ANCHORED_ASK_ON}
+    rewritten = []
+    for tool in tools:
+        if "anchored" not in tool.properties:
+            rewritten.append(tool)
+            continue
+        if tool.name not in swapped:
+            # A fourth tool grew an `anchored` argument and nobody added its replacement
+            # text. Raised rather than passed through, because passing it through is the
+            # silent version of the defect this function exists to prevent: the tool
+            # would keep offering a description that says the default is false while the
+            # server applies true. A startup error names the tool; a wrong description
+            # names nothing and is read by a model rather than a person.
+            raise KeyError(
+                f"{tool.name} takes `anchored` and has no description for a server that "
+                "anchors by default. Add one beside _ANCHORED_ON and name it here.")
+        rewritten.append(replace(
+            tool, properties={**tool.properties, "anchored": swapped[tool.name]}))
+    return tuple(rewritten)
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,19 +296,45 @@ _MIN_SCORE = {
     ),
 }
 
+#: What anchoring *is*, written once for each of the two tools that offer it, because the
+#: same sentence has to reach a model whether the server's default is true or false. The
+#: advice that follows it differs — on a server that anchors by default the decision in
+#: front of the caller is when to widen, not when to narrow — but the mechanism does not,
+#: and two copies of one sentence is two copies that can disagree. Nothing checks prose in
+#: these dicts, so the way to keep them from drifting is to have one of them.
+_ANCHORING = (
+    "Return only memories the query is demonstrably about: a memory whose subject or "
+    "object the query names, or one reached by walking the graph out of such a memory. "
+)
+
+#: The same sentence for `memory_ask`, which returns readings about fact slots rather than
+#: a list of memories, and has no `min_score` to combine with.
+_ANCHORING_ASK = (
+    "Answer only from fact slots the question is demonstrably about: a slot whose "
+    "subject or object the question names, or one reached by walking the graph out "
+    "of such a slot. "
+)
+
+#: The paraphrase case, which is the whole cost of anchoring and is worth the same words
+#: in both directions: a caller deciding whether to switch it on and a caller deciding
+#: whether to switch it off are weighing one thing.
+_PARAPHRASE = (
+    "a memory the query names only by a paraphrase of its subject ('the coverage "
+    "threshold' for a memory filed under coverage_gate)"
+)
+
+_COMBINES = "It needs no number, unlike min_score, and the two can be combined."
+
 _ANCHORED = {
     "type": "boolean",
     "default": False,
     "description": (
-        "Return only memories the query is demonstrably about: a memory whose subject or "
-        "object the query names, or one reached by walking the graph out of such a memory. "
+        _ANCHORING +
         "Default false. Set it when a wrong entity is worse than no answer — a question "
         "about a specific person, service or ticket — because without it the store answers "
         "a question about a stranger from the nearest memory about somebody else, at a "
-        "relevance that looks like any other match. It needs no number, unlike min_score, "
-        "and the two can be combined. It also drops a memory the query names only by a "
-        "paraphrase of its subject ('the coverage threshold' for a memory filed under "
-        "coverage_gate), so leave it off for a topic-style question that names nothing "
+        "relevance that looks like any other match. " + _COMBINES + " It also drops " +
+        _PARAPHRASE + ", so leave it off for a topic-style question that names nothing "
         "in particular."
     ),
 }
@@ -329,15 +363,12 @@ _RANKED = {
     ),
 }
 
-#: The same switch on `memory_ask`, described for a tool that returns readings about
-#: fact slots rather than a list of memories, and that has no `min_score` to combine with.
 _ANCHORED_ASK = {
     "type": "boolean",
     "default": False,
     "description": (
-        "Answer only from fact slots the question is demonstrably about: a slot whose "
-        "subject or object the question names, or one reached by walking the graph out "
-        "of such a slot. Default false. Set it when a wrong entity is worse than no "
+        _ANCHORING_ASK +
+        "Default false. Set it when a wrong entity is worse than no "
         "answer — a question about a specific person, service or ticket — because "
         "without it a question about an entity this store has never heard of is still "
         "narrated, confidently, from the nearest slot it has. With it that question "
@@ -346,23 +377,19 @@ _ANCHORED_ASK = {
     ),
 }
 
-#: What the two dicts above become on a server whose operator set `MEMVARA_ANCHORED`.
-#: Written out rather than substituted into, because the sentence a model needs is not
-#: the same one with a word swapped: on a server that anchors by default the decision in
-#: front of the caller is when to *widen*, and that is the advice these say.
+#: What the two dicts above become on a server whose operator set `MEMVARA_ANCHORED`. The
+#: advice is written out rather than substituted into, because the sentence a model needs
+#: is not the same one with a word swapped: here the decision in front of the caller is
+#: when to *widen*.
 _ANCHORED_ON = {
     "type": "boolean",
     "default": True,
     "description": (
-        "Return only memories the query is demonstrably about: a memory whose subject or "
-        "object the query names, or one reached by walking the graph out of such a "
-        "memory. Default true on this server. Leave it alone for a question about a "
+        _ANCHORING +
+        "Default true on this server. Leave it alone for a question about a "
         "specific person, service or ticket, where a memory about a stranger is worse "
         "than no answer. Pass false to widen a topic-style question that names nothing "
-        "in particular, because anchoring also drops a memory the query names only by a "
-        "paraphrase of its subject ('the coverage threshold' for a memory filed under "
-        "coverage_gate). It needs no number, unlike min_score, and the two can be "
-        "combined."
+        "in particular, because anchoring also drops " + _PARAPHRASE + ". " + _COMBINES
     ),
 }
 
@@ -371,9 +398,8 @@ _ANCHORED_ASK_ON = {
     "type": "boolean",
     "default": True,
     "description": (
-        "Answer only from fact slots the question is demonstrably about: a slot whose "
-        "subject or object the question names, or one reached by walking the graph out "
-        "of such a slot. Default true on this server. Leave it alone for a question "
+        _ANCHORING_ASK +
+        "Default true on this server. Leave it alone for a question "
         "about a specific person, service or ticket: without anchoring, a question about "
         "an entity this store has never heard of is still narrated, confidently, from "
         "the nearest slot it has. Pass false for a topic-style question, because "
@@ -517,7 +543,7 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
         args["query"],
         k=args["k"],
         min_score=args["min_score"],
-        anchored=bool(args.get("anchored", ctx.anchored)),
+        anchored=bool(args.get("anchored", False)),
         memory_types=_memory_types(args.get("memory_types")),
         as_of=_timestamp(as_of, "memory_search.as_of") if as_of is not None else None,
         valid_at=(_timestamp(valid_at, "memory_search.valid_at")
@@ -574,7 +600,7 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             args["query"],
             k=args["k"],
             min_score=args["min_score"],
-            anchored=bool(args.get("anchored", ctx.anchored)),
+            anchored=bool(args.get("anchored", False)),
             ranked=bool(args.get("ranked", False)),
             memory_types=_memory_types(args.get("memory_types")),
             budget=args.get("budget"),
@@ -732,7 +758,7 @@ def _ask(ctx: ToolContext, args: dict[str, Any]) -> str:
     answer = ctx.memory.ask(
         args["question"],
         at=_timestamp(at, "memory_ask.at") if at is not None else None,
-        k=args["k"], anchored=bool(args.get("anchored", ctx.anchored)))
+        k=args["k"], anchored=bool(args.get("anchored", False)))
     if not answer.readings:
         return (f"Nothing in this scope matches: {safe_line(args['question'])}. "
                 "memory_search with a shorter query will say whether the store holds "

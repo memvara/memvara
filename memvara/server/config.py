@@ -14,6 +14,7 @@ failed launch and the message below immediately.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -531,14 +532,16 @@ def _weight(raw: str | None) -> float:
     text = (raw or "").strip()
     if not text:
         return 0.0
+    # NaN stands for "did not parse" as well as for the literal word, because all three
+    # rejections earn the same sentence and `math.isfinite` already has to run. The ASCII
+    # check comes first because `float()` reads Arabic-indic and every other decimal digit
+    # Unicode defines, so "\u0661" would be accepted as 1.0 — and a setting nobody can grep
+    # for is a paste accident rather than a choice.
     try:
-        # ASCII first, then `float()`. `float()` reads Arabic-indic and every other
-        # decimal digit Unicode defines, so "\u0661" would be accepted as 1.0 — and a
-        # setting nobody can grep for is a paste accident rather than a choice.
         value = float(text) if text.isascii() else float("nan")
     except ValueError:
         value = float("nan")
-    if not (value == value and value not in (float("inf"), float("-inf")) and value >= 0):
+    if not math.isfinite(value) or value < 0:
         raise ConfigError(
             f"MEMVARA_READ_W_GRAPH={raw!r} is not a weight. Give a finite number of zero "
             "or more: 0 switches the graph leg off, which is the default, and 1.0 gives "
