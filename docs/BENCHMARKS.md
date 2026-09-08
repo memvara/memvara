@@ -764,24 +764,26 @@ not hold. One filter keeps that honest: 2Wiki reuses entities heavily, so a held
 counts as a negative only when it names no entity the store holds at all — refusing a question
 about somebody the store knows would be wrong rather than right.
 
-3,000 questions ingested, 1,000 of them scored for cost, 1,018 negatives. Identical on repeat.
+3,000 questions ingested, 1,000 of them scored for cost, 332 negatives. Every arm reads at a
+pinned instant, and the table is identical on repeat.
 
 ```
-  configuration              k   answer found   correctly silent
-  shipped                    5          49.9%               0.0%
-  shipped                   12          55.5%               0.0%
-  shipped                   25          57.6%               0.0%
-  anchored                   5          39.0%              50.6%
-  anchored                  12          39.1%              46.8%
-  anchored                  25          39.1%              42.0%
-  anchored + graph leg       5          53.8%              50.6%
-  anchored + graph leg      12          53.9%              46.8%
-  anchored + graph leg      25          54.1%              42.0%
+  configuration          k  answer found  correctly silent
+  shipped                5         49.8%              0.0%
+  shipped               12         55.3%              0.0%
+  shipped               25         57.6%              0.0%
+  anchored               5         39.0%            100.0%
+  anchored              12         39.1%            100.0%
+  anchored              25         39.1%            100.0%
+  anchored + graph leg   5         53.8%            100.0%
+  anchored + graph leg  12         53.9%            100.0%
+  anchored + graph leg  25         54.1%            100.0%
 ```
 
-**The shipped configuration is silent on none of them, at any depth.** It returns rows for
-every one of the 1,018 questions it was never told the answer to, at relevances that look like
-any other match. That is the behaviour anchoring exists to change, and this is the first
+**The shipped configuration is silent on none of them, and anchoring is silent on all of
+them.** Every one of the 332 questions the store was never told the answer to comes back with
+rows by default, at relevances that look like any other match; with `anchored` set, none of
+them does. That is the behaviour anchoring exists to produce, and this is the first
 measurement of it on questions written by somebody else.
 
 **Anchoring alone costs about a sixth of the legitimate answers**, and the graph leg pays most
@@ -797,10 +799,19 @@ what `memory_stats` calls a star, and what one user's own sentences produce — 
 nowhere to go and pays nothing back. A deployment should read its own join rate before reading
 these numbers as advice, which is why neither setting ships on.
 
-The abstention column falls as `k` rises, from 50.6% at k=5 to 42.0% at k=25, because a deeper
-read gives more rows a chance to satisfy the anchor. It never approaches 100%: a question that
-names an entity the store holds but asks about an attribute it does not is not caught here,
-and anchoring is not the mechanism that would catch it.
+**100% is a statement about this filter, not about abstention in general.** These negatives
+name no entity the store holds, which is the case anchoring is built to catch and the reason
+it catches all of them at every depth. The case it does not catch is a question that names an
+entity the store *does* hold and asks about an attribute it does not — the reporting service's
+authentication strategy, in the Agent Memory Benchmark's wording. Nothing here measures that,
+and anchoring is not the mechanism that would answer it.
+
+An earlier version of this table read 42.0% to 50.6% instead, from a negative set of 1,018.
+That filter decided "the question names this entity" by substring, where the mechanism it was
+measuring folds the entity to a key and requires every word of the key to appear as a token.
+The looser rule let 686 answerable questions into the negative set; they anchored, returned
+rows, and were counted as failures to abstain. `negatives()` now calls the same
+`entity_key` / `key_words` / `query_tokens` path that `anchor_of` does.
 
 ### The temporal leg, and the abstention that is the actual finding
 

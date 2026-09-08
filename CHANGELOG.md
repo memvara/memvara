@@ -66,6 +66,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   is worth depends on how much graph a store holds and whether anchoring is right depends
   on whether the questions name entities. `docs/DEPLOY.md` has the trade in full.
 
+- **`bench/anchoring.py` measures anchoring against negatives this repository did not
+  write.** The case for `anchored` rested on six negative questions in the Agent Memory
+  Benchmark, all six of them ours. This script draws 332 from public data instead, by
+  ingesting half of 2WikiMultihopQA and keeping the held-out questions that name no entity
+  the store holds. The shipped configuration returns rows for every one of them; anchoring
+  returns rows for none. It decides "names" by the same `entity_key` / `key_words` /
+  `query_tokens` path `anchor_of` uses, because a substring test disagrees with that rule in
+  both directions and moves the number the script exists to report.
+
 - **`--system memvara-anchored` publishes that configuration in the Agent Memory
   Benchmark.** Same library, same adapter, the two switches on. It is a system of its own
   rather than a change to `--system memvara`, which still means the library's shipped

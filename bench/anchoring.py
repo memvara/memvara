@@ -25,10 +25,10 @@ names no entity the store holds at all.
 ## What the two columns mean
 
 `answer found` is `twowiki._found`'s answer criterion over questions whose facts *are*
-stored: the cost of anchoring, in legitimate answers it drops.
+stored. It is the cost of anchoring: the legitimate answers the filter drops.
 
-`correctly silent` is the share of negatives that return no rows: the buy, in questions it
-stops answering from the nearest match.
+`correctly silent` is the share of negatives that return no rows. It is what anchoring buys:
+the questions the store stops answering from the nearest row it happens to hold.
 
 ## The finding, and the condition on it
 
@@ -58,36 +58,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import evalkit as ek                                          # noqa: E402
 import twowiki as tw                                          # noqa: E402
-from memvara import HashingEmbedder, Memvara, NullLLM         # noqa: E402
+from memvara import Memvara                                   # noqa: E402
+from memvara.entities import entity_key, key_words            # noqa: E402
+from memvara.retrieve.anchor import query_tokens              # noqa: E402
+from memvara.retrieve.hybrid import HybridRetriever           # noqa: E402
 
 #: The depths `twowiki.py` reports, so the two arms can be read side by side.
 DEPTHS = (5, 12, 25)
 
-#: Below this length an entity name matches too much prose to mean anything: "de" and
-#: "of" appear in most questions, and a negative filtered on those would filter everything.
-MIN_ENTITY_CHARS = 4
+def reader(mem: Memvara, *, w_graph: float) -> HybridRetriever:
+    """A retriever over the ingested store, differing only in the graph weight.
 
-
-def build(samples: Sequence[tw.Sample], *, w_graph: float) -> Memvara:
-    """`twowiki.ingest`, with the retrieval configuration a deployment would set.
-
-    Built per configuration rather than mutated between passes: `read_w_graph` is a
-    constructor argument, and reaching into the retriever afterwards would measure
-    something no deployment can ask for.
+    One store and two readers rather than one store per arm, which is how
+    `bench/twowiki.py` measures its own arms: `w_graph` is a retriever argument, so a
+    second ingest would re-pay the corpus to change a number the retriever holds. The
+    traverser is borrowed from `mem` so the walk is bounded exactly as `neighborhood()`'s
+    is, rather than being a differently-configured copy of it.
     """
-    mem = Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=tw.DIM),
-                  tenant="2wiki", user="reader", read_w_graph=w_graph)
-    seen: set[tuple[str, str, str]] = set()
-    with mem.store.batch():
-        for sample in samples:
-            for triple in sample.triples:
-                if triple in seen:
-                    continue
-                seen.add(triple)
-                mem.remember(*triple, valid_from=tw.WRITTEN_AT, recorded_at=tw.WRITTEN_AT)
-    for sample in samples:
-        sample.fold_to_store(mem.registry)
-    return mem
+    return HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=w_graph,
+                           graph_depth=2, traverser=mem.traverser,
+                           # `Memvara` always wires this into its own reader, and it is
+                           # what lets an anchor widen onto a learned alias. Inert while
+                           # the ingest runs on `NullLLM`, which never resolves two
+                           # spellings into one entity, and wrong to omit the moment a
+                           # real backend is put behind this script.
+                           entities=mem.writer.reconciler.entities)
 
 
 def negatives(held: Sequence[tw.Sample], stored: Sequence[tw.Sample]) -> list[tw.Sample]:
@@ -96,17 +91,44 @@ def negatives(held: Sequence[tw.Sample], stored: Sequence[tw.Sample]) -> list[tw
     The filter is what makes these negatives rather than merely unanswered questions: a
     held-out question naming an entity the store knows from elsewhere is one the store has
     a reason to answer, and counting a refusal there as a success would flatter the number.
+
+    **It decides "names" the way the thing being measured decides it**, which is the whole
+    reason this function is not two lines of substring matching. `anchor.anchor_of` folds a
+    stored entity to a key, splits the key into words, and asks whether the question's own
+    folded tokens contain every one of them. A substring test agrees with that on neither
+    side: it matches "Mark" inside "Denmark", and it misses "Atlas Project" for a key stored
+    as "project atlas". Either disagreement puts questions in this set that the filter under
+    test would have anchored, which moves the column this script exists to report. Measured
+    on the shipped split: the substring version admitted 1,018 negatives and the folded one
+    admits 332, and the extra 686 were questions the store could answer.
+
+    One branch of `anchor_of` is deliberately not mirrored. It also anchors a claim whose
+    subject is the self subject, `user`, when the question uses a first-person pronoun, with
+    no word overlap required. No 2Wiki entity folds to `user`, so replicating it here would
+    be code for a case this corpus cannot produce.
     """
-    known = {entity.lower()
+    known = {parts
              for sample in stored
              for triple in sample.triples
-             for entity in (triple[0], triple[2])}
-    known = {e for e in known if len(e) >= MIN_ENTITY_CHARS}
-    return [s for s in held if not any(e in s.question.lower() for e in known)]
+             for entity in (triple[0], triple[2])
+             if (parts := tuple(key_words(entity_key(entity))))}
+    kept = []
+    for sample in held:
+        # Folded once per question rather than once per entity: `known` runs to thousands,
+        # and a true negative is exactly the case that cannot short-circuit.
+        tokens = query_tokens(sample.question)
+        if not any(tokens.issuperset(parts) for parts in known):
+            kept.append(sample)
+    return kept
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    # The first line of the docstring, or nothing at all: `python -OO` strips docstrings,
+    # so both the attribute and the first element have to be allowed to be absent. A
+    # benchmark that cannot print its own usage under an optimised interpreter would be a
+    # poor trade for one line of help text.
+    parser = argparse.ArgumentParser(
+        description=next(iter((__doc__ or "").splitlines()), None))
     parser.add_argument("--download", action="store_true",
                         help="fetch the 2Wiki dev set, as bench/twowiki.py does")
     parser.add_argument("--ingest", type=int, default=3000,
@@ -138,22 +160,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not unheard:
         print("  no negatives survived the filter; nothing to measure")
         return 1
+    if not scored:
+        # Guarded beside `unheard` rather than left to divide by zero: --score 0 and
+        # --ingest 0 both reach here with negatives still to report, so the run would
+        # otherwise end in a traceback after printing the counts that suggest it worked.
+        print("  no answerable questions to score; nothing to measure")
+        return 1
 
-    print(f"{'configuration':24}{'k':>4}{'answer found':>15}{'correctly silent':>19}")
-    for name, w_graph, anchored in (("shipped", 0.0, False),
-                                    ("anchored", 0.0, True),
-                                    ("anchored + graph leg", 1.0, True)):
-        mem = build(stored, w_graph=w_graph)
-        try:
+    mem = tw.ingest(stored)
+    rows: list[tuple[str, int, str, str]] = []
+    try:
+        scope = mem.default_scope
+        plain, walked = reader(mem, w_graph=0.0), reader(mem, w_graph=1.0)
+        for name, rdr, anchored in (("shipped", plain, False),
+                                    ("anchored", plain, True),
+                                    ("anchored + graph leg", walked, True)):
             for k in DEPTHS:
-                found = sum(tw._found(mem.search(s.question, k=k, anchored=anchored), s)[0]
+                # `now=tw.NOW` for the reason `bench/twowiki.py` pins it: retrieval decays
+                # a claim's score from the instant it is asked, so an unpinned run scores
+                # every question differently on every pass and a re-run differs from the
+                # published table with no code change behind it.
+                found = sum(tw._found(rdr.search(s.question, scope, k=k, now=tw.NOW,
+                                                 anchored=anchored), s)[0]
                             for s in scored)
                 silent = sum(1 for s in unheard
-                             if not mem.search(s.question, k=k, anchored=anchored))
-                print(f"{name:24}{k:>4}{found / len(scored) * 100:>14.1f}%"
-                      f"{silent / len(unheard) * 100:>18.1f}%")
-        finally:
-            mem.close()
+                             if not rdr.search(s.question, scope, k=k, now=tw.NOW,
+                                               anchored=anchored))
+                rows.append((name, k, f"{found / len(scored) * 100:.1f}%",
+                             f"{silent / len(unheard) * 100:.1f}%"))
+    finally:
+        mem.close()
+    print(ek.render_table(["configuration", "k", "answer found", "correctly silent"],
+                          rows))
     return 0
 
 
