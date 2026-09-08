@@ -1,7 +1,9 @@
 # Subject, entity and predicate conventions for memory writes
 
-**Status: proposal, revision 3, 2026-09-08. Nothing described here is implemented.** The six
-blocking questions at the end have to be answered before any of it is built.
+**Status: design settled, revision 4, 2026-09-08. Nothing described here is implemented yet.**
+The six questions that blocked implementation were answered on 2026-09-08 and are recorded as
+[decisions](#the-six-decisions) at the end. Those decisions are the implementation contract;
+the sections above them are the reasoning that produced it.
 
 Two rounds of review have shaped this. The first found that the document ran four separate
 concepts together; they are separated below. The second found the separation sound and
@@ -403,10 +405,10 @@ graph_scope        what a traversal may walk through     → current project plu
                                                             related projects
 ```
 
-Option C is probably the better product architecture, because it gives isolated default recall
+**Decision 4 chose Option C.** It is the better product architecture because it gives isolated default recall
 without discarding the global entity graph, and because the relation that licenses a crossing
 (`fork_of`, `belongs_to`, `depends_on`) is then itself a claim somebody can inspect. It is also
-the most work. This is blocking question 4.
+the most work, and it needs a project channel the hosted plugin does not currently have.
 
 ## 7. Project identity
 
@@ -668,15 +670,20 @@ silently create a supersession.
 
 Nothing depends on anything later in the list. None of it is written.
 
-1. **Freeze the baseline and build the measurement harness.** Gold paths, entity-collision
-   counting, the connectivity numbers recorded before anything changes. First, because
-   otherwise several major pieces get built with no way to attribute an improvement or a
-   regression to any of them.
-2. **Entity representation** — object `kind`, and the type namespace on the key (sections 1
-   and 3).
-3. **Predicate schema fields** — `subject_type`, `object_type`, `graph`, `inverse` with both
-   cardinalities, `traversal_cost` (section 4).
-4. **Object classification and resolution** (section 3).
+1. **Benchmark harness, and a predicate pack for every benchmark corpus.** The pack is a
+   prerequisite, not a nicety: `BUILTIN_PREDICATES` holds 23 personal-assistant predicates and
+   none of 2Wiki's Wikidata relations — `director`, `mother`, `spouse`, `composer` are all
+   undeclared — so under decision 3 every 2Wiki object becomes a VALUE and the corpus drops
+   from 40.6% joinable to zero. Without the pack the primary regression test reports that the
+   graph leg stopped working, correctly and for reasons unrelated to whether this design is
+   good. Gold path labels, entity-collision counting and the baseline connectivity numbers
+   belong here too. First, because otherwise several major pieces get built with no way to
+   attribute an improvement or a regression to any of them.
+2. **Entity representation** — the `object_kind` column and the `subject_type` / `object_type`
+   columns (decisions 1 and 2), with the `fact_key` rehash they imply.
+3. **Predicate schema fields** — `graph`, `inverse` with both cardinalities, `traversal_cost`
+   (section 4).
+4. **Object classification** — predicate-declared, undeclared defaults to VALUE (decision 3).
 5. **Entity resolution boundary** — `EntityCandidate`, resolution confidence, provenance
    (sections 2 and 8).
 6. **Server-side invariants** (section 10), which items 2 to 5 make expressible.
@@ -684,39 +691,159 @@ Nothing depends on anything later in the list. None of it is written.
 8. **Tool description and packaged skill** (`memvara/server/tools.py:337`,
    `memvara/skills/memvara/SKILL.md`). Cheap and effective, but guidance only, and
    deliberately after the enforcement it complements.
-9. **Migration and rollout** (section 11), including retiring `project:<absolute path>` and
-   fixing the note at `plugin/hooks/recall.py:622`.
-10. **Typed disambiguation** (section 9).
-11. **Predicate pack** with entity-valued, graph-traversable predicates.
-12. **Full adversarial benchmark** (section 13).
+9. **The adversarial corpus**, ingested through `add()` so classification and resolution
+   actually run (decision 6).
+10. **Shadow promotion** (decision 5), which needs items 1 and 9 before it means anything.
+11. **Project scope** (decision 4) — the fifth `Scope` element, the traversal policy, and the
+    configuration channel the hosted plugin lacks.
+12. **Migration and rollout** (section 11), including retiring `project:<absolute path>` and
+    fixing the note at `plugin/hooks/recall.py:622`.
+13. **Typed disambiguation** (section 9).
 
-## Six blocking questions
+## The six decisions
 
-Implementation should not start until these are answered.
+Taken 2026-09-08. Each replaces a question that previously blocked implementation.
 
-1. **What is the logical representation of an object?** Specifically, does an object gain an
-   explicit `kind` (ENTITY or VALUE), and where does it live — a column, a structured field, or
-   an inference from the predicate's declared `object_type`? Note that the related question
-   "should entity identity be first-class rather than metadata" is already answered:
-   `subject_key` and `object_key` are indexed columns.
-2. **What is an entity's type, and where does the namespace live?** A prefix on the stored key,
-   a separate column, or a structured id. This decides how much of `entities.py`, `types.py`
-   and both store backends move.
-3. **How are objects classified and resolved, and what happens when resolution is uncertain?**
-   Section 1 proposes "uncertain resolves to a novel typed entity"; the thresholds are not set.
-4. **What is the relationship between subject and scope, and may a traversal cross scopes?**
-   Options A, B and C in section 6. C is the most promising and the most work. This is the one
-   question that is a product decision rather than an engineering one.
-5. **Which predicates are graph-traversable, and what are their type, cardinality and inverse
-   rules?** A vocabulary that has to be written, not derived.
-6. **How is useful connectivity measured?** Section 12 proposes gold paths and path
-   precision/recall; the benchmark work to make entity-collision rate and cross-scope leakage
-   real numbers does not exist yet.
+### 1. An `object_kind` column on `claims`
 
-Questions 1, 2, 3 and 5 are answerable inside this repository. Question 4 is a product decision
-about whether memvara, memvara-cloud and memvara-web share a memory. Question 6 is benchmark
-work that has to happen before anything here can be called successful — which is why it is
-first in the sequence and last in this list.
+`ENTITY` or `VALUE`, stored the way `subject_key` and `object_key` were added at schema
+version 6, with the same backfill shape. The `_WALKABLE` gate at
+`memvara/store/sqlite.py:653` gains `AND object_kind = 'entity'`.
+
+Rejected: deriving the kind from the predicate schema with no storage, because most predicates
+in a live store are runtime-learned and the undeclared default would then be today's broken
+behaviour; overloading `object_key = ''` for values, because `''` already means "a surface form
+with no content" and the two would become indistinguishable; a structured `ObjectRef` in
+`types.py`, because the blast radius reaches both backends, remote hydration, the tool schemas
+and every caller that reads `claim.object` as a string. A column does not foreclose `ObjectRef`
+later.
+
+### 2. Separate `subject_type` and `object_type` columns
+
+Entity identity becomes the `(type, key)` pair, and `fact_key_for()` takes the type as a
+fourth input.
+
+The evidence that decided it was measured rather than assumed: `entity_key("software:postgresql")`
+returns `"software postgresql"`. A `type:` prefix does not survive the fold, because
+`entity_key()` treats every non-alphanumeric character as a word boundary. Storing the type in
+the key would therefore require making `entity_key()` structural, and that function's guarantee —
+a pure total fold giving any novel entity a correct stable identity for free, with no model call —
+is what the whole entity design's cost argument rests on.
+
+Rejected: the prefix, for that reason; type held only in the entity registry, because traversal
+joins on `claims.subject_key` and `claims.object_key` and so would still not see a type;
+packing type and key into one column, because identity would have to be split on every read,
+which drifts once a second backend implements it.
+
+Both surviving options required a `fact_key` rehash over the whole table, so that cost did not
+distinguish them. `backfill_entities` is the instrument.
+
+### 3. The predicate declares the object kind; undeclared defaults to VALUE
+
+The destructive direction on this axis is joining. A value wrongly treated as an entity creates
+false joins, which degrade retrieval invisibly; an entity wrongly treated as a value costs a
+join and corrupts nothing, and a later declaration fixes it. This is the same bias already
+written into the codebase, where an unknown predicate defaults to `Cardinality.MANY` because
+wrongly retiring a true fact is worse than keeping two.
+
+**Connectivity is therefore opt-in.** A store has no graph until somebody writes a vocabulary,
+which is what moves the predicate pack onto the critical path — including for the benchmark
+corpora, per the sequencing above.
+
+Rejected: defaulting undeclared predicates to ENTITY, which reads "undeclared permits" literally
+but permits the exact failure being designed against; a deterministic shape test as the fallback,
+which correctly catches `17` and `2026-01-01` but misclassifies words that are not things —
+`plain` as a prose style, `high` as an effort level — and can be added later once the benchmark
+can show whether it helps; the model proposing the kind, because it would put a model call on
+`memory_remember`, which today needs none and is documented as the write that cannot mis-parse.
+
+### 4. Project identity enters `Scope`, and visibility is separate from traversal
+
+`Scope` gains a fifth element. Default recall is project-local. A graph walk may cross into
+projects reachable by an explicit relation — `fork_of`, `belongs_to`, or a declared sibling set —
+so the crossing is licensed by an inspectable claim rather than a hidden rule.
+
+Decided now although it is built late, because `fact_key` is `content_hash(owner_key(scope), …)`
+and decision 2 already commits to one rehash. Adding a scope element afterwards would mean a
+second full-table rehash.
+
+Rejected: full isolation, which would wall memvara off from memvara-cloud although they are one
+product; project as an ordinary typed subject with no scope change, which is cheapest and leaves
+the leakage already measured in `plugin/hooks/recall.py`, where a turn approving a cleanup was
+handed notes about pricing tiers and an unrelated project's zip layout.
+
+### 5. Shadow promotion, gated on the benchmark
+
+A learned predicate is promoted to traversable automatically, on deterministic signals — type
+consistency across its objects, object diversity, object shape, and a volume floor — but only
+into a shadow graph that the benchmark evaluates and live retrieval ignores. It becomes live
+only if graph-path precision holds.
+
+**One signal is excluded by name: "this predicate's objects match existing subject keys".** That
+rule rewards string collision by construction, and evaluating it would mean measuring exactly
+the accidental-collision signal decision 3 exists to suppress.
+
+The reasoning that survives is that `graph = true` is an editorial judgement about whether
+walking a relation helps answer questions, not a property of the data. `mentioned`, `discussed`
+and `similar_to` look identical to `depends_on` on every measurable signal and all make
+retrieval worse. Shadow promotion does not solve that; it moves the human from confirming
+individual predicates to reading one benchmark result per release, which is a better place for
+a human and needs no new user-facing surface.
+
+Rejected: declaration only, which is correct but leaves the vocabulary to rot; operator-confirmed
+promotion, because there is nowhere for a proposal to land — the candidates were a fifteenth MCP
+tool, the session-start block, or an admin console that does not exist, and each costs attention
+on a surface already carrying load; automatic promotion straight to live, which is the
+manufacture-joins-while-retrieval-degrades failure that demoted join rate to a diagnostic.
+
+Nothing here was forced by migration pressure. Adding or changing a promotion rule later costs
+no rehash, so this decision can be revisited cheaply.
+
+### 6. Two corpora, split by role
+
+**2Wiki, plus a corpus predicate pack**, carries the primary retrieval metric and validates
+decision 5's promotion signals. It ships evidence as `[subject, relation, object]` triples across
+12,576 questions and roughly 31,000 triples, and `bench/twowiki.py` already separates the
+transitive question types (`compositional`, `inference`) from the non-transitive ones
+(`comparison`, `bridge_comparison`) rather than averaging them — which is a gold path label in
+the sense the metric needs. Its breadth of relations, with the corpus itself saying which are
+transitive, is what makes it the right instrument for checking whether promotion picks the
+relations that carry chains.
+
+**A purpose-built adversarial corpus, ingested through `add()`** rather than `remember()` so that
+classification and resolution actually run, carries the safety metrics: typed collision, entity
+collision, cross-project behaviour. 2Wiki cannot test these — its entities arrive
+pre-disambiguated, so there is no Apple-company-versus-Apple-Records case in it, and it runs in
+one shared scope by design.
+
+**Four of the six safety criteria are assertions, not metrics**, and belong in the unit suite
+where they run in seconds and fail loudly: cross-scope leakage is zero, project identity
+collisions are zero, migration is idempotent, historical claim identity is preserved. Only
+entity collision rate and graph-path precision need labelled data.
+
+Rejected: the existing corpora alone, which cannot exercise object classification, typing or
+scope, because LOCOMO and LongMemEval measure extraction (the offline extractor turns 5,882
+LOCOMO turns into zero claims) and 2Wiki loads structured triples through `remember()`; the
+adversarial corpus alone, which gives no retrieval-quality signal and validates a design only
+against the failure set its own author wrote; a labelled snapshot of the live store, which has
+no ground truth and cannot become a regression test that survives the store changing. The live
+store remains useful as an unlabelled smoke test, since incompatible-type counts and leakage
+assertions need no gold labels.
+
+## What is still open
+
+The decisions above settle the design. These are implementation questions that follow from
+them and are not yet answered.
+
+- **How a component identity is derived** for a monorepo — declared in a config file, inferred
+  from a workspace manifest, or named by the user (section 7).
+- **The confidence threshold** at which `EntityRegistry.acquire()`'s answer is accepted, and
+  where resolution confidence is stored (sections 1 and 8).
+- **The promotion thresholds** in decision 5 — the volume floor, the type-consistency fraction,
+  the diversity ratio.
+- **The configuration channel** that carries a project id to the hosted server, given that
+  `plugin/mcp.json` declares an HTTP server with no environment block (sections 6 and 11).
+- **The vocabulary itself**: which predicates ship, with which types, cardinalities and inverses.
 
 ## Read next
 
