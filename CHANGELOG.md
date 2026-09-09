@@ -73,7 +73,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   the store holds. The shipped configuration returns rows for every one of them; anchoring
   returns rows for none. It decides "names" by the same `entity_key` / `key_words` /
   `query_tokens` path `anchor_of` uses, because a substring test disagrees with that rule in
-  both directions and moves the number the script exists to report.
+  both directions and moves the number the script exists to report: measured on the shipped
+  split, substring matching called 698 questions negatives that the real rule says name a
+  stored entity, and threw away 12 that it says do not.
 
 - **`--system memvara-anchored` publishes that configuration in the Agent Memory
   Benchmark.** Same library, same adapter, the two switches on. It is a system of its own

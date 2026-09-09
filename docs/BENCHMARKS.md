@@ -809,9 +809,18 @@ and anchoring is not the mechanism that would answer it.
 An earlier version of this table read 42.0% to 50.6% instead, from a negative set of 1,018.
 That filter decided "the question names this entity" by substring, where the mechanism it was
 measuring folds the entity to a key and requires every word of the key to appear as a token.
-The looser rule let 686 answerable questions into the negative set; they anchored, returned
-rows, and were counted as failures to abstain. `negatives()` now calls the same
-`entity_key` / `key_words` / `query_tokens` path that `anchor_of` does.
+The two rules disagree in both directions, and the sets are not nested:
+
+- **698 questions the substring rule called negatives are not.** A key stored as
+  `project atlas` is named by a question saying "Atlas Project", which contains no such
+  substring. Those questions anchored, returned rows, and were counted as failures to
+  abstain — which is the whole of the missing abstention.
+- **12 genuine negatives the substring rule threw away.** `iran` matches inside `Piranha`
+  and `france` inside `Francesco`, so a question naming neither was treated as naming both.
+  The four-character floor did not stop either, since both are longer than four characters.
+
+`negatives()` now calls the same `entity_key` / `key_words` / `query_tokens` path that
+`anchor_of` does, which is the only way the filter and the thing it measures can agree.
 
 ### The temporal leg, and the abstention that is the actual finding
 
