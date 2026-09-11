@@ -52,9 +52,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   that assumed the forward cardinality would treat several true facts as competing answers
   to one question and end all but the last.
 
-  Nothing consumes these yet. They exist first so that a vocabulary written now does not
-  have to be rewritten later, and because everything that declares anything needs them to
-  exist before it can be written. `SCHEMA_VERSION` moves from 9 to 10 to persist them:
+  `object_type` and `graph` are both consumed by the object-kind classification above: a
+  claim can be one end of a graph edge only when its predicate declares entity objects
+  *and* declares the relation walkable. The other four are declared and not yet read.
+  They exist now so that a vocabulary written today does not have to be rewritten when
+  traversal weighting and inverse walking arrive. `SCHEMA_VERSION` moves from 9 to 10 to persist them:
   `put_spec` stores whatever spec it is handed, a *declared* predicate reaches it whenever
   an alias is learned for one, and rehydration only protects a declared spec from a
   persisted *learned* one. Without the columns, a graph declaration would be dropped on

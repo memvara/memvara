@@ -770,7 +770,7 @@ class GraphTraverser:
                pin: _Pin) -> dict[str, list[Edge]]:
         """Every walkable edge leaving the current frontier, indexed by the node it leaves.
 
-        Three claims are dropped here rather than deeper, and each drop is a semantic:
+        Four claims are dropped here rather than deeper, and each drop is a semantic:
 
         * **Negative polarity.** "Alice does not work at Acme" is adjacency and is not a
           link. Traversing it would report the absence of a relationship as the presence

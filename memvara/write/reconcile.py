@@ -481,7 +481,7 @@ class Reconciler:
         # nobody has declared yields VALUE, which is the whole of the rule — connectivity
         # is something a vocabulary asks for, never something a string collision supplies.
         claim.object_kind = (ObjectKind.ENTITY
-                             if self.registry.spec(claim.predicate).objects_are_entities
+                             if self.registry.spec(claim.predicate).carries_edge
                              else ObjectKind.VALUE)
         self._stamp(claim)
         # Only re-render text the Claim generated for itself; a caller-supplied

@@ -769,3 +769,37 @@ def test_an_inverse_without_an_edge_to_reverse_is_refused(tmp_path):
                     encoding="utf-8")
     with pytest.raises(PredicatePackError, match="no edge"):
         load_specs(str(path))
+
+
+@needs_toml
+class TestCarriesEdge:
+    """An entity object type is necessary and not sufficient.
+
+    `graph` used to be declared and read by nothing: a predicate with an entity
+    `object_type` and `graph` left false was classified ENTITY, walked by
+    `GraphTraverser`, and counted as joinable by `connectivity()`. The vocabulary said the
+    relation was not worth walking and the store walked it anyway, which made `graph` the
+    kind of declaration that looks present in a file and does nothing — the failure the
+    loader's other refusals exist to prevent, in the field that names the feature.
+    """
+
+    def test_both_halves_are_required(self):
+        assert PredicateSpec("depends_on", object_type=("software",),
+                             graph=True).carries_edge is True
+        assert PredicateSpec("mentions", object_type=("work",)).carries_edge is False
+        assert PredicateSpec("version", object_type=("value",),
+                             graph=False).carries_edge is False
+        assert PredicateSpec("undeclared").carries_edge is False
+
+    def test_objects_are_entities_still_answers_only_about_the_object(self):
+        """The two are kept apart on purpose: the corpus audit asks what a declaration
+        says about its objects, and the write path asks whether a claim can be walked."""
+        spec = PredicateSpec("mentions", object_type=("work",))
+        assert spec.objects_are_entities is True
+        assert spec.carries_edge is False
+
+    def test_the_twowiki_pack_declares_both_halves_everywhere(self):
+        """Otherwise its measured 68.3% would be counting relations the walk refuses."""
+        specs = load_specs(str(ROOT / "bench" / "packs" / "twowiki.toml"))
+        mismatched = [s.name for s in specs if s.objects_are_entities != s.carries_edge]
+        assert mismatched == [], mismatched

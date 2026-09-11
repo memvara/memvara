@@ -69,10 +69,17 @@ file upgrades in place on open.
 
 ### Who this changes, and in which direction
 
-**Nothing about an existing store's behaviour changes.** The defaults mean "takes values,
-walks nowhere", which is exactly what every predicate meant before these fields existed,
-and nothing yet consumes them. No claim is touched and no migration backfills anything —
-these are declared by a vocabulary, not derived from data, so there is nothing to derive.
+**Nothing about an existing store's behaviour changes when you add these fields alone.**
+The defaults mean "takes values, walks nowhere", which is exactly what every predicate
+meant before they existed. No claim is touched and no migration backfills anything — these
+are declared by a vocabulary, not derived from data, so there is nothing to derive.
+
+`object_type` and `graph` are read by the object-kind rule described in the entry above:
+a claim can carry a graph edge only when its predicate declares entity objects **and**
+declares the relation walkable. Declaring an entity `object_type` without `graph = true`
+is legitimate and means "these objects are things, but walking this relation does not help
+answer anything" — `mentions` is the example. The remaining four fields are declared and
+not yet read.
 
 **Your existing packs keep loading.** Every new key is optional. The shipped `engineering`,
 `decisions` and `events` packs declare none of them.

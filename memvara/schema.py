@@ -152,6 +152,30 @@ class PredicateSpec:
         """
         return bool(self.object_type) and VALUE_TYPE not in self.object_type
 
+    @property
+    def carries_edge(self) -> bool:
+        """Whether a claim on this predicate can be one end of a graph edge.
+
+        Both halves are required and they answer different questions.
+        `objects_are_entities` asks what the object *is*; `graph` asks whether walking
+        this relation helps answer anything. An entity-valued object is not automatically
+        a useful edge — `mentions` and `discussed` have objects as clean and as diverse as
+        `depends_on`, and walking them makes retrieval worse — which is why the vocabulary
+        declares the second separately rather than inferring it from the first.
+
+        Kept apart from `objects_are_entities` because the audit in `bench/` asks the
+        first question when reporting what a corpus declares, and `Reconciler` asks this
+        one when deciding whether a claim can be walked.
+
+        >>> PredicateSpec("depends_on", object_type=("software",), graph=True).carries_edge
+        True
+        >>> PredicateSpec("mentions", object_type=("work",)).carries_edge
+        False
+        >>> PredicateSpec("version", object_type=(VALUE_TYPE,), graph=False).carries_edge
+        False
+        """
+        return self.objects_are_entities and self.graph
+
 
 def _p(
     name: str,
