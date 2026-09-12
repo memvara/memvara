@@ -12,6 +12,7 @@ from memvara.embed import HashingEmbedder
 from memvara.store import (STATES, SQLStore, SQLiteStore, live_predicate,
                            state_predicate, stored_state_predicate)
 from memvara.store.base import Store
+from memvara.store.sqlite import _WALKABLE as _WALKABLE_SQL
 from memvara.store.sqlite import SCHEMA_VERSION
 from memvara.types import Claim, Derivation, Episode, MemoryType, Scope
 
@@ -2750,3 +2751,198 @@ def test_omittable_names_every_member_a_backend_may_actually_leave_out():
     from memvara.store.remote import RemoteStore
     for cls in (SQLiteStore, RemoteStore):
         assert not [m for m in members if not hasattr(cls, m)]
+
+
+# --- the predicate graph declaration ---------------------------------------------------
+
+
+_V9_PREDICATES = """
+CREATE TABLE predicates (
+    tenant TEXT NOT NULL, name TEXT NOT NULL, cardinality TEXT NOT NULL,
+    volatility TEXT NOT NULL, memory_type TEXT NOT NULL,
+    aliases TEXT NOT NULL DEFAULT '[]', supersedes TEXT NOT NULL DEFAULT '[]',
+    learned INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (tenant, name));
+INSERT INTO predicates VALUES ('t','works_at','one','slow','semantic','[]','[]',1);
+PRAGMA user_version = 9;
+"""
+
+
+def test_a_graph_declaration_survives_a_restart(tmp_path):
+    """The reason these columns exist at all.
+
+    `put_spec` persists whatever spec it is handed, and a *declared* predicate reaches it
+    whenever an alias is learned for one. Rehydration only protects a declared spec from a
+    persisted *learned* one, so a declared spec written back without its graph fields
+    would be reloaded as non-traversable and would overwrite the declaration. The store
+    would stop walking edges it walked yesterday, with no error and nothing in the file
+    saying why. Asserted on the whole spec rather than field by field, so a seventh field
+    added later cannot be forgotten here.
+    """
+    from memvara.schema import Cardinality, PredicateSpec, Volatility
+
+    path = str(tmp_path / "specs.db")
+    spec = PredicateSpec("depends_on", Cardinality.MANY, Volatility.SLOW,
+                         subject_type=("project",), object_type=("software",), graph=True,
+                         inverse="depended_on_by", inverse_cardinality=Cardinality.MANY,
+                         traversal_cost=0.5)
+    first = SQLiteStore(path)
+    first.put_spec(spec, "t")
+    first.close()
+
+    second = SQLiteStore(path)
+    try:
+        assert [s for s in second.all_specs("t") if s.name == "depends_on"] == [spec]
+    finally:
+        second.close()
+
+
+def test_a_spec_with_no_inverse_round_trips_as_none(tmp_path):
+    """The nullable half. Stored as SQL NULL rather than an empty string, because an
+    empty inverse and no inverse would otherwise be two spellings of one state."""
+    from memvara.schema import PredicateSpec
+
+    path = str(tmp_path / "plain.db")
+    spec = PredicateSpec("version", object_type=("value",), learned=True)
+    first = SQLiteStore(path)
+    first.put_spec(spec, "t")
+    first.close()
+
+    second = SQLiteStore(path)
+    try:
+        back, = [s for s in second.all_specs("t") if s.name == "version"]
+        assert back == spec
+        assert back.inverse is None and back.inverse_cardinality is None
+        assert back.objects_are_entities is False
+    finally:
+        second.close()
+
+
+def test_a_version_9_file_gains_the_columns_and_keeps_its_rows(tmp_path):
+    """Nothing is backfilled, and that is not an omission: these columns are declared by a
+    vocabulary rather than derived from anything the row already holds, so no function of
+    the existing columns could fill them. The defaults say "takes values, walks nowhere",
+    which is what an undeclared predicate means and the safe reading for a row whose pack
+    is no longer loaded."""
+    path = str(tmp_path / "old.db")
+    conn = sqlite3.connect(path)
+    conn.executescript(_V9_PREDICATES)
+    conn.commit()
+    conn.close()
+
+    store = SQLiteStore(path)
+    try:
+        columns = {r["name"] for r in store._db.execute("PRAGMA table_info(predicates)")}
+        assert {"subject_type", "object_type", "graph", "inverse",
+                "inverse_cardinality", "traversal_cost"} <= columns
+        assert int(store._db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
+
+        survivor, = [s for s in store.all_specs("t") if s.name == "works_at"]
+        assert survivor.learned is True
+        assert survivor.graph is False
+        assert survivor.objects_are_entities is False
+        assert survivor.traversal_cost == 1.0
+    finally:
+        store.close()
+
+
+def test_the_migration_is_a_no_op_on_a_fresh_file(tmp_path):
+    """Shape-driven like every migration here, so a brand-new database that already has
+    the columns from the schema passes through untouched. Running it twice is the test:
+    a second ALTER TABLE for a column that exists would raise."""
+    path = str(tmp_path / "fresh.db")
+    store = SQLiteStore(path)
+    try:
+        store._migrate_to_v10()
+        store._migrate_to_v10()
+        columns = {r["name"] for r in store._db.execute("PRAGMA table_info(predicates)")}
+        assert "traversal_cost" in columns
+    finally:
+        store.close()
+
+
+# --- object kind, and the graph edges that depend on it --------------------------------
+
+
+def _v10_claims_ddl() -> str:
+    """The claims table as version 10 shaped it: today's, minus `object_kind`.
+
+    Derived from `SCHEMA` rather than pasted, so this cannot drift into testing a table
+    no version of memvara ever wrote. `ALTER TABLE ... DROP COLUMN` is not an option: it
+    re-parses the stored DDL, and dropping the last column leaves the comment above it
+    dangling, which SQLite rejects as incomplete input.
+    """
+    from memvara.store import sqlite as sq
+
+    body = sq.SCHEMA.split("CREATE TABLE IF NOT EXISTS claims (", 1)[1]
+    body = body.split("\n);", 1)[0]
+    kept = [ln for ln in body.splitlines()
+            if "object_kind" not in ln and "Version 11" not in ln
+            and not ln.strip().startswith("-- classification rule")]
+    # Drop the rest of the version-11 comment block and the now-trailing comma.
+    kept = [ln for ln in kept if not ln.strip().startswith("--")
+            or "Version 9" in ln or "answer for them" in ln]
+    text = "\n".join(kept).rstrip().rstrip(",")
+    return f"CREATE TABLE claims ({text}\n);"
+
+
+def test_a_version_10_file_gains_object_kind_and_keeps_its_claims(tmp_path):
+    """The upgrade must not switch off a graph that was walking yesterday.
+
+    Nothing backfills the column, and nothing could: the kind is read from the predicate's
+    declared object_type, and which vocabulary a deployment loads is environment rather
+    than data, so a backfill would make two machines disagree about one file. The claim
+    written before the rule therefore keeps `object_kind IS NULL`, and `_WALKABLE` admits
+    it.
+    """
+    path = str(tmp_path / "v10.db")
+    conn = sqlite3.connect(path)
+    conn.executescript(_v10_claims_ddl())
+    conn.execute("PRAGMA user_version = 10")
+    conn.commit()
+    conn.close()
+
+    store = SQLiteStore(path)
+    try:
+        columns = {r["name"] for r in store._db.execute("PRAGMA table_info(claims)")}
+        assert "object_kind" in columns
+        assert int(store._db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
+    finally:
+        store.close()
+
+
+def test_the_object_kind_migration_is_a_no_op_on_a_fresh_file(tmp_path):
+    """Running it twice is the test: a second ALTER for a column that exists would raise."""
+    store = SQLiteStore(str(tmp_path / "fresh.db"))
+    try:
+        store._migrate_to_v11()
+        store._migrate_to_v11()
+        columns = {r["name"] for r in store._db.execute("PRAGMA table_info(claims)")}
+        assert "object_kind" in columns
+    finally:
+        store.close()
+
+
+def test_a_value_object_is_not_a_graph_edge_but_an_unclassified_one_still_is(store):
+    """`_WALKABLE` and `GraphTraverser._edges` have to agree, and this pins the SQL half.
+
+    Three claims that are otherwise identical in shape: one classified as an entity, one
+    as a value, one written before the rule existed. Only the value is refused.
+    """
+    from memvara.types import ObjectKind
+
+    def put(cid, subj, obj, kind):
+        c = claim(id=cid, subject=subj, predicate="depends_on", object=obj)
+        c.object_kind = kind
+        store.put_claim(c)
+
+    put("cl_ent", "alpha", "beta", ObjectKind.ENTITY)
+    put("cl_val", "gamma", "delta", ObjectKind.VALUE)
+    put("cl_old", "epsilon", "zeta", None)
+
+    walkable = {
+        r["id"] for r in store._db.execute(
+            "SELECT id FROM claims WHERE " + _WALKABLE_SQL.format(a="claims"))
+    }
+    assert "cl_ent" in walkable
+    assert "cl_old" in walkable, "a claim written before the rule keeps its edges"
+    assert "cl_val" not in walkable

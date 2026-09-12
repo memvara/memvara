@@ -238,9 +238,13 @@ def test_the_erasures_table_is_schema_seven():
     The version assertion is a tripwire rather than a fact worth pinning: it fails on any
     schema bump so that whoever makes one has to come and decide whether the sentence
     above still holds. Version 9 added three nullable claim columns and no table, so it
-    does.
+    does. Version 10 added six columns to `predicates` — the graph declaration — and no
+    table either; it does not touch `erasures`, does not write one, and cannot invent a
+    record of an erasure that happened before the upgrade, so the sentence still holds.
+    Version 11 added one nullable column to `claims`, `object_kind`, and no table; it
+    neither reads nor writes `erasures`, so the sentence holds there too.
     """
-    assert SCHEMA_VERSION == 9
+    assert SCHEMA_VERSION == 11
     store = SQLiteStore(":memory:")
     try:
         assert store.erasure_record("anything") is None

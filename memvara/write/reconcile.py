@@ -69,6 +69,7 @@ from ..entities import EntityRegistry, entity_key
 from ..schema import PredicateRegistry
 from ..store.base import Store
 from ..types import (
+    ObjectKind,
     ENTITY_REKEY,
     PREDICATE_REKEY,
     MAX_SALIENCE,
@@ -474,6 +475,14 @@ class Reconciler:
         canonical = self.registry.normalize(claim.predicate)
         if canonical:
             claim.predicate = canonical
+        # After normalizing, because the declaration lives on the canonical name: a pack
+        # declares `born_in`, and a claim written as `place_of_birth` has to be classified
+        # by what it will be stored as rather than by what it was typed as. A predicate
+        # nobody has declared yields VALUE, which is the whole of the rule — connectivity
+        # is something a vocabulary asks for, never something a string collision supplies.
+        claim.object_kind = (ObjectKind.ENTITY
+                             if self.registry.spec(claim.predicate).carries_edge
+                             else ObjectKind.VALUE)
         self._stamp(claim)
         # Only re-render text the Claim generated for itself; a caller-supplied
         # natural-language rendering is theirs to keep.

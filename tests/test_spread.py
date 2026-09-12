@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from conftest import entity_registry
+
 from memvara import Memvara, NullLLM
 from memvara.embed import HashingEmbedder
 from memvara.retrieve.hybrid import DegradedRetrievalWarning, HybridRetriever
@@ -52,6 +54,7 @@ def mem():
     it is not what these tests are about.
     """
     with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64), tenant="acme",
+                 registry=entity_registry(),
                  user="alice", read_w_graph=1.0) as m:
         for subject, predicate, obj in (
             ("Alice", "reports_to", "Dana"),

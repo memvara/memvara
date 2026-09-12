@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +27,10 @@ from memvara.schema import (BUILTIN_PREDICATES, Cardinality, PredicatePackError,
                             PredicateRegistry, PredicateSpec, Volatility,
                             available_packs, load_all_specs, load_specs)
 from memvara.server.config import ConfigError, ServerConfig, build_memvara
+
+#: Resolved from this file rather than the working directory, because pytest
+#: is run from wherever the caller happened to be.
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def _env(tmp_path, **extra):
@@ -344,3 +349,457 @@ def test_the_events_pack_declares_no_quantity_predicates() -> None:
     thing, and the two would drift."""
     names = {s.name for s in load_specs("events")}
     assert not ({"distance", "duration", "cost", "weight", "count"} & names)
+
+
+# --- the graph declaration ------------------------------------------------------------
+#
+# A vocabulary is read once, at startup, by nobody. That makes every way for a pack to
+# look declarative and do nothing a silent failure, and it is why the loader refuses more
+# than it used to. These pin each refusal, and the classification rule the whole design
+# rests on: an undeclared predicate takes values, and a value carries no edge.
+
+
+def _pack(tmp_path, body: str):
+    path = tmp_path / "graph.toml"
+    path.write_text(body, encoding="utf-8")
+    return str(path)
+
+
+_TRAVERSABLE = """
+[[predicate]]
+name = "depends_on"
+cardinality = "many"
+volatility = "slow"
+subject_type = ["project", "software"]
+object_type = ["software", "service"]
+graph = true
+inverse = "depended_on_by"
+inverse_cardinality = "many"
+traversal_cost = 0.5
+"""
+
+
+class TestGraphDeclarationDefaults:
+    def test_a_spec_declares_no_graph_behaviour_unless_asked(self):
+        """The defaults are the classification rule, not merely empty values.
+
+        `objects_are_entities` is False here, which is what makes an undeclared predicate
+        take values. Connectivity is opt-in, and this is the line that makes it so.
+        """
+        spec = PredicateSpec(name="anything")
+        assert (spec.subject_type, spec.object_type) == ((), ())
+        assert spec.graph is False
+        assert spec.inverse is None and spec.inverse_cardinality is None
+        assert spec.traversal_cost == 1.0
+        assert spec.objects_are_entities is False
+
+    def test_every_builtin_takes_values(self):
+        """The 23 builtins predate the graph and declare nothing about it, so none of
+        them is traversable. Asserted because the opposite would be invisible: a builtin
+        that quietly resolved as entity-valued would put edges in every store on earth."""
+        assert not [s.name for s in BUILTIN_PREDICATES if s.objects_are_entities]
+        assert not [s.name for s in BUILTIN_PREDICATES if s.graph]
+
+    def test_a_mixed_object_type_resolves_to_values(self):
+        """`prefers` legitimately holds `postgresql` and `plain` alike, so its
+        declaration cannot decide per claim. The undecidable case takes the safe
+        direction: connectivity lost is recoverable by declaring more precisely, a false
+        join is not."""
+        spec = PredicateSpec(name="prefers", object_type=("software", "value"))
+        assert spec.objects_are_entities is False
+
+
+@needs_toml
+class TestGraphDeclarationLoading:
+    def test_a_pack_can_declare_every_graph_field(self, tmp_path):
+        spec, = load_specs(_pack(tmp_path, _TRAVERSABLE))
+        assert spec.subject_type == ("project", "software")
+        assert spec.object_type == ("software", "service")
+        assert spec.graph is True
+        assert spec.inverse == "depended_on_by"
+        assert spec.inverse_cardinality is Cardinality.MANY
+        assert spec.traversal_cost == 0.5
+        assert spec.objects_are_entities is True
+        assert spec.learned is False
+
+    def test_the_shipped_packs_still_load(self):
+        """They predate the graph fields and declare none of them. A loader that had made
+        any of the new keys required would fail here rather than in a deployment."""
+        for name in available_packs():
+            specs = load_specs(name)
+            assert specs
+            assert not any(s.graph for s in specs)
+
+
+@needs_toml
+class TestGraphDeclarationRefusals:
+    """Each of these is a pack that would otherwise load and do nothing."""
+
+    def test_graph_without_object_type_is_refused(self, tmp_path):
+        body = '[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\ngraph=true\n'
+        with pytest.raises(PredicatePackError, match="no object_type"):
+            load_specs(_pack(tmp_path, body))
+
+    def test_graph_with_a_value_object_is_refused(self, tmp_path):
+        """A scalar is not a thing to walk to, so `graph` and a value object type cannot
+        both be true. Left to resolve silently, this is the false-join failure the whole
+        classification rule exists to prevent."""
+        body = ('[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\n'
+                'graph=true\nobject_type=["software","value"]\n')
+        with pytest.raises(PredicatePackError, match="cannot both be true"):
+            load_specs(_pack(tmp_path, body))
+
+    def test_a_non_boolean_graph_is_refused(self, tmp_path):
+        body = ('[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\n'
+                'graph="yes"\n')
+        with pytest.raises(PredicatePackError, match="not a boolean"):
+            load_specs(_pack(tmp_path, body))
+
+    def test_an_inverse_without_its_cardinality_is_refused(self, tmp_path):
+        """The two sides are not symmetric — `owned_by` holds one value and `owns` holds
+        many — so a walk that assumed the forward cardinality would treat true facts as
+        competing answers to one question and end all but the last."""
+        body = ('[[predicate]]\nname="owned_by"\ncardinality="one"\nvolatility="slow"\n'
+                'inverse="owns"\n')
+        with pytest.raises(PredicatePackError, match="without inverse_cardinality"):
+            load_specs(_pack(tmp_path, body))
+
+    def test_an_inverse_cardinality_without_an_inverse_is_refused(self, tmp_path):
+        body = ('[[predicate]]\nname="x"\ncardinality="one"\nvolatility="slow"\n'
+                'inverse_cardinality="many"\n')
+        with pytest.raises(PredicatePackError, match="without an inverse"):
+            load_specs(_pack(tmp_path, body))
+
+    def test_an_empty_inverse_is_read_as_no_inverse(self, tmp_path):
+        body = ('[[predicate]]\nname="x"\ncardinality="one"\nvolatility="slow"\n'
+                'inverse="   "\n')
+        spec, = load_specs(_pack(tmp_path, body))
+        assert spec.inverse is None
+
+    @pytest.mark.parametrize("value", ['"heavy"', "true"])
+    def test_a_non_numeric_traversal_cost_is_refused(self, tmp_path, value):
+        """`true` is included because a bool is an int in Python, so a naive numeric check
+        would accept `traversal_cost = true` and store an edge weight of 1."""
+        body = ('[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\n'
+                f'traversal_cost={value}\n')
+        with pytest.raises(PredicatePackError, match="not a\n?\\s*number"):
+            load_specs(_pack(tmp_path, body))
+
+    @pytest.mark.parametrize("value", ["0", "-1.5"])
+    def test_a_non_positive_traversal_cost_is_refused(self, tmp_path, value):
+        body = ('[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\n'
+                f'traversal_cost={value}\n')
+        with pytest.raises(PredicatePackError, match="above zero"):
+            load_specs(_pack(tmp_path, body))
+
+    @pytest.mark.parametrize("key", ["object_type", "subject_type", "aliases",
+                                     "supersedes"])
+    def test_a_bare_string_where_a_list_belongs_is_refused(self, tmp_path, key):
+        """Wrapping it would be kinder for exactly one release, until somebody wrote
+        `aliases = "a, b"` and got one alias with a comma in it."""
+        body = ('[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\n'
+                f'{key}="software"\n')
+        with pytest.raises(PredicatePackError, match="takes a list of strings"):
+            load_specs(_pack(tmp_path, body))
+
+    def test_an_unrecognised_key_is_refused(self, tmp_path):
+        """The refusal this set exists for. `graph_traversable = true` is the plausible
+        typo, and ignoring it would leave the predicate non-traversable, the store with no
+        edges, and nothing anywhere saying why."""
+        body = ('[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\n'
+                'graph_traversable=true\n')
+        with pytest.raises(PredicatePackError, match="graph_traversable"):
+            load_specs(_pack(tmp_path, body))
+
+
+# --- overriding a builtin, and the benchmark vocabulary -------------------------------
+
+
+@needs_toml
+def test_declaring_a_builtin_name_replaces_it_and_drops_its_aliases(tmp_path):
+    """The trap that cost a measurement to find, pinned so it cannot cost another.
+
+    A declared spec *replaces* the builtin of the same name rather than extending it, so an
+    override that omits `aliases` silently discards them. Declaring a bare `born_on` to give
+    it an `object_type` therefore stops `date_of_birth` folding onto it, and the relation it
+    was declared for goes from resolved to unknown *because* it was declared.
+
+    Nothing warns. The failure is a declaration that looks present in the file, resolves to
+    nothing at runtime, and shows up only as connectivity that never appears.
+    """
+    from memvara.schema import BUILTIN_PREDICATES
+
+    builtin, = [s for s in BUILTIN_PREDICATES if s.name == "born_on"]
+    assert "date_of_birth" in builtin.aliases, "fixture assumes the builtin carries it"
+
+    bare = tmp_path / "bare.toml"
+    bare.write_text('[[predicate]]\nname="born_on"\ncardinality="many"\n'
+                    'volatility="static"\nobject_type=["value"]\n', encoding="utf-8")
+    registry = PredicateRegistry(BUILTIN_PREDICATES + load_specs(str(bare)))
+    assert registry.normalize("date_of_birth") != "born_on", (
+        "if this now folds, the replace-not-extend behaviour changed and the twowiki pack's "
+        "repeated alias lists are no longer load-bearing")
+
+    kept = tmp_path / "kept.toml"
+    kept.write_text('[[predicate]]\nname="born_on"\ncardinality="many"\n'
+                    'volatility="static"\nobject_type=["value"]\n'
+                    'aliases=["birthday","date_of_birth","dob"]\n', encoding="utf-8")
+    restored = PredicateRegistry(BUILTIN_PREDICATES + load_specs(str(kept)))
+    assert restored.normalize("date_of_birth") == "born_on"
+    assert restored.spec("born_on").objects_are_entities is False
+
+
+@needs_toml
+class TestTwoWikiPack:
+    """`bench/packs/twowiki.toml`, which is a prerequisite rather than an enhancement.
+
+    Without it every one of 2WikiMultihopQA's 31,120 evidence triples is value-valued once
+    the classification rule reaches retrieval, and the graph benchmark reports that the graph
+    stopped working. These check the pack's shape; `bench/predicate_audit.py` is what checks
+    it against the corpus, and needs the dataset to do so.
+    """
+
+    @staticmethod
+    def _specs():
+        path = ROOT / "bench" / "packs" / "twowiki.toml"
+        assert path.is_file(), f"the benchmark vocabulary is missing from {path}"
+        return {s.name: s for s in load_specs(str(path))}
+
+    def test_it_loads_and_declares_every_relation_once(self):
+        specs = self._specs()
+        assert len(specs) == 34, "the corpus has 34 relations; the audit script counts them"
+
+    def test_the_date_relations_take_values_and_walk_nowhere(self):
+        """9,854 of the corpus's 31,120 triples, and the reason they are values is the whole
+        classification rule: declaring them entity-valued would connect every person born in
+        1935 to every work published in 1935."""
+        specs = self._specs()
+        for name in ("born_on", "date_of_death", "publication_date", "inception"):
+            assert specs[name].objects_are_entities is False, name
+            assert specs[name].graph is False, name
+
+    def test_every_traversable_relation_declares_an_entity_object(self):
+        specs = self._specs()
+        for spec in specs.values():
+            if spec.graph:
+                assert spec.objects_are_entities, spec.name
+
+    def test_the_three_overridden_builtins_keep_their_aliases(self):
+        """The pack replaces three builtins to give them an object_type. Replacing drops
+        aliases, and `bench/twowiki.py` folds every relation through the registry as it
+        loads, so without these the corpus spellings resolve to nothing."""
+        from memvara.schema import BUILTIN_PREDICATES
+
+        builtins = {s.name: s for s in BUILTIN_PREDICATES}
+        specs = self._specs()
+        for name in ("born_on", "born_in", "works_at"):
+            assert set(builtins[name].aliases) <= set(specs[name].aliases), (
+                f"{name} drops an alias its builtin carries; the corpus spelling for it "
+                "will resolve to nothing")
+
+    def test_nothing_supersedes(self):
+        """The corpus is a static set of gold evidence loaded in one pass, so a `one`
+        declaration would make a second true value retire the first and delete evidence the
+        benchmark scores its own recall against. A film has several directors."""
+        offenders = [s.name for s in self._specs().values()
+                     if s.cardinality is not Cardinality.MANY]
+        assert offenders == [], offenders
+
+
+@needs_toml
+class TestPredicateAudit:
+    """`bench.predicate_audit.audit`, which encodes decision 3's classification rule.
+
+    Tested despite living in `bench/` — which coverage does not measure and pytest does not
+    collect by default — because its first version got this wrong in the direction that
+    hides the answer. It reported declared-as-value and undeclared together, so a pack that
+    covered every relation still showed a large "gap" made entirely of dates it had
+    deliberately declared as values. The counts here are synthetic; the corpus measurement
+    is the script's job.
+    """
+
+    @staticmethod
+    def _audit(counts, pack_body: str | None, tmp_path):
+        import bench.predicate_audit as pa
+        from memvara.schema import BUILTIN_PREDICATES
+
+        specs = ()
+        if pack_body is not None:
+            path = tmp_path / "p.toml"
+            path.write_text(pack_body, encoding="utf-8")
+            specs = load_specs(str(path))
+        return pa.audit(counts, PredicateRegistry(BUILTIN_PREDICATES + specs))
+
+    def test_it_separates_declared_values_from_undeclared(self, tmp_path):
+        """The distinction the first version lost. Both carry no edge; only one is a gap."""
+        from collections import Counter
+
+        pack = ('[[predicate]]\nname="ships_on"\ncardinality="many"\nvolatility="static"\n'
+                'object_type=["value"]\n\n'
+                '[[predicate]]\nname="depends_on"\ncardinality="many"\nvolatility="slow"\n'
+                'object_type=["software"]\ngraph=true\n')
+        report = self._audit(Counter({"depends_on": 10, "ships_on": 5, "invented_by": 2}),
+                             pack, tmp_path)
+        assert report["declared"] == [("depends_on", 10)]
+        assert report["values"] == [("ships_on", 5)]
+        assert report["undeclared"] == [("invented_by", 2)]
+        assert report["entity_valued"] == 10
+        assert report["projected_share"] == 10 / 17
+
+    def test_an_undeclared_corpus_can_carry_no_edge_at_all(self, tmp_path):
+        """The measurement the whole step exists for, in miniature."""
+        from collections import Counter
+
+        report = self._audit(Counter({"director": 7, "mother": 3}), None, tmp_path)
+        assert report["declared"] == []
+        assert report["projected_share"] == 0.0
+        assert report["undeclared"] == [("director", 7), ("mother", 3)]
+
+    def test_a_relation_is_audited_under_the_name_it_is_stored_as(self, tmp_path):
+        """`bench/twowiki.py` folds every relation through the registry as it loads, so
+        auditing the raw spelling would report a working declaration as missing. This is the
+        alias case that made three of 2Wiki's relations look undeclared."""
+        from collections import Counter
+
+        pack = ('[[predicate]]\nname="born_in"\ncardinality="many"\nvolatility="static"\n'
+                'aliases=["birthplace","place_of_birth"]\n'
+                'object_type=["place"]\ngraph=true\n')
+        report = self._audit(Counter({"place_of_birth": 9}), pack, tmp_path)
+        assert report["declared"] == [("place_of_birth", 9)]
+        assert report["undeclared"] == []
+
+    def test_an_empty_corpus_does_not_divide_by_zero(self, tmp_path):
+        from collections import Counter
+
+        report = self._audit(Counter(), None, tmp_path)
+        assert report["projected_share"] == 0.0
+        assert report["asserted"] == 0
+
+
+def test_the_accepted_pack_keys_track_the_spec_they_build() -> None:
+    """`_PREDICATE_KEYS` and `PredicateSpec`'s fields are two lists nothing forces to agree.
+
+    Adding a field to the spec without adding its key here rejects a valid pack with "which
+    this version does not understand", and the trail from that message leads to a different
+    file than the one that was edited. Deriving the set from `dataclasses.fields` was the
+    obvious fix and is the wrong one: it would silently expose every future internal field
+    to TOML, which is a quieter failure than the loud one it prevents. So the set stays
+    explicit and this test makes drift impossible — a new field has to be deliberately
+    accepted or deliberately excluded, and either way somebody edits this line and says
+    which.
+
+    `learned` is the one exclusion: a pack declares predicates, so everything it loads is by
+    definition declared, and letting a file assert `learned = true` would let it claim its
+    own declarations were guesses.
+    """
+    from dataclasses import fields
+
+    from memvara.schema import _PREDICATE_KEYS
+
+    assert _PREDICATE_KEYS == {f.name for f in fields(PredicateSpec)} - {"learned"}
+
+
+@needs_toml
+class TestTypeNamesAreCaseInsensitive:
+    """A capital letter used to turn a value into an entity, silently.
+
+    Every other declared name in a pack is case-insensitive, because `_coerce_enum` folds
+    cardinality, volatility and both memory types. Type names were not, so `VALUE_TYPE` was
+    compared against the author's exact spelling: `object_type = ["Person", "Value"]` with
+    `graph = true` passed the loader's own "a value carries no edge" check, because "Value"
+    is not "value", and `objects_are_entities` then reported true. A predicate marked as
+    holding scalars became entity-valued with no error anywhere — the false join this
+    feature exists to prevent, reached through capitalisation.
+    """
+
+    def _spec(self, tmp_path, body: str):
+        path = tmp_path / "case.toml"
+        path.write_text(body, encoding="utf-8")
+        spec, = load_specs(str(path))
+        return spec
+
+    def test_a_capitalised_value_type_still_means_value(self, tmp_path):
+        spec = self._spec(tmp_path, '[[predicate]]\nname="holds"\ncardinality="many"\n'
+                                    'volatility="slow"\nobject_type=["Value"]\n')
+        assert spec.object_type == ("value",)
+        assert spec.objects_are_entities is False
+
+    def test_a_capitalised_value_type_is_refused_alongside_graph(self, tmp_path):
+        """The regression. This pack used to load, and produced a traversable predicate
+        whose objects its author had declared to be scalars."""
+        with pytest.raises(PredicatePackError, match="cannot both be true"):
+            self._spec(tmp_path, '[[predicate]]\nname="holds"\ncardinality="many"\n'
+                                 'volatility="slow"\nobject_type=["Person","Value"]\n'
+                                 'graph=true\n')
+
+    def test_entity_type_names_fold_too(self, tmp_path):
+        """So that two packs naming the same type differently declare the same type."""
+        spec = self._spec(tmp_path, '[[predicate]]\nname="depends_on"\ncardinality="many"\n'
+                                    'volatility="slow"\nsubject_type=[" Project "]\n'
+                                    'object_type=["Software"]\ngraph=true\n')
+        assert spec.subject_type == ("project",)
+        assert spec.object_type == ("software",)
+        assert spec.objects_are_entities is True
+
+    def test_aliases_are_not_folded(self, tmp_path):
+        """They name predicates, not types, and `normalize()` already owns that spelling
+        rule. A second, quieter one in front of it would be the drift this avoids."""
+        spec = self._spec(tmp_path, '[[predicate]]\nname="x"\ncardinality="many"\n'
+                                    'volatility="slow"\naliases=["Git_State"]\n')
+        assert spec.aliases == ("Git_State",)
+
+
+@needs_toml
+def test_an_inverse_without_an_edge_to_reverse_is_refused(tmp_path):
+    """A full inverse pair on a predicate nothing can walk.
+
+    `inverse` names the reverse of an edge, so a predicate with `graph = false` has no edge
+    for it to reverse and the declaration resolves to nothing a walk could use — the same
+    "looks present in the file, does nothing at runtime" this loader refuses everywhere
+    else.
+
+    Deliberately *not* the same as a mixed `object_type`, which is refused only alongside
+    `graph`. A mixture means something: `prefers` holds `postgresql` and `plain` alike,
+    resolves to a value, and is the documented shape for a predicate that takes either. An
+    inverse with no edge means nothing at all.
+    """
+    path = tmp_path / "inv.toml"
+    path.write_text('[[predicate]]\nname="owned_by"\ncardinality="one"\n'
+                    'volatility="slow"\ninverse="owns"\ninverse_cardinality="many"\n',
+                    encoding="utf-8")
+    with pytest.raises(PredicatePackError, match="no edge"):
+        load_specs(str(path))
+
+
+@needs_toml
+class TestCarriesEdge:
+    """An entity object type is necessary and not sufficient.
+
+    `graph` used to be declared and read by nothing: a predicate with an entity
+    `object_type` and `graph` left false was classified ENTITY, walked by
+    `GraphTraverser`, and counted as joinable by `connectivity()`. The vocabulary said the
+    relation was not worth walking and the store walked it anyway, which made `graph` the
+    kind of declaration that looks present in a file and does nothing — the failure the
+    loader's other refusals exist to prevent, in the field that names the feature.
+    """
+
+    def test_both_halves_are_required(self):
+        assert PredicateSpec("depends_on", object_type=("software",),
+                             graph=True).carries_edge is True
+        assert PredicateSpec("mentions", object_type=("work",)).carries_edge is False
+        assert PredicateSpec("version", object_type=("value",),
+                             graph=False).carries_edge is False
+        assert PredicateSpec("undeclared").carries_edge is False
+
+    def test_objects_are_entities_still_answers_only_about_the_object(self):
+        """The two are kept apart on purpose: the corpus audit asks what a declaration
+        says about its objects, and the write path asks whether a claim can be walked."""
+        spec = PredicateSpec("mentions", object_type=("work",))
+        assert spec.objects_are_entities is True
+        assert spec.carries_edge is False
+
+    def test_the_twowiki_pack_declares_both_halves_everywhere(self):
+        """Otherwise its measured 68.3% would be counting relations the walk refuses."""
+        specs = load_specs(str(ROOT / "bench" / "packs" / "twowiki.toml"))
+        mismatched = [s.name for s in specs if s.objects_are_entities != s.carries_edge]
+        assert mismatched == [], mismatched

@@ -30,6 +30,8 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
+from conftest import entity_registry
+
 import memvara.core
 from memvara import (
     CachedEmbedder,
@@ -90,7 +92,8 @@ class ScriptedLLM:
 
 def make_memory(**kw):
     kw.setdefault("llm", NullLLM())
-    return Memvara(embedder=HashingEmbedder(dim=64), **kw)
+    return Memvara(embedder=HashingEmbedder(dim=64),
+                   **{"registry": entity_registry(), **kw})
 
 
 @pytest.fixture()

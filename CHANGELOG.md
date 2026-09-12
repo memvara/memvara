@@ -9,6 +9,74 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **A claim's object records whether it names a thing or holds a scalar.** `ObjectKind` is
+  `ENTITY` or `VALUE`, decided at write time from the predicate's declared `object_type`,
+  and only an entity object can be one end of a graph edge. `memvara version 17` therefore
+  stops connecting to every other claim about the string `17`. `SCHEMA_VERSION` moves from
+  10 to 11 for the nullable column.
+
+  `None` is a third state, and it is what makes the upgrade safe: it means the claim was
+  written before this rule existed, and both the SQL gate and the graph walker admit it, so
+  an upgrade does not switch off a graph that was working the day before. Nothing backfills
+  it and nothing could — the kind comes from the predicate's declared `object_type`, and
+  which vocabulary a deployment loads is environment rather than data, so a backfill would
+  make two machines disagree about what one file says.
+
+- **`bench/predicate_audit.py` and `bench/packs/twowiki.toml`.** The audit reports which of a
+  corpus's relations a vocabulary declares, splitting them three ways: entity-valued,
+  declared-as-value, and undeclared. The first two both carry no graph edge and only the
+  third is a gap, so reporting them together would hide the only number that is actionable.
+  Measured against 2WikiMultihopQA, the 23 builtins declare none of its 34 Wikidata
+  relations, so under the classification rule above every one of its 31,120 evidence triples
+  becomes value-valued and the corpus goes from 40.6% joinable to zero. The pack closes that
+  to no gap and 68.3% of triples able to carry an edge; the remaining third is four date
+  relations that are values on purpose. Neither file ships in the wheel — a vocabulary about
+  Wikidata biography belongs to the benchmark, not to a user's store.
+
+- **A predicate can declare its graph behaviour.** `PredicateSpec` gains six
+  declaration-only fields — `subject_type`, `object_type`, `graph`, `inverse`,
+  `inverse_cardinality` and `traversal_cost` — and a TOML vocabulary can set all of them.
+  `PredicateSpec.objects_are_entities` reads `object_type` to say whether a predicate's
+  objects name things or are scalars, and it is False for any predicate nobody has
+  declared. That default is the classification rule rather than an empty value: a value
+  wrongly treated as an entity creates false joins that degrade retrieval invisibly, while
+  an entity wrongly treated as a value costs a join that a later declaration recovers.
+  Connectivity is therefore opt-in. The reserved object type `value` names a scalar, and a
+  declaration mixing it with an entity type resolves to a value, because such a predicate
+  cannot decide per claim.
+
+  `inverse_cardinality` is declared beside `inverse` rather than inferred, because the two
+  sides are not symmetric — `owned_by` holds one value and `owns` holds many — and a walk
+  that assumed the forward cardinality would treat several true facts as competing answers
+  to one question and end all but the last.
+
+  `object_type` and `graph` are both consumed by the object-kind classification above: a
+  claim can be one end of a graph edge only when its predicate declares entity objects
+  *and* declares the relation walkable. The other four are declared and not yet read.
+  They exist now so that a vocabulary written today does not have to be rewritten when
+  traversal weighting and inverse walking arrive. `SCHEMA_VERSION` moves from 9 to 10 to persist them:
+  `put_spec` stores whatever spec it is handed, a *declared* predicate reaches it whenever
+  an alias is learned for one, and rehydration only protects a declared spec from a
+  persisted *learned* one. Without the columns, a graph declaration would be dropped on
+  that write and the next start would rehydrate the predicate as non-traversable — a store
+  that quietly stops walking edges it walked yesterday. Nothing is backfilled, because
+  these are declared rather than derived and no function of the existing columns could
+  fill them.
+
+### Changed
+
+- **A predicate vocabulary with an unrecognised key is now refused rather than ignored.**
+  A pack is read once, at startup, by nobody, so a key nothing reads is a declaration that
+  silently does nothing — `graph_traversable = true` instead of `graph = true` would leave
+  the predicate non-traversable, the store with no edges, and nothing anywhere saying why.
+  The same reasoning refuses `graph = true` without an `object_type` or with a `value`
+  object type, a `traversal_cost` at or below zero, an `inverse` without its cardinality,
+  and a bare string where a list of strings belongs. Every shipped pack still loads, and
+  every new key is optional. If one of your vocabularies carries an extra key as a note to
+  a reader, move it to a `#` comment.
+
 ### Fixed
 
 - **A model that hits its token limit mid-answer now fails the write instead of silently

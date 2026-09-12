@@ -375,6 +375,28 @@ def fact_key_for(scope: "Scope", subject: str, predicate: str) -> str:
     return content_hash(owner_key(scope), entity_key(subject) or subject, predicate)
 
 
+class ObjectKind(str, Enum):
+    """Whether a claim's object names a thing or holds a scalar.
+
+    The stored form of the classification rule in `docs/SUBJECT-CONVENTIONS.md`: only an
+    ENTITY object can be one end of a graph edge, because `17` as a version must not
+    connect to `17` as an age. Set at write time from the predicate's declared
+    `object_type`, so a predicate nobody has declared produces VALUE and connectivity is
+    something a vocabulary asks for rather than something string collisions supply.
+
+    `None` is a third state and it is not "unknown, treat as one of these". It means the
+    claim was written before this rule existed, and it is what stops an upgrade silently
+    switching off a graph that was walking yesterday: those claims keep their edges, new
+    ones follow the rule, and the store converges as claims are rewritten. Nothing
+    backfills it, because the answer depends on which vocabulary a deployment loads
+    rather than on anything in the row, and two machines reading one file must not
+    disagree about what it says.
+    """
+
+    ENTITY = "entity"
+    VALUE = "value"
+
+
 class MemoryType(str, Enum):
     """Different kinds of memory decay and retrieve differently.
 
@@ -562,6 +584,11 @@ class Claim:
     #: predicate where it could matter — a boundary is resolved only for predicates that
     #: accumulate, never for the ones that supersede.
     temporal_precision: Precision | None = None
+
+    #: Whether `object` names a thing or holds a scalar. See `ObjectKind`. Decided in
+    #: `Reconciler._canonicalize`, which is the one place every write path passes through
+    #: before a key is derived, and `None` on any claim written before the rule existed.
+    object_kind: "ObjectKind | None" = None
 
     # --- transaction time: when we believed it ---
     recorded_at: datetime = field(default_factory=utcnow)

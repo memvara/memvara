@@ -210,3 +210,50 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
         "key with the fixture key-123 whenever a test forgot; that has now "
         "happened three times."
     )
+
+
+#: The predicates this suite builds graphs out of. Named here rather than per test so a
+#: fixture can declare them in one place; each is genuinely a relation between two things,
+#: which is why `born_on` and `notes` are absent — a date and a free-text note are values,
+#: and declaring them entity-valued to make a test pass would be declaring something false.
+GRAPH_TEST_PREDICATES = (
+    "reports_to", "works_at", "lives_in", "uses", "configured_in", "headquartered_in",
+    "listed_on", "renamed_as", "mother", "father", "founded_in", "located_now",
+    "prefers_tool", "owns_pet", "based_in", "in_country", "deploy_region",
+    "hq_city", "works_on",
+)
+
+
+def entity_registry(*names: str):
+    """A registry that declares `names` entity-valued, so their claims can carry an edge.
+
+    Since `object_kind` gates traversal, a predicate nobody has declared produces a VALUE
+    object and no edge — deliberately, because connectivity is meant to be something a
+    vocabulary asks for rather than something string collisions supply. A test that builds
+    a graph therefore has to declare one, exactly as a deployment does, and saying so at
+    the top of the test is better than the graph quietly being empty.
+
+    **Extends a builtin rather than replacing it**, which is the whole of why this is a
+    helper and not four lines inline. A declared spec of the same name replaces the
+    builtin outright, so writing `PredicateSpec("lives_in", object_type=("entity",))`
+    silently drops that builtin's `ONE` cardinality and its aliases — and a name that is
+    itself an alias, like `employed_by_company`, stops folding onto `works_at` and becomes
+    a predicate of its own. Both were caught here by tests that had nothing to do with the
+    graph, which is the good case; in a deployment the same mistake is a slot that quietly
+    stops superseding.
+    """
+    from dataclasses import replace
+
+    from memvara.schema import BUILTIN_PREDICATES, PredicateRegistry, PredicateSpec
+
+    names = names or GRAPH_TEST_PREDICATES
+    plain = PredicateRegistry()
+    builtins = {s.name: s for s in BUILTIN_PREDICATES}
+    specs = []
+    for name in names:
+        canonical = plain.normalize(name) or name
+        existing = builtins.get(canonical)
+        specs.append(replace(existing, object_type=("entity",), graph=True)
+                     if existing is not None
+                     else PredicateSpec(name=canonical, object_type=("entity",), graph=True))
+    return PredicateRegistry(BUILTIN_PREDICATES + tuple(specs))

@@ -65,6 +65,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Collection, Iterable, Iterator
 import numpy as np
 
 from ..types import (
+    ObjectKind,
     OBJECT_ENTITY,
     SUBJECT_ENTITY,
     Claim,
@@ -130,7 +131,24 @@ if TYPE_CHECKING:  # pragma: no cover
 #    backfill and nothing an earlier version could have written. The stamp is what tells
 #    the next migration whether the table it sees was built here or invented on the spot
 #    by its own `IF NOT EXISTS`.
-SCHEMA_VERSION = 9
+# 11: objects gained a kind. Only an ENTITY object can be one end of a graph edge, so
+#    `17` as a version stops connecting to `17` as an age. Nullable and NOT backfilled,
+#    which is the one thing to understand about this version: the kind comes from the
+#    predicate's declared `object_type`, and which vocabulary a deployment loads is not
+#    a property of the row, so a backfill would make two machines disagree about what
+#    one file says. NULL therefore means "written before this rule", and `_WALKABLE`
+#    admits it — an upgrade must not switch off a graph that was walking yesterday.
+# 10: predicates gained their graph declaration — `subject_type`, `object_type`, `graph`,
+#    `inverse`, `inverse_cardinality` and `traversal_cost`. They are declaration-only, so
+#    unlike version 6 there is nothing to derive and nothing to backfill: a row written
+#    before this version was either learned, which leaves them at their defaults anyway,
+#    or declared, in which case the pack re-declares it on the next start. The columns
+#    have to exist all the same, because `put_spec` persists whatever spec it is handed
+#    and a declared predicate reaches it whenever an alias is learned for one. Without
+#    them the graph declaration would be dropped on that write and the next start would
+#    rehydrate the predicate as non-traversable — a store that quietly stops walking
+#    edges it walked yesterday, with no error and nothing in the file saying why.
+SCHEMA_VERSION = 11
 
 # Kept separate because the v1 -> v2 migration has to recreate this table: SQLite
 # cannot add a column to an existing primary key, and (tenant, name) is now the key.
@@ -144,6 +162,12 @@ CREATE TABLE IF NOT EXISTS predicates (
     aliases     TEXT NOT NULL DEFAULT '[]',
     supersedes  TEXT NOT NULL DEFAULT '[]',
     learned     INTEGER NOT NULL DEFAULT 1,
+    subject_type        TEXT NOT NULL DEFAULT '[]',
+    object_type         TEXT NOT NULL DEFAULT '[]',
+    graph               INTEGER NOT NULL DEFAULT 0,
+    inverse             TEXT,
+    inverse_cardinality TEXT,
+    traversal_cost      REAL NOT NULL DEFAULT 1.0,
     PRIMARY KEY (tenant, name)
 );
 """
@@ -208,7 +232,12 @@ CREATE TABLE IF NOT EXISTS claims (
     -- answer for them and inventing one would be forging history.
     temporal_precision TEXT,
     amount             REAL,
-    unit               TEXT
+    unit               TEXT,
+    -- Version 11. Nullable, and deliberately not backfilled: a claim written before the
+    -- classification rule has no answer, and the answer depends on which vocabulary a
+    -- deployment loads rather than on anything in the row. NULL keeps such a claim
+    -- walkable, so an upgrade does not switch off a graph that worked yesterday.
+    object_kind        TEXT
 );
 -- The index that makes contradiction detection O(1) instead of a similarity search.
 CREATE INDEX IF NOT EXISTS cl_fact  ON claims(tenant, fact_key, invalidated_at);
@@ -372,7 +401,7 @@ _CLAIM_FIELDS = (
     "polarity", "memory_type", "valid_from", "valid_to", "recorded_at", "invalidated_at",
     "invalidated_by", "confidence", "salience", "obs_count", "sources", "derivation",
     "extractor", "meta", "fact_key", "value_key", "subject_key", "object_key",
-    "temporal_precision", "amount", "unit",
+    "temporal_precision", "amount", "unit", "object_kind",
 )
 _CLAIM_COLS = ", ".join(_CLAIM_FIELDS)
 _CLAIM_VALUES = ", ".join("?" * len(_CLAIM_FIELDS))
@@ -650,8 +679,14 @@ def _object_key_of(meta: str, surface: str) -> str:
 #: stores and not a node; a self-loop leads back to where the walk is standing. Written
 #: once because a join rate that counts edges the traverser refuses to follow promises
 #: hops that will not happen — the same failure as a benchmark scoring its own answer key.
+#: `GraphTraverser._edges`' four rules as SQL, and the two have to say the same thing:
+#: this is what `connectivity()` counts, so a rule in one and not the other makes the
+#: reported join rate promise hops the walk will not take. The `IS NULL` is the third
+#: state of `object_kind` and not an oversight — a claim written before the
+#: classification rule keeps its edges rather than losing them to an upgrade.
 _WALKABLE = ("{a}.polarity > 0 AND {a}.subject_key != '' AND {a}.object_key != '' "
-             "AND {a}.subject_key != {a}.object_key")
+             "AND {a}.subject_key != {a}.object_key "
+             "AND ({a}.object_kind IS NULL OR {a}.object_kind = 'entity')")
 
 
 def _unit(vec: np.ndarray) -> np.ndarray:
@@ -1165,6 +1200,8 @@ class SQLiteStore:
             self._migrate_to_v6()
             self._migrate_to_v7()
             self._migrate_to_v9()
+            self._migrate_to_v10()
+            self._migrate_to_v11()
             # No `_migrate_to_v8`: version 8 added a table nothing had ever written to
             # and that holds no derived data, so its `CREATE TABLE IF NOT EXISTS` above
             # genuinely is the whole migration — the same shape as version 4. What it
@@ -1172,6 +1209,49 @@ class SQLiteStore:
             # table, and an empty one means "nothing has been erased *since this file was
             # upgraded*", never "nothing has ever been erased here".
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _migrate_to_v11(self) -> None:
+        """Add the object kind column.
+
+        Shape-driven like every migration here, so a brand-new database that already has
+        it from `SCHEMA` passes through untouched.
+
+        **Nothing is backfilled, and this one could not be.** The kind is read from the
+        predicate's declared `object_type`, and which vocabulary a deployment has loaded
+        is environment rather than data — two machines opening the same file would write
+        different answers into it. Every other migration here is a pure function of
+        columns the row already holds, and this is why this one adds a column and stops.
+
+        So an existing claim keeps `object_kind IS NULL`, which `_WALKABLE` admits. Its
+        edges survive the upgrade, claims written afterwards follow the rule, and the
+        store converges as claims are rewritten rather than in one pass.
+        """
+        have = {r["name"] for r in self._db.execute("PRAGMA table_info(claims)")}
+        if "object_kind" not in have:
+            self._db.execute("ALTER TABLE claims ADD COLUMN object_kind TEXT")
+
+    def _migrate_to_v10(self) -> None:
+        """Add the predicate graph declaration columns.
+
+        Shape-driven like every migration here, so a brand-new database that already has
+        them from `_PREDICATES_DDL` passes through untouched.
+
+        Nothing is backfilled, and that is not an omission. These columns are declared by
+        a vocabulary rather than derived from anything the row already holds, so there is
+        no function of the existing columns that could fill them — unlike version 6, where
+        the keys were a pure function of `meta` and the raw text. Their defaults say
+        "takes values, walks nowhere", which is what an undeclared predicate means and is
+        the safe reading for a row whose pack is no longer loaded.
+        """
+        have = {r["name"] for r in self._db.execute("PRAGMA table_info(predicates)")}
+        for column, decl in (("subject_type", "TEXT NOT NULL DEFAULT '[]'"),
+                             ("object_type", "TEXT NOT NULL DEFAULT '[]'"),
+                             ("graph", "INTEGER NOT NULL DEFAULT 0"),
+                             ("inverse", "TEXT"),
+                             ("inverse_cardinality", "TEXT"),
+                             ("traversal_cost", "REAL NOT NULL DEFAULT 1.0")):
+            if column not in have:
+                self._db.execute(f"ALTER TABLE predicates ADD COLUMN {column} {decl}")
 
     def _migrate_to_v9(self) -> None:
         """Add the temporal-precision and quantity columns.
@@ -1954,6 +2034,7 @@ class SQLiteStore:
                     # two dict lookups and the two extra index rows below.
                     claim.subject_key, claim.object_key,
                     claim.temporal_precision, claim.amount, claim.unit,
+                    claim.object_kind.value if claim.object_kind else None,
                 ),
             )
             # Mirror the claim's rowid into the FTS table so the index entry can be
@@ -2068,6 +2149,7 @@ class SQLiteStore:
             temporal_precision=r["temporal_precision"],
             amount=r["amount"],
             unit=r["unit"],
+            object_kind=ObjectKind(r["object_kind"]) if r["object_kind"] else None,
         )
 
     def get_claim(self, claim_id: str) -> Claim | None:
@@ -2562,14 +2644,24 @@ class SQLiteStore:
             self._db.execute(
                 "INSERT INTO predicates "
                 "(tenant, name, cardinality, volatility, memory_type, aliases, "
-                " supersedes, learned) "
-                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(tenant, name) DO UPDATE SET "
+                " supersedes, learned, subject_type, object_type, graph, inverse, "
+                " inverse_cardinality, traversal_cost) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(tenant, name) DO UPDATE SET "
                 "cardinality=excluded.cardinality, volatility=excluded.volatility, "
                 "memory_type=excluded.memory_type, aliases=excluded.aliases, "
-                "supersedes=excluded.supersedes, learned=excluded.learned",
+                "supersedes=excluded.supersedes, learned=excluded.learned, "
+                "subject_type=excluded.subject_type, object_type=excluded.object_type, "
+                "graph=excluded.graph, inverse=excluded.inverse, "
+                "inverse_cardinality=excluded.inverse_cardinality, "
+                "traversal_cost=excluded.traversal_cost",
                 (tenant, spec.name, spec.cardinality.value, spec.volatility.value,
                  spec.memory_type.value, json.dumps(list(spec.aliases)),
-                 json.dumps(list(spec.supersedes)), int(spec.learned)),
+                 json.dumps(list(spec.supersedes)), int(spec.learned),
+                 json.dumps(list(spec.subject_type)),
+                 json.dumps(list(spec.object_type)), int(spec.graph), spec.inverse,
+                 spec.inverse_cardinality.value if spec.inverse_cardinality else None,
+                 spec.traversal_cost),
             )
             self._maybe_commit()
 
@@ -2588,6 +2680,13 @@ class SQLiteStore:
                 aliases=tuple(json.loads(r["aliases"])),
                 supersedes=tuple(json.loads(r["supersedes"])),
                 learned=bool(r["learned"]),
+                subject_type=tuple(json.loads(r["subject_type"])),
+                object_type=tuple(json.loads(r["object_type"])),
+                graph=bool(r["graph"]),
+                inverse=r["inverse"],
+                inverse_cardinality=(Cardinality(r["inverse_cardinality"])
+                                     if r["inverse_cardinality"] else None),
+                traversal_cost=r["traversal_cost"],
             )
             for r in rows
         ]

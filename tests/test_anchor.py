@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from conftest import entity_registry
+
 from memvara import Memvara, NullLLM
 from memvara.embed import HashingEmbedder
 from memvara.retrieve.anchor import SELF_SUBJECT, anchor_of, query_tokens
@@ -44,6 +46,7 @@ ORG = (
 
 def build(**kw) -> Memvara:
     mem = Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=128), tenant="acme",
+                  registry=entity_registry(),
                   user="alice", **kw)
     for subject, predicate, obj in ORG:
         mem.remember(subject, predicate, obj, recorded_at=T0)
@@ -174,6 +177,7 @@ def test_an_anchored_claim_past_the_first_cut_is_found_on_the_retry(monkeypatch)
     retry the answer would be an empty list with Ada's row one position past the cut.
     """
     with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=128), tenant="acme",
+                 registry=entity_registry(),
                  user="alice", read_candidate_multiplier=1) as mem:
         for n in range(3):
             mem.remember("Bea", f"note_{n}", f"note {n}",

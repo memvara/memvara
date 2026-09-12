@@ -1,0 +1,333 @@
+# 2WikiMultihopQA's evidence vocabulary.
+#
+#   PYTHONPATH=. python3 bench/predicate_audit.py --packs bench/packs/twowiki.toml
+#
+# This is benchmark tooling and deliberately does NOT ship in `memvara/packs/`. It describes
+# one public corpus, so listing it in `available_packs()` would offer every user a vocabulary
+# about Wikidata biography that has nothing to do with their store. Load it by path.
+#
+# WHY IT EXISTS. `docs/SUBJECT-CONVENTIONS.md` decision 3 makes an object's kind a property
+# of its predicate: an undeclared predicate takes values, and a value carries no graph edge.
+# The 23 builtins are a personal-assistant vocabulary and declare none of these 34 relations,
+# so without this file every one of the corpus's 31,120 triples is value-valued and the
+# corpus goes from its measured 40.6% joinable to zero — the graph benchmark reporting that
+# the graph stopped working, correctly and for reasons unrelated to the design.
+#
+# THREE NAMES ARE NOT THE CORPUS SPELLING, AND THEY CARRY THEIR BUILTINS' ALIASES BACK.
+# `bench/twowiki.py` normalizes each relation through the registry as it loads, and three of
+# them are already aliases of builtins: `date_of_birth` becomes `born_on`, `place_of_birth`
+# becomes `born_in`, and `employer` becomes `works_at`. Claims are stored under those
+# canonical names, so declaring the corpus spelling instead would leave the declaration
+# matching nothing.
+#
+# Declaring the canonical name is necessary and not sufficient, which cost a measurement to
+# find out. A declared spec REPLACES the builtin of the same name rather than extending it,
+# so an override that omits `aliases` silently drops them: after declaring a bare `born_on`,
+# `date_of_birth` folded to nothing and the audit reported all three relations as undeclared
+# *because* they had been declared. Each of the three below therefore repeats its builtin's
+# alias list verbatim. If a builtin ever gains an alias, this file has to gain it too — there
+# is nothing that checks, which is why the audit script is the thing to trust rather than
+# this comment.
+#
+# EVERYTHING IS MANY, INCLUDING THE THREE BUILTINS THIS OVERRIDES. The corpus is a static set
+# of gold evidence loaded in one pass, and a `one` declaration would make a second true value
+# retire the first — deleting evidence the benchmark scores its own recall against. A film
+# has several directors and a person several awards. `born_on`, `born_in` and `works_at` are
+# `one` among the builtins for good reasons that do not apply to a frozen corpus, and a
+# declared spec outranks a builtin, which is what makes the override work. Nothing outside
+# this benchmark loads this file.
+#
+# EVERYTHING IS STATIC. These are biographical and historical facts, and `bench/twowiki.py`
+# pins one write instant for the whole corpus, so decay would only add noise to R@k.
+#
+# NO INVERSES ARE DECLARED. `father`/`child` and `student_of`/`doctoral_advisor` are real
+# inverse pairs, but nothing consumes `inverse` yet and a wrongly declared one is a future
+# correctness bug for no present gain. Declaring an inverse also requires declaring the
+# other side's cardinality, which is a second judgement this corpus does not need made.
+#
+# The four date relations are `value`, and that is the point rather than an omission: they
+# are 9,854 of the 31,120 triples, and declaring them entity-valued would connect every
+# person born in 1935 to every work published in 1935. That is the false join the
+# classification rule exists to prevent, and it is a third of this corpus.
+
+# --- dates: values, and no edge -------------------------------------------------------
+
+[[predicate]]
+name = "born_on"                  # the corpus spells this date_of_birth
+cardinality = "many"
+volatility = "static"
+aliases = ["birthday", "date_of_birth", "dob"]
+subject_type = ["person"]
+object_type = ["value"]
+
+[[predicate]]
+name = "date_of_death"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["value"]
+
+[[predicate]]
+name = "publication_date"
+cardinality = "many"
+volatility = "static"
+subject_type = ["work"]
+object_type = ["value"]
+
+[[predicate]]
+name = "inception"
+cardinality = "many"
+volatility = "static"
+subject_type = ["organization", "work"]
+object_type = ["value"]
+
+# --- people ---------------------------------------------------------------------------
+
+[[predicate]]
+name = "director"
+cardinality = "many"
+volatility = "static"
+subject_type = ["work"]
+object_type = ["person"]
+graph = true
+
+[[predicate]]
+name = "father"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["person"]
+graph = true
+
+[[predicate]]
+name = "mother"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["person"]
+graph = true
+
+[[predicate]]
+name = "spouse"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["person"]
+graph = true
+
+[[predicate]]
+name = "child"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["person"]
+graph = true
+
+[[predicate]]
+name = "sibling"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["person"]
+graph = true
+
+[[predicate]]
+name = "performer"
+cardinality = "many"
+volatility = "static"
+subject_type = ["work"]
+object_type = ["person"]
+graph = true
+
+[[predicate]]
+name = "composer"
+cardinality = "many"
+volatility = "static"
+subject_type = ["work"]
+object_type = ["person"]
+graph = true
+
+[[predicate]]
+name = "producer"
+cardinality = "many"
+volatility = "static"
+subject_type = ["work"]
+object_type = ["person"]
+graph = true
+
+[[predicate]]
+name = "creator"
+cardinality = "many"
+volatility = "static"
+subject_type = ["work"]
+object_type = ["person"]
+graph = true
+
+[[predicate]]
+name = "editor"
+cardinality = "many"
+volatility = "static"
+subject_type = ["work"]
+object_type = ["person"]
+graph = true
+
+[[predicate]]
+name = "presenter"
+cardinality = "many"
+volatility = "static"
+subject_type = ["work"]
+object_type = ["person"]
+graph = true
+
+[[predicate]]
+name = "founded_by"
+cardinality = "many"
+volatility = "static"
+subject_type = ["organization"]
+object_type = ["person", "organization"]
+graph = true
+
+[[predicate]]
+name = "student_of"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["person"]
+graph = true
+
+[[predicate]]
+name = "doctoral_advisor"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["person"]
+graph = true
+
+# --- places ---------------------------------------------------------------------------
+
+[[predicate]]
+name = "born_in"                  # the corpus spells this place_of_birth
+cardinality = "many"
+volatility = "static"
+aliases = ["birthplace", "place_of_birth"]
+subject_type = ["person"]
+object_type = ["place"]
+graph = true
+
+[[predicate]]
+name = "place_of_death"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["place"]
+graph = true
+
+[[predicate]]
+name = "place_of_burial"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["place"]
+graph = true
+
+[[predicate]]
+name = "place_of_detention"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["place"]
+graph = true
+
+[[predicate]]
+name = "country_of_citizenship"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["place"]
+graph = true
+
+[[predicate]]
+name = "country_of_origin"
+cardinality = "many"
+volatility = "static"
+subject_type = ["work"]
+object_type = ["place"]
+graph = true
+
+[[predicate]]
+name = "country"
+cardinality = "many"
+volatility = "static"
+subject_type = ["work", "organization", "place"]
+object_type = ["place"]
+graph = true
+
+# --- organizations ----------------------------------------------------------------------
+
+[[predicate]]
+name = "works_at"                 # the corpus spells this employer
+cardinality = "many"
+volatility = "static"
+aliases = ["employed_at", "employer", "employed_by", "company", "works_for", "joined",
+           "workplace"]
+subject_type = ["person"]
+object_type = ["organization"]
+graph = true
+
+[[predicate]]
+name = "educated_at"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["organization"]
+graph = true
+
+[[predicate]]
+name = "publisher"
+cardinality = "many"
+volatility = "static"
+subject_type = ["work"]
+object_type = ["organization"]
+graph = true
+
+[[predicate]]
+name = "manufacturer"
+cardinality = "many"
+volatility = "static"
+subject_type = ["work"]
+object_type = ["organization"]
+graph = true
+
+# --- everything else --------------------------------------------------------------------
+
+[[predicate]]
+name = "award_received"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person", "work"]
+object_type = ["award"]
+graph = true
+
+[[predicate]]
+name = "occupation"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["occupation"]
+graph = true
+
+[[predicate]]
+name = "cause_of_death"
+cardinality = "many"
+volatility = "static"
+subject_type = ["person"]
+object_type = ["cause"]
+graph = true
+
+[[predicate]]
+name = "has_part"
+cardinality = "many"
+volatility = "static"
+subject_type = ["work"]
+object_type = ["work"]
+graph = true

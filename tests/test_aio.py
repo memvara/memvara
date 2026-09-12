@@ -24,6 +24,8 @@ from datetime import timedelta
 
 import pytest
 
+from conftest import entity_registry
+
 from memvara import Memvara, HashingEmbedder, NullLLM, Scope, utcnow
 from memvara.aio import (
     NOT_WRAPPED,
@@ -44,7 +46,8 @@ def run(coro):
 
 @pytest.fixture()
 def mem():
-    m = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+    m = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice",
+                registry=entity_registry())
     yield m
     m.close()
 

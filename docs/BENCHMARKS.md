@@ -407,9 +407,59 @@ Both halves are now fixed and the numbers above are after both:
   `PredicateRegistry.learn()` is called only from the LLM-assisted resolution in
   `write/pipeline.py`, so an offline store never teaches it and the rule sees the 23
   builtins alone. `bench/twowiki.py` exposed that — every predicate in that corpus is a
-  learned one, so the rule does not fire there. Matched as phrases
+  learned one, so the rule does not fire there. `bench/packs/twowiki.toml` now declares all
+  34 of them, which is a prerequisite rather than a tuning knob; see below. Matched as phrases
   and never as tokens: `lives_in` splits into `lives` and `in`, and a token index would
   read almost every question as a chain.
+
+## The graph benchmark needs a vocabulary of its own, and this is why
+
+`docs/SUBJECT-CONVENTIONS.md` decision 3 makes an object's kind a property of its predicate:
+a predicate whose `object_type` is undeclared takes *values*, and a value carries no graph
+edge. Connectivity becomes exactly as large as the declared vocabulary and not one edge
+larger.
+
+2WikiMultihopQA's evidence is Wikidata relations, and the 23 builtins are a
+personal-assistant vocabulary. `bench/predicate_audit.py` measures the overlap:
+
+```
+$ PYTHONPATH=. python3 bench/predicate_audit.py
+  vocabulary: builtins only
+  relations: 34   triples asserted: 31,120
+  declared entity-valued: 0 relations, 0 triples
+  declared value-valued:  3 relations, 6,772 triples   (deliberate: no edge)
+  undeclared:             31 relations, 24,348 triples   (the gap)
+  share of triples that can carry an edge: 0.0%
+```
+
+So once that rule reaches retrieval, every triple in the corpus is value-valued and the
+40.6% joinable figure this file reports elsewhere becomes 0.0% — the graph benchmark
+reporting that the graph leg had stopped working, correctly, and for reasons having nothing
+to do with whether the design is any good. `bench/packs/twowiki.toml` closes it:
+
+```
+$ PYTHONPATH=. python3 bench/predicate_audit.py --packs bench/packs/twowiki.toml
+  declared entity-valued: 30 relations, 21,266 triples
+  declared value-valued:  4 relations, 9,854 triples   (deliberate: no edge)
+  undeclared:             0 relations, 0 triples   (the gap)
+  share of triples that can carry an edge: 68.3%
+```
+
+**The remaining 31.7% is not a gap.** Four relations — `date_of_birth`, `date_of_death`,
+`publication_date` and `inception` — take dates, and 9,854 of the corpus's 31,120 triples
+are theirs. Declaring them entity-valued would connect every person born in 1935 to every
+work published in 1935, which is the false join the classification rule exists to prevent.
+A third of this corpus is a value, and the audit reports declared-as-value separately from
+undeclared for exactly that reason: both carry no edge, and only one of them is a problem.
+
+**Two things about the pack are load-bearing and neither is obvious.** Three of the corpus's
+relations are already aliases of builtins, so `bench/twowiki.py` stores them under the
+canonical names — `date_of_birth` as `born_on`, `place_of_birth` as `born_in`, `employer` as
+`works_at` — and the pack has to declare those names rather than the corpus spelling. And a
+declared spec *replaces* a builtin of the same name rather than extending it, so the
+override has to repeat the builtin's alias list: a bare `born_on` declaration made all three
+relations resolve to nothing, and the audit reported them as undeclared *because* they had
+been declared. `tests/test_predicate_packs.py` pins both.
 
 **What is still gated is one family, and it is morphology rather than vocabulary.** "Who
 founded the company that X works at" names `works_at` and `founded_by`, but the store

@@ -61,7 +61,7 @@ was being read as holding further than it does.
    supersedes on the next write and retires nothing already stored.
 
    A vocabulary is TOML, one `[[predicate]]` table each, `name`, `cardinality` and
-   `volatility` required, `memory_type`, `aliases` and `supersedes` optional:
+   `volatility` required, everything else optional:
 
    ```toml
    [[predicate]]
@@ -69,13 +69,42 @@ was being read as holding further than it does.
    cardinality = "one"     # "one" supersedes, "many" accumulates
    volatility = "fast"     # static | slow | fast -> 36500 | 730 | 7 day half-life
    aliases = ["git_status"]
+
+   [[predicate]]
+   name = "depends_on"
+   cardinality = "many"
+   volatility = "slow"
+   subject_type = ["project", "software"]   # what may hold this relation
+   object_type = ["software", "service"]    # what its objects are
+   graph = true                             # this relation is worth walking
+   inverse = "depended_on_by"
+   inverse_cardinality = "many"             # not the same as this predicate's own
+   traversal_cost = 1.0                     # edge weight; nothing consumes it yet
    ```
+
+   The second block is the **graph declaration**, and its six fields are declaration-only:
+   nothing infers them, and a learned predicate leaves them at defaults that mean "takes
+   values, walks nowhere". `object_type` is what classifies an object as an entity or a
+   scalar, so `PredicateSpec.objects_are_entities` is False for any predicate nobody has
+   declared — connectivity is opt-in. The reserved type `value` names a scalar, and a
+   declaration that mixes it with an entity type resolves to a value, because such a
+   predicate cannot decide per claim and the undecidable case takes the safe direction.
+
+   `inverse_cardinality` is declared beside `inverse` rather than assumed, because the two
+   sides are not symmetric: `owned_by` holds one value and `owns` holds many. A walk that
+   assumed the forward cardinality would treat several true facts as competing answers to
+   one question and end all but the last, so the loader refuses one without the other.
 
    Needs Python 3.11 or later, which is where `tomllib` arrives; the reader is
    imported lazily so 3.10 keeps working for everything else.
 
    Malformed entries raise rather than being skipped: a vocabulary that half-loads leaves
-   some predicates superseding and others accumulating with nothing recording which.
+   some predicates superseding and others accumulating with nothing recording which. For
+   the same reason an **unrecognised key is refused** rather than ignored. A pack is read
+   once, at startup, by nobody; `graph_traversable = true` instead of `graph = true` would
+   leave the predicate non-traversable, the store with no edges, and nothing anywhere
+   saying why. `graph = true` without an `object_type`, with a `value` object type, or a
+   `traversal_cost` at or below zero are refused on the same grounds.
 
    > **Claim.** A predicate nobody declared accumulates rather than superseding.
    > **Scope.** Detection only. It makes a missed contradiction the failure mode instead

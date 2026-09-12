@@ -7,6 +7,94 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Graph traversal now follows only declared relations
+
+### What changed
+
+A claim's object carries an `ObjectKind` — `ENTITY` or `VALUE` — set at write time from the
+predicate's declared `object_type`. Only an entity object can be one end of a graph edge.
+A predicate nobody has declared produces a value, so it carries no edge.
+
+`SCHEMA_VERSION` moves from 10 to 11, adding one nullable column to `claims`.
+
+### Who this changes, and in which direction
+
+**Read this one if you use `neighborhood()`, `paths_between()`, or the graph leg of
+`search()`.** It is the change in this release that can quietly do less than it did before.
+
+**Claims you already have are unaffected.** They keep `object_kind IS NULL`, which means
+"written before this rule", and both the traversal gate and the walker admit them. Nothing
+backfills the column: the answer depends on which vocabulary a deployment loads rather than
+on anything in the row, so a backfill would make two machines disagree about one file. Your
+existing edges survive the upgrade.
+
+**Claims written after the upgrade need a vocabulary.** If you have not declared
+`object_type` for a predicate, its new claims are value-valued and carry no edge. A store
+that walks today and is still being written to will therefore see its graph thin out over
+time rather than break at once, which is the more confusing failure of the two — so if you
+rely on traversal, declare your relations now:
+
+```toml
+[[predicate]]
+name = "depends_on"
+cardinality = "many"
+volatility = "slow"
+object_type = ["software"]
+graph = true
+```
+
+**This is deliberate and it is the point.** Connectivity used to be whatever string
+collisions produced, which is how a version number came to be connected to an age.
+Connectivity is now something you declare and can measure.
+
+**Watch out when declaring a predicate that already exists.** A declared spec *replaces* a
+builtin of the same name rather than extending it, so `PredicateSpec("lives_in",
+object_type=("place",))` silently drops that builtin's `ONE` cardinality and its aliases.
+Repeat what you want to keep, or build the new spec with `dataclasses.replace` from the
+builtin.
+
+---
+
+## Predicates can declare their graph behaviour
+
+### What changed
+
+`PredicateSpec` gains six declaration-only fields: `subject_type`, `object_type`, `graph`,
+`inverse`, `inverse_cardinality` and `traversal_cost`. A TOML vocabulary can set all six,
+and `PredicateSpec.objects_are_entities` reads `object_type` to say whether this
+predicate's objects name things or are scalars.
+
+`SCHEMA_VERSION` moves from 9 to 10, adding six columns to the `predicates` table. An older
+file upgrades in place on open.
+
+### Who this changes, and in which direction
+
+**Nothing about an existing store's behaviour changes when you add these fields alone.**
+The defaults mean "takes values, walks nowhere", which is exactly what every predicate
+meant before they existed. No claim is touched and no migration backfills anything — these
+are declared by a vocabulary, not derived from data, so there is nothing to derive.
+
+`object_type` and `graph` are read by the object-kind rule described in the entry above:
+a claim can carry a graph edge only when its predicate declares entity objects **and**
+declares the relation walkable. Declaring an entity `object_type` without `graph = true`
+is legitimate and means "these objects are things, but walking this relation does not help
+answer anything" — `mentions` is the example. The remaining four fields are declared and
+not yet read.
+
+**Your existing packs keep loading.** Every new key is optional. The shipped `engineering`,
+`decisions` and `events` packs declare none of them.
+
+**A pack with a key this version does not recognise now fails to load**, where it used to
+be ignored. That is the one behaviour change and it is deliberate: a pack is read once, at
+startup, by nobody, so a misspelled key is a declaration that silently does nothing. If a
+vocabulary of yours carried an extra key as a note to a reader, move it to a `#` comment.
+
+**A build older than this cannot open a file this one has upgraded.** The usual one-way
+schema door; the store refuses rather than corrupting. Take a copy first if you may need to
+roll back.
+
+---
+
 ## `MemoryAPI.recall` gains `valid_at`, the world clock
 
 ### What changed
