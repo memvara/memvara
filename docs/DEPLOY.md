@@ -127,6 +127,7 @@ transport is stdio and the configuration is entirely environment.
 | `MEMVARA_LLM_TERSE_CLAIMS` | `1` asks `MEMVARA_LLM=openai` for a shorter claim shape: `polarity`, `when`, `amount` and `unit` become optional, so the model stops writing a field name and a null for each of them. `memory_type` and `confidence` stay required, because defaulting those two is a decision rather than a formality. Unset means the full shape, which is right for hosted OpenAI — its strict mode requires every declared property in `required`, so this is a 400 there. Set it for a self-hosted model whose generation speed is the bottleneck. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_LLM_MAX_TOKENS` | Ceiling on the tokens one response from `MEMVARA_LLM=openai` may generate. Unset means the backend's own default of 8,192, which is what every deployment ran on before this existed. It bounds how long a runaway lasts; it does not shorten an answer. A model stopped by this limit has its turn reported as not extracted and retried, so a budget below what your model actually writes turns slow turns into turns that never land. Read the number off a measured response length, not an estimate. A positive integer; anything else is refused at startup. See [Bounding a runaway](#bounding-a-runaway). |
 | `MEMVARA_LLM_EXTRA_BODY` | A JSON object of extra request fields for `MEMVARA_LLM=openai`, sent on every request. Set it for a self-hosted model whose reasoning mode is on by default: a Qwen3 server needs `{"chat_template_kwargs": {"enable_thinking": false}}` or it spends the token budget thinking and returns an empty message. Refused at startup when it is not a JSON object. See [Set `MEMVARA_LLM_EXTRA_BODY` if the model thinks before it answers](#set-memvara_llm_extra_body-if-the-model-thinks-before-it-answers). |
+| `MEMVARA_LLM_TIMEOUT` | Seconds one extraction from `MEMVARA_LLM=openai` may take before the client gives up. Unset keeps the OpenAI SDK's default of 600. Raise it for a self-hosted model that generates slowly: at about 5 tokens a second a turn of a few thousand characters needs longer than 600 seconds, and a cancelled call is a turn that was not extracted. Lower it for a fast model reached over a network, where a long timeout is a long wait on a connection that has already died. A positive number of seconds, decimals allowed; `0`, negatives, `inf` and `nan` are refused at startup. See [When a long turn runs out of time](#when-a-long-turn-runs-out-of-time). |
 | `MEMVARA_ADVISE_REPLACEMENTS` | `1` makes a `memory_remember` that closed nothing ask the model whether the new fact is a newer version of one of its nearest neighbours in other slots, and adds a `may replace:` line to the receipt naming the matches. Nothing is closed. Up to three model calls per write. Needs `MEMVARA_LLM=anthropic` or `openai`; refused at startup with `none`. See [Set `MEMVARA_ADVISE_REPLACEMENTS` to have writes name the fact they may replace](#set-memvara_advise_replacements-to-have-writes-name-the-fact-they-may-replace). |
 | `MEMVARA_EMBEDDER` | `hashing` (default, offline, 512-dimensional), `hashing:<dim>`, `local` or `local:<model>` (needs `memvara[local-embed]`), or `auto`. See [The embedder is named, not discovered](#the-embedder-is-named-not-discovered). |
 | `MEMVARA_READ_ONLY` | `1` hides every tool that writes. |
@@ -151,7 +152,9 @@ a model to be talked into changing.
 endpoint is deliberately **not** a memvara setting: the adapter builds its client through
 the official SDK, which reads `OPENAI_BASE_URL` and `OPENAI_API_KEY` from the environment
 itself. So memvara's own variables here are the model name, the claim cap for a server
-that constrains decoding, the extraction instructions themselves, and the claim shape.
+that constrains decoding, the extraction instructions themselves, the claim shape, the
+response budget, the extra request fields a self-hosted server needs, and how long one
+call may take.
 
 ```bash
 OPENAI_BASE_URL=http://127.0.0.1:8000/v1 \
@@ -163,6 +166,7 @@ MEMVARA_LLM_EXTRACT_SYSTEM=$HOME/.memvara/extract.txt \
 MEMVARA_LLM_TERSE_CLAIMS=1 \
 MEMVARA_LLM_MAX_TOKENS=2048 \
 MEMVARA_LLM_EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": false}}' \
+MEMVARA_LLM_TIMEOUT=1800 \
 MEMVARA_DB=$HOME/.memvara/memory.db python3 -m memvara.server
 ```
 
@@ -386,6 +390,38 @@ Neither is a default this package can pick for you, which is why both ship off: 
 graph leg is worth depends on how much graph your store holds, and whether anchoring is
 right depends on whether your questions name entities. [`docs/BENCHMARKS.md`](BENCHMARKS.md)
 has the measurements on both sides.
+
+### When a long turn runs out of time
+
+`MEMVARA_LLM_TIMEOUT` sets how long one extraction may take before the client gives up.
+Unset, the OpenAI SDK applies its own default of **600 seconds**, and that default is why
+this setting exists.
+
+**A cancelled call is a turn that was not extracted.** It is not stored with fewer claims
+and it is not stored empty: the write reports the batch as deferred, and whatever reads the
+queue is expected to try the turn again. So a timeout shorter than the call needs does not
+degrade extraction, it stops it.
+
+This was measured on a production worker on 2026-09-11. A self-hosted phi-4-mini on four
+cores generates about 5 tokens a second, so turns of around 10,000 characters took longer
+than 600 seconds and every call was cancelled mid-generation after more than 3,200 tokens.
+The worker recorded no failure for a cancelled call, so the next pass picked the same turn
+and did the same thing — five days, with 2,066 turns waiting behind the one at the front,
+and every signal except queue depth looking normal.
+
+**The right value is a property of the model and where it runs, and the two directions are
+opposite.** The same worker against a 27-billion-parameter model on a GPU over a local
+network answered that turn in 13.7 seconds. There a long timeout stops being a ceiling and
+becomes a long wait on a connection that has already died, and 300 seconds is generous.
+Work the number out rather than guessing: a turn's cost is its prompt divided by your
+model's prefill rate, plus its answer divided by the generation rate. `bench/extract_cost.py`
+measures both and prints the largest response each arm generated.
+
+**Raising the timeout does not rescue a turn the model cannot finish**, and neither does
+lowering it bound a runaway — `MEMVARA_LLM_MAX_CLAIMS` does that. What the timeout decides
+is how long each attempt costs. How many attempts a turn gets belongs to whatever owns the
+queue: a reader that takes the oldest turn, fails, and records nothing will take that turn
+forever, and no timeout value prevents it.
 
 ### The embedder is named, not discovered
 

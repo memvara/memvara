@@ -34,6 +34,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`MEMVARA_LLM_TIMEOUT` and `OpenAILLM(timeout=...)` set how long one extraction may
+  take.** Unset keeps the OpenAI SDK's default of 600 seconds, so nothing changes for a
+  deployment that does not set it. There was no seam for this before: raising the timeout
+  meant building the `openai.OpenAI` client yourself and injecting it, which is what
+  `bench/extract_cost.py` does and says so in a comment. The value is sent on the request
+  rather than set on the client, so it applies to an injected client too, and `chat()`
+  keeps its own per-call timeout — `memvara.select` measures its budget in seconds and must
+  not inherit an extraction's.
+
+  **This came out of a wedged production queue.** On a four-core self-hosted phi-4-mini
+  generating about 5 tokens a second, turns of around 10,000 characters took longer than
+  600 seconds, so every extraction call was cancelled mid-generation after more than 3,200
+  tokens. Nothing recorded the failure, so the next pass chose the same turn — five days,
+  2,066 turns waiting behind one, and every signal except queue depth looking healthy.
+
+  **The right value runs both ways.** The same worker against a 27-billion-parameter model
+  on a GPU over a local network answers that turn in 13.7 seconds, where a long timeout is
+  a long wait on a connection that has already died. `docs/DEPLOY.md` carries the
+  arithmetic for picking one, and the reminder that raising it rescues no turn the model
+  cannot finish — that belongs to whatever owns the queue.
+
 - **An entity can say what kind of thing it is, and two kinds with one name stay apart.**
   A subject or object may carry a `type:` namespace — `company:apple`, `software:postgresql`,
   `project:github.com/you/repo` — and the namespace is part of the entity's identity. So

@@ -141,19 +141,24 @@ def live(batches: Sequence[Sequence[Episode]], gold: Sequence[str],
 
     from memvara.llm.openai import OpenAILLM
 
-    # The client is built here rather than left to `OpenAILLM` so the timeout can be
-    # raised. The SDK's default is 600 s, and the uncapped `full` arm can exceed it: with
-    # no `maxItems` the grammar has no legal way to end the response, so a model that
-    # starts restating itself runs to `max_tokens` (8,192) — where it now raises
-    # `TruncatedResponse` rather than returning an answer nothing can read. Measured on the production box
-    # on 2026-09-06, the full arm passed 2,700 generated tokens on a 900-character turn
-    # and was cancelled at 600 s. That cancellation is the behaviour `max_claims` exists
-    # to prevent, so the bench has to be able to outlast it in order to show it.
+    # `--timeout` reaches the request through `OpenAILLM(timeout=)` rather than through a
+    # client built here. It used to be the second, and this file's comment saying so is
+    # what found the gap: the backend had no timeout parameter, so raising the SDK's 600 s
+    # default meant constructing the whole client yourself. It has one now, so the bench
+    # uses the seam instead of working around it.
+    #
+    # Raising it is what lets this measure the failure it exists to show. With no
+    # `maxItems` the grammar has no legal way to end the response, so a model that starts
+    # restating itself runs to `max_tokens` (8,192) — where it now raises
+    # `TruncatedResponse` rather than returning an answer nothing can read. Measured on the
+    # production box on 2026-09-06, the `full` arm passed 2,700 generated tokens on a
+    # 900-character turn and was cancelled at 600 s. That cancellation is the behaviour
+    # `max_claims` exists to prevent, so the bench has to outlast it to show it.
+    #
+    # The client is still built here for `base_url`, which the SDK reads from the
+    # environment and this script takes as a flag.
     def client_for() -> Any:
-        kwargs: dict[str, Any] = {"base_url": base_url}
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-        return openai.OpenAI(**kwargs)
+        return openai.OpenAI(base_url=base_url)
 
     # Per call rather than per arm: a flat list loses which turn each claim came from,
     # and a claim can only be scored against the gold for its own turn. Call `k` is
@@ -166,7 +171,8 @@ def live(batches: Sequence[Sequence[Episode]], gold: Sequence[str],
     for name in VARIANTS:
         llm = OpenAILLM(model=model, client=client_for(),
                         max_claims=max_claims if name != "full" else None,
-                        terse=(name == "terse"), extract_system=extract_system)
+                        terse=(name == "terse"), extract_system=extract_system,
+                        timeout=timeout)
         times: list[float] = []
         usage = Usage()
         # Per call as well as accumulated, because the largest response is the number that

@@ -101,9 +101,23 @@ class OpenAILLM:
         extract_system: str | None = None,
         terse: bool = False,
         extra_body: Mapping[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens
+        # How long one call may take before the client gives up. `None` keeps the SDK's
+        # own default of 600 seconds, and that default is why this exists: a self-hosted
+        # model generating at about 5 tokens a second needs longer than 600 s for a turn
+        # of a few thousand characters, and a cancelled call is a turn that was not
+        # extracted. Until this, raising it meant building the whole `openai.OpenAI`
+        # client and injecting it — which `bench/extract_cost.py` does, and says so in a
+        # comment.
+        #
+        # Sent on the request rather than set on the client, so it applies however the
+        # client was built, including one a caller injected. `chat()` passes its own
+        # per-call timeout and is unaffected: `memvara.select` measures its budget in
+        # seconds and must not inherit an extraction's.
+        self.timeout = timeout
         # Provider-specific request fields the SDK does not name, sent on every request
         # as the SDK's `extra_body`. The case it exists for is a self-hosted model that
         # reasons before it answers: a Qwen3 server needs
@@ -200,6 +214,10 @@ class OpenAILLM:
         }
         if self.extra_body is not None:
             kwargs["extra_body"] = self.extra_body
+        # Absent unless asked for, so a deployment that never set it sends the request it
+        # sent before this option existed and keeps the SDK's own default.
+        if self.timeout is not None:
+            kwargs["timeout"] = self.timeout
         response = self._client.chat.completions.create(**kwargs)
         # OpenAI names the same two quantities differently from Anthropic; the reading and
         # the refusal-to-guess live in one place so the two backends cannot drift.
