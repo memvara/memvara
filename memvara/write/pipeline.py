@@ -363,6 +363,13 @@ class WritePipeline:
         lock_t0 = perf_counter() if rec is not None else 0.0
         with self._transaction():
             for claim, sources, observed_at in pending:
+                # A restated turn does not go through `apply`, so the one rule `apply`
+                # enforces on every candidate is applied here to the claim it restates:
+                # `procedural` is for the user only, and a misfiled claim heals the next
+                # time it is seen, this way or that.
+                moved = self.reconciler.file_by_subject(claim)
+                if moved is not None:
+                    receipt.retyped.append(moved)
                 receipt.reinforced.append(
                     self.reconciler.reinforce(claim, sources, observed_at))
             to_embed: list[Claim] = []

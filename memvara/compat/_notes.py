@@ -42,12 +42,13 @@ from typing import Any, Mapping
 from ..core import Memvara
 from ..schema import Cardinality, PredicateSpec, Volatility
 from ..types import (
-    Claim, Closure, Derivation, Episode, MemoryType, Scope, WriteReceipt, close_out,
+    NOTE_PREDICATE, Claim, Closure, Derivation, Episode, MemoryType, Scope, WriteReceipt,
+    close_out,
 )
 
-#: Predicate every note lands on. Deliberately generic: it is the *subject* that
-#: identifies the memory, so one predicate serves the whole corpus.
-NOTE_PREDICATE = "note"
+# `NOTE_PREDICATE` lives in `types.py` and is re-exported here: the reconciler reads it
+# too, and it must not import this package. Deliberately generic: it is the *subject*
+# that identifies the memory, so one predicate serves the whole corpus.
 
 #: Prefix on the synthetic subject, so a note slot is recognisable in `get_all()` output
 #: and cannot collide with a real subject a caller writes ("user", "acme_corp").

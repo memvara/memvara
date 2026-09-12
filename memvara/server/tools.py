@@ -991,24 +991,47 @@ def _retyped_note(items: Sequence[Retype]) -> str:
     session. A claim moving in or out of `procedural` changes what every later
     conversation opens with, which is a larger consequence than `already-known 1` suggests.
 
-    >>> note = _retyped_note([Retype("cl_1a", "agent-memory", "rejected",
-    ...                              MemoryType.PROCEDURAL, MemoryType.SEMANTIC)])
-    >>> "procedural to semantic" in note
+    A `Retype` with `reason="subject"` is the other case: `procedural` was sent, or was
+    the predicate's declared default, for a subject other than the user, and the store
+    filed the claim as `semantic`. That one is not a correction the caller made, so it
+    is worded as the rule it is and the caller learns the rule rather than a mystery.
+
+    >>> note = _retyped_note([Retype("cl_1a", "user", "prefers",
+    ...                              MemoryType.SEMANTIC, MemoryType.PROCEDURAL)])
+    >>> "semantic to procedural" in note
     True
     >>> "claim_id cl_1a" in note
     True
+    >>> note = _retyped_note([Retype("cl_2b", "agent-memory", "never_do",
+    ...                              MemoryType.PROCEDURAL, MemoryType.SEMANTIC,
+    ...                              reason="subject")])
+    >>> "procedural is for the subject 'user'" in note
+    True
     """
-    moves = "; ".join(
-        f"{safe_line(r.subject)} {safe_line(r.predicate)}: {r.was.value} to "
-        f"{r.now.value} (claim_id {r.claim_id})" for r in items)
-    return (
-        f"note: {len(items)} already-known fact(s) were re-filed under the memory_type "
-        f"you sent, and nothing else about them changed -- {moves}. The type decides "
-        f"which population a claim belongs to, and memory_standing returns the "
-        f"procedural one, so a claim entering or leaving it changes what later sessions "
-        f"are given. Send memory_type only when you mean to assert it: a write that "
-        f"omits it re-files nothing."
-    )
+    asserted = [r for r in items if r.reason != "subject"]
+    refused = [r for r in items if r.reason == "subject"]
+    parts = []
+    if asserted:
+        moves = "; ".join(
+            f"{safe_line(r.subject)} {safe_line(r.predicate)}: {r.was.value} to "
+            f"{r.now.value} (claim_id {r.claim_id})" for r in asserted)
+        parts.append(
+            f"{len(asserted)} already-known fact(s) were re-filed under the memory_type "
+            f"you sent, and nothing else about them changed -- {moves}. The type decides "
+            f"which population a claim belongs to, and memory_standing returns the "
+            f"procedural one, so a claim entering or leaving it changes what later "
+            f"sessions are given. Send memory_type only when you mean to assert it: a "
+            f"write that omits it re-files nothing.")
+    if refused:
+        names = "; ".join(
+            f"{safe_line(r.subject)} {safe_line(r.predicate)} (claim_id {r.claim_id})"
+            for r in refused)
+        parts.append(
+            f"{len(refused)} fact(s) arrived as procedural and were filed as semantic, "
+            f"because procedural is for the subject 'user' and nothing else -- {names}. "
+            f"A repository, a service or a file cannot want anything, and memory_standing "
+            f"would otherwise carry the note into every session.")
+    return "note: " + " ".join(parts)
 
 
 def _disputed_note(items: Sequence[Dispute]) -> str:
@@ -2149,13 +2172,14 @@ TOOLS: tuple[Tool, ...] = (
                 "description": (
                     "'semantic' for a durable fact, 'episodic' for something that "
                     "happened at a time, 'procedural' for how the user wants work done. "
-                    "Decide it by asking who the claim is about: if the subject is not "
-                    "the person you are talking to, it is almost never 'procedural'. A "
-                    "fact about a repository, a system or a deployment is 'semantic' "
-                    "however operational it sounds, and filing one as 'procedural' is "
-                    "not a filing error — that is the standing set memory_standing "
-                    "returns, which clients inject at the top of every session, so the "
-                    "note is then carried on every turn whether or not it is relevant. "
+                    "'procedural' is for the subject 'user' and nothing else: a fact "
+                    "about a repository, a system or a deployment is 'semantic' however "
+                    "operational it sounds, and if you send 'procedural' for any other "
+                    "subject the store files it as 'semantic' and the receipt says so. "
+                    "The reason is that 'procedural' is the standing set memory_standing "
+                    "returns, which clients inject at the top of every session, so a "
+                    "note filed there is carried on every turn whether or not it is "
+                    "relevant. "
                     "Omitting it uses the predicate's declared type, and predicates this "
                     "store has never seen have none — they become 'semantic', which is "
                     "the safe default rather than a reading of what you wrote. Nothing "

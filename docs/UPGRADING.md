@@ -7,6 +7,45 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `procedural` is for the subject `user` only
+
+### What changed
+
+A claim about any subject other than `user` that arrives as `procedural` is filed as
+`semantic`. It does not matter where the type came from: `remember(memory_type=...)`, a
+model's extraction, or a predicate declared `procedural` because it is usually about the
+user (`prefers_tool`, `never_do`). The receipt says it happened: `retyped` carries a
+`Retype` whose `reason` is `"subject"`, and the MCP write tools print a note naming the
+claim and the rule.
+
+`procedural` means how the user wants work done. It is the population `memory_standing`
+returns and nothing else, and clients inject that set at the top of every session, so a
+project fact filed there is carried on every turn of every later conversation. A
+repository, a service or a file cannot want anything, so such a filing was wrong however it
+was produced; this release makes the store say so instead of relying on every caller and
+every prompt to know it.
+
+### Who this changes, and in which direction
+
+**If every `procedural` claim you write is about `user`, nothing changes.** Verbatim notes
+(the `note` predicate: the mem0-compatible `infer=False` path and the importer) written
+with `memory_type="procedural"` keep their type too, and keep it when restated: a note is
+the owner's own text, not a claim about a thing.
+
+**If you wrote `procedural` claims about other subjects, they move.** A new one is filed as
+`semantic` at write. One already on record moves the next time the same triple is seen,
+even by a write that asserts no type; the safety property that an unopinionated write
+cannot undo a deliberate correction still holds, because moving such a claim out of
+`procedural` is never a correction anyone could have wanted to keep. Nothing else about the
+claim changes: not its confidence, its sources, its `derivation` or its `extractor`. Until
+a claim is seen again it stays where it is, so a store that wants the move now re-asserts
+the triples, and `memory_standing` shrinks to the user's own instructions as they go.
+
+**If you asserted `procedural` for another subject on purpose**, for example to keep a
+team rule under a project subject in the standing set, that no longer works and there is no
+switch for it. File it under `user` (`user / never_do / git add -A`), which is where a
+standing instruction belongs whichever repository it is about.
+
 ## An entity can declare what kind of thing it is
 
 ### What changed

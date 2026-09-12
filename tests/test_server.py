@@ -4410,34 +4410,60 @@ def test_the_receipt_says_when_an_already_known_fact_was_refiled(server):
     only thing that tells the two apart.
     """
     first = text(server, "memory_remember",
-                 {"subject": "agent-memory", "predicate": "rejected",
-                  "object": "auto as the embedder default",
-                  "memory_type": "procedural"})
+                 {"subject": "user", "predicate": "prefers",
+                  "object": "tests before the commit",
+                  "memory_type": "semantic"})
     assert "added 1" in first
 
     second = text(server, "memory_remember",
-                  {"subject": "agent-memory", "predicate": "rejected",
-                   "object": "auto as the embedder default",
-                   "memory_type": "semantic"})
+                  {"subject": "user", "predicate": "prefers",
+                   "object": "tests before the commit",
+                   "memory_type": "procedural"})
 
     assert "already-known 1" in second
     assert "re-filed under the memory_type you sent" in second
-    assert "procedural to semantic" in second
+    assert "semantic to procedural" in second
     assert "memory_standing" in second, (
         "the consequence is which population it is in, not the field")
 
     # The note's claim, checked against the store rather than taken on trust. Asserted as
-    # "found nowhere in the procedural population, found in the semantic one" rather than
+    # "found nowhere in the semantic population, found in the procedural one" rather than
     # as the absence of a substring: the empty-result line echoes the query back, so a
     # bare `not in` passes on the wrong reason and would keep passing if the move broke.
-    standing, _ = call(server, "memory_search", {"query": "embedder default",
+    plain, _ = call(server, "memory_search", {"query": "tests before commit",
+                                              "memory_types": ["semantic"]})
+    assert "No stored memory matched" in plain, "it left the population it was filed in"
+
+    standing, _ = call(server, "memory_search", {"query": "tests before commit",
+                                                 "memory_types": ["procedural"]})
+    assert "tests before the commit" in standing, (
+        "and arrived in the one memory_standing returns")
+
+
+def test_the_receipt_says_when_procedural_was_refused_for_a_component(server):
+    """The other reason a claim is filed elsewhere than sent, worded as the rule it is.
+
+    Over this transport the caller is a model reading a transcript, which is where most
+    of the misfiled standing claims came from, so the note has to teach the rule rather
+    than report a mystery: `procedural` is for the subject `user`, and a repository, a
+    service or a file cannot want anything.
+    """
+    receipt = text(server, "memory_remember",
+                   {"subject": "memvara", "predicate": "never_do",
+                    "object": "git add -A", "memory_type": "procedural"})
+
+    assert "added 1" in receipt
+    assert "arrived as procedural and were filed as semantic" in receipt
+    assert "procedural is for the subject 'user'" in receipt
+    assert "memvara never_do" in receipt
+
+    standing, _ = call(server, "memory_search", {"query": "git add",
                                                  "memory_types": ["procedural"]})
     assert "No stored memory matched" in standing, (
-        "it left the population memory_standing returns")
-
-    moved, _ = call(server, "memory_search", {"query": "embedder default",
+        "it never entered the population memory_standing returns")
+    plain, _ = call(server, "memory_search", {"query": "git add",
                                               "memory_types": ["semantic"]})
-    assert "auto as the embedder default" in moved, "and arrived in the other one"
+    assert "git add -A" in plain
 
 
 # -- anchored ------------------------------------------------------------------

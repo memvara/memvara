@@ -69,6 +69,7 @@ from ..entities import EntityRegistry, entity_key
 from ..schema import PredicateRegistry
 from ..store.base import Store
 from ..types import (
+    NOTE_PREDICATE, SELF_SUBJECT,
     ObjectKind,
     ENTITY_REKEY,
     PREDICATE_REKEY,
@@ -180,9 +181,10 @@ class ReconcileResult:
     #: Claims this candidate closed at or before the instant they began. Their intervals
     #: are empty, so they answer no query on either clock — see `Collapse`.
     collapsed: list[Collapse] = field(default_factory=list)
-    #: Set when a re-observation carried an asserted `memory_type` that differed from the
-    #: one on record, so the claim was re-filed — see `Retype`. `None` on every other
-    #: action, and on every re-observation that asserted nothing.
+    #: Set when the claim was filed under a different `memory_type` than it arrived
+    #: with: a re-observation that carried an asserted type differing from the one on
+    #: record, or a `procedural` claim about a subject other than the user, which is
+    #: filed as `semantic` whatever sent it — see `Retype`. `None` otherwise.
     retyped: "Retype | None" = None
 
 
@@ -282,6 +284,8 @@ class Reconciler:
         """
         t = now or utcnow()
         self._canonicalize(claim)
+        # After `_canonicalize`, which resolves the subject this compares on.
+        refiled = self.file_by_subject(claim)
         if claim.recorded_at > t:
             # Transaction time is when *we* commit to believing it, which is `t` by
             # definition. A clock read taken when the Claim was constructed can land
@@ -312,7 +316,12 @@ class Reconciler:
                 # Decided before the write, because `reinforce` performs the single
                 # `put_claim` that persists both the reinforcement and the re-filing.
                 # Reporting it afterwards would need a second write for no gain.
-                retyped = self._retype(keep, asserted_type)
+                if (asserted_type is MemoryType.PROCEDURAL
+                        and not self._may_be_procedural(keep)):
+                    # The candidate was already refused above; the same rule applies to
+                    # the type asserted for the claim on record.
+                    asserted_type = MemoryType.SEMANTIC
+                retyped = self._retype(keep, asserted_type) or self.file_by_subject(keep)
                 return ReconcileResult(
                     "reinforce",
                     self.reinforce(keep, claim.sources, self._observed_at(claim, t)),
@@ -347,8 +356,51 @@ class Reconciler:
             collapsed = self._retire(superseded, t, claim.id, claim.valid_from,
                                      close=close)
             return ReconcileResult("supersede", claim, superseded,
-                                   disputed=disputed, collapsed=collapsed)
-        return ReconcileResult("add", claim, [], accumulated, disputed=disputed)
+                                   disputed=disputed, collapsed=collapsed,
+                                   retyped=refiled)
+        return ReconcileResult("add", claim, [], accumulated, disputed=disputed,
+                               retyped=refiled)
+
+    @staticmethod
+    def _may_be_procedural(claim: Claim) -> bool:
+        """Whether `procedural` is a filing this claim can have.
+
+        The user's own subject, or a verbatim note. A note is recognised by its
+        predicate rather than by a subject prefix: the mem0 shim and the importer build
+        notes under different prefixes, and both are notes.
+        """
+        return claim.subject_key == SELF_SUBJECT or claim.predicate == NOTE_PREDICATE
+
+    @classmethod
+    def file_by_subject(cls, claim: Claim) -> "Retype | None":
+        """File a `procedural` claim about anything but the user as `semantic`.
+
+        Mutates, writes not; the caller performs the write, as with `_retype`. Public
+        because `write/pipeline.py` reinforces a restated turn's claims without going
+        through `apply`, and a claim restated that way must heal the same way.
+
+        `procedural` means how the user wants work done, and `memory_standing` returns
+        that population and nothing else so that clients can inject it at the top of
+        every session. A repository, a service or a file cannot want anything, so a
+        `procedural` claim about one is a filing error whoever made it — a caller, a
+        model reading a transcript, or a predicate declared `procedural` because it is
+        usually about the user (`prefers_tool`, `never_do`). On one production store
+        113 of 287 standing claims had such a subject, and every session opened with
+        them. The rule is deterministic so that no prompt has to carry it: the subject
+        decides, and a claim that was already known is moved the next time it is seen.
+
+        One kind of claim is exempt: a verbatim note, on the `note` predicate
+        (`compat/_notes.py`: the mem0-compatible `infer=False` path and the importer). A
+        note is not a claim about a thing; it is the owner's own text, typed by the
+        owner, and a note typed `procedural` is a standing instruction in the owner's
+        words.
+        """
+        if claim.memory_type is not MemoryType.PROCEDURAL or cls._may_be_procedural(claim):
+            return None
+        claim.meta["retyped_from"] = MemoryType.PROCEDURAL.value
+        claim.memory_type = MemoryType.SEMANTIC
+        return Retype(claim.id, claim.subject, claim.predicate, MemoryType.PROCEDURAL,
+                      MemoryType.SEMANTIC, reason="subject")
 
     @staticmethod
     def _retype(keep: Claim, asserted: MemoryType | None) -> "Retype | None":
