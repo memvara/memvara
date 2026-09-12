@@ -1423,7 +1423,7 @@ class Retype:
     already known was re-filed under the type a caller sent. `"subject"`: a claim about
     anything but the user arrived as `procedural` and was filed as `semantic`, because
     `procedural` is how the user wants work done and a repository, a service or a file
-    cannot want anything — see `Reconciler._file_by_subject`. The second kind happens on
+    cannot want anything — see `Reconciler.file_by_subject`. The second kind happens on
     a new claim as readily as on a known one, and whether the type came from a caller,
     from a model, or from a predicate's declared default.
 
