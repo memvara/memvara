@@ -9,6 +9,29 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The three shipped predicate packs now declare what their objects are, so a deployment
+  that loads one has a graph again.** `engineering`, `events` and `decisions` declared none
+  of the fields `PredicateSpec` gained in 0.12's graph work, and an undeclared predicate
+  classifies its object as a value — so every claim they wrote carried no edge,
+  `connectivity()` reported zero joinable claims and `paths_between()` returned nothing.
+  The classification rule is deliberate and unchanged: connectivity is something a
+  vocabulary asks for, never something a string collision supplies. What was missing is
+  that no shipped vocabulary asked.
+
+  Five predicates in `engineering` declare `graph = true` — `depends_on`, `blocked_by`,
+  `deploys_to`, `current_host` and `owner` — because their objects are things the store
+  then holds other facts about. Three in `events` do: `visited`, `met` and `attended`. The
+  rest declare an explicit `object_type`, most of them `value`, which classifies the same
+  way the default did but now says why. `bought`, `watched` and `read` declare entity
+  objects and leave `graph` false on purpose: nothing in that vocabulary makes a product or
+  a book the subject of anything, so a walk crossing them would arrive with no onward edge.
+
+  Measured on a store loading `engineering`: three writes give one joinable claim and the
+  two-hop path `memvara_cloud -depends_on-> postgres -current_host-> db.internal`. The same
+  three writes with the builtins alone still give zero, which is the rule holding.
+
 ### Added
 
 - **An entity can say what kind of thing it is, and two kinds with one name stay apart.**

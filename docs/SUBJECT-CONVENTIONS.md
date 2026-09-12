@@ -99,6 +99,11 @@ still outstanding.
   covers. Without the pack that corpus goes from 40.6% joinable to zero; with it, 68.3% of
   its triples can carry an edge and the remaining third is four date relations that are
   values on purpose.
+- **Step 3b, the shipped vocabulary.** The three packs under `memvara/packs/` declare
+  their object types, and eight predicates across `engineering` and `events` declare
+  `graph`. Until they did, step 4a's rule had nothing to act on in any deployment that was
+  not running the benchmark pack: every claim a shipped pack wrote was classified a value
+  and no store had a graph. The rule was right and the vocabulary was silent.
 - **Step 4a, the object kind.** `Claim.object_kind` is `ENTITY`, `VALUE` or `None`, decided
   at write time, persisted, and gating both the SQL and the Python side of traversal.
   `None` means the claim predates the rule and keeps its edges, which is decision C below.

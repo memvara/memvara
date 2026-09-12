@@ -423,12 +423,43 @@ class TestGraphDeclarationLoading:
         assert spec.learned is False
 
     def test_the_shipped_packs_still_load(self):
-        """They predate the graph fields and declare none of them. A loader that had made
-        any of the new keys required would fail here rather than in a deployment."""
+        """A loader that had made any of the graph keys required would fail here rather
+        than in a deployment, so every shipped pack is loaded rather than sampled.
+
+        This used to assert that no shipped pack declared `graph`, which was a true
+        statement about the packs of the day rather than a property worth defending — and
+        while it held, the rule that a claim carries an edge only when its vocabulary says
+        so meant no deployment loading a shipped pack had a graph at all.
+        """
         for name in available_packs():
             specs = load_specs(name)
-            assert specs
-            assert not any(s.graph for s in specs)
+            assert specs, name
+
+    def test_every_shipped_pack_declares_what_its_objects_are(self):
+        """Left undeclared, a predicate's objects are values and its claims carry no edge.
+        That default is deliberate — connectivity is asked for, never inferred — so a
+        shipped pack that declares nothing is a vocabulary with no graph, which is what
+        these three were until they said otherwise. Asserted per predicate so a new one
+        added without a type is caught here rather than by a join rate nobody is watching.
+        """
+        for name in available_packs():
+            for spec in load_specs(name):
+                assert spec.object_type, f"{name}: {spec.name} declares no object_type"
+
+    def test_a_shipped_pack_that_walks_declares_both_halves(self):
+        """`carries_edge` is `objects_are_entities and graph`, so a pack declaring one
+        without the other has a predicate that looks traversable and is not. The loader
+        refuses `graph` without an `object_type`; this asserts the other direction holds
+        in what actually ships."""
+        walkable = {(name, s.name) for name in available_packs()
+                    for s in load_specs(name) if s.graph}
+        assert walkable, "no shipped pack declares a relation; a graph nobody can opt into"
+        for pack, predicate in walkable:
+            [spec] = [s for s in load_specs(pack) if s.name == predicate]
+            assert spec.objects_are_entities, (
+                f"{pack}: {predicate} declares graph but its objects are values, so "
+                "carries_edge is False and the declaration does nothing")
+            assert spec.carries_edge
 
 
 @needs_toml
@@ -825,3 +856,45 @@ def test_a_pack_can_declare_a_predicate_global():
     assert PredicateSpec("version").project_scoped is True, "partitioning is the default"
     assert all(not s.project_scoped for s in BUILTIN_PREDICATES), (
         "every builtin is a fact about the person, so none of them partitions")
+
+
+@needs_toml
+def test_loading_the_engineering_pack_gives_a_store_a_graph():
+    """The property the declarations exist for, asserted end to end rather than on a spec.
+
+    Before the shipped packs declared anything, this walk returned nothing for every
+    deployment: `object_kind` is decided at write time from the predicate's declaration,
+    an undeclared predicate yields VALUE, and the traversal admits only ENTITY and the
+    unclassified NULL of a claim written before the rule. A vocabulary that declared
+    nothing therefore produced a store with no edges at all — the rule working exactly as
+    designed, on a vocabulary that had nothing to ask with.
+
+    The second half is as important as the first: with no pack the same three writes are
+    still a star, because connectivity is asked for and never inferred.
+    """
+    from memvara import Memvara
+    from memvara.embed import HashingEmbedder
+    from memvara.llm import NullLLM
+
+    def store(registry):
+        mem = Memvara(":memory:", embedder=HashingEmbedder(dim=32), user="alice",
+                      llm=NullLLM(), registry=registry)
+        mem.remember("memvara_cloud", "depends_on", "postgres")
+        mem.remember("postgres", "current_host", "db.internal")
+        mem.remember("memvara_cloud", "version", "0.11.3")
+        return mem
+
+    declared = store(PredicateRegistry(BUILTIN_PREDICATES + load_specs("engineering")))
+    assert declared.connectivity() == {"live_claims": 3, "joinable_claims": 1}
+    assert [p.render() for p in
+            declared.paths_between("memvara_cloud", "db.internal")] == [
+        "memvara_cloud -depends_on-> postgres -current_host-> db.internal"]
+
+    # `version` is declared a value, so it is not the joinable one even though its subject
+    # is the same component: an edge from a version string would go nowhere.
+    assert declared.paths_between("memvara_cloud", "0.11.3") == []
+
+    bare = store(PredicateRegistry(BUILTIN_PREDICATES))
+    assert bare.connectivity()["joinable_claims"] == 0, (
+        "the builtins declare no relation, so a store without a pack is a star")
+    assert bare.paths_between("memvara_cloud", "db.internal") == []

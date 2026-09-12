@@ -40,68 +40,100 @@ name = "ran"
 cardinality = "many"
 volatility = "fast"
 aliases = ["went_for_a_run", "jogged"]
+object_type = ["value"]
 
 [[predicate]]
 name = "walked"
 cardinality = "many"
 volatility = "fast"
 aliases = ["hiked"]
+object_type = ["value"]
 
 [[predicate]]
 name = "exercised"
 cardinality = "many"
 volatility = "fast"
 aliases = ["worked_out", "trained"]
+object_type = ["value"]
 
 [[predicate]]
 name = "bought"
 cardinality = "many"
 volatility = "fast"
 aliases = ["purchased", "ordered"]
+object_type = ["thing"]
 
 [[predicate]]
 name = "spent"
 cardinality = "many"
 volatility = "fast"
 aliases = ["paid"]
+object_type = ["value"]
 
 [[predicate]]
 name = "visited"
 cardinality = "many"
 volatility = "fast"
 aliases = ["travelled_to", "traveled_to", "went_to"]
+object_type = ["place"]
+graph = true
 
 [[predicate]]
 name = "attended"
 cardinality = "many"
 volatility = "fast"
 aliases = ["went_to_event"]
+object_type = ["event"]
+graph = true
 
 [[predicate]]
 name = "completed"
 cardinality = "many"
 volatility = "fast"
 aliases = ["finished"]
+object_type = ["value"]
 
 [[predicate]]
 name = "started"
 cardinality = "many"
 volatility = "fast"
 aliases = ["began"]
+object_type = ["value"]
 
 [[predicate]]
 name = "watched"
 cardinality = "many"
 volatility = "fast"
 aliases = ["saw"]
+object_type = ["work"]
 
 [[predicate]]
 name = "read"
 cardinality = "many"
 volatility = "fast"
+object_type = ["work"]
 
 [[predicate]]
 name = "met"
 cardinality = "many"
 volatility = "fast"
 aliases = ["met_with"]
+object_type = ["person"]
+graph = true
+
+# ## What declares a graph edge here, and what only declares its type
+#
+# Three predicates carry edges: `visited`, `met` and `attended`. Each puts a thing in the
+# object slot that the store is plausibly holding other facts *about* — a place, a person,
+# an event — so "who else was at the conference I attended" is a walk rather than a scan.
+#
+# `bought`, `watched` and `read` declare an entity object and deliberately leave `graph`
+# false. Their objects are real things with names, but nothing in this vocabulary makes a
+# product, a film or a book the subject of anything, so a walk that crossed them would
+# arrive somewhere with no onward edge and pay for the hop regardless. `docs/SUBJECT-
+# CONVENTIONS.md` section 5 is the rule being applied: an entity-valued object is not
+# automatically a useful edge, which is why the two are declared separately. Declare
+# `graph = true` on them in your own pack if you also write facts about what you read.
+#
+# The rest are values. A distance, a duration and an amount are carried by the claim's own
+# `amount` and `unit` fields, and the object is the reading itself.
