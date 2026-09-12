@@ -1159,3 +1159,60 @@ def test_every_precision_covers_the_span_it_names(rec, store, precision, inside,
                      temporal_precision=precision), now=at(2026, 9, 30))
     assert live_objects(other, claim("lives_in", "x"),
                         as_of=at(2026, 9, 30)) == ["After"]
+
+
+def test_a_global_predicate_is_written_with_no_project():
+    """One line in `_canonicalize`, and two consequences that are both wanted.
+
+    A fact the vocabulary calls global is not project-relative, so it is written at the
+    level above one. Its slot then has no project, which is what makes saying it in a
+    second repository retire the first value rather than duplicate it; and it sits at user
+    level, which visibility widens up into, so it is readable from inside every project.
+    `fact_key_for` needs no special case for either.
+    """
+    from memvara import Memvara, NullLLM
+    from memvara.embed import HashingEmbedder
+    from memvara.schema import (BUILTIN_PREDICATES, Cardinality, PredicateRegistry,
+                                PredicateSpec)
+    from memvara.store import SQLiteStore
+
+    registry = PredicateRegistry(BUILTIN_PREDICATES + (
+        PredicateSpec(name="version", cardinality=Cardinality.ONE),))
+    store = SQLiteStore(":memory:")
+    cloud = Memvara(store=store, llm=NullLLM(), embedder=HashingEmbedder(dim=64),
+                    registry=registry, user="alice", project="gh/o/cloud")
+    web = Memvara(store=store, llm=NullLLM(), embedder=HashingEmbedder(dim=64),
+                  registry=registry, user="alice", project="gh/o/web")
+    try:
+        # `version` is undeclared for project scoping, so it partitions: two repositories
+        # running different versions are two true facts, not a contradiction.
+        #
+        # Each handle is asked about its own repository, and that is the point rather than
+        # a detail of how the test is phrased. An earlier version of this test read both
+        # values from one handle and passed, because the scope SQL was not yet comparing
+        # the project — so it was reading the leak instead of the partition, and would
+        # have gone on passing if the partition had never worked at all.
+        cloud.remember("postgresql", "version", "17")
+        web.remember("postgresql", "version", "16")
+
+        def version_at(mem):
+            return [c.object for c in mem.get_all(states=("live",))
+                    if c.predicate == "version"]
+
+        assert version_at(cloud) == ["17"]
+        assert version_at(web) == ["16"], "neither value displaced the other"
+
+        # `lives_in` is a builtin, so it is global: the second statement retires the
+        # first even though it was made from a different repository.
+        cloud.remember("user", "lives_in", "Berlin")
+        web.remember("user", "lives_in", "Lisbon")
+        live = [c.object for c in cloud.get_all(states=("live",))
+                if c.predicate == "lives_in"]
+        assert live == ["Lisbon"], "a global predicate holds one slot across projects"
+
+        stored, = [c for c in cloud.get_all(states=("live",))
+                   if c.predicate == "lives_in"]
+        assert stored.scope.project is None
+    finally:
+        cloud.close()
+        web.close()

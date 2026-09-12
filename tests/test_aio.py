@@ -379,7 +379,7 @@ def test_a_scoped_view_narrows_but_never_widens(amem):
 
 def test_a_scoped_view_says_what_it_is_bound_to(amem):
     assert repr(amem.scope(user="grace", session="s3")).startswith(
-        "<AsyncScopedMemvara default/grace/*/s3 of <AsyncMemvara ")
+        "<AsyncScopedMemvara default/grace/*/*/s3 of <AsyncMemvara ")
 
 
 def test_binding_a_scope_touches_no_store(amem, monkeypatch):

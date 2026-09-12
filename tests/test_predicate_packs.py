@@ -803,3 +803,25 @@ class TestCarriesEdge:
         specs = load_specs(str(ROOT / "bench" / "packs" / "twowiki.toml"))
         mismatched = [s.name for s in specs if s.objects_are_entities != s.carries_edge]
         assert mismatched == [], mismatched
+
+
+@needs_toml
+def test_a_non_boolean_project_scoped_is_refused(tmp_path):
+    """Same reason `graph` is checked: a pack is read once, by nobody, so a value that
+    silently does not mean what it looks like is the failure this loader refuses."""
+    path = tmp_path / "ps.toml"
+    path.write_text('[[predicate]]\nname="x"\ncardinality="many"\nvolatility="slow"\n'
+                    'project_scoped="yes"\n', encoding="utf-8")
+    with pytest.raises(PredicatePackError, match="not a\n?\\s*boolean"):
+        load_specs(str(path))
+
+
+@needs_toml
+def test_a_pack_can_declare_a_predicate_global():
+    """Declared per predicate rather than inferred from the subject, because the subject
+    cannot tell the two apart: `software:postgresql version 17` is project-relative and
+    `software:postgresql released_on 2024-09-26` is true everywhere, and both are about a
+    `software`."""
+    assert PredicateSpec("version").project_scoped is True, "partitioning is the default"
+    assert all(not s.project_scoped for s in BUILTIN_PREDICATES), (
+        "every builtin is a fact about the person, so none of them partitions")

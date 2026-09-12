@@ -242,9 +242,12 @@ def test_the_erasures_table_is_schema_seven():
     table either; it does not touch `erasures`, does not write one, and cannot invent a
     record of an erasure that happened before the upgrade, so the sentence still holds.
     Version 11 added one nullable column to `claims`, `object_kind`, and no table; it
-    neither reads nor writes `erasures`, so the sentence holds there too.
+    neither reads nor writes `erasures`, so the sentence holds there too. Version 12 added
+    a `project` column to `claims` and to `episodes` and rehashed every `fact_key`; it adds
+    no table, does not read or write `erasures`, and rewriting a slot key cannot conjure a
+    record of an erasure that happened before the upgrade, so it holds again.
     """
-    assert SCHEMA_VERSION == 11
+    assert SCHEMA_VERSION == 12
     store = SQLiteStore(":memory:")
     try:
         assert store.erasure_record("anything") is None

@@ -61,7 +61,7 @@ caller who really is correcting the record says so with `close="retired"`; see
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Callable, Mapping, Sequence
 
@@ -480,9 +480,16 @@ class Reconciler:
         # by what it will be stored as rather than by what it was typed as. A predicate
         # nobody has declared yields VALUE, which is the whole of the rule — connectivity
         # is something a vocabulary asks for, never something a string collision supplies.
-        claim.object_kind = (ObjectKind.ENTITY
-                             if self.registry.spec(claim.predicate).carries_edge
-                             else ObjectKind.VALUE)
+        spec = self.registry.spec(claim.predicate)
+        claim.object_kind = (ObjectKind.ENTITY if spec.carries_edge else ObjectKind.VALUE)
+        if not spec.project_scoped and claim.scope.project is not None:
+            # A fact the vocabulary calls global is not project-relative, so it is written
+            # at the level above one. Two consequences follow from the same line and both
+            # are wanted: its slot has no project, so saying it in a second repository
+            # retires the first value rather than duplicating it; and it sits at user
+            # level, which visibility widens up into, so it is readable from inside every
+            # project. `fact_key_for` therefore needs no special case.
+            claim.scope = replace(claim.scope, project=None)
         self._stamp(claim)
         # Only re-render text the Claim generated for itself; a caller-supplied
         # natural-language rendering is theirs to keep.

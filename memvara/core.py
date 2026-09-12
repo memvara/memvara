@@ -731,6 +731,7 @@ class Memvara:
         user: str | None = None,
         agent: str | None = None,
         session: str | None = None,
+        project: str | None = None,
         telemetry: Recorder | None = None,
         redactor: Redactor | None = None,
         reembed: bool = False,
@@ -759,7 +760,8 @@ class Memvara:
                 "where the data lives, so the path would be silently ignored. Pass one "
                 f"of Memvara({path!r}) or Memvara(store={type(store).__name__}(...))."
             )
-        scope_kw: dict[str, str | None] = {"user": user, "agent": agent, "session": session}
+        scope_kw: dict[str, str | None] = {"user": user, "agent": agent,
+                                           "session": session, "project": project}
         self._absorb_scope_aliases(tuning, scope_kw)
         tuned = self._split_tuning(tuning)
         write_kw, read_kw, graph_kw = tuned["write_"], tuned["read_"], tuned["graph_"]
@@ -825,8 +827,11 @@ class Memvara:
             # nothing already stored.
             if not (spec.learned and self.registry.spec_is_declared(spec.name)):
                 self.registry.register(spec)
+        # Keyword for `project`, positional for the rest: `project` is declared last on
+        # `Scope` so that existing positional callers keep binding, and it is bound here
+        # rather than accepted per call because scope is bound once, at construction.
         self.default_scope = Scope(tenant, scope_kw["user"], scope_kw["agent"],
-                                   scope_kw["session"])
+                                   scope_kw["session"], project=scope_kw["project"])
 
         self.writer = WritePipeline(
             self.store, self.embedder, self.registry, self.llm, **write_kw
@@ -1054,13 +1059,15 @@ class Memvara:
 
     # -- scope helpers -------------------------------------------------------
 
-    def _scope(self, tenant=None, user=None, agent=None, session=None) -> Scope:
+    def _scope(self, tenant=None, user=None, agent=None, session=None,
+               project=None) -> Scope:
         d = self.default_scope
         return Scope(
             tenant if tenant is not None else d.tenant,
             user if user is not None else d.user,
             agent if agent is not None else d.agent,
             session if session is not None else d.session,
+            project=project if project is not None else d.project,
         )
 
     @staticmethod
@@ -3476,6 +3483,9 @@ class ScopedMemvara:
     @property
     def _kw(self) -> dict[str, Any]:
         s = self.scope
+        # `project` is deliberately absent. Scope is bound at construction, so a scoped
+        # view has nothing to say about it and every public method would have to grow a
+        # parameter to carry it; `_scope()` already reads it from `default_scope`.
         return {"tenant": s.tenant, "user": s.user, "agent": s.agent, "session": s.session}
 
     # -- writing -------------------------------------------------------------

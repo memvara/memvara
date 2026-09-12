@@ -148,7 +148,7 @@ if TYPE_CHECKING:  # pragma: no cover
 #    them the graph declaration would be dropped on that write and the next start would
 #    rehydrate the predicate as non-traversable — a store that quietly stops walking
 #    edges it walked yesterday, with no error and nothing in the file saying why.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # Kept separate because the v1 -> v2 migration has to recreate this table: SQLite
 # cannot add a column to an existing primary key, and (tenant, name) is now the key.
@@ -193,7 +193,10 @@ CREATE TABLE IF NOT EXISTS episodes (
     content  TEXT NOT NULL,
     ts       REAL NOT NULL,
     hash     TEXT NOT NULL,
-    meta     TEXT NOT NULL DEFAULT '{}'
+    meta     TEXT NOT NULL DEFAULT '{}',
+    -- Version 12, for the same reason claims got one: an episode is scoped, and without
+    -- this a turn recorded in one repository would be visible from every other.
+    project  TEXT
 );
 CREATE INDEX IF NOT EXISTS ep_hash  ON episodes(tenant, hash);
 -- `ts` last, so the same index serves both the scope filter and the as-of range scan
@@ -237,7 +240,11 @@ CREATE TABLE IF NOT EXISTS claims (
     -- classification rule has no answer, and the answer depends on which vocabulary a
     -- deployment loads rather than on anything in the row. NULL keeps such a claim
     -- walkable, so an upgrade does not switch off a graph that worked yesterday.
-    object_kind        TEXT
+    object_kind        TEXT,
+    -- Version 12. Which repository a claim was learned in, or NULL for a fact the
+    -- vocabulary calls global. NULL is the common case and the meaningful one: it is
+    -- what makes a preference one fact across every project.
+    project            TEXT
 );
 -- The index that makes contradiction detection O(1) instead of a similarity search.
 CREATE INDEX IF NOT EXISTS cl_fact  ON claims(tenant, fact_key, invalidated_at);
@@ -401,7 +408,7 @@ _CLAIM_FIELDS = (
     "polarity", "memory_type", "valid_from", "valid_to", "recorded_at", "invalidated_at",
     "invalidated_by", "confidence", "salience", "obs_count", "sources", "derivation",
     "extractor", "meta", "fact_key", "value_key", "subject_key", "object_key",
-    "temporal_precision", "amount", "unit", "object_kind",
+    "temporal_precision", "amount", "unit", "object_kind", "project",
 )
 _CLAIM_COLS = ", ".join(_CLAIM_FIELDS)
 _CLAIM_VALUES = ", ".join("?" * len(_CLAIM_FIELDS))
@@ -422,6 +429,7 @@ _CLAIM_UPSERT = (
 )
 _EPISODE_FIELDS = (
     "id", "tenant", "usr", "agent", "session", "role", "content", "ts", "hash", "meta",
+    "project",
 )
 # Upsert, not INSERT OR REPLACE, for the same reason `put_claim` uses one: REPLACE
 # deletes and re-inserts, which assigns a new rowid, and the FTS row is keyed on the old
@@ -664,6 +672,25 @@ def _clock(valid_at: datetime | None, known_at: datetime | None) -> tuple[float,
 # from the object, and only the rows already on disk have to be re-derived from the two
 # columns that hold the same information. Taking `meta` as its stored JSON rather than as
 # a dict is what lets the whole backfill be one UPDATE.
+
+
+def _fact_key_of(tenant: str, usr: str | None, project: str | None,
+                 packed: str) -> str:
+    """`fact_key` for a stored row, computed in SQL so the backfill is one UPDATE.
+
+    `subject_key` and `predicate` arrive packed into one argument because SQLite's
+    `create_function` takes a fixed arity and four is what the key needs; they are split
+    on the same separator `owner_key` uses, which cannot appear in either.
+
+    Deliberately re-derived from the stored columns rather than from `Claim`: the row is
+    what has to change, and loading every claim to re-save it would turn a single UPDATE
+    into a scan with a Python round trip per row.
+    """
+    from ..types import OWNER_SEP, content_hash
+
+    subject_key, _, predicate = packed.partition(OWNER_SEP)
+    return content_hash(f"{tenant}{OWNER_SEP}{usr or ''}", project or "",
+                        subject_key, predicate)
 
 
 def _subject_key_of(meta: str, surface: str) -> str:
@@ -1202,6 +1229,7 @@ class SQLiteStore:
             self._migrate_to_v9()
             self._migrate_to_v10()
             self._migrate_to_v11()
+            self._migrate_to_v12()
             # No `_migrate_to_v8`: version 8 added a table nothing had ever written to
             # and that holds no derived data, so its `CREATE TABLE IF NOT EXISTS` above
             # genuinely is the whole migration — the same shape as version 4. What it
@@ -1209,6 +1237,35 @@ class SQLiteStore:
             # table, and an empty one means "nothing has been erased *since this file was
             # upgraded*", never "nothing has ever been erased here".
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _migrate_to_v12(self) -> None:
+        """Add the project column, and rehash every slot key, because its shape changed.
+
+        `fact_key` now mixes the scope's project in, so every key already on disk was
+        computed under the old shape and would address a slot nothing else lands in. This
+        is the one migration here that rewrites a derived column for every row rather than
+        filling in a new one, and it has to: a claim whose `fact_key` nobody else computes
+        stops contradicting anything, silently.
+
+        Existing claims have no project, so they rehash to the *same* shape a global
+        predicate produces — one slot per owner, exactly what they had. The rehash changes
+        the bytes, not what competes with what, which is why it can run unattended.
+
+        `project` itself is left NULL and is not inferred. A claim written before this
+        version was not recorded against a repository, and choosing one for it now would
+        be inventing where it was learned.
+        """
+        have = {r["name"] for r in self._db.execute("PRAGMA table_info(claims)")}
+        if "project" not in have:
+            self._db.execute("ALTER TABLE claims ADD COLUMN project TEXT")
+        have_ep = {r["name"] for r in self._db.execute("PRAGMA table_info(episodes)")}
+        if "project" not in have_ep:
+            self._db.execute("ALTER TABLE episodes ADD COLUMN project TEXT")
+        self._db.create_function("mv_fact_key", 4, _fact_key_of, deterministic=True)
+        self._db.execute(
+            "UPDATE claims SET fact_key = mv_fact_key(tenant, usr, project, "
+            "subject_key || char(31) || predicate)"
+        )
 
     def _migrate_to_v11(self) -> None:
         """Add the object kind column.
@@ -1705,6 +1762,15 @@ class SQLiteStore:
 
     @staticmethod
     def _scope_clause(scopes: Sequence[Scope], alias: str = "") -> tuple[str, list]:
+        """SQL and binds for "written at one of these scopes". Every read goes through it.
+
+        It must compare every element `Scope.key()` compares, and `project` was the one
+        that showed why. `sees()` authorizes an id-addressed read by comparing keys, so it
+        counted the project from the moment the field existed; this clause did not, so
+        `get_all()` in one repository returned another repository's claims while `get()`
+        on the very same id refused them. That is the two-answers-to-one-question defect
+        `sees()` was written to end, and the permissive answer was the enumerating one.
+        """
         a = f"{alias}." if alias else ""
         if not scopes:
             # Fail closed. An empty scope list means "no scope was resolved", which is a
@@ -1716,8 +1782,9 @@ class SQLiteStore:
             return "1=0", []
         parts, params = [], []
         for s in scopes:
-            parts.append(f"({a}tenant IS ? AND {a}usr IS ? AND {a}agent IS ? AND {a}session IS ?)")
-            params += [s.tenant, s.user, s.agent, s.session]
+            parts.append(f"({a}tenant IS ? AND {a}usr IS ? AND {a}project IS ? "
+                         f"AND {a}agent IS ? AND {a}session IS ?)")
+            params += [s.tenant, s.user, s.project, s.agent, s.session]
         return "(" + " OR ".join(parts) + ")", params
 
     def _state_clause(self, valid_at: datetime | None, known_at: datetime | None,
@@ -1813,7 +1880,8 @@ class SQLiteStore:
             self._db.execute(
                 _EPISODE_UPSERT,
                 (ep.id, ep.scope.tenant, ep.scope.user, ep.scope.agent, ep.scope.session,
-                 ep.role, ep.content, _ts(ep.ts), ep.hash, json.dumps(ep.meta)),
+                 ep.role, ep.content, _ts(ep.ts), ep.hash, json.dumps(ep.meta),
+                 ep.scope.project),
             )
             # Mirror the episode's rowid into the FTS table, exactly as `put_claim`
             # does and for the same reason: `episode_id` is UNINDEXED, so deleting on
@@ -1831,7 +1899,8 @@ class SQLiteStore:
     def _row_to_episode(self, r: sqlite3.Row) -> Episode:
         return Episode(
             id=r["id"],
-            scope=Scope(r["tenant"], r["usr"], r["agent"], r["session"]),
+            scope=Scope(r["tenant"], r["usr"], r["agent"], r["session"],
+                        project=r["project"]),
             role=r["role"],
             content=r["content"],
             ts=_dt(r["ts"]),  # type: ignore[arg-type]
@@ -2035,6 +2104,7 @@ class SQLiteStore:
                     claim.subject_key, claim.object_key,
                     claim.temporal_precision, claim.amount, claim.unit,
                     claim.object_kind.value if claim.object_kind else None,
+                    claim.scope.project,
                 ),
             )
             # Mirror the claim's rowid into the FTS table so the index entry can be
@@ -2131,7 +2201,8 @@ class SQLiteStore:
     def _row_to_claim(r: sqlite3.Row) -> Claim:
         return Claim(
             id=r["id"],
-            scope=Scope(r["tenant"], r["usr"], r["agent"], r["session"]),
+            scope=Scope(r["tenant"], r["usr"], r["agent"], r["session"],
+                        project=r["project"]),
             subject=r["subject"], predicate=r["predicate"], object=r["object"],
             text=r["text"], polarity=r["polarity"],
             memory_type=MemoryType(r["memory_type"]),

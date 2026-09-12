@@ -720,7 +720,7 @@ def test_an_unknown_on_clear_is_rejected_at_construction(mem, monkeypatch):
 
 
 def test_the_history_repr_names_the_scope_and_the_deletion_policy(history):
-    assert "default/alice/*/s1" in repr(history) and "on_clear=error" in repr(history)
+    assert "default/alice/*/*/s1" in repr(history) and "on_clear=error" in repr(history)
 
 
 def test_the_base_classs_add_message_path_still_works(history):

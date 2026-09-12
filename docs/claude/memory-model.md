@@ -47,8 +47,10 @@ reason a claim was returned is inspectable rather than implied. Every write retu
 `WriteReceipt`, which counts what happened: claims written, claims reinforced, values ended,
 values retired, model calls made, and whether extraction was deferred.
 
-Scope is a four-part key — tenant, user, agent, session — held by `Scope` and flattened by
-`owner_key()`. It is bound where the store is opened, not passed per call by a model, which
+Scope is a five-part key — tenant, user, project, agent, session — held by `Scope` and
+flattened by `owner_key()`, which folds only tenant and user because it also scopes entity
+identity. The project is mixed into `fact_key_for()` directly instead, so that two repositories
+keep separate slots while `software:postgresql` stays one entity across both. It is bound where the store is opened, not passed per call by a model, which
 is what stops a tool call reaching another user's memory.
 
 ## Three states, and three different endings

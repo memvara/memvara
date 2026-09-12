@@ -841,7 +841,7 @@ def test_a_scope_view_cannot_be_talked_out_of_its_scope(mem):
 
 def test_a_scope_view_says_what_it_is_bound_to(mem):
     text = repr(mem.scope(user="grace", session="s3"))
-    assert text.startswith("<ScopedMemvara default/grace/*/s3 of <Memvara ")
+    assert text.startswith("<ScopedMemvara default/grace/*/*/s3 of <Memvara ")
 
 
 def test_a_scope_view_passes_write_options_through(mem):

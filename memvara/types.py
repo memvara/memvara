@@ -371,8 +371,20 @@ def fact_key_for(scope: "Scope", subject: str, predicate: str) -> str:
     The subject is folded to its entity identity on the way in, so no caller can derive
     a key from a raw surface form by forgetting to. `entity_key` is idempotent, so
     passing an already-resolved identity (as `Claim.fact_key` does) is safe.
+
+    **The project is mixed in here rather than inside `owner_key`, and the difference
+    matters.** `owner_key` is also what entity identity is scoped to, so putting the
+    project there would make `software:postgresql` in one repository a different entity
+    from the same software in another — which would break the cross-project traversal the
+    scope design exists to keep. Slots partition by project; entities do not.
+
+    A claim whose predicate is declared global reaches this with `scope.project` already
+    cleared by `Reconciler._canonicalize`, so it occupies one slot for the whole store.
+    That is how a preference stays one fact while two services' Postgres versions stay
+    two.
     """
-    return content_hash(owner_key(scope), entity_key(subject) or subject, predicate)
+    return content_hash(owner_key(scope), scope.project or "",
+                        entity_key(subject) or subject, predicate)
 
 
 class ObjectKind(str, Enum):
@@ -437,9 +449,39 @@ class Scope:
     user: str | None = None
     agent: str | None = None
     session: str | None = None
+    #: Which repository this was learned in, as `host/owner/repo`.
+    #:
+    #: **Declared last, and ranked third.** In the visibility hierarchy it sits below
+    #: `user` and above `agent`, which is what `key()` and `ancestors()` express. It is
+    #: declared here because several callers build a `Scope` positionally — `core.py` and
+    #: both remote clients pass four arguments in order — and inserting a field into the
+    #: middle silently shifted `agent` into `project` and `session` into `agent`. A frozen
+    #: dataclass type-checks none of that; the first symptom was two projects' claims
+    #: landing in one slot.
+    #:
+    #: Unset means "not project-relative", and that is a real state rather than a missing
+    #: one. A predicate declared global is written with this cleared, so its claims sit at
+    #: user level: one slot for the whole store, and visible from inside every project
+    #: because visibility widens upward. A preference follows you between repositories;
+    #: what version of Postgres a service runs does not.
+    project: str | None = None
 
     def key(self) -> str:
-        return "/".join([self.tenant, self.user or "*", self.agent or "*", self.session or "*"])
+        """A flat, comparable identity for this scope. Never parsed back apart.
+
+        Every component is escaped before joining, which reads like defensiveness and is
+        not. `project` is a `host/owner/repo` string and therefore contains the separator:
+        without escaping, `Scope(user="alice", project="gh/o/a")` and
+        `Scope(user="alice/gh", project="o/a")` produce the same key, and `sees()`
+        compares keys — so one user's scope would see another's. `%` is escaped first so
+        that the escape itself cannot be forged by a component that contains `%2F`.
+        """
+        def esc(part: str) -> str:
+            return part.replace("%", "%25").replace("/", "%2F")
+
+        return "/".join(esc(p) for p in (self.tenant, self.user or "*",
+                                         self.project or "*", self.agent or "*",
+                                         self.session or "*"))
 
     def ancestors(self) -> list["Scope"]:
         """This scope plus every broader scope it inherits from, narrowest first."""
@@ -448,6 +490,8 @@ class Scope:
             out.append(replace(self, session=None))
         if self.agent is not None:
             out.append(replace(self, agent=None, session=None))
+        if self.project is not None:
+            out.append(replace(self, project=None, agent=None, session=None))
         if self.user is not None:
             out.append(Scope(tenant=self.tenant))
         # De-duplicate while preserving order.

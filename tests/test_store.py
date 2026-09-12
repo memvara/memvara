@@ -2946,3 +2946,72 @@ def test_a_value_object_is_not_a_graph_edge_but_an_unclassified_one_still_is(sto
     assert "cl_ent" in walkable
     assert "cl_old" in walkable, "a claim written before the rule keeps its edges"
     assert "cl_val" not in walkable
+
+
+def test_a_version_11_file_gains_project_on_claims_and_episodes(tmp_path):
+    """Episodes are scoped too, and were missed on the first pass.
+
+    Without the column on `episodes`, a turn recorded in one repository would be readable
+    from every other, so the claims half of this migration would be enforced while the
+    evidence behind those claims leaked across projects.
+    """
+    path = str(tmp_path / "v11.db")
+    store = SQLiteStore(path)
+    try:
+        for table in ("claims", "episodes"):
+            store._db.execute(f"ALTER TABLE {table} RENAME COLUMN project TO gone")
+        store._migrate_to_v12()
+        for table in ("claims", "episodes"):
+            columns = {r["name"] for r in store._db.execute(f"PRAGMA table_info({table})")}
+            assert "project" in columns, table
+    finally:
+        store.close()
+
+
+def test_the_sql_rehash_agrees_with_the_python_slot_key():
+    """The property the v12 migration lives or dies on.
+
+    It recomputes every `fact_key` in SQL rather than loading each claim, so if the two
+    derivations disagreed by a byte, every migrated claim would address a slot nothing
+    else computes — and would silently stop contradicting anything.
+    """
+    from memvara.store.sqlite import _fact_key_of
+    from memvara.types import OWNER_SEP, Scope, fact_key_for
+
+    for project in ("gh/o/cloud", None):
+        scope = Scope("t", "alice", project=project)
+        packed = "postgresql" + OWNER_SEP + "version"
+        assert fact_key_for(scope, "postgresql", "version") == _fact_key_of(
+            "t", "alice", project, packed), project
+
+
+def test_enumeration_and_id_reads_agree_about_the_project(store):
+    """A read that lists claims filters by project, exactly as a read by id does.
+
+    These two paths answer the same question through different code. `sees()` authorizes
+    an id-addressed read by comparing `Scope.key()`, which counted the project from the
+    moment the field existed. The SQL every enumerating read shares did not, so a handle
+    opened on one repository listed another repository's claims while `get()` on the very
+    same id refused them — the permissive answer being the one that returns rows.
+
+    The global claim in the middle is the other half of the rule and is why this cannot be
+    tested by asserting that a foreign project contributes nothing: a claim written with
+    no project must stay visible from inside every project, because visibility widens
+    upward.
+    """
+    for project, obj in (("gh/o/a", "17"), ("gh/o/b", "16")):
+        put(store, scope=Scope("t", "alice", project=project),
+            subject="postgresql", predicate="version", object=obj)
+    put(store, scope=Scope("t", "alice"), subject="user", predicate="prefers",
+        object="dark mode")
+
+    here = Scope("t", "alice", project="gh/o/a")
+    listed = [store.get_claim(i) for i in store.candidate_ids(here.ancestors())]
+    assert sorted((c.subject, c.object) for c in listed) == [
+        ("postgresql", "17"), ("user", "dark mode")]
+
+    there = Scope("t", "alice", project="gh/o/b")
+    foreign = [store.get_claim(i) for i in store.candidate_ids(there.ancestors())]
+    sixteen = [c for c in foreign if c.object == "16"]
+    assert len(sixteen) == 1
+    assert not here.sees(sixteen[0].scope)
