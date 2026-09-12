@@ -564,3 +564,33 @@ def test_every_schema_call_is_checked_not_only_extraction():
 ])
 def test_the_finish_reason_is_read_from_whatever_shape_arrives(response, expected, why):
     assert _finish_reason(response) == expected, why
+
+
+# -- the request timeout ---------------------------------------------------------------
+
+
+def test_the_timeout_is_sent_on_the_request():
+    """On the request rather than set on the client, so it applies to a client a caller
+    injected — which is every test here, and was `bench/extract_cost.py`'s reason for
+    building its own client before this option existed."""
+    client = FakeClient({"claims": []})
+    OpenAILLM(client=client, timeout=1800).extract(episodes("hi"), [])
+    assert client.calls[0]["timeout"] == 1800
+
+
+def test_no_timeout_means_the_request_carries_none():
+    """Unset has to send the request this backend sent before the option existed, so a
+    deployment that never set it keeps the SDK's own 600-second default."""
+    client = FakeClient({"claims": []})
+    OpenAILLM(client=client).extract(episodes("hi"), [])
+    assert "timeout" not in client.calls[0]
+
+
+def test_the_selector_keeps_its_own_timeout():
+    """`chat()` passes a per-call timeout and must not inherit an extraction's. The
+    selector's budget is seconds; an extraction's is minutes, and a selector that waited
+    that long would hold up a read."""
+    client = FakeClient("{}")
+    OpenAILLM(client=client, timeout=1800).chat(
+        "sys", "prompt", json_object=True, max_completion_tokens=400, timeout=10)
+    assert client.calls[0]["timeout"] == 10
