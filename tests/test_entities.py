@@ -25,7 +25,11 @@ from memvara.entities import (
     EntitySpec,
     entity_id,
     entity_key,
+    entity_type_of,
+    key_words,
     split_entity_id,
+    split_entity_type,
+    typed_entity_key,
 )
 from memvara.schema import Cardinality, PredicateRegistry, PredicateSpec
 from memvara.store import SQLiteStore
@@ -1225,3 +1229,105 @@ def test_a_long_object_round_trips_through_remember():
     assert longest <= len(entity_id(OWNER, "").encode("utf-8")) + ENTITY_KEY_MAX * 4
     assert longest < 2704, "an id this long cannot be a Postgres btree row"
     mem.close()
+
+
+# -- typed identity ----------------------------------------------------------------
+#
+# A namespace stays inside the key rather than moving to a column beside it. Splitting it
+# out was measured and makes the graph worse: `company:apple` and `fruit:apple` both fold
+# to `apple`, and traversal joins on the key, so a walk crosses from a company to a
+# fruit. See `entities.typed_entity_key`.
+
+
+def test_a_namespace_keeps_two_things_with_one_name_apart():
+    """The case the namespace exists for, and the fold that used to lose it.
+
+    `apple` names a company and a fruit, and no amount of normalizing can tell them
+    apart, because the difference is not in the text. Both are also distinct from the
+    bare name: an entity written with no namespace is not a wildcard that matches every
+    namespace, it is its own identity, which is the same bias the rest of this module
+    takes -- two entities left apart cost a duplicate slot a later alias can merge, while
+    two merged wrongly have lost the distinction for good.
+    """
+    keys = {typed_entity_key(s) for s in ("company:apple", "fruit:apple", "apple")}
+    assert keys == {"company:apple", "fruit:apple", "apple"}
+
+
+def test_the_corporate_form_fold_is_confined_to_one_namespace():
+    """`Apple Inc.` is `Apple` within `company:`, and that is the only place it holds.
+
+    `_LEGAL_FORMS` stripping is the one genuinely risky transformation `entity_key`
+    performs, because it merges two names deterministically with no evidence behind it.
+    A namespace is what makes it safe: inside `company:` the two spellings really are one
+    company, and across namespaces they cannot reach each other at all.
+    """
+    assert typed_entity_key("company:Apple Inc.") == typed_entity_key("company:apple")
+    assert typed_entity_key("company:Apple Inc.") != typed_entity_key("fruit:apple")
+
+
+def test_ordinary_text_that_contains_a_colon_is_not_a_namespace():
+    """Three shapes of everyday text carry a colon, and each is refused by a rule.
+
+    Refused by a rule rather than by a list of known schemes, because this runs on every
+    write and the list would be the thing nobody updates. A URL is caught by the rest
+    starting with two slashes, prose by the space after the colon, and a time by a
+    namespace having to begin with a letter.
+    """
+    for text in ("https://memvara.dev", "Note: call Bob back", "09:30",
+                 "ratio 3:1", "TODO: ship it"):
+        assert split_entity_type(text) == ("", text), text
+
+
+def test_a_namespace_is_not_one_of_the_name_s_words():
+    """What a retriever matches on is the name, because that is what a question contains.
+
+    `key_words` feeds anchoring, which needs every word of a key to appear in the
+    question. Nobody types the namespace, so leaving it in would stop a typed entity ever
+    anchoring -- silently, and only for typed entities, which is the hardest shape of bug
+    to notice.
+    """
+    assert key_words("company:apple") == ["apple"]
+    assert key_words("apple") == ["apple"]
+
+
+def test_an_alias_may_not_merge_two_kinds_of_thing():
+    """The invariant, enforced rather than left to chance.
+
+    An alias says two spellings name one entity, and one entity has one type. Merging
+    `fruit:apple` onto `company:apple` would destroy a distinction somebody wrote down on
+    purpose, and destroy it permanently, because nothing afterwards records that the two
+    were ever separate. It raises rather than quietly declining: the caller asked for a
+    merge, and a store that does not do what its operator believes it did is worse than
+    one that refuses out loud.
+    """
+    reg = EntityRegistry()
+    reg.resolve(OWNER, "company:apple")
+    with pytest.raises(ValueError, match="different kinds of thing"):
+        reg.learn_alias(OWNER, "company:apple", "fruit:apple")
+
+
+def test_a_model_is_only_offered_candidates_it_could_be_allowed_to_merge():
+    """The shortlist is filtered to one namespace, which is not merely tidiness.
+
+    `alias` refuses a merge across namespaces, so a candidate from another one can only
+    ever produce a refusal -- a model call spent reaching an error, and an invitation to
+    give the one answer the refusal exists to stop.
+    """
+    reg = EntityRegistry()
+    for surface in ("company:apple", "company:acme", "fruit:apple", "apple"):
+        reg.resolve(OWNER, surface)
+    assert reg.candidates(OWNER, "company:apple inc") == ["company:apple",
+                                                          "company:acme"]
+    assert reg.candidates(OWNER, "apple") == ["apple"]
+
+
+def test_the_type_is_read_out_of_the_identity_not_out_of_the_text():
+    """So a claim's type and its identity cannot drift apart.
+
+    An alias resolves one spelling onto another entity's identity. Reading the type from
+    that identity is what makes an alias unable to change a type without also moving the
+    claim to the other entity -- which is the same event, and the one `alias` refuses
+    across types.
+    """
+    assert entity_type_of(typed_entity_key("Company:Apple Inc.")) == "company"
+    assert entity_type_of(typed_entity_key("apple")) == ""

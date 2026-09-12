@@ -138,6 +138,12 @@ if TYPE_CHECKING:  # pragma: no cover
 #    a property of the row, so a backfill would make two machines disagree about what
 #    one file says. NULL therefore means "written before this rule", and `_WALKABLE`
 #    admits it — an upgrade must not switch off a graph that was walking yesterday.
+# 12: claims gained `project`, `subject_type` and `object_type`, episodes gained `project`,
+#    and both keys and both hashes were re-derived. The entity fold now keeps a `type:`
+#    namespace, so `company:apple` keys to `company:apple` rather than `company apple`, and
+#    `fact_key` mixes the scope's project in. Two rewrites of the same rows, done in one
+#    migration because doing them in two would rewrite every row twice -- which is the cost
+#    the design set out to pay once.
 # 10: predicates gained their graph declaration — `subject_type`, `object_type`, `graph`,
 #    `inverse`, `inverse_cardinality` and `traversal_cost`. They are declaration-only, so
 #    unlike version 6 there is nothing to derive and nothing to backfill: a row written
@@ -244,7 +250,14 @@ CREATE TABLE IF NOT EXISTS claims (
     -- Version 12. Which repository a claim was learned in, or NULL for a fact the
     -- vocabulary calls global. NULL is the common case and the meaningful one: it is
     -- what makes a preference one fact across every project.
-    project            TEXT
+    project            TEXT,
+    -- Version 12. The namespace half of each end's identity, or '' where it declares
+    -- none. Both are derived from `subject_key` and `object_key` and are kept here so
+    -- that "claims whose subject is a company" is an indexable question rather than a
+    -- scan that takes every key apart. They are not identity: the key is, and it already
+    -- contains the namespace -- see `entities.typed_entity_key`.
+    subject_type       TEXT NOT NULL DEFAULT '',
+    object_type        TEXT NOT NULL DEFAULT ''
 );
 -- The index that makes contradiction detection O(1) instead of a similarity search.
 CREATE INDEX IF NOT EXISTS cl_fact  ON claims(tenant, fact_key, invalidated_at);
@@ -409,6 +422,7 @@ _CLAIM_FIELDS = (
     "invalidated_by", "confidence", "salience", "obs_count", "sources", "derivation",
     "extractor", "meta", "fact_key", "value_key", "subject_key", "object_key",
     "temporal_precision", "amount", "unit", "object_kind", "project",
+    "subject_type", "object_type",
 )
 _CLAIM_COLS = ", ".join(_CLAIM_FIELDS)
 _CLAIM_VALUES = ", ".join("?" * len(_CLAIM_FIELDS))
@@ -691,6 +705,28 @@ def _fact_key_of(tenant: str, usr: str | None, project: str | None,
     subject_key, _, predicate = packed.partition(OWNER_SEP)
     return content_hash(f"{tenant}{OWNER_SEP}{usr or ''}", project or "",
                         subject_key, predicate)
+
+
+def _value_key_of(tenant: str, usr: str | None, packed: str) -> str:
+    """`value_key` for a stored row, alongside `_fact_key_of` and for the same reason.
+
+    Needed by the same migration, because `value_key` hashes the object's identity and the
+    fold that produces it changed. A row whose `value_key` nobody else computes stops
+    being recognised as a re-observation, so the next assertion of a fact already on
+    record is stored as a rival value instead of reinforcing the one there.
+    """
+    from ..types import OWNER_SEP, content_hash
+
+    subject_key, predicate, object_key, polarity = packed.split(OWNER_SEP)
+    return content_hash(f"{tenant}{OWNER_SEP}{usr or ''}", subject_key, predicate,
+                        object_key, polarity)
+
+
+def _entity_type_of(key: str) -> str:
+    """The namespace half of an entity identity. See `types.entity_type_of`."""
+    from ..types import entity_type_of
+
+    return entity_type_of(key)
 
 
 def _subject_key_of(meta: str, surface: str) -> str:
@@ -1239,32 +1275,72 @@ class SQLiteStore:
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _migrate_to_v12(self) -> None:
-        """Add the project column, and rehash every slot key, because its shape changed.
+        """Add the project and type columns, re-fold both keys, and rehash both hashes.
 
-        `fact_key` now mixes the scope's project in, so every key already on disk was
-        computed under the old shape and would address a slot nothing else lands in. This
-        is the one migration here that rewrites a derived column for every row rather than
-        filling in a new one, and it has to: a claim whose `fact_key` nobody else computes
-        stops contradicting anything, silently.
+        Two changes land in one migration on purpose, because both move `fact_key` and
+        doing them separately would rewrite every row twice.
 
-        Existing claims have no project, so they rehash to the *same* shape a global
-        predicate produces — one slot per owner, exactly what they had. The rehash changes
-        the bytes, not what competes with what, which is why it can run unattended.
+        **The project.** `fact_key` now mixes the scope's project in. Existing claims have
+        none, so they rehash to the same shape a predicate declared global produces — one
+        slot per owner, exactly what they had. `project` itself is left NULL and is not
+        inferred: a claim written before this version was not recorded against a
+        repository, and choosing one for it now would be inventing where it was learned.
 
-        `project` itself is left NULL and is not inferred. A claim written before this
-        version was not recorded against a repository, and choosing one for it now would
-        be inventing where it was learned.
+        **The type.** An entity identity now keeps its `type:` namespace, so
+        `company:apple` folds to `company:apple` where it used to fold to `company apple`.
+        The stored keys are therefore re-derived from the surface text and the write-time
+        alias stamp, which is exactly what version 6 did and by the same two SQL functions.
+
+        Then both hashes are recomputed from the new keys, and this is the half that has to
+        be complete rather than merely correct. `fact_key` decides what contradicts what: a
+        claim whose key nobody else computes stops contradicting anything, silently.
+        `value_key` decides what counts as the same assertion: a stale one turns the next
+        re-statement of a known fact into a rival value instead of a reinforcement. Both
+        failures look like a working store.
+
+        The column order matters and is the reverse of how it reads. Keys first, because
+        the hashes are computed from them; the namespace columns last, because they are
+        read back out of the finished keys.
+
+        Idempotent and shape-driven like every migration here. Running it twice re-derives
+        the same keys from the same text and rehashes them to the same bytes.
         """
         have = {r["name"] for r in self._db.execute("PRAGMA table_info(claims)")}
         if "project" not in have:
             self._db.execute("ALTER TABLE claims ADD COLUMN project TEXT")
+        for col in ("subject_type", "object_type"):
+            if col not in have:
+                self._db.execute(
+                    f"ALTER TABLE claims ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         have_ep = {r["name"] for r in self._db.execute("PRAGMA table_info(episodes)")}
         if "project" not in have_ep:
             self._db.execute("ALTER TABLE episodes ADD COLUMN project TEXT")
+
+        # `mv_subject_key` and `mv_object_key` are the ones version 6 registered, reused
+        # rather than registered again. SQLite refuses to *replace* a function while the
+        # connection has work in flight, and every migration here runs inside one
+        # transaction, so re-registering them raises "Error creating function" on the
+        # first open of any database. `_migrate` calls version 6 unconditionally and
+        # before this, so they are always present by the time this line runs.
         self._db.create_function("mv_fact_key", 4, _fact_key_of, deterministic=True)
+        self._db.create_function("mv_value_key", 3, _value_key_of, deterministic=True)
+        self._db.create_function("mv_entity_type", 1, _entity_type_of, deterministic=True)
         self._db.execute(
-            "UPDATE claims SET fact_key = mv_fact_key(tenant, usr, project, "
-            "subject_key || char(31) || predicate)"
+            "UPDATE claims SET subject_key = mv_subject_key(meta, subject), "
+            "object_key = mv_object_key(meta, object)"
+        )
+        self._db.execute(
+            "UPDATE claims SET"
+            " fact_key = mv_fact_key(tenant, usr, project,"
+            "                        subject_key || char(31) || predicate),"
+            " value_key = mv_value_key(tenant, usr,"
+            "                          subject_key || char(31) || predicate"
+            "                          || char(31) || object_key"
+            "                          || char(31) || CAST(polarity AS TEXT))"
+        )
+        self._db.execute(
+            "UPDATE claims SET subject_type = mv_entity_type(subject_key), "
+            "object_type = mv_entity_type(object_key)"
         )
 
     def _migrate_to_v11(self) -> None:
@@ -2105,6 +2181,7 @@ class SQLiteStore:
                     claim.temporal_precision, claim.amount, claim.unit,
                     claim.object_kind.value if claim.object_kind else None,
                     claim.scope.project,
+                    claim.subject_type, claim.object_type,
                 ),
             )
             # Mirror the claim's rowid into the FTS table so the index entry can be
@@ -2675,7 +2752,7 @@ class SQLiteStore:
         something to record, so a claim whose surface form was already canonical carries
         no key at all and would look like a claim referring to nothing.
         """
-        from ..entities import entity_id, entity_key
+        from ..entities import entity_id, typed_entity_key
         from ..types import owner_key
 
         rows = self._db.execute("SELECT id FROM entities WHERE tenant=?",
@@ -2691,7 +2768,7 @@ class SQLiteStore:
             owner = owner_key(Scope(tenant, c["usr"], c["agent"], c["session"]))
             for surface in (c["subject"], c["object"]):
                 if surface:
-                    live.add(entity_id(owner, entity_key(surface)))
+                    live.add(entity_id(owner, typed_entity_key(surface)))
 
         doomed = [r["id"] for r in rows if r["id"] not in live]
         if doomed:

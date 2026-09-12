@@ -24,7 +24,9 @@ landing beside them unnoticed.
   `state_predicate()`, `stored_state_predicate()`, `live_predicate()`.
 - Storage backends: `memvara/store/sqlite.py` — `SQLiteStore`, the default;
   `memvara/store/remote.py` — `RemoteStore`, the same protocol against a hosted deployment.
-- Entities and predicates: `memvara/entities.py` — `EntityRegistry`, `entity_key()`;
+- Entities and predicates: `memvara/entities.py` — `EntityRegistry`, `entity_key()` and
+  `typed_entity_key()`, which keeps a `type:` namespace so `company:apple` and `fruit:apple`
+  are two entities;
   `memvara/schema.py` — `PredicateRegistry`, `PredicateSpec`, `Cardinality`, `Volatility`.
 - Tests: `tests/test_bitemporal.py`, `tests/test_types.py`, `tests/test_store.py`,
   `tests/test_erasure.py`, `tests/test_erasure_residue.py`.

@@ -795,6 +795,40 @@ which drifts once a second backend implements it.
 Both surviving options required a `fact_key` rehash over the whole table, so that cost did not
 distinguish them. `backfill_entities` is the instrument.
 
+#### Revised 2026-09-12: the type stays inside the key
+
+This decision was implemented as written and the result was measured before it was committed.
+Splitting the namespace out of the key makes the graph worse. `company:apple` and
+`fruit:apple` both fold to `apple`, and traversal joins on the key, so a walk crosses from a
+company to a fruit — the confusion this decision exists to prevent, made worse than the
+behaviour it replaced, where the two folded to `company apple` and `fruit apple` and stayed
+apart. Keeping them apart under the split would mean comparing a type at every join, which
+changes `GraphTraverser`'s node identity from a key to a pair and changes the signature of
+`Store.adjacent`, a published protocol method third-party stores implement.
+
+What was built instead: `entities.typed_entity_key` folds the name and puts the folded
+namespace back in front of it, so `company:apple` and `fruit:apple` are simply two keys and
+nothing downstream changes. `subject_type` and `object_type` are still added as columns, but
+they are a derived denormalization for indexing and enforcement rather than identity — each
+is read back out of the key beside it, so the two cannot drift apart.
+
+The reasoning above against a prefix does not survive contact with the code. It says a prefix
+would require making `entity_key()` structural and would cost that function its guarantee.
+Nothing here touches `entity_key()`: `typed_entity_key` is a thin layer above it, and
+splitting a namespace off and putting it back is itself pure and total, so the guarantee is
+intact. The objection to packing type and key into one column — that identity would have to
+be split on every read and would drift across backends — is answered by the codebase itself:
+`entity_id()` packs the owner into the identity string and `split_entity_id()` takes it apart,
+in both backends, and has not drifted. The split here is exact rather than best-effort,
+because `entity_key()` emits only alphanumerics and spaces, so a folded name never contains a
+colon.
+
+Two things the revision gains that the split did not offer. Stripping a corporate form —
+named in section 1 as the one genuinely risky fold here — becomes safe within a namespace and
+impossible across one, which is precisely the rule section 1 asks for. And an alias that would
+merge two namespaces is refusable, because the registry can see both types in the keys it is
+being asked to merge; under the split it would have had to be told them separately.
+
 ### 3. The predicate declares the object kind; undeclared defaults to VALUE
 
 The destructive direction on this axis is joining. A value wrongly treated as an entity creates

@@ -15,7 +15,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Iterable, Literal, cast
 
-from .entities import OWNER_SEP, entity_key
+from .entities import (OWNER_SEP, entity_key, entity_type_of,
+                       split_entity_type, typed_entity_key)
 
 if TYPE_CHECKING:
     # For annotations only. `memvara.select.base` imports `Usage` from `memvara.llm.base`,
@@ -343,10 +344,12 @@ def default_entity(surface: str) -> str:
 
     An unfoldable surface ("...", an emoji, a bare separator) keeps its raw text rather
     than collapsing to the empty string, which would make every such value one value.
+
+    A `type:` namespace survives the fold, so `company:apple` and `fruit:apple` are two
+    entities and neither is the bare `apple`. See `typed_entity_key` for why the namespace
+    stays inside the key instead of moving to a column beside it.
     """
-    return entity_key(surface) or surface
-
-
+    return typed_entity_key(surface) or surface
 def resolved_entity(meta: dict[str, Any], meta_key: str, surface: str) -> str:
     """Identity of one end of a claim: its stamp if it has one, else the fold.
 
@@ -369,8 +372,12 @@ def fact_key_for(scope: "Scope", subject: str, predicate: str) -> str:
     apart and a lookup starts matching nothing.
 
     The subject is folded to its entity identity on the way in, so no caller can derive
-    a key from a raw surface form by forgetting to. `entity_key` is idempotent, so
+    a key from a raw surface form by forgetting to. `default_entity` is idempotent, so
     passing an already-resolved identity (as `Claim.fact_key` does) is safe.
+
+    The entity's type needs no argument of its own because the identity carries it:
+    `default_entity("company:apple")` is `company:apple`, and `company:apple` and
+    `fruit:apple` are therefore already two different slots. See `typed_entity_key`.
 
     **The project is mixed in here rather than inside `owner_key`, and the difference
     matters.** `owner_key` is also what entity identity is scoped to, so putting the
@@ -384,7 +391,7 @@ def fact_key_for(scope: "Scope", subject: str, predicate: str) -> str:
     two.
     """
     return content_hash(owner_key(scope), scope.project or "",
-                        entity_key(subject) or subject, predicate)
+                        default_entity(subject), predicate)
 
 
 class ObjectKind(str, Enum):
@@ -798,6 +805,28 @@ class Claim:
     def object_key(self) -> str:
         """Entity this claim asserts as the value."""
         return resolved_entity(self.meta, OBJECT_ENTITY, self.object)
+
+    # Each type is read back out of the key above it rather than out of the text, so a
+    # claim's type and its identity cannot drift apart. They are stored as columns of
+    # their own because SQL has to be able to ask "claims whose subject is a company"
+    # without taking every key apart, which is what the declared-type invariants in
+    # `docs/SUBJECT-CONVENTIONS.md` will be enforced with.
+
+    @property
+    def subject_type(self) -> str:
+        """Namespace of the subject's entity, or `""` where it declares none."""
+        return entity_type_of(self.subject_key)
+
+    @property
+    def object_type(self) -> str:
+        """Namespace of the object's entity, or `""` where it declares none.
+
+        Answers a different question from `object_kind`, and the two are worth keeping
+        apart. The kind says whether the object is a thing at all and is decided by the
+        predicate; the type says which kind of thing and is decided by the text. A claim
+        whose kind is VALUE carries no edge whatever this says.
+        """
+        return entity_type_of(self.object_key)
 
     @property
     def fact_key(self) -> str:

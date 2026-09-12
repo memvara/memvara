@@ -393,7 +393,9 @@ from memvara import entity_key
 entity_key("Acme Corp.") == entity_key("ACME, Inc.") == entity_key("acme")   # True
 ```
 
-— which is what makes the keyed lookup fire at all. **Then cardinality decides**:
+— which is what makes the keyed lookup fire at all. A name that means two things can say
+which one it means, by writing a `type:` namespace in front of it. `company:apple` and
+`fruit:apple` are then two entities, and neither is the bare `apple`. **Then cardinality decides**:
 `lives_in` is declared single-valued, so the new value closes the old one's interval.
 
 The alternative design — embed, retrieve the nearest existing memories, ask a model

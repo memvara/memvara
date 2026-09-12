@@ -582,3 +582,34 @@ def test_the_project_is_declared_last_so_positional_callers_keep_binding():
 
     s = Scope("acme", "alice", "bot", "s1")
     assert (s.user, s.agent, s.session, s.project) == ("alice", "bot", "s1", None)
+
+
+def test_a_claim_reads_each_type_out_of_the_key_beside_it():
+    """`subject_type` and `object_type` describe the identity, not the text.
+
+    Reading them from the resolved key rather than from the surface form is what stops a
+    claim's type and its identity drifting apart. An alias resolves one spelling onto
+    another entity's identity, so a type read from the identity moves only when the claim
+    moves to a different entity — which is the same event, and the one the entity
+    registry refuses across types.
+    """
+    claim = Claim(scope=Scope("t", "alice"), subject="company:Apple Inc.",
+                  predicate="founded_in", object="17")
+    assert (claim.subject_key, claim.subject_type) == ("company:apple", "company")
+    assert (claim.object_key, claim.object_type) == ("17", "")
+
+
+def test_two_kinds_of_thing_with_one_name_occupy_two_slots():
+    """The point of the namespace, stated as the property that actually matters.
+
+    A slot is what contradiction handling works on, so `company:apple` and `fruit:apple`
+    sharing one would mean a fact about the company retiring a fact about the fruit.
+    Neither shares a slot with the bare name either: an entity written with no namespace
+    is its own identity, not a wildcard that matches every namespace.
+    """
+    def slot(subject):
+        return Claim(scope=Scope("t", "alice"), subject=subject,
+                     predicate="grows_in", object="somewhere").fact_key
+
+    keys = {slot(s) for s in ("company:apple", "fruit:apple", "apple")}
+    assert len(keys) == 3

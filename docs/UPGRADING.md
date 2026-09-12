@@ -7,6 +7,55 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## An entity can declare what kind of thing it is
+
+### What changed
+
+A subject or object may carry a `type:` namespace, and the namespace is part of the
+entity's identity:
+
+```python
+mem.remember("company:apple", "founded_in", "Cupertino")
+mem.remember("fruit:apple", "grows_in", "orchards")
+```
+
+Those are two entities. Neither is the bare `apple`. A fact about one never retires a fact
+about the other, and a graph walk does not cross between them.
+
+The namespace is optional and nothing has to adopt it. A surface form without one is an
+entity of no declared type, which is an identity of its own rather than a wildcard.
+
+### Who this changes, and in which direction
+
+**If you never write a colon in a subject or object, nothing changes.** Ordinary text that
+happens to contain one is not read as a namespace: a URL is excluded by the two slashes
+after the colon, prose by the space after it, and a time by a namespace having to begin
+with a letter. Everything else keys exactly as it did.
+
+**If you already write `type:name` subjects, your keys change and the migration fixes
+them.** `company:apple` used to fold to `company apple`, treating the namespace as a word
+of the name; it now folds to `company:apple`. The version 12 migration re-derives every
+stored key from the text you wrote and rehashes both `fact_key` and `value_key` from the
+new keys, so nothing is left addressing a slot no one else computes.
+
+**Two folds behave differently now, and both are narrower than before.** Stripping a
+corporate form is confined to one namespace, so `company:Apple Inc.` and `company:apple`
+are one entity while `company:apple` and `fruit:apple` can never reach each other. And
+`EntityRegistry.learn_alias` raises `ValueError` if the two surface forms have different
+namespaces, where it previously performed the merge. If you call it in a loop over
+untrusted pairs, catch that.
+
+### How to find your instances
+
+Claims whose ends carry a namespace, after upgrading:
+
+```sql
+SELECT subject_type, object_type, count(*) FROM claims
+WHERE subject_type != '' OR object_type != '' GROUP BY 1, 2;
+```
+
+---
+
 ## A claim can belong to a repository, and reads no longer cross between them
 
 ### What changed
