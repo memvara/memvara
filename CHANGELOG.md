@@ -9,6 +9,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-09-12
+
 ### Fixed
 
 - **The three shipped predicate packs now declare what their objects are, so a deployment
