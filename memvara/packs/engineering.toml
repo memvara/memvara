@@ -67,7 +67,7 @@ cardinality = "one"
 volatility = "slow"
 aliases = ["owned_by", "maintainer"]
 subject_type = ["component"]
-object_type = ["person"]
+object_type = ["person", "team"]
 graph = true
 
 # Multi-valued on purpose. A project rejects many things and depends on many things, and
@@ -82,8 +82,6 @@ aliases = ["requires"]
 subject_type = ["component"]
 object_type = ["component"]
 graph = true
-inverse = "depended_on_by"
-inverse_cardinality = "many"
 
 [[predicate]]
 name = "rejected"
@@ -109,8 +107,6 @@ aliases = ["blocker"]
 subject_type = ["component"]
 object_type = ["component"]
 graph = true
-inverse = "blocks"
-inverse_cardinality = "many"
 
 # ## Why five of these declare `graph` and six declare `value`
 #
@@ -135,7 +131,17 @@ inverse_cardinality = "many"
 # name something else is stored under, and a false join degrades retrieval invisibly while
 # a missing one costs a hop a later declaration recovers.
 #
-# `depends_on` and `blocked_by` declare inverses so a walk can cross them in the direction
-# nobody wrote. `inverse_cardinality` is declared beside each rather than inferred: one
-# component is blocked by many, and blocks many, but the two sides are not symmetric in
-# general and the loader refuses an `inverse` without it.
+# `endpoint` is a value for the same reason as `version`, and it is the one that looks most
+# like an entity: a URL is a name, and something could plausibly be filed under it. Nothing
+# in either shipped vocabulary is, so an edge from it would go nowhere today.
+#
+# **No inverses are declared here**, and that is `bench/packs/twowiki.toml`'s rule rather
+# than an oversight: nothing reads `inverse` yet, reverse traversal already works for any
+# predicate with `graph = true` — `GraphTraverser._edges` emits both directions from the
+# claim itself — and a wrongly declared inverse is a future correctness bug for no present
+# gain. `depended_on_by` and `blocks` are not in doubt, but two shipped vocabularies
+# answering the same question differently is worse than either answer.
+#
+# `owner` takes a team as readily as a person, so both are declared. Type enforcement is a
+# later step in `docs/SUBJECT-CONVENTIONS.md` rather than something that runs today, and a
+# narrower declaration made now would refuse `platform-team` when it arrives.

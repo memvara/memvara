@@ -27,8 +27,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   way the default did but now says why. `bought`, `watched` and `read` declare entity
   objects and leave `graph` false on purpose: nothing in that vocabulary makes a product or
   a book the subject of anything, so a walk crossing them would arrive with no onward edge.
-  `depends_on` and `blocked_by` declare inverses so a walk can cross them in the direction
-  nobody wrote.
 
   Measured on a store loading `engineering`: three writes give one joinable claim and the
   two-hop path `memvara_cloud -depends_on-> postgres -current_host-> db.internal`. The same
