@@ -7,6 +7,123 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## An entity can declare what kind of thing it is
+
+### What changed
+
+A subject or object may carry a `type:` namespace, and the namespace is part of the
+entity's identity:
+
+```python
+mem.remember("company:apple", "founded_in", "Cupertino")
+mem.remember("fruit:apple", "grows_in", "orchards")
+```
+
+Those are two entities. Neither is the bare `apple`. A fact about one never retires a fact
+about the other, and a graph walk does not cross between them.
+
+The namespace is optional and nothing has to adopt it. A surface form without one is an
+entity of no declared type, which is an identity of its own rather than a wildcard.
+
+### Who this changes, and in which direction
+
+**If you never write a colon in a subject or object, nothing changes.** Ordinary text that
+happens to contain one is not read as a namespace: a URL is excluded by the two slashes
+after the colon, prose by the space after it, and a time by a namespace having to begin
+with a letter. Everything else keys exactly as it did.
+
+**If you already write `type:name` subjects, your keys change and the migration fixes
+them.** `company:apple` used to fold to `company apple`, treating the namespace as a word
+of the name; it now folds to `company:apple`. The version 12 migration re-derives every
+stored key from the text you wrote and rehashes both `fact_key` and `value_key` from the
+new keys, so nothing is left addressing a slot no one else computes.
+
+**Two folds behave differently now, and both are narrower than before.** Stripping a
+corporate form is confined to one namespace, so `company:Apple Inc.` and `company:apple`
+are one entity while `company:apple` and `fruit:apple` can never reach each other. And
+`EntityRegistry.learn_alias` raises `ValueError` if the two surface forms have different
+namespaces, where it previously performed the merge. If you call it in a loop over
+untrusted pairs, catch that. A surface form that folds to nothing at all — `"..."`, a bare
+emoji — is still the silent no-op it always was, rather than a namespace mismatch: there is
+no entity there to have a namespace.
+
+### How to find your instances
+
+Claims whose ends carry a namespace, after upgrading:
+
+```sql
+SELECT subject_type, object_type, count(*) FROM claims
+WHERE subject_type != '' OR object_type != '' GROUP BY 1, 2;
+```
+
+---
+
+## A claim can belong to a repository, and reads no longer cross between them
+
+### What changed
+
+`Scope` gains a fifth element, `project`, holding a `host/owner/repo` identity, and you pass
+it once when you open the store:
+
+```python
+mem = Memvara("memory.db", user="alice", project="github.com/you/repo")
+```
+
+The project is mixed into the slot key, so two repositories that both record
+`postgresql version` hold two separate facts instead of one that keeps overwriting itself.
+Reads are filtered by it as well: a handle opened on one project does not enumerate another
+project's claims.
+
+Not everything partitions. `PredicateSpec` gains `project_scoped`, and a predicate declared
+`project_scoped = false` has its claims written with the project cleared, so they sit at user
+level and stay visible from inside every project. All 23 builtin predicates are declared
+global, so a personal assistant's memory behaves exactly as it did.
+
+`SCHEMA_VERSION` moves from 11 to 12. It adds a nullable `project` column to `claims` and to
+`episodes`, and then rehashes every `fact_key` in `claims`, because the hash takes a fifth
+input now.
+
+### Who this changes, and in which direction
+
+**If you never pass `project`, nothing changes.** Every scope has `project=None`, every claim
+is written with it unset, and the read filter matches. The rehash changes the bytes of your
+keys but not which claims compete for a slot, so contradiction handling behaves identically
+before and after.
+
+**If you start passing `project`, older claims do not move into it.** Claims written before
+the upgrade keep `project` NULL, which means "not recorded against a repository". Nothing
+infers one for them, because choosing a repository for a fact after the event would be
+inventing where it was learned. A handle opened with `project=` still sees them, because
+visibility widens upward from a project to that user's project-less claims — but a *new*
+claim on the same subject and predicate lands in a different slot and will not supersede the
+old one. If you want the old fact superseded, write the new one with `project=None`, or
+declare its predicate `project_scoped = false`.
+
+**If your own vocabulary declares predicates, decide which of them partition.** An undeclared
+predicate partitions by project, which is the safe direction but not always the one you want.
+A predicate that records something about the person rather than the codebase should be
+declared global:
+
+```toml
+[[predicate]]
+name = "prefers"
+cardinality = "many"
+project_scoped = false
+```
+
+### How to find your instances
+
+Claims written before the upgrade, and therefore not in any project:
+
+```sql
+SELECT count(*) FROM claims WHERE project IS NULL;
+```
+
+Predicates your vocabulary leaves partitioned, which is every one that does not say otherwise:
+grep your pack files for `project_scoped` and assume `true` wherever it is absent.
+
+---
+
 ## Graph traversal now follows only declared relations
 
 ### What changed

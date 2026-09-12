@@ -48,7 +48,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .types import MemoryType
+from .types import MemoryType, Scope
 
 
 class Cardinality(str, Enum):
@@ -116,6 +116,18 @@ class PredicateSpec:
     #: the forward cardinality would treat several true facts as competing answers to one
     #: question and end all but the last, so the pack loader refuses `inverse` without it.
     inverse_cardinality: "Cardinality | None" = None
+    #: Whether this predicate's slot partitions by project. Default True, and that
+    #: default is the safe direction rather than the common one: an undeclared
+    #: project-relative predicate that did *not* partition would let one repository's
+    #: write retire another's true value, and wrongly retiring a true fact is worse than
+    #: keeping two. The 23 builtins are person-facts and declare False, so a preference
+    #: or a home city stays one fact across every project.
+    #:
+    #: Declared on the predicate rather than inferred from the subject's type, because
+    #: the subject cannot tell the two apart: `software:postgresql version 17` is
+    #: project-relative and `software:postgresql released_on 2024-09-26` is true
+    #: everywhere, and both are about a `software`.
+    project_scoped: bool = True
     #: Room for edge strength in ranking, consumed by `retrieve/spread.rank_paths`.
     #: Nothing weights by it yet; the field exists so that a vocabulary written now does
     #: not have to be rewritten when weighting arrives. `depends_on` is a strong edge and
@@ -185,9 +197,12 @@ def _p(
     mtype: MemoryType = MemoryType.SEMANTIC,
     supersedes: tuple[str, ...] = (),
 ) -> PredicateSpec:
+    # Every builtin is a fact about the person, so none partitions by project: "lives in
+    # Lisbon" is the same fact whichever repository you were in when you said it, and
+    # learning it in one must retire the old city everywhere.
     return PredicateSpec(name=name, cardinality=card, volatility=vol,
                          memory_type=mtype, aliases=tuple(aliases),
-                         supersedes=supersedes)
+                         supersedes=supersedes, project_scoped=False)
 
 
 # A starter schema for the personal-assistant domain. Deliberately small: it is meant to
@@ -557,6 +572,26 @@ class PredicateRegistry:
         # `learn()` can still install a real spec for it.
         return PredicateSpec(name=name, cardinality=Cardinality.MANY, volatility=Volatility.SLOW)
 
+    def slot_scope(self, predicate: str, scope: Scope) -> Scope:
+        """The scope a claim with this predicate occupies its slot at.
+
+        The single definition of the project-clearing rule, because it has to be applied
+        in two places that do not otherwise meet. The write path applies it to the claim
+        it stores (`Reconciler._canonicalize`); `forget()` and `history()` apply it to the
+        probe claim they build to *find* that claim by key. Written out twice, the two
+        drifted immediately: a preference written from inside a repository was stored with
+        no project, while the probe looking for it still carried one, so `forget()`
+        matched nothing and returned an empty list — reporting success for a fact it left
+        live — and `history()` reported no history for a claim `get_all()` returns.
+
+        A predicate the vocabulary declares global is not project-relative, so its claims
+        sit one level above a project: one slot for the whole store, and readable from
+        inside every project because visibility widens upward. Everything else partitions.
+        """
+        if self.spec(predicate).project_scoped or scope.project is None:
+            return scope
+        return replace(scope, project=None)
+
     def known(self, predicate: str) -> bool:
         return self.normalize(predicate) in self._specs
 
@@ -708,7 +743,7 @@ def _coerce_enum(enum: "type[Enum]", value: object, field: str, name: str) -> An
 _PREDICATE_KEYS = frozenset({
     "name", "cardinality", "volatility", "memory_type", "aliases", "supersedes",
     "subject_type", "object_type", "graph", "inverse", "inverse_cardinality",
-    "traversal_cost",
+    "traversal_cost", "project_scoped",
 })
 
 
@@ -808,7 +843,14 @@ def _graph_declaration(entry: dict, name: str, path: Path) -> dict:
             "edge in ranking, so it has to be above zero; a zero or negative cost is a "
             "way of spelling 'not traversable', which is what graph = false says.")
 
-    return {"subject_type": subject_type, "object_type": object_type, "graph": graph,
+    scoped = entry.get("project_scoped", True)
+    if not isinstance(scoped, bool):
+        raise PredicatePackError(
+            f"predicate {name!r} in {path} has project_scoped={scoped!r}, which is not a "
+            "boolean. Write project_scoped = true or project_scoped = false.")
+
+    return {"project_scoped": scoped,
+            "subject_type": subject_type, "object_type": object_type, "graph": graph,
             "inverse": inverse or None, "inverse_cardinality": inverse_cardinality,
             "traversal_cost": float(cost)}
 

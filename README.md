@@ -301,7 +301,8 @@ The other four shapes this store is built for:
 | **Support agents** | The customer corrected the address in March; the agent must not quote the old one in August. This is the corpus behind [`demo/`](https://github.com/memvara/memvara/blob/main/demo/README.md). |
 | **Personal assistants** | The built-in vocabulary is this one: where somebody lives, works, what they are allergic to, and how they want to be spoken to (`memory_standing`). |
 | **Research agents** | A finding that arrives late about the past is a `valid_from` in the past and a `recorded_at` of today, which is exactly what the two clocks are for. |
-| **Multi-agent systems** | `tenant > user > agent > session`, with inheritance and fail-closed filters: a session sees that user's durable memory but never a sibling session's scratch space. |
+| **Multi-agent systems** | `tenant > user > project > agent > session`, with inheritance and fail-closed filters: a session sees that user's durable memory but never a sibling session's scratch space. |
+| **Agents working across repositories** | Pass `Memvara(project="github.com/you/repo")` and a fact learned in one repository stays there. A preference does not: predicates the vocabulary declares global are stored with no project, so they follow the user everywhere. |
 
 ```python
 bob = mem.scope(user="bob")     # the whole API, with the scope bound
@@ -392,7 +393,9 @@ from memvara import entity_key
 entity_key("Acme Corp.") == entity_key("ACME, Inc.") == entity_key("acme")   # True
 ```
 
-— which is what makes the keyed lookup fire at all. **Then cardinality decides**:
+— which is what makes the keyed lookup fire at all. A name that means two things can say
+which one it means, by writing a `type:` namespace in front of it. `company:apple` and
+`fruit:apple` are then two entities, and neither is the bare `apple`. **Then cardinality decides**:
 `lives_in` is declared single-valued, so the new value closes the old one's interval.
 
 The alternative design — embed, retrieve the nearest existing memories, ask a model

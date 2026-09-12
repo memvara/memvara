@@ -551,11 +551,16 @@ class AsyncScopedMemvara:
              session=None) -> "AsyncScopedMemvara":
         """A narrower view. Fields not given keep this view's values."""
         s = self.scope
+        # `project` is carried rather than named as a parameter: `bind` narrows, and a
+        # project is bound once where the store is opened. Dropping it here contradicted
+        # this method's own docstring, which says fields not given keep this view's
+        # values, and left the view reporting a scope it was not actually reading at.
         return AsyncScopedMemvara(self._amem, Scope(
             tenant if tenant is not None else s.tenant,
             user if user is not None else s.user,
             agent if agent is not None else s.agent,
             session if session is not None else s.session,
+            project=s.project,
         ))
 
     @property

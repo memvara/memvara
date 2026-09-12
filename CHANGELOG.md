@@ -11,6 +11,88 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **An entity can say what kind of thing it is, and two kinds with one name stay apart.**
+  A subject or object may carry a `type:` namespace — `company:apple`, `software:postgresql`,
+  `project:github.com/you/repo` — and the namespace is part of the entity's identity. So
+  `company:apple` and `fruit:apple` are two entities, neither is the bare `apple`, and a
+  fact about one never retires a fact about the other. `claims` gains `subject_type` and
+  `object_type` columns holding the namespace of each end, so that "claims whose subject is
+  a company" is an indexable question.
+
+  **The namespace stays inside the key rather than moving to a column beside it**, which
+  revises the design's earlier plan rather than implementing it. Splitting it out was
+  implemented and measured: `company:apple` and `fruit:apple` both fold to `apple`, and
+  graph traversal joins on the key, so a walk crossed from a company to a fruit — the exact
+  confusion the namespace exists to prevent. Keeping them apart afterwards would mean
+  comparing a type at every join, which changes the walker's node identity and the signature
+  of `Store.adjacent`, a published protocol method other stores implement. Keeping the
+  namespace in the key is two keys instead, with nothing else to change.
+
+  The earlier reasoning against a prefix was that it would make `entity_key` structural and
+  cost that function its guarantee: a pure, total fold that gives any novel entity a correct
+  stable identity with no model call. Nothing here touches `entity_key`. `typed_entity_key`
+  is a thin layer above it, and splitting a namespace off and putting it back is itself pure
+  and total, so the guarantee is intact. An identity that packs two things into one string
+  and is taken apart by a pure function is the shape `entity_id` already uses for the owner.
+
+  Two consequences worth knowing. Stripping a corporate form — the one fold here that merges
+  two names with no evidence behind it — is now confined to one namespace, so `company:Apple
+  Inc.` and `company:apple` are one entity while `company:apple` and `fruit:apple` can never
+  reach each other. And an alias that would merge across namespaces is refused with an
+  error rather than performed, because an alias says two spellings name one entity and one
+  entity has one type.
+
+  Ordinary text containing a colon is not a namespace, and is refused by a rule rather than
+  by a list of known schemes: `https://memvara.dev` by the two slashes after the colon,
+  `Note: call Bob back` by the space after it, and `09:30` by a namespace having to begin
+  with a letter.
+
+- **A claim can belong to a repository, and most facts then stay in it.** `Scope` gains a
+  fifth element, `project`, holding a `host/owner/repo` identity. Pass it once, at
+  construction: `Memvara(project="github.com/you/repo")`. Two repositories that both record
+  `postgresql version` now hold two separate facts instead of one that keeps overwriting
+  itself, because the project is mixed into the slot key.
+
+  **It is mixed into `fact_key_for()` and deliberately not into `owner_key()`**, although
+  `owner_key()` is what the slot key used to be built from. `owner_key()` also scopes entity
+  identity, so putting the project there would make `software:postgresql` in one repository a
+  different entity from the same software in another, and cross-project graph traversal is the
+  thing the design exists to keep. Slots partition by project; entities do not.
+
+  **Not every fact should partition.** A preference should follow you between repositories, so
+  `PredicateSpec` gains `project_scoped`, and a predicate declared `project_scoped = false` has
+  its claims written with the project cleared — one slot for the whole store, visible from
+  inside every project because visibility widens upward. All 23 builtin predicates are declared
+  global, so nothing about a personal assistant's memory changes. An undeclared predicate
+  partitions, which is the safe direction: two facts where one would do costs a duplicate a
+  later declaration can merge, while one fact where two were needed has already destroyed the
+  distinction.
+
+  In the visibility hierarchy the project sits below the user and above the agent, so
+  `ancestors()` widens from a project to that user's project-less claims and never sideways
+  into a sibling project. `Scope.key()` now percent-escapes each component before joining,
+  because a `host/owner/repo` project contains the separator and without escaping
+  `Scope(user="alice", project="gh/o/a")` and `Scope(user="alice/gh", project="o/a")` produced
+  one key — and `sees()` compares keys, so one user's scope would have seen another's.
+
+  Reads are filtered by the project too. `Scope.key()` counted it from the moment the field
+  existed, and `sees()` authorizes an id-addressed read by comparing keys, so `get()` refused a
+  foreign project's claim while `get_all()` on the same handle returned it. The scope clause
+  every enumerating read shares now compares the project as well, which is what makes the two
+  agree again.
+
+  `SCHEMA_VERSION` moves from 11 to 12. It adds a nullable `project` column to `claims` and to
+  `episodes` — an episode is scoped too, and without the column a turn recorded in one
+  repository stays readable from every other. It also adds the two namespace columns
+  described above, re-folds `subject_key` and `object_key` because the fold changed, and
+  rehashes `value_key` alongside `fact_key` because both read those keys. All of it is one
+  migration on purpose: doing it in two would rewrite every row twice. This is the one
+  migration in this release that rewrites
+  existing rows rather than adding a nullable column: every `fact_key` in `claims` is rehashed
+  in place, in SQL, because the hash now takes a fifth input. Rows written before the upgrade
+  have no project, so their keys change value but not meaning, and claims that shared a slot
+  before still share one after.
+
 - **A claim's object records whether it names a thing or holds a scalar.** `ObjectKind` is
   `ENTITY` or `VALUE`, decided at write time from the predicate's declared `object_type`,
   and only an entity object can be one end of a graph edge. `memvara version 17` therefore

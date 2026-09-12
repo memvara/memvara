@@ -2946,3 +2946,153 @@ def test_a_value_object_is_not_a_graph_edge_but_an_unclassified_one_still_is(sto
     assert "cl_ent" in walkable
     assert "cl_old" in walkable, "a claim written before the rule keeps its edges"
     assert "cl_val" not in walkable
+
+
+def test_a_version_11_file_gains_project_on_claims_and_episodes(tmp_path):
+    """Episodes are scoped too, and were missed on the first pass.
+
+    Without the column on `episodes`, a turn recorded in one repository would be readable
+    from every other, so the claims half of this migration would be enforced while the
+    evidence behind those claims leaked across projects.
+    """
+    path = str(tmp_path / "v11.db")
+    store = SQLiteStore(path)
+    try:
+        for table in ("claims", "episodes"):
+            store._db.execute(f"ALTER TABLE {table} RENAME COLUMN project TO gone")
+        for col in ("subject_type", "object_type"):
+            store._db.execute(f"ALTER TABLE claims RENAME COLUMN {col} TO gone_{col}")
+        store._migrate_to_v12()
+        for table in ("claims", "episodes"):
+            columns = {r["name"] for r in store._db.execute(f"PRAGMA table_info({table})")}
+            assert "project" in columns, table
+        columns = {r["name"] for r in store._db.execute("PRAGMA table_info(claims)")}
+        assert {"subject_type", "object_type"} <= columns
+    finally:
+        store.close()
+
+
+def test_the_v12_migration_re_folds_a_typed_key_and_both_hashes_that_read_it(store):
+    """The half of version 12 that rewrites rows rather than adding columns.
+
+    An entity identity now keeps its namespace, so a claim written before this version
+    holds `company apple` where the same text now folds to `company:apple`. Three derived
+    values read that key, and leaving any of them stale is a store that looks like it
+    works:
+
+    * `subject_key` is what traversal joins on, so a stale one is an entity that has
+      quietly split in two.
+    * `fact_key` decides what contradicts what, so a stale one stops contradicting
+      anything.
+    * `value_key` decides what counts as the same assertion, so a stale one turns the
+      next re-statement of a known fact into a rival value instead of a reinforcement.
+
+    The claim is written through the normal path and then forced back to the old shape,
+    rather than being hand-built, so what the migration repairs is the shape this
+    repository actually used to produce.
+    """
+    claim = put(store, subject="company:Apple Inc.", predicate="founded_in",
+                object="fruit:apple")
+    store._db.execute(
+        "UPDATE claims SET subject_key = 'company apple', object_key = 'fruit apple', "
+        "fact_key = 'stale-fact', value_key = 'stale-value', "
+        "subject_type = '', object_type = ''"
+    )
+
+    store._migrate_to_v12()
+
+    row = store._db.execute(
+        "SELECT subject_key, object_key, fact_key, value_key, subject_type, object_type "
+        "FROM claims WHERE id = ?", (claim.id,)).fetchone()
+    fresh = store.get_claim(claim.id)
+    assert fresh is not None
+    assert row["subject_key"] == fresh.subject_key == "company:apple"
+    assert row["object_key"] == fresh.object_key == "fruit:apple"
+    assert row["fact_key"] == fresh.fact_key
+    assert row["value_key"] == fresh.value_key
+    assert (row["subject_type"], row["object_type"]) == ("company", "fruit")
+
+
+def test_the_v12_migration_leaves_the_same_store_when_it_runs_twice(store):
+    """Idempotent, like every migration here, and this one has to be checked.
+
+    It re-derives keys from text and then hashes the keys, so a second pass reads its own
+    output. That is the shape where a migration that is not idempotent corrupts rather
+    than merely wasting time.
+    """
+    put(store, subject="company:Apple Inc.", predicate="founded_in", object="fruit:apple")
+    store._migrate_to_v12()
+    once = store._db.execute(
+        "SELECT subject_key, object_key, fact_key, value_key, subject_type, object_type "
+        "FROM claims").fetchall()
+    store._migrate_to_v12()
+    twice = store._db.execute(
+        "SELECT subject_key, object_key, fact_key, value_key, subject_type, object_type "
+        "FROM claims").fetchall()
+    assert [tuple(r) for r in once] == [tuple(r) for r in twice]
+
+
+def test_the_sql_rehash_agrees_with_the_python_slot_key():
+    """The property the v12 migration lives or dies on.
+
+    It recomputes every `fact_key` in SQL rather than loading each claim, so if the two
+    derivations disagreed by a byte, every migrated claim would address a slot nothing
+    else computes — and would silently stop contradicting anything.
+    """
+    from memvara.store.sqlite import _fact_key_of
+    from memvara.types import OWNER_SEP, Scope, fact_key_for
+
+    for project in ("gh/o/cloud", None):
+        scope = Scope("t", "alice", project=project)
+        packed = "postgresql" + OWNER_SEP + "version"
+        assert fact_key_for(scope, "postgresql", "version") == _fact_key_of(
+            "t", "alice", project, packed), project
+
+
+def test_the_sql_rehash_agrees_with_the_python_value_key():
+    """The same property for `value_key`, which the same migration also recomputes.
+
+    Checked separately from `fact_key` because it hashes a different list of parts, and a
+    transposition inside that list would leave both derivations wrong in the same way
+    only if both were written from one place — which they are not.
+    """
+    from memvara.store.sqlite import _value_key_of
+    from memvara.types import OWNER_SEP, Claim, Scope
+
+    claim = Claim(scope=Scope("t", "alice"), subject="company:Apple Inc.",
+                  predicate="founded_in", object="fruit:apple")
+    packed = OWNER_SEP.join((claim.subject_key, claim.predicate, claim.object_key,
+                             str(claim.polarity)))
+    assert claim.value_key == _value_key_of("t", "alice", packed)
+
+
+def test_enumeration_and_id_reads_agree_about_the_project(store):
+    """A read that lists claims filters by project, exactly as a read by id does.
+
+    These two paths answer the same question through different code. `sees()` authorizes
+    an id-addressed read by comparing `Scope.key()`, which counted the project from the
+    moment the field existed. The SQL every enumerating read shares did not, so a handle
+    opened on one repository listed another repository's claims while `get()` on the very
+    same id refused them — the permissive answer being the one that returns rows.
+
+    The global claim in the middle is the other half of the rule and is why this cannot be
+    tested by asserting that a foreign project contributes nothing: a claim written with
+    no project must stay visible from inside every project, because visibility widens
+    upward.
+    """
+    for project, obj in (("gh/o/a", "17"), ("gh/o/b", "16")):
+        put(store, scope=Scope("t", "alice", project=project),
+            subject="postgresql", predicate="version", object=obj)
+    put(store, scope=Scope("t", "alice"), subject="user", predicate="prefers",
+        object="dark mode")
+
+    here = Scope("t", "alice", project="gh/o/a")
+    listed = [store.get_claim(i) for i in store.candidate_ids(here.ancestors())]
+    assert sorted((c.subject, c.object) for c in listed) == [
+        ("postgresql", "17"), ("user", "dark mode")]
+
+    there = Scope("t", "alice", project="gh/o/b")
+    foreign = [store.get_claim(i) for i in store.candidate_ids(there.ancestors())]
+    sixteen = [c for c in foreign if c.object == "16"]
+    assert len(sixteen) == 1
+    assert not here.sees(sixteen[0].scope)

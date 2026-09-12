@@ -24,7 +24,9 @@ landing beside them unnoticed.
   `state_predicate()`, `stored_state_predicate()`, `live_predicate()`.
 - Storage backends: `memvara/store/sqlite.py` — `SQLiteStore`, the default;
   `memvara/store/remote.py` — `RemoteStore`, the same protocol against a hosted deployment.
-- Entities and predicates: `memvara/entities.py` — `EntityRegistry`, `entity_key()`;
+- Entities and predicates: `memvara/entities.py` — `EntityRegistry`, `entity_key()` and
+  `typed_entity_key()`, which keeps a `type:` namespace so `company:apple` and `fruit:apple`
+  are two entities;
   `memvara/schema.py` — `PredicateRegistry`, `PredicateSpec`, `Cardinality`, `Volatility`.
 - Tests: `tests/test_bitemporal.py`, `tests/test_types.py`, `tests/test_store.py`,
   `tests/test_erasure.py`, `tests/test_erasure_residue.py`.
@@ -47,8 +49,10 @@ reason a claim was returned is inspectable rather than implied. Every write retu
 `WriteReceipt`, which counts what happened: claims written, claims reinforced, values ended,
 values retired, model calls made, and whether extraction was deferred.
 
-Scope is a four-part key — tenant, user, agent, session — held by `Scope` and flattened by
-`owner_key()`. It is bound where the store is opened, not passed per call by a model, which
+Scope is a five-part key — tenant, user, project, agent, session — held by `Scope` and
+flattened by `owner_key()`, which folds only tenant and user because it also scopes entity
+identity. The project is mixed into `fact_key_for()` directly instead, so that two repositories
+keep separate slots while `software:postgresql` stays one entity across both. It is bound where the store is opened, not passed per call by a model, which
 is what stops a tool call reaching another user's memory.
 
 ## Three states, and three different endings

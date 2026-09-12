@@ -137,6 +137,57 @@ _DIGEST_CHARS = 16
 _DIGEST = re.compile(r"[0-9a-f]{" + str(_DIGEST_CHARS) + r"}")
 
 
+#: Longest namespace `split_entity_type` will accept. A type is a vocabulary word —
+#: `software`, `company`, `benchmark` — so anything longer is a sentence that happens to
+#: contain a colon, and reading it as a type would invent a namespace per claim.
+ENTITY_TYPE_MAX = 32
+
+#: What a namespace has to look like: a lowercase word, optionally with digits and
+#: underscores after the first letter. Deliberately narrower than the surface forms a
+#: type could be written in, because this runs on every write and a rule that accepts
+#: more than it should cannot be tightened later without re-keying the store.
+_TYPE = re.compile(r"[a-z][a-z0-9_]*\Z")
+
+
+def split_entity_type(surface: str) -> tuple[str, str]:
+    """Split a `type:name` surface form into its namespace and the rest.
+
+    The namespace is how a writer says which kind of thing a name refers to, so that
+    `company:apple` and `fruit:apple` are two entities rather than one. It is optional:
+    a surface form with no namespace returns `("", surface)` and is an entity of no
+    declared type, which is its own namespace rather than a wildcard.
+
+    >>> split_entity_type("software:postgresql")
+    ('software', 'postgresql')
+    >>> split_entity_type("project:github.com/memvara/memvara")
+    ('project', 'github.com/memvara/memvara')
+    >>> split_entity_type("postgresql")
+    ('', 'postgresql')
+
+    Three kinds of ordinary text contain a colon and must not be read as a namespace,
+    and each is refused by a rule rather than by a list:
+
+    >>> split_entity_type("https://memvara.dev")     # a URL scheme
+    ('', 'https://memvara.dev')
+    >>> split_entity_type("Note: call Bob back")     # prose
+    ('', 'Note: call Bob back')
+    >>> split_entity_type("09:30")                   # a time
+    ('', '09:30')
+
+    A URL is caught by the rest starting with `//`, prose by the space after the colon,
+    and a time by the namespace having to start with a letter. The namespace is folded to
+    lower case, so `Software:postgresql` and `software:postgresql` are one type — the
+    same fold `entity_key` applies to the name, for the same reason.
+    """
+    head, sep, rest = surface.partition(":")
+    if not sep or not rest or rest.startswith("//") or rest[0].isspace():
+        return "", surface
+    folded = head.strip().casefold()
+    if len(folded) > ENTITY_TYPE_MAX or not _TYPE.match(folded):
+        return "", surface
+    return folded, rest
+
+
 def entity_key(surface: str) -> str:
     """Deterministic identity of an entity surface form. A pure function.
 
@@ -186,6 +237,69 @@ def entity_key(surface: str) -> str:
     return _bounded(key, tokens)
 
 
+
+def entity_type_of(key: str) -> str:
+    """The namespace an entity identity declares, or `""` for one that declares none.
+
+    Read from the *identity* rather than from the surface text, so the two can never
+    disagree. An alias resolves one spelling onto another entity's identity, and reading
+    the type from that identity is what makes an alias unable to change a claim's type
+    without also moving it to the other entity — which is the same event, and the one the
+    write path is meant to refuse across types.
+
+    `""` is a namespace of its own and not a wildcard: an entity written with no type does
+    not share identity with the same name written under one. That is the bias already
+    codified in `memvara/entities.py` — leaving two entities apart costs a duplicate slot
+    a later alias can still merge, while merging two destroys a distinction permanently.
+    """
+    return split_entity_type(key)[0]
+
+
+def typed_entity_key(surface: str) -> str:
+    """Identity of an entity surface form, keeping any `type:` namespace it declares.
+
+    The fold, applied to the name, with the folded namespace put back in front of it.
+    Both halves are pure functions of the text, so this is too.
+
+    >>> typed_entity_key("Company:Apple Inc.")
+    'company:apple'
+    >>> typed_entity_key("fruit:apple")
+    'fruit:apple'
+    >>> typed_entity_key("Apple Inc.")
+    'apple'
+
+    **The type stays inside the key rather than being split into a column beside it, and
+    that is a revision of an earlier decision rather than an oversight.** Splitting it out
+    was measured and makes the graph worse: `company:apple` and `fruit:apple` both fold to
+    `apple`, and traversal joins on the key, so a walk crosses from a company to a fruit.
+    Keeping them apart afterwards would mean comparing a type at every join, which changes
+    the walker's node identity and the signature of `Store.adjacent`, a published protocol
+    method other stores implement. Here they are simply two keys, as they are today.
+
+    The earlier reasoning against a prefix was that it would make `entity_key` structural
+    and cost that function its guarantee — a pure, total fold that gives any novel entity a
+    correct stable identity with no model call. Nothing here touches `entity_key`: this is
+    a thin layer above it, and the guarantee is intact, because splitting a namespace off
+    and putting it back is itself pure and total.
+
+    An identity that packs two things into one string and is taken apart by a pure function
+    is the shape `entity_id` already uses for the owner, split by `split_entity_id`, in
+    both backends. The split is exact rather than best-effort: `entity_key` emits only
+    alphanumerics and spaces, so a folded name never contains a colon and the first colon
+    is always the namespace boundary.
+
+    Folding is therefore idempotent, which `fact_key_for` and `history()` both rely on:
+
+    >>> typed_entity_key(typed_entity_key("Company:Apple Inc."))
+    'company:apple'
+    """
+    kind, name = split_entity_type(surface)
+    key = entity_key(name)
+    if not key:
+        return ""
+    return f"{kind}:{key}" if kind else key
+
+
 def _bounded(key: str, tokens: list[str]) -> str:
     """Cut a key past `ENTITY_KEY_MAX` to the words that fit, plus a digest of all of it.
 
@@ -233,7 +347,7 @@ def key_words(key: str) -> list[str]:
     >>> key_words(entity_key("the customer said the renewal would be decided " * 40))[-1]
     'renewal'
     """
-    parts = key.split()
+    parts = split_entity_type(key)[1].split()
     if len(parts) > 1 and _DIGEST.fullmatch(parts[-1]):
         return parts[:-1]
     return parts
@@ -339,7 +453,7 @@ class EntityRegistry:
         reading it.
         """
         self._load(tenant_of(owner))
-        key = entity_key(surface)
+        key = typed_entity_key(surface)
         if not key:
             return self._counted(EntityResolution("", "", "empty", False))
         # Aliases are consulted before entities on purpose. A merged-away entity may
@@ -367,7 +481,7 @@ class EntityRegistry:
     def known(self, owner: str, surface: str) -> bool:
         """Whether this owner already has an identity for `surface`. No side effects."""
         self._load(tenant_of(owner))
-        key = entity_key(surface)
+        key = typed_entity_key(surface)
         return bool(key) and (key in self._specs.get(owner, {})
                               or key in self._alias.get(owner, {}))
 
@@ -412,7 +526,7 @@ class EntityRegistry:
         would let any read populate an owner's entity table with whatever it was asked.
         """
         self._load(tenant_of(owner))
-        key = entity_key(surface)
+        key = typed_entity_key(surface)
         # Deliberately `types.default_entity`, spelled out rather than imported: `types`
         # imports *this* module, so the dependency cannot run the other way. An
         # unfoldable surface ("...", an emoji) keeps its raw text instead of collapsing
@@ -461,10 +575,16 @@ class EntityRegistry:
                    limit: int = _CANDIDATE_LIMIT) -> list[str]:
         """A bounded, stably-ordered shortlist to offer a model. Most words shared first."""
         self._load(tenant_of(owner))
-        tokens = frozenset(entity_key(surface).split())
+        kind, name = split_entity_type(surface)
+        tokens = frozenset(entity_key(name).split())
+        # Only the same namespace, because this list is what a model is asked to merge
+        # `surface` into and `alias` refuses a merge across types. Offering a candidate
+        # that cannot be accepted spends a model call to reach a refusal, and it invites
+        # the one answer the refusal exists to stop.
+        pool = [k for k in self._specs.get(owner, {}) if entity_type_of(k) == kind]
         return sorted(
-            self._specs.get(owner, {}),
-            key=lambda k: (-len(tokens & frozenset(k.split())), k),
+            pool,
+            key=lambda k: (-len(tokens & frozenset(split_entity_type(k)[1].split())), k),
         )[:limit]
 
     def acquire(self, owner: str, surface: str,
@@ -480,7 +600,7 @@ class EntityRegistry:
         Returns whether a merge was recorded.
         """
         self._load(tenant_of(owner))
-        key = entity_key(surface)
+        key = typed_entity_key(surface)
         if not key:
             return False
         marker = (owner, key)
@@ -499,7 +619,7 @@ class EntityRegistry:
         except Exception:
             # Enrichment, not a precondition. The fold already gave us an identity.
             return False
-        target = entity_key(str(answer or ""))
+        target = typed_entity_key(str(answer or ""))
         if not target or target == key or target not in self._specs.get(owner, {}):
             # A canonical we cannot look up is indistinguishable from a hallucination,
             # and inventing the entity it names is worse than holding two.
@@ -515,7 +635,7 @@ class EntityRegistry:
         row lands, for every process after it.
         """
         self._load(tenant_of(owner))
-        target = entity_key(canonical)
+        target = typed_entity_key(canonical)
         bucket = self._specs.get(owner, {})
         spec = bucket.get(target)
         if spec is None:
@@ -523,9 +643,29 @@ class EntityRegistry:
                 f"cannot alias {surface!r} onto unknown entity {canonical!r}; "
                 "resolve it first"
             )
-        key = entity_key(surface)
+        key = typed_entity_key(surface)
         if not key or key == target or key in spec.aliases:
+            # Before the type check on purpose. An unfoldable surface ("...", a bare
+            # emoji) folds to the empty key, which means "no entity here" rather than "an
+            # entity of no type" — so refusing it as a type mismatch would answer a
+            # question nobody asked, and would turn what has always been a silent no-op
+            # into an exception. The other two are the same no-op: aliasing a spelling
+            # onto the identity it already has, or onto one it already answers to.
             return spec
+        if entity_type_of(key) != entity_type_of(target):
+            # An alias says two spellings name one entity, and one entity has one type.
+            # `company:apple` and `fruit:apple` are two things that share a name, so
+            # merging them would destroy the distinction the namespace was written to
+            # make -- and permanently, because nothing afterwards records that the two
+            # were ever separate. Refused rather than ignored: the caller asked for a
+            # merge and silently not performing one is how a store ends up disagreeing
+            # with what its operator believes it did.
+            raise ValueError(
+                f"cannot alias {surface!r} onto {canonical!r}: they are different kinds "
+                f"of thing ({entity_type_of(key) or 'untyped'} and "
+                f"{entity_type_of(target) or 'untyped'}). An alias merges two spellings "
+                "of one entity; these are two entities that share a name."
+            )
         # The absorbed fold stops being an entity in its own right. Its row may survive
         # in the store; `resolve` checks aliases first so that row can never win.
         bucket.pop(key, None)

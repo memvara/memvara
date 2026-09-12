@@ -107,15 +107,15 @@ def test_ancestors_walks_from_narrow_to_broad():
     s = Scope("acme", "alice", "bot", "sess1")
     keys = [a.key() for a in s.ancestors()]
     assert keys == [
-        "acme/alice/bot/sess1",
-        "acme/alice/bot/*",
-        "acme/alice/*/*",
-        "acme/*/*/*",
+        "acme/alice/*/bot/sess1",
+        "acme/alice/*/bot/*",
+        "acme/alice/*/*/*",
+        "acme/*/*/*/*",
     ]
 
 
 def test_ancestors_of_bare_tenant_is_just_itself():
-    assert [a.key() for a in Scope("acme").ancestors()] == ["acme/*/*/*"]
+    assert [a.key() for a in Scope("acme").ancestors()] == ["acme/*/*/*/*"]
 
 
 def test_ancestors_are_deduplicated():
@@ -414,14 +414,14 @@ def test_invalidated_is_still_the_same_list_object_it_always_was():
 # example.
 
 def test_scope_repr_is_the_scope_key():
-    assert repr(Scope("acme", "alice")) == "<Scope acme/alice/*/*>"
+    assert repr(Scope("acme", "alice")) == "<Scope acme/alice/*/*/*>"
 
 
 def test_episode_repr_fits_on_one_line():
     ep = Episode(content="I live in Berlin", scope=Scope("acme", "alice"),
                  ts=datetime(2025, 3, 4, 9, 30, tzinfo=timezone.utc))
     text = repr(ep)
-    assert text.startswith(f"<Episode {ep.id} acme/alice/*/* user 2025-03-04 09:30Z")
+    assert text.startswith(f"<Episode {ep.id} acme/alice/*/*/* user 2025-03-04 09:30Z")
     assert "'I live in Berlin'" in text
     assert "\n" not in text
 
@@ -435,7 +435,7 @@ def test_episode_repr_flattens_and_truncates_hostile_content():
 def test_claim_repr_names_the_slot_the_value_and_the_state():
     c = mk()
     text = repr(c)
-    assert text == (f"<Claim {c.id} acme/alice/*/* user lives_in='Berlin' semantic "
+    assert text == (f"<Claim {c.id} acme/alice/*/*/* user lives_in='Berlin' semantic "
                     "conf=1.00 sal=1.00 live>")
 
 
@@ -528,3 +528,88 @@ def test_explanation_fields_added_after_020_are_appended_not_slotted_in() -> Non
     old_call = Explanation(0, 0.9, 1, 0.8, 0.5)
     assert old_call.fusion_score == 0.5
     assert old_call.graph_rank is None
+
+
+# --- project scope ---------------------------------------------------------------------
+
+
+def test_ancestors_drops_the_project_between_user_and_agent():
+    """Project sits third in the hierarchy though it is declared last on the dataclass.
+
+    A search from inside a repository widens up to that user's project-less claims, which
+    is what lets a preference written in one repository answer a question asked in
+    another. It does not widen sideways into a sibling project.
+    """
+    from memvara.types import Scope
+
+    narrow = Scope("acme", "alice", "bot", "s1", project="gh/o/a")
+    assert [s.key() for s in narrow.ancestors()] == [
+        "acme/alice/gh%2Fo%2Fa/bot/s1",
+        "acme/alice/gh%2Fo%2Fa/bot/*",
+        "acme/alice/gh%2Fo%2Fa/*/*",
+        "acme/alice/*/*/*",
+        "acme/*/*/*/*",
+    ]
+    assert narrow.sees(Scope("acme", "alice"))
+    assert not narrow.sees(Scope("acme", "alice", project="gh/o/b"))
+
+
+def test_a_project_id_cannot_forge_another_scopes_key():
+    """A project is `host/owner/repo`, so it contains the separator `key()` joins on.
+
+    Unescaped, `Scope(user="alice", project="gh/o/a")` and
+    `Scope(user="alice/gh", project="o/a")` produce one key — and `sees()` compares keys,
+    so one user's scope would see another's. `%` is escaped first, so a component holding
+    a literal `%2F` cannot forge the escape either.
+    """
+    from memvara.types import Scope
+
+    assert (Scope("t", "alice", project="gh/o/a").key()
+            != Scope("t", "alice/gh", project="o/a").key())
+    assert (Scope("t", "alice", project="a%2Fb").key()
+            != Scope("t", "alice", project="a/b").key())
+
+
+def test_the_project_is_declared_last_so_positional_callers_keep_binding():
+    """`core.py` and both remote clients build a Scope from four positional arguments.
+
+    Ranked third and declared last, for that reason. When it was declared third, `agent`
+    silently became `project` and `session` became `agent` — and the first symptom was two
+    repositories' claims landing in one slot, which reads as the feature not working
+    rather than as a field-order mistake.
+    """
+    from memvara.types import Scope
+
+    s = Scope("acme", "alice", "bot", "s1")
+    assert (s.user, s.agent, s.session, s.project) == ("alice", "bot", "s1", None)
+
+
+def test_a_claim_reads_each_type_out_of_the_key_beside_it():
+    """`subject_type` and `object_type` describe the identity, not the text.
+
+    Reading them from the resolved key rather than from the surface form is what stops a
+    claim's type and its identity drifting apart. An alias resolves one spelling onto
+    another entity's identity, so a type read from the identity moves only when the claim
+    moves to a different entity — which is the same event, and the one the entity
+    registry refuses across types.
+    """
+    claim = Claim(scope=Scope("t", "alice"), subject="company:Apple Inc.",
+                  predicate="founded_in", object="17")
+    assert (claim.subject_key, claim.subject_type) == ("company:apple", "company")
+    assert (claim.object_key, claim.object_type) == ("17", "")
+
+
+def test_two_kinds_of_thing_with_one_name_occupy_two_slots():
+    """The point of the namespace, stated as the property that actually matters.
+
+    A slot is what contradiction handling works on, so `company:apple` and `fruit:apple`
+    sharing one would mean a fact about the company retiring a fact about the fruit.
+    Neither shares a slot with the bare name either: an entity written with no namespace
+    is its own identity, not a wildcard that matches every namespace.
+    """
+    def slot(subject):
+        return Claim(scope=Scope("t", "alice"), subject=subject,
+                     predicate="grows_in", object="somewhere").fact_key
+
+    keys = {slot(s) for s in ("company:apple", "fruit:apple", "apple")}
+    assert len(keys) == 3
