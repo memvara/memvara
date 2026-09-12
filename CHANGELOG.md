@@ -9,6 +9,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.12.1] — 2026-09-12
+
 ### Changed
 
 - **`procedural` is for the subject `user` and nothing else.** A claim about any other
