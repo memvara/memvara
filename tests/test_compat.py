@@ -188,6 +188,10 @@ def test_infer_false_stores_the_message_verbatim(api):
 
 
 def test_infer_false_accepts_a_memory_type_and_a_transcript(api):
+    """Both notes keep the type they were given, including the assistant's. A note's
+    subject is a slot of type `note`, not the user, and the reconciler's rule that
+    `procedural` is for the user only exempts notes: the text was typed by the owner as a
+    standing instruction, and a note is not a claim about a thing."""
     api.add([{"role": "user", "content": "Always run pytest"},
              {"role": "assistant", "content": "Noted"}],
             infer=False, memory_type=MemoryType.PROCEDURAL)

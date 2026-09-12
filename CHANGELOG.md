@@ -9,6 +9,23 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Changed
+
+- **`procedural` is for the subject `user` and nothing else.** A claim about any other
+  subject that arrives as `procedural` — from `remember(memory_type=...)`, from a model
+  reading a transcript, or from a predicate declared `procedural` because it is usually
+  about the user (`prefers_tool`, `never_do`) — is filed as `semantic`, and the receipt
+  carries a `Retype` with `reason="subject"` saying so. A claim already on record with
+  such a filing is moved the next time the same triple is seen, whether or not the write
+  asserts a type. `procedural` is what `memory_standing` returns and what clients inject
+  at the top of every session; on one production store 113 of 287 standing claims were
+  about a repository, a service or a file, and every session opened with them. The rule
+  is in `Reconciler._file_by_subject`, on the one path every write takes, so no prompt
+  has to carry it. Asserting `procedural` for such a subject on a known claim is not a
+  re-filing; it is filed where the rule puts it and nothing is reported. A verbatim note
+  (subject type `note`, the mem0-compatible `infer=False` path) is exempt: it is the
+  owner's own text typed as procedural, not a claim about a thing.
+
 ## [0.12.0] — 2026-09-12
 
 ### Fixed

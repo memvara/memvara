@@ -1411,7 +1411,15 @@ class Accumulation:
 
 @dataclass(slots=True)
 class Retype:
-    """A claim that was already known, re-filed under a different `memory_type`.
+    """A claim filed under a different `memory_type` than the one it arrived with.
+
+    Two things produce one, and `reason` says which. `"asserted"`: a claim that was
+    already known was re-filed under the type a caller sent. `"subject"`: a claim about
+    anything but the user arrived as `procedural` and was filed as `semantic`, because
+    `procedural` is how the user wants work done and a repository, a service or a file
+    cannot want anything — see `Reconciler._file_by_subject`. The second kind happens on
+    a new claim as readily as on a known one, and whether the type came from a caller,
+    from a model, or from a predicate's declared default.
 
     An identical triple is the same fact, so re-asserting one reinforces the record
     rather than forking it — and until this existed, the `memory_type` the caller sent
@@ -1435,22 +1443,29 @@ class Retype:
     does change it, correctly, because there consolidation authored the reclassification
     rather than re-filing someone else's.
 
-    >>> Retype("cl_1a2b", "agent-memory", "rejected", MemoryType.PROCEDURAL,
-    ...        MemoryType.SEMANTIC)
-    <Retype agent-memory rejected: procedural -> semantic>
+    >>> Retype("cl_1a2b", "user", "prefers", MemoryType.SEMANTIC,
+    ...        MemoryType.PROCEDURAL)
+    <Retype user prefers: semantic -> procedural>
+    >>> Retype("cl_3c4d", "agent-memory", "never_do", MemoryType.PROCEDURAL,
+    ...        MemoryType.SEMANTIC, reason="subject")
+    <Retype agent-memory never_do: procedural -> semantic, procedural is for the user only>
     """
 
     claim_id: str
     subject: str
     predicate: str
-    #: What it was filed as until this write.
+    #: What it was filed as until this write, or what it arrived as.
     was: "MemoryType"
-    #: What the caller asserted, and what it is filed as now.
+    #: What it is filed as now.
     now: "MemoryType"
+    #: `"asserted"` when a caller's `memory_type` moved a known claim; `"subject"` when
+    #: the write path refused `procedural` for a subject other than the user.
+    reason: str = "asserted"
 
     def __repr__(self) -> str:
+        why = ", procedural is for the user only" if self.reason == "subject" else ""
         return (f"<Retype {self.subject} {self.predicate}: "
-                f"{self.was.value} -> {self.now.value}>")
+                f"{self.was.value} -> {self.now.value}{why}>")
 
 
 @dataclass(slots=True)

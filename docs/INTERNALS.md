@@ -386,8 +386,9 @@ class ReconcileResult:
                                  # to close; they stayed, it was stored beside them
     collapsed: list[Collapse]    # claims closed at or before their own start, so their
                                  # interval is empty and answers nothing on either clock
-    retyped: Retype | None       # an already-known claim re-filed under an asserted
-                                 # memory_type; None unless the caller sent one
+    retyped: Retype | None       # a claim filed under a different memory_type than it
+                                 # arrived with: an asserted type on a known claim, or
+                                 # procedural refused for a subject other than the user
 ```
 
 **Re-filing a claim's `memory_type`.** An identical triple is the same fact, so a
@@ -401,6 +402,22 @@ and raised the confidence, which made the wrong filing more strongly believed.
 stamps `meta["retyped_from"]`, mirroring `consolidate.promote_pass`, which has always
 reclassified a live claim in place — the operation is not new, only the caller's route to
 it.
+
+**`procedural` is for the subject `user` only, and the reconciler enforces it.**
+`Reconciler._file_by_subject` runs on every candidate right after `_canonicalize`, and on
+the claim on record when a candidate turns out to be a re-observation. A `procedural` claim
+whose subject is not the user is filed as `semantic`, whoever supplied the type — a caller,
+a model, or a predicate's declared default — and the result carries a `Retype` with
+`reason="subject"`, so the receipt says what happened rather than silently filing
+elsewhere. The reason it is a rule and not prompt guidance: `procedural` is the population
+`memory_standing` returns and clients inject at the top of every session, and a repository
+or a service cannot want anything, so a `procedural` claim about one is wrong however it
+was produced. A claim already misfiled is moved the next time the same triple is seen,
+even by a write that asserts no type; the safety property that an unopinionated write
+cannot undo a correction still holds, because moving such a claim out of `procedural` is
+never a correction anyone could have wanted to keep. A verbatim note is exempt — its
+subject is a slot of type `note` (`compat/_notes.py`), and a note typed `procedural` is the
+owner's own standing instruction in the owner's words, not a claim about a thing.
 
 Two things it deliberately does not do. It does not touch `derivation`: where the fact
 came from has not changed, only which drawer it is in, and `promote_pass` re-derives only

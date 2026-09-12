@@ -2899,35 +2899,38 @@ class TestRetypeAMisfiledClaim:
     """
 
     def test_an_asserted_type_refiles_a_fact_this_store_already_holds(self, mem):
-        """The issue's own reproduction: a project fact filed as procedural."""
-        first = mem.remember("agent-memory", "rejected", "auto as the embedder default",
-                             confidence=0.95, memory_type=MemoryType.PROCEDURAL)
+        """A standing instruction filed as a plain fact, then corrected. The issue's own
+        reproduction was a project fact filed as procedural; that direction is now refused
+        at write (`TestProceduralIsForTheUserOnly`), so the correction this exercises is
+        the one still open to a caller: moving the user's own claim into `procedural`."""
+        first = mem.remember("user", "prefers", "tests before the commit",
+                             confidence=0.95, memory_type=MemoryType.SEMANTIC)
         claim_id = first.added[0].id
 
-        again = mem.remember("agent-memory", "rejected", "auto as the embedder default",
-                             memory_type=MemoryType.SEMANTIC)
+        again = mem.remember("user", "prefers", "tests before the commit",
+                             memory_type=MemoryType.PROCEDURAL)
 
         assert not again.added, "an identical triple is the same fact, not a second one"
         assert len(again.reinforced) == 1
-        assert [(r.was, r.now) for r in again.retyped] == [
-            (MemoryType.PROCEDURAL, MemoryType.SEMANTIC)]
+        assert [(r.was, r.now, r.reason) for r in again.retyped] == [
+            (MemoryType.SEMANTIC, MemoryType.PROCEDURAL, "asserted")]
         stored = mem.store.get_claim(claim_id)
-        assert stored.memory_type is MemoryType.SEMANTIC
-        assert stored.meta["retyped_from"] == "procedural", (
+        assert stored.memory_type is MemoryType.PROCEDURAL
+        assert stored.meta["retyped_from"] == "semantic", (
             "the move is stamped, as promote_pass stamps its own")
 
-    def test_the_refiled_claim_leaves_the_standing_population(self, mem):
+    def test_the_refiled_claim_joins_the_standing_population(self, mem):
         """The consequence that matters, rather than the field in isolation. Until it
         moves populations, correcting the type has changed nothing a session will notice."""
-        mem.remember("agent-memory", "rejected", "auto as the embedder default",
-                     memory_type=MemoryType.PROCEDURAL)
-        assert mem.search("embedder default", memory_types=[MemoryType.PROCEDURAL])
-
-        mem.remember("agent-memory", "rejected", "auto as the embedder default",
+        mem.remember("user", "prefers", "tests before the commit",
                      memory_type=MemoryType.SEMANTIC)
+        assert not mem.search("tests before commit", memory_types=[MemoryType.PROCEDURAL])
 
-        assert not mem.search("embedder default", memory_types=[MemoryType.PROCEDURAL])
-        assert mem.search("embedder default", memory_types=[MemoryType.SEMANTIC])
+        mem.remember("user", "prefers", "tests before the commit",
+                     memory_type=MemoryType.PROCEDURAL)
+
+        assert mem.search("tests before commit", memory_types=[MemoryType.PROCEDURAL])
+        assert not mem.search("tests before commit", memory_types=[MemoryType.SEMANTIC])
 
     def test_a_write_that_asserts_no_type_refiles_nothing(self, mem):
         """The safety property, and the reason this reads `memory_type` rather than the
@@ -2939,17 +2942,17 @@ class TestRetypeAMisfiledClaim:
         writer win — and the last writer is usually the one who said nothing. A deliberate
         correction would then be undone by the next incidental write, silently.
         """
-        mem.remember("agent-memory", "rejected", "auto as the embedder default",
-                     memory_type=MemoryType.PROCEDURAL)
-        mem.remember("agent-memory", "rejected", "auto as the embedder default",
+        mem.remember("user", "prefers", "tests before the commit",
                      memory_type=MemoryType.SEMANTIC)
+        mem.remember("user", "prefers", "tests before the commit",
+                     memory_type=MemoryType.PROCEDURAL)
 
-        blind = mem.remember("agent-memory", "rejected", "auto as the embedder default")
+        blind = mem.remember("user", "prefers", "tests before the commit")
 
         assert blind.retyped == [], "no type was asserted, so nothing was re-filed"
         assert len(blind.reinforced) == 1, "it is still a re-observation"
         assert mem.store.get_claim(
-            blind.reinforced[0].id).memory_type is MemoryType.SEMANTIC
+            blind.reinforced[0].id).memory_type is MemoryType.PROCEDURAL
 
     def test_asserting_the_type_it_already_has_is_not_a_retype(self, mem):
         """A report for a move that did not happen trains a reader to ignore the note."""
@@ -2965,16 +2968,133 @@ class TestRetypeAMisfiledClaim:
         """Only the drawer moved. The content's provenance is the more important of the
         two and did not change, so `derivation` is left alone — unlike `promote_pass`,
         where consolidation genuinely authored the reclassification."""
-        first = mem.remember("agent-memory", "rejected", "auto as the embedder default",
-                             memory_type=MemoryType.PROCEDURAL, extractor="import:notion")
+        first = mem.remember("user", "prefers", "tests before the commit",
+                             memory_type=MemoryType.SEMANTIC, extractor="import:notion")
         before = mem.store.get_claim(first.added[0].id)
 
-        mem.remember("agent-memory", "rejected", "auto as the embedder default",
-                     memory_type=MemoryType.SEMANTIC)
+        mem.remember("user", "prefers", "tests before the commit",
+                     memory_type=MemoryType.PROCEDURAL)
 
         after = mem.store.get_claim(first.added[0].id)
         assert after.derivation is before.derivation
         assert after.extractor == before.extractor
+
+
+class TestProceduralIsForTheUserOnly:
+    """A `procedural` claim about anything but the user is filed as `semantic`.
+
+    `procedural` is how the user wants work done. `memory_standing` returns that
+    population and nothing else, and clients inject it at the top of every session, so a
+    project fact filed there is carried on every turn of every later conversation. On one
+    production store, 113 of 287 standing claims had a repository, a service or a file as
+    their subject, written by two different models and by callers; every session opened
+    with `memvara / prefers_tool / superpowers` and `task_5 / prefers_tool / 71`.
+
+    The rule is deterministic and lives in the reconciler, on the one path every write
+    takes, so it holds for `remember()`, for extraction and for imports alike, and no
+    prompt has to carry it. The receipt says when it applied.
+    """
+
+    def test_remember_files_a_procedural_claim_about_a_component_as_semantic(self, mem):
+        receipt = mem.remember("memvara", "never_do", "git add -A",
+                               memory_type=MemoryType.PROCEDURAL)
+
+        assert receipt.added[0].memory_type is MemoryType.SEMANTIC
+        assert [(r.was, r.now, r.reason) for r in receipt.retyped] == [
+            (MemoryType.PROCEDURAL, MemoryType.SEMANTIC, "subject")]
+        stored = mem.store.get_claim(receipt.added[0].id)
+        assert stored.memory_type is MemoryType.SEMANTIC
+        assert stored.meta["retyped_from"] == "procedural"
+        assert not mem.search("git add", memory_types=[MemoryType.PROCEDURAL])
+
+    def test_a_predicate_declared_procedural_does_not_override_the_subject(self, mem):
+        """`never_do` and `prefers_tool` are declared `procedural` because they are usually
+        about the user. The declaration is the default for the type, not a licence."""
+        receipt = mem.remember("memvara", "prefers_tool", "superpowers")
+
+        assert receipt.added[0].memory_type is MemoryType.SEMANTIC
+        assert [r.reason for r in receipt.retyped] == ["subject"]
+
+    def test_the_user_keeps_procedural(self, mem):
+        receipt = mem.remember("user", "never_do", "git add -A",
+                               memory_type=MemoryType.PROCEDURAL)
+
+        assert receipt.added[0].memory_type is MemoryType.PROCEDURAL
+        assert receipt.retyped == []
+
+    def test_a_claim_already_misfiled_is_moved_when_seen_again(self, mem):
+        """The stores that already hold such claims heal on re-observation, and by a
+        write that asserts no type: moving a component out of `procedural` is not a
+        correction anyone could have wanted to keep, so the safety property that an
+        unopinionated write cannot undo a correction is not in play."""
+        first = mem.remember("memvara", "never_do", "git add -A")
+        legacy = mem.store.get_claim(first.added[0].id)
+        legacy.memory_type = MemoryType.PROCEDURAL
+        mem.store.put_claim(legacy)
+        assert mem.search("git add", memory_types=[MemoryType.PROCEDURAL])
+
+        again = mem.remember("memvara", "never_do", "git add -A")
+
+        assert len(again.reinforced) == 1
+        assert [(r.was, r.now, r.reason) for r in again.retyped] == [
+            (MemoryType.PROCEDURAL, MemoryType.SEMANTIC, "subject")]
+        assert mem.store.get_claim(first.added[0].id).memory_type is MemoryType.SEMANTIC
+        assert not mem.search("git add", memory_types=[MemoryType.PROCEDURAL])
+
+    def test_asserting_procedural_on_a_known_component_claim_cannot_move_it_in(self, mem):
+        """The asserted type goes through the same rule as the candidate, so a caller
+        cannot re-file a component into the standing set by re-asserting it. Nothing is
+        reported: the claim is already filed where the rule puts it."""
+        mem.remember("memvara", "never_do", "git add -A")
+
+        again = mem.remember("memvara", "never_do", "git add -A",
+                             memory_type=MemoryType.PROCEDURAL)
+
+        assert len(again.reinforced) == 1
+        assert again.retyped == []
+        assert mem.store.get_claim(
+            again.reinforced[0].id).memory_type is MemoryType.SEMANTIC
+
+    def test_extraction_is_held_to_the_same_rule(self):
+        """A model reading a transcript is where most of the misfiled claims came from.
+        A declared single-valued builtin under a component subject never reaches the
+        reconciler (`write/pollution.py` refuses it earlier), so the case that does is a
+        predicate the registry has not seen, which the same model then declares
+        `procedural` when asked to classify it. The declaration becomes the registry's
+        default and the pipeline takes it over the per-claim opinion, so this is the
+        path a registry-declared type reaches the reconciler by. The same write files the
+        user's claim as `procedural` and the component's as `semantic`."""
+
+        class TwoClaimLLM:
+            name = "scripted"
+            is_noop = False
+
+            def extract(self, episodes, known_predicates):
+                return [
+                    {"subject": "memvara", "predicate": "release_rule",
+                     "object": "tag before the upload", "polarity": 1,
+                     "memory_type": "procedural", "confidence": 0.9, "source_index": 0},
+                    {"subject": "user", "predicate": "prefers",
+                     "object": "tests before the commit", "polarity": 1,
+                     "memory_type": "procedural", "confidence": 0.9, "source_index": 0},
+                ]
+
+            def classify_predicate(self, predicate, example):
+                return {"cardinality": "many", "volatility": "slow",
+                        "memory_type": "procedural"}
+
+        with Memvara(embedder=HashingEmbedder(dim=32), llm=TwoClaimLLM(),
+                     user="alice") as mem:
+            # Not "I prefer ...": that sentence form belongs to the deterministic fast
+            # path, which extracts it itself and never consults the model.
+            receipt = mem.add("The memvara release rule is to tag before the upload, "
+                              "and the order this user wants is tests before the commit.")
+
+            by_subject = {c.subject: c.memory_type for c in receipt.added}
+            assert by_subject == {"memvara": MemoryType.SEMANTIC,
+                                  "user": MemoryType.PROCEDURAL}
+            assert [(r.subject, r.reason) for r in receipt.retyped] == [
+                ("memvara", "subject")]
 
 
 class TestRecallMarksWhatNobodyStated:
