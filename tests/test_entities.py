@@ -1331,3 +1331,29 @@ def test_the_type_is_read_out_of_the_identity_not_out_of_the_text():
     """
     assert entity_type_of(typed_entity_key("Company:Apple Inc.")) == "company"
     assert entity_type_of(typed_entity_key("apple")) == ""
+
+
+def test_an_unfoldable_surface_is_still_a_no_op_rather_than_a_type_error():
+    """The empty-key guard comes before the type check, and the order is the point.
+
+    `"..."` folds to the empty key, which means "no entity here" rather than "an entity of
+    no type". Refusing it as a type mismatch would answer a question nobody asked, and
+    would turn what has always been a silent no-op into an exception for callers passing
+    surface forms they did not clean.
+    """
+    reg = EntityRegistry()
+    reg.resolve(OWNER, "company:apple")
+    assert reg.learn_alias(OWNER, "company:apple", "...").key == "company:apple"
+
+
+def test_an_alias_within_one_namespace_is_still_learned():
+    """The refusal is across namespaces only, and this is what stops it over-reaching.
+
+    Without this the cross-type check could be satisfied by refusing every alias, which
+    would pass the test above it and quietly disable the merge the registry exists for.
+    """
+    reg = EntityRegistry()
+    reg.resolve(OWNER, "company:apple")
+    spec = reg.learn_alias(OWNER, "company:apple", "company:apple incorporated")
+    assert spec.key == "company:apple"
+    assert reg.resolve(OWNER, "company:apple incorporated").key == "company:apple"

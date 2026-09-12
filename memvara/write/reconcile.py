@@ -482,14 +482,14 @@ class Reconciler:
         # is something a vocabulary asks for, never something a string collision supplies.
         spec = self.registry.spec(claim.predicate)
         claim.object_kind = (ObjectKind.ENTITY if spec.carries_edge else ObjectKind.VALUE)
-        if not spec.project_scoped and claim.scope.project is not None:
-            # A fact the vocabulary calls global is not project-relative, so it is written
-            # at the level above one. Two consequences follow from the same line and both
-            # are wanted: its slot has no project, so saying it in a second repository
-            # retires the first value rather than duplicating it; and it sits at user
-            # level, which visibility widens up into, so it is readable from inside every
-            # project. `fact_key_for` therefore needs no special case.
-            claim.scope = replace(claim.scope, project=None)
+        # A fact the vocabulary calls global is not project-relative, so it is written at
+        # the level above one. Two consequences follow and both are wanted: its slot has
+        # no project, so saying it in a second repository retires the first value rather
+        # than duplicating it; and it sits at user level, which visibility widens up into,
+        # so it is readable from inside every project. `fact_key_for` needs no special
+        # case. The rule itself lives on the registry because `forget()` and `history()`
+        # have to apply the same one to the probe they look this claim up with.
+        claim.scope = self.registry.slot_scope(claim.predicate, claim.scope)
         self._stamp(claim)
         # Only re-render text the Claim generated for itself; a caller-supplied
         # natural-language rendering is theirs to keep.

@@ -424,3 +424,28 @@ def test_two_erasures_of_one_id_are_two_records(tmp_path):
     finally:
         mem.close()
 
+
+
+def test_the_erasure_record_names_the_project_the_claim_was_erased_from(tmp_path):
+    """The audit row is the permanent record, so what it omits is unrecoverable.
+
+    `erase_claim` deletes the row it is describing, and the `erasures` table deliberately
+    holds no text, subject, predicate or object. The scope key is most of what is left, so
+    a scope that reports every erasure as unscoped is not a cosmetic gap: after the delete
+    there is nothing to go back to and read the project from.
+    """
+    from memvara import Memvara, NullLLM
+    from memvara.embed import HashingEmbedder
+
+    mem = Memvara(str(tmp_path / "m.db"), embedder=HashingEmbedder(dim=32), llm=NullLLM(),
+                  user="alice", project="gh/o/x")
+    try:
+        mem.remember("postgresql", "version", "17")
+        claim = mem.get_all()[0]
+        assert claim.scope.project == "gh/o/x"
+        mem.store.erase_claim(claim.id)
+        recorded = [r["scope"] for r in mem.store._db.execute("SELECT scope FROM erasures")]
+        assert recorded == [claim.scope.key()]
+        assert "gh%2Fo%2Fx" in recorded[0]
+    finally:
+        mem.close()

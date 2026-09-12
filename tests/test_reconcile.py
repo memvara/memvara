@@ -1216,3 +1216,43 @@ def test_a_global_predicate_is_written_with_no_project():
     finally:
         cloud.close()
         web.close()
+
+
+def test_forget_and_history_find_a_global_predicate_written_from_a_project():
+    """The probe has to be keyed the way the claim it is hunting was written.
+
+    `_canonicalize` clears the project for a globally-declared predicate, so the stored
+    `fact_key` has none. `forget()` and `history()` build a probe claim and look the slot
+    up by its key, and while they built it from the caller's raw scope the two keys
+    disagreed for exactly those predicates — which is all 23 builtins.
+
+    Both failures were silent in the worst available way. `forget()` returned an empty
+    list, which reads as "there was nothing to forget" rather than as a failure, and left
+    the fact live. `history()` reported no history at all for a claim `get_all()` returns.
+
+    The rule now has one definition, `PredicateRegistry.slot_scope`, and all three callers
+    go through it. The partitioned predicate is here as the other half: it must keep its
+    project, or the fix would have cured the probe by making every slot global.
+    """
+    from memvara import Memvara, NullLLM
+    from memvara.embed import HashingEmbedder
+    from memvara.schema import (BUILTIN_PREDICATES, Cardinality, PredicateRegistry,
+                                PredicateSpec)
+    from memvara.store import SQLiteStore
+
+    registry = PredicateRegistry(BUILTIN_PREDICATES + (
+        PredicateSpec(name="version", cardinality=Cardinality.ONE),))
+    mem = Memvara(store=SQLiteStore(":memory:"), llm=NullLLM(),
+                  embedder=HashingEmbedder(dim=64), registry=registry,
+                  user="alice", project="gh/o/x")
+    try:
+        mem.remember("user", "lives_in", "Berlin")      # builtin, so global
+        mem.remember("postgresql", "version", "17")     # undeclared, so partitioned
+
+        assert [c.object for c in mem.history("user", "lives_in")] == ["Berlin"]
+        assert [c.object for c in mem.history("postgresql", "version")] == ["17"]
+        assert [c.object for c in mem.forget("user", "lives_in")] == ["Berlin"]
+        assert [c.object for c in mem.forget("postgresql", "version")] == ["17"]
+        assert mem.get_all(states=("live",)) == []
+    finally:
+        mem.close()

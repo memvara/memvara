@@ -2513,7 +2513,8 @@ class SQLiteStore:
         """
         with self._lock:
             row = self._db.execute(
-                "SELECT tenant, usr, agent, session, sources FROM claims WHERE id=?",
+                "SELECT tenant, usr, project, agent, session, sources FROM claims "
+                "WHERE id=?",
                 (claim_id,)).fetchone()
             if row is None:
                 # Zeroes rather than an absent key, so a caller adding up an erasure
@@ -2553,7 +2554,8 @@ class SQLiteStore:
                     "(claim_id, tenant, scope, erased_at, sources, counts) "
                     "VALUES (?,?,?,?,?,?)",
                     (claim_id, tenant,
-                     Scope(tenant, row["usr"], row["agent"], row["session"]).key(),
+                     Scope(tenant, row["usr"], row["agent"], row["session"],
+                           project=row["project"]).key(),
                      stamp, len(json.loads(row["sources"])), "{}"))
                 # Before the claim row goes, and not as housekeeping afterwards: these rows
                 # are what `_orphan` reads three lines below to decide whether the turns this

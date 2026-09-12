@@ -644,6 +644,14 @@ class EntityRegistry:
                 "resolve it first"
             )
         key = typed_entity_key(surface)
+        if not key or key == target or key in spec.aliases:
+            # Before the type check on purpose. An unfoldable surface ("...", a bare
+            # emoji) folds to the empty key, which means "no entity here" rather than "an
+            # entity of no type" — so refusing it as a type mismatch would answer a
+            # question nobody asked, and would turn what has always been a silent no-op
+            # into an exception. The other two are the same no-op: aliasing a spelling
+            # onto the identity it already has, or onto one it already answers to.
+            return spec
         if entity_type_of(key) != entity_type_of(target):
             # An alias says two spellings name one entity, and one entity has one type.
             # `company:apple` and `fruit:apple` are two things that share a name, so
@@ -658,8 +666,6 @@ class EntityRegistry:
                 f"{entity_type_of(target) or 'untyped'}). An alias merges two spellings "
                 "of one entity; these are two entities that share a name."
             )
-        if not key or key == target or key in spec.aliases:
-            return spec
         # The absorbed fold stops being an entity in its own right. Its row may survive
         # in the store; `resolve` checks aliases first so that row can never win.
         bucket.pop(key, None)

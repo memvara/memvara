@@ -1760,8 +1760,13 @@ class Memvara:
         scope = self._scope(tenant, user, agent, session)
         now = at or utcnow()
         how = closure(close)
-        probe = Claim(subject=subject, predicate=self.registry.normalize(predicate),
-                      object="", scope=scope)
+        pred = self.registry.normalize(predicate)
+        # The probe has to be keyed the way the claim it is looking for was written, and a
+        # globally-declared predicate is written with the project cleared. Skipping this
+        # made `forget()` match nothing and return an empty list, which reads as "there
+        # was nothing to forget" rather than as a failure, while the fact stayed live.
+        probe = Claim(subject=subject, predicate=pred, object="",
+                      scope=self.registry.slot_scope(pred, scope))
         # `fact_key` intentionally ignores agent and session so a fact learned in a new
         # session still retires the old value. That is right for a user-level caller and
         # wrong for a narrow one: without this filter a session could retire a sibling
@@ -2827,8 +2832,12 @@ class Memvara:
         pred = self.registry.normalize(predicate)
         subjects = self._probe_entities(subject, scope)
         rows: list[Claim] = []
+        slot = self.registry.slot_scope(pred, scope)
         for key in subjects:
-            probe = Claim(subject=key, predicate=pred, object="", scope=scope)
+            # `slot`, not `scope`: a globally-declared predicate is stored with the
+            # project cleared, so a probe that kept one would look up a slot nothing was
+            # ever written to and report that a claim `get_all()` returns has no history.
+            probe = Claim(subject=key, predicate=pred, object="", scope=slot)
             rows.extend(self.store.slot_history(scope.tenant, probe.fact_key))
         if len(subjects) > 1:
             # Two slots concatenated are not one timeline. `slot_history` promises
@@ -3473,11 +3482,16 @@ class ScopedMemvara:
     def bind(self, *, tenant=None, user=None, agent=None, session=None) -> "ScopedMemvara":
         """A narrower view. Fields not given keep this view's values."""
         s = self.scope
+        # `project` is carried rather than named as a parameter: `bind` narrows, and a
+        # project is bound once where the store is opened. Dropping it here contradicted
+        # this method's own docstring, which says fields not given keep this view's
+        # values, and left the view reporting a scope it was not actually reading at.
         return ScopedMemvara(self._mem, Scope(
             tenant if tenant is not None else s.tenant,
             user if user is not None else s.user,
             agent if agent is not None else s.agent,
             session if session is not None else s.session,
+            project=s.project,
         ))
 
     @property

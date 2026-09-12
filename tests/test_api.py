@@ -3057,3 +3057,25 @@ class TestRecallMarksWhatNobodyStated:
 
         assert counter(out) <= budget
         assert Memvara.RECALL_INFERRED in out
+
+
+def test_binding_a_narrower_view_keeps_the_project():
+    """`bind` narrows, and a project is not one of the things it narrows.
+
+    The docstring promises that fields not given keep this view's values, and `project`
+    was being dropped — so a bound view reported a scope it was not reading at. Nothing
+    downstream read that scope, which is why it showed up as a wrong `repr` rather than as
+    lost data, and is exactly the kind of discrepancy that becomes a real bug the first
+    time something does read it.
+    """
+    from memvara import Memvara, NullLLM
+    from memvara.embed import HashingEmbedder
+
+    mem = Memvara(embedder=HashingEmbedder(dim=32), llm=NullLLM(),
+                  user="alice", project="gh/o/x")
+    try:
+        view = mem.scope(user="alice").bind(agent="worker")
+        assert view.scope.project == "gh/o/x"
+        assert view.scope.agent == "worker"
+    finally:
+        mem.close()

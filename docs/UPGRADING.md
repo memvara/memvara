@@ -43,7 +43,9 @@ corporate form is confined to one namespace, so `company:Apple Inc.` and `compan
 are one entity while `company:apple` and `fruit:apple` can never reach each other. And
 `EntityRegistry.learn_alias` raises `ValueError` if the two surface forms have different
 namespaces, where it previously performed the merge. If you call it in a loop over
-untrusted pairs, catch that.
+untrusted pairs, catch that. A surface form that folds to nothing at all — `"..."`, a bare
+emoji — is still the silent no-op it always was, rather than a namespace mismatch: there is
+no entity there to have a namespace.
 
 ### How to find your instances
 

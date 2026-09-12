@@ -48,7 +48,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .types import MemoryType
+from .types import MemoryType, Scope
 
 
 class Cardinality(str, Enum):
@@ -571,6 +571,26 @@ class PredicateRegistry:
         # Unknown: synthesize a conservative default. Not registered, so a later
         # `learn()` can still install a real spec for it.
         return PredicateSpec(name=name, cardinality=Cardinality.MANY, volatility=Volatility.SLOW)
+
+    def slot_scope(self, predicate: str, scope: Scope) -> Scope:
+        """The scope a claim with this predicate occupies its slot at.
+
+        The single definition of the project-clearing rule, because it has to be applied
+        in two places that do not otherwise meet. The write path applies it to the claim
+        it stores (`Reconciler._canonicalize`); `forget()` and `history()` apply it to the
+        probe claim they build to *find* that claim by key. Written out twice, the two
+        drifted immediately: a preference written from inside a repository was stored with
+        no project, while the probe looking for it still carried one, so `forget()`
+        matched nothing and returned an empty list — reporting success for a fact it left
+        live — and `history()` reported no history for a claim `get_all()` returns.
+
+        A predicate the vocabulary declares global is not project-relative, so its claims
+        sit one level above a project: one slot for the whole store, and readable from
+        inside every project because visibility widens upward. Everything else partitions.
+        """
+        if self.spec(predicate).project_scoped or scope.project is None:
+            return scope
+        return replace(scope, project=None)
 
     def known(self, predicate: str) -> bool:
         return self.normalize(predicate) in self._specs
