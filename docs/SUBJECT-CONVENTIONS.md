@@ -85,12 +85,44 @@ and subject differing from object. A typed walk needs the declaration, not the p
 
 ### What has been built since
 
-Step 2 of the sequence — the predicate schema fields — is implemented in pull request #200,
-which adds `subject_type`, `object_type`, `graph`, `inverse`, `inverse_cardinality` and
-`traversal_cost` to `PredicateSpec`, along with `objects_are_entities` and the persistence
-that keeps a declaration alive across a restart. Section 4 below describes that step as
-proposed, which is what it was when this document was written; read it as the specification
-that pull request implements rather than as work still outstanding.
+Steps 2, 3 and 4a of the sequence are implemented in pull request #200. Sections 1, 3, 4
+and 5 below describe them as proposed, which is what they were when this document was
+written; read those as the specification that pull request implements rather than as work
+still outstanding.
+
+- **Step 2, the predicate schema fields.** `subject_type`, `object_type`, `graph`,
+  `inverse`, `inverse_cardinality` and `traversal_cost` on `PredicateSpec`, with
+  `objects_are_entities`, `carries_edge`, and the persistence that keeps a declaration
+  alive across a restart.
+- **Step 3, the benchmark vocabulary.** `bench/packs/twowiki.toml` declares all 34 of
+  2WikiMultihopQA's relations, and `bench/predicate_audit.py` measures what a vocabulary
+  covers. Without the pack that corpus goes from 40.6% joinable to zero; with it, 68.3% of
+  its triples can carry an edge and the remaining third is four date relations that are
+  values on purpose.
+- **Step 4a, the object kind.** `Claim.object_kind` is `ENTITY`, `VALUE` or `None`, decided
+  at write time, persisted, and gating both the SQL and the Python side of traversal.
+  `None` means the claim predates the rule and keeps its edges, which is decision C below.
+
+**A claim carries an edge only when both halves are declared.** `carries_edge` is
+`objects_are_entities and graph`, because section 5's point is that an entity-valued object
+is not automatically a useful edge. An earlier revision of the implementation gated on the
+object type alone, which made `graph` a field nothing read: a predicate declaring entity
+objects with `graph` left false was walked and counted as joinable anyway.
+
+### Decision C — a claim written before the object-kind rule keeps its edges
+
+Taken 2026-09-08, after the six below. A migration cannot classify existing claims: the
+kind comes from the predicate's declared `object_type`, and which vocabulary a deployment
+loads is environment rather than data, so two machines opening one file would write
+different answers into it. Existing claims therefore record nothing, both gates admit
+"nothing recorded", and a store keeps the edges it had. Claims written afterwards follow
+the rule, so a store converges as it is rewritten rather than in one pass.
+
+Rejected: treating old claims as values, which switches off a working graph on upgrade and
+can only be undone by writing a vocabulary and rewriting every claim; treating them as
+entities, which keeps the false connections alive indefinitely in the rows nobody revisits;
+and backfilling from whatever vocabulary is loaded, which breaks the rule that a migration
+is a pure function of the row.
 
 ## The store today
 
