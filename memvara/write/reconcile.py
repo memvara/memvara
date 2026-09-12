@@ -65,11 +65,11 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Callable, Mapping, Sequence
 
-from ..entities import EntityRegistry, entity_key, entity_type_of
+from ..entities import EntityRegistry, entity_key
 from ..schema import PredicateRegistry
 from ..store.base import Store
 from ..types import (
-    SELF_SUBJECT,
+    NOTE_PREDICATE, SELF_SUBJECT,
     ObjectKind,
     ENTITY_REKEY,
     PREDICATE_REKEY,
@@ -285,7 +285,7 @@ class Reconciler:
         t = now or utcnow()
         self._canonicalize(claim)
         # After `_canonicalize`, which resolves the subject this compares on.
-        refiled = self._file_by_subject(claim)
+        refiled = self.file_by_subject(claim)
         if claim.recorded_at > t:
             # Transaction time is when *we* commit to believing it, which is `t` by
             # definition. A clock read taken when the Claim was constructed can land
@@ -317,11 +317,11 @@ class Reconciler:
                 # `put_claim` that persists both the reinforcement and the re-filing.
                 # Reporting it afterwards would need a second write for no gain.
                 if (asserted_type is MemoryType.PROCEDURAL
-                        and keep.subject_key != SELF_SUBJECT):
+                        and not self._may_be_procedural(keep)):
                     # The candidate was already refused above; the same rule applies to
                     # the type asserted for the claim on record.
                     asserted_type = MemoryType.SEMANTIC
-                retyped = self._retype(keep, asserted_type) or self._file_by_subject(keep)
+                retyped = self._retype(keep, asserted_type) or self.file_by_subject(keep)
                 return ReconcileResult(
                     "reinforce",
                     self.reinforce(keep, claim.sources, self._observed_at(claim, t)),
@@ -362,10 +362,22 @@ class Reconciler:
                                retyped=refiled)
 
     @staticmethod
-    def _file_by_subject(claim: Claim) -> "Retype | None":
+    def _may_be_procedural(claim: Claim) -> bool:
+        """Whether `procedural` is a filing this claim can have.
+
+        The user's own subject, or a verbatim note. A note is recognised by its
+        predicate rather than by a subject prefix: the mem0 shim and the importer build
+        notes under different prefixes, and both are notes.
+        """
+        return claim.subject_key == SELF_SUBJECT or claim.predicate == NOTE_PREDICATE
+
+    @classmethod
+    def file_by_subject(cls, claim: Claim) -> "Retype | None":
         """File a `procedural` claim about anything but the user as `semantic`.
 
-        Mutates, writes not; the caller performs the write, as with `_retype`.
+        Mutates, writes not; the caller performs the write, as with `_retype`. Public
+        because `write/pipeline.py` reinforces a restated turn's claims without going
+        through `apply`, and a claim restated that way must heal the same way.
 
         `procedural` means how the user wants work done, and `memory_standing` returns
         that population and nothing else so that clients can inject it at the top of
@@ -377,14 +389,13 @@ class Reconciler:
         them. The rule is deterministic so that no prompt has to carry it: the subject
         decides, and a claim that was already known is moved the next time it is seen.
 
-        One subject is exempt: a verbatim note, whose subject is a slot of type `note`
-        (`compat/_notes.py`, the mem0-compatible `infer=False` path). A note is not a
-        claim about a thing; it is the owner's own text, typed by the owner, and a note
-        typed `procedural` is a standing instruction in the owner's words.
+        One kind of claim is exempt: a verbatim note, on the `note` predicate
+        (`compat/_notes.py`: the mem0-compatible `infer=False` path and the importer). A
+        note is not a claim about a thing; it is the owner's own text, typed by the
+        owner, and a note typed `procedural` is a standing instruction in the owner's
+        words.
         """
-        if (claim.memory_type is not MemoryType.PROCEDURAL
-                or claim.subject_key == SELF_SUBJECT
-                or entity_type_of(claim.subject_key) == "note"):
+        if claim.memory_type is not MemoryType.PROCEDURAL or cls._may_be_procedural(claim):
             return None
         claim.meta["retyped_from"] = MemoryType.PROCEDURAL.value
         claim.memory_type = MemoryType.SEMANTIC

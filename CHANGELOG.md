@@ -23,8 +23,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   is in `Reconciler._file_by_subject`, on the one path every write takes, so no prompt
   has to carry it. Asserting `procedural` for such a subject on a known claim is not a
   re-filing; it is filed where the rule puts it and nothing is reported. A verbatim note
-  (subject type `note`, the mem0-compatible `infer=False` path) is exempt: it is the
-  owner's own text typed as procedural, not a claim about a thing.
+  (on the `note` predicate: the mem0-compatible `infer=False` path and the importer) is
+  exempt: it is the owner's own text typed as procedural, not a claim about a thing.
 
 ## [0.12.0] — 2026-09-12
 

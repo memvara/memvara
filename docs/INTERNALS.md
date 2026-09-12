@@ -415,9 +415,13 @@ or a service cannot want anything, so a `procedural` claim about one is wrong ho
 was produced. A claim already misfiled is moved the next time the same triple is seen,
 even by a write that asserts no type; the safety property that an unopinionated write
 cannot undo a correction still holds, because moving such a claim out of `procedural` is
-never a correction anyone could have wanted to keep. A verbatim note is exempt — its
-subject is a slot of type `note` (`compat/_notes.py`), and a note typed `procedural` is the
-owner's own standing instruction in the owner's words, not a claim about a thing.
+never a correction anyone could have wanted to keep. A verbatim note is exempt — it is on
+the `note` predicate (`types.NOTE_PREDICATE`, written by `compat/_notes.py` for the mem0
+shim and the importer alike), and a note typed `procedural` is the owner's own standing
+instruction in the owner's words, not a claim about a thing. The one write that does not
+pass through `apply` — a restated turn, which `write/pipeline.py` reinforces directly —
+calls `Reconciler.file_by_subject` on the claim it restates, so it heals and reports the
+same way.
 
 Two things it deliberately does not do. It does not touch `derivation`: where the fact
 came from has not changed, only which drawer it is in, and `promote_pass` re-derives only

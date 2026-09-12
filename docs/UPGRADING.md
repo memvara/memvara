@@ -28,8 +28,9 @@ every prompt to know it.
 ### Who this changes, and in which direction
 
 **If every `procedural` claim you write is about `user`, nothing changes.** Verbatim notes
-written through the mem0-compatible `infer=False` path with `memory_type="procedural"`
-keep their type too: a note is the owner's own text, not a claim about a thing.
+(the `note` predicate: the mem0-compatible `infer=False` path and the importer) written
+with `memory_type="procedural"` keep their type too, and keep it when restated: a note is
+the owner's own text, not a claim about a thing.
 
 **If you wrote `procedural` claims about other subjects, they move.** A new one is filed as
 `semantic` at write. One already on record moves the next time the same triple is seen,

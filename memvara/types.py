@@ -129,6 +129,12 @@ LAST_OBSERVED = "last_observed_at"
 #: do I live" is a question about this row. One spelling, so the three cannot drift.
 SELF_SUBJECT = "user"
 
+#: The predicate every verbatim note lands on (`compat/_notes.py`): a mem0-compatible
+#: `infer=False` write, or an import. A note is not a claim about a thing; it is the
+#: owner's own text under a synthetic subject, which is why `write/reconcile.py` lets a
+#: note keep `procedural` when it refuses it for every other non-user subject.
+NOTE_PREDICATE = "note"
+
 #: Resolved entity of `Claim.subject`. See `memvara/entities.py`.
 SUBJECT_ENTITY = "subject_entity"
 #: Resolved entity of `Claim.object`.

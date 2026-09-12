@@ -3055,6 +3055,61 @@ class TestProceduralIsForTheUserOnly:
         assert mem.store.get_claim(
             again.reinforced[0].id).memory_type is MemoryType.SEMANTIC
 
+    def test_a_verbatim_note_keeps_procedural_and_keeps_it_when_restated(self, mem):
+        """The exemption, and the reinforce branch honouring it. A note is recognised by
+        its predicate, so both prefixes the compat layer uses are notes: the shim's
+        `note:` and the importer's `mem0:`. The second write is the case the review
+        caught: the asserted type used to go through a check that knew the user but
+        not the note, and re-asserting a note demoted it."""
+        for subject in ("note:9f2c", "mem0:9f2c"):
+            first = mem.remember(subject, "note", "always run pytest before pushing",
+                                 memory_type=MemoryType.PROCEDURAL)
+            assert first.added[0].memory_type is MemoryType.PROCEDURAL
+            assert first.retyped == []
+
+            again = mem.remember(subject, "note", "always run pytest before pushing",
+                                 memory_type=MemoryType.PROCEDURAL)
+
+            assert len(again.reinforced) == 1
+            assert again.retyped == []
+            assert mem.store.get_claim(
+                first.added[0].id).memory_type is MemoryType.PROCEDURAL
+
+    def test_a_restated_turn_heals_a_misfiled_claim_too(self):
+        """A byte-identical repeat of a turn never reaches `apply`: the pipeline finds the
+        claims citing the earlier turn and reinforces them directly. That path applies
+        the same rule to what it restates, so the claim heals and the receipt says so."""
+
+        class OneClaimLLM:
+            name = "scripted"
+            is_noop = False
+
+            def extract(self, episodes, known_predicates):
+                return [{"subject": "memvara", "predicate": "release_rule",
+                         "object": "tag before the upload", "polarity": 1,
+                         "memory_type": "semantic", "confidence": 0.9,
+                         "source_index": 0}]
+
+            def classify_predicate(self, predicate, example):
+                return {"cardinality": "many", "volatility": "slow",
+                        "memory_type": "semantic"}
+
+        with Memvara(embedder=HashingEmbedder(dim=32), llm=OneClaimLLM(),
+                     user="alice") as mem:
+            turn = "The memvara release rule is to tag before the upload."
+            first = mem.add(turn)
+            legacy = mem.store.get_claim(first.added[0].id)
+            legacy.memory_type = MemoryType.PROCEDURAL
+            mem.store.put_claim(legacy)
+
+            again = mem.add(turn)
+
+            assert again.skipped == 1 and not again.added, "the repeat was recognised"
+            assert [c.id for c in again.reinforced] == [legacy.id]
+            assert [(r.claim_id, r.reason) for r in again.retyped] == [
+                (legacy.id, "subject")]
+            assert mem.store.get_claim(legacy.id).memory_type is MemoryType.SEMANTIC
+
     def test_extraction_is_held_to_the_same_rule(self):
         """A model reading a transcript is where most of the misfiled claims came from.
         A declared single-valued builtin under a component subject never reaches the

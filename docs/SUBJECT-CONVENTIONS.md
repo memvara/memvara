@@ -276,8 +276,9 @@ canonicalization and reconciliation resolve those references into identities.**
 Three classes of subject, with a different source for each:
 
 1. **Facts about the person.** Subject `user`. Unchanged. `procedural` claims live here
-   and nowhere else: the write path files a `procedural` claim about any other subject as
-   `semantic` and says so on the receipt (`Reconciler._file_by_subject`).
+   and nowhere else, apart from verbatim notes on the `note` predicate: the write path
+   files a `procedural` claim about any other subject as `semantic` and says so on the
+   receipt (`Reconciler.file_by_subject`).
 2. **Facts about the project.** Subject is the canonical project identity, supplied by the
    plugin and never typed by the model.
 3. **Facts about a third thing.** The model proposes a reference; the resolver commits an
