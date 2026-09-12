@@ -32,7 +32,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   arithmetic for picking one, and the reminder that raising it rescues no turn the model
   cannot finish — that belongs to whatever owns the queue.
 
-
 - **An entity can say what kind of thing it is, and two kinds with one name stay apart.**
   A subject or object may carry a `type:` namespace — `company:apple`, `software:postgresql`,
   `project:github.com/you/repo` — and the namespace is part of the entity's identity. So

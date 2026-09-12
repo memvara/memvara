@@ -348,12 +348,19 @@ def _timeout(raw: str | None) -> float | None:
     `float()` alone would take `"nan"`, `"inf"` and `"1e400"`, and none of those is a
     duration. `inf` is the sharp one: it would wait on a single turn forever, which is the
     failure this setting exists to end rather than to cause.
+
+    `isascii()` for the reason `_weight` and `_max_tokens` give, and this validator was
+    written without it: `float()` reads Arabic-indic `"\u0661"` as `1.0`, so
+    `MEMVARA_LLM_TIMEOUT=١` would have started a server that cancels every extraction after
+    one second and retries every turn forever — the wedged queue this setting exists to
+    end, moved to a new intake. A value nobody can grep for is a paste accident rather than
+    a choice.
     """
     value = (raw or "").strip()
     if not value:
         return None
     try:
-        seconds = float(value)
+        seconds = float(value) if value.isascii() else float("nan")
     except ValueError:
         seconds = float("nan")
     if not math.isfinite(seconds) or seconds <= 0:

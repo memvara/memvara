@@ -3523,11 +3523,17 @@ def test_no_extraction_timeout_leaves_the_sdk_default_alone(monkeypatch):
     memory.close()
 
 
-@pytest.mark.parametrize("value", ["0", "-5", "inf", "nan", "1e400", "soon", "10s"])
+@pytest.mark.parametrize("value", ["0", "-5", "inf", "nan", "1e400", "soon", "10s",
+                                   "\u0661", "\u0665\u0660\u0660"])
 def test_an_unusable_extraction_timeout_is_refused_at_startup(value):
     """`float()` alone would take `inf`, `nan` and `1e400`, and none of those is a
     duration. `inf` is the sharp one: it would wait on a single turn forever, which is
-    the failure this setting exists to end rather than to cause."""
+    the failure this setting exists to end rather than to cause.
+
+    The last two are Arabic-indic digits, which `float()` reads as 1 and 500. Without the
+    `isascii()` guard `MEMVARA_LLM_TIMEOUT=١` started a server that cancelled every
+    extraction after one second — the same test `_weight` and `_max_tokens` carry, and
+    this validator shipped its first draft without it."""
     with pytest.raises(ConfigError, match="MEMVARA_LLM_TIMEOUT"):
         ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
                                "MEMVARA_LLM_TIMEOUT": value})

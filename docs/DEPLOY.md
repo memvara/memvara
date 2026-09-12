@@ -152,7 +152,9 @@ a model to be talked into changing.
 endpoint is deliberately **not** a memvara setting: the adapter builds its client through
 the official SDK, which reads `OPENAI_BASE_URL` and `OPENAI_API_KEY` from the environment
 itself. So memvara's own variables here are the model name, the claim cap for a server
-that constrains decoding, the extraction instructions themselves, and the claim shape.
+that constrains decoding, the extraction instructions themselves, the claim shape, the
+response budget, the extra request fields a self-hosted server needs, and how long one
+call may take.
 
 ```bash
 OPENAI_BASE_URL=http://127.0.0.1:8000/v1 \
