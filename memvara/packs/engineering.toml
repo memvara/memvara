@@ -16,42 +16,59 @@ name = "deploys_to"
 cardinality = "one"
 volatility = "slow"
 aliases = ["deployed_to", "deployment_target"]
+subject_type = ["component"]
+object_type = ["environment"]
+graph = true
 
 [[predicate]]
 name = "current_host"
 cardinality = "one"
 volatility = "slow"
 aliases = ["hosted_on", "runs_on"]
+subject_type = ["component"]
+object_type = ["host"]
+graph = true
 
 [[predicate]]
 name = "git_state"
 cardinality = "one"
 volatility = "fast"
 aliases = ["git_status", "branch_state"]
+subject_type = ["component"]
+object_type = ["value"]
 
 [[predicate]]
 name = "build_status"
 cardinality = "one"
 volatility = "fast"
 aliases = ["ci_status"]
+subject_type = ["component"]
+object_type = ["value"]
 
 [[predicate]]
 name = "version"
 cardinality = "one"
 volatility = "fast"
 aliases = ["current_version", "released_version"]
+subject_type = ["component"]
+object_type = ["value"]
 
 [[predicate]]
 name = "endpoint"
 cardinality = "one"
 volatility = "slow"
 aliases = ["base_url", "service_url"]
+subject_type = ["component"]
+object_type = ["value"]
 
 [[predicate]]
 name = "owner"
 cardinality = "one"
 volatility = "slow"
 aliases = ["owned_by", "maintainer"]
+subject_type = ["component"]
+object_type = ["person"]
+graph = true
 
 # Multi-valued on purpose. A project rejects many things and depends on many things, and
 # declaring these is not a formality: it is what stops the accumulation note firing on
@@ -62,21 +79,63 @@ name = "depends_on"
 cardinality = "many"
 volatility = "slow"
 aliases = ["requires"]
+subject_type = ["component"]
+object_type = ["component"]
+graph = true
+inverse = "depended_on_by"
+inverse_cardinality = "many"
 
 [[predicate]]
 name = "rejected"
 cardinality = "many"
 volatility = "static"
 aliases = ["declined"]
+subject_type = ["component"]
+object_type = ["value"]
 
 [[predicate]]
 name = "known_defect"
 cardinality = "many"
 volatility = "slow"
 aliases = ["known_issue", "known_bug"]
+subject_type = ["component"]
+object_type = ["value"]
 
 [[predicate]]
 name = "blocked_by"
 cardinality = "many"
 volatility = "fast"
 aliases = ["blocker"]
+subject_type = ["component"]
+object_type = ["component"]
+graph = true
+inverse = "blocks"
+inverse_cardinality = "many"
+
+# ## Why five of these declare `graph` and six declare `value`
+#
+# A claim carries a graph edge only when its predicate declares both that the object is an
+# entity and that walking the relation helps — `carries_edge` is `objects_are_entities and
+# graph`. Until this pack said so, nothing here declared either, so every claim it wrote
+# was classified `value` and this vocabulary had no graph at all. That is the rule working
+# as designed: connectivity is something a vocabulary asks for, never something a string
+# collision supplies. It just had nothing to ask with.
+#
+# The five that ask are the ones where the object is a thing you would then want to ask
+# about. `memvara_cloud -depends_on-> postgres -current_host-> db.internal` is a chain
+# worth walking, and it is the shape an infrastructure store is full of. `owner` joins a
+# component to a person, which is how "who owns the thing that is blocking me" is answered
+# in two hops rather than two queries.
+#
+# The six that do not are not a judgement about how clean their objects are. A version
+# string, a branch name, a URL and a defect description are values: nothing else in the
+# store is ever their subject, so an edge from them would go nowhere. `rejected` is the
+# one that could have gone either way — sometimes a rejected thing is a component — and it
+# is declared `value` because the object is more often a sentence about an approach than a
+# name something else is stored under, and a false join degrades retrieval invisibly while
+# a missing one costs a hop a later declaration recovers.
+#
+# `depends_on` and `blocked_by` declare inverses so a walk can cross them in the direction
+# nobody wrote. `inverse_cardinality` is declared beside each rather than inferred: one
+# component is blocked by many, and blocks many, but the two sides are not symmetric in
+# general and the loader refuses an `inverse` without it.

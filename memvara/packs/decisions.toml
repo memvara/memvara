@@ -68,6 +68,7 @@ cardinality = "many"
 volatility = "static"
 memory_type = "episodic"
 aliases = ["decision", "chose", "settled_on", "agreed_on"]
+object_type = ["value"]
 
 [[predicate]]
 name = "observed"
@@ -75,6 +76,7 @@ cardinality = "many"
 volatility = "slow"
 memory_type = "episodic"
 aliases = ["noticed", "measured", "found"]
+object_type = ["value"]
 
 # `slow` rather than `static`, and this is the one place the two families genuinely
 # differ. A decision is a commitment and stays true as a record of itself; an observation
@@ -88,3 +90,15 @@ aliases = ["noticed", "measured", "found"]
 # write and the provenance is recorded properly. This predicate is for the *content* — a
 # thing observed — and using it to mean "I inferred this" duplicates `Derivation` in a
 # place nothing keeps in step with it.
+
+# ## Neither predicate carries a graph edge, and that is not an omission
+#
+# The object of both is a statement — "to use Postgres", "the p95 was 400ms" — not a name
+# anything else in the store is filed under. Declaring `object_type = ["value"]` says so
+# explicitly rather than leaving it to the undeclared default, which classifies the same
+# way but says nothing about why.
+#
+# A decision *about* a component is expressed by making the component the subject, which is
+# what `engineering`'s predicates are for. `memvara_cloud -rejected-> the polling design`
+# is the joinable shape; `agent -decided-> we rejected polling for memvara_cloud` is the
+# same fact written so that nothing can walk it.
