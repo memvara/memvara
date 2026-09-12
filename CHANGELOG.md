@@ -9,7 +9,7 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
-## [0.12.1] — 2026-09-12
+## [0.13.0] — 2026-09-12
 
 ### Changed
 
@@ -22,7 +22,7 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   asserts a type. `procedural` is what `memory_standing` returns and what clients inject
   at the top of every session; on one production store 113 of 287 standing claims were
   about a repository, a service or a file, and every session opened with them. The rule
-  is in `Reconciler._file_by_subject`, on the one path every write takes, so no prompt
+  is in `Reconciler.file_by_subject`, on the one path every write takes, so no prompt
   has to carry it. Asserting `procedural` for such a subject on a known claim is not a
   re-filing; it is filed where the rule puts it and nothing is reported. A verbatim note
   (on the `note` predicate: the mem0-compatible `infer=False` path and the importer) is

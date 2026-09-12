@@ -404,7 +404,7 @@ reclassified a live claim in place — the operation is not new, only the caller
 it.
 
 **`procedural` is for the subject `user` only, and the reconciler enforces it.**
-`Reconciler._file_by_subject` runs on every candidate right after `_canonicalize`, and on
+`Reconciler.file_by_subject` runs on every candidate right after `_canonicalize`, and on
 the claim on record when a candidate turns out to be a re-observation. A `procedural` claim
 whose subject is not the user is filed as `semantic`, whoever supplied the type — a caller,
 a model, or a predicate's declared default — and the result carries a `Retype` with
