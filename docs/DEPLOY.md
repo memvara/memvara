@@ -126,6 +126,7 @@ transport is stdio and the configuration is entirely environment.
 | `MEMVARA_LLM_EXTRACT_SYSTEM` | Path to a file holding replacement extraction instructions for `MEMVARA_LLM=openai`. Unset uses the instructions memvara ships, which is right for every hosted model. Set it for a small self-hosted model that the shipped wording talks out of extracting at all. Read only by this backend, and checked only when it runs: a file that is missing, empty, over 64 KiB or not UTF-8 is refused at startup, but under any other `MEMVARA_LLM` the variable is never read at all. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_LLM_TERSE_CLAIMS` | `1` asks `MEMVARA_LLM=openai` for a shorter claim shape: `polarity`, `when`, `amount` and `unit` become optional, so the model stops writing a field name and a null for each of them. `memory_type` and `confidence` stay required, because defaulting those two is a decision rather than a formality. Unset means the full shape, which is right for hosted OpenAI — its strict mode requires every declared property in `required`, so this is a 400 there. Set it for a self-hosted model whose generation speed is the bottleneck. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_LLM_MAX_TOKENS` | Ceiling on the tokens one response from `MEMVARA_LLM=openai` may generate. Unset means the backend's own default of 8,192, which is what every deployment ran on before this existed. It bounds how long a runaway lasts; it does not shorten an answer. A model stopped by this limit has its turn reported as not extracted and retried, so a budget below what your model actually writes turns slow turns into turns that never land. Read the number off a measured response length, not an estimate. A positive integer; anything else is refused at startup. See [Bounding a runaway](#bounding-a-runaway). |
+| `MEMVARA_LLM_TIMEOUT` | Seconds one extraction from `MEMVARA_LLM=openai` may take before the client gives up. Unset keeps the OpenAI SDK's default of 600. Raise it for a self-hosted model that generates slowly: at about 5 tokens a second, a turn of a few thousand characters needs longer than 600 seconds, and a cancelled call is a turn that was not extracted. A positive number of seconds, decimals allowed; `0`, negatives, `inf` and `nan` are refused at startup. See [When a long turn runs out of time](#when-a-long-turn-runs-out-of-time). |
 | `MEMVARA_EMBEDDER` | `hashing` (default, offline, 512-dimensional), `hashing:<dim>`, `local` or `local:<model>` (needs `memvara[local-embed]`), or `auto`. See [The embedder is named, not discovered](#the-embedder-is-named-not-discovered). |
 | `MEMVARA_READ_ONLY` | `1` hides every tool that writes. |
 
@@ -158,6 +159,7 @@ MEMVARA_LLM_MAX_CLAIMS=32 \
 MEMVARA_LLM_EXTRACT_SYSTEM=$HOME/.memvara/extract.txt \
 MEMVARA_LLM_TERSE_CLAIMS=1 \
 MEMVARA_LLM_MAX_TOKENS=2048 \
+MEMVARA_LLM_TIMEOUT=1800 \
 MEMVARA_DB=$HOME/.memvara/memory.db python3 -m memvara.server
 ```
 
@@ -258,8 +260,8 @@ one field in a claim nothing downstream can check, but the change is real. Decid
 per deployment rather than turning it on and off.
 
 `MEMVARA_LLM_MODEL`, `MEMVARA_LLM_MAX_CLAIMS`, `MEMVARA_LLM_EXTRACT_SYSTEM`,
-`MEMVARA_LLM_TERSE_CLAIMS` and `MEMVARA_LLM_MAX_TOKENS` apply to the `openai` backend
-only. Under `MEMVARA_MODE=cloud` all five are refused outright, along with `MEMVARA_LLM` and `MEMVARA_EMBEDDER`: extraction
+`MEMVARA_LLM_TERSE_CLAIMS`, `MEMVARA_LLM_MAX_TOKENS` and `MEMVARA_LLM_TIMEOUT` apply to
+the `openai` backend only. Under `MEMVARA_MODE=cloud` all six are refused outright, along with `MEMVARA_LLM` and `MEMVARA_EMBEDDER`: extraction
 runs inside the deployment, so a value named here would be read and never used.
 
 ### Bounding a runaway
@@ -312,6 +314,43 @@ its attempts — same turn, same failure, nine calls in, three truncations, abou
 seconds each. A turn like that is not retried into success; it needs the claims array
 capped, or it needs a different model. What the budget decides is only how much time each
 doomed attempt costs before the worker moves on.
+
+### When a long turn runs out of time
+
+`MEMVARA_LLM_TIMEOUT` sets how long one extraction may take before the client gives up.
+Unset, the OpenAI SDK applies its own default of **600 seconds**, and that default is why
+this setting exists.
+
+**A cancelled call is a turn that was not extracted.** It is not stored with fewer claims
+and it is not stored empty: the write reports the batch as deferred, and whatever reads the
+queue is expected to try the turn again. So a timeout that is shorter than the call needs
+does not degrade extraction, it stops it.
+
+This was measured on a production worker on 2026-09-11, and it is the clearest argument for
+setting it. A self-hosted phi-4-mini on four cores generates about 5 tokens a second. Turns
+of around 10,000 characters took longer than 600 seconds, so every call was cancelled mid-
+generation after more than 3,200 tokens. The worker recorded no failure for a cancelled
+call, so the next pass picked the same turn, and the same thing happened. It ran that way
+for five days with 2,066 turns waiting behind the one at the front, and every dashboard
+panel except the queue depth looked normal: passes completed, nothing errored, no turn was
+ever marked attempted.
+
+**Two things that follow from that, and only one of them is this setting.**
+
+Raising the timeout is what lets a slow turn finish. Work out the number rather than
+guessing it: a turn's cost is its prompt divided by your model's prefill rate, plus the
+answer divided by its generation rate. For the box above — 21 tokens a second prefill, 5.4
+generating, a 2,100-token prompt and a 12-claim answer — that is about 100 seconds of
+prefill and 150 of generation, so 600 seconds is ample for an ordinary turn and nowhere
+near enough for a long one. Measure both rates with `bench/extract_cost.py` and set the
+timeout above the slowest turn you actually intend to extract.
+
+**Recording the failure is the other half, and it belongs to whatever owns the queue.** A
+reader that takes the oldest turn, fails, and records nothing will take the same turn
+forever, and no timeout value prevents that. A queue needs to count a turn's attempts and
+stop choosing it, so that one turn nothing can extract costs you that turn rather than all
+of them. memvara's own `WriteReceipt` reports `deferred` and `unextracted` for exactly this
+purpose; a worker that ignores both will wedge on its first hard turn.
 
 ### The embedder is named, not discovered
 

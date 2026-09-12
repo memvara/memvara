@@ -3504,6 +3504,61 @@ def test_cloud_mode_refuses_the_response_budget():
         build_memvara(cloud)
 
 
+def test_the_extraction_timeout_reaches_the_openai_backend(monkeypatch):
+    """The setting a wedged production queue needed and could not have.
+
+    Measured on 2026-09-11: the worker's extraction calls were cancelled at the SDK's
+    600-second default after generating more than 3,200 tokens on turns of around 10,000
+    characters. Nothing recorded the failure, so the same turn was picked every pass for
+    five days while 2,066 turns waited behind it. Raising the timeout is the part of that
+    a deployment can set, and before this it could not."""
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+        "MEMVARA_LLM_TIMEOUT": "1800"}))
+    assert memory.llm.timeout == 1800.0
+    memory.close()
+
+
+def test_no_extraction_timeout_leaves_the_sdk_default_alone(monkeypatch):
+    import types as pytypes
+
+    monkeypatch.setitem(sys.modules, "openai",
+                        pytypes.SimpleNamespace(OpenAI=lambda: object()))
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai"}))
+    assert memory.llm.timeout is None
+    memory.close()
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "inf", "nan", "1e400", "soon", "10s"])
+def test_an_unusable_extraction_timeout_is_refused_at_startup(value):
+    """`float()` alone would take `inf`, `nan` and `1e400`, and none of those is a
+    duration. `inf` is the sharp one: it would wait on a single turn forever, which is
+    the failure this setting exists to end rather than to cause."""
+    with pytest.raises(ConfigError, match="MEMVARA_LLM_TIMEOUT"):
+        ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+                               "MEMVARA_LLM_TIMEOUT": value})
+
+
+def test_a_fractional_extraction_timeout_is_allowed():
+    """A duration, not a count, so a decimal is a reasonable thing to write."""
+    assert ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
+        "MEMVARA_LLM_TIMEOUT": "900.5"}).llm_timeout == 900.5
+
+
+def test_cloud_mode_refuses_the_extraction_timeout():
+    cloud = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "k",
+                                   "MEMVARA_LLM_TIMEOUT": "1800"})
+    assert cloud.llm_timeout == 1800.0
+    with pytest.raises(ConfigError, match="MEMVARA_LLM_TIMEOUT"):
+        build_memvara(cloud)
+
+
 def test_replacement_extraction_instructions_are_read_from_the_named_file(
         monkeypatch, tmp_path):
     """The file's text reaches the backend, so a self-hosted deployment can change what

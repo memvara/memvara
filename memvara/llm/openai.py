@@ -97,9 +97,23 @@ class OpenAILLM:
         base_url: str | None = None,
         extract_system: str | None = None,
         terse: bool = False,
+        timeout: float | None = None,
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens
+        # How long one extraction may take before the client gives up. `None` keeps the
+        # SDK's own default, which is 600 seconds, and that default is the reason this
+        # exists: a self-hosted model generating at 5 tok/s needs more than 600 seconds
+        # for a turn of a few thousand characters, and until now the only way to raise it
+        # was to build the whole `openai.OpenAI` client yourself and inject it.
+        # `bench/extract_cost.py` does exactly that, and says so in a comment, which is
+        # how this gap was found.
+        #
+        # Sent on the request rather than set on the client, so it applies however the
+        # client was built — including one a caller injected. `chat()` passes its own
+        # per-call timeout and is unaffected: `memvara.select` measures its budget in
+        # seconds and must not inherit an extraction's.
+        self.timeout = timeout
         # Replacement extraction instructions, for the same self-hosted case `max_claims`
         # serves. `EXTRACT_SYSTEM` closes by saying an empty list is a correct answer and
         # the common case, which is true and is what a model able to weigh salience across
@@ -170,15 +184,15 @@ class OpenAILLM:
 
     def _call(self, system: str, prompt: str, schema: dict[str, Any],
               usage: Usage | None = None, *, name: str | None = None) -> Any:
-        response = self._client.chat.completions.create(
-            model=self.model,
-            max_completion_tokens=self.max_tokens,
-            temperature=self.temperature,
-            messages=[
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_completion_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
-            response_format={
+            "response_format": {
                 "type": "json_schema",
                 "json_schema": {
                     "name": name or _SCHEMA_NAMES.get(id(schema), "result"),
@@ -186,7 +200,12 @@ class OpenAILLM:
                     "schema": schema,
                 },
             },
-        )
+        }
+        # Absent unless asked for, so a deployment that never set it sends the request it
+        # sent before this option existed and keeps the SDK's own default.
+        if self.timeout is not None:
+            kwargs["timeout"] = self.timeout
+        response = self._client.chat.completions.create(**kwargs)
         # OpenAI names the same two quantities differently from Anthropic; the reading and
         # the refusal-to-guess live in one place so the two backends cannot drift.
         _shape.record_usage(response, usage, "prompt_tokens", "completion_tokens")

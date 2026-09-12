@@ -40,6 +40,30 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`MEMVARA_LLM_TIMEOUT` and `OpenAILLM(timeout=...)` set how long one extraction may
+  take.** Unset keeps the OpenAI SDK's default of 600 seconds, so nothing changes for a
+  deployment that does not set it. Until now there was no seam for this at all: the only
+  way to raise the timeout was to build the `openai.OpenAI` client yourself and inject it,
+  which is what `bench/extract_cost.py` does and says so in a comment. The value is sent on
+  the request rather than set on the client, so it applies to an injected client too, and
+  `chat()` keeps passing its own per-call timeout — `memvara.select` measures its budget in
+  seconds and must not inherit an extraction's.
+
+  **This came out of a wedged production queue, and the measurement is worth recording.** On
+  a four-core self-hosted phi-4-mini generating about 5 tokens a second, turns of around
+  10,000 characters took longer than 600 seconds, so every extraction call was cancelled
+  mid-generation after more than 3,200 tokens. The worker recorded nothing for a cancelled
+  call, so the next pass chose the same turn and did the same thing. It ran that way for
+  five days with 2,066 turns queued behind the one at the front, and every signal except
+  queue depth looked healthy: passes completed, nothing errored, and no turn was ever
+  marked attempted.
+
+  Raising the timeout is the half of that fix a deployment can set. The other half belongs
+  to whatever owns the queue: a reader that takes the oldest turn, fails, and records
+  nothing will take the same turn forever, and no timeout prevents that.
+  `docs/DEPLOY.md` has the arithmetic for picking a value and the full account.
+
+
 - **`MEMVARA_LLM_MAX_TOKENS` bounds how long one runaway extraction can run.** It sets the
   largest response `MEMVARA_LLM=openai` may generate; unset it stays at `OpenAILLM`'s own
   default of 8,192, so no existing deployment changes. `OpenAILLM(max_tokens=...)` has

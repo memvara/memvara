@@ -14,6 +14,7 @@ failed launch and the message below immediately.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -165,6 +166,20 @@ class ServerConfig:
     #: `max out` column. Measured on a 4-core box with a 12-claim cap, the worst call
     #: generated 814 tokens.
     llm_max_tokens: int | None = None
+    #: Seconds one extraction may take before the client gives up, for the "openai"
+    #: backend. Unset keeps the SDK's own default of 600.
+    #:
+    #: That default is the reason this exists. A self-hosted model generating at about
+    #: 5 tokens a second needs longer than 600 seconds for a turn of a few thousand
+    #: characters, and a cancelled call is a turn that was not extracted. Measured on a
+    #: production worker on 2026-09-11: turns of around 10,000 characters were cancelled
+    #: at the 600-second mark after generating more than 3,200 tokens, every pass, for
+    #: five days, because nothing recorded the failure and the same turn was picked again.
+    #:
+    #: Raising this lets a long turn finish. It does not make a turn that cannot finish
+    #: safe to retry — that needs the queue to record the failure — and it does not bound
+    #: a runaway, which is `MEMVARA_LLM_MAX_CLAIMS`.
+    llm_timeout: float | None = None
     #: "local" (default) opens MEMVARA_DB on disk, exactly as before this field existed.
     #: "cloud" opens no local file at all; it resolves an API key (MEMVARA_API_KEY, or
     #: the credentials file `memvara-mcp login` writes) and talks to `server_url` instead.
@@ -256,6 +271,7 @@ class ServerConfig:
             llm_terse_claims=_flag(
                 env.get("MEMVARA_LLM_TERSE_CLAIMS"), "MEMVARA_LLM_TERSE_CLAIMS"),
             llm_max_tokens=_max_tokens(env.get("MEMVARA_LLM_MAX_TOKENS")),
+            llm_timeout=_timeout(env.get("MEMVARA_LLM_TIMEOUT")),
             embedder=_embedder_spec(env.get("MEMVARA_EMBEDDER")),
             mode=mode,
             server_url=server_url,
@@ -267,6 +283,35 @@ class ServerConfig:
     def scope_kwargs(self) -> dict[str, Any]:
         return {"tenant": self.tenant, "user": self.user, "agent": self.agent,
                 "session": self.session}
+
+
+def _timeout(raw: str | None) -> float | None:
+    """A positive number of seconds, or `None` for the SDK's own default.
+
+    Accepts a decimal because a timeout is a duration rather than a count, so `900.5` is
+    a sensible thing for somebody to write. Refused rather than clamped for the reason
+    its two neighbours are: a value that fell back to the default would leave an operator
+    believing they had given a slow model more room when they had not, and the symptom is
+    a queue that does not drain.
+
+    `float()` on its own would accept `"nan"`, `"inf"` and `"1e400"`, which are not
+    durations — `inf` would hang a worker on one turn forever, which is the failure this
+    setting exists to end rather than to cause.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = float("nan")
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ConfigError(
+            f"MEMVARA_LLM_TIMEOUT={raw!r} is not a positive number of seconds. Leave it "
+            "unset for the SDK default of 600. Set it higher than the slowest extraction "
+            "your model actually completes — a cancelled call is a turn that was not "
+            "extracted, and it is retried rather than stored.")
+    return seconds
 
 
 def _max_tokens(raw: str | None) -> int | None:
@@ -472,7 +517,7 @@ def _anthropic() -> Any:
 
 def _openai(model: str | None, max_claims: int | None = None,
             extract_system: str | None = None, terse: bool = False,
-            max_tokens: int | None = None) -> Any:
+            max_tokens: int | None = None, timeout: float | None = None) -> Any:
     # Imported here so the default offline configuration never touches the optional SDK.
     from ..llm.openai import OpenAILLM
 
@@ -495,6 +540,8 @@ def _openai(model: str | None, max_claims: int | None = None,
         # before the option existed, rather than the same number passed explicitly.
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if timeout is not None:
+            kwargs["timeout"] = timeout
         return OpenAILLM(**kwargs)
     except Exception as exc:
         # Deliberately wider than ImportError. `openai.OpenAI()` refuses to construct
@@ -553,7 +600,7 @@ def _llm(config: ServerConfig) -> Any:
     if config.llm == "openai":
         return _openai(config.llm_model, config.llm_max_claims,
                        config.llm_extract_system, config.llm_terse_claims,
-                       config.llm_max_tokens)
+                       config.llm_max_tokens, config.llm_timeout)
     raise ConfigError(
         f"MEMVARA_LLM={config.llm!r} is listed in _BACKENDS but _llm() has no branch "
         "for it, so this server cannot say which model it would extract with. This is "
@@ -589,6 +636,7 @@ _SERVER_SIDE_UNDER_CLOUD = (
     ("llm_extract_system", None, "MEMVARA_LLM_EXTRACT_SYSTEM", "extraction prompt"),
     ("llm_terse_claims", False, "MEMVARA_LLM_TERSE_CLAIMS", "claim shape"),
     ("llm_max_tokens", None, "MEMVARA_LLM_MAX_TOKENS", "response budget"),
+    ("llm_timeout", None, "MEMVARA_LLM_TIMEOUT", "extraction timeout"),
 )
 
 
