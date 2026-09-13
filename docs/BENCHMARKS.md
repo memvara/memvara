@@ -1231,10 +1231,29 @@ and comes out the same on every run:
   full_transcript           9803      10263          2451              60.8 / 60.8
   naive_rag                 2329       2846           582              12.0 / 60.8
   memvara                   2074       2489           519              12.0 / 60.8
-  memvara_structured        1721       2151           430              12.0 / 60.8
+  memvara_structured        1772       2241           443              12.0 / 60.8
 ```
 
-`~tokens` is characters ÷ 4, an estimate and not a tokenizer.
+`~tokens` is characters ÷ 4, an estimate and not a tokenizer. The `memvara_structured`
+row grew from 1,721 to 1,772 characters when the arm moved to `recall(valid_at=)`; the
+agent run below was made at the earlier size.
+
+### The hosted run, which is the measurement
+
+```bash
+export ANTHROPIC_API_KEY=...
+PYTHONPATH=. python3 demo/harness.py --reader anthropic --judge llm \
+    --model claude-opus-5 --effort low --max-tokens 4096 --thinking adaptive \
+    --checkpoint runs/hosted.checkpoint.jsonl --concurrency 4 --out runs/hosted.jsonl
+```
+
+The same arms and questions, with a model behind an API as the reader and a second call
+to it as the judge. The model id, effort, output budget and thinking setting are printed
+under the report's title exactly as sent, the cost is priced from the usage the provider
+reported, and answers that never finished are counted apart from wrong ones.
+`--checkpoint` makes the run resumable and `--concurrency` shortens it;
+[`demo/README.md`](../demo/README.md) has every flag. No run with it has been recorded
+yet: the scores below are the agent run.
 
 ### The scores, and everything that makes them less than they look
 

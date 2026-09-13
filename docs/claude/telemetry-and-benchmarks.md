@@ -48,8 +48,10 @@ project in its first week.
 
 The benchmark scripts under `bench/` are run by hand and write their numbers into
 [BENCHMARKS.md](../BENCHMARKS.md) alongside the caveats that make each number less than it
-looks. `demo/harness.py` is the end-to-end run: an authored corpus, an agent reading the
-memory block, and a scored answer file. `benchmarks/agent_memory/` is different in kind — it
+looks. `demo/harness.py` is the end-to-end run: an authored corpus, a reader — a model
+behind an API with its parameters pinned, or an agent through a blinded round trip —
+reading the memory block, and a scored answer file. `benchmarks/agent_memory/` is
+different in kind — it
 is written to be entered by somebody adding their own memory system, so it has adapters, a
 contributor guide and a CLI rather than a script per corpus.
 

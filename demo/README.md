@@ -6,10 +6,11 @@ reading memvara's output tells the customer the right thing. `docs/ROADMAP.md` h
 that as the first item under *What is still missing* since it was written, and this
 directory is the corpus, the arms and the harness for closing it.
 
-It closes the *apparatus* half. The half still open is a reader behind an API: the one run
-recorded below used an agent as the reader, which makes it a sanity check and not a
-benchmark. [What one run produced](#what-one-run-produced) is specific about the
-difference.
+The apparatus is complete: the corpus, the five arms, a blinded round trip for a person or
+an agent, and a reader behind an API with every parameter pinned and printed. The one run
+recorded below still used an agent as the reader, which makes it a sanity check and not a
+benchmark; [What one run produced](#what-one-run-produced) is specific about the
+difference, and a run with the hosted reader is the next thing to record.
 
 ```
 demo/scenario.py    the support history and the question set
@@ -36,7 +37,56 @@ common with the question; it cannot reason, cannot read a date and cannot combin
 turns. What its `correct` and `trapped` columns describe is the corpus and the arms. The
 run prints that above its own table, twice.
 
-Measuring answers needs a reader, and a reader is not in this process:
+Measuring answers needs a reader. The one that makes the run reproducible is a model
+behind an API:
+
+```bash
+export ANTHROPIC_API_KEY=...            # or OPENAI_API_KEY, with --reader openai
+PYTHONPATH=. python3 demo/harness.py --reader anthropic --judge llm \
+    --model claude-opus-5 --effort low --max-tokens 4096 --thinking adaptive \
+    --checkpoint runs/hosted.checkpoint.jsonl --concurrency 4 --out runs/hosted.jsonl
+```
+
+That is the whole run in one process: every arm, every question, answered by the model
+and graded by a second call to it. Everything that decides an answer is pinned by a flag
+and printed under the report's title exactly as it was sent, which is what makes the
+number quotable and the run repeatable:
+
+* `--model`, `--effort`, `--max-tokens` and `--thinking` on `--reader anthropic`.
+  `--thinking default` sends no thinking field and the model applies its own default;
+  `adaptive` and `disabled` send that setting explicitly. On a model that thinks, thinking
+  and the answer share `--max-tokens`, which is why the default is 4096 rather than the
+  few dozen tokens an answer needs. The Anthropic models reject `temperature`, `top_p` and
+  `top_k`, so nothing is sampled, the header says so, and there is no seed to pin: two
+  runs will differ, and the per-question rows in `--out` are the unit to compare.
+* `--model`, `--max-tokens`, `--temperature` and `--sampling-seed` on `--reader openai`.
+  The seed is sent only when given, and the header prints whichever was the case.
+* `--judge llm` grades with the reader's twin: the same provider and the same parameters,
+  with `--judge-model` swapped in when given. `--judge containment`, the default, is free
+  and wrong in the known directions the report lists under its tables.
+* `--checkpoint PATH` appends every completed model call to a JSONL file as it completes.
+  A run that dies resumes on the next invocation with the same path and pays only for
+  what it lost; the header says how many calls were replayed. The key covers the pinned
+  settings and the whole prompt, so a changed flag starts a fresh set of rows rather than
+  replaying another configuration's answers.
+* `--concurrency N` issues N model calls at once. Rows come back in item order and the
+  cost ledger is billed in item order, so the report is identical whatever N is.
+
+The report carries the floor (`none`) and the ceiling (`full_transcript`) beside the three
+memory arms and names which is which in its header, because a memory score without both
+beside it is uninterpretable. Under the tables it prints what the run cost, from the usage
+the provider reported, and counts the answers that never finished — a `max_tokens`
+truncation or a `refusal` — apart from wrong answers, because both arrive as a short or
+empty string and would otherwise be averaged in as a memory layer that surfaced bad
+evidence. Each row of `--out` carries the reader's `stop_reason` for the same reason.
+
+The provider's SDK has to be installed: `pip install 'memvara[anthropic]'` or
+`pip install 'memvara[openai]'`. Neither is a dependency of the library, and the whole
+harness runs without them under `--reader stub`.
+
+A person or an agent can be the reader instead, through a blinded round trip. Its number
+is a sanity check rather than a measurement — there is no model id, seed or temperature
+to quote beside it — and it is the configuration the one recorded run used:
 
 ```bash
 PYTHONPATH=. python3 demo/harness.py --dump runs/demo.jsonl
@@ -406,10 +456,13 @@ Context size is deterministic and comes out the same every time. This is real ou
   full_transcript           9803      10263          2451              60.8 / 60.8
   naive_rag                 2329       2846           582              12.0 / 60.8
   memvara                   2074       2489           519              12.0 / 60.8
-  memvara_structured        1721       2151           430              12.0 / 60.8
+  memvara_structured        1772       2241           443              12.0 / 60.8
 ```
 
 `~tokens` is `chars // 4`, an estimate and not a tokenizer — `CHARS_PER_TOKEN` says so.
+The `memvara_structured` row grew from 1,721 to 1,772 characters when the arm moved to
+`recall(valid_at=)`, whose dated header is part of what it renders; the agent run below
+was made at the earlier size.
 `naive_rag` retrieved every visible turn on **0 of 20** questions, so it is a retrieval arm
 throughout rather than `full_transcript` in a different order; the harness prints a warning
 when that stops being true.

@@ -1,12 +1,15 @@
 """Blinded five-arm answer-quality run over the support-history demo.
 
     PYTHONPATH=. python3 demo/harness.py --reader stub          # offline, one command
+    PYTHONPATH=. python3 demo/harness.py --reader anthropic --judge llm \\
+        --model claude-opus-5 --effort low --max-tokens 4096 --thinking adaptive \\
+        --checkpoint runs/hosted.checkpoint.jsonl --concurrency 4 --out runs/hosted.jsonl
     PYTHONPATH=. python3 demo/harness.py --dump   runs/demo.jsonl
     # ...answer them into runs/answers.jsonl as {"id": ..., "answer": ...}
     PYTHONPATH=. python3 demo/harness.py --dump runs/demo.jsonl --answers runs/answers.jsonl
 
-Two readers, and the difference between them is the difference between a smoke test and a
-measurement.
+Three kinds of reader, and the differences between them are the differences between a
+smoke test, a measurement and a sanity check.
 
 `--reader stub` runs both phases in one process against `evalkit.StubReader` and
 `ContainmentJudge`, so it needs no key, no dump file and no answerer, and it produces the
@@ -17,10 +20,26 @@ with the question, so its `correct` column is a property of the corpus and the a
 nothing else. `evalkit.stub_caveat` prints that on every run of it, and the number must
 never be quoted beside the ones in `docs/BENCHMARKS.md`.
 
-`--reader file` is the two-phase round trip and the only configuration that produces a
-number about answers. Phase one writes one file containing every question under every arm
+`--reader anthropic` and `--reader openai` are the measurement: a model behind an API
+answers every arm's questions in one process. Everything that decides its answers is
+pinned by a flag and printed under the report's title exactly as it was sent — the model
+id, the effort, the output budget and the thinking setting on Anthropic; the model id,
+the output budget, the temperature and the seed on OpenAI — so the run can be repeated by
+somebody else. The Anthropic models reject sampling parameters, so none is sent and the
+header says so. `--judge llm` grades with a second model on the same provider: the
+reader's twin, with `--judge-model` swapped in. `--checkpoint PATH` keeps every completed
+call so a run that dies resumes rather than pays again, and `--concurrency N` issues N
+calls at once; both live in `evalkit` and are shared with the `bench/` runners. The
+report always carries the floor (`none`) and the ceiling (`full_transcript`) beside the
+three memory arms and names which is which, because a memory score without both beside
+it is uninterpretable.
+
+`--reader file` is the two-phase round trip for an answerer outside this process, a
+person or an agent. Phase one writes one file containing every question under every arm
 in `demo/baselines`, merged and shuffled together. Phase two reads the answers back,
-re-derives which item belonged to which arm, and scores.
+re-derives which item belonged to which arm, and scores. Its number is a sanity check
+rather than a measurement: there is no model id, seed or temperature to quote beside it,
+and the same contexts answered again will not give the same answers.
 
 ## The two numbers, and why the second one is the headline
 
@@ -293,6 +312,12 @@ class Scored:
     correct: bool
     trapped: bool
     context_chars: int
+    #: Why the reader stopped, from the provider: `end_turn` for a finished answer,
+    #: `max_tokens` for one the budget cut off, `refusal` for one a classifier declined.
+    #: `""` for the stub and the file reader, which consult no model. Kept per row so an
+    #: audit can see *which* items were never answered rather than only how many; the
+    #: report's cost block prints the counts.
+    stop_reason: str = ""
 
 
 def stale_ids(key_path: str | Path, items: Sequence[Item]) -> list[str]:
@@ -309,31 +334,50 @@ def stale_ids(key_path: str | Path, items: Sequence[Item]) -> list[str]:
     return [str(row["id"]) for row in rows if str(row["id"]) not in known]
 
 
+def hosted(reader: ek.Reader) -> bool:
+    """True for a model behind an API: neither the stub nor a person."""
+    return not getattr(reader, "is_stub", False) and not getattr(reader, "is_human", False)
+
+
 def score(items: Sequence[Item], questions: Sequence[Question], *,
-          reader: ek.Reader, judge: ek.Judge) -> list[Scored]:
+          reader: ek.Reader, judge: ek.Judge, ledger: ek.TokenLedger | None = None,
+          concurrency: int = 1) -> list[Scored]:
     """Judge every answer for correctness and for the trap, separately.
 
     The answers come back through a `Reader` rather than a dict so that the same path
     serves a `FileReader` holding a completed round trip and, unchanged, an API reader —
     and so the unanswered count is `FileReader.missing`'s rather than a second
     reimplementation of it.
+
+    One job per item — the reader's call and up to two judge calls — issued
+    `concurrency` at a time through `ek.score_in_order`, which bills every call into
+    `ledger` in item order on the calling thread. At the default of 1 nothing runs on
+    another thread, and the rows come back in item order whatever the concurrency was.
     """
     by_id = {q.id: q for q in questions}
-    out: list[Scored] = []
-    for item in items:
+
+    def one(item: Item) -> tuple[Scored, list[tuple[str, ek.Answer]]]:
         q = by_id[item.qid]
-        hypothesis = reader.answer(SYSTEM, item.prompt).text
+        out = reader.answer(SYSTEM, item.prompt)
+        hypothesis = out.text
+        calls = [("reader", out)]
         correct = trapped = False
         if hypothesis:
-            correct, _ = judge.judge(q.text, q.gold, hypothesis,
-                                     JUDGE_TYPES.get(q.kind, "default"))
+            correct, verdict = judge.judge(q.text, q.gold, hypothesis,
+                                           JUDGE_TYPES.get(q.kind, "default"))
+            calls.append(("judge", verdict))
             if q.trap is not None:
-                trapped, _ = judge.judge(q.text, q.trap, hypothesis, TRAP_JUDGE_TYPE)
-        out.append(Scored(id=item.id, arm=item.arm, qid=q.id, kind=q.kind,
-                          question=q.text, gold=q.gold, trap=q.trap,
-                          answer=hypothesis, correct=correct, trapped=trapped,
-                          context_chars=item.context.chars))
-    return out
+                trapped, verdict = judge.judge(q.text, q.trap, hypothesis, TRAP_JUDGE_TYPE)
+                calls.append(("judge", verdict))
+        return Scored(id=item.id, arm=item.arm, qid=q.id, kind=q.kind,
+                      question=q.text, gold=q.gold, trap=q.trap,
+                      answer=hypothesis, correct=correct, trapped=trapped,
+                      context_chars=item.context.chars,
+                      stop_reason=out.stop_reason), calls
+
+    return ek.score_in_order(one, items,
+                             ledger=ek.TokenLedger() if ledger is None else ledger,
+                             concurrency=concurrency)
 
 
 def tally(scored: Iterable[Scored], key: Callable[[Scored], Any]) -> dict[Any, Tally]:
@@ -396,15 +440,6 @@ def results_table(cells: Mapping[Any, Tally], label: str) -> str:
                            rows)
 
 
-#: Appended to `evalkit.stub_caveat`'s stub banner, which ends "Re-run with --reader
-#: anthropic" — the right instruction for the `bench/` runners it was written for and the
-#: wrong one here, where the reader that measures answers is a person or an agent behind
-#: `--reader file`. A banner naming a flag this program does not have is worse than no
-#: banner: it reads as a way out and there isn't one.
-STUB_READER_HERE = """\
-  In THIS harness the flag is `--reader file`, and the answerer is a person or an
-  agent rather than an API. There is no `--reader anthropic` here."""
-
 #: Everything the containment judge gets wrong here, printed on every run that uses it.
 #: Longer than `evalkit.stub_caveat`'s one line because this harness asks the judge a
 #: second question it was never designed for — "did the answer give the trap" — and the
@@ -431,12 +466,52 @@ CONTAINMENT_CAVEAT = """\
   instrument does."""
 
 
+def run_header(reader: ek.Reader, judge: ek.Judge, arms: Mapping[str, Arm]) -> str:
+    """What a run is quoted with, printed under the title.
+
+    Nothing for the stub, which has no parameters and whose report is pinned byte for
+    byte by `test_the_offline_run_is_identical_twice`. For every other reader: the
+    reader and its pinned parameters (`ek.run_settings_block`), the judge, which arm is
+    the floor and which the ceiling — a memory score without both beside it is
+    uninterpretable, and a narrowed run has to say what it lacks rather than be read as
+    if it had them — and what the checkpoint replayed.
+    """
+    if getattr(reader, "is_stub", False):
+        return ""
+    lines = [ek.run_settings_block(reader) or f"  reader {reader.name}"]
+    # A model judge prints its own parameters: it is the reader's twin by construction
+    # on the hosted path, but the header should say so rather than have it inferred.
+    judge_lines = ek.reader_settings_lines(getattr(judge, "reader", judge),
+                                           sampling_note=False)
+    lines.append(f"  judge {judge.name}" + (":" if judge_lines else ""))
+    lines += judge_lines
+    memory = [name for name in arms if name not in ("none", "full_transcript")]
+    lines.append("  " + "   ".join([
+        "floor: none" if "none" in arms else "NO FLOOR ARM in this run",
+        ("ceiling: full_transcript (a reader ceiling, not a memory result)"
+         if "full_transcript" in arms else "NO CEILING ARM in this run"),
+    ]))
+    lines.append("  " + ("measurement: " + ", ".join(memory) if memory
+                         else "NO MEMORY ARM in this run"))
+    if "none" not in arms or "full_transcript" not in arms:
+        lines.append("  A memory score with no floor and no ceiling beside it is "
+                     "uninterpretable. Run all five arms.")
+    note = ek.checkpoint_note(reader)
+    if note:
+        lines.append(note)
+    return "\n".join(lines)
+
+
 def report(items: Sequence[Item], scored: Sequence[Scored], *, reader: ek.Reader,
-           judge: ek.Judge, arms: Mapping[str, Arm] | None = None) -> str:
+           judge: ek.Judge, arms: Mapping[str, Arm] | None = None,
+           ledger: ek.TokenLedger | None = None) -> str:
     """The whole result, including everything that makes it less than it looks."""
     arms = resolve_arms(arms)
     order = list(arms)
     out = ["", "  five-arm answer quality, blinded", ""]
+    header = run_header(reader, judge, arms)
+    if header:
+        out += [header, ""]
     out.append(size_table(items, arms))
 
     degraded = sorted({i.arm for i in items if i.context.degraded})
@@ -493,11 +568,16 @@ def report(items: Sequence[Item], scored: Sequence[Scored], *, reader: ek.Reader
             "  `trapped` says it gave the specific superseded value the product claims to",
             "  prevent, and that is the only column a before/after claim can rest on.", ""]
 
+    if ledger is not None and hosted(reader) and ledger.rows():
+        # Tokens, dollars and the answers that never finished, from the usage the
+        # provider reported. Only for a model: the stub and the file reader spend nothing
+        # and a cost block for them would be a table of zeros under a heading that reads
+        # as a finding.
+        out += [ek.cost_block(ledger)]
+
     caveat = ek.stub_caveat(reader, judge)
     if caveat:
         out += [caveat, ""]
-    if getattr(reader, "is_stub", False):
-        out += [STUB_READER_HERE, ""]
     if isinstance(judge, ek.ContainmentJudge):
         out += [CONTAINMENT_CAVEAT, ""]
     return "\n".join(out)
@@ -515,61 +595,92 @@ def write_jsonl(path: str | Path, scored: Sequence[Scored]) -> None:
 
 @dataclass(frozen=True)
 class Offline:
-    """One end-to-end run with nothing outside this process in it.
+    """One end-to-end run with the answerer inside this process.
 
     Carries the reader and the judge as well as the rows because `report` needs both to
     print the right caveats, and a caller that had to rebuild them could rebuild them
-    differently from the run they are describing.
+    differently from the run they are describing. The ledger is what the run cost, from
+    the usage the provider reported; `None` only when a caller scored without one.
     """
 
     items: tuple[Item, ...]
     scored: tuple[Scored, ...]
     reader: ek.Reader
     judge: ek.Judge
+    ledger: ek.TokenLedger | None = None
 
     def report(self, *, arms: Mapping[str, Arm] | None = None) -> str:
         return report(list(self.items), list(self.scored), reader=self.reader,
-                      judge=self.judge, arms=arms)
+                      judge=self.judge, arms=arms, ledger=self.ledger)
+
+
+def in_process(questions: Sequence[Question], turns: Sequence[Turn], *,
+               reader: ek.Reader, judge: ek.Judge,
+               arms: Mapping[str, Arm] | None = None,
+               concurrency: int = 1) -> Offline:
+    """Plan, answer and score in one process: the stub, or a model behind an API.
+
+    The dump/answers round trip exists because a person or an agent cannot be in this
+    process. A stub can, and so can a model behind an API, which reads one prompt at a
+    time and has no memory between them — so blinding has nothing to protect against
+    here and skipping it is not a shortcut. `FileReader`'s shuffle defends against an
+    answerer who can read the file; neither of these can.
+    """
+    items = plan(questions, turns, arms=arms)
+    ledger = ek.TokenLedger()
+    scored = score(items, questions, reader=reader, judge=judge, ledger=ledger,
+                   concurrency=concurrency)
+    return Offline(items=tuple(items), scored=tuple(scored), reader=reader, judge=judge,
+                   ledger=ledger)
 
 
 def offline(questions: Sequence[Question], turns: Sequence[Turn], *,
             arms: Mapping[str, Arm] | None = None,
             reader: ek.Reader | None = None,
             judge: ek.Judge | None = None) -> Offline:
-    """Plan, answer, and score in one process, with no key and no file.
-
-    The dump/answers round trip exists because the answerer is a person or a model and
-    neither is in this process. A stub reader is, so blinding has nothing to protect
-    against here and skipping it is not a shortcut — `FileReader`'s shuffle defends
-    against an answerer who can read the file, and `StubReader` reads one prompt at a time
-    and has no memory between them.
+    """`in_process` with the stub reader and the containment judge: no key, no file.
 
     What this path is *for* is repeatability: it is deterministic end to end, so two runs
     of it differ only where the library does, which is the property a test can assert and
     a `git bisect` can use. Its accuracy column is not a measurement of anything — see the
     module docstring and `evalkit.StubReader`.
     """
-    items = plan(questions, turns, arms=arms)
-    reader = ek.StubReader() if reader is None else reader
-    judge = ek.ContainmentJudge() if judge is None else judge
-    scored = score(items, questions, reader=reader, judge=judge)
-    return Offline(items=tuple(items), scored=tuple(scored), reader=reader, judge=judge)
+    return in_process(questions, turns, arms=arms,
+                      reader=ek.StubReader() if reader is None else reader,
+                      judge=ek.ContainmentJudge() if judge is None else judge)
 
 
 # --- CLI ------------------------------------------------------------------------
 
 
-def build_judge(name: str, *, model: str | None = None) -> ek.Judge:
+def build_reader(args: Any) -> ek.Reader:
+    """The in-process reader `--reader` names: the stub, or a model with its parameters
+    pinned by the `ek.add_reader_arguments` flags, checkpointed when `--checkpoint` was
+    given. The file reader is built where its two phases are, in `main`."""
+    reader = ek.StubReader() if args.reader == "stub" else ek.hosted_reader(args.reader, args)
+    if args.checkpoint:
+        return ek.CheckpointedReader(reader, ek.Checkpoint(args.checkpoint))
+    return reader
+
+
+def build_judge(name: str, *, model: str | None = None,
+                like: ek.Reader | None = None) -> ek.Judge:
     """The judge, by name. Containment works today; llm works the moment a key exists.
+
+    `like` is the reader to build the model judge from: its twin on the same provider
+    with the same pinned parameters and `model` swapped in, so a run states one
+    configuration. Without one — a direct call with nothing to mirror — the judge is an
+    `AnthropicReader` on its defaults.
 
     Not `evalkit.build_judge`: that one refuses an `LLMJudge` beside a `FileReader`,
     because in its runners the reader and the judge would be the same party. Here they
-    never are — the reader is always the file round trip and the judge is always a
-    separate model — so the refusal does not apply, and the configuration it forbids is
-    the only correct one.
+    never are — on the file round trip the reader is a person and the judge a model —
+    so the refusal does not apply, and the configuration it forbids is the correct one.
     """
     if name == "containment":
         return ek.ContainmentJudge()
+    if like is not None:
+        return ek.LLMJudge(like.spawn(model))
     return ek.LLMJudge(ek.AnthropicReader(model=model or "claude-opus-5"))
 
 
@@ -592,10 +703,13 @@ def load_scenario() -> tuple[list[Question], list[Turn]]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Blinded five-arm answer-quality run.")
-    parser.add_argument("--reader", default="file", choices=["file", "stub"],
-                        help="file: the two-phase blinded round trip, and the only "
-                             "configuration that measures answers. stub: one offline, "
-                             "deterministic process, for checking the pipeline runs")
+    parser.add_argument("--reader", default="file",
+                        choices=["file", "stub", "anthropic", "openai"],
+                        help="file: the two-phase blinded round trip for a person or an "
+                             "agent. stub: one offline, deterministic process, for "
+                             "checking the pipeline runs. anthropic | openai: a model "
+                             "behind an API, in one process — the measurement; pin it "
+                             "with --model and the flags beside it")
     parser.add_argument("--dump", metavar="PATH", default=None,
                         help="the blinded dump: written in phase one, and read for its "
                              "key file in phase two. Required by --reader file")
@@ -604,24 +718,42 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=20260813,
                         help="shuffle seed, recorded in the key file")
     parser.add_argument("--judge", default="containment", choices=["containment", "llm"])
-    parser.add_argument("--judge-model", default=None)
+    parser.add_argument("--judge-model", default=None,
+                        help="model for --judge llm: the reader's twin with this model "
+                             "swapped in. Defaults to the reader's own model on a hosted "
+                             "reader, and to claude-opus-5 on the file round trip")
     parser.add_argument("--out", default=None, help="write per-question JSONL here")
+    # --model, --effort, --max-tokens, --thinking, --temperature, --sampling-seed,
+    # --concurrency and --checkpoint: one definition, shared with the bench/ runners.
+    ek.add_reader_arguments(parser)
     args = parser.parse_args(argv)
 
     questions, turns = load_scenario()
 
-    if args.reader == "stub":
-        # Deliberately ignores --dump and --answers rather than refusing them: the two
-        # readers answer different questions, and a run that is told to blind itself
-        # against a stub has nothing to blind. --judge is honoured, because a model judge
-        # over stub answers is a real thing to want when debugging the judge itself.
-        run = offline(questions, turns,
-                      judge=build_judge(args.judge, model=args.judge_model))
+    if args.reader != "file":
+        # The stub and the hosted readers share one path, because both are inside this
+        # process. It deliberately ignores --dump and --answers rather than refusing
+        # them: those belong to the round trip, and a run that is told to blind itself
+        # against a reader that cannot read the file has nothing to blind. --judge llm
+        # grades with the reader's twin on the hosted path; over stub answers it is an
+        # Anthropic judge on the same flags, a real thing to want when debugging the
+        # judge itself.
+        reader = build_reader(args)
+        like = None
+        if args.judge == "llm":
+            like = reader if hosted(reader) else ek.hosted_reader("anthropic", args)
+        judge = build_judge(args.judge, model=args.judge_model, like=like)
+        run = in_process(questions, turns, reader=reader, judge=judge,
+                         concurrency=args.concurrency)
         print(run.report())
         if args.out:
             write_jsonl(args.out, run.scored)
         return 0
 
+    if args.checkpoint or args.concurrency > 1:
+        parser.error("--checkpoint and --concurrency apply to --reader anthropic, openai "
+                     "or stub. The file round trip is its own resume mechanism, and its "
+                     "answerer is outside this process.")
     if args.dump is None:
         parser.error("--dump is required by --reader file")
 
@@ -645,7 +777,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     reader = ek.FileReader(answers=args.answers)
-    judge = build_judge(args.judge, model=args.judge_model)
+    judge = build_judge(args.judge, model=args.judge_model,
+                        like=ek.hosted_reader("anthropic", args) if args.judge == "llm"
+                        else None)
     scored = score(items, questions, reader=reader, judge=judge)
     print(report(items, scored, reader=reader, judge=judge))
     if args.out:

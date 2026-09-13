@@ -417,27 +417,58 @@ BASELINE_EMBED_DIM = ek.BASELINE_EMBED_DIM
 build_embedder = ek.build_embedder
 
 
-def answer_one(
+@dataclass(slots=True)
+class Pending:
+    """One question with its context retrieved and its prompt built, awaiting a reader.
+
+    The store is touched only while these are built. That split is what lets the model
+    calls that follow run `concurrency` at a time: nothing in `finish_one` needs a
+    store, a lock or an order, and the store is closed before the first call goes out.
+    """
+
+    qa: LocomoQA
+    qid: str
+    context: str
+    prompt: str
+    retrieval_ms: float
+
+
+def prepare_one(
     mem: Memvara,
     qa: LocomoQA,
     haystack: str,
     *,
-    reader: ek.Reader,
-    judge: ek.Judge | None,
-    ledger: ek.TokenLedger,
     budget: ek.RetrievalBudget,
     source: ek.ContextSource,
     read_stats: ek.RetrievalStats,
-    stem: Callable[[str], str] | None,
     qid: str,
-) -> ek.QuestionResult:
+) -> Pending:
+    """Retrieve and build the prompt for one question. Sequential: it reads the store."""
     context, ms, hits = ek.retrieve(mem, qa.question, budget, source, haystack)
     read_stats.record(ms, len(context), hits, len(haystack))
-    out = reader.answer(SYSTEM, ek.build_prompt(qa.question, context))
-    ledger.record("reader", out)
+    return Pending(qa=qa, qid=qid, context=context,
+                   prompt=ek.build_prompt(qa.question, context), retrieval_ms=ms)
+
+
+def finish_one(
+    pending: Pending,
+    *,
+    reader: ek.Reader,
+    judge: ek.Judge | None,
+    stem: Callable[[str], str] | None,
+) -> tuple[ek.QuestionResult, list[tuple[str, ek.Answer]]]:
+    """Answer and score one prepared question. May run in a pool; shares nothing.
+
+    Returns the reader's and the judge's `Answer` beside the result instead of billing
+    them, so `ek.score_in_order` can record them in question order on its own thread and
+    the ledger comes out identical whatever the concurrency was.
+    """
+    qa = pending.qa
+    out = reader.answer(SYSTEM, pending.prompt)
+    calls = [("reader", out)]
 
     result = ek.QuestionResult(
-        qid=qid,
+        qid=pending.qid,
         category=CATEGORIES.get(qa.category, f"category-{qa.category}"),
         question=qa.question,
         # An adversarial item has no gold and its `adversarial_answer` is the bait, not
@@ -447,21 +478,21 @@ def answer_one(
         prediction=out.text,
         is_abstention=qa.is_adversarial,
         did_abstain=ek.abstained(out.text),
-        context_chars=len(context),
-        retrieval_ms=ms,
+        context_chars=len(pending.context),
+        retrieval_ms=pending.retrieval_ms,
     )
     if qa.is_adversarial:
         result.judged = result.did_abstain
-        return result
+        return result, calls
 
     result.f1 = ek.token_f1(out.text, qa.answer, stem)
     result.bleu1 = ek.bleu1(out.text, qa.answer, stem)
     result.exact = ek.exact_match(out.text, qa.answer, stem)
     if judge is not None:
         ok, verdict = judge.judge(qa.question, qa.answer, out.text, result.category)
-        ledger.record("judge", verdict)
+        calls.append(("judge", verdict))
         result.judged = ok
-    return result
+    return result, calls
 
 
 def run(
@@ -479,6 +510,7 @@ def run(
     rerank_top_n: int = 0,
     embedder: Any = None,
     w_temporal: float = 0.0,
+    concurrency: int = 1,
 ) -> tuple[list[ek.QuestionResult], ek.IngestStats, ek.RetrievalStats, ek.TokenLedger]:
     """The answer pipeline. Takes the same read-path configuration as `run_retrieval`.
 
@@ -491,10 +523,18 @@ def run(
     never. Two runs differing only in those flags produced byte-identical answers,
     which is how this was found. An answer-quality number is the expensive one to
     produce, and it was the one whose read path could not be stated.
+
+    Two phases. Every conversation is ingested and every question's context retrieved
+    first, one at a time, because those touch a store; then the model calls are made
+    `concurrency` at a time and billed in question order (`ek.score_in_order`). At the
+    default of 1 nothing runs on another thread. Resuming a run that died is the
+    reader's job, not this function's: wrap it in `ek.CheckpointedReader`, which
+    `--checkpoint` does.
     """
     budget = budget or ek.RetrievalBudget()
     ledger = ledger or ek.TokenLedger()
-    totals, read_stats, results = ek.IngestStats(), ek.RetrievalStats(), []
+    totals, read_stats = ek.IngestStats(), ek.RetrievalStats()
+    pending: list[Pending] = []
 
     for sample in samples:
         mem = build_memory(sample, budget, llm, reranker=reranker,
@@ -510,17 +550,20 @@ def run(
                                       if not s.raw_when or parse_when(s.raw_when) is None)
             totals.merge(stats)
             for qa in sample.qa:
-                if limit and len(results) >= limit:
+                if limit and len(pending) >= limit:
                     break
-                results.append(answer_one(
-                    mem, qa, haystack, reader=reader, judge=judge, ledger=ledger,
-                    budget=budget, source=source, read_stats=read_stats, stem=stem,
-                    qid=f"{sample.sample_id}:{qa.index}",
+                pending.append(prepare_one(
+                    mem, qa, haystack, budget=budget, source=source,
+                    read_stats=read_stats, qid=f"{sample.sample_id}:{qa.index}",
                 ))
         finally:
             mem.close()
-        if limit and len(results) >= limit:
+        if limit and len(pending) >= limit:
             break
+
+    results = ek.score_in_order(
+        lambda item: finish_one(item, reader=reader, judge=judge, stem=stem),
+        pending, ledger=ledger, concurrency=concurrency)
     return results, totals, read_stats, ledger
 
 
@@ -658,6 +701,11 @@ def report(
         f"  reader={reader.name}  judge={judge.name if judge else 'none'}  "
         f"context={source.value}  k={budget.k}  max_chars={budget.max_chars}  "
         f"stem={'porter' if stemmed else 'none'}",
+        # The pinned reader parameters and the checkpoint's replay count, present only
+        # when there is a model or a checkpoint to describe, so a stub run's report is
+        # the report it always was.
+        *[line for line in (ek.run_settings_block(reader), ek.checkpoint_note(reader))
+          if line],
         "",
         ek.render_table(["category", "n", "F1", "BLEU-1", "judge"], rows) if rows
         else "  no answerable questions in this slice",
@@ -788,7 +836,7 @@ def main(argv: Sequence[str] | None = None,
         source=ek.ContextSource(args.context), limit=args.limit,
         ledger=ek.build_ledger(args, reader), stem=ek.build_stemmer(args),
         reranker=reranker, rerank_top_n=args.rerank, embedder=embedder,
-        w_temporal=args.w_temporal,
+        w_temporal=args.w_temporal, concurrency=args.concurrency,
     )
     if getattr(reader, "dumping", False):
         # The dump phase has no answers yet, so every result is empty. Printing the

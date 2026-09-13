@@ -9,6 +9,25 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`demo/harness.py` can put a model behind an API in the reader's seat.** `--reader
+  anthropic` and `--reader openai` answer every arm's questions in one process, with the
+  model id, effort, output budget and thinking setting (Anthropic) or temperature and seed
+  (OpenAI) pinned by flags and printed under the report's title, so a run can be repeated
+  by somebody else. `--judge llm` grades with the reader's twin on the same provider. The
+  report names the floor and the ceiling arm beside the memory arms, prices the run from
+  the usage the provider reported, and counts truncated and refused answers apart from
+  wrong ones; each per-question row carries the reader's `stop_reason`. The stub run's
+  report is unchanged apart from a banner that had become false.
+- **Hosted benchmark runs resume and run in parallel.** `--checkpoint PATH` appends every
+  completed model call to a JSONL file as it completes, and a re-run with the same path
+  replays those calls instead of paying for them again; `--concurrency N` issues N calls
+  at once, with the results and the cost ledger assembled in question order, so the report
+  is identical whatever N is. Both flags are shared by `bench/locomo.py`,
+  `bench/longmemeval.py` and `demo/harness.py`, and every flag that pins a reader is now
+  defined once, in `evalkit.add_reader_arguments`.
+
 ### Changed
 
 - **The LongMemEval harness now hands each question's day to retrieval, so the temporal
@@ -66,6 +85,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `docs/BENCHMARKS.md` carries every cell. `bench/anchoring.py` ingests through the same
   path, so its three `anchored + graph leg` rows were re-measured on the same day and
   moved by about a point, to 55.0, 54.8 and 55.0; the other six rows did not move.
+
+- **`claude-sonnet-5` is priced at $2 / $10 per million tokens in `bench/evalkit.py`'s
+  price table**, not $3 / $15. The rise announced for 1 September 2026 was cancelled and
+  the launch price is the standard one, so a cost printed for a Sonnet 5 run was half
+  again too high.
+- **`--judge-model` builds the judge from the reader** — the same provider, effort,
+  output budget and thinking setting with only the model swapped — instead of a bare
+  Anthropic reader carrying the effort alone, and it now works with `--reader openai`.
 
 ## [0.14.0] — 2026-09-14
 

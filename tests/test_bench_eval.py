@@ -2422,3 +2422,476 @@ def test_every_reranker_reports_a_name_that_identifies_it():
     coverage = ek.build_reranker(_RerankArgs(rerank=20, reranker="coverage"))
     null = ek.build_reranker(_RerankArgs(rerank=20, reranker="null"))
     assert getattr(coverage, "name", None) and getattr(null, "name", None)
+
+
+# --- checkpoint, bounded concurrency, and the reader settings a run is quoted with ---
+#
+# A hosted run used to be one foreground process that issued every model call in turn
+# and wrote nothing until it finished, so a LOCOMO run that died two hours in left
+# nothing behind. The three pieces below fix that in the shared machinery: every
+# completed call is appended to a JSONL checkpoint as it completes, a re-run with the
+# same path replays those calls instead of paying for them again, and the reader and
+# judge calls can be issued `--concurrency N` at a time. Each test here names the way
+# one of those could go wrong in a direction that would look fine in the report.
+
+
+def _answer(text: str = "Lisbon", **kw) -> ek.Answer:
+    return ek.Answer(text, model="scripted", input_tokens=10, output_tokens=2, **kw)
+
+
+def test_a_call_id_changes_with_the_system_prompt_and_with_the_pinned_settings():
+    """The checkpoint key has to cover everything that changes what a call returns.
+
+    `item_id` hashes the user prompt alone, which is right for a blinded dump — the
+    answerer must not be able to tell arms apart by id — and wrong for a checkpoint: two
+    calls with the same prompt under different system prompts, or the same prompt sent
+    to a different model, are different calls, and replaying one as the other would score
+    an answer nobody asked for. A changed `--model` or `--effort` therefore never replays
+    the previous configuration's answers; it starts a fresh set of rows.
+    """
+    base = ek.call_id({"model": "a"}, "sys", "prompt")
+    assert base == ek.call_id({"model": "a"}, "sys", "prompt")
+    assert base != ek.call_id({"model": "b"}, "sys", "prompt")
+    assert base != ek.call_id({"model": "a"}, "other system", "prompt")
+    assert base != ek.call_id({"model": "a"}, "sys", "other prompt")
+    assert len(base) == 16
+
+
+def test_a_checkpoint_appends_one_row_per_completed_call_and_reloads_them(tmp_path):
+    """Written as each call completes, not when the run ends.
+
+    The whole point is that a run killed halfway leaves its paid-for answers on disk, so
+    the file has to grow by one line per call and be readable by a fresh process at any
+    moment. The reloaded answer carries the tokens and the stop reason, so a resumed run
+    prices the calls it did not repeat and still counts a truncation it did not repeat.
+    """
+    path = tmp_path / "run.jsonl"
+    checkpoint = ek.Checkpoint(path)
+    assert checkpoint.loaded == 0 and not path.exists()
+    checkpoint.put("k1", _answer("Lisbon", stop_reason="end_turn"))
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 1
+    checkpoint.put("k2", _answer("", stop_reason="max_tokens", cache_read_tokens=5))
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
+
+    again = ek.Checkpoint(path)
+    assert again.loaded == 2
+    replayed = again.get("k2")
+    assert replayed is not None
+    assert (replayed.text, replayed.stop_reason) == ("", "max_tokens")
+    assert (replayed.model, replayed.input_tokens, replayed.output_tokens,
+            replayed.cache_read_tokens) == ("scripted", 10, 2, 5)
+    assert again.get("k3") is None
+
+
+def test_a_checkpoint_keeps_the_first_row_for_an_id_and_skips_an_unreadable_line(tmp_path):
+    """A run killed mid-write leaves a torn last line; that must not make the file useless.
+
+    Refusing the whole file would throw away every answer it holds exactly when they are
+    needed, so an unreadable line is skipped and counted, and the note the report prints
+    says how many calls will be repeated because of it. A duplicate id can only come from
+    two identical prompts answered in the same run under concurrency, so the first row
+    wins and the second is ignored rather than refused — unlike `FileReader`, where a
+    duplicate means a hand-assembled file whose intent is unrecoverable.
+    """
+    path = tmp_path / "run.jsonl"
+    rows = [
+        {"id": "k1", "answer": "first", "model": "m"},
+        {"id": "k1", "answer": "second", "model": "m"},
+        '{"id": "k2", "answer": "torn',
+        {"id": "k3", "answer": "whole", "model": "m", "stop_reason": "end_turn"},
+    ]
+    path.write_text("\n".join(json.dumps(r) if isinstance(r, dict) else r
+                              for r in rows) + "\n", encoding="utf-8")
+    checkpoint = ek.Checkpoint(path)
+    assert checkpoint.loaded == 2 and checkpoint.unreadable == 1
+    assert checkpoint.get("k1").text == "first"
+    assert checkpoint.get("k3").stop_reason == "end_turn"
+    # A put for an id already on disk is a no-op: nothing is appended twice.
+    checkpoint.put("k1", _answer("third"))
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 4
+
+
+def test_a_checkpointed_reader_replays_a_stored_answer_without_calling_the_model(tmp_path):
+    """The resumed run must not pay again, and it must not answer differently.
+
+    A scripted reader that would give a *different* answer on the second call is the
+    honest double here: if the wrapper ever fell through to the inner reader on a hit,
+    the replayed text would change and the inner call count would grow.
+    """
+    inner = _ScriptedReader(["Lisbon", "Porto"])
+    checkpoint = ek.Checkpoint(tmp_path / "run.jsonl")
+    reader = ek.CheckpointedReader(inner, checkpoint)
+    first = reader.answer("sys", "prompt")
+    second = reader.answer("sys", "prompt")
+    assert (first.text, second.text) == ("Lisbon", "Lisbon")
+    assert len(inner.prompts) == 1
+    assert (reader.calls, reader.replayed) == (2, 1)
+    assert (reader.name, reader.is_stub, reader.is_human) == ("scripted", False, False)
+
+    # A fresh process, a fresh inner reader, the same file: still no model call.
+    resumed = ek.CheckpointedReader(_ScriptedReader(["Porto"]),
+                                    ek.Checkpoint(tmp_path / "run.jsonl"))
+    assert resumed.answer("sys", "prompt").text == "Lisbon"
+    assert resumed.replayed == 1
+
+
+def test_a_checkpointed_reader_carries_the_inner_readers_model_and_settings():
+    """`build_ledger` prices by `reader.model` and the report header prints
+    `settings()`; a wrapper that hid either would report a hosted run as a stub's."""
+    inner = ek.AnthropicReader(model="claude-opus-5", client=_FakeAnthropic())
+    reader = ek.CheckpointedReader(inner, ek.Checkpoint(Path("unused.jsonl")))
+    assert reader.model == "claude-opus-5"
+    assert reader.settings() == inner.settings()
+    spawned = reader.spawn("claude-sonnet-5")
+    assert isinstance(spawned, ek.CheckpointedReader)
+    assert spawned.model == "claude-sonnet-5" and spawned.checkpoint is reader.checkpoint
+
+
+def test_a_replayed_answer_is_billed_so_the_ledger_prices_the_whole_run(tmp_path):
+    """The number a run is quoted with is what the run cost, summed over every resume.
+
+    If replayed calls were not recorded, a run that took three resumes to finish would
+    print a third of its true cost under a heading that reads as the whole. The report
+    separately says how many calls were replayed, so this invocation's own spend is
+    still recoverable.
+    """
+    checkpoint = ek.Checkpoint(tmp_path / "run.jsonl")
+    checkpoint.put(ek.call_id({"reader": "scripted"}, "sys", "p"),
+                   _answer("x", stop_reason="max_tokens"))
+    reader = ek.CheckpointedReader(_ScriptedReader([]), checkpoint)
+    ledger = ek.TokenLedger()
+    ledger.record("reader", reader.answer("sys", "p"))
+    assert ledger.by_role["reader"]["scripted"].input_tokens == 10
+    assert ledger.stops[("reader", "max_tokens")] == 1
+    assert "replayed 1 of 1" in ek.checkpoint_note(reader)
+    assert ek.checkpoint_note(_ScriptedReader([])) == ""
+
+
+def test_the_checkpoint_note_tells_a_resumed_row_from_a_repeat_within_the_run(tmp_path):
+    """Two arms giving the byte-identical answer to one question put the byte-identical
+    grading call to the judge, and the second reuses the first's verdict. That is a hit
+    too, and on a run that never died "replayed 120 calls" would read as a resume — so
+    the note counts the two kinds apart, and the stale-rows warning fires only when
+    rows from an earlier run matched nothing, never on a fresh file."""
+    path = tmp_path / "run.jsonl"
+    reader = ek.CheckpointedReader(_ScriptedReader(["a"]), ek.Checkpoint(path))
+    reader.answer("sys", "same")
+    reader.answer("sys", "same")
+    note = ek.checkpoint_note(reader)
+    assert "replayed 1 of 2" in note and "1 repeats of a call made earlier" in note
+    assert "already on disk" not in note and "NONE of the" not in note
+
+    resumed = ek.CheckpointedReader(_ScriptedReader([]), ek.Checkpoint(path))
+    resumed.answer("sys", "same")
+    note = ek.checkpoint_note(resumed)
+    assert "replayed 1 of 1" in note and "1 from rows already on disk" in note
+
+    # A file from another configuration: every row present, none matching.
+    stale = ek.CheckpointedReader(_ScriptedReader(["b"]), ek.Checkpoint(path))
+    stale.answer("other system", "same")
+    assert "NONE of the 1 rows" in ek.checkpoint_note(stale)
+
+
+def test_parallel_map_returns_results_in_input_order_whatever_order_they_finish_in():
+    """A pool that returned answers as they completed would pair them with the wrong
+    questions, and every score would still be a plausible number."""
+    import threading
+
+    gate = threading.Barrier(3, timeout=5)
+
+    def call(i: int) -> int:
+        # All three arrive at the barrier together, so completion order is up to the
+        # scheduler rather than to submission order.
+        gate.wait()
+        return i * 10
+
+    assert ek.parallel_map(call, [0, 1, 2], concurrency=3) == [0, 10, 20]
+
+
+def test_parallel_map_at_concurrency_one_runs_on_the_calling_thread():
+    """The offline path must stay exactly what it was: no pool, no thread, so the stub
+    run remains byte-for-byte the run it was before concurrency existed."""
+    import threading
+
+    seen: list[str] = []
+    out = ek.parallel_map(lambda i: seen.append(threading.current_thread().name) or i,
+                          [1, 2], concurrency=1)
+    assert out == [1, 2]
+    assert seen == [threading.current_thread().name] * 2
+
+
+def test_parallel_map_issues_n_calls_at_once_and_no_more():
+    """`--concurrency 3` means three model calls in flight, which a barrier of three can
+    prove without sleeping: it only opens when all three have arrived. A bound of two
+    would deadlock here, so the barrier's timeout is the assertion."""
+    import threading
+
+    gate = threading.Barrier(3, timeout=5)
+    in_flight, peak = [0], [0]
+    lock = threading.Lock()
+
+    def call(i: int) -> int:
+        with lock:
+            in_flight[0] += 1
+            peak[0] = max(peak[0], in_flight[0])
+        gate.wait()
+        with lock:
+            in_flight[0] -= 1
+        return i
+
+    assert ek.parallel_map(call, range(6), concurrency=3) == list(range(6))
+    assert peak[0] == 3
+
+
+def test_parallel_map_raises_the_first_error_after_letting_in_flight_calls_finish():
+    """A rate-limit error must surface, not be swallowed into an empty answer.
+
+    Calls already running are allowed to complete — their checkpoint rows are the whole
+    reason to let them — and the ones still queued are cancelled rather than started.
+    """
+    started: list[int] = []
+
+    def call(i: int) -> int:
+        started.append(i)
+        if i == 0:
+            raise RuntimeError("429 from the provider")
+        return i
+
+    with pytest.raises(RuntimeError, match="429"):
+        ek.parallel_map(call, range(50), concurrency=2)
+    assert len(started) < 50
+
+
+def test_the_anthropic_reader_reports_every_parameter_it_pins_and_spawns_a_twin():
+    """What the header prints is what was sent, and a judge built from the reader keeps
+    everything but the model — so a `--judge-model` run states one configuration."""
+    client = _FakeAnthropic()
+    reader = ek.AnthropicReader(model="claude-opus-5", client=client, effort="medium",
+                                max_tokens=2048, thinking={"type": "adaptive"})
+    assert reader.settings() == {"model": "claude-opus-5", "effort": "medium",
+                                 "max_tokens": 2048, "thinking": {"type": "adaptive"}}
+    twin = reader.spawn("claude-sonnet-5")
+    assert twin.settings() == {**reader.settings(), "model": "claude-sonnet-5"}
+    assert twin._client is client
+    lines = "\n".join(ek.reader_settings_lines(reader))
+    assert "model=claude-opus-5" in lines and "effort=medium" in lines
+    assert "max_tokens=2048" in lines and "adaptive" in lines
+    # Nothing was sampled, and the header has to say so rather than leave a reader of
+    # the report wondering which temperature was used.
+    assert "temperature" in lines and "not accepted" in lines
+
+
+def test_the_anthropic_reader_prints_that_thinking_was_left_to_the_model_when_unset():
+    reader = ek.AnthropicReader(client=_FakeAnthropic())
+    assert reader.settings()["thinking"] is None
+    assert "thinking=not sent" in "\n".join(ek.reader_settings_lines(reader))
+
+
+def test_the_openai_reader_sends_a_seed_only_when_one_was_pinned():
+    """`seed` is the one sampling parameter that provider accepts, so it is pinned when
+    asked for and absent otherwise — an unrequested default seed would silently make
+    every OpenAI run a seeded one and the header would not say so."""
+    client = _FakeOpenAI()
+    ek.OpenAIReader(client=client).answer("s", "p")
+    assert "seed" not in client.seen
+    seeded = ek.OpenAIReader(client=client, seed=7, temperature=0.5, max_tokens=64)
+    seeded.answer("s", "p")
+    assert client.seen["seed"] == 7 and client.seen["temperature"] == 0.5
+    assert seeded.settings() == {"model": "gpt-4.1", "max_tokens": 64,
+                                 "temperature": 0.5, "seed": 7}
+    assert seeded.spawn("gpt-4.1-mini").settings()["seed"] == 7
+    lines = "\n".join(ek.reader_settings_lines(seeded))
+    assert "seed=7" in lines and "temperature=0.5" in lines
+
+
+def test_a_stub_or_file_reader_has_no_settings_to_print():
+    assert ek.reader_settings_lines(ek.StubReader()) == []
+    assert ek.checkpoint_note(ek.StubReader()) == ""
+
+
+def test_build_reader_pins_thinking_max_tokens_and_the_sampling_flags(monkeypatch):
+    """Every flag the header prints has to reach the reader, or the header lies."""
+    sdk = type(sys)("anthropic")
+    sdk.Anthropic = lambda: _FakeAnthropic()
+    monkeypatch.setitem(sys.modules, "anthropic", sdk)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    reader = ek.build_reader(_Args(reader="anthropic", thinking="disabled",
+                                   max_tokens=512, effort="high"))
+    assert isinstance(reader, ek.AnthropicReader)
+    assert reader.settings() == {"model": "claude-opus-5", "effort": "high",
+                                 "max_tokens": 512, "thinking": {"type": "disabled"}}
+    assert ek.build_reader(_Args(reader="anthropic", thinking="adaptive")).thinking == {
+        "type": "adaptive"}
+
+    oai = type(sys)("openai")
+    oai.OpenAI = lambda: _FakeOpenAI()
+    monkeypatch.setitem(sys.modules, "openai", oai)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    reader = ek.build_reader(_Args(reader="openai", temperature=0.2, sampling_seed=3,
+                                   max_tokens=99))
+    assert isinstance(reader, ek.OpenAIReader)
+    assert reader.settings() == {"model": "gpt-4.1", "max_tokens": 99,
+                                 "temperature": 0.2, "seed": 3}
+
+
+def test_build_reader_wraps_the_reader_in_a_checkpoint_when_a_path_is_given(tmp_path):
+    reader = ek.build_reader(_Args(reader="stub", checkpoint=str(tmp_path / "c.jsonl")))
+    assert isinstance(reader, ek.CheckpointedReader)
+    assert reader.is_stub and isinstance(reader.inner, ek.StubReader)
+    assert not isinstance(ek.build_reader(_Args(reader="stub")), ek.CheckpointedReader)
+
+
+def test_build_reader_refuses_a_checkpoint_beside_the_file_reader(tmp_path):
+    """The file round trip already is a resume mechanism, and a checkpoint wrapped
+    around a dump-mode reader would store its empty placeholder answers and replay
+    them over the real ones on the next run."""
+    with pytest.raises(SystemExit, match="--checkpoint"):
+        ek.build_reader(_Args(reader="file", dump=str(tmp_path / "d.jsonl"),
+                              checkpoint=str(tmp_path / "c.jsonl")))
+
+
+def test_a_judge_model_builds_the_judge_on_the_readers_own_provider_and_settings():
+    """`--judge-model` used to construct a bare `AnthropicReader` with the reader's
+    effort and nothing else, and only when the reader was Anthropic. The judge is now
+    the reader's twin with the model swapped, so one run has one stated configuration
+    and an OpenAI reader gets an OpenAI judge."""
+    reader = ek.AnthropicReader(client=_FakeAnthropic(), max_tokens=777,
+                                thinking={"type": "adaptive"})
+    judge = ek.build_judge(_Args(judge="llm", judge_model="claude-sonnet-5",
+                                 reader="anthropic"), reader)
+    assert isinstance(judge, ek.LLMJudge)
+    assert judge.reader.settings() == {**reader.settings(), "model": "claude-sonnet-5"}
+    openai_reader = ek.OpenAIReader(client=_FakeOpenAI(), seed=1)
+    judge = ek.build_judge(_Args(judge="llm", judge_model="gpt-4.1-mini",
+                                 reader="openai"), openai_reader)
+    assert judge.reader.settings() == {**openai_reader.settings(), "model": "gpt-4.1-mini"}
+
+
+def test_a_hosted_reader_run_prints_its_settings_and_the_stub_run_prints_none():
+    """The block the runners put under their title: present for a model, absent for a
+    stub, because a stub has no parameters and the dry-run output is pinned elsewhere."""
+    hosted = ek.AnthropicReader(client=_FakeAnthropic())
+    block = ek.run_settings_block(hosted)
+    assert "model=claude-opus-5" in block
+    assert ek.run_settings_block(ek.StubReader()) == ""
+
+
+class _ScriptedReaderByPrompt:
+    """Answers by looking the prompt up, so the reply does not depend on call order —
+    which is what a pooled run needs a double to guarantee."""
+
+    name = "scripted"
+    is_stub = False
+    is_human = False
+
+    def __init__(self, replies: dict[str, str] | None = None,
+                 default: str = "No information available."):
+        self.replies = replies or {}
+        self.default = default
+        self.prompts: list[tuple[str, str]] = []
+        self._lock = __import__("threading").Lock()
+
+    def answer(self, system, prompt):
+        with self._lock:
+            self.prompts.append((system, prompt))
+        for needle, reply in self.replies.items():
+            if needle in prompt:
+                return ek.Answer(reply, model="scripted", output_tokens=1)
+        return ek.Answer(self.default, model="scripted", output_tokens=1)
+
+
+class _CrashingReader(_ScriptedReaderByPrompt):
+    """Dies after `survive` calls, the way a run dies on a rate limit two hours in."""
+
+    def __init__(self, survive: int):
+        super().__init__()
+        self.survive = survive
+
+    def answer(self, system, prompt):
+        if len(self.prompts) >= self.survive:
+            raise RuntimeError("connection reset by the provider")
+        return super().answer(system, prompt)
+
+
+def _timeless(results):
+    """Results with the retrieval wall clock zeroed. Everything else has to match exactly;
+    `retrieval_ms` is the one field two runs of the same code legitimately disagree on."""
+    import dataclasses
+
+    return [dataclasses.replace(r, retrieval_ms=0.0) for r in results]
+
+
+def test_locomo_at_concurrency_three_scores_exactly_what_it_scores_one_at_a_time():
+    """Concurrency may only change the wall clock. The results list, the ledger and the
+    retrieval statistics have to come out identical, in the same order, or a number
+    produced under `--concurrency 8` is not comparable with one produced without it."""
+    serial = locomo.run(locomo.fixture(), reader=_ScriptedReaderByPrompt(),
+                        judge=ek.ContainmentJudge(), embedder=ek.build_embedder("hashing"))
+    pooled = locomo.run(locomo.fixture(), reader=_ScriptedReaderByPrompt(),
+                        judge=ek.ContainmentJudge(), embedder=ek.build_embedder("hashing"),
+                        concurrency=3)
+    assert _timeless(serial[0]) == _timeless(pooled[0]) and len(serial[0]) == 5
+    assert serial[2].chars == pooled[2].chars
+    assert serial[3].rows() == pooled[3].rows()
+
+
+@pytest.mark.parametrize("runner, fixture, kwargs", [
+    (locomo, locomo.fixture, {}),
+    (lme, lme.fixture, {}),
+    (lme, lme.fixture, {"share_store": True}),
+])
+def test_a_run_that_died_halfway_resumes_from_its_checkpoint_and_scores_identically(
+        tmp_path, runner, fixture, kwargs):
+    """The property the checkpoint exists for, stated on both runners and both store
+    layouts.
+
+    An uninterrupted run and a run that crashed after two answers and was started again
+    with the same checkpoint path must produce identical per-question results and an
+    identical ledger — and the resumed run's inner reader must have been called only for
+    the answers the crash lost, which is the evidence that nothing was paid for twice.
+    """
+    path = tmp_path / "checkpoint.jsonl"
+    whole = runner.run(fixture(), reader=_ScriptedReaderByPrompt(),
+                       judge=ek.ContainmentJudge(),
+                       embedder=ek.build_embedder("hashing"), **kwargs)
+
+    crashed = ek.CheckpointedReader(_CrashingReader(survive=2), ek.Checkpoint(path))
+    with pytest.raises(RuntimeError, match="connection reset"):
+        runner.run(fixture(), reader=crashed, judge=ek.ContainmentJudge(),
+                   embedder=ek.build_embedder("hashing"), **kwargs)
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
+
+    inner = _ScriptedReaderByPrompt()
+    resumed_reader = ek.CheckpointedReader(inner, ek.Checkpoint(path))
+    resumed = runner.run(fixture(), reader=resumed_reader, judge=ek.ContainmentJudge(),
+                         embedder=ek.build_embedder("hashing"), **kwargs)
+    assert _timeless(whole[0]) == _timeless(resumed[0]) and len(whole[0]) > 2
+    assert whole[3].rows() == resumed[3].rows()
+    assert resumed_reader.replayed == 2
+    assert len(inner.prompts) == len(whole[0]) - 2
+
+
+def test_the_runners_take_concurrency_and_checkpoint_from_the_command_line(tmp_path):
+    """Both flags have to reach `run()`; a flag accepted and ignored is worse than none.
+
+    The dry run is the vehicle: a checkpoint written by the first dry run is replayed by
+    the second, and the second report says so, which is only possible if the path was
+    handed through and the stub's calls were checkpointed.
+    """
+    for main in (locomo.main, lme.main):
+        path = tmp_path / f"{main.__module__}.jsonl"
+        first = _run_cli(main, ["--dry-run", "--concurrency", "2",
+                                "--checkpoint", str(path)])
+        assert "replayed 0 of" in first
+        rows = len(path.read_text(encoding="utf-8").splitlines())
+        assert rows > 0
+        second = _run_cli(main, ["--dry-run", "--checkpoint", str(path)])
+        assert f"replayed {rows} of {rows}" in second
+
+
+def test_concurrency_is_refused_beside_the_file_reader(tmp_path):
+    """Nothing about the file round trip can run in parallel — the answerer is a person
+    — and `FileReader` keeps its own counters, which a pool would race on."""
+    with pytest.raises(SystemExit, match="--concurrency"):
+        locomo.main(["--dry-run", "--reader", "file", "--dump", str(tmp_path / "d.jsonl"),
+                     "--concurrency", "2"], out=lambda _m: None)
