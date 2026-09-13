@@ -733,7 +733,10 @@ A question names a predicate in whatever form it inflects it. `predicate_refs` a
 `schema.word_stem` — the fold the registry uses to decide that `employer` and `employed_by`
 are one predicate — so "who *leads* the team" names `team_lead` and "where is it
 *deployed*" names `deploy_region`. Every content token still has to be present, which is
-what keeps the match from becoming a token index.
+what keeps the match from becoming a token index. The count is the fewest predicates that
+account for everything the question said: `works_at` and `job_title`'s alias `works_as`
+both reduce to `work` once the prepositions are gone, so "what company does Ada work at"
+is one relation said two ways, and a lookup, rather than a chain.
 
 `MULTIPLIERS` scales the *configured* weights rather than replacing them, so a deployment
 that tuned `w_vector` keeps its tuning. Every entry is 1.0 except the graph column, where
@@ -1256,8 +1259,9 @@ finding.
 
 Why the distinction earns a method at all: every claim is already an edge, so "is this
 store a graph" is always yes and predicts nothing. Connectivity is what varies. Measured
-on the two public corpora with identical retrieval code, 2Wiki joins at 40.6% and the
-graph leg takes chained questions from 28.3% to 43.8%; LongMemEval joins at **0.0%** —
+on the two public corpora with identical retrieval code, 2Wiki joins at 29.0% with its
+relations declared, and the graph leg takes chained questions from 28.2% to 48.3%;
+LongMemEval joins at **0.0%** —
 one subject, 78 leaf objects, no two-hop path in the store at all — and the leg loses 1.6
 points. See [`docs/BENCHMARKS.md`](BENCHMARKS.md).
 

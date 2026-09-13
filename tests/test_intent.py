@@ -401,6 +401,42 @@ def test_a_question_names_a_predicate_in_whatever_form_it_inflects_it() -> None:
                     registry) is Intent.LOOKUP
 
 
+def test_one_relation_said_two_ways_is_one_slot_even_where_a_word_is_ambiguous() -> None:
+    """"What company does Ada work at" names `works_at` twice and nothing else.
+
+    It read as a chain. `works_at` has the alias `company`, `job_title` has the alias
+    `works_as`, and once the prepositions are dropped `works_as` and `works_at` both
+    reduce to the one content token `work`. The old count resolved each thing the
+    question said on its own: `work` went to whichever of the two predicates sorted
+    first, which is `job_title`, and `company` went to `works_at`. Two names, so a
+    chain, and the walk opened on the plainest lookup a personal store gets asked. On
+    `bench/multihop.py`, every question that says "the company X works at" opened the
+    walk through `job_title` — a predicate no question there is about — which is how it
+    was found.
+
+    The count is now the fewest predicates that account for everything the question
+    said. A word only one predicate answers to names that predicate, and an ambiguous
+    word names a predicate the question already named where there is one. A question
+    that says two things only one predicate can explain is still a chain, and an
+    ambiguous word on its own still names exactly one predicate, so "when was Alice
+    born" is one slot as before.
+    """
+    from memvara.schema import PredicateRegistry, PredicateSpec
+
+    registry = PredicateRegistry()
+    assert predicate_refs("what company does Ada work at", registry) == {"works_at"}
+    for query in ("what company does Ada work at", "which company does my sister work for",
+                  "what company do I work for"):
+        assert classify(query, registry) is Intent.LOOKUP, query
+    assert len(predicate_refs("when was Alice born", registry)) == 1
+
+    registry.register(PredicateSpec(name="founded_by"))
+    assert predicate_refs("who founded the company that Ada works at?",
+                          registry) == {"works_at", "founded_by"}
+    assert classify("who founded the company that Ada works at?",
+                    registry) is Intent.RELATIONAL
+
+
 def test_a_chain_that_also_names_an_instant_keeps_its_second_reading() -> None:
     """`classify` returns one label and time wins; `is_relational` is the other one.
 

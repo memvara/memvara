@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 
 sys.path.insert(0, "bench")
@@ -80,6 +81,9 @@ from evalkit import mean, percentile                        # noqa: E402
 
 from memvara import HashingEmbedder, Memvara, NullLLM       # noqa: E402
 from memvara.retrieve import HybridRetriever                # noqa: E402
+from memvara.schema import (                                # noqa: E402
+    BUILTIN_PREDICATES, PredicateRegistry, PredicateSpec,
+)
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
@@ -90,6 +94,38 @@ LAST = ["Ahmed", "Bennett", "Costa", "Duarte", "Eriksson", "Fontaine", "Gruber",
 HOME = ["Lisbon", "Berlin", "Osaka", "Nairobi", "Lima", "Oslo", "Cairo", "Perth"]
 OFFICE = ["Tallinn", "Bogota", "Dakar", "Hanoi", "Zagreb", "Quito", "Bergen", "Utrecht"]
 SUFFIX = ["Systems", "Labs", "Works", "Dynamics", "Analytics", "Robotics", "Foundry"]
+
+#: The relations the corpus is made of. Each one is declared below so that its object is
+#: an entity and its claims carry an edge. `acquired_by` appears only in `interleaving()`.
+RELATIONS = ("works_at", "lives_in", "reports_to", "founded_by", "headquartered_in",
+             "acquired_by")
+
+
+def vocabulary() -> PredicateRegistry:
+    """The builtin registry, with the corpus's relations declared as graph edges.
+
+    A relation nobody has declared takes values, and a value carries no edge
+    (`docs/SUBJECT-CONVENTIONS.md`, decision 3). That rule reached the store in 0.12, and
+    this harness declared nothing, so every object in it became a value: the one-hop
+    frontier of a person was 0 paths, every traversal column read 0.0%, and `+graph`
+    equalled `search` in every row. The table looked like a gate that blocked
+    everything, when the leg had nothing to walk. The store has to be told which
+    relations lead somewhere, exactly as a deployment tells it by loading a pack.
+
+    `works_at` and `lives_in` are builtins. A declared spec replaces a builtin of the same
+    name rather than extending it, so both are copied with their cardinality and their
+    aliases kept: the questions say "the company X works at" and "based in", and
+    `company` and `based_in` are aliases of those two. The padding predicate `noted`
+    stays undeclared on purpose. A padding claim is a value that answers nothing, and
+    leaving it a value means the walk never spends a slot on one.
+    """
+    builtins = {spec.name: spec for spec in BUILTIN_PREDICATES}
+    declared = tuple(
+        replace(builtins[name], object_type=("entity",), graph=True)
+        if name in builtins
+        else PredicateSpec(name, object_type=("entity",), graph=True)
+        for name in RELATIONS)
+    return PredicateRegistry(BUILTIN_PREDICATES + declared)
 
 
 class Corpus:
@@ -149,7 +185,8 @@ class Corpus:
 
 
 def load(corpus: Corpus, *, padding: int, path: str = ":memory:") -> Memvara:
-    mem = Memvara(path, llm=NullLLM(), embedder=HashingEmbedder(dim=256), user="alice")
+    mem = Memvara(path, llm=NullLLM(), embedder=HashingEmbedder(dim=256), user="alice",
+                  registry=vocabulary())
     with mem.store.batch():
         for subject, predicate, obj in corpus.facts():
             mem.remember(subject, predicate, obj, recorded_at=T0)
@@ -183,20 +220,22 @@ def graph_reader(mem: Memvara, *, w_graph: float = 1.0, depth: int = 2,
     `gated` is `intent_weighting`, and it is a column of its own below rather than a
     footnote: the gap between the two columns is what the gate costs on this workload.
 
-    **That gap used to have the wrong explanation, including here.** This docstring said
-    the cause was vocabulary — that two of the three families contain no relational word.
-    They do not, and it was not the cause: `evaluate` passes `as_of=T0` on every call, so
-    `_weights` took its `timed` branch, `classify` was never reached, and
-    `Intent.TEMPORAL`'s multipliers set the graph weight to zero. The whole `+graph`
-    column measured a configuration in which the leg could not run at all.
+    **That gap has had two wrong explanations here, and today it is zero.** This
+    docstring first said the cause was vocabulary — that two of the three families
+    contain no relational word. They do not, and it was not the cause: `evaluate` passes
+    `as_of=T0` on every call, so `_weights` took its `timed` branch, `classify` was never
+    reached, and `Intent.TEMPORAL`'s multipliers set the graph weight to zero. It then
+    said one family was still gated by morphology: the store holds `founded_by` and the
+    question says "founded the". Both are fixed. Naming an instant no longer switches
+    the walk off, the classifier counts the distinct predicates a question names, and
+    both sides of that match fold through `schema.word_stem`, so "founded the company"
+    names `founded_by` the way "who leads the team" names `team_lead`. Measured on
+    2026-09-13, the two columns are equal in every row at every `k`.
 
-    Both halves are fixed. The classifier now counts distinct predicates, so
-    "which city is the company X works at based in" reads as a chain without any word
-    being added to the relational list; and naming an instant no longer switches the walk
-    off. What remains gated is "who founded the company that X works at", and that one is
-    morphology rather than vocabulary — the store holds `founded_by` and the question
-    says "founded the", so the phrase never matches. A stemmer would close it; a longer
-    word list would only close it here.
+    What moved the table most since it was last published was not the gate. Once only a
+    declared relation carries an edge, this harness held no edges at all, every column
+    that walks read 0.0%, and `+graph` equalled `search` in every row; `vocabulary()`
+    says what was done about it.
     """
     return HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=w_graph,
                            graph_depth=depth, traverser=mem.traverser,
@@ -286,14 +325,11 @@ def accuracy() -> None:
                   f" {got['linked']:>7.1f}%")
     print("  `+graph` is the shipped configuration and `+graph!` the same with "
           "intent_weighting off.\n   The gap between them is what the query-shape gate "
-          "still costs here. It was larger, and\n   for a reason this note used to get "
-          "wrong: every call below passes `as_of=T0`, which\n   made the intent "
-          "`temporal` before the classifier ran, and the temporal row sets the\n   "
-          "graph weight to zero. What is left is one family — \"who founded the company "
-          "that\n   X works at\" — where the store holds `founded_by` and the question "
-          "says \"founded the\".\n   Both walk two hops, the shipped `graph_depth`, "
-          "which is why the three-hop rows\n   measure that bound rather than "
-          "traversal.")
+          "costs here. Every question names two\n   relations the registry declares, "
+          "and the match folds both sides through one stemmer,\n   so \"founded the "
+          "company\" names `founded_by`; the columns should be equal.\n   Both readers "
+          "walk two hops, the shipped `graph_depth`, which is why the three-hop\n   "
+          "rows measure that bound rather than traversal.")
 
     question, seed, gold, hops, preds = two[0]
     print(f"\n  example: {question}\n    gold: {gold}")
@@ -323,7 +359,8 @@ def interleaving() -> None:
     its first hop and cannot be called any other way.
     """
     print("\n=== the same question, asked across a write ===")
-    mem = Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=256), user="alice")
+    mem = Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=256), user="alice",
+                  registry=vocabulary())
     mem.remember("Dana Novak", "works_at", "Kovac Labs", recorded_at=T0)
     mem.remember("Petrov Foundry", "headquartered_in", "Bergen", recorded_at=T0)
 

@@ -178,12 +178,6 @@ _BETWEEN_AND = re.compile(r"\bbetween\b.+\band\b", re.IGNORECASE)
 #: "works at?" and "works-at" both match `works at`.
 _WORDS = re.compile(r"[^a-z0-9]+")
 
-#: Cache of predicate phrases per registry, keyed on how many predicates it has learned.
-#: A registry grows at runtime — `learn()` adds a predicate the moment a store sees one —
-#: so a plain memo would go stale silently. `learned_count` moves whenever it does.
-_PHRASES: dict[tuple[int, int], frozenset[str]] = {}
-
-
 def _phrases(registry: "PredicateRegistry") -> frozenset[str]:
     """Every predicate name and alias the registry knows, spelled the way a person would.
 
@@ -191,18 +185,20 @@ def _phrases(registry: "PredicateRegistry") -> frozenset[str]:
     stores the first. Matched as phrases and never as tokens: `lives_in` splits into
     `lives` and `in`, and `in` appears in most English questions, so a token index would
     make almost every query look relational.
+
+    Read from the registry on every call, and not memoised. A memo keyed on the registry's
+    identity and its `learned_count` went stale in two ways nothing reported: `register()`
+    and `learn_alias()` change the vocabulary without moving `learned_count`, and a
+    registry created after another was garbage-collected can carry the same `id()`, so a
+    fresh registry answered with a dead one's phrases. Either way `predicate_refs` saw a
+    vocabulary the registry no longer held. The set is a few dozen short strings, which
+    costs less than the stemming `_named_in` does on every call anyway.
     """
-    key = (id(registry), registry.learned_count)
-    cached = _PHRASES.get(key)
-    if cached is None:
-        cached = frozenset(
-            name.replace("_", " ")
-            for spec in registry.all_specs()
-            for name in (spec.name, *spec.aliases)
-        )
-        _PHRASES.clear()        # one registry per process in practice; bound the dict
-        _PHRASES[key] = cached
-    return cached
+    return frozenset(
+        name.replace("_", " ")
+        for spec in registry.all_specs()
+        for name in (spec.name, *spec.aliases)
+    )
 
 
 def predicate_refs(query: str, registry: "PredicateRegistry") -> set[str]:
@@ -281,22 +277,36 @@ def _named_in(query: str, spoken: "Mapping[str, str] | Iterable[str]",
     `lives_in` being named by every question containing `in`. A bare token index would
     read almost every query as naming several predicates — the opposite failure to the one
     this fixes, and visible only as latency.
+
+    The result is the fewest predicates that account for everything the question said.
+    One word can answer to several predicates once the joinery is gone: `born_in` and
+    `born_on` both reduce to `born`, and `works_at` and `job_title`'s alias `works_as`
+    both reduce to `work`. Counting each such word on its own read "what company does Ada
+    work at" as a chain — `work` went to `job_title`, `company` to `works_at`, two names
+    from one relation said twice — and opened the walk on the plainest lookup there is.
+    So a word only one predicate answers to names that predicate, and an ambiguous word
+    names a predicate the question has already named where there is one. Where there is
+    none, it names the smallest name, so two stores holding the same schema agree.
     """
     tokens = {word_stem(t) for t in tokenize(query)}
     pairs = (spoken.items() if isinstance(spoken, Mapping)
              else ((phrase, phrase.replace(" ", "_")) for phrase in spoken))
-    # One entry per *thing the question said*, not per predicate that answers to it.
-    # `born_in` and `born_out` both reduce to `born`, so "when was Alice born" matched two
-    # predicates and read as a chain — from one word. Which of them the caller sees is
-    # settled on the name so two stores holding the same schema agree.
-    best: dict[frozenset[str], str] = {}
+    # Everything the question said, keyed on the content tokens that said it, with every
+    # predicate that answers to each.
+    said: dict[frozenset[str], set[str]] = {}
     for _phrase, name in pairs:
         parts = _content(name)
         if parts and parts <= tokens:
-            folded = fold(name)
-            if folded < best.get(parts, folded + "\uffff"):
-                best[parts] = folded
-    return set(best.values())
+            said.setdefault(parts, set()).add(fold(name))
+    named = {next(iter(names)) for names in said.values() if len(names) == 1}
+    # The ambiguous words, in a fixed order so the answer does not depend on how the
+    # vocabulary was iterated. Each adds a predicate only when none it answers to is
+    # already named.
+    for parts in sorted(said, key=sorted):
+        names = said[parts]
+        if not names & named:
+            named.add(min(names))
+    return named
 
 
 def is_comparison(query: str) -> bool:

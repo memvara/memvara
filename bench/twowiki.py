@@ -59,10 +59,31 @@ import bench.evalkit as ek                                          # noqa: E402
 from memvara import Memvara, NullLLM                                # noqa: E402
 from memvara.embed import HashingEmbedder                           # noqa: E402
 from memvara.retrieve.hybrid import HybridRetriever                 # noqa: E402
-from memvara.schema import PredicateRegistry                        # noqa: E402
+from memvara.schema import (                                        # noqa: E402
+    BUILTIN_PREDICATES, PredicateRegistry, load_specs,
+)
 
 #: The transitive types. A walk can only help where the evidence has a join in it.
 CHAINED = ("compositional", "inference")
+
+#: The corpus's 34 relations, each declared as an edge or as a value. A relation nobody
+#: has declared takes values, and a value carries no edge (`docs/SUBJECT-CONVENTIONS.md`,
+#: decision 3), so a store built from the builtins alone holds 26,403 claims and not one
+#: edge: the leg has nothing to walk and `+graph` equals `search` in every row. The pack's
+#: own header says what each declaration is for and why the four date relations are
+#: values. Loaded by path, because it describes one public corpus and is not a pack a
+#: user should be offered.
+PACK = Path(__file__).resolve().parent / "packs" / "twowiki.toml"
+
+
+def vocabulary() -> PredicateRegistry:
+    """The builtins first and the pack appended, the way `server/config` builds one.
+
+    The pack overrides three builtins to give them an object type, and each override
+    repeats its builtin's aliases, so `date_of_birth`, `place_of_birth` and `employer`
+    still fold onto `born_on`, `born_in` and `works_at` as they load.
+    """
+    return PredicateRegistry(BUILTIN_PREDICATES + load_specs(str(PACK)))
 
 #: Hash embedder rather than a model, for the same reason `multihop.py` uses one: this
 #: measures whether the *walk* reaches a row the lookup legs missed, and a real embedder
@@ -124,7 +145,7 @@ def ingest(samples: Sequence[Sample]) -> Memvara:
     `(subject, relation, object)`, which is what the store would hold anyway.
     """
     mem = Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=DIM),
-                  tenant="2wiki", user="reader")
+                  tenant="2wiki", user="reader", registry=vocabulary())
     seen: set[tuple[str, str, str]] = set()
     written = 0
     started = time.perf_counter()
