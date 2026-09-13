@@ -128,7 +128,7 @@ tenant and drops every `read_*` option, and `tests/test_memories.py:81-97` pins 
 deliberate. The image cannot load one either: `deploy/Dockerfile:116-118` bakes only the
 embedder (`sentence-transformers/all-MiniLM-L6-v2`) into `HF_HOME`, and the runtime stage
 sets `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` (`Dockerfile:261-263`), so
-`CrossEncoderReranker()`, which loads its model in `__init__` (`memvara/rerank/cross.py:37,
+`CrossEncoderReranker()`, which loads its model in `__init__` (`memvara/rerank/cross.py:43,
 55-62`), raises at construction in production (§4, "The image"). `MEMVARA_LLM=none` in
 production, so no model is called anywhere and every token series is structurally zero.
 Five places state that nothing on the read path involves a model, and this design amends
