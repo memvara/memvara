@@ -128,12 +128,15 @@ LAST_OBSERVED = "last_observed_at"
 #: (`write/pipeline.py`), and read by `retrieve/anchor.py`, which has to know that "where
 #: do I live" is a question about this row. One spelling, so the three cannot drift.
 SELF_SUBJECT = "user"
-#: A subject spelled `project:<key>` is a scope rather than a thing: a preference that
+#: A subject typed `project:<key>` is a scope rather than a thing: a preference that
 #: holds in one checkout. `Reconciler._may_be_procedural` lets such a claim stay
 #: `procedural`, which a bare repository name cannot, and the plugin's session-start
-#: block reads `project:<cwd>` beside `user`. The prefix is exact and lowercase, as the
-#: plugin writes it; `Project:` is a bare name and is retyped like any other.
-PROJECT_SUBJECT_PREFIX = "project:"
+#: block reads `project:<cwd>` beside `user`. Read through `Claim.subject_type`, so it is
+#: the same `type:name` convention every typed entity follows (`memvara/entities.py`):
+#: the namespace folds case, and prose with a space after the colon or a `//` scheme is
+#: not a type. `PROJECT_SUBJECT_PREFIX` is the spelling a writer uses.
+PROJECT_SUBJECT_TYPE = "project"
+PROJECT_SUBJECT_PREFIX = PROJECT_SUBJECT_TYPE + ":"
 
 #: The predicate every verbatim note lands on (`compat/_notes.py`): a mem0-compatible
 #: `infer=False` write, or an import. A note is not a claim about a thing; it is the

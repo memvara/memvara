@@ -36,8 +36,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   and the session-start budget cut off below them. The plugin's session-start block sorts
   the same way (`plugin/hooks/lib/standing.py`).
 - **A subject spelled `project:<key>` may stay `procedural`.** The 0.13.0 rule that
-  `procedural` is for the subject `user` gains one exemption, `types.PROJECT_SUBJECT_PREFIX`,
-  an exact lowercase prefix: a preference scoped to one checkout is still how the user
+  `procedural` is for the subject `user` gains one exemption, `types.PROJECT_SUBJECT_TYPE`,
+  read through `Claim.subject_type` like every typed entity (the namespace folds case;
+  prose with a space after the colon or a `//` scheme is not a type): a preference scoped to one checkout is still how the user
   wants work done, there, and the plugin's session-start block already reads
   `project:<cwd>` beside `user`. Without it every project-scoped rule had to be filed under
   `user`, and on one store forty rules for a single skill in a single repository opened

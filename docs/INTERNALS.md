@@ -417,7 +417,7 @@ was produced. A claim already misfiled is moved the next time the same triple is
 even by a write that asserts no type; the safety property that an unopinionated write
 cannot undo a correction still holds, because moving such a claim out of `procedural` is
 never a correction anyone could have wanted to keep. A subject beginning `project:`
-(`types.PROJECT_SUBJECT_PREFIX`, exact and lowercase) is exempt: it is a scope, not a thing, and
+(`types.PROJECT_SUBJECT_TYPE`, read through `Claim.subject_type`) is exempt: it is a scope, not a thing, and
 a preference scoped to one checkout is still how the user wants work done there — the
 plugin's session-start block reads `project:<cwd>` beside `user`. A verbatim note is exempt — it is on
 the `note` predicate (`types.NOTE_PREDICATE`, written by `compat/_notes.py` for the mem0

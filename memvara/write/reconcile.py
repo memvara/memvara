@@ -69,7 +69,7 @@ from ..entities import EntityRegistry, entity_key
 from ..schema import PredicateRegistry
 from ..store.base import Store
 from ..types import (
-    NOTE_PREDICATE, PROJECT_SUBJECT_PREFIX, SELF_SUBJECT,
+    NOTE_PREDICATE, PROJECT_SUBJECT_TYPE, SELF_SUBJECT,
     ObjectKind,
     ENTITY_REKEY,
     PREDICATE_REKEY,
@@ -376,15 +376,16 @@ class Reconciler:
         done; it is merely how they want it done *here*. Without this exemption every
         project-scoped rule had to be filed under `user` to stay standing, and on one
         store forty rules for a single skill in a single repository then opened every
-        session in every other repository. The prefix is exact and lowercase, the way the plugin spells it, so that the
-        reconciler and the plugin's `_mine` agree on which claims are scoped: a `Project:`
-        claim the reconciler kept would be one the plugin never showed. A bare repository
+        session in every other repository. Read through `Claim.subject_type`, the `type:name` convention every typed
+        entity already follows, rather than a prefix test of its own: the namespace folds
+        case, and `project: some prose` or `project://x` is not a type. The plugin's
+        `_mine` folds the namespace the same way and compares the path exactly. A bare repository
         name (`memvara`, `memvara-cloud`) is not the prefix and is still filed as
         `semantic`: a repository cannot want anything.
         """
         return (claim.subject_key == SELF_SUBJECT
                 or claim.predicate == NOTE_PREDICATE
-                or claim.subject.startswith(PROJECT_SUBJECT_PREFIX))
+                or claim.subject_type == PROJECT_SUBJECT_TYPE)
 
     @classmethod
     def file_by_subject(cls, claim: Claim) -> "Retype | None":

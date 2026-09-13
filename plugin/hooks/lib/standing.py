@@ -59,6 +59,14 @@ _ADDED_ROW = re.compile(r"^\+\s+\[id=(\S+)([^\]]*)\]\s+(.+)$")
 #: The server's word for "a machine derived this". Matched as a bracket field.
 _INFERRED = "inferred"
 
+#: What `memory_standing` is asked for on a hosted deployment, instead of the tool's own
+#: default of 64. The deployment truncates BEFORE this module orders or filters anything,
+#: and a store measured at 169 standing claims was handing back 64 of them chosen by the
+#: server. 200 is the most memvara-cloud's `GET /v1/standing` accepts (`le=200` on its
+#: `limit`); a larger number is refused there, not clamped, so this is a ceiling and not
+#: a wish. Only the hosted route reads it: the local route holds the whole set already.
+HOSTED_STANDING_MAX = 200
+
 #: What a marked row ends with. The library's own spelling, so a reader who has seen one
 #: block has seen both. The extractor's NAME is deliberately never rendered here or
 #: upstream: it is caller-supplied through `memory_remember`, so printing it would put
@@ -137,7 +145,10 @@ def _mine(subject: str, cwd: str) -> bool:
     """
     if subject == "user":
         return True
-    return bool(cwd) and subject == f"project:{cwd}"
+    # The namespace folds case, the way every typed entity does in the library
+    # (`Claim.subject_type`); the path does not, because paths do not.
+    namespace, sep, path = subject.partition(":")
+    return bool(cwd) and bool(sep) and namespace.lower() == "project" and path == cwd
 
 
 def _machine_wrote(claim: Any) -> bool:
@@ -251,11 +262,7 @@ def _from_tool(store: Any) -> "list[Note] | None":
     call = getattr(store, "_call", None)
     if not callable(accepts) or not callable(call) or not accepts("memory_standing", "k"):
         return None
-    # `k=200`, the most the hosted route accepts, rather than the tool's own default of
-    # 64: the deployment truncates BEFORE this module orders or filters anything, and a
-    # store measured at 169 standing claims was handing back 64 of them chosen by the
-    # server's order. `render` still says how many did not fit the budget.
-    return _rows(str(call("memory_standing", {"k": 200}) or ""))
+    return _rows(str(call("memory_standing", {"k": HOSTED_STANDING_MAX}) or ""))
 
 
 def _from_since(store: Any) -> "list[Note] | None":
@@ -290,7 +297,9 @@ def _order(notes: "list[Note]") -> "list[Note]":
     stand-in value would sort real claims against a number nobody measured.
     """
     if any(note.confidence is None for note in notes):
-        return list(notes)
+        # Stated before derived is still knowable without a number: the marker is on
+        # the row. Stable, so within each half the server's own order stands.
+        return sorted(notes, key=lambda n: n.inferred)
     return sorted(notes, key=lambda n: (n.inferred, -(n.confidence or 0.0),
                                         _negated(n.recorded), n.ident))
 

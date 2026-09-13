@@ -801,8 +801,13 @@ class WritePipeline:
         onto a neighbour by token overlap is not — that fold is the acquisition path's
         backstop for an open vocabulary, and a closed one has asked for no backstop.
         """
-        kept = [item for item in raw
-                if self.registry.resolve(str(item.get("predicate", "") or "")).resolved]
+        kept = []
+        for item in raw:
+            resolution = self.registry.resolve(str(item.get("predicate", "") or ""))
+            # An item with no predicate at all is malformed, not unregistered: it is
+            # dropped uncounted by `_claim_from_dict`, as it always was.
+            if resolution.resolved or not resolution.name:
+                kept.append(item)
         return kept, len(raw) - len(kept)
 
     def _report_usage(self, receipt: WriteReceipt, usage: Usage | None) -> None:

@@ -2085,7 +2085,9 @@ TOOLS: tuple[Tool, ...] = (
             "k": {
                 "type": "integer",
                 "description": (
-                    "Most preferences to return, newest and most-trusted first. "
+                    "Most preferences to return: the ones the user stated first, then "
+                    "the ones a model or a hook derived, each half most-trusted and "
+                    "newest first. "
                     "Defaults to enough for the whole set; raise it only if the reply "
                     "says some were not shown."
                 ),

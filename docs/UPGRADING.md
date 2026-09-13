@@ -11,8 +11,9 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ### What changed
 
-Since 0.14.0 the rule in the next entry has one exemption: a subject that begins with the
-exact lowercase prefix `project:` (`types.PROJECT_SUBJECT_PREFIX`) keeps `procedural`. A
+Since 0.14.0 the rule in the next entry has one exemption: a subject typed `project:<key>`
+(`types.PROJECT_SUBJECT_TYPE`, read through `Claim.subject_type` like every typed entity, so
+`Project:` folds and `project: some prose` does not count) keeps `procedural`. A
 preference that holds only in one checkout is filed under `project:<absolute path>`, stays
 a standing rule, and a client that knows its working directory can show it there and
 nowhere else. A bare repository name (`memvara`) is not the prefix and still moves.

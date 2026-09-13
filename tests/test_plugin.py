@@ -380,3 +380,30 @@ def test_the_session_start_block_orders_stated_rules_before_derived_ones() -> No
                        confidence=1.0, recorded="2026-08-01T00:00:00Z", inferred=False)
     ordered = _order([derived_sure, stated_unsure, stated_sure])
     assert [n.text for n in ordered] == ["stated, sure", "stated, unsure", "derived, sure"]
+
+
+def test_stated_still_comes_first_when_no_route_reported_a_confidence() -> None:
+    """The tool and delta routes parse rows and carry no confidence, and `_order` used to
+    hand those back untouched. The marker is on the row, so stated-before-derived is
+    still knowable; within each half the server's own order stands (stable sort)."""
+    import sys
+    hooks = pathlib.Path(__file__).resolve().parents[1] / "plugin" / "hooks"
+    sys.path.insert(0, str(hooks))
+    try:
+        from lib.standing import Note, _mine, _order
+    finally:
+        sys.path.remove(str(hooks))
+    rows = [Note(ident="cl_1", subject="user", text="derived first", confidence=None,
+                 recorded="", inferred=True),
+            Note(ident="cl_2", subject="user", text="stated", confidence=None,
+                 recorded="", inferred=False),
+            Note(ident="cl_3", subject="user", text="derived second", confidence=None,
+                 recorded="", inferred=True)]
+    assert [n.text for n in _order(rows)] == ["stated", "derived first", "derived second"]
+    # `_mine` folds the namespace the way the library's typed entities do, and never the
+    # path: `Project:` is the same scope, a different directory is not.
+    assert _mine("project:/home/alice/src/snorkel", "/home/alice/src/snorkel")
+    assert _mine("Project:/home/alice/src/snorkel", "/home/alice/src/snorkel")
+    assert not _mine("project:/home/alice/src/other", "/home/alice/src/snorkel")
+    assert not _mine("project:/home/alice/src/Snorkel", "/home/alice/src/snorkel")
+    assert not _mine("snorkel", "/home/alice/src/snorkel")

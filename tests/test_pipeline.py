@@ -2134,6 +2134,23 @@ def test_an_unregistered_predicate_is_refused_and_counted_under_a_closed_vocabul
     store.close()
 
 
+def test_an_item_with_no_predicate_is_malformed_and_not_counted_as_unregistered():
+    """`_claim_from_dict`'s own contract: a structurally malformed item is dropped
+    uncounted, and only a real refusal gets a number. An empty predicate does not
+    resolve, and a first draft of the filter counted it as an invented one -- which
+    would have told a caller to declare a predicate the model never proposed."""
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "", "object": "Lisbon", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    pipe, store, _ = build(llm, closed_vocabulary=True)
+    receipt = pipe.add([ep("I have moved to Lisbon for the year.")])
+    assert receipt.added == []
+    assert receipt.unregistered == 0
+    assert receipt.unextracted == 1
+    store.close()
+
+
 def test_a_registered_predicate_and_a_declared_alias_survive_a_closed_vocabulary():
     """A filter, not a tax: the builtin passes, and so does an alias the registry itself
     declares (`employer` is registered as a spelling of `works_at`)."""

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import pytest
 
+from memvara.remote import hydrate
 from memvara.remote.api import RemoteMemvara
 from memvara.server.config import ConfigError, ServerConfig, build_memvara
 from memvara.server.mcp import MemvaraMCPServer
@@ -509,3 +510,15 @@ def test_closed_vocabulary_reaches_the_local_pipeline_from_the_environment():
     finally:
         mem.close()
     assert ServerConfig.from_env({"MEMVARA_DB": ":memory:"}).closed_vocabulary is False
+
+
+def test_hydrate_reads_the_closed_vocabulary_count_and_defaults_it_for_an_older_server():
+    """memvara 0.14.0's `unregistered` is a server-side refusal (`closed_vocabulary` is a
+    deployment setting under cloud mode), so a `RemoteMemvara` caller only ever learns of
+    it through this function. A deployment older than the field sends no key, and absent
+    means 0, the way `may_replace` is handled one line above."""
+    wire = {"episode_ids": ["ep_1"], "added": [], "invalidated": [], "reinforced": [],
+            "skipped": 0, "unextracted": 1, "llm_calls": 1, "latency_ms": 9.0,
+            "deferred": False}
+    assert hydrate.receipt(wire).unregistered == 0
+    assert hydrate.receipt({**wire, "unregistered": 3}).unregistered == 3
