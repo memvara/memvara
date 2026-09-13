@@ -1,6 +1,7 @@
 """Blinded five-arm answer-quality run over the support-history demo.
 
     PYTHONPATH=. python3 demo/harness.py --reader stub          # offline, one command
+    PYTHONPATH=. python3 demo/harness.py --reader stub --corpus-scale 10   # the second size
     PYTHONPATH=. python3 demo/harness.py --reader anthropic --judge llm \\
         --model claude-opus-5 --effort low --max-tokens 4096 --thinking adaptive \\
         --checkpoint runs/hosted.checkpoint.jsonl --concurrency 4 --out runs/hosted.jsonl
@@ -32,7 +33,9 @@ call so a run that dies resumes rather than pays again, and `--concurrency N` is
 calls at once; both live in `evalkit` and are shared with the `bench/` runners. The
 report always carries the floor (`none`) and the ceiling (`full_transcript`) beside the
 three memory arms and names which is which, because a memory score without both beside
-it is uninterpretable.
+it is uninterpretable. `--corpus-scale N` runs any reader over the authored history padded
+to N times its length with generated tickets that move no fact (`demo/distractors.py`),
+which is how the token argument gets its second point.
 
 `--reader file` is the two-phase round trip for an answerer outside this process, a
 person or an agent. Phase one writes one file containing every question under every arm
@@ -129,6 +132,7 @@ from demo.baselines import (  # noqa: E402
     Question,
     Turn,
 )
+from demo.distractors import scale_conversation  # noqa: E402
 
 #: The reader's instruction, identical for every arm. Deliberately says nothing about
 #: memory, retrieval or systems: naming any of that would tell the answerer what kind of
@@ -502,13 +506,29 @@ def run_header(reader: ek.Reader, judge: ek.Judge, arms: Mapping[str, Arm]) -> s
     return "\n".join(lines)
 
 
+def corpus_note(scale: int, authored: int, total: int) -> str:
+    """One line naming the haystack when it is not the authored one, `""` when it is.
+
+    Empty at scale 1 rather than "corpus: the authored 64 turns", so the offline report
+    stays byte-identical to what it was before the flag existed. At any other scale the
+    line is what stops a table of "turns seen" being read as the authored corpus.
+    """
+    if scale == 1:
+        return ""
+    return (f"  corpus: scale {scale} — {total} turns, the {authored} authored plus "
+            f"{total - authored} generated distractor-ticket turns that name no value a "
+            "question is about (demo/distractors.py)")
+
+
 def report(items: Sequence[Item], scored: Sequence[Scored], *, reader: ek.Reader,
            judge: ek.Judge, arms: Mapping[str, Arm] | None = None,
-           ledger: ek.TokenLedger | None = None) -> str:
+           ledger: ek.TokenLedger | None = None, corpus: str = "") -> str:
     """The whole result, including everything that makes it less than it looks."""
     arms = resolve_arms(arms)
     order = list(arms)
     out = ["", "  five-arm answer quality, blinded", ""]
+    if corpus:
+        out += [corpus, ""]
     header = run_header(reader, judge, arms)
     if header:
         out += [header, ""]
@@ -608,16 +628,18 @@ class Offline:
     reader: ek.Reader
     judge: ek.Judge
     ledger: ek.TokenLedger | None = None
+    #: `corpus_note`'s line, or `""` for the authored corpus.
+    corpus: str = ""
 
     def report(self, *, arms: Mapping[str, Arm] | None = None) -> str:
         return report(list(self.items), list(self.scored), reader=self.reader,
-                      judge=self.judge, arms=arms, ledger=self.ledger)
+                      judge=self.judge, arms=arms, ledger=self.ledger, corpus=self.corpus)
 
 
 def in_process(questions: Sequence[Question], turns: Sequence[Turn], *,
                reader: ek.Reader, judge: ek.Judge,
                arms: Mapping[str, Arm] | None = None,
-               concurrency: int = 1) -> Offline:
+               concurrency: int = 1, corpus: str = "") -> Offline:
     """Plan, answer and score in one process: the stub, or a model behind an API.
 
     The dump/answers round trip exists because a person or an agent cannot be in this
@@ -631,7 +653,7 @@ def in_process(questions: Sequence[Question], turns: Sequence[Turn], *,
     scored = score(items, questions, reader=reader, judge=judge, ledger=ledger,
                    concurrency=concurrency)
     return Offline(items=tuple(items), scored=tuple(scored), reader=reader, judge=judge,
-                   ledger=ledger)
+                   ledger=ledger, corpus=corpus)
 
 
 def offline(questions: Sequence[Question], turns: Sequence[Turn], *,
@@ -717,6 +739,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help='phase two: {"id": ..., "answer": ...} per line')
     parser.add_argument("--seed", type=int, default=20260813,
                         help="shuffle seed, recorded in the key file")
+    parser.add_argument("--corpus-scale", type=int, default=1, metavar="N",
+                        help="pad the history to N times its authored length with "
+                             "generated distractor tickets that name no value a question "
+                             "is about (demo/distractors.py). 1, the default, is the "
+                             "authored corpus. Both phases of --reader file must use the "
+                             "same N; the stale-dump check catches a mismatch")
     parser.add_argument("--judge", default="containment", choices=["containment", "llm"])
     parser.add_argument("--judge-model", default=None,
                         help="model for --judge llm: the reader's twin with this model "
@@ -727,8 +755,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     # --concurrency and --checkpoint: one definition, shared with the bench/ runners.
     ek.add_reader_arguments(parser)
     args = parser.parse_args(argv)
+    if args.corpus_scale < 1:
+        parser.error("--corpus-scale must be at least 1")
 
     questions, turns = load_scenario()
+    authored = len(turns)
+    turns = scale_conversation(turns, args.corpus_scale)
+    corpus = corpus_note(args.corpus_scale, authored, len(turns))
 
     if args.reader != "file":
         # The stub and the hosted readers share one path, because both are inside this
@@ -744,7 +777,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             like = reader if hosted(reader) else ek.hosted_reader("anthropic", args)
         judge = build_judge(args.judge, model=args.judge_model, like=like)
         run = in_process(questions, turns, reader=reader, judge=judge,
-                         concurrency=args.concurrency)
+                         concurrency=args.concurrency, corpus=corpus)
         print(run.report())
         if args.out:
             write_jsonl(args.out, run.scored)
@@ -781,7 +814,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         like=ek.hosted_reader("anthropic", args) if args.judge == "llm"
                         else None)
     scored = score(items, questions, reader=reader, judge=judge)
-    print(report(items, scored, reader=reader, judge=judge))
+    print(report(items, scored, reader=reader, judge=judge, corpus=corpus))
     if args.out:
         write_jsonl(args.out, scored)
     return 0

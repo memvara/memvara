@@ -1189,6 +1189,7 @@ tells the customer the right thing. [`demo/`](../demo/) is the apparatus for tha
 
 ```
 demo/scenario.py    64 turns of one customer's support history, and 20 questions
+demo/distractors.py generated tickets that scale the history without moving any fact
 demo/baselines.py   five context-building arms
 demo/harness.py     a blinded dump/answer round trip over those arms, and the scoring
 ```
@@ -1254,6 +1255,30 @@ reported, and answers that never finished are counted apart from wrong ones.
 `--checkpoint` makes the run resumable and `--concurrency` shortens it;
 [`demo/README.md`](../demo/README.md) has every flag. No run with it has been recorded
 yet: the scores below are the agent run.
+
+### The second corpus size
+
+The token argument is a slope — retrieval context flat in corpus length, transcript
+context linear — and the authored corpus is one point on it. `--corpus-scale 10` pads the
+history with generated support tickets (`demo/distractors.py`) that never name a value a
+question is about, so the questions, golds and traps are unchanged and only the haystack
+grows. At that scale, deterministically:
+
+```
+  arm                 mean chars  max chars  mean ~tokens  items used / turns seen
+  ------------------  ----------  ---------  ------------  -----------------------
+  none                         0          0             0              0.0 / 607.5
+  full_transcript          92053      96897         23013            607.5 / 607.5
+  naive_rag                 1891       2838           473             12.0 / 607.5
+  memvara                   1596       2424           399             12.0 / 607.5
+  memvara_structured        1530       2204           383             12.0 / 607.5
+```
+
+The transcript arm grows 9.4× while the three retrieval arms stay under their cap.
+Whether they still surface the evidence among ten times more turns is the hosted run's
+question at this scale, and that run has not been made yet.
+[`demo/README.md`](../demo/README.md#two-corpus-sizes) has the constraints the generated
+turns are tested against.
 
 ### The scores, and everything that makes them less than they look
 

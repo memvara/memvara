@@ -20,8 +20,8 @@ answer quality with no error, no exception and nothing in any log.
 - Comparison and cost: `bench/compare.py`, `bench/mem0_real.py`, `bench/baseline.py`,
   `bench/extract_cost.py`, `bench/perf.py`, `bench/evalkit.py`.
 - Against a hosted store: `bench/hosted.py`.
-- End-to-end answer quality: `demo/harness.py`, `demo/scenario.py`, `demo/baselines.py`,
-  with recorded runs under `demo/runs/`.
+- End-to-end answer quality: `demo/harness.py`, `demo/scenario.py`, `demo/distractors.py`
+  (the second corpus size), `demo/baselines.py`, with recorded runs under `demo/runs/`.
 - The public benchmark others can enter: `benchmarks/agent_memory/`, with its own
   `benchmarks/agent_memory/README.md` and adapters under
   `benchmarks/agent_memory/adapters/`.

@@ -118,8 +118,11 @@ calls at once, with the results and the cost ledger assembled in question order,
 report is the same whatever N is. Both live in `bench/evalkit.py` and serve the two
 runners and `demo/harness.py` alike. `demo/harness.py` also gained `--reader
 anthropic|openai`, with the model id, effort, output budget and thinking setting pinned
-by flags and printed under the report's title. The apparatus for the judged number on
-this corpus therefore exists in full; the run itself is still to be made.
+by flags and printed under the report's title, and `--corpus-scale N`, which pads the
+authored history with generated tickets that name no value a question is about
+(`demo/distractors.py`), so the token argument can be measured at two sizes rather than
+argued from one. The apparatus for the judged number on this corpus therefore exists in
+full; the run itself is still to be made.
 
 ---
 
@@ -775,9 +778,9 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
    layer's argument here is 5.6× fewer tokens rather than a better answer; and the trap
    metric — the column a before/after claim would rest on — produced **no signal at all**,
    because the reader never gave a superseded value. Still missing on *this* corpus: a
-   run with the hosted reader, a second corpus size to turn the token argument from a
-   slope into a measurement, and any comparison against mem0 on answers rather than on
-   architecture. A hosted reader has since been run on a different corpus — 0.11.0's
+   run with the hosted reader, at both corpus sizes now that `--corpus-scale` supplies
+   the second, and any comparison against mem0 on answers rather than on architecture.
+   A hosted reader has since been run on a different corpus — 0.11.0's
    ranked recall, judged on LongMemEval-S through the MemoryBench harness, in
    [`docs/BENCHMARKS.md`](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness)
    — but it says nothing about this authored support scenario, which still needs its own

@@ -7,20 +7,23 @@ that as the first item under *What is still missing* since it was written, and t
 directory is the corpus, the arms and the harness for closing it.
 
 The apparatus is complete: the corpus, the five arms, a blinded round trip for a person or
-an agent, and a reader behind an API with every parameter pinned and printed. The one run
-recorded below still used an agent as the reader, which makes it a sanity check and not a
-benchmark; [What one run produced](#what-one-run-produced) is specific about the
-difference, and a run with the hosted reader is the next thing to record.
+an agent, a reader behind an API with every parameter pinned and printed, and a second
+corpus size ([Two corpus sizes](#two-corpus-sizes)). The one run recorded below still
+used an agent as the reader, which makes it a sanity check and not a benchmark;
+[What one run produced](#what-one-run-produced) is specific about the difference, and a
+run with the hosted reader at both sizes is the next thing to record.
 
 ```
 demo/scenario.py    the support history and the question set
+demo/distractors.py generated tickets that scale the history without moving any fact
 demo/baselines.py   the five context-building arms, and the structured integration
 demo/harness.py     the blinded run over those arms, and the scoring
 ```
 
-`scenario.py` is pure data with no dependencies. `from demo import conversation, questions`
-costs nothing and cannot fail; `demo.baselines` and `demo.harness` are imported by name
-because they pull in numpy and the bench helpers.
+`scenario.py` and `distractors.py` are pure data with no dependencies. `from demo import
+conversation, questions, scaled_conversation` costs nothing and cannot fail;
+`demo.baselines` and `demo.harness` are imported by name because they pull in numpy and
+the bench helpers.
 
 ```bash
 PYTHONPATH=. python3 demo/harness.py --reader stub          # offline, one command
@@ -441,6 +444,64 @@ part of what is being measured. The structured arm passes `valid_at=question.abo
 a historical question is answered from the block `recall()` renders for that day, under
 the header that names it. The demo used to re-render `search()` results itself for that
 case, because `recall()` had no `valid_at=`; it no longer needs to, so it does not.
+
+---
+
+## Two corpus sizes
+
+The claim the size table makes — retrieval context is flat in corpus length while
+transcript context is linear — is a slope, and the authored corpus is one point on it.
+The second point is the same corpus scaled: `demo/distractors.py` pads the sixty-four
+authored turns with generated support tickets for the same customer and product, and
+`--corpus-scale N` on `demo/harness.py` runs any reader over the padded history. The
+questions, the golds, the `asked_at` cutoffs and `SUPPORT_FACTS` are untouched; only the
+haystack grows. Scale 1, the default, is the authored corpus itself.
+
+```bash
+PYTHONPATH=. python3 demo/harness.py --reader stub --corpus-scale 10
+```
+
+What a generated turn may say is the whole design, and it is tested rather than promised.
+A distractor never names the value of any fact a question is about, old or new — no
+address, plan name, serial, mobile number or contact channel — nor the money or the card
+the corpus leaves unstated, nor the two controls. Repeating a superseded value would move
+the balance the authored corpus was built on (the old address is named nine times to the
+new one's three, and last) and change what a trapped answer means. A distractor may name a
+fact's *topic* without its value — which subscription tiers exist, where an invoice
+appears, whether someone has to be in for a parcel — and several do on purpose, because
+topic words are what a retriever matches on, and those tickets compete with the authored
+turns for the twelve slots a retrieval arm has. Every generated turn is unique text,
+because `Memvara.add()` returns the existing episode for a repeat and the memvara arms
+would otherwise hold fewer turns than `full_transcript`. Tickets land on days with no
+authored turn, at 06:00 or 22:00, inside the authored window, so the cutoffs slice them
+as they slice the authored turns and the corpus keeps its shape.
+`tests/test_demo_scenario.py` pins all of this against a hand-written list of the
+forbidden strings rather than against anything the module exports.
+
+At scale 10 the size table is this, and like the table above it is deterministic:
+
+```
+  arm                 mean chars  max chars  mean ~tokens  items used / turns seen
+  ------------------  ----------  ---------  ------------  -----------------------
+  none                         0          0             0              0.0 / 607.5
+  full_transcript          92053      96897         23013            607.5 / 607.5
+  naive_rag                 1891       2838           473             12.0 / 607.5
+  memvara                   1596       2424           399             12.0 / 607.5
+  memvara_structured        1530       2204           383             12.0 / 607.5
+```
+
+The transcript arm grows 9.4× (9,803 to 92,053 characters; the authored turns are longer
+than the generated ones, so ten times the turns is not quite ten times the text). The
+three retrieval arms stay under `MAX_CONTEXT_CHARS` by construction and come out a little
+*shorter*, because the twelve slots now fill with generated turns that are shorter than
+the authored ones. Whether they still surface the evidence among ten times more turns is
+what the hosted run at this scale measures; the stub cannot say.
+
+`memvara_structured` deserves one more sentence. Its claims come from the desk's own
+fields (`SUPPORT_FACTS`), not from the transcript, so at every scale its claim tier is
+identical and only its episode tail faces more competition. That is the product's thesis
+stated as an experiment: structured facts plus retrieval should hold as the history grows,
+while an arm that has only the transcript to work from has more to lose.
 
 ---
 

@@ -1612,6 +1612,68 @@ def test_checkpoint_and_concurrency_are_refused_beside_the_file_reader(tmp_path,
         assert flags[0] in capsys.readouterr().err
 
 
+# --- the harness: two corpus sizes ------------------------------------------------------
+#
+# `demo/distractors.py` pads a conversation with generated support tickets so the token
+# argument — retrieval context flat in corpus length, transcript context linear in it —
+# can be measured at two sizes instead of argued from one. The scenario-level properties
+# of the generated turns are pinned in `tests/test_demo_scenario.py`; these tests cover
+# the generator on the fixture corpus and the flag that reaches it.
+
+
+def test_scaling_a_fixture_corpus_pads_inside_its_own_window_and_is_deterministic():
+    """`scale_conversation` works on any dated conversation, which is what lets these
+    tests run on the fixture rather than the real corpus. The padding stays inside the
+    input's own first-to-last window and comes out the same twice; factor 1 is the input
+    itself, which is what makes the default a no-op."""
+    from demo.distractors import scale_conversation
+
+    scaled = scale_conversation(CONVERSATION, 3)
+    assert scaled == scale_conversation(CONVERSATION, 3)
+    assert len(scaled) == 3 * len(CONVERSATION)
+    assert all(CONVERSATION[0].at <= t.at <= CONVERSATION[-1].at for t in scaled)
+    assert [t.at for t in scaled] == sorted(t.at for t in scaled)
+    assert scale_conversation(CONVERSATION, 1) == list(CONVERSATION)
+
+
+def test_the_corpus_scale_flag_grows_only_the_haystack(monkeypatch, capsys, tmp_path):
+    """Same questions, same golds, same arms; only the history the arms see is longer.
+
+    The report says so in its header at any scale but 1, and at 1 — the default — it says
+    nothing, so the offline run's report is byte-identical to what it was before the flag
+    existed. The transcript arm's context grows on every question; the three retrieval
+    arms stay under their cap, which is the whole shape of the argument being measured.
+    """
+    _install_stub_scenario(monkeypatch)
+    small, large = tmp_path / "small.jsonl", tmp_path / "large.jsonl"
+    assert hz.main(["--reader", "stub", "--out", str(small)]) == 0
+    assert "corpus:" not in capsys.readouterr().out
+    assert hz.main(["--reader", "stub", "--corpus-scale", "3", "--out", str(large)]) == 0
+    printed = capsys.readouterr().out
+    assert "corpus: scale 3" in printed and f"{3 * len(CONVERSATION)} turns" in printed
+
+    def rows(path):
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    assert [(r["arm"], r["qid"], r["gold"]) for r in rows(small)] == [
+        (r["arm"], r["qid"], r["gold"]) for r in rows(large)]
+    by_arm = lambda path, arm: [r["context_chars"] for r in rows(path) if r["arm"] == arm]  # noqa: E731
+    assert all(big > little for little, big in
+               zip(by_arm(small, "full_transcript"), by_arm(large, "full_transcript")))
+    for arm in ("naive_rag", "memvara", "memvara_structured"):
+        assert all(chars <= bl.MAX_CONTEXT_CHARS for chars in by_arm(large, arm))
+
+
+def test_a_corpus_scale_below_one_is_refused(monkeypatch, capsys):
+    """Zero would be an empty history and a report full of abstentions that read as a
+    finding; the flag names itself in the refusal."""
+    _install_stub_scenario(monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        hz.main(["--reader", "stub", "--corpus-scale", "0"])
+    assert exc.value.code == 2
+    assert "--corpus-scale" in capsys.readouterr().err
+
+
 def test_a_narrowed_run_without_the_floor_and_the_ceiling_says_so_in_the_header():
     """A programmatic caller can drop arms. The header then names what is missing,
     because the roadmap's rule is that a memory score is uninterpretable without the

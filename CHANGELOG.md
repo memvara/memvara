@@ -27,6 +27,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   is identical whatever N is. Both flags are shared by `bench/locomo.py`,
   `bench/longmemeval.py` and `demo/harness.py`, and every flag that pins a reader is now
   defined once, in `evalkit.add_reader_arguments`.
+- **The demo has a second corpus size.** `--corpus-scale N` on `demo/harness.py` pads
+  the authored history with generated support tickets (`demo/distractors.py`) that name
+  no value a question is about, so the token argument — retrieval context flat in corpus
+  length, transcript context linear — can be measured at two sizes rather than argued
+  from one. At scale 10 the transcript arm's context is 9.4× larger and the three
+  retrieval arms stay under their cap. Scale 1, the default, is the authored corpus
+  untouched, and every generated turn is unique text so the memvara arms hold the same
+  haystack as the transcript arm.
 
 ### Changed
 
