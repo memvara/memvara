@@ -3022,15 +3022,18 @@ class TestProceduralIsForTheUserOnly:
         assert "retyped_from" not in mem.store.get_claim(receipt.added[0].id).meta
         assert mem.search("terminus", memory_types=[MemoryType.PROCEDURAL])
 
-    def test_the_prefix_is_matched_case_insensitively_and_a_bare_name_is_not_it(self, mem):
+    def test_the_prefix_is_exact_and_lowercase_and_a_bare_name_is_not_it(self, mem):
+        """`Project:` is not the prefix. The plugin's `_mine` compares the subject
+        exactly against `project:<cwd>`, so a claim the reconciler kept under another
+        spelling would be one no session-start block ever showed."""
         upper = mem.remember("Project:/home/alice/src/snorkel", "prefers",
                              "fish shell here", memory_type=MemoryType.PROCEDURAL)
         bare = mem.remember("snorkel", "prefers", "fish shell here",
                             memory_type=MemoryType.PROCEDURAL)
 
-        assert upper.added[0].memory_type is MemoryType.PROCEDURAL
+        assert upper.added[0].memory_type is MemoryType.SEMANTIC
         assert bare.added[0].memory_type is MemoryType.SEMANTIC
-        assert [r.reason for r in bare.retyped] == ["subject"]
+        assert [r.reason for r in upper.retyped + bare.retyped] == ["subject", "subject"]
 
     def test_a_predicate_declared_procedural_does_not_override_the_subject(self, mem):
         """`never_do` and `prefers_tool` are declared `procedural` because they are usually

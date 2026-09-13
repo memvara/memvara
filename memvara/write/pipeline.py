@@ -380,8 +380,8 @@ class WritePipeline:
             for claim, sources, observed_at in pending:
                 # A restated turn does not go through `apply`, so the one rule `apply`
                 # enforces on every candidate is applied here to the claim it restates:
-                # `procedural` is for the user only, and a misfiled claim heals the next
-                # time it is seen, this way or that.
+                # `procedural` is for the user or a `project:` scope, and a misfiled claim
+                # heals the next time it is seen, this way or that.
                 moved = self.reconciler.file_by_subject(claim)
                 if moved is not None:
                     receipt.retyped.append(moved)
@@ -801,14 +801,9 @@ class WritePipeline:
         onto a neighbour by token overlap is not — that fold is the acquisition path's
         backstop for an open vocabulary, and a closed one has asked for no backstop.
         """
-        kept: list[dict[str, Any]] = []
-        dropped = 0
-        for item in raw:
-            if self.registry.resolve(str(item.get("predicate", "") or "")).resolved:
-                kept.append(item)
-            else:
-                dropped += 1
-        return kept, dropped
+        kept = [item for item in raw
+                if self.registry.resolve(str(item.get("predicate", "") or "")).resolved]
+        return kept, len(raw) - len(kept)
 
     def _report_usage(self, receipt: WriteReceipt, usage: Usage | None) -> None:
         """Put what a write consumed on its receipt, and on the two token series.

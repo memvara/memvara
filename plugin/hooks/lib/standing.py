@@ -251,7 +251,11 @@ def _from_tool(store: Any) -> "list[Note] | None":
     call = getattr(store, "_call", None)
     if not callable(accepts) or not callable(call) or not accepts("memory_standing", "k"):
         return None
-    return _rows(str(call("memory_standing", {}) or ""))
+    # `k=200`, the most the hosted route accepts, rather than the tool's own default of
+    # 64: the deployment truncates BEFORE this module orders or filters anything, and a
+    # store measured at 169 standing claims was handing back 64 of them chosen by the
+    # server's order. `render` still says how many did not fit the budget.
+    return _rows(str(call("memory_standing", {"k": 200}) or ""))
 
 
 def _from_since(store: Any) -> "list[Note] | None":

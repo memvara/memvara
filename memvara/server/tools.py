@@ -695,6 +695,11 @@ def _standing(ctx: ToolContext, args: dict[str, Any]) -> str:
     `core.is_derived` is the same rule the row marker uses, so a row sorted into the
     second half is the row that carries the marker. The id makes the order total, so two
     claims written in the same instant cannot swap places between calls.
+
+    Under a hosted deployment the server side truncates to `k` before this sort runs, so
+    the order is only as good as the route's own; memvara-cloud's `GET /v1/standing` sorts
+    the same way since the change that introduced this order, and a client that wants the
+    whole set asks for the route's maximum rather than the default.
     """
     cap = args.get("k")
     cap = STANDING_K if cap is None else int(cap)

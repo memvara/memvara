@@ -131,7 +131,8 @@ SELF_SUBJECT = "user"
 #: A subject spelled `project:<key>` is a scope rather than a thing: a preference that
 #: holds in one checkout. `Reconciler._may_be_procedural` lets such a claim stay
 #: `procedural`, which a bare repository name cannot, and the plugin's session-start
-#: block reads `project:<cwd>` beside `user`. Compared case-insensitively.
+#: block reads `project:<cwd>` beside `user`. The prefix is exact and lowercase, as the
+#: plugin writes it; `Project:` is a bare name and is retyped like any other.
 PROJECT_SUBJECT_PREFIX = "project:"
 
 #: The predicate every verbatim note lands on (`compat/_notes.py`): a mem0-compatible
@@ -1459,7 +1460,7 @@ class Retype:
     <Retype user prefers: semantic -> procedural>
     >>> Retype("cl_3c4d", "agent-memory", "never_do", MemoryType.PROCEDURAL,
     ...        MemoryType.SEMANTIC, reason="subject")
-    <Retype agent-memory never_do: procedural -> semantic, procedural is for the user only>
+    <Retype agent-memory never_do: procedural -> semantic, procedural is for the user or a project: scope>
     """
 
     claim_id: str
@@ -1474,7 +1475,8 @@ class Retype:
     reason: str = "asserted"
 
     def __repr__(self) -> str:
-        why = ", procedural is for the user only" if self.reason == "subject" else ""
+        why = (", procedural is for the user or a project: scope"
+               if self.reason == "subject" else "")
         return (f"<Retype {self.subject} {self.predicate}: "
                 f"{self.was.value} -> {self.now.value}{why}>")
 

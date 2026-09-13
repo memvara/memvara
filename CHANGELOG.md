@@ -36,7 +36,7 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   the same way (`plugin/hooks/lib/standing.py`).
 - **A subject spelled `project:<key>` may stay `procedural`.** The 0.13.0 rule that
   `procedural` is for the subject `user` gains one exemption, `types.PROJECT_SUBJECT_PREFIX`,
-  matched case-insensitively: a preference scoped to one checkout is still how the user
+  an exact lowercase prefix: a preference scoped to one checkout is still how the user
   wants work done, there, and the plugin's session-start block already reads
   `project:<cwd>` beside `user`. Without it every project-scoped rule had to be filed under
   `user`, and on one store forty rules for a single skill in a single repository opened
