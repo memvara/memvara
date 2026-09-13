@@ -665,6 +665,48 @@ Code's entry shape as its default, and the formatter still writes `Claude: ` in 
 assistant line whatever host produced it. Neither is load-bearing for extraction, and
 neither is worth a rename that would re-label history in users' stores.
 
+**Fast decay for `known_defect` in the shipped `engineering` pack.** Declined on
+2026-09-12, on the numbers rather than on a measurement. The problem it was meant to solve is
+real: a defect recorded from a transcript stays live after a later turn says it is fixed,
+because `known_defect` is many-valued and nothing ends it. On the production store the
+worker had written 738 of them in a day. Decay looked like the lever, and it is not one.
+Volatility sets a half-life used only in ranking (7 days for `fast`, 2 years for `slow`,
+100 years for `static`), and recency is one of three signals inside a bounded quality
+multiplier: at the default weights a fully decayed claim carries 1.25 against 1.5 for a
+fresh one, and the ranking divides that back into a bounded factor because one step of
+freshness would otherwise buy about 41 rank positions (`retrieve/scoring.py`). A fixed
+defect from August on `fast` would still come back for any query it matches well; it
+would only lose to an equally good match that is newer. That is a tiebreak, and changing a
+shipped vocabulary for every user of the pack to gain a tiebreak is the wrong trade.
+Editing the tenant's `predicates` row is not a lever either: the cloud builds a project's
+registry in memory from the pack on every request and never reads a declared spec back
+from the store. Until #209 lands, a stale defect is ended by hand with `memory_end` at the
+instant it was fixed.
+
+**A retraction sentence in the extraction prompt, so a turn that says a defect is fixed
+ends it.** Measured on 2026-09-12 against Qwen3.8-27B through the core's own `OpenAILLM`
+and declined. With the sentence the model does emit a retraction, but on a fresh triple —
+`memvara_fts_index / stall_defect_status / fixed_in_0.9.1` with polarity -1 — because it
+cannot know the wording the store holds (`memvara / known_defect / FTS stalls at ~250 MB on
+0.9.0`, written from another turn). `Reconciler._retract` ends a claim only when subject,
+predicate and object match, so the retraction hits nothing and the reconciler records a
+no-op, which is its documented behaviour for a named retraction that matches no claim.
+Without the sentence the model writes a positive "fixed" claim beside the stale defect,
+which is no better. The sentence cost nothing measurable elsewhere (12 of 15 keyed facts
+with 1 wrong predicate against 13 of 15 with 1, inside the test's run-to-run noise), so
+the reason it is declined is that it does not work, not that it costs.
+
+**Showing the extractor the live values it could be retracting (#209).** The fix the two
+items above point at, deferred until it has a design page. The write path would send, for
+each subject a turn names, the live claims under predicates a pack marks as retractable
+(`known_defect`, `blocked_by`), with their stored wording, so the model can retract the
+exact object and `_retract` finds it. The known-predicate list the prompt already carries
+is the same idea one level up. Two things to settle first: which predicates opt in, since
+sending every live value for every subject costs prompt tokens on every call and invites
+the model to restate what it sees; and matching the turn's subject to the stored one
+through entity resolution rather than string equality, or the values are never found for
+exactly the turns that need them.
+
 ## A JavaScript client, and what was built instead
 
 Recorded here because this list is where *considered* belongs, and until 2026-08-25 a JS
