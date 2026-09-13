@@ -210,6 +210,9 @@ def receipt(body: dict[str, Any]) -> WriteReceipt:
         # `.get`: a deployment older than replacement advice sends no such key, and an
         # absent list means what an empty one means, that nothing was suggested.
         may_replace=[claim(c) for c in body.get("may_replace", ())],
+        # `.get` for the same reason: a deployment older than memvara 0.14.0 sends no
+        # such key, and 0 is what an absent count means.
+        unregistered=int(body.get("unregistered", 0)),
     )
 
 

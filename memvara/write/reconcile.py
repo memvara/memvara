@@ -69,7 +69,7 @@ from ..entities import EntityRegistry, entity_key
 from ..schema import PredicateRegistry
 from ..store.base import Store
 from ..types import (
-    NOTE_PREDICATE, SELF_SUBJECT,
+    NOTE_PREDICATE, PROJECT_SUBJECT_TYPE, SELF_SUBJECT,
     ObjectKind,
     ENTITY_REKEY,
     PREDICATE_REKEY,
@@ -365,15 +365,32 @@ class Reconciler:
     def _may_be_procedural(claim: Claim) -> bool:
         """Whether `procedural` is a filing this claim can have.
 
-        The user's own subject, or a verbatim note. A note is recognised by its
-        predicate rather than by a subject prefix: the mem0 shim and the importer build
-        notes under different prefixes, and both are notes.
+        The user's own subject, a verbatim note, or a subject spelled `project:<key>`.
+        A note is recognised by its predicate rather than by a subject prefix: the mem0
+        shim and the importer build notes under different prefixes, and both are notes.
+
+        The `project:` prefix is a scope, not a thing. It is how a client files a
+        preference that holds only in one checkout -- "use this skill here, never
+        auto-activate that one" -- and the plugin's session-start block already reads
+        `project:<cwd>` beside `user`. Such a claim is still how the user wants work
+        done; it is merely how they want it done *here*. Without this exemption every
+        project-scoped rule had to be filed under `user` to stay standing, and on one
+        store forty rules for a single skill in a single repository then opened every
+        session in every other repository. Read through `Claim.subject_type`, the `type:name` convention every typed
+        entity already follows, rather than a prefix test of its own: the namespace folds
+        case, and `project: some prose` or `project://x` is not a type. The plugin's
+        `_mine` folds the namespace the same way and compares the path exactly. A bare repository
+        name (`memvara`, `memvara-cloud`) is not the prefix and is still filed as
+        `semantic`: a repository cannot want anything.
         """
-        return claim.subject_key == SELF_SUBJECT or claim.predicate == NOTE_PREDICATE
+        return (claim.subject_key == SELF_SUBJECT
+                or claim.predicate == NOTE_PREDICATE
+                or claim.subject_type == PROJECT_SUBJECT_TYPE)
 
     @classmethod
     def file_by_subject(cls, claim: Claim) -> "Retype | None":
-        """File a `procedural` claim about anything but the user as `semantic`.
+        """File a `procedural` claim about anything but the user, or a `project:` scope, as
+        `semantic`.
 
         Mutates, writes not; the caller performs the write, as with `_retype`. Public
         because `write/pipeline.py` reinforces a restated turn's claims without going

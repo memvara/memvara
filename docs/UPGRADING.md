@@ -7,6 +7,31 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A `project:<key>` subject keeps `procedural`, and standing sets list stated rules first
+
+### What changed
+
+Since 0.14.0 the rule in the next entry has one exemption: a subject typed `project:<key>`
+(`types.PROJECT_SUBJECT_TYPE`, read through `Claim.subject_type` like every typed entity, so
+`Project:` folds and `project: some prose` does not count) keeps `procedural`. A
+preference that holds only in one checkout is filed under `project:<absolute path>`, stays
+a standing rule, and a client that knows its working directory can show it there and
+nowhere else. A bare repository name (`memvara`) is not the prefix and still moves.
+
+In the same release `memory_standing` and the plugin's session-start block order every
+row a caller asserted (`extractor` `""` or `"api"`) before every row a model or a hook
+derived, and only then by confidence, recency and id. Confidence used to come first, and a
+model's own confidence in its paraphrase outranked the sentence the user typed.
+
+### How you find your instances
+
+A `project:`-scoped claim that was retyped by 0.13.0 stays `semantic` until the same triple
+is written again; `memory_history` shows `retyped_from`. Re-assert the triple with
+`memory_type="procedural"` to move it back. Standing sets that a client truncates by `k`
+change composition, not size: the stated rows now survive a cut.
+
+---
+
 ## `procedural` is for the subject `user` only
 
 ### What changed

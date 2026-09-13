@@ -128,6 +128,15 @@ LAST_OBSERVED = "last_observed_at"
 #: (`write/pipeline.py`), and read by `retrieve/anchor.py`, which has to know that "where
 #: do I live" is a question about this row. One spelling, so the three cannot drift.
 SELF_SUBJECT = "user"
+#: A subject typed `project:<key>` is a scope rather than a thing: a preference that
+#: holds in one checkout. `Reconciler._may_be_procedural` lets such a claim stay
+#: `procedural`, which a bare repository name cannot, and the plugin's session-start
+#: block reads `project:<cwd>` beside `user`. Read through `Claim.subject_type`, so it is
+#: the same `type:name` convention every typed entity follows (`memvara/entities.py`):
+#: the namespace folds case, and prose with a space after the colon or a `//` scheme is
+#: not a type. `PROJECT_SUBJECT_PREFIX` is the spelling a writer uses.
+PROJECT_SUBJECT_TYPE = "project"
+PROJECT_SUBJECT_PREFIX = PROJECT_SUBJECT_TYPE + ":"
 
 #: The predicate every verbatim note lands on (`compat/_notes.py`): a mem0-compatible
 #: `infer=False` write, or an import. A note is not a claim about a thing; it is the
@@ -1421,9 +1430,9 @@ class Retype:
 
     Two things produce one, and `reason` says which. `"asserted"`: a claim that was
     already known was re-filed under the type a caller sent. `"subject"`: a claim about
-    anything but the user arrived as `procedural` and was filed as `semantic`, because
-    `procedural` is how the user wants work done and a repository, a service or a file
-    cannot want anything — see `Reconciler.file_by_subject`. The second kind happens on
+    anything but the user, or a `project:` scope, arrived as `procedural` and was filed
+    as `semantic`, because `procedural` is how the user wants work done and a repository,
+    a service or a file cannot want anything — see `Reconciler.file_by_subject`. The second kind happens on
     a new claim as readily as on a known one, and whether the type came from a caller,
     from a model, or from a predicate's declared default.
 
@@ -1454,7 +1463,7 @@ class Retype:
     <Retype user prefers: semantic -> procedural>
     >>> Retype("cl_3c4d", "agent-memory", "never_do", MemoryType.PROCEDURAL,
     ...        MemoryType.SEMANTIC, reason="subject")
-    <Retype agent-memory never_do: procedural -> semantic, procedural is for the user only>
+    <Retype agent-memory never_do: procedural -> semantic, procedural is for the user or a project: scope>
     """
 
     claim_id: str
@@ -1469,7 +1478,8 @@ class Retype:
     reason: str = "asserted"
 
     def __repr__(self) -> str:
-        why = ", procedural is for the user only" if self.reason == "subject" else ""
+        why = (", procedural is for the user or a project: scope"
+               if self.reason == "subject" else "")
         return (f"<Retype {self.subject} {self.predicate}: "
                 f"{self.was.value} -> {self.now.value}{why}>")
 
@@ -1600,6 +1610,13 @@ class WriteReceipt:
     #: proposed for its turn. Not counted: claims the guard kept at a discounted
     #: confidence, which are stored and cannot end an incumbent.
     polluted: int = 0
+    #: Claims the extractor proposed and this write refused because their predicate is
+    #: not one the registry knows -- `WritePipeline`'s `closed_vocabulary`, off by
+    #: default. Zero means nothing tripped or the option is off. A claim counted here
+    #: also counts toward `unextracted` if it was the only thing proposed for its turn,
+    #: as with `ungrounded` and `polluted`. Nothing a caller asserts through `remember()`
+    #: or the fast path is ever counted here.
+    unregistered: int = 0
     #: Turns `reextract()` was handed that already had claims citing them, and so did not
     #: read again. Always 0 from `add()`, which never sees an episode twice.
     #:

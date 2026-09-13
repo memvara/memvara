@@ -195,6 +195,12 @@ class ServerConfig:
     #: receipt. Off by default: it is up to three model calls per write, and it needs a
     #: backend that can judge (`anthropic` and `openai` both can; `none` cannot).
     advise_replacements: bool = False
+    #: Refuse a model-proposed claim whose predicate the registry does not know, instead
+    #: of learning the predicate. Off by default. `WritePipeline.closed_vocabulary`
+    #: carries the reason and the measurement; here it is one more server-side setting
+    #: that means nothing under MEMVARA_MODE=cloud, where the deployment's own worker
+    #: decides.
+    closed_vocabulary: bool = False
     #: "local" (default) opens MEMVARA_DB on disk, exactly as before this field existed.
     #: "cloud" opens no local file at all; it resolves an API key (MEMVARA_API_KEY, or
     #: the credentials file `memvara-mcp login` writes) and talks to `server_url` instead.
@@ -289,6 +295,8 @@ class ServerConfig:
                 "'none'. Set MEMVARA_LLM=anthropic or MEMVARA_LLM=openai, or unset "
                 "MEMVARA_ADVISE_REPLACEMENTS.")
 
+        closed = _flag(env.get("MEMVARA_CLOSED_VOCABULARY"), "MEMVARA_CLOSED_VOCABULARY")
+
         predicates = (env.get("MEMVARA_PREDICATES") or "").strip()
         if predicates:
             # Read now and discard the result: a typo in a pack name or an unreadable file
@@ -321,6 +329,7 @@ class ServerConfig:
             llm_extra_body=_json_object(
                 env.get("MEMVARA_LLM_EXTRA_BODY"), "MEMVARA_LLM_EXTRA_BODY"),
             advise_replacements=advise,
+            closed_vocabulary=closed,
             embedder=_embedder_spec(env.get("MEMVARA_EMBEDDER")),
             mode=mode,
             server_url=server_url,
@@ -750,6 +759,7 @@ _SERVER_SIDE_UNDER_CLOUD = (
     ("llm_timeout", None, "MEMVARA_LLM_TIMEOUT", "extraction timeout"),
     ("llm_extra_body", None, "MEMVARA_LLM_EXTRA_BODY", "request body"),
     ("advise_replacements", False, "MEMVARA_ADVISE_REPLACEMENTS", "replacement advice"),
+    ("closed_vocabulary", False, "MEMVARA_CLOSED_VOCABULARY", "vocabulary policy"),
     ("read_w_graph", 0.0, "MEMVARA_READ_W_GRAPH", "retriever"),
 )
 
@@ -824,6 +834,7 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         # pinned to the builtins and everything outside them accumulated silently.
         registry=_registry(config),
         advise_replacements=config.advise_replacements,
+        write_closed_vocabulary=config.closed_vocabulary,
         # Explicit at its own default, like `llm` and `embedder` above and for a related
         # reason: this is the one line that says which retrieval legs this store reads
         # with, and a reader of this function should not have to know that

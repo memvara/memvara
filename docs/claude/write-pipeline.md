@@ -73,6 +73,11 @@ exception the caller retries.
   negative loses a memory permanently. `SalienceGate.DEFAULT_EVIDENCE_ROLES` is the user
   role alone, and passing `evidence_roles=None` is the documented way to handle a transcript
   between two named people, where the default would otherwise drop every turn.
+- **A closed vocabulary refuses what nothing declared.** `closed_vocabulary=True` drops a
+  model-proposed claim whose predicate the registry cannot resolve, counts it on
+  `receipt.unregistered`, and never spends a model call learning it. Off by default; on for
+  a deployment whose predicates are deliberate, because an unregistered predicate is
+  multi-valued forever and supersedes nothing, so all it adds is noise in every recall.
 - **The fast path chooses precision over recall.** It emits nothing rather than a wrong
   triple, sets `Derivation.FAST_PATH`, and leaves the rest to tier 2.
 - **`reject_ungrounded` defaults to `"auto"`.** A model-proposed claim whose object shares

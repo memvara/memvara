@@ -403,7 +403,8 @@ stamps `meta["retyped_from"]`, mirroring `consolidate.promote_pass`, which has a
 reclassified a live claim in place — the operation is not new, only the caller's route to
 it.
 
-**`procedural` is for the subject `user` only, and the reconciler enforces it.**
+**`procedural` is for the subject `user`, or a scope spelled `project:<key>`, and the
+reconciler enforces it.**
 `Reconciler.file_by_subject` runs on every candidate right after `_canonicalize`, and on
 the claim on record when a candidate turns out to be a re-observation. A `procedural` claim
 whose subject is not the user is filed as `semantic`, whoever supplied the type — a caller,
@@ -415,7 +416,10 @@ or a service cannot want anything, so a `procedural` claim about one is wrong ho
 was produced. A claim already misfiled is moved the next time the same triple is seen,
 even by a write that asserts no type; the safety property that an unopinionated write
 cannot undo a correction still holds, because moving such a claim out of `procedural` is
-never a correction anyone could have wanted to keep. A verbatim note is exempt — it is on
+never a correction anyone could have wanted to keep. A subject beginning `project:`
+(`types.PROJECT_SUBJECT_TYPE`, read through `Claim.subject_type`) is exempt: it is a scope, not a thing, and
+a preference scoped to one checkout is still how the user wants work done there — the
+plugin's session-start block reads `project:<cwd>` beside `user`. A verbatim note is exempt — it is on
 the `note` predicate (`types.NOTE_PREDICATE`, written by `compat/_notes.py` for the mem0
 shim and the importer alike), and a note typed `procedural` is the owner's own standing
 instruction in the owner's words, not a claim about a thing. The one write that does not
@@ -475,7 +479,8 @@ class WritePipeline:
     def __init__(self, store, embedder, registry, llm, *,
                  near_dup_threshold: float = 0.97,
                  reinforce_bump: float = 0.25,
-                 reject_ungrounded: bool | str = "auto") -> None
+                 reject_ungrounded: bool | str = "auto",
+                 closed_vocabulary: bool = False) -> None
 
     def add(self, episodes: Sequence[Episode]) -> WriteReceipt
     def reextract(self, episodes: Sequence[Episode]) -> WriteReceipt
@@ -537,6 +542,15 @@ suggestion must not turn it into an exception the caller retries.
   Held to its measurement by `tests/test_pollution.py` over the 255-claim fixture:
   wrong-predicate 46 → 20, duplicates 32 → 0, keyed facts found unchanged at 60/90 in
   every configuration.
+- **`closed_vocabulary`** (default `False`) refuses a model-proposed claim whose predicate
+  the registry does not know — `registry.resolve(...)` not resolved, so a declared alias
+  passes and a spelling nothing declared does not — and counts it on `receipt.unregistered`.
+  It runs after the pollution guard and before acquisition, so a refused predicate is never
+  learned and costs no model call. `remember()` and the fast path never reach it. The
+  measurement behind it: a worker whose prompt let the model name relations itself wrote
+  2,555 claims under about a hundred invented predicates in one afternoon, every one
+  unregistered, multi-valued and retiring nothing, and recall for a short query about a
+  repository's CI returned five commit hashes ahead of the note that answered it.
 
 `reextract()` is `add()` with tier 0 removed, for turns already in the store: a
 deployment that ran without a model, or a batch a provider failure left `deferred` — or

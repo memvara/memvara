@@ -3007,6 +3007,41 @@ class TestProceduralIsForTheUserOnly:
         assert stored.meta["retyped_from"] == "procedural"
         assert not mem.search("git add", memory_types=[MemoryType.PROCEDURAL])
 
+    def test_a_project_scoped_subject_keeps_its_procedural_filing(self, mem):
+        """`project:<key>` is a scope, not a thing, and a preference scoped to one
+        checkout is still how the user wants work done -- there. The plugin's
+        session-start block reads `project:<cwd>` beside `user` for exactly this, and
+        without the exemption every such rule had to be filed under `user`, where forty
+        rules for one skill in one repository opened every session everywhere."""
+        receipt = mem.remember("project:/home/alice/src/snorkel", "never_do",
+                               "auto-activate the terminus skill",
+                               memory_type=MemoryType.PROCEDURAL)
+
+        assert receipt.added[0].memory_type is MemoryType.PROCEDURAL
+        assert receipt.retyped == []
+        assert "retyped_from" not in mem.store.get_claim(receipt.added[0].id).meta
+        assert mem.search("terminus", memory_types=[MemoryType.PROCEDURAL])
+
+    def test_the_scope_is_read_as_a_typed_entity_and_a_bare_name_is_not_it(self, mem):
+        """`Claim.subject_type`, the `type:name` convention every typed entity follows,
+        decides — not a prefix test of its own. So the namespace folds case, and the
+        two shapes `split_entity_type` refuses (prose with a space after the colon, a
+        `//` scheme) are bare names: kept as `semantic`, like a repository."""
+        folded = mem.remember("Project:/home/alice/src/snorkel", "prefers",
+                              "fish shell here", memory_type=MemoryType.PROCEDURAL)
+        prose = mem.remember("project: quick notes on the migration", "prefers",
+                             "fish shell here", memory_type=MemoryType.PROCEDURAL)
+        scheme = mem.remember("project://github.com/memvara/memvara", "prefers",
+                              "fish shell here", memory_type=MemoryType.PROCEDURAL)
+        bare = mem.remember("snorkel", "prefers", "fish shell here",
+                            memory_type=MemoryType.PROCEDURAL)
+
+        assert folded.added[0].memory_type is MemoryType.PROCEDURAL
+        assert folded.retyped == []
+        for receipt in (prose, scheme, bare):
+            assert receipt.added[0].memory_type is MemoryType.SEMANTIC
+            assert [r.reason for r in receipt.retyped] == ["subject"]
+
     def test_a_predicate_declared_procedural_does_not_override_the_subject(self, mem):
         """`never_do` and `prefers_tool` are declared `procedural` because they are usually
         about the user. The declaration is the default for the type, not a licence."""

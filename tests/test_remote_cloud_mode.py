@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import pytest
 
+from memvara.remote import hydrate
 from memvara.remote.api import RemoteMemvara
 from memvara.server.config import ConfigError, ServerConfig, build_memvara
 from memvara.server.mcp import MemvaraMCPServer
@@ -86,7 +87,8 @@ def test_a_cloud_config_without_a_key_still_fails_at_construction():
                                    server_url="https://example.test"))
 
 
-@pytest.mark.parametrize("field, value", [("llm", "anthropic"), ("embedder", "local")])
+@pytest.mark.parametrize("field, value", [("llm", "anthropic"), ("embedder", "local"),
+                                          ("closed_vocabulary", True)])
 def test_naming_a_server_side_subsystem_under_cloud_mode_is_refused(field, value):
     """Extraction and embedding run inside the deployment, so naming one here is a
     setting that would do nothing. Silently ignoring it is the failure: the operator sets
@@ -494,3 +496,29 @@ def test_memory_standing_asks_the_deployment_rather_than_paging_the_whole_scope(
     assert "more not shown" not in body, (
         "`GET /v1/standing` reports no total, so the hint has no number to print and "
         "printing one would make it wrong")
+
+
+def test_closed_vocabulary_reaches_the_local_pipeline_from_the_environment():
+    """`MEMVARA_CLOSED_VOCABULARY=1` is a write tuning, and a tuning set on the config
+    and absent from the pipeline is a setting that means nothing -- the failure the
+    cloud-mode refusals above exist to prevent, one layer down."""
+    cfg = ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_CLOSED_VOCABULARY": "1"})
+    assert cfg.closed_vocabulary is True
+    mem = build_memvara(cfg)
+    try:
+        assert mem.writer.closed_vocabulary is True
+    finally:
+        mem.close()
+    assert ServerConfig.from_env({"MEMVARA_DB": ":memory:"}).closed_vocabulary is False
+
+
+def test_hydrate_reads_the_closed_vocabulary_count_and_defaults_it_for_an_older_server():
+    """memvara 0.14.0's `unregistered` is a server-side refusal (`closed_vocabulary` is a
+    deployment setting under cloud mode), so a `RemoteMemvara` caller only ever learns of
+    it through this function. A deployment older than the field sends no key, and absent
+    means 0, the way `may_replace` is handled one line above."""
+    wire = {"episode_ids": ["ep_1"], "added": [], "invalidated": [], "reinforced": [],
+            "skipped": 0, "unextracted": 1, "llm_calls": 1, "latency_ms": 9.0,
+            "deferred": False}
+    assert hydrate.receipt(wire).unregistered == 0
+    assert hydrate.receipt({**wire, "unregistered": 3}).unregistered == 3

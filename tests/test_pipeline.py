@@ -2107,3 +2107,79 @@ def test_a_non_finite_amount_from_a_custom_llm_is_dropped():
     [claim] = _one(claims, "I ran a 5k.")
     assert (claim.amount, claim.unit) == (None, None)
     assert claim.object == "5k", "the claim survives; only the bad quantity is dropped"
+
+
+# -- closed_vocabulary ---------------------------------------------------------
+#
+# Off by default, so every test above keeps its invented predicates. These turn it on.
+
+def test_an_unregistered_predicate_is_refused_and_counted_under_a_closed_vocabulary():
+    """The exact shape the option exists for: a real value under a predicate nobody
+    declared. `build_commit` is one of about a hundred spellings one production
+    extractor invented in an afternoon, every one unregistered and so multi-valued and
+    retiring nothing. The claim is dropped, counted, and no model call is spent learning
+    the predicate -- the acquisition path is where an open vocabulary pays for itself.
+    """
+    llm = CountingLLM(claims=[
+        {"subject": "memvara", "predicate": "build_commit", "object": "127f6eb",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    pipe, store, _ = build(llm, closed_vocabulary=True)
+    receipt = pipe.add([ep("The build is at commit 127f6eb on the release branch.")])
+    assert receipt.added == []
+    assert receipt.unregistered == 1
+    assert receipt.unextracted == 1
+    assert llm.classify_calls == 0, "a refused predicate must not be acquired"
+    assert llm.extract_calls == 1
+    store.close()
+
+
+def test_an_item_with_no_predicate_is_malformed_and_not_counted_as_unregistered():
+    """`_claim_from_dict`'s own contract: a structurally malformed item is dropped
+    uncounted, and only a real refusal gets a number. An empty predicate does not
+    resolve, and a first draft of the filter counted it as an invented one -- which
+    would have told a caller to declare a predicate the model never proposed."""
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "", "object": "Lisbon", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    pipe, store, _ = build(llm, closed_vocabulary=True)
+    receipt = pipe.add([ep("I have moved to Lisbon for the year.")])
+    assert receipt.added == []
+    assert receipt.unregistered == 0
+    assert receipt.unextracted == 1
+    store.close()
+
+
+def test_a_registered_predicate_and_a_declared_alias_survive_a_closed_vocabulary():
+    """A filter, not a tax: the builtin passes, and so does an alias the registry itself
+    declares (`employer` is registered as a spelling of `works_at`)."""
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "works_at", "object": "Acme Robotics",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+        {"subject": "user", "predicate": "employer", "object": "Acme Robotics",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": 1},
+    ])
+    pipe, store, _ = build(llm, closed_vocabulary=True)
+    receipt = pipe.add([ep("I just started at Acme Robotics as a machinist."),
+                        ep("My employer is Acme Robotics, still.")])
+    assert receipt.unregistered == 0
+    assert {c.predicate for c in receipt.added} | {c.predicate for c in receipt.reinforced} \
+        == {"works_at"}
+    store.close()
+
+
+def test_closed_vocabulary_is_off_by_default_and_remember_never_sees_it():
+    """Two things the option must not change: an open pipeline still learns a new
+    predicate, and a caller asserting a fact through the fast path is never filtered --
+    the check runs only on what a model proposed."""
+    llm = CountingLLM(claims=[
+        {"subject": "memvara", "predicate": "build_commit", "object": "127f6eb",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
+    ])
+    pipe, store, _ = build(llm)
+    receipt = pipe.add([ep("The build is at commit 127f6eb on the release branch.")])
+    assert receipt.unregistered == 0
+    assert [c.predicate for c in receipt.added] == ["build_commit"]
+    assert pipe.closed_vocabulary is False
+    store.close()

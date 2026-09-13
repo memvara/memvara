@@ -686,9 +686,20 @@ def _standing(ctx: ToolContext, args: dict[str, Any]) -> str:
     one client parser that serves both tools. There is no `gone` half here, so the `+`
     marks a row rather than an arrival.
 
-    Order is confidence, then recency, then id. The first is the whole point -- what the
-    user stated outranks what a model inferred -- and the last makes the order total, so
-    two claims written in the same instant cannot swap places between calls.
+    Order is stated before derived, then confidence, then recency, then id. The first
+    two are the whole point -- what the user stated outranks what a model inferred --
+    and confidence alone did not deliver it: a model reading a transcript reports its
+    own confidence, and one production extractor wrote every paraphrase at 0.84 to 1.00
+    while the capture hook wrote the user's own words at 0.70, so seven machine
+    restatements of one rule opened every session ahead of the sentence the user typed.
+    `core.is_derived` is the same rule the row marker uses, so a row sorted into the
+    second half is the row that carries the marker. The id makes the order total, so two
+    claims written in the same instant cannot swap places between calls.
+
+    Under a hosted deployment the server side truncates to `k` before this sort runs, so
+    the order is only as good as the route's own; memvara-cloud's `GET /v1/standing` sorts
+    the same way since the change that introduced this order, and a client that wants the
+    whole set asks for the route's maximum rather than the default.
     """
     cap = args.get("k")
     cap = STANDING_K if cap is None else int(cap)
@@ -711,11 +722,12 @@ def _standing(ctx: ToolContext, args: dict[str, Any]) -> str:
     else:
         claims = [c for c in ctx.memory.get_all(states=["live"])
                   if c.memory_type is MemoryType.PROCEDURAL]
-    # Applied to both branches. Order is confidence, then recency, then id: the first is
-    # the point — what the user stated outranks what a model inferred — and the last makes
-    # the order total, so two claims written in the same instant cannot swap places
-    # between calls, whichever side did the filtering.
-    claims.sort(key=lambda c: (-c.confidence, _descending(c.recorded_at), c.id))
+    # Applied to both branches, and applied here even when the server side already
+    # sorted, because the server side sorts by confidence and this is the layer that
+    # knows a derived claim's confidence is the model's opinion of itself. Stated first,
+    # then confidence, then recency, then id: see the docstring for the measurement.
+    claims.sort(key=lambda c: (is_derived(c), -c.confidence, _descending(c.recorded_at),
+                               c.id))
     shown = claims[:cap]
     if not shown:
         # Said plainly for `_since`'s reason: an empty-looking reply reads as "the store is
@@ -878,6 +890,8 @@ def _receipt_summary(ctx: ToolContext, receipt: WriteReceipt) -> list[str]:
         lines.append(_unextracted_note(ctx, receipt.unextracted))
     if receipt.ungrounded:
         lines.append(_ungrounded_note(receipt.ungrounded))
+    if receipt.unregistered:
+        lines.append(_unregistered_note(receipt.unregistered))
     if receipt.accumulated:
         lines.append(_accumulated_note(receipt.accumulated))
     if receipt.disputed:
@@ -936,6 +950,19 @@ def _ungrounded_note(count: int) -> str:
     """
     return (f"note: {count} proposed claim(s) had no support in the turn they cited "
             f"as their source and were not stored.")
+
+
+def _unregistered_note(count: int) -> str:
+    """Say when the extractor proposed a predicate this deployment does not declare.
+
+    Appears only under `WritePipeline.closed_vocabulary`. Rendered for the same reason
+    `_ungrounded_note` is: a turn that kept one registered claim and lost two unregistered
+    ones is otherwise a clean receipt, and a refusal nobody can see is a refusal nobody
+    can act on -- by declaring the predicate, or by fixing the prompt that invented it.
+    """
+    return (f"note: {count} proposed claim(s) used a predicate this deployment does not "
+            f"declare and were not stored; declare it with MEMVARA_PREDICATES or reuse a "
+            f"known one.")
 
 
 def _accumulated_note(items: Sequence[Accumulation]) -> str:
@@ -1028,7 +1055,8 @@ def _retyped_note(items: Sequence[Retype]) -> str:
             for r in refused)
         parts.append(
             f"{len(refused)} fact(s) arrived as procedural and were filed as semantic, "
-            f"because procedural is for the subject 'user' and nothing else -- {names}. "
+            f"because procedural is for the subject 'user', or a scope spelled "
+            f"'project:<key>', and nothing else -- {names}. "
             f"A repository, a service or a file cannot want anything, and memory_standing "
             f"would otherwise carry the note into every session.")
     return "note: " + " ".join(parts)
@@ -2057,7 +2085,9 @@ TOOLS: tuple[Tool, ...] = (
             "k": {
                 "type": "integer",
                 "description": (
-                    "Most preferences to return, newest and most-trusted first. "
+                    "Most preferences to return: the ones the user stated first, then "
+                    "the ones a model or a hook derived, each half most-trusted and "
+                    "newest first. "
                     "Defaults to enough for the whole set; raise it only if the reply "
                     "says some were not shown."
                 ),
@@ -2172,10 +2202,12 @@ TOOLS: tuple[Tool, ...] = (
                 "description": (
                     "'semantic' for a durable fact, 'episodic' for something that "
                     "happened at a time, 'procedural' for how the user wants work done. "
-                    "'procedural' is for the subject 'user' and nothing else: a fact "
-                    "about a repository, a system or a deployment is 'semantic' however "
-                    "operational it sounds, and if you send 'procedural' for any other "
-                    "subject the store files it as 'semantic' and the receipt says so. "
+                    "'procedural' is for the subject 'user', or for a scope spelled "
+                    "'project:<key>' when the preference holds only in one checkout, and "
+                    "nothing else: a fact about a repository, a system or a deployment "
+                    "is 'semantic' however operational it sounds, and if you send "
+                    "'procedural' for any other subject the store files it as 'semantic' "
+                    "and the receipt says so. A bare repository name is not the prefix. "
                     "The reason is that 'procedural' is the standing set memory_standing "
                     "returns, which clients inject at the top of every session, so a "
                     "note filed there is carried on every turn whether or not it is "
