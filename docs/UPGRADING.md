@@ -27,7 +27,7 @@ every prompt to know it.
 
 ### Who this changes, and in which direction
 
-**Since 0.13.1, a subject spelled `project:<key>` is exempt too** (`types.PROJECT_SUBJECT_PREFIX`,
+**Since 0.14.0, a subject spelled `project:<key>` is exempt too** (`types.PROJECT_SUBJECT_PREFIX`,
 matched case-insensitively). A preference that holds only in one checkout is filed under
 `project:<absolute path>` and stays `procedural`, so `memory_standing` returns it and a client
 that knows its working directory can show it there and nowhere else. A bare repository
