@@ -214,7 +214,8 @@ class WritePipeline:
                  redactor: Redactor | None = None,
                  reject_ungrounded: bool | str = "auto",
                  extraction_deferred: bool = False,
-                 reject_polluted: bool = True) -> None:
+                 reject_polluted: bool = True,
+                 closed_vocabulary: bool = False) -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
@@ -239,6 +240,20 @@ class WritePipeline:
         #: deployment on a frontier model that measures a false-positive rate it dislikes
         #: — the option exists so that measurement can be made.
         self.reject_polluted = bool(reject_polluted)
+        #: Off by default. On, a model-proposed claim whose predicate the registry does
+        #: not know is refused and counted on `receipt.unregistered`, and no model call
+        #: is spent learning the predicate. The reason is what an open vocabulary did on
+        #: one production store: a prompt that let the model "name the relation yourself"
+        #: produced `build_commit`, `test_count`, `build_duration`, `injection_count` and
+        #: about a hundred more spellings in one afternoon, 2,555 claims from a 27B model
+        #: reading an 816-turn backlog, and every one landed unregistered — multi-valued,
+        #: retiring nothing — so a short query about a repository's CI came back as five
+        #: commit hashes ahead of the note that said the workflows were disabled. A
+        #: predicate the operator did not declare cannot supersede anything and cannot be
+        #: asked about by name, so on a deployment whose vocabulary is deliberate the only
+        #: thing an invented one adds is noise in every recall. `remember()` and the fast
+        #: path never reach this check: a caller asserting a fact is trusted to spell it.
+        self.closed_vocabulary = bool(closed_vocabulary)
         if not (reject_ungrounded is True or reject_ungrounded is False
                 or reject_ungrounded == "auto"):
             raise TypeError(
@@ -757,6 +772,11 @@ class WritePipeline:
             # would spend a model call registering the pollution's spelling.
             raw, refused, _ = pollution.guard(raw, self.registry)
             receipt.polluted += refused
+        if self.closed_vocabulary:
+            # Before acquisition, for the same reason the pollution guard runs before it:
+            # a predicate this deployment refuses must not cost a model call to register.
+            raw, dropped = self._registered_only(raw)
+            receipt.unregistered += dropped
         # Acquisition shares the accumulator: the caller is billed for a write, not for a
         # round trip, and a novel surface form costing a second call is part of the same
         # write. Reported after it, so those tokens are inside the total.
@@ -771,6 +791,24 @@ class WritePipeline:
         return out
 
     # -- predicate identity ---------------------------------------------------
+
+    def _registered_only(self, raw: Sequence[dict[str, Any]]
+                         ) -> tuple[list[dict[str, Any]], int]:
+        """The items whose predicate the registry already knows, and how many did not.
+
+        `resolve` rather than `known`: an alias the registry declares (`employer` for
+        `works_at`) is a registered spelling and passes, while a form that only folds
+        onto a neighbour by token overlap is not — that fold is the acquisition path's
+        backstop for an open vocabulary, and a closed one has asked for no backstop.
+        """
+        kept: list[dict[str, Any]] = []
+        dropped = 0
+        for item in raw:
+            if self.registry.resolve(str(item.get("predicate", "") or "")).resolved:
+                kept.append(item)
+            else:
+                dropped += 1
+        return kept, dropped
 
     def _report_usage(self, receipt: WriteReceipt, usage: Usage | None) -> None:
         """Put what a write consumed on its receipt, and on the two token series.

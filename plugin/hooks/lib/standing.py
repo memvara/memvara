@@ -269,7 +269,14 @@ def _from_since(store: Any) -> "list[Note] | None":
 
 
 def _order(notes: "list[Note]") -> "list[Note]":
-    """Most-trusted first, then newest, then by id so the order is total.
+    """Stated first, then most-trusted, then newest, then by id so the order is total.
+
+    Stated before trusted, because confidence is written by whoever wrote the claim and
+    a model writes its own. Measured on the real store: one extractor filed every
+    paraphrase it derived at 0.84 to 1.00 and the capture hook filed the user's own
+    sentence at 0.70, so seven machine restatements of one rule sat above the sentence
+    the user typed, and the budget cut off below them. The server's `memory_standing`
+    sorts the same way; this is the same rule on the route that parses rows.
 
     The id tiebreak is not decoration. Without a total order two claims written in the same
     instant swap places between runs, and a block that differs run to run is a block whose
@@ -280,8 +287,8 @@ def _order(notes: "list[Note]") -> "list[Note]":
     """
     if any(note.confidence is None for note in notes):
         return list(notes)
-    return sorted(notes, key=lambda n: (-(n.confidence or 0.0), _negated(n.recorded),
-                                        n.ident))
+    return sorted(notes, key=lambda n: (n.inferred, -(n.confidence or 0.0),
+                                        _negated(n.recorded), n.ident))
 
 
 def _negated(stamp: str) -> str:

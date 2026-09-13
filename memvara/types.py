@@ -128,6 +128,11 @@ LAST_OBSERVED = "last_observed_at"
 #: (`write/pipeline.py`), and read by `retrieve/anchor.py`, which has to know that "where
 #: do I live" is a question about this row. One spelling, so the three cannot drift.
 SELF_SUBJECT = "user"
+#: A subject spelled `project:<key>` is a scope rather than a thing: a preference that
+#: holds in one checkout. `Reconciler._may_be_procedural` lets such a claim stay
+#: `procedural`, which a bare repository name cannot, and the plugin's session-start
+#: block reads `project:<cwd>` beside `user`. Compared case-insensitively.
+PROJECT_SUBJECT_PREFIX = "project:"
 
 #: The predicate every verbatim note lands on (`compat/_notes.py`): a mem0-compatible
 #: `infer=False` write, or an import. A note is not a claim about a thing; it is the
@@ -1600,6 +1605,13 @@ class WriteReceipt:
     #: proposed for its turn. Not counted: claims the guard kept at a discounted
     #: confidence, which are stored and cannot end an incumbent.
     polluted: int = 0
+    #: Claims the extractor proposed and this write refused because their predicate is
+    #: not one the registry knows -- `WritePipeline`'s `closed_vocabulary`, off by
+    #: default. Zero means nothing tripped or the option is off. A claim counted here
+    #: also counts toward `unextracted` if it was the only thing proposed for its turn,
+    #: as with `ungrounded` and `polluted`. Nothing a caller asserts through `remember()`
+    #: or the fast path is ever counted here.
+    unregistered: int = 0
     #: Turns `reextract()` was handed that already had claims citing them, and so did not
     #: read again. Always 0 from `add()`, which never sees an episode twice.
     #:

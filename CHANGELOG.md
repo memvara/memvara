@@ -9,6 +9,40 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`WritePipeline(closed_vocabulary=True)`, `Memvara(write_closed_vocabulary=True)`,
+  `MEMVARA_CLOSED_VOCABULARY=1`.** A model-proposed claim whose predicate the registry does
+  not know is refused, counted on the new `WriteReceipt.unregistered`, and costs no model
+  call to learn the predicate. Off by default. A declared alias (`employer` for `works_at`)
+  still passes; only a spelling nothing declared is refused. `remember()` and the fast path
+  never reach the check. The reason is measured: a worker whose prompt let the model "name
+  the relation yourself" wrote 2,555 claims from a 27B model in one afternoon under about a
+  hundred invented predicates (`build_commit`, `test_count`, `build_duration`), every one
+  unregistered and so multi-valued and retiring nothing, and a short query about a
+  repository's CI then returned five commit hashes ahead of the note saying the workflows
+  were disabled. Under `MEMVARA_MODE=cloud` the variable is refused, like the other
+  server-side settings: the deployment's own worker decides.
+
+### Changed
+
+- **`memory_standing` puts every stated row before every derived row.** The order is now
+  stated-or-derived (`core.is_derived`, the same rule the ` inferred` marker uses), then
+  confidence, then recency, then id. It was confidence first, and confidence is the
+  writer's opinion of itself: one production extractor wrote every paraphrase it derived at
+  0.84 to 1.00 while the capture hook wrote the user's own sentence at 0.70, so seven
+  machine restatements of one rule opened every session above the sentence the user typed,
+  and the session-start budget cut off below them. The plugin's session-start block sorts
+  the same way (`plugin/hooks/lib/standing.py`).
+- **A subject spelled `project:<key>` may stay `procedural`.** The 0.13.0 rule that
+  `procedural` is for the subject `user` gains one exemption, `types.PROJECT_SUBJECT_PREFIX`,
+  matched case-insensitively: a preference scoped to one checkout is still how the user
+  wants work done, there, and the plugin's session-start block already reads
+  `project:<cwd>` beside `user`. Without it every project-scoped rule had to be filed under
+  `user`, and on one store forty rules for a single skill in a single repository opened
+  every session in every other repository. A bare repository name is not the prefix and is
+  still filed as `semantic`. The `memory_remember` description and the receipt note say so.
+
 ## [0.13.0] — 2026-09-12
 
 ### Changed

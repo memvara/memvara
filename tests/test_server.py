@@ -4223,6 +4223,32 @@ def test_standing_marks_the_row_a_machine_derived(standing_server):
     assert "inferred" not in stated[0], stated[0]
 
 
+def test_standing_puts_a_derived_row_after_every_stated_one_whatever_its_confidence(
+        standing_server):
+    """Stated before derived, and confidence only inside each half.
+
+    Measured on a production store: an extraction model wrote every paraphrase it
+    derived at 0.84 to 1.00 and the capture hook wrote the user's own sentence at 0.70,
+    so seven machine restatements of one rule opened every session above the sentence
+    the user typed, and the session-start budget cut off below them. Confidence is the
+    writer's opinion of itself, and a model's opinion of itself does not outrank a
+    person's statement.
+    """
+    memory = standing_server._memory
+    memory.remember("user", "never_do", "put an AI attribution in a commit trailer",
+                    memory_type=MemoryType.PROCEDURAL, confidence=1.0,
+                    extractor="qwen-27b")
+    rows = [l for l in text(standing_server, "memory_standing").splitlines()
+            if l.startswith("+ ")]
+    stated = [i for i, r in enumerate(rows) if "inferred]" not in r]
+    derived = [i for i, r in enumerate(rows) if "inferred]" in r]
+    assert stated and derived
+    assert max(stated) < min(derived), rows
+    # The 0.70 stated row sits above the 1.00 derived one: that is the whole change.
+    assert rows.index(next(r for r in rows if "user name on GitHub" in r)) \
+        < rows.index(next(r for r in rows if "commit trailer" in r))
+
+
 def test_standing_marks_inside_the_bracket_and_not_after_the_text(standing_server):
     """The row format's own rule, and the reason this marker is not a suffix.
 

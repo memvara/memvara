@@ -356,3 +356,27 @@ def test_the_script_runs_here_and_says_how_to_use_it() -> None:
     assert done.returncode == 2, done.stdout + done.stderr
     for command in AUTH_COMMANDS:
         assert command in done.stdout, f"the usage line omits {command}"
+
+
+def test_the_session_start_block_orders_stated_rules_before_derived_ones() -> None:
+    """`lib.standing._order` sorts stated before derived, and confidence only within each
+    half. Measured on the real store: an extractor filed every paraphrase it derived at
+    0.84 to 1.00 and the capture hook filed the user's own sentence at 0.70, so seven
+    machine restatements of one rule sat above the sentence the user typed and the
+    16,000-character budget cut off below them. The server's `memory_standing` sorts the
+    same way; this is the same rule on the route that parses rows."""
+    import sys
+    hooks = pathlib.Path(__file__).resolve().parents[1] / "plugin" / "hooks"
+    sys.path.insert(0, str(hooks))
+    try:
+        from lib.standing import Note, _order
+    finally:
+        sys.path.remove(str(hooks))
+    derived_sure = Note(ident="cl_b", subject="user", text="derived, sure",
+                        confidence=1.0, recorded="2026-09-12T09:00:00Z", inferred=True)
+    stated_unsure = Note(ident="cl_a", subject="user", text="stated, unsure",
+                         confidence=0.7, recorded="2026-08-25T06:00:00Z", inferred=False)
+    stated_sure = Note(ident="cl_c", subject="user", text="stated, sure",
+                       confidence=1.0, recorded="2026-08-01T00:00:00Z", inferred=False)
+    ordered = _order([derived_sure, stated_unsure, stated_sure])
+    assert [n.text for n in ordered] == ["stated, sure", "stated, unsure", "derived, sure"]

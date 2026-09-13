@@ -86,7 +86,8 @@ def test_a_cloud_config_without_a_key_still_fails_at_construction():
                                    server_url="https://example.test"))
 
 
-@pytest.mark.parametrize("field, value", [("llm", "anthropic"), ("embedder", "local")])
+@pytest.mark.parametrize("field, value", [("llm", "anthropic"), ("embedder", "local"),
+                                          ("closed_vocabulary", True)])
 def test_naming_a_server_side_subsystem_under_cloud_mode_is_refused(field, value):
     """Extraction and embedding run inside the deployment, so naming one here is a
     setting that would do nothing. Silently ignoring it is the failure: the operator sets
@@ -494,3 +495,17 @@ def test_memory_standing_asks_the_deployment_rather_than_paging_the_whole_scope(
     assert "more not shown" not in body, (
         "`GET /v1/standing` reports no total, so the hint has no number to print and "
         "printing one would make it wrong")
+
+
+def test_closed_vocabulary_reaches_the_local_pipeline_from_the_environment():
+    """`MEMVARA_CLOSED_VOCABULARY=1` is a write tuning, and a tuning set on the config
+    and absent from the pipeline is a setting that means nothing -- the failure the
+    cloud-mode refusals above exist to prevent, one layer down."""
+    cfg = ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_CLOSED_VOCABULARY": "1"})
+    assert cfg.closed_vocabulary is True
+    mem = build_memvara(cfg)
+    try:
+        assert mem.writer.closed_vocabulary is True
+    finally:
+        mem.close()
+    assert ServerConfig.from_env({"MEMVARA_DB": ":memory:"}).closed_vocabulary is False

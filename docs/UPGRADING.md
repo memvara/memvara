@@ -27,6 +27,12 @@ every prompt to know it.
 
 ### Who this changes, and in which direction
 
+**Since 0.13.1, a subject spelled `project:<key>` is exempt too** (`types.PROJECT_SUBJECT_PREFIX`,
+matched case-insensitively). A preference that holds only in one checkout is filed under
+`project:<absolute path>` and stays `procedural`, so `memory_standing` returns it and a client
+that knows its working directory can show it there and nowhere else. A bare repository
+name (`memvara`) is not the prefix and still moves.
+
 **If every `procedural` claim you write is about `user`, nothing changes.** Verbatim notes
 (the `note` predicate: the mem0-compatible `infer=False` path and the importer) written
 with `memory_type="procedural"` keep their type too, and keep it when restated: a note is
