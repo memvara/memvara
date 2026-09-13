@@ -2049,6 +2049,44 @@ class FabricatingLLM(ScriptedLLM):
                  "source_index": 0}]
 
 
+class InventingLLM(ScriptedLLM):
+    """Proposes one grounded claim under a predicate nobody declared, beside one that is."""
+
+    name = "inventing"
+
+    def extract(self, episodes, known_predicates):
+        return [{"subject": "memvara", "predicate": "build_commit", "object": "127f6eb",
+                 "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
+                 "source_index": 0},
+                {"subject": "user", "predicate": "works_at", "object": "Acme",
+                 "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
+                 "source_index": 0}]
+
+
+def test_the_unregistered_note_appears_under_a_closed_vocabulary_and_only_then():
+    """The partial-drop case the receipt used to hide: a turn that kept one registered
+    claim and lost one invented one read as a clean write. With `closed_vocabulary` on,
+    the receipt says how many were refused and what to do about it; with it off, the
+    invented predicate is learned and stored, and the note is absent because nothing
+    was refused -- not because nothing was checked.
+    """
+    turn = {"text": "Payroll comes from Acme these days, and the build sits at commit 127f6eb."}
+    on = MemvaraMCPServer(
+        make_memory(user="alice", llm=InventingLLM(), write_closed_vocabulary=True),
+        user="alice")
+    body_on = text(on, "memory_add", turn)
+    assert "note: 1 proposed claim(s) used a predicate this deployment does not declare" \
+        in body_on
+    assert "Acme" in body_on and "127f6eb" not in body_on
+    on.close()
+
+    off = MemvaraMCPServer(make_memory(user="alice", llm=InventingLLM()), user="alice")
+    body_off = text(off, "memory_add", turn)
+    assert "does not declare" not in body_off
+    assert "127f6eb" in body_off, "with the vocabulary open, the invented predicate is stored"
+    off.close()
+
+
 def test_the_ungrounded_note_appears_by_default_and_off_means_silent():
     """The default is "auto", so a fabricated claim is refused with a note -- and a
     deployment that turns the option off gets silence, which is the honest reading:

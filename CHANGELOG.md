@@ -14,7 +14,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 - **`WritePipeline(closed_vocabulary=True)`, `Memvara(write_closed_vocabulary=True)`,
   `MEMVARA_CLOSED_VOCABULARY=1`.** A model-proposed claim whose predicate the registry does
   not know is refused, counted on the new `WriteReceipt.unregistered`, and costs no model
-  call to learn the predicate. Off by default. A declared alias (`employer` for `works_at`)
+  call to learn the predicate; the `memory_add` receipt says how many were refused and
+  names `MEMVARA_PREDICATES` as the way to declare one. Off by default. A declared alias (`employer` for `works_at`)
   still passes; only a spelling nothing declared is refused. `remember()` and the fast path
   never reach the check. The reason is measured: a worker whose prompt let the model "name
   the relation yourself" wrote 2,555 claims from a 27B model in one afternoon under about a

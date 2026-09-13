@@ -890,6 +890,8 @@ def _receipt_summary(ctx: ToolContext, receipt: WriteReceipt) -> list[str]:
         lines.append(_unextracted_note(ctx, receipt.unextracted))
     if receipt.ungrounded:
         lines.append(_ungrounded_note(receipt.ungrounded))
+    if receipt.unregistered:
+        lines.append(_unregistered_note(receipt.unregistered))
     if receipt.accumulated:
         lines.append(_accumulated_note(receipt.accumulated))
     if receipt.disputed:
@@ -948,6 +950,19 @@ def _ungrounded_note(count: int) -> str:
     """
     return (f"note: {count} proposed claim(s) had no support in the turn they cited "
             f"as their source and were not stored.")
+
+
+def _unregistered_note(count: int) -> str:
+    """Say when the extractor proposed a predicate this deployment does not declare.
+
+    Appears only under `WritePipeline.closed_vocabulary`. Rendered for the same reason
+    `_ungrounded_note` is: a turn that kept one registered claim and lost two unregistered
+    ones is otherwise a clean receipt, and a refusal nobody can see is a refusal nobody
+    can act on -- by declaring the predicate, or by fixing the prompt that invented it.
+    """
+    return (f"note: {count} proposed claim(s) used a predicate this deployment does not "
+            f"declare and were not stored; declare it with MEMVARA_PREDICATES or reuse a "
+            f"known one.")
 
 
 def _accumulated_note(items: Sequence[Accumulation]) -> str:

@@ -388,7 +388,8 @@ class Reconciler:
 
     @classmethod
     def file_by_subject(cls, claim: Claim) -> "Retype | None":
-        """File a `procedural` claim about anything but the user as `semantic`.
+        """File a `procedural` claim about anything but the user, or a `project:` scope, as
+        `semantic`.
 
         Mutates, writes not; the caller performs the write, as with `_retype`. Public
         because `write/pipeline.py` reinforces a restated turn's claims without going
