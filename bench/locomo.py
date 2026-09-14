@@ -361,8 +361,14 @@ def fixture() -> list[Sample]:
 def build_memory(sample: Sample, budget: ek.RetrievalBudget, llm: Any = None,
                  read_k: int | None = None, reranker: Any = None,
                  rerank_top_n: int = 0, embedder: Any = None,
-                 w_graph: float = 0.0) -> Memvara:
+                 w_graph: float = 0.0, w_temporal: float = 0.0) -> Memvara:
     """A store per conversation, which is the unit a LOCOMO question is about.
+
+    `w_temporal` reaches the retriever here because `--w-temporal` is a shared flag
+    that this runner parsed and, until it was threaded through, never applied. On this
+    dataset the leg has no instant to measure from — a LOCOMO question carries no date —
+    so at any weight it abstains on every question; the parameter exists so that a sweep
+    measures that rather than printing a weight the store never saw.
 
     `read_max_episodes=k` because the library's default of 3 assumes raw turns are a
     tail on a list of extracted facts. On this dataset, with the shipped extractor
@@ -400,6 +406,7 @@ def build_memory(sample: Sample, budget: ek.RetrievalBudget, llm: Any = None,
         read_reranker=reranker,
         read_rerank_top_n=rerank_top_n or 20,
         read_w_graph=w_graph,
+        read_w_temporal=w_temporal,
     )
 
 
@@ -471,6 +478,7 @@ def run(
     reranker: Any = None,
     rerank_top_n: int = 0,
     embedder: Any = None,
+    w_temporal: float = 0.0,
 ) -> tuple[list[ek.QuestionResult], ek.IngestStats, ek.RetrievalStats, ek.TokenLedger]:
     """The answer pipeline. Takes the same read-path configuration as `run_retrieval`.
 
@@ -490,7 +498,8 @@ def run(
 
     for sample in samples:
         mem = build_memory(sample, budget, llm, reranker=reranker,
-                           rerank_top_n=rerank_top_n, embedder=embedder)
+                           rerank_top_n=rerank_top_n, embedder=embedder,
+                           w_temporal=w_temporal)
         # Once per conversation, not once per question: joining 590 turns for each of
         # ~200 questions is the kind of accidental O(n²) that turns a ten-minute run
         # into an hour and gets blamed on the memory layer.
@@ -526,6 +535,7 @@ def run_retrieval(
     rerank_top_n: int = 0,
     embedder: Any = None,
     w_graph: float = 0.0,
+    w_temporal: float = 0.0,
 ) -> tuple[list[ek.RetrievalScore], ek.IngestStats, ek.RetrievalStats, Counter]:
     """The same ingest and the same retrieval as `run()`, scored with no reader.
 
@@ -542,7 +552,7 @@ def run_retrieval(
 
     for sample in samples:
         mem = build_memory(sample, budget, llm, read_k=plan.depth(budget),
-                           w_graph=w_graph,
+                           w_graph=w_graph, w_temporal=w_temporal,
                            reranker=reranker, rerank_top_n=rerank_top_n,
                            embedder=embedder)
         haystack = sample.haystack
@@ -748,13 +758,20 @@ def main(argv: Sequence[str] | None = None,
             f"({getattr(reranker, 'name', type(reranker).__name__)}) over the top "
             f"{args.rerank} fused candidates, cut to k afterwards. The default "
             "configuration has no reranker at all.")
+    # Printed unconditionally, as `bench/longmemeval.py` prints them: the temporal leg's
+    # weight, and the fact that this runner has no question date to anchor it on.
+    out(f"  --w-temporal {args.w_temporal:g}: "
+        + ("temporal leg over raw turns, fused at that weight"
+           if args.w_temporal > 0 else "temporal leg off (the shipped default)"))
+    out("  anchor: none. LOCOMO questions carry no date, so retrieval runs with the "
+        "wall clock as\n  its instant and the temporal leg abstains on this archive")
 
     if args.score == "retrieval":
         plan = ek.build_plan(args)
         scores, ingest_stats, read_stats, excluded = run_retrieval(
             samples, budget=budget, plan=plan, limit=args.limit,
             reranker=reranker, rerank_top_n=args.rerank, embedder=embedder,
-            w_graph=args.w_graph)
+            w_graph=args.w_graph, w_temporal=args.w_temporal)
         out(ek.retrieval_report(
             scores, ingest_stats, read_stats, title="LOCOMO", plan=plan, budget=budget,
             categories=[CATEGORIES[c] for c in ANSWERABLE],
@@ -773,6 +790,7 @@ def main(argv: Sequence[str] | None = None,
         source=ek.ContextSource(args.context), limit=args.limit,
         ledger=ek.build_ledger(args, reader), stem=ek.build_stemmer(args),
         reranker=reranker, rerank_top_n=args.rerank, embedder=embedder,
+        w_temporal=args.w_temporal,
     )
     if getattr(reader, "dumping", False):
         # The dump phase has no answers yet, so every result is empty. Printing the

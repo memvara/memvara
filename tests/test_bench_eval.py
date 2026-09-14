@@ -1954,6 +1954,248 @@ def test_longmemeval_retrieval_mode_writes_per_question_jsonl(tmp_path):
     assert len(out.read_text(encoding="utf-8").splitlines()) == 3
 
 
+# --- the question date as the temporal leg's anchor -------------------------------
+#
+# LongMemEval dates every question. Until this section existed the harness put that
+# date into the reader's prompt and nowhere else, so retrieval ran with the wall clock
+# as its instant, every archived turn sat years from it, and the temporal leg abstained
+# on every question — which is why `docs/BENCHMARKS.md` could only report the
+# abstention. The harness now hands the date to `recall()` and `search()` as `valid_at`,
+# which is the instant `retrieve/temporal.py` measures from and, at the same time, the
+# world clock every leg filters on.
+
+
+def _dated_memory(**kw):
+    """Two turns five weeks apart, so a world-clock cut between them is observable."""
+    mem = Memvara(user="t", llm=NullLLM(), read_max_episodes=5,
+                  embedder=ek.build_embedder("hashing"), **kw)
+    mem.add("I adopted a greyhound called Pepper", role="user",
+            ts=datetime(2023, 5, 2, tzinfo=UTC))
+    mem.add("Pepper the greyhound opened the fridge", role="user",
+            ts=datetime(2023, 6, 10, tzinfo=UTC))
+    return mem
+
+
+def test_retrieve_hands_the_question_date_to_recall_as_the_world_clock():
+    """`retrieve()` is the call a real integration makes, and the one whose latency the
+    report charges to the read path. A question date it does not forward is a date
+    retrieval never sees: the anchor stays at the wall clock, the temporal leg abstains,
+    and a turn dated after the question comes back as if it had already happened. The
+    observable here is the world-clock cut, because `valid_at` is the anchor and the
+    filter at once: asked on 1 June, the fridge turn of 10 June had not happened yet.
+    """
+    mem = _dated_memory()
+    try:
+        budget = ek.RetrievalBudget(k=5)
+        asked_on = datetime(2023, 6, 1, tzinfo=UTC)
+        dated, _, _ = ek.retrieve(mem, "Pepper the greyhound", budget,
+                                  ek.ContextSource.MEMORY, "hay", valid_at=asked_on)
+        undated, _, _ = ek.retrieve(mem, "Pepper the greyhound", budget,
+                                    ek.ContextSource.MEMORY, "hay")
+        assert "adopted" in dated and "fridge" not in dated
+        assert "adopted" in undated and "fridge" in undated
+    finally:
+        mem.close()
+
+
+def test_retrieval_pass_hands_the_question_date_to_search():
+    """The deeper diagnostic pass is what the recall curve is drawn from, so it has to
+    run under the same clock as the budgeted read. Otherwise the curve would come from
+    a different retrieval than the context it is printed beside, and a change to the
+    anchor would move one table and not the other.
+    """
+    mem = _dated_memory()
+    try:
+        plan, budget = ek.RetrievalPlan(ks=(1, 5)), ek.RetrievalBudget(k=5)
+        asked_on = datetime(2023, 6, 1, tzinfo=UTC)
+        dated, _ = ek.retrieval_pass(mem, "Pepper the greyhound", plan, budget, {},
+                                     valid_at=asked_on)
+        undated, _ = ek.retrieval_pass(mem, "Pepper the greyhound", plan, budget, {})
+        turns = lambda items: {i.text for i in items if i.kind == "episode"}  # noqa: E731
+        assert turns(dated) == {"I adopted a greyhound called Pepper"}
+        assert turns(undated) == {"I adopted a greyhound called Pepper",
+                                  "Pepper the greyhound opened the fridge"}
+    finally:
+        mem.close()
+
+
+def _leg_votes(monkeypatch):
+    """Record, per query, whether the temporal leg ranked anything on the searches a
+    run made. The spy wraps the retriever of every store the runner builds, so the
+    runner's own `build_memory` stays the thing under test, and it sees both of a
+    question's reads because `recall()` goes through `search()`."""
+    votes: dict[str, bool] = {}
+    real_build = lme.build_memory
+
+    def build(*a, **kw):
+        mem = real_build(*a, **kw)
+        search = mem.reader.search
+
+        def spy(query, *args, **kwargs):
+            results = search(query, *args, **kwargs)
+            voted = any(r.explain.temporal_rank is not None for r in results)
+            votes[query] = votes.get(query, False) or voted
+            return results
+
+        mem.reader.search = spy
+        return mem
+
+    monkeypatch.setattr(lme, "build_memory", build)
+    return votes
+
+
+def test_the_temporal_leg_votes_once_the_question_date_is_the_anchor(monkeypatch):
+    """The finding the roadmap could only state until now: at `w_temporal > 0` the leg
+    abstained on every benchmark question, because nothing passed an instant, so the
+    anchor was the wall clock and every 2023 turn sat years outside the half-life.
+
+    With the question's day as the anchor, the fixture's knowledge-update evidence is
+    eleven days out and the leg ranks it. The unanswerable question's only session is
+    58 days out, past the thirty-day floor, and the leg still holds its tongue there,
+    which is the guard `MIN_PROXIMITY` exists for. Withholding the anchor
+    (`anchor=False`) reproduces the old silence on every question, and that is what
+    makes the before/after rows in `docs/BENCHMARKS.md` a measurement of the anchor
+    alone. Per-question stores, deliberately: under a shared store the nearest turn to
+    the unanswerable question's day belongs to another question and is twelve days
+    out, so the leg would vote there too.
+    """
+    votes = _leg_votes(monkeypatch)
+    lme.run_retrieval(lme.fixture(), w_temporal=1.0,
+                      embedder=ek.build_embedder("hashing"))
+    by_question = {item.question: item.qid for item in lme.fixture()}
+    voted = {by_question[q] for q, v in votes.items() if v}
+    assert "fx_knowledge_update" in voted
+    assert "fx_temporal_abs" not in voted
+
+    votes.clear()
+    lme.run_retrieval(lme.fixture(), w_temporal=1.0, anchor=False,
+                      embedder=ek.build_embedder("hashing"))
+    assert votes and not any(votes.values())
+
+
+def test_the_anchor_is_the_last_second_of_the_questions_day_not_its_clock_time():
+    """`valid_at` is the world clock every leg filters on, so a session dated after it
+    is unreachable by any leg. The `s` file dates 1,475 haystack sessions, in 76
+    questions, later on the question's day than the question's own clock time — never
+    on a later day — and 75 of them are evidence sessions, the whole of the evidence
+    for 20 temporal-reasoning questions. Anchoring on the clock time scored those 20 at
+    zero and cost temporal-reasoning 6.4 points of evidence R@12 on the oracle split for
+    a reason that has nothing to do with retrieval. The day is the dataset's own
+    granularity for "before the question", so its last second is the anchor.
+    """
+    item = lme.fixture()[0]
+    assert item.asked_on == datetime(2023, 6, 1, 9, 0, tzinfo=UTC)
+    assert item.anchor == datetime(2023, 6, 1, 23, 59, 59, 999999, tzinfo=UTC)
+    undated = lme.parse_instance({**lme.FIXTURE[0], "question_date": "not a date"})
+    assert undated.asked_on is None and undated.anchor is None
+
+
+def test_longmemeval_passes_each_questions_own_date_unless_told_not_to(monkeypatch):
+    """Both reads a question makes — the budgeted `retrieve()` the report charges and
+    the deeper `retrieval_pass()` the curve is drawn from — get the same instant, and it
+    is that question's own day (`Instance.anchor`) rather than a run-wide constant: a
+    shared store holds a hundred and forty-seven question dates, and the anchor has to
+    move with the question. `anchor=False` sends `None` on both, which is the
+    configuration every published row before this change was produced with and the one
+    `--no-anchor` reproduces.
+    """
+    seen: list[tuple[str, str, object]] = []
+    real_retrieve, real_pass = ek.retrieve, ek.retrieval_pass
+
+    def retrieve(mem, question, *a, valid_at=None, **kw):
+        seen.append(("retrieve", question, valid_at))
+        return real_retrieve(mem, question, *a, valid_at=valid_at, **kw)
+
+    def retrieval_pass(mem, question, *a, valid_at=None, **kw):
+        seen.append(("pass", question, valid_at))
+        return real_pass(mem, question, *a, valid_at=valid_at, **kw)
+
+    monkeypatch.setattr(ek, "retrieve", retrieve)
+    monkeypatch.setattr(ek, "retrieval_pass", retrieval_pass)
+    items = lme.fixture()
+    expected = {item.question: item.anchor for item in items}
+
+    lme.run_retrieval(items, share_store=True, embedder=ek.build_embedder("hashing"))
+    assert len(seen) == 2 * len(items)
+    assert all(when is not None and when == expected[q] for _, q, when in seen)
+
+    seen.clear()
+    lme.run_retrieval(items, share_store=True, anchor=False,
+                      embedder=ek.build_embedder("hashing"))
+    assert seen and all(when is None for _, _, when in seen)
+
+
+def test_longmemeval_answer_path_reads_under_the_same_anchor(monkeypatch):
+    """`--score answer` is the expensive run, and it reads through `retrieve()` alone.
+    The reader's prompt already carried the question date; retrieval now gets the same
+    date, so the context the reader is shown was fetched as of the day it is told it
+    is. Without this, the two halves of one prompt would disagree about what day it was.
+    """
+    seen: list[object] = []
+    real = ek.retrieve
+
+    def retrieve(mem, question, *a, valid_at=None, **kw):
+        seen.append(valid_at)
+        return real(mem, question, *a, valid_at=valid_at, **kw)
+
+    monkeypatch.setattr(ek, "retrieve", retrieve)
+    items = lme.fixture()
+    lme.run(items, reader=_ScriptedReader(["x"] * 3),
+            embedder=ek.build_embedder("hashing"))
+    assert seen == [item.anchor for item in items]
+
+    seen.clear()
+    lme.run(items, reader=_ScriptedReader(["x"] * 3), anchor=False,
+            embedder=ek.build_embedder("hashing"))
+    assert seen == [None] * len(items)
+
+
+def test_w_temporal_reaches_the_store_on_every_path_of_both_runners(monkeypatch):
+    """`--w-temporal` was parsed by both runners and read by one path of one of them:
+    LOCOMO ignored it outright, and LongMemEval's answer path did too. A sweep on either
+    would have printed the flag and measured nothing, and a flag that is accepted and
+    ignored is worse than one that is absent. The sweep in `docs/BENCHMARKS.md` needs
+    the weight to reach the retriever on every path it reports on.
+    """
+    built: list[float] = []
+    for module in (lme, locomo):
+        real = module.build_memory
+
+        def build(*a, _real=real, **kw):
+            mem = _real(*a, **kw)
+            built.append(mem.reader.w_temporal)
+            return mem
+
+        monkeypatch.setattr(module, "build_memory", build)
+    hashing = ek.build_embedder("hashing")
+    lme.run(lme.fixture(), reader=_ScriptedReader(["x"] * 3), w_temporal=0.25,
+            embedder=hashing)
+    lme.run_retrieval(lme.fixture(), w_temporal=0.5, embedder=hashing)
+    locomo.run(locomo.fixture(), reader=_ScriptedReader(["x"] * 5), w_temporal=0.75,
+               embedder=hashing)
+    locomo.run_retrieval(locomo.fixture(), w_temporal=1.0, embedder=hashing)
+    assert built == [0.25] * 3 + [0.5] * 3 + [0.75] + [1.0]
+
+
+def test_the_runners_state_the_anchor_and_the_temporal_weight_with_every_row():
+    """A row that does not say whether the question date was passed, or what the
+    temporal leg weighed, is not comparable to the row above it. That is the reason
+    the embedder and the reranker are already printed unconditionally, and the same
+    reason applies here. LOCOMO carries no question date at all, and its runner says
+    so rather than printing nothing.
+    """
+    text = _run_cli(lme.main, ["--dry-run", "--score", "retrieval"])
+    assert "--w-temporal 0" in text
+    assert "anchor: the last second of each question's day is passed as valid_at" in text
+    text = _run_cli(lme.main, ["--dry-run", "--no-anchor", "--w-temporal", "0.5"])
+    assert "--w-temporal 0.5" in text
+    assert "anchor: withheld" in text
+    text = _run_cli(locomo.main, ["--dry-run", "--score", "retrieval",
+                                  "--w-temporal", "0.5"])
+    assert "--w-temporal 0.5" in text
+    assert "anchor: none" in text
+
+
 # --- the file reader, through the runners -----------------------------------------
 
 
