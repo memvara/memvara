@@ -9,6 +9,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-09-14
+
 ### Added
 
 - **`WritePipeline(closed_vocabulary=True)`, `Memvara(write_closed_vocabulary=True)`,
