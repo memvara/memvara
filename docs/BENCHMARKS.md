@@ -955,19 +955,72 @@ zero-norm query, the lexical leg on a query with no content terms. `MIN_PROXIMIT
 this one the same rule — nothing within a half-life of the anchor and it does not vote —
 and the loss goes to zero.
 
-What it does not do is clear the bar. Temporal-reasoning is unchanged and multi-session
-loses 0.5, so the default stays off. The reason is the same shape as the graph leg's: the
-leg is strongest when a caller passes `valid_at`, and no benchmark here passes one — both
-call `search(question, k)` with the question as prose. It is second strongest on a **live**
-store, where `add()` stamps turns with the wall clock and the recent ones genuinely are
-near the anchor; LongMemEval replays an archive, so the abstention fires nearly everywhere,
-which is right and also leaves nothing to measure.
+What it does not do is clear the bar, and the reason it could not be read off these rows
+was that nothing passed an instant: both runners called `search(question, k)` with the
+question as prose, so the anchor was the wall clock, every archived turn sat years from
+it, and the leg abstained on every question. `bench/longmemeval.py` now hands retrieval
+the question's own day, and the next section measures what that is worth. The leg still
+ships at `0.0`.
 
 **The blocking dependency here is ingestion, not retrieval.** Both public instruments are
 blind to the graph leg for the same reason the `memvara` demo arm produces zero claims —
 see [What the fast path does not
 catch](DESIGN.md#what-the-fast-path-does-not-catch-measured). Until the offline write path extracts
 from ordinary prose, no public retrieval number can move on this.
+
+### The anchor the leg never had, measured
+
+Every row above was produced with no instant passed to retrieval. LongMemEval dates every
+question, and the harness put that date in the reader's prompt and nowhere else, so the
+memory was read as of now while the reader was told it was 2023. `bench/longmemeval.py`
+now passes the last second of the question's day as `valid_at` on both reads a question
+makes, and `--no-anchor` withholds it and reproduces every row published before this.
+
+Measured on 2026-09-14 on the `s` split with one shared store: 199,499 turns ingested once
+in 490 seconds, then six configurations scored on that one store. Each configuration is
+what this command prints for the same flags, and the harness ingests once per invocation,
+so scoring them together only saves time:
+
+```bash
+PYTHONPATH=. python3 bench/longmemeval.py --dataset s --score retrieval \
+    --recall-at 1,5,12,20 --share-store --embedder hashing [--no-anchor] [--w-temporal W]
+```
+
+| configuration | all R@12 | temporal-reasoning R@12 | all MRR | questions the leg voted on |
+|---|---:|---:|---:|---:|
+| `--no-anchor --w-temporal 0` | 35.1 | 23.1 | 24.6 | 0 of 500 |
+| anchor, `--w-temporal 0` | **40.9** | **38.9** | **28.8** | 0 of 500 |
+| anchor, `--w-temporal 0.25` | 41.2 | 38.9 | 25.8 | 52 of 500 |
+| anchor, `--w-temporal 0.5` | 40.7 | 38.4 | 24.0 | 87 of 500 |
+| anchor, `--w-temporal 1.0` | 28.3 | 19.2 | 16.6 | 447 of 500 |
+| `--no-anchor --w-temporal 1.0` | 35.1 | 23.1 | 24.6 | 0 of 500 |
+
+**Read the first row first.** It reproduces [the shared-store
+baseline](#episode-retrieval-on-a-shared-store) to the decimal, which is what makes the
+five rows below it attributable to the configuration rather than to the shortcut.
+
+**The abstention is a count now, not an inference.** Without an anchor the leg ranks
+nothing on any of the 500 questions at any weight, and the last row is identical to the
+first in every cell. The section above could only say that this was expected.
+
+**The anchor is worth more than the leg is, and it is not the leg.** With the leg still
+off, the question's day takes overall evidence recall from 35.1 to 40.9 and
+temporal-reasoning from 23.1 to 38.9. `valid_at` is the world clock every leg filters on,
+so most of that gain is a shared store no longer returning sessions dated after the
+question was asked — other questions' sessions leaving the pool, rather than better
+ranking. A per-question store has far less for the filter to remove, and that
+configuration is not measured here.
+
+**The leg itself still does not pay.** At 0.25 it ranks something on 52 questions, buys
+0.3 of recall and loses 3.0 of mean reciprocal rank. At 1.0 it ranks something on 447 and
+overall recall falls to 28.3. The shipped default stays `0.0`.
+
+**What it costs.** Scoring the 500 questions took 302 seconds with the leg off and 354
+with it at 1.0 on the same store, about 17% more, because every temporal or open query
+runs `episodes_near`, whose `ORDER BY ABS(ts - ?)` sorts everything the scope matched. On
+LOCOMO the leg is inert for a different reason — no question there carries a date — and
+`--w-temporal 1.0` changes no cell of that table at all, at a median retrieval latency of
+2.9 ms against 2.7.
 
 ### Episode retrieval on a shared store
 
