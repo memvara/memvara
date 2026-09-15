@@ -36,6 +36,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   untouched, and every generated turn is unique text so the memvara arms hold the same
   haystack as the transcript arm.
 
+- **A `memvara` command: `memvara login`, `memvara logout` and `memvara whoami`.**
+  `pip install 'memvara[cloud]'` then `memvara login` signs this machine in to a hosted
+  deployment; `whoami` prints the project, the key's non-secret id, its privilege and its
+  expiry, and never the key; `logout` deletes the credentials file and says the key stays
+  valid until it is revoked in the console. `python3 -m memvara` runs the same command.
+  All three take `--credentials PATH`, which is how one machine holds keys for two
+  projects: the default `~/.memvara/credentials.json` is what `MEMVARA_MODE=cloud`,
+  `Memvara.connect()` and the npm bridge read, so writing a second project's key there
+  would move every one of them into that project. `memvara.remote.creds` gains
+  `read_credentials_file(path)`, the one reader of that file's format.
+
 ### Changed
 
 - **The LongMemEval harness now hands each question's day to retrieval, so the temporal
@@ -56,6 +67,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   LongMemEval's answer path and applied by neither. LOCOMO questions carry no date, so
   that runner has no anchor to pass and says so in its report. The library is unchanged;
   `w_temporal` still ships at `0.0`.
+
+- **`memvara-mcp login` no longer requires `--project`, and refuses a project name.** The
+  hosted console's authorize route takes a project id or no project at all, because it
+  has no session to resolve a name against, and it answered `--project NAME` — the
+  spelling this command's usage printed — with 400 `bad_request`. With no `--project` the
+  person approving the sign-in in the browser chooses from the projects they hold. A value
+  that is not a project id is refused before a browser opens. Messages from the flow now
+  name whichever command was typed, `memvara login` or `memvara-mcp login`.
 
 ### Fixed
 

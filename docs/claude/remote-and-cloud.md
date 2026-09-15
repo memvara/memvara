@@ -19,7 +19,12 @@ gated behind a lazy `httpx` import so the core install stays as small as it alwa
 - Response parsing: `memvara/remote/hydrate.py` — one function per dataclass, so a wire body
   becomes a `Claim`, a `WriteReceipt`, an `Explanation` and so on.
 - Credentials: `memvara/remote/creds.py` — `resolve()`, which reads `MEMVARA_API_KEY` or the
-  credential file `memvara-mcp login` wrote.
+  credential file `memvara login` wrote, and `read_credentials_file()`, the one reader of
+  that file's format for any path.
+- The console script: `memvara/cli.py` — `memvara login`, `logout` and `whoami`. `login` is
+  `memvara/server/login.py`'s device-code flow, which `memvara-mcp login` also runs.
+  `--credentials PATH` writes or reads a file other than the default one, which is how
+  one machine holds keys for two projects without moving every caller into the second.
 - Errors: `memvara/remote/errors.py` — `RemoteError` and its subclasses `AuthError`,
   `ScopeError`, `NotFound`, `Conflict`, `QuotaExhausted`, `RateLimited`, `LegalHold`,
   `ReadOnly`, `InvalidRequest`, `ServerError`, plus `error_from_response()`.

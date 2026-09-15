@@ -47,8 +47,10 @@ as text.
 in the client's .mcp.json, the packaged skill tree, and a short note appended to the project's
 `CLAUDE.md` between marker comments. The `--agent cursor` and `--agent grok` variants write
 the same skill into those clients' skill directories, and `--skill-only` skips the .mcp.json step.
-`memvara-mcp login --project NAME` is the separate path for cloud mode; it writes an API key
-that `MEMVARA_MODE=cloud` then uses.
+`memvara login` (or `memvara-mcp login`, the same flow under its older name) is the separate
+path for cloud mode: it writes an API key that `MEMVARA_MODE=cloud` then uses. It takes no
+project name, because the sign-in request has no session to look one up with; the person
+approving it in the browser chooses the project.
 
 ## Configuration
 

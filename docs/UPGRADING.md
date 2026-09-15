@@ -7,6 +7,40 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A `memvara` console script, and `login --project` takes an id or nothing
+
+### What changed
+
+Installing the package now puts a second command on your `PATH`, `memvara`, with three
+subcommands: `login`, `logout` and `whoami`. `memvara login` is the device-code sign-in
+`memvara-mcp login` already ran, and `memvara-mcp login` keeps working.
+
+`--project` is now optional on both, and a project *name* is refused. The hosted
+console's authorize route has no session, so it cannot look a name up; it takes a project
+id or nothing, and it already answered a name with 400 `bad_request`. Leave `--project`
+out and choose the project in the browser.
+
+### How you find your instances
+
+**A script or a setup document that runs `memvara-mcp login --project NAME`.** It has been
+failing against the hosted console with a 400; it now fails before a browser opens, with a
+message saying to drop the flag. Remove `--project NAME`, or pass the project's id.
+
+**A machine with the npm package installed globally.** `npm install -g memvara` installs a
+bin named `memvara` as well — the stdio bridge to the hosted MCP server — and whichever of
+the two comes first on `PATH` wins. The two `login`s are different programs: the bridge's
+writes an OAuth token to `~/.memvara/oauth.json`, this one's writes an API key to
+`~/.memvara/credentials.json`. Run `which -a memvara` to see which you have. Use `npx
+memvara` for the bridge and `python3 -m memvara` for this command wherever it matters; both
+spellings reach the right program whatever `PATH` says. The bridge reads
+`~/.memvara/credentials.json` first, so a key from either `login` serves it.
+
+**A second project on one machine.** `memvara login --credentials PATH` writes the key
+somewhere other than `~/.memvara/credentials.json`, so the file every other caller reads
+still names the project it did. Nothing reads the other file unless you point it there.
+
+---
+
 ## A question that says one relation two ways is a lookup again
 
 ### What changed

@@ -32,15 +32,40 @@ memory correctly.
 
 Run `memvara-mcp init --help` for the full, current list of options.
 
-### `memvara-mcp login` — sign in to a hosted deployment
+### `memvara login`, `memvara logout`, `memvara whoami` — a hosted deployment
 
 ```bash
-memvara-mcp login --project my-project
+memvara login                 # sign in; you choose the project in the browser
+memvara whoami                # what the stored key is for, and what it allows
+memvara logout                # remove the stored key from this machine
 ```
 
-Requires `pip install "memvara[cloud]"`. Runs a device-code sign-in flow in your browser
-and writes an API key to `~/.memvara/credentials.json`, used automatically by
-`MEMVARA_MODE=cloud`. Run `memvara-mcp login --help` for the full options.
+All three require `pip install "memvara[cloud]"`.
+
+`memvara login` runs a device-code sign-in flow in your browser. You approve the sign-in
+there and choose which of your projects the key is for, and the key is written to
+`~/.memvara/credentials.json`, where `MEMVARA_MODE=cloud` and `Memvara.connect()` find it.
+`memvara-mcp login` is the same command under its older name.
+
+| Flag | Meaning |
+|---|---|
+| `--project ID` | Issue the key for this project, named by its id rather than its name. Usually leave it out and choose in the browser: the sign-in request carries no session, so it cannot look a project up by name, and a name is refused. |
+| `--credentials PATH` | Write the key to this file instead of the default one. This is how one machine holds keys for two projects. Nothing reads a file other than the default one unless you point it there. |
+| `--server URL` | The deployment to sign in to. Defaults to `MEMVARA_SERVER_URL`, then `https://app.memvara.dev`. |
+
+`memvara whoami` prints the project, the key's non-secret id, its privilege and its
+expiry, and never the key itself. It reads `MEMVARA_API_KEY` first when you have not
+passed `--credentials`, which is the order every other part of Memvara uses.
+
+`memvara logout` deletes the credentials file. The key itself stays valid until you revoke
+it in the console, and the command says so.
+
+**The npm package also installs a command called `memvara`.** It is the bridge that
+connects a stdio-only MCP client to the hosted server. If both are installed globally,
+whichever comes first on your `PATH` wins. `npx memvara` always runs the npm bridge, and
+`python3 -m memvara` always runs this one, so use those spellings wherever it matters. The
+bridge reads `~/.memvara/credentials.json` before its own sign-in, so a key from
+`memvara login` is one it uses without opening a browser.
 
 ## Environment variables
 
@@ -69,7 +94,7 @@ keeps a model from being able to reach into a different user's memory.
 | `openai` | Fact extraction from free text, using GPT | `pip install "memvara[openai]"` |
 | `local-embed` | A real semantic embedding model, run locally | `pip install "memvara[local-embed]"` |
 | `rerank` | A more accurate cross-encoder re-ranking step for search | `pip install "memvara[rerank]"` |
-| `cloud` | Connecting to a hosted Memvara deployment, and `memvara-mcp login` | `pip install "memvara[cloud]"` |
+| `cloud` | Connecting to a hosted Memvara deployment, and `memvara login` | `pip install "memvara[cloud]"` |
 | `langchain` | The LangChain retriever and chat history adapters | `pip install "memvara[langchain]"` |
 | `llama-index` | The LlamaIndex retriever and memory block adapters | `pip install "memvara[llama-index]"` |
 | `langgraph` | The LangGraph store adapter | `pip install "memvara[langgraph]"` |

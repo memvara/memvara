@@ -99,6 +99,12 @@ def _no_loopback(monkeypatch) -> None:
     monkeypatch.setattr(login_module, "_bind_loopback_listener", lambda: None)
 
 
+#: What `--project` takes: the project's id. The authorize route is unauthenticated, so
+#: it has no session and no organization to resolve a name against, and it refuses a
+#: name with 400 `bad_request`. Every test here that names a project names it this way,
+#: because a test passing a name would be testing a request the server rejects.
+PROJECT_ID = "3f1c9b2e-7a41-4d6e-9c05-8b2d1f4a6e70"
+
 AUTH_BODY = {
     "device_code": "dc-1", "user_code": "ABCD-1234",
     "verification_uri": "https://app.memvara.dev/device",
@@ -122,10 +128,39 @@ def test_help_prints_usage_and_exits_zero():
     assert out.getvalue() == LOGIN_USAGE + "\n"
 
 
-def test_missing_project_is_a_usage_error():
+def test_no_project_starts_an_unbound_grant_rather_than_a_usage_error(monkeypatch):
+    """`--project` used to be required, and requiring it was wrong on both ends.
+
+    The authorize route is unauthenticated: it has no session, so it cannot resolve a
+    project name, and it refuses one with 400 — which is what `--project NAME`, the
+    spelling this command's own usage printed, had become. It takes a project *id* or
+    nothing at all, and nothing at all is the better request: the grant then names no
+    project, there is nothing for an anonymous caller to probe, and the person approving
+    the sign-in in the browser chooses from the projects they hold.
+
+    So the body must carry no `project` key at all. An empty string or a null is a 400
+    rather than the unbound grant that was meant.
+    """
+    _no_browser(monkeypatch)
+    _no_loopback(monkeypatch)
+    client = _install_fake_httpx(monkeypatch, {
+        "device/authorize": [FakeResponse(201, AUTH_BODY)],
+        "device/token": [FakeResponse(200, approved())],
+    })
+    out = io.StringIO()
+
+    assert login([], env={}, stdout=out) == 0
+    assert "project" not in client.calls[0][1]
+    assert "the project you choose in the browser" in out.getvalue()
+
+
+def test_a_project_name_is_refused_before_a_browser_is_opened():
+    """The server's own 400 says this well, and it arrives one request and one browser
+    tab too late. `dev` — a real project's name on the machine this was written on — is
+    the mistake somebody makes after reading the old usage text."""
     err = io.StringIO()
-    assert login([], env={}, stderr=err) == 2
-    assert "--project" in err.getvalue()
+    assert login(["--project", "dev"], env={}, stderr=err) == 2
+    assert "project id" in err.getvalue() and "Omit --project" in err.getvalue()
 
 
 def test_unexpected_argument_is_a_usage_error():
@@ -148,9 +183,9 @@ def test_equals_form_is_accepted(monkeypatch):
         "device/token": [FakeResponse(200, approved())],
     })
     out, err = io.StringIO(), io.StringIO()
-    status = login(["--project=proj"], env={}, stdout=out, stderr=err)
+    status = login([f"--project={PROJECT_ID}"], env={}, stdout=out, stderr=err)
     assert status == 0
-    assert client.calls[0][1]["project"] == "proj"
+    assert client.calls[0][1]["project"] == PROJECT_ID
 
 
 def test_the_httpx_client_sends_the_csrf_header_the_hosted_console_requires(monkeypatch):
@@ -164,7 +199,7 @@ def test_the_httpx_client_sends_the_csrf_header_the_hosted_console_requires(monk
         "device/authorize": [FakeResponse(200, AUTH_BODY)],
         "device/token": [FakeResponse(200, approved())],
     })
-    assert login(["--project", "proj"], env={}, stdout=io.StringIO()) == 0
+    assert login(["--project", PROJECT_ID], env={}, stdout=io.StringIO()) == 0
     headers = client.init_kwargs.get("headers") or {}
     assert headers.get("X-Memvara-CSRF")
 
@@ -179,7 +214,7 @@ def test_server_url_falls_back_to_the_environment_then_the_default(monkeypatch):
         "device/token": [FakeResponse(200, approved())],
     })
     out = io.StringIO()
-    status = login(["--project", "proj"],
+    status = login(["--project", PROJECT_ID],
                    env={"MEMVARA_SERVER_URL": "https://custom.example"}, stdout=out)
     assert status == 0
     assert client.calls[0][0].startswith("https://custom.example")
@@ -192,7 +227,7 @@ def test_explicit_server_flag_wins_over_the_environment(monkeypatch):
         "device/authorize": [FakeResponse(200, AUTH_BODY)],
         "device/token": [FakeResponse(200, approved())],
     })
-    status = login(["--project", "proj", "--server", "https://flagged.example"],
+    status = login(["--project", PROJECT_ID, "--server", "https://flagged.example"],
                    env={"MEMVARA_SERVER_URL": "https://env.example"}, stdout=io.StringIO())
     assert status == 0
     assert client.calls[0][0].startswith("https://flagged.example")
@@ -214,7 +249,7 @@ def test_authorize_http_error_is_reported(monkeypatch):
 
     monkeypatch.setattr(httpx, "Client", lambda *a, **kw: RaisingClient({}))
     err = io.StringIO()
-    status = login(["--project", "proj"], env={}, stdout=io.StringIO(), stderr=err)
+    status = login(["--project", PROJECT_ID], env={}, stdout=io.StringIO(), stderr=err)
     assert status == 1
     assert "could not reach" in err.getvalue()
 
@@ -226,7 +261,7 @@ def test_authorize_non_200_is_a_login_failure(monkeypatch):
         "device/authorize": [FakeResponse(400, {"error": "unknown_project"})],
     })
     err = io.StringIO()
-    status = login(["--project", "proj"], env={}, stdout=io.StringIO(), stderr=err)
+    status = login(["--project", PROJECT_ID], env={}, stdout=io.StringIO(), stderr=err)
     assert status == 1
     assert "the server refused to start a device login" in err.getvalue()
     assert "unknown_project" in err.getvalue()
@@ -242,7 +277,7 @@ def test_authorize_201_is_success(monkeypatch):
         "device/authorize": [FakeResponse(201, AUTH_BODY)],
         "device/token": [FakeResponse(200, approved())],
     })
-    assert login(["--project", "proj"], env={}, stdout=io.StringIO()) == 0
+    assert login(["--project", PROJECT_ID], env={}, stdout=io.StringIO()) == 0
 
 
 def test_authorize_error_body_that_is_not_json_falls_back_to_text(monkeypatch):
@@ -252,7 +287,7 @@ def test_authorize_error_body_that_is_not_json_falls_back_to_text(monkeypatch):
         "device/authorize": [FakeResponse(502, "upstream error")],
     })
     err = io.StringIO()
-    status = login(["--project", "proj"], env={}, stdout=io.StringIO(), stderr=err)
+    status = login(["--project", PROJECT_ID], env={}, stdout=io.StringIO(), stderr=err)
     assert status == 1
     assert "upstream error" in err.getvalue()
 
@@ -271,7 +306,7 @@ def test_an_upstream_error_page_does_not_land_whole_in_the_log(monkeypatch):
         "device/authorize": [FakeResponse(502, "<html><body>" + "x" * 5000)],
     })
     err = io.StringIO()
-    status = login(["--project", "proj"], env={}, stdout=io.StringIO(), stderr=err)
+    status = login(["--project", PROJECT_ID], env={}, stdout=io.StringIO(), stderr=err)
 
     assert status == 1
     body = err.getvalue()
@@ -290,7 +325,7 @@ def test_browser_opened_successfully_prints_the_short_message(monkeypatch):
         "device/token": [FakeResponse(200, approved())],
     })
     out = io.StringIO()
-    assert login(["--project", "proj"], env={}, stdout=out) == 0
+    assert login(["--project", PROJECT_ID], env={}, stdout=out) == 0
     assert "Opened a browser" in out.getvalue()
     assert AUTH_BODY["user_code"] in out.getvalue()
 
@@ -307,7 +342,7 @@ def test_browser_launch_raising_is_treated_as_not_opened(monkeypatch):
         "device/token": [FakeResponse(200, approved())],
     })
     out = io.StringIO()
-    assert login(["--project", "proj"], env={}, stdout=out) == 0
+    assert login(["--project", PROJECT_ID], env={}, stdout=out) == 0
     assert f"Open {AUTH_BODY['verification_uri']}" in out.getvalue()
 
 
@@ -323,7 +358,7 @@ def _run(monkeypatch, poll_responses, *, no_loopback=True):
         "device/token": poll_responses,
     })
     out, err = io.StringIO(), io.StringIO()
-    status = login(["--project", "proj"], env={}, stdout=out, stderr=err)
+    status = login(["--project", PROJECT_ID], env={}, stdout=out, stderr=err)
     return status, out.getvalue(), err.getvalue(), client
 
 
@@ -359,7 +394,7 @@ def test_a_successful_login_does_not_rewrite_the_home_credentials_file(monkeypat
         "device/authorize": [FakeResponse(200, AUTH_BODY)],
         "device/token": [FakeResponse(200, approved())],
     })
-    assert login(["--project", "proj"], env={}, stdout=io.StringIO()) == 0
+    assert login(["--project", PROJECT_ID], env={}, stdout=io.StringIO()) == 0
     written = tmp_path / "credentials.json"
     assert json.loads(written.read_text())["api_key"] == "key-123"
     after = home_creds.read_bytes() if home_creds.is_file() else None
@@ -423,7 +458,7 @@ def test_timeout_is_reported_and_stops_polling(monkeypatch, tmp_path):
         "device/token": [FakeResponse(200, approved())],
     })
     err = io.StringIO()
-    status = login(["--project", "proj"], env={}, stdout=io.StringIO(), stderr=err)
+    status = login(["--project", PROJECT_ID], env={}, stdout=io.StringIO(), stderr=err)
     assert status == 1
     assert "timed out" in err.getvalue()
 
@@ -482,7 +517,7 @@ def test_a_redirect_hint_caught_mid_poll_skips_the_sleep(monkeypatch):
 
     monkeypatch.setattr(httpx, "Client", lambda *a, **kw: RedirectingClient({}))
     out = io.StringIO()
-    status = login(["--project", "proj"], env={}, stdout=out)
+    status = login(["--project", PROJECT_ID], env={}, stdout=out)
     assert status == 0
 
 
@@ -496,7 +531,7 @@ def test_login_completes_with_a_real_loopback_listener_bound(monkeypatch):
         "device/token": [FakeResponse(200, approved())],
     })
     out = io.StringIO()
-    status = login(["--project", "proj"], env={}, stdout=out)
+    status = login(["--project", PROJECT_ID], env={}, stdout=out)
     assert status == 0
 
 

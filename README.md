@@ -184,11 +184,17 @@ From your own code instead — the same client, against the hosted `/v1` API:
 
 ```bash
 pip install 'memvara[cloud]'
+memvara login          # approve in the browser and pick a project; memvara whoami checks it
 ```
 
 ```python
 mem = Memvara(api_key="mv_…", user="alice")     # or Memvara.connect()
 ```
+
+`Memvara.connect()` uses the key `memvara login` wrote. The npm bridge installs a command
+called `memvara` too, so where both are on your `PATH`, `python3 -m memvara login` is the
+spelling that always reaches this one and `npx memvara` the one that always reaches the
+bridge.
 
 **A bare `Memvara()` never becomes remote.** The dispatch reads the explicit `api_key=` or
 `base_url=` argument and never the environment, so a script that has always written to a

@@ -52,7 +52,7 @@ Looked for in this order; the first one found wins.
 | | source | how it gets there |
 | --- | --- | --- |
 | 1 | `MEMVARA_API_KEY` | you set it — for CI, containers, anywhere without a browser |
-| 2 | `~/.memvara/credentials.json` | `memvara-mcp login --project NAME`, the Python CLI |
+| 2 | `~/.memvara/credentials.json` | `memvara-mcp login` or `python3 -m memvara login`, the Python CLI |
 | 3 | `~/.memvara/oauth.json` | `npx memvara login` |
 
 The second is why this is not `mcp-remote`: if you already use the Python package, the

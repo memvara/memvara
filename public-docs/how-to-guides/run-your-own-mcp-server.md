@@ -57,11 +57,12 @@ first:
 
 ```bash
 pip install "memvara[cloud]"
-memvara-mcp login --project my-project
+memvara login
 ```
 
-This walks you through a device-code sign-in flow in your browser and writes an API key
-to `~/.memvara/credentials.json`. Then start the server with:
+This walks you through a device-code sign-in flow in your browser, where you choose which
+of your projects the key is for, and writes the key to `~/.memvara/credentials.json`.
+`memvara-mcp login` is the same command under its older name. Then start the server with:
 
 ```bash
 MEMVARA_MODE=cloud memvara-mcp
