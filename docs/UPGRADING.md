@@ -7,6 +7,35 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A question that says one relation two ways is a lookup again
+
+### What changed
+
+The intent gate counts the distinct predicates a question names, and two of them is a
+chain that opens the graph leg. It counted each word on its own. A word that answers to
+two predicates once the prepositions are gone — `work` is the content of both `works_at`
+and `job_title`'s alias `works_as` — could therefore add a second name from one relation,
+and "what company does Ada work at" read as a chain. The count is now the fewest
+predicates one greedy pass needs to account for everything the question said, so that
+question is one slot
+and a lookup.
+
+Separately, `intent.predicate_refs` no longer memoises a registry's vocabulary. The memo
+could answer with a vocabulary the registry no longer held after `register()` or
+`learn_alias()`, and with a garbage-collected registry's vocabulary when a new registry
+reused its `id()`.
+
+### Who this changes, and in which direction
+
+**Only reads with `w_graph > 0` on a store whose vocabulary declares edges.** With the leg
+off, nothing changes. With it on, a question that says one relation two ways now skips
+the walk, which is what the gate is for, and `Explanation.intent` reports `lookup` where
+it reported `relational`. A question that names two relations still opens it: "who
+founded the company that Ada works at" names `works_at` and `founded_by`. If you register
+predicates after the first search, the gate now sees them.
+
+---
+
 ## A `project:<key>` subject keeps `procedural`, and standing sets list stated rules first
 
 ### What changed

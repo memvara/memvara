@@ -259,22 +259,31 @@ list.
   registry rather than to widen the list by hand, because widening it against a benchmark
   this repository wrote is how a classifier gets fitted to its own corpus.
 
-  **That fix has landed. The gate is now right in principle and badly calibrated**, which
-  is a better position than the one above and not the finished one. `intent.predicate_refs`
-  counts how many distinct predicates a question names, folded onto canonical names and
-  matched as phrases over content tokens, and two of them is a chain; naming an instant no
-  longer switches the walk off. Declared vocabulary alone was not enough, because
+  **That fix has landed, and the gap it left is closed: the gate now costs nothing on
+  `bench/multihop.py` and captures half of the gain on `bench/twowiki.py`.**
+  `intent.predicate_refs` counts how many distinct predicates a question names, folded onto
+  canonical names and matched on content tokens, and two of them is a chain; naming an
+  instant no longer switches the walk off. Declared vocabulary alone was not enough, because
   `PredicateRegistry.learn()` runs only from the LLM-assisted resolution in
   `write/pipeline.py`, so an offline store declares nothing and the rule sees the 23
   builtins — `intent.observed_refs` therefore reads the vocabulary off the candidate rows
-  the lookup legs have already returned, which takes `bench/twowiki.py`'s chained questions
-  from 29.1% to 35.4% with flat questions unchanged. What is still gated is one family, and
-  it is morphology rather than vocabulary: the store holds `founded_by` and the question
-  says "founded the", so the phrase never matches. A stemmer would close that gap; a longer
-  word list would close it only here. What the gate still costs is measured: as shipped the
-  leg takes `bench/multihop.py` from 2.9% to 6.4% at k=12, against 2.9% to 20.0% with the
-  gate off. The numbers, and the condition under which a deployment should turn
-  `intent_weighting` off with the leg on, are in
+  the lookup legs have already returned. The last family the gate blocked was morphology
+  rather than vocabulary: the store holds `founded_by` and the question says "founded the".
+  Both sides of the match now fold through `schema.word_stem` (#150), so that question
+  names `founded_by` the way "who leads the team" names `team_lead`. One false positive of
+  that fold is fixed with it: a question that says one relation two ways ("what company
+  does Ada work at") counted as a chain, and the count is now the fewest predicates that
+  account for what the question said. Measured on 2026-09-13, with each harness declaring
+  its corpus's relations as edges — which the 0.12 rule made a prerequisite and neither
+  harness did, so for a day both measured a store with no edges: the leg takes
+  `bench/multihop.py` from 2.9% to 20.0% at k=12 with the gate on and to 20.0% with it
+  off, equal in every row; on `bench/twowiki.py` chained questions go from 28.2% to 48.3%
+  with the gate on and to 67.3% with it off, and flat questions lose 1.4 points with the
+  gate on against 14.7 with it off. What the gate still pays on flat questions comes from
+  the hand-written markers `same`, `both` and `whose` on comparison questions that have no
+  disjunction, and that is a calibration question this list does not settle. The numbers,
+  and the condition under which a deployment should turn `intent_weighting` off with the
+  leg on, are in
   [`docs/BENCHMARKS.md`](BENCHMARKS.md#the-graph-leg-and-what-it-costs-on-the-corpora-above).
 - **Token accounting** — `WriteReceipt.tokens_in`/`tokens_out`, `LLM.Usage` with a
   caller-allocated accumulator, and the `write.tokens_in` / `write.tokens_out` /

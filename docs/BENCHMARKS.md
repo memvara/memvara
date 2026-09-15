@@ -346,9 +346,9 @@ PYTHONPATH=. python3 bench/longmemeval.py --score retrieval --share-store --w-gr
 | LOCOMO, 1,531 questions | **0** | nothing — the two reports are byte-identical |
 | LongMemEval oracle, 500, `--share-store` | **78** | **a loss**: single-session-user R@12 92.2 → 90.6, all 70.4 → 70.1, nothing gained |
 | `bench/multihop.py` (synthetic), gate off | 4,498 | **2.9% → 20.0%** at k=12, **7.6% → 50.0%** at k=25 |
-| `bench/multihop.py`, **as shipped** | 4,498 | **2.9% → 6.4%** at k=12, **7.6% → 21.8%** at k=25 |
-| `bench/twowiki.py`, gate off, **public** | 26,403 | **28.3% → 72.2%** at k=12 on chained questions; **−13.7** on flat ones |
-| `bench/twowiki.py`, **as shipped** | 26,403 | **28.3% → 43.8%** answer and **25.5% → 41.3%** chain on chained questions; flat unchanged (+0.4) |
+| `bench/multihop.py`, **as shipped** | 4,498 | **2.9% → 20.0%** at k=12, **7.6% → 50.0%** at k=25 — the same as with the gate off |
+| `bench/twowiki.py`, gate off, **public** | 26,403 | **28.2% → 67.3%** at k=12 on chained questions; **−14.7** on flat ones |
+| `bench/twowiki.py`, **as shipped** | 26,403 | **28.2% → 48.3%** answer and **25.5% → 45.8%** chain on chained questions; **−1.4** on flat ones |
 
 The leg walks *claims*, and both public runs are episode retrieval: `SalienceGate` drops
 any turn whose role is not `user`, LOCOMO writes each turn under the speaker's name, and
@@ -369,16 +369,19 @@ could previously get by hand (take the seed entity off the top hit and call
 
 ```
   set           k   search   +graph  +graph!  search x2  traverse  +min_hops    +both   linked
-  two-hop      12     4.0%     9.3%    29.7%      64.3%     69.7%     100.0%   100.0%    99.7%
-  two-hop      25     9.3%    30.3%    72.7%      96.3%    100.0%     100.0%   100.0%    99.7%
+  two-hop      12     4.0%    29.7%    29.7%      64.3%     69.7%     100.0%   100.0%    99.7%
+  two-hop      25     9.3%    72.7%    72.7%      96.3%    100.0%     100.0%   100.0%    99.7%
   three-hop    25     4.0%     4.7%     4.7%       4.7%     34.7%      48.7%   100.0%    46.7%
-  all          12     2.9%     6.4%    20.0%      43.1%     46.4%      78.7%    83.1%    77.8%
-  all          25     7.6%    21.8%    50.0%      65.8%     78.2%      82.9%   100.0%    82.0%
+  all          12     2.9%    20.0%    20.0%      43.1%     46.4%      78.7%    83.1%    77.8%
+  all          25     7.6%    50.0%    50.0%      65.8%     78.2%      82.9%   100.0%    82.0%
 ```
 
 **`+graph` is the shipped configuration and `+graph!` is the same with
-`intent_weighting=False`.** The `+graph` column used to read `2.9%` and `7.6%` — exactly
-`search`, as though the leg were not installed.
+`intent_weighting=False`.** The two columns are equal in every row, measured on
+2026-09-13: on this workload the gate now costs nothing. The `+graph` column used to read
+`2.9%` and `7.6%` — exactly `search`, as though the leg were not installed — and then
+`6.4%` and `21.8%`, with one question family still gated. Every other column reproduced
+the previously published figure exactly, which is the check that only the gate moved.
 
 **The published reason for that was wrong, and finding out why is the more useful half of
 this entry.** This document, the benchmark's own footnote and the classifier's source
@@ -395,10 +398,15 @@ said more about time than any word could — and it was never meant to say anyth
 chains. It said the strongest possible thing silently. *"Where was Alice's employer based
 in 2019"* is the query this library exists for, and it was the shape that lost the walk.
 
-Both halves are now fixed and the numbers above are after both:
+Three things are fixed and the numbers above are after all of them:
 
 * **Naming an instant no longer switches the walk off.** The temporal row still decides
   the other three legs; the graph leg keeps the weight the query shape asked for.
+* **A question names a predicate in whatever form it inflects it** (#150). The store
+  holds `founded_by` and the question says "founded the company"; both sides of the match
+  now fold through `schema.word_stem`, so that family opens the walk like the other two.
+  Before this, "who founded the company that X works at" was the one family still gated,
+  and it was the whole of the gap between `6.4%` and `20.0%`.
 * **The classifier counts predicates instead of matching a longer word list.**
   `intent.predicate_refs` counts how many *distinct* predicates a question names, folded
   onto canonical names, and two of them is a chain — one predicate is a question about one
@@ -461,26 +469,53 @@ override has to repeat the builtin's alias list: a bare `born_on` declaration ma
 relations resolve to nothing, and the audit reported them as undeclared *because* they had
 been declared. `tests/test_predicate_packs.py` pins both.
 
-**What is still gated is one family, and it is morphology rather than vocabulary.** "Who
+**The same rule reached `bench/multihop.py`, and for a day the harness measured nothing.**
+Its five relations were never declared, so once only a declared relation carries an edge
+every object in its store was a value: the one-hop frontier of a person was 0 paths, every
+traversal column read 0.0%, and `+graph` equalled `search` in every row — which the
+footnote then explained as the gate's cost. `bench/multihop.py` now declares its relations
+in `vocabulary()`, extending the two builtins it uses rather than replacing them, and
+`tests/test_predicate_packs.py` pins both harnesses' registries so the next change of that
+kind fails in a test rather than in a table. The `+graph!` column reproduced its published
+figure to the decimal once the edges were back, so the padding claims, which stay values,
+never contributed to the walk.
+
+**The last gated family was morphology rather than vocabulary, and it is closed.** "Who
 founded the company that X works at" names `works_at` and `founded_by`, but the store
-holds `founded_by` and the question says "founded the", so the phrase never matches.
+holds `founded_by` and the question says "founded the", so the phrase never matched.
 Matching the head token instead was measured and rejected: the head tokens of this
 registry's predicates include `in`, `is`, `do`, `has`, `date` and `place`, which turns
-"what is my name" into a two-predicate chain. A stemmer would close that gap; a longer
-word list would only close it here.
+"what is my name" into a two-predicate chain. A stemmer closed it (#150): both sides fold
+through `schema.word_stem`, and the fold is the registry's own, so it only has to agree
+with itself.
+
+One false positive came out of that fold and is fixed here. `works_at` and `job_title`'s
+alias `works_as` both reduce to `work` once the prepositions are gone, and the count took
+each word on its own, so "what company does Ada work at" — `work` to `job_title`, `company`
+to `works_at` — read as a chain and opened the walk on the plainest lookup there is. The
+count is now the fewest predicates that account for everything the question said. It
+changes no row above: every question here names two relations that only one predicate
+each can explain.
 
 **The standing advice needs a condition on it, which `bench/twowiki.py` supplied.** It
 used to read: a deployment turning the graph leg on should turn `intent_weighting` off
-with it. On public multi-hop data that buys 44 points on chained questions and **costs
-14 on flat ones**, so it is right for a workload of relationship questions and wrong for
-a workload of lookups. Net on a corpus that is 54% chained it is +17.4 points at k=12;
+with it. On public multi-hop data that buys 39 points on chained questions and **costs
+15 on flat ones**, so it is right for a workload of relationship questions and wrong for
+a workload of lookups. Net on a corpus that is 54% chained it is +14.4 points at k=12;
 invert the mix and it inverts.
 
-The honest statement is that the gate is right in principle and badly calibrated: it
-captures almost none of the gain and still pays part of the cost. A deployment should
-turn `intent_weighting` off if its traffic is mostly relationship questions, and leave
-the graph leg off entirely if it is mostly lookups. Neither is a default this repository
-can pick for you, which is why `w_graph` ships at 0.0.
+The honest statement is that the gate is right in principle and half calibrated. As
+shipped it captures 20.1 of the 39.1 points on chained questions and pays 1.4 of the 14.7
+on flat ones, measured on 2026-09-13 with the corpus's relations declared; it used to
+capture almost none of the gain. What it still pays on flat questions comes from the
+hand-written markers rather than from the predicate count. Of the first 3,000 questions,
+the walk ran on 29.1% of the flat ones with the gate on, and 22.3% of them classify as
+relational through `same`, `both` or `whose` — comparison questions written without a
+disjunction, so `is_comparison` does not see them — against 0.1% that open through two
+declared predicates. A deployment should turn `intent_weighting` off if its traffic is
+mostly relationship questions, and leave the graph leg off entirely if it is mostly
+lookups. Neither is a default this repository can pick for you, which is why `w_graph`
+ships at 0.0.
 
 **The store now asks itself.** Where no live claim's object is another live claim's
 subject, the graph leg does not run whatever `w_graph` says — so turning it on costs
@@ -492,7 +527,7 @@ See `UnjoinedStoreWarning`, which says so out loud once per retriever.
 That is a floor, not a recommendation. **Ask the store before you guess at the traffic**,
 because the store is the half you can measure. `memory_stats` reports a **join rate** — the share of live claims whose object is
 the subject of another live claim, which is the share that leads anywhere at all. The two
-corpora below sit at 40.6% and 0.0% and the leg gains 13 points on one and loses 1.6 on
+corpora below sit at 29.0% and 0.0% and the leg gains 20 points on one and loses 1.6 on
 the other, so the rate predicts the sign where a guess about query mix does not. Under
 about 1% the store is a *star*, every fact hanging off one subject, and there is no
 second hop to find however the traffic is shaped. `Memvara.connectivity()` is the same
@@ -541,7 +576,7 @@ gates is 1.0 and stays 1.0 until a per-category sweep moves it.
 
 ### The graph leg on public data, with the extractor out of the loop
 
-**The leg is worth 2.6x on multi-hop questions, and costs 14 points on questions that are
+**The leg is worth 2.4x on multi-hop questions, and costs 15 points on questions that are
 not.** Both halves are new information, and the second is the more useful one.
 
 Everything above this section says the leg is unmeasurable on public data, because LOCOMO
@@ -558,45 +593,56 @@ returned rows / whole evidence chain returned*:
 ```
   k=12
   set                     n         search         +graph        +graph!
-  all                12,576   50.6% / 37.2%   59.0% / 44.5%   68.0% / 57.2%
-  chained             6,785   28.3% / 25.5%   43.8% / 41.3%   72.3% / 70.3%
-  flat                5,791   76.7% / 50.8%   76.7% / 48.3%   63.0% / 41.8%
-  compositional       5,236   22.8% / 20.5%   43.0% / 40.9%   70.2% / 68.3%
-  inference           1,549   46.6% / 42.3%   46.6% / 42.3%   79.3% / 77.3%
-  comparison          3,040   73.9% / 96.8%   75.7% / 86.8%   60.8% / 58.1%
-  bridge_comparison   2,751   79.8% /  0.0%   77.9% /  5.7%   65.5% / 23.8%
+  all                12,576   50.5% / 37.2%   60.8% / 46.2%   64.9% / 51.4%
+  chained             6,785   28.2% / 25.5%   48.3% / 45.8%   67.3% / 65.5%
+  flat                5,791   76.7% / 50.8%   75.3% / 46.8%   62.0% / 34.9%
+  compositional       5,236   22.8% / 20.5%   48.8% / 46.8%   63.5% / 61.7%
+  inference           1,549   46.6% / 42.3%   46.7% / 42.4%   80.4% / 78.4%
+  comparison          3,040   73.9% / 96.8%   73.4% / 87.1%   58.1% / 64.5%
+  bridge_comparison   2,751   79.8% /  0.0%   77.5% /  2.2%   66.4% /  2.2%
 ```
 
-The `+graph` column is after the gate repair filed as
+Measured on 2026-09-13, with the harness loading `bench/packs/twowiki.toml`. Since 0.12
+only a declared relation carries an edge. This harness declared nothing, so for a day it
+measured a store with no edges: `search`, `+graph` and `+graph!` were equal in every row.
+`ingest()` now builds its registry from the builtins and the pack, and the store's
+join rate with it is 29.0% (7,663 of 26,402 live claims lead to another). Three things
+moved against the previously published table, and none of them is the gate. The four
+date relations are values now — 9,854 triples that used to be edges — so every walk
+reaches less: with the gate off, `chained` fell from 72.3% to 67.3% and
+`bridge_comparison` chain recall from 23.8% to 2.2%, which was the year-hub join that
+decision 3 exists to prevent. With the gate on, `chained` rose from 43.8% to 48.3%,
+because the declared vocabulary is visible to `classify` where before only the rows a
+query happened to retrieve were. And `flat` gives up 1.4 points with the gate on where it
+gave up none, because the walks it still runs reach different rows. The matcher fix
+described above moved no cell: the table with it and without it is identical to the
+decimal, here and on `bench/multihop.py`. `search` moved by 0.1 on two rows; the pack
+declares every relation `static`, and a near-tie at the `k` boundary is the likely
+reason.
+
+The previous table was after the gate repair filed as
 [#150](https://github.com/memvara/memvara/issues/150): a question names a predicate in
-whatever form it inflects it, and a chain that also names an instant keeps the walk. Both
-runs, the branch and a pristine `origin/main`, were taken on the same day with the same
-harness; `main` reproduced the previously published column exactly, and the repair moved
-it as follows, answer / chain: `all` 57.9 / 43.8 → 59.0 / 44.5, `chained` 42.1 / 39.5 →
-43.8 / 41.3, `compositional` 40.8 / 38.7 → 43.0 / 40.9, `flat` 76.3 / 48.9 → 76.7 / 48.3,
-`comparison` 74.9 / 88.7 → 75.7 / 86.8, `bridge_comparison` 77.8 / 4.9 → 77.9 / 5.7,
-`inference` unchanged. The `search` and `+graph!` columns did not move, which is the check
-that only the gate changed. Chain recall on `comparison` gives up 1.9 points: a few more
-comparison questions now name two predicates through their inflections and are not
-written as a disjunction, so `is_comparison` does not catch them and the walk spends part
-of `k` there.
+whatever form it inflects it, and a chain that also names an instant keeps the walk. That
+repair moved `chained` from 42.1 / 39.5 to 43.8 / 41.3 with `search` and `+graph!`
+unmoved, which was the check that only the gate had changed.
 
 **`chained` is the result.** `compositional` and `inference` questions chain one fact into
 the next — "who is the mother of the director of X" is `director` then `mother` — and the
-leg takes them from **28.3% to 72.2%**. `inference` also carries its derivation: chain
-recall 42.2% → 76.4%, so most answers arrive with every triple that supports them rather
+leg takes them from **28.2% to 67.3%**. `inference` also carries its derivation: chain
+recall 42.3% → 78.4%, so most answers arrive with every triple that supports them rather
 than with the gold entity alone.
 
 **`flat` is the control, and it did what a control is for.** `comparison` and
 `bridge_comparison` ask which of two independent entities came first. The evidence has two
-ends and no join, the leg has nothing to walk, and turning it on **costs 13.7 points**
-(76.7% → 63.0%) because the walk spends `k` on neighbours of a hub. Had that row improved,
+ends and no join, the leg has nothing to walk, and turning it on **costs 14.7 points**
+(76.7% → 62.0%) because the walk spends `k` on neighbours of a hub. Had that row improved,
 the `chained` row would be worth much less: it would suggest the leg helps by adding rows
 rather than by following edges.
 
-**The intent gate is right in principle, and it now captures some of what it was
-blocking.** It exists to route flat questions past the walk, and on `flat` it does:
-76.7% against search's 76.7%. On `chained` it used to block almost the entire gain —
+**The intent gate is right in principle, and it now captures half of what it was
+blocking.** It exists to route flat questions past the walk, and on `flat` it mostly
+does: 75.3% against search's 76.7%, where the gate off costs 14.7. On `chained` it
+captures 20.1 of the 39.1 points available. It used to block almost the entire gain —
 29.1% where 72.2% was available, 0.9 points of 43.9.
 
 The reason was vocabulary, and not the kind a word list fixes. `classify` counts the
@@ -644,9 +690,9 @@ One false positive found on the way: `born_in` and `born_on` share the content t
 Matches are now deduplicated by what the question said rather than by how many predicates
 answer to it.
 
-**Answers and derivations move together.** On `chained`, the leg is worth +15.5 points of
-answer recall and **+15.8 of chain recall** — 28.3% → 43.8% and 25.5% → 41.3%. Ungated the
-two columns nearly meet, 72.3% against 70.3%: almost every answer the walk finds arrives
+**Answers and derivations move together.** On `chained`, the leg is worth +20.1 points of
+answer recall and **+20.3 of chain recall** — 28.2% → 48.3% and 25.5% → 45.8%. Ungated the
+two columns nearly meet, 67.3% against 65.5%: almost every answer the walk finds arrives
 with every triple that supports it. That is the property the library is for, and it is the
 one worth quoting.
 
@@ -722,8 +768,8 @@ The terms are not persisted, so a server pays once at startup; `docs/ROADMAP.md`
 why, and it is that the two obvious places to put them are both wrong.
 
 **What it still does not reach.**
-`inference` gains **nothing** — 46.6% through every change in this series — and the reason
-is not a bug. Those
+`inference` gains **nothing** — 46.6% through every change in this series, 46.7% on the
+current table — and the reason is not a bug. Those
 questions ask "who is the maternal grandfather of X"; the evidence is `(X, mother, Y)` and
 `(Y, father, Z)`, and the question names neither `mother` nor `father`. It names a
 *derived* relation. Matching a question's words against stored predicate names cannot
@@ -731,9 +777,12 @@ bridge `grandfather` to `mother` + `father`, and no longer word list closes that
 needs synonymy or entailment, which is a model rather than a lookup. All of the gain here
 is in `compositional`, where the question does say the predicates out loud: 24.0% → 32.1%.
 
-`bridge_comparison` chain recall is 0.0% for `search` and 6.7% ungated. Those chains are
+`bridge_comparison` chain recall is 0.0% for `search` and 2.2% ungated. Those chains are
 four hops and `graph_depth` ships at 2, so that row measures the depth bound rather than
-traversal — the same caveat the synthetic benchmark's three-hop rows carry.
+traversal — the same caveat the synthetic benchmark's three-hop rows carry. It read 23.8%
+while every claim carried an edge. The only edges removed since are the four date
+relations, so that recall was reached through a shared date rather than through the
+chain, and with dates as values it cannot be.
 
 **What this does not measure.** Retrieval given claims. The write path never runs, so
 nothing here says anything about extraction, which remains the bottleneck. Quote this as
@@ -815,7 +864,10 @@ counts as a negative only when it names no entity the store holds at all — ref
 about somebody the store knows would be wrong rather than right.
 
 3,000 questions ingested, 1,000 of them scored for cost, 332 negatives. Every arm reads at a
-pinned instant, and the table is identical on repeat.
+pinned instant, and the table is identical on repeat. The three `graph leg` rows were re-measured on
+2026-09-14, when `bench/twowiki.py` began declaring the corpus's relations: the walk now
+follows the declared edges only, so those rows moved by about a point and the other six did
+not move at all. The run takes about 85 minutes on a developer machine.
 
 ```
   configuration          k  answer found  correctly silent
@@ -825,9 +877,9 @@ pinned instant, and the table is identical on repeat.
   anchored               5         39.0%            100.0%
   anchored              12         39.1%            100.0%
   anchored              25         39.1%            100.0%
-  anchored + graph leg   5         53.8%            100.0%
-  anchored + graph leg  12         53.9%            100.0%
-  anchored + graph leg  25         54.1%            100.0%
+  anchored + graph leg   5         55.0%            100.0%
+  anchored + graph leg  12         54.8%            100.0%
+  anchored + graph leg  25         55.0%            100.0%
 ```
 
 **The shipped configuration is silent on none of them, and anchoring is silent on all of
@@ -837,7 +889,7 @@ them does. That is the behaviour anchoring exists to produce, and this is the fi
 measurement of it on questions written by somebody else.
 
 **Anchoring alone costs about a sixth of the legitimate answers**, and the graph leg pays most
-of it back: 39.1% against 53.9% at k=12, where the shipped figure is 55.5%. A 2Wiki question
+of it back: 39.1% against 54.8% at k=12, where the shipped figure is 55.3%. A 2Wiki question
 names entities the anchor then has to match, and a question whose answer sits one hop away
 reaches it through the entity the question does name. At k=5 the pair is ahead of the shipped
 configuration on both columns at once.
