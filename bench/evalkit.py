@@ -126,6 +126,23 @@ because `anthropic.Anthropic()` constructs happily without a key and fails on th
 first request, which here is several minutes and one whole ingest later, reading like
 a network fault.
 
+**A server of your own.** `--reader openai` also reads from any server that speaks Chat
+Completions. `--base-url URL` says where, `--api-key-file PATH` reads the bearer key from
+a file at run time (and then `OPENAI_API_KEY` is not consulted at all), and `--extra-body
+JSON` is merged into every request body. The demo's reader is set up this way:
+
+    PYTHONPATH=. python3 demo/harness.py --reader openai --judge llm \
+        --base-url http://100.80.255.55:8888/v1 \
+        --api-key-file ~/.config/memvara/qwen.key \
+        --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_S \
+        --temperature 0 --sampling-seed 7 --max-tokens 512 \
+        --extra-body '{"chat_template_kwargs": {"enable_thinking": false}}'
+
+The base URL and the extra body are printed under the report's title and keyed in the
+checkpoint, because both change the answers; the key file is neither, and it is refused
+if it is missing, empty or readable by other users — see `read_api_key_file`. A
+self-hosted model has no list price, so its tokens are printed with an UNPRICED line.
+
 **There is no key in this repository and none is needed to develop against this
 harness.** `--reader stub` runs the entire pipeline offline; `--reader file` runs it
 with a person or an agent in the loop.
@@ -856,6 +873,41 @@ def require_key(variable: str, flag: str) -> None:
         )
 
 
+def read_api_key_file(path: str) -> str:
+    """The bearer key in `path`, or a refusal that names the path and never the key.
+
+    For a server whose key lives in a file outside the repository — the demo's reader
+    reads `~/.config/memvara/qwen.key` this way — so that the key is never on a command
+    line, in shell history, in the environment of every child process, or in a report.
+    Read once, at construction, before anything is ingested.
+
+    Refused rather than warned about, and each refusal says what to do:
+
+    * a missing file, because the run would otherwise fail on its first request, after
+      the whole ingest, reading like a network fault;
+    * an empty one, for the same reason;
+    * one that other users can read (any group or other permission bit), because a
+      warning scrolls past and the key has already leaked. This is the rule ssh applies
+      to a private key. Checked on POSIX only: Windows has no such bits to read.
+
+    No message quotes the file's content, even partly. `~` is expanded, because a shell
+    does not expand it inside `--api-key-file=~/...`.
+    """
+    resolved = Path(path).expanduser()
+    if not resolved.is_file():
+        raise SystemExit(f"\n  --api-key-file: {resolved} does not exist. Create it with "
+                         "the server's key on one line, then chmod 600 it.\n")
+    if os.name == "posix" and resolved.stat().st_mode & 0o077:
+        raise SystemExit(f"\n  --api-key-file: {resolved} can be read by other users "
+                         f"(mode {resolved.stat().st_mode & 0o777:o}). Run chmod 600 on "
+                         "it first; a key file anyone else can read is refused.\n")
+    key = resolved.read_text(encoding="utf-8").strip()
+    if not key:
+        raise SystemExit(f"\n  --api-key-file: {resolved} is empty. It should hold the "
+                         "server's key on one line.\n")
+    return key
+
+
 def build_prompt(question: str, context: str, *, asked_on: str | None = None) -> str:
     """The reader's user turn: the question first, then whatever retrieval produced.
 
@@ -1033,6 +1085,30 @@ class OpenAIReader:
     Completions accepts it as best-effort determinism. It is sent only when given, so a
     run that did not ask for one is not quietly a seeded run, and the report header
     prints whichever was the case.
+
+    ## A server of your own
+
+    Any server that speaks Chat Completions works, and the answer-quality demo is run
+    against one: llama.cpp serving a quantized Qwen model on a private network. Three
+    settings make that possible, and each one is printed, keyed and tested for what it
+    does, because each changes either the answers or who can see the run:
+
+    * `base_url` is where every request goes. A different server is a different build of
+      the model, so it is part of `settings()` and of the checkpoint key.
+    * `api_key_file` is where the bearer key is read from, at construction and nowhere
+      else — see `read_api_key_file`. The key is never an attribute, a setting, a header
+      line or a log line; with a file given, `OPENAI_API_KEY` is not consulted at all,
+      so a public OpenAI key cannot be sent to a private server by accident.
+    * `extra_body` is merged into the top level of every request body. llama.cpp reads
+      `chat_template_kwargs` there, and `{"enable_thinking": false}` is what switches a
+      Qwen model's thinking off — a run with it on is a different experiment, so it is
+      printed and keyed like the base URL.
+
+    Both settings appear in `settings()` only when they are set, so an ordinary OpenAI
+    run keeps the checkpoint ids it had before either existed.
+
+    A self-hosted model has no list price, so a run against one prints its tokens and an
+    UNPRICED line under the cost table rather than a dollar figure it could not know.
     """
 
     is_stub = False
@@ -1045,27 +1121,43 @@ class OpenAIReader:
         max_tokens: int = 1024,
         temperature: float = 0.0,
         seed: int | None = None,
+        base_url: str | None = None,
+        api_key_file: str | None = None,
+        extra_body: Mapping[str, Any] | None = None,
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.seed = seed
+        self.base_url = base_url
+        self.extra_body = dict(extra_body) if extra_body is not None else None
         self.name = f"openai/{model}"
-        self._client = client if client is not None else self._default_client()
+        self._client = (client if client is not None
+                        else self._default_client(base_url, api_key_file))
 
     def settings(self) -> dict[str, Any]:
-        """See `AnthropicReader.settings`. `seed` is `None` when none was sent."""
-        return {"model": self.model, "max_tokens": self.max_tokens,
-                "temperature": self.temperature, "seed": self.seed}
+        """See `AnthropicReader.settings`. `seed` is `None` when none was sent; the
+        server and the extra body are present only when set, and the key never is."""
+        out: dict[str, Any] = {"model": self.model, "max_tokens": self.max_tokens,
+                               "temperature": self.temperature, "seed": self.seed}
+        if self.base_url is not None:
+            out["base_url"] = self.base_url
+        if self.extra_body is not None:
+            out["extra_body"] = dict(self.extra_body)
+        return out
 
     def spawn(self, model: str | None = None) -> "OpenAIReader":
-        """See `AnthropicReader.spawn`."""
+        """See `AnthropicReader.spawn`. The twin keeps the client, the server and the
+        extra body: a judge that lost the base URL would send every grading prompt,
+        gold answers included, to a different provider."""
         return OpenAIReader(model=model or self.model, client=self._client,
                             max_tokens=self.max_tokens, temperature=self.temperature,
-                            seed=self.seed)
+                            seed=self.seed, base_url=self.base_url,
+                            extra_body=self.extra_body)
 
     @staticmethod
-    def _default_client() -> Any:
+    def _default_client(base_url: str | None = None,
+                        api_key_file: str | None = None) -> Any:
         try:
             import openai
         except ImportError as exc:
@@ -1074,11 +1166,19 @@ class OpenAIReader:
                 "Pass client= to inject one, or run with --reader stub to exercise the "
                 "harness offline."
             ) from exc
-        require_key("OPENAI_API_KEY", "--reader openai")
-        return openai.OpenAI()
+        options: dict[str, Any] = {}
+        if base_url is not None:
+            options["base_url"] = base_url
+        if api_key_file is not None:
+            options["api_key"] = read_api_key_file(api_key_file)
+        else:
+            require_key("OPENAI_API_KEY", "--reader openai")
+        return openai.OpenAI(**options)
 
     def answer(self, system: str, prompt: str) -> Answer:
-        extra = {"seed": self.seed} if self.seed is not None else {}
+        extra: dict[str, Any] = {"seed": self.seed} if self.seed is not None else {}
+        if self.extra_body is not None:
+            extra["extra_body"] = dict(self.extra_body)
         response = self._client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
@@ -2755,6 +2855,19 @@ def add_reader_arguments(parser: Any) -> None:
                         help="OpenAI reader seed, sent only when given: best-effort "
                              "determinism on that provider. The Anthropic API has no "
                              "equivalent")
+    # The three that point `--reader openai` at a server of your own. Printed in the
+    # header and keyed in the checkpoint, except the key, which is neither.
+    parser.add_argument("--base-url", default=None, metavar="URL",
+                        help="OpenAI reader: send requests to this OpenAI-compatible "
+                             "server instead of OpenAI's, e.g. http://host:8888/v1")
+    parser.add_argument("--api-key-file", default=None, metavar="PATH",
+                        help="OpenAI reader: read the bearer key from this file (mode "
+                             "600) at run time. Never printed; OPENAI_API_KEY is not "
+                             "consulted when this is given")
+    parser.add_argument("--extra-body", default=None, metavar="JSON",
+                        help="OpenAI reader: a JSON object merged into every request "
+                             "body, e.g. '{\"chat_template_kwargs\": "
+                             "{\"enable_thinking\": false}}'. Printed in the header")
     parser.add_argument("--concurrency", type=int, default=1, metavar="N",
                         help="model calls in flight at once, reader and judge alike. "
                              "1, the default, issues them one at a time on the calling "
@@ -2775,6 +2888,27 @@ THINKING_SETTINGS: dict[str, Mapping[str, Any] | None] = {
 }
 
 
+def parse_extra_body(raw: str | None) -> dict[str, Any] | None:
+    """`--extra-body`'s JSON, as the object it has to be, or a refusal naming the flag.
+
+    An object and nothing else, because the SDK merges it key by key into the top level
+    of the request body; a list or a string there is not a malformed setting the server
+    would reject, it is one the SDK would fail on mid-run.
+    """
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError as exc:
+        raise SystemExit(f"--extra-body is not JSON: {exc}. Pass an object, for example "
+                         '\'{"chat_template_kwargs": {"enable_thinking": false}}\'.') \
+            from exc
+    if not isinstance(value, dict):
+        raise SystemExit("--extra-body must be a JSON object, whose keys are merged into "
+                         f"every request body; got {type(value).__name__}.")
+    return value
+
+
 def hosted_reader(provider: str, args: Any, *,
                   default_model: str = "claude-opus-5") -> Reader:
     """An API reader built from the `add_reader_arguments` flags.
@@ -2785,7 +2919,18 @@ def hosted_reader(provider: str, args: Any, *,
     pinned = {name: value for name, value in (
         ("max_tokens", getattr(args, "max_tokens", None)),
     ) if value is not None}
+    base_url = getattr(args, "base_url", None)
+    api_key_file = getattr(args, "api_key_file", None)
+    extra_body = getattr(args, "extra_body", None)
     if provider == "anthropic":
+        # Refused rather than ignored: a run whose command line names a server of its
+        # own and which then answers from Anthropic's would be quoted as the first.
+        given = [flag for flag, value in (("--base-url", base_url),
+                                          ("--api-key-file", api_key_file),
+                                          ("--extra-body", extra_body)) if value]
+        if given:
+            raise SystemExit(f"{', '.join(given)} apply to --reader openai, which is the "
+                             "reader an OpenAI-compatible server of your own uses.")
         return AnthropicReader(
             model=args.model or default_model, effort=args.effort,
             thinking=THINKING_SETTINGS[getattr(args, "thinking", "default")], **pinned)
@@ -2794,7 +2939,9 @@ def hosted_reader(provider: str, args: Any, *,
         if temperature is not None:
             pinned["temperature"] = temperature
         return OpenAIReader(model=args.model or "gpt-4.1",
-                            seed=getattr(args, "sampling_seed", None), **pinned)
+                            seed=getattr(args, "sampling_seed", None),
+                            base_url=base_url, api_key_file=api_key_file,
+                            extra_body=parse_extra_body(extra_body), **pinned)
     raise SystemExit(f"--reader {provider} is not a hosted reader; use anthropic or openai")
 
 

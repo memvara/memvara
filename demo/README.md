@@ -64,6 +64,11 @@ number quotable and the run repeatable:
   runs will differ, and the per-question rows in `--out` are the unit to compare.
 * `--model`, `--max-tokens`, `--temperature` and `--sampling-seed` on `--reader openai`.
   The seed is sent only when given, and the header prints whichever was the case.
+* `--base-url`, `--api-key-file` and `--extra-body` point `--reader openai` at a server of
+  your own that speaks Chat Completions. The base URL and the extra body are printed and
+  keyed in the checkpoint, because a different server or `{"chat_template_kwargs":
+  {"enable_thinking": false}}` changes the answers. The key is read from the file at run
+  time and appears nowhere; the file is refused if other users can read it.
 * `--judge llm` grades with the reader's twin: the same provider and the same parameters,
   with `--judge-model` swapped in when given. `--judge containment`, the default, is free
   and wrong in the known directions the report lists under its tables.

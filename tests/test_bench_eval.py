@@ -2709,6 +2709,234 @@ def test_a_stub_or_file_reader_has_no_settings_to_print():
     assert ek.checkpoint_note(ek.StubReader()) == ""
 
 
+# --- an OpenAI-compatible server of your own -------------------------------------
+#
+# The reader the answer-quality demo is run with is a self-hosted model behind an
+# OpenAI-compatible API (llama.cpp's server), reached on a private network with a bearer
+# key kept in a file outside the repository. Three settings make that work, and each one
+# changes the answer or the privacy of the run, so each is tested for what it does rather
+# than for being accepted: where the requests go, which key they carry, and what extra
+# request body the server is sent — `chat_template_kwargs` switches a Qwen model's
+# thinking off, and a run with it on is a different experiment.
+
+_SECRET = "sk-local-test-key-3141"
+
+
+class _CompatibleServer:
+    """A real HTTP server on 127.0.0.1 speaking the one Chat Completions route.
+
+    Real rather than a fake client object, because the thing under test is what the
+    installed SDK actually puts on the wire when it is handed a base URL, a key and an
+    extra body — and a fake client would only test that this module passed the arguments
+    along, which is the part least likely to be wrong. Loopback, an OS-chosen port and no
+    DNS, which is the same line `tests/test_login.py` draws for its listener.
+    """
+
+    def __init__(self) -> None:
+        import http.server
+        import threading
+
+        seen: list[dict] = []
+        self.seen = seen
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):  # noqa: D401 - keep the test output quiet
+                pass
+
+            def do_POST(self):  # noqa: N802 - http.server's name
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                seen.append({"path": self.path, "auth": self.headers.get("Authorization"),
+                             "body": body})
+                reply = json.dumps({
+                    "id": "c1", "object": "chat.completion", "created": 0,
+                    "model": body["model"],
+                    "choices": [{"index": 0, "finish_reason": "stop",
+                                 "message": {"role": "assistant", "content": " Home "}}],
+                    "usage": {"prompt_tokens": 21, "completion_tokens": 2,
+                              "total_tokens": 23},
+                }).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+        self._server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}/v1"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def compatible_server():
+    pytest.importorskip("openai")
+    server = _CompatibleServer()
+    yield server
+    server.close()
+
+
+def _key_file(tmp_path: Path, content: str = _SECRET + "\n", mode: int = 0o600) -> Path:
+    path = tmp_path / "qwen.key"
+    path.write_text(content)
+    path.chmod(mode)
+    return path
+
+
+def test_an_openai_compatible_reader_sends_to_its_base_url_with_the_key_from_its_file(
+        compatible_server, tmp_path, monkeypatch):
+    """Where the request went, what it carried, and what came back — read off the wire.
+
+    `OPENAI_API_KEY` is deleted first, so the only way the request can carry a key is the
+    file: a reader that fell back to the environment would send somebody's OpenAI key to
+    a server on a private network, which is the failure worth a test. The extra body has
+    to arrive at the top level of the request, where llama.cpp reads
+    `chat_template_kwargs`; nested anywhere else the server ignores it and the model
+    thinks, silently.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    reader = ek.OpenAIReader(
+        model="unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_S", max_tokens=256, temperature=0.0,
+        seed=7, base_url=compatible_server.url, api_key_file=str(_key_file(tmp_path)),
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+
+    out = reader.answer("system prompt", "Question: which plan?")
+
+    assert out.text == "Home" and out.stop_reason == "stop"
+    assert (out.input_tokens, out.output_tokens) == (21, 2)
+    [request] = compatible_server.seen
+    assert request["path"] == "/v1/chat/completions"
+    assert request["auth"] == f"Bearer {_SECRET}"
+    body = request["body"]
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert (body["model"], body["max_tokens"], body["temperature"], body["seed"]) == (
+        "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_S", 256, 0.0, 7)
+
+
+def test_the_header_and_the_checkpoint_carry_the_server_and_the_body_but_never_the_key(
+        tmp_path):
+    """Everything that decides an answer is printed under the report's title, and the
+    base URL and the extra body both decide it: a different server is a different model
+    build, and thinking on is a different experiment. So both are in `settings()`, and
+    with them in the checkpoint key, so a run against another server never replays this
+    one's answers. The key decides nothing about an answer and is a secret, so it is in
+    neither — asserted on the rendered header and on the checkpoint id's input."""
+    reader = ek.OpenAIReader(client=_FakeOpenAI(), model="m", base_url="http://h:1/v1",
+                             api_key_file=str(_key_file(tmp_path)),
+                             extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+    settings = reader.settings()
+    assert settings["base_url"] == "http://h:1/v1"
+    assert settings["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    rendered = "\n".join(ek.reader_settings_lines(reader)) + json.dumps(settings)
+    assert _SECRET not in rendered and "qwen.key" not in rendered
+
+    other = ek.OpenAIReader(client=_FakeOpenAI(), model="m", base_url="http://h:1/v1",
+                            extra_body={"chat_template_kwargs": {"enable_thinking": True}})
+    assert ek.call_id(settings, "s", "p") != ek.call_id(other.settings(), "s", "p")
+
+
+def test_a_plain_openai_reader_keeps_the_settings_and_checkpoint_ids_it_had():
+    """The two new settings appear only when set. Adding them as `None` everywhere would
+    change every existing OpenAI run's checkpoint ids, so a resume of a run started
+    before this change would replay nothing and pay for everything again."""
+    assert ek.OpenAIReader(client=_FakeOpenAI()).settings() == {
+        "model": "gpt-4.1", "max_tokens": 1024, "temperature": 0.0, "seed": None}
+
+
+def test_the_judge_spawned_from_a_self_hosted_reader_goes_to_the_same_server():
+    """`--judge llm` grades with the reader's twin. A twin that lost the base URL would
+    send every grading prompt, gold answers included, to the public OpenAI API."""
+    reader = ek.OpenAIReader(client=_FakeOpenAI(), base_url="http://h:1/v1",
+                             extra_body={"a": 1})
+    judge = reader.spawn("judge-model")
+    assert judge.settings()["base_url"] == "http://h:1/v1"
+    assert judge.settings()["extra_body"] == {"a": 1}
+    assert judge._client is reader._client
+
+
+@pytest.mark.parametrize("case, expected", [
+    ("missing", "does not exist"),
+    ("empty", "is empty"),
+    ("group_readable", "chmod 600"),
+])
+def test_a_key_file_that_cannot_be_trusted_is_refused_without_quoting_it(tmp_path, case,
+                                                                         expected):
+    """Refused at construction, before anything is ingested, with the path named and the
+    content never repeated. A key file other users can read is refused rather than
+    warned about, because the warning scrolls past and the key has already leaked — the
+    rule ssh applies to a private key, for the same reason."""
+    if case == "missing":
+        path = tmp_path / "absent.key"
+    elif case == "empty":
+        path = _key_file(tmp_path, content="  \n")
+    else:
+        if sys.platform == "win32":
+            pytest.skip("no POSIX permission bits to check")
+        path = _key_file(tmp_path, mode=0o644)
+    with pytest.raises(SystemExit) as caught:
+        ek.read_api_key_file(str(path))
+    message = str(caught.value)
+    assert expected in message and str(path) in message and _SECRET not in message
+
+
+def test_the_key_file_path_expands_a_home_directory(tmp_path, monkeypatch):
+    """`~/.config/memvara/qwen.key` is how the path is written in the instructions, and a
+    shell does not expand a tilde inside `--api-key-file=~/...`."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _key_file(tmp_path)
+    assert ek.read_api_key_file("~/qwen.key") == _SECRET
+
+
+def test_the_reader_flags_build_a_self_hosted_reader_and_refuse_what_does_not_apply(
+        monkeypatch, tmp_path):
+    """Every flag the header prints has to reach the reader, and a flag that cannot apply
+    is refused rather than accepted and ignored: `--base-url` beside `--reader anthropic`
+    would run against Anthropic while the command line said otherwise."""
+    built: dict = {}
+    oai = type(sys)("openai")
+
+    def construct(**kwargs):
+        built.update(kwargs)
+        return _FakeOpenAI()
+
+    oai.OpenAI = construct
+    monkeypatch.setitem(sys.modules, "openai", oai)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    key = _key_file(tmp_path)
+    args = _Args(reader="openai", model="qwen", base_url="http://h:1/v1",
+                 api_key_file=str(key), temperature=0.0, sampling_seed=7, max_tokens=256,
+                 extra_body='{"chat_template_kwargs": {"enable_thinking": false}}')
+
+    reader = ek.build_reader(args)
+
+    assert built == {"base_url": "http://h:1/v1", "api_key": _SECRET}
+    assert reader.settings() == {
+        "model": "qwen", "max_tokens": 256, "temperature": 0.0, "seed": 7,
+        "base_url": "http://h:1/v1",
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+
+    for bad, message in (("{not json", "not JSON"), ("[1, 2]", "JSON object")):
+        with pytest.raises(SystemExit, match=message):
+            ek.build_reader(_Args(reader="openai", extra_body=bad))
+    with pytest.raises(SystemExit, match="--reader openai"):
+        ek.build_reader(_Args(reader="anthropic", base_url="http://h:1/v1"))
+
+
+def test_a_base_url_without_a_key_file_still_needs_a_key_from_somewhere(monkeypatch):
+    """A self-hosted server that needs no key is real, and so is one that does. With no
+    file the environment is still the source, and its absence is refused the way it
+    always was, before anything is ingested."""
+    oai = type(sys)("openai")
+    oai.OpenAI = lambda **kw: _FakeOpenAI()
+    monkeypatch.setitem(sys.modules, "openai", oai)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(SystemExit, match="OPENAI_API_KEY"):
+        ek.OpenAIReader(base_url="http://h:1/v1")
+
+
 def test_build_reader_pins_thinking_max_tokens_and_the_sampling_flags(monkeypatch):
     """Every flag the header prints has to reach the reader, or the header lies."""
     sdk = type(sys)("anthropic")

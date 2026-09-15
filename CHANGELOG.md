@@ -36,6 +36,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   untouched, and every generated turn is unique text so the memvara arms hold the same
   haystack as the transcript arm.
 
+- **`--reader openai` reads from an OpenAI-compatible server of your own.** `--base-url`
+  sends every request there, `--api-key-file PATH` reads the bearer key from a file at run
+  time instead of `OPENAI_API_KEY`, and `--extra-body JSON` is merged into every request
+  body, which is where llama.cpp reads `chat_template_kwargs`. Shared by
+  `bench/locomo.py`, `bench/longmemeval.py` and `demo/harness.py`. The base URL and the
+  extra body are printed under the report's title and keyed in the checkpoint, and an
+  LLM judge spawned from the reader goes to the same server; the key is never printed,
+  and a key file that is missing, empty or readable by other users is refused before
+  anything is ingested. `--base-url` and the other two beside `--reader anthropic` are
+  refused rather than ignored.
 - **A `memvara` command: `memvara login`, `memvara logout` and `memvara whoami`.**
   `pip install 'memvara[cloud]'` then `memvara login` signs this machine in to a hosted
   deployment; `whoami` prints the project, the key's non-secret id, its privilege and its
