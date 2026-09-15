@@ -16,7 +16,8 @@ chain that opens the graph leg. It counted each word on its own. A word that ans
 two predicates once the prepositions are gone — `work` is the content of both `works_at`
 and `job_title`'s alias `works_as` — could therefore add a second name from one relation,
 and "what company does Ada work at" read as a chain. The count is now the fewest
-predicates that account for everything the question said, so that question is one slot
+predicates one greedy pass needs to account for everything the question said, so that
+question is one slot
 and a lookup.
 
 Separately, `intent.predicate_refs` no longer memoises a registry's vocabulary. The memo

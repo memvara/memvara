@@ -864,7 +864,10 @@ counts as a negative only when it names no entity the store holds at all — ref
 about somebody the store knows would be wrong rather than right.
 
 3,000 questions ingested, 1,000 of them scored for cost, 332 negatives. Every arm reads at a
-pinned instant, and the table is identical on repeat.
+pinned instant, and the table is identical on repeat. The three `graph leg` rows were re-measured on
+2026-09-14, when `bench/twowiki.py` began declaring the corpus's relations: the walk now
+follows the declared edges only, so those rows moved by about a point and the other six did
+not move at all. The run takes about 85 minutes on a developer machine.
 
 ```
   configuration          k  answer found  correctly silent
@@ -874,9 +877,9 @@ pinned instant, and the table is identical on repeat.
   anchored               5         39.0%            100.0%
   anchored              12         39.1%            100.0%
   anchored              25         39.1%            100.0%
-  anchored + graph leg   5         53.8%            100.0%
-  anchored + graph leg  12         53.9%            100.0%
-  anchored + graph leg  25         54.1%            100.0%
+  anchored + graph leg   5         55.0%            100.0%
+  anchored + graph leg  12         54.8%            100.0%
+  anchored + graph leg  25         55.0%            100.0%
 ```
 
 **The shipped configuration is silent on none of them, and anchoring is silent on all of
@@ -886,7 +889,7 @@ them does. That is the behaviour anchoring exists to produce, and this is the fi
 measurement of it on questions written by somebody else.
 
 **Anchoring alone costs about a sixth of the legitimate answers**, and the graph leg pays most
-of it back: 39.1% against 53.9% at k=12, where the shipped figure is 55.5%. A 2Wiki question
+of it back: 39.1% against 54.8% at k=12, where the shipped figure is 55.3%. A 2Wiki question
 names entities the anchor then has to match, and a question whose answer sits one hop away
 reaches it through the entity the question does name. At k=5 the pair is ahead of the shipped
 configuration on both columns at once.

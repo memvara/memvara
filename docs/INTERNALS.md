@@ -733,8 +733,8 @@ A question names a predicate in whatever form it inflects it. `predicate_refs` a
 `schema.word_stem` — the fold the registry uses to decide that `employer` and `employed_by`
 are one predicate — so "who *leads* the team" names `team_lead` and "where is it
 *deployed*" names `deploy_region`. Every content token still has to be present, which is
-what keeps the match from becoming a token index. The count is the fewest predicates that
-account for everything the question said: `works_at` and `job_title`'s alias `works_as`
+what keeps the match from becoming a token index. The count is the fewest predicates one
+greedy pass needs to account for everything the question said: `works_at` and `job_title`'s alias `works_as`
 both reduce to `work` once the prepositions are gone, so "what company does Ada work at"
 is one relation said two ways, and a lookup, rather than a chain.
 

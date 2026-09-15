@@ -18,7 +18,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   are dropped — `work` is the content of both `works_at` and `job_title`'s alias
   `works_as` — could add a second name from one relation: "what company does Ada work at"
   read as a chain and opened the walk on the plainest lookup there is. The count is now
-  the fewest predicates that account for everything the question said; "who founded the
+  the fewest predicates one greedy pass needs to account for everything the question
+  said; "who founded the
   company that Ada works at" still names `works_at` and `founded_by`. `predicate_refs`
   also stops memoising a registry's phrases. The memo was keyed on the registry's `id()`
   and its `learned_count`, which `register()` and `learn_alias()` do not move and which a
@@ -41,7 +42,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   it off (72.3% published). The ungated arm reaches less because the four date relations
   are values now, which removes the year-hub join decision 3 exists to prevent, and the
   gated arm reaches more because the declared vocabulary is visible to the classifier.
-  `docs/BENCHMARKS.md` carries every cell.
+  `docs/BENCHMARKS.md` carries every cell. `bench/anchoring.py` ingests through the same
+  path, so its three `anchored + graph leg` rows were re-measured on the same day and
+  moved by about a point, to 55.0, 54.8 and 55.0; the other six rows did not move.
 
 ## [0.14.0] — 2026-09-14
 

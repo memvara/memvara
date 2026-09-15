@@ -278,7 +278,9 @@ def _named_in(query: str, spoken: "Mapping[str, str] | Iterable[str]",
     read almost every query as naming several predicates — the opposite failure to the one
     this fixes, and visible only as latency.
 
-    The result is the fewest predicates that account for everything the question said.
+    The result is the fewest predicates one pass needs to account for everything the
+    question said. One pass rather than the true smallest set: the pass is greedy, so
+    two ambiguous words that one shared predicate could account for can still name two.
     One word can answer to several predicates once the joinery is gone: `born_in` and
     `born_on` both reduce to `born`, and `works_at` and `job_title`'s alias `works_as`
     both reduce to `work`. Counting each such word on its own read "what company does Ada
@@ -304,7 +306,7 @@ def _named_in(query: str, spoken: "Mapping[str, str] | Iterable[str]",
     # already named.
     for parts in sorted(said, key=sorted):
         names = said[parts]
-        if not names & named:
+        if len(names) > 1 and not names & named:
             named.add(min(names))
     return named
 
