@@ -79,7 +79,11 @@ JSON, under a header that names the text as data rather than instruction.
 - **A leg abstains rather than contributing noise.** The temporal leg returns nothing when
   no turn is within a half-life of the anchor; without that guard, fusion reads positions
   and takes the top ranks from a leg whose every score was near zero. The vector and lexical
-  legs have had the same guard from the start.
+  legs have had the same guard from the start. On an archived transcript read with no
+  instant, the guard fires on every question, which is why `bench/longmemeval.py` passes
+  the last second of each question's day as `valid_at` and why [BENCHMARKS.md](../BENCHMARKS.md)
+  reports the leg with and without that anchor. The anchor is still given by the caller,
+  never parsed from the question.
 - **The graph leg seeds on content, never on ids.** `spread.seed_keys()` re-sorts on
   `value_key`, because a claim id is a `uuid4` and seeding off it would make the walk a
   property of which ingest ran.
