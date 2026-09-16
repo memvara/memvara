@@ -791,9 +791,7 @@ def main(argv: Sequence[str] | None = None,
     # does not say whether retrieval was given the question date is not comparable to
     # the row above it, because the date is both the instant the leg measures from and
     # the world clock every leg filters on.
-    out(f"  --w-temporal {args.w_temporal:g}: "
-        + ("temporal leg over raw turns, fused at that weight"
-           if args.w_temporal > 0 else "temporal leg off (the shipped default)"))
+    out(ek.temporal_weight_line(args.w_temporal))
     out("  anchor: "
         + ("withheld (--no-anchor). Retrieval runs with the wall clock as its instant, "
            "so the\n  temporal leg abstains on every question of this archive"

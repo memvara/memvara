@@ -999,11 +999,11 @@ PYTHONPATH=. python3 bench/longmemeval.py --dataset s --score retrieval \
 baseline](#episode-retrieval-on-a-shared-store) to the decimal, which is what makes the
 five rows below it attributable to the configuration rather than to the shortcut.
 
-**The abstention is a count now, not an inference.** Without an anchor the leg ranks
-nothing on any of the 500 questions at any weight, and the last row is identical to the
-first in every cell. The section above could only say that this was expected.
+**Without an anchor the leg ranks nothing**, on any of the 500 questions, at any weight.
+The last row is identical to the first in every cell. The section above could only say
+that this was expected; here it is counted.
 
-**The anchor is worth more than the leg is, and it is not the leg.** With the leg still
+**Most of the gain comes from the anchor rather than from the leg.** With the leg still
 off, the question's day takes overall evidence recall from 35.1 to 40.9 and
 temporal-reasoning from 23.1 to 38.9. `valid_at` is the world clock every leg filters on,
 so most of that gain is a shared store no longer returning sessions dated after the

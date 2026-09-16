@@ -760,9 +760,7 @@ def main(argv: Sequence[str] | None = None,
             "configuration has no reranker at all.")
     # Printed unconditionally, as `bench/longmemeval.py` prints them: the temporal leg's
     # weight, and the fact that this runner has no question date to anchor it on.
-    out(f"  --w-temporal {args.w_temporal:g}: "
-        + ("temporal leg over raw turns, fused at that weight"
-           if args.w_temporal > 0 else "temporal leg off (the shipped default)"))
+    out(ek.temporal_weight_line(args.w_temporal))
     out("  anchor: none. LOCOMO questions carry no date, so retrieval runs with the "
         "wall clock as\n  its instant and the temporal leg abstains on this archive")
 

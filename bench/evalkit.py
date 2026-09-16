@@ -2471,6 +2471,18 @@ def build_reranker(args: Any) -> Any:
     return CoverageReranker()
 
 
+def temporal_weight_line(weight: float) -> str:
+    """The `--w-temporal` line both runners print above every table.
+
+    It lives here, beside the flag's own definition, because the two runners printed it
+    in identical words. Two copies of one sentence is how a later change to the wording,
+    or to the threshold it reports on, ends up in one runner's report and not the other's.
+    """
+    state = ("temporal leg over raw turns, fused at that weight" if weight > 0
+             else "temporal leg off (the shipped default)")
+    return f"  --w-temporal {weight:g}: {state}"
+
+
 def build_plan(args: Any) -> RetrievalPlan:
     ks = tuple(int(k) for k in str(args.recall_at).split(",") if k.strip())
     if not ks or any(k < 1 for k in ks):
