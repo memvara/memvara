@@ -510,6 +510,59 @@ while an arm that has only the transcript to work from has more to lose.
 
 ---
 
+## The memvara arms against the hosted service
+
+By default both memvara arms use a store inside the process. `--memory hosted` points them
+at a memvara-cloud project instead, through the same client a customer uses
+(`memvara.remote`), so a run can measure the hosted service rather than the library alone.
+Every other arm is unchanged: `none`, `full_transcript` and `naive_rag` use no store at all.
+
+```bash
+memvara login --credentials ~/.memvara/demo-credentials.json   # choose the demo's project
+PYTHONPATH=. python3 demo/harness.py --reader stub --memory hosted \
+    --hosted-credentials ~/.memvara/demo-credentials.json --hosted-run-id 2026-09-16a
+```
+
+**It writes to a project of its own, and refuses to do otherwise.** A run writes a few
+thousand turns, which no code here can take back, so `--hosted-credentials` refuses the
+default credentials file, any file holding the same key as it or as `MEMVARA_API_KEY`, and
+any file for the same project. Make a separate project in the console and sign in to it
+with `memvara login --credentials PATH`.
+
+Three things differ from the local arms, and the report prints them above its tables
+rather than leaving them to be noticed:
+
+* **The schema cannot be sent.** A hosted project's predicate vocabulary is the
+  deployment's, so `plan` and the two addresses are not single-valued there. The arm
+  closes a single-valued slot itself — `forget(close="ended")` at the instant the new value
+  begins — before writing the new one, which is the explicit form of what the declared
+  cardinality does locally. `tests/test_demo_hosted.py` checks every slot at every question
+  instant against the local structured arm, which has the schema.
+* **`plan` is filed under `goal`.** The built-in vocabulary resolves `plan` as an alias of
+  `goal`, so that is where the plan history lands. Reads by slot resolve the alias and the
+  prompt carries each claim's own sentence, so the reader sees the same words; anything
+  keyed on the predicate name does not. The report names the fold.
+* **Dated questions are read differently.** `POST /v1/recall` has no time axis, so the four
+  questions carrying `about` are read with `search(valid_at=)` and rendered by the
+  library's own recall renderer — byte-identical to local `recall(valid_at=)` on the same
+  store, which a test pins. The report counts how many contexts were read that way.
+
+Extraction and the episode cap are the deployment's: it runs its own extractor over the
+turns the `memvara` arm writes, on its own schedule, and its own limit on how many turns a
+read returns, where the local arm sets `read_max_episodes=k`. So each context records how
+many claims its scope held when it was read, and the report prints the range.
+
+**Scopes, and repeating a run.** One scope per run, arm, corpus size and question instant —
+eighteen of the twenty questions share an `asked_at`, so a run writes three scopes per arm
+rather than twenty. `Manifest` records each scope as `started` then `complete` in
+`demo/runs/<run id>.hosted.jsonl`. Reusing `--hosted-run-id` reads the finished scopes
+without writing them again, which is how the noise-floor repeat measures the reader twice
+over the same stored contexts. A scope left `started` by a run that died is refused, because
+replaying the fact table into it would close values at instants they were never closed at;
+start again with a new run id.
+
+---
+
 ## What one run produced
 
 Context size is deterministic and comes out the same every time. This is real output from

@@ -202,6 +202,16 @@ class Context:
     #: because the arm builds one store per question and a `warnings.warn` per store is
     #: noise that hides the finding. The harness reports it once, loudly.
     degraded: bool = False
+    #: How the block was read: `"recall"` for the rendering an integration drops into a
+    #: prompt, or `"search"` for a dated question against a hosted deployment, whose
+    #: recall has no time axis — see `demo/hosted.py`. Counted in the report, because a
+    #: row built partly one way and partly the other is two measurements.
+    read: str = "recall"
+    #: Claims the hosted scope held when it was read, or `None` for a local arm. A hosted
+    #: deployment runs its own extractor, possibly after the write returned, so the claim
+    #: tier a hosted `memvara` row was measured on is not known in advance; this is the
+    #: record of what it was.
+    claims_in_scope: int | None = None
 
     @property
     def chars(self) -> int:

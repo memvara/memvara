@@ -316,6 +316,11 @@ class Scored:
     correct: bool
     trapped: bool
     context_chars: int
+    #: Which clock closed on this question's fact — `"ended"`, `"retired"` or `None` —
+    #: copied from `Question.closure`. Carried per row so the trapped rate can be split by
+    #: it: "served a value that expired" and "served a value that was never true" are
+    #: opposite failures, and one trapped percentage over both hides which one happened.
+    closure: str | None = None
     #: Why the reader stopped, from the provider: `end_turn` for a finished answer,
     #: `max_tokens` for one the budget cut off, `refusal` for one a classifier declined.
     #: `""` for the stub and the file reader, which consult no model. Kept per row so an
@@ -377,6 +382,7 @@ def score(items: Sequence[Item], questions: Sequence[Question], *,
                       question=q.text, gold=q.gold, trap=q.trap,
                       answer=hypothesis, correct=correct, trapped=trapped,
                       context_chars=item.context.chars,
+                      closure=getattr(q, "closure", None),
                       stop_reason=out.stop_reason), calls
 
     return ek.score_in_order(one, items,
@@ -520,19 +526,53 @@ def corpus_note(scale: int, authored: int, total: int) -> str:
             "question is about (demo/distractors.py)")
 
 
+def hosted_reads(items: Sequence[Item], arms: Mapping[str, Arm]) -> list[str]:
+    """What the size table cannot show about arms that read a hosted deployment.
+
+    Nothing for a local run: no local context carries `claims_in_scope`, so the offline
+    report is unchanged. For a hosted arm, two things a reader of its row needs. How many
+    of its contexts were read through `search(valid_at=)` and rendered here rather than
+    through `recall()`, because the hosted recall has no time axis. And how many claims
+    its scopes held when they were read, because the deployment extracts on its own
+    schedule and the `memvara` row was measured on whatever claim tier existed by then.
+    """
+    lines: list[str] = []
+    for name in arms:
+        mine = [i.context for i in items if i.arm == name]
+        counts = [c.claims_in_scope for c in mine if c.claims_in_scope is not None]
+        if not counts:
+            continue
+        searched = sum(1 for c in mine if c.read == "search")
+        spread = (str(counts[0]) if min(counts) == max(counts)
+                  else f"{min(counts)}–{max(counts)}")
+        lines.append(f"  {name}: claims in the hosted scope at read time {spread}; "
+                     f"{searched} of {len(mine)} contexts read through search(valid_at=) "
+                     "and rendered by the library's recall renderer")
+    return ["", *lines] if lines else []
+
+
 def report(items: Sequence[Item], scored: Sequence[Scored], *, reader: ek.Reader,
            judge: ek.Judge, arms: Mapping[str, Arm] | None = None,
-           ledger: ek.TokenLedger | None = None, corpus: str = "") -> str:
-    """The whole result, including everything that makes it less than it looks."""
+           ledger: ek.TokenLedger | None = None, corpus: str = "",
+           backend: str = "") -> str:
+    """The whole result, including everything that makes it less than it looks.
+
+    `backend` is the note a run with `--memory hosted` carries — where the memvara arms
+    read, and what about that store differs from a local one. Empty for a local run, so
+    the offline report prints nothing about a backend it did not use.
+    """
     arms = resolve_arms(arms)
     order = list(arms)
     out = ["", "  five-arm answer quality, blinded", ""]
     if corpus:
         out += [corpus, ""]
+    if backend:
+        out += [backend, ""]
     header = run_header(reader, judge, arms)
     if header:
         out += [header, ""]
     out.append(size_table(items, arms))
+    out += hosted_reads(items, arms)
 
     degraded = sorted({i.arm for i in items if i.context.degraded})
     if degraded:
@@ -577,6 +617,24 @@ def report(items: Sequence[Item], scored: Sequence[Scored], *, reader: ek.Reader
     out += ["", "  per arm and question kind", ""]
     by_kind = sorted(scored, key=lambda r: (order.index(r.arm), r.kind))
     out.append(results_table(tally(by_kind, lambda r: (r.arm, r.kind)), "arm / kind"))
+
+    # The trapped rate split by which clock closed, which `demo/README.md` asks for. One
+    # trapped percentage merges "served a value that expired" (`ended`, a stale cache)
+    # with "served a value that was never true" (`retired`, the failure this library
+    # exists to prevent); the scenario records which on every question, so the split is
+    # made here rather than by hand afterwards. `neither` holds the controls, the two
+    # summary questions and the unanswerables, where no single clock applies.
+    out += ["", "  per arm and closure", ""]
+    closures = ("ended", "retired", None)
+    by_closure = sorted(scored, key=lambda r: (order.index(r.arm),
+                                               closures.index(r.closure)
+                                               if r.closure in closures else len(closures)))
+    out.append(results_table(tally(by_closure,
+                                   lambda r: (r.arm, r.closure or "neither")),
+                             "arm / closure"))
+    out += ["", "  On `correction` questions a correct answer names the wrong value in order "
+                "to say it was",
+            "  wrong, so read `trapped only` there, not `trapped`."]
 
     if any(r.arm == "none" and r.kind == "unanswerable" for r in scored):
         out += ["", "  The `none / unanswerable` row is an artefact, not a finding. An arm",
@@ -630,16 +688,19 @@ class Offline:
     ledger: ek.TokenLedger | None = None
     #: `corpus_note`'s line, or `""` for the authored corpus.
     corpus: str = ""
+    #: `HostedMemvara.backend_note`'s lines, or `""` for a local run.
+    backend: str = ""
 
     def report(self, *, arms: Mapping[str, Arm] | None = None) -> str:
         return report(list(self.items), list(self.scored), reader=self.reader,
-                      judge=self.judge, arms=arms, ledger=self.ledger, corpus=self.corpus)
+                      judge=self.judge, arms=arms, ledger=self.ledger, corpus=self.corpus,
+                      backend=self.backend)
 
 
 def in_process(questions: Sequence[Question], turns: Sequence[Turn], *,
                reader: ek.Reader, judge: ek.Judge,
                arms: Mapping[str, Arm] | None = None,
-               concurrency: int = 1, corpus: str = "") -> Offline:
+               concurrency: int = 1, corpus: str = "", backend: str = "") -> Offline:
     """Plan, answer and score in one process: the stub, or a model behind an API.
 
     The dump/answers round trip exists because a person or an agent cannot be in this
@@ -653,7 +714,7 @@ def in_process(questions: Sequence[Question], turns: Sequence[Turn], *,
     scored = score(items, questions, reader=reader, judge=judge, ledger=ledger,
                    concurrency=concurrency)
     return Offline(items=tuple(items), scored=tuple(scored), reader=reader, judge=judge,
-                   ledger=ledger, corpus=corpus)
+                   ledger=ledger, corpus=corpus, backend=backend)
 
 
 def offline(questions: Sequence[Question], turns: Sequence[Turn], *,
@@ -723,6 +784,32 @@ def load_scenario() -> tuple[list[Question], list[Turn]]:
     return list(scenario.questions()), list(scenario.conversation())
 
 
+def build_arms(args: Any) -> tuple[dict[str, Arm], str]:
+    """The arms this run compares, and the backend note the report carries.
+
+    `--memory local` is `ARMS` exactly, with an empty note, so the offline report does
+    not change. `--memory hosted` replaces the two memvara arms with `demo/hosted.py`'s,
+    after refusing a credential that could reach this machine's own store, and returns
+    the note naming the project, the run and what that store does differently. The
+    hosted module is imported only here, because a local run has no use for it.
+    """
+    arms: dict[str, Arm] = dict(ARMS)
+    if args.memory != "hosted":
+        return arms, ""
+    from datetime import datetime, timezone
+
+    from demo import hosted as ho
+
+    credential = ho.load_demo_credential(args.hosted_credentials)
+    run_id = args.hosted_run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    manifest = ho.Manifest(args.hosted_manifest
+                           or _ROOT / "demo" / "runs" / f"{run_id}.hosted.jsonl")
+    hosted_arms = ho.HostedMemvara(ho.connect(credential), run_id=run_id,
+                                   scale=args.corpus_scale, manifest=manifest)
+    arms.update(hosted_arms.arms())
+    return arms, hosted_arms.backend_note(credential)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Blinded five-arm answer-quality run.")
     parser.add_argument("--reader", default="file",
@@ -751,17 +838,40 @@ def main(argv: Sequence[str] | None = None) -> int:
                              "swapped in. Defaults to the reader's own model on a hosted "
                              "reader, and to claude-opus-5 on the file round trip")
     parser.add_argument("--out", default=None, help="write per-question JSONL here")
+    parser.add_argument("--memory", default="local", choices=["local", "hosted"],
+                        help="where the two memvara arms store and read: local, a store "
+                             "inside this process (the default, and offline), or hosted, "
+                             "a memvara-cloud project reached through memvara.remote. "
+                             "Every other arm is unchanged. See demo/hosted.py")
+    parser.add_argument("--hosted-credentials", metavar="PATH", default=None,
+                        help="--memory hosted: the credentials file for the demo's own "
+                             "project, written by `memvara login --credentials PATH`. The "
+                             "default file, and any file for the same key or project, is "
+                             "refused")
+    parser.add_argument("--hosted-run-id", metavar="ID", default=None,
+                        help="--memory hosted: names this run's scopes. Reuse it to read "
+                             "stores an earlier run finished writing, as the noise-floor "
+                             "repeat does. Default: the current UTC time")
+    parser.add_argument("--hosted-manifest", metavar="PATH", default=None,
+                        help="--memory hosted: the JSON-lines record of which scopes this "
+                             "run has written. Default demo/runs/<run id>.hosted.jsonl")
     # --model, --effort, --max-tokens, --thinking, --temperature, --sampling-seed,
-    # --concurrency and --checkpoint: one definition, shared with the bench/ runners.
+    # --base-url, --api-key-file, --extra-body, --concurrency and --checkpoint: one
+    # definition, shared with the bench/ runners.
     ek.add_reader_arguments(parser)
     args = parser.parse_args(argv)
     if args.corpus_scale < 1:
         parser.error("--corpus-scale must be at least 1")
+    if args.memory == "hosted" and not args.hosted_credentials:
+        parser.error("--memory hosted needs --hosted-credentials PATH: the credentials "
+                     "file for a project made for the demo. Create the project in the "
+                     "console, then run `memvara login --credentials PATH`.")
 
     questions, turns = load_scenario()
     authored = len(turns)
     turns = scale_conversation(turns, args.corpus_scale)
     corpus = corpus_note(args.corpus_scale, authored, len(turns))
+    arms, backend = build_arms(args)
 
     if args.reader != "file":
         # The stub and the hosted readers share one path, because both are inside this
@@ -776,9 +886,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.judge == "llm":
             like = reader if hosted(reader) else ek.hosted_reader("anthropic", args)
         judge = build_judge(args.judge, model=args.judge_model, like=like)
-        run = in_process(questions, turns, reader=reader, judge=judge,
-                         concurrency=args.concurrency, corpus=corpus)
-        print(run.report())
+        run = in_process(questions, turns, reader=reader, judge=judge, arms=arms,
+                         concurrency=args.concurrency, corpus=corpus, backend=backend)
+        print(run.report(arms=arms))
         if args.out:
             write_jsonl(args.out, run.scored)
         return 0
@@ -791,7 +901,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--dump is required by --reader file")
 
     if args.answers is None:
-        result = dump(questions, turns, args.dump, seed=args.seed)
+        result = dump(questions, turns, args.dump, arms=arms, seed=args.seed)
         print(result.note)
         if result.collisions:
             print(f"  {len(result.collisions)} PROMPT COLLISIONS: two arms built "
@@ -801,7 +911,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"    {cid}  {', '.join(owners)}")
         return 0
 
-    items = plan(questions, turns)
+    items = plan(questions, turns, arms=arms)
     stale = stale_ids(key_path_for(args.dump), items)
     if stale:
         print(f"  {len(stale)} items in the key file are not produced by the scenario as "
@@ -814,7 +924,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         like=ek.hosted_reader("anthropic", args) if args.judge == "llm"
                         else None)
     scored = score(items, questions, reader=reader, judge=judge)
-    print(report(items, scored, reader=reader, judge=judge, corpus=corpus))
+    print(report(items, scored, reader=reader, judge=judge, arms=arms, corpus=corpus,
+                 backend=backend))
     if args.out:
         write_jsonl(args.out, scored)
     return 0

@@ -1280,6 +1280,24 @@ question at this scale, and that run has not been made yet.
 [`demo/README.md`](../demo/README.md#two-corpus-sizes) has the constraints the generated
 turns are tested against.
 
+### The memvara arms against the hosted service
+
+`--memory hosted` points the two memvara arms at a memvara-cloud project, through the
+client a customer uses, so the run can measure the service rather than the library alone.
+The other three arms use no store and are unchanged. It writes to a project made for it:
+the credentials file is refused if it is the machine's default one, holds the same key, or
+names the same project.
+
+Two differences are not incidental and are printed above the report's tables. A hosted
+project cannot be sent the support schema, so the arm closes single-valued slots itself
+rather than relying on a declared cardinality, and the built-in vocabulary files `plan`
+under its alias `goal`. And `POST /v1/recall` has no time axis, so the four dated questions
+are read with `search(valid_at=)` and rendered by the library's own recall renderer.
+Extraction and the episode cap are the deployment's, so each context records how many
+claims its scope held when it was read.
+[`demo/README.md`](../demo/README.md#the-memvara-arms-against-the-hosted-service) has the
+whole of it.
+
 ### The scores, and everything that makes them less than they look
 
 One run has been done. **The reader was an agent, not a model behind an API** — there is

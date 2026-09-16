@@ -36,6 +36,23 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   untouched, and every generated turn is unique text so the memvara arms hold the same
   haystack as the transcript arm.
 
+- **`demo/harness.py --memory hosted` runs the two memvara arms against a memvara-cloud
+  project**, through the same client a customer uses, so the answer-quality run can
+  measure the hosted service and not only the library. Every other arm is unchanged.
+  `--hosted-credentials PATH` refuses the machine's default credentials file, any file
+  holding the same key, and any file for the same project, because a run writes thousands
+  of turns that nothing here can take back. A hosted project cannot be sent the support
+  schema, so the arm closes single-valued slots itself, and `POST /v1/recall` has no time
+  axis, so a dated question is read with `search(valid_at=)` and rendered by the library's
+  own recall renderer. Both, and the fact that the built-in vocabulary files `plan` under
+  `goal`, are printed above the report's tables. Scopes are written once per run, arm,
+  corpus size and question instant and recorded in a manifest, so a repeat run with the
+  same `--hosted-run-id` re-reads them instead of writing them again.
+- **The report splits the trapped rate by which clock closed.** A table per arm and
+  closure sits beside the per-kind one, and every row of the per-question JSONL carries
+  `closure`. One trapped percentage merged "served a value that expired" with "served a
+  value that was never true", which are opposite failures and the distinction the library
+  is built on.
 - **`--reader openai` reads from an OpenAI-compatible server of your own.** `--base-url`
   sends every request there, `--api-key-file PATH` reads the bearer key from a file at run
   time instead of `OPENAI_API_KEY`, and `--extra-body JSON` is merged into every request
