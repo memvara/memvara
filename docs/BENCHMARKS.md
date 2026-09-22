@@ -1191,6 +1191,7 @@ tells the customer the right thing. [`demo/`](../demo/) is the apparatus for tha
 demo/scenario.py    64 turns of one customer's support history, and 20 questions
 demo/distractors.py generated tickets that scale the history without moving any fact
 demo/baselines.py   five context-building arms
+demo/competitors.py two more arms, mem0 and Supermemory, off unless asked for
 demo/harness.py     a blinded dump/answer round trip over those arms, and the scoring
 ```
 
@@ -1297,6 +1298,33 @@ Extraction and the episode cap are the deployment's, so each context records how
 claims its scope held when it was read.
 [`demo/README.md`](../demo/README.md#the-memvara-arms-against-the-hosted-service) has the
 whole of it.
+
+### Two other systems, as arms
+
+`--arm-mem0` and `--arm-supermemory` add a competitor arm each. Both are off by default
+and each needs something a fresh checkout does not have, so neither can affect the offline
+run.
+
+**mem0** needs only the package (`pip install mem0ai`). It is driven by the oracle
+`bench/mem0_real.py` uses, so it receives exactly the ground-truth facts
+`memvara_structured` receives, with perfect extraction recall — better than any real model
+— which leaves architecture as the only thing that differs. mem0 2.x's add path emits only
+`ADD`, so a value that moves is held beside the value that replaced it.
+
+Measured on the authored corpus with mem0ai 2.1.0, over the fifteen questions whose answer
+has a superseded value to be wrong with, mem0 asserts that superseded value as a current
+fact in **13 of 15**; both memvara arms assert it in **0 of 15** and carry it only under
+the episode header, which tells the reader those lines are things that were said and are
+unverified. That is a statement about where a value appears in a prompt, not about whether
+a reader was fooled — no model was asked. The judged comparison is the missing half and is
+[item 1 of what is still missing](ROADMAP.md#what-is-still-missing).
+
+**Supermemory** needs an account, which this repository does not have. The only endpoint
+anything here has ever called is `POST /v3/documents/list`, in the importer, and it is a
+read; an arm has to write a corpus and query it. So the arm ships with no default write or
+search path and refuses without them rather than guessing, and it refuses without an
+explicit container tag so that a run cannot land in whatever space an account defaults to.
+**No Supermemory number is published in this repository**, because nobody here has run it.
 
 ### The scores, and everything that makes them less than they look
 

@@ -73,6 +73,24 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `Memvara.connect()` and the npm bridge read, so writing a second project's key there
   would move every one of them into that project. `memvara.remote.creds` gains
   `read_credentials_file(path)`, the one reader of that file's format.
+- **Two other memory systems can be run as arms of the answer-quality demo.**
+  `--arm-mem0` and `--arm-supermemory` add a competitor arm each (`demo/competitors.py`).
+  Both are off by default and each is refused, while the arms are being built, if what it
+  needs is missing, so neither can affect the offline run. mem0 needs only `pip install
+  mem0ai`: the arm drives the real package with the oracle `bench/mem0_real.py` uses, so
+  it is handed exactly the ground-truth facts the `memvara_structured` arm is handed and
+  architecture is the only thing left to differ. Measured with mem0ai 2.1.0 over the
+  fifteen questions that have a superseded value to be wrong with, mem0 asserts that value
+  as a current fact in 13 of them and both memvara arms in none, which is where a value
+  sits in a prompt rather than whether a reader was fooled by it. Supermemory needs an
+  account: it refuses without a key, without a container tag of its own, and without the
+  write and search paths, which have **no default** because the only Supermemory endpoint
+  this repository has ever called is the importer's read, and one refusal names everything
+  that is missing rather than one thing per run. The tag it is given is a prefix — the arm
+  writes one container per question instant, because the harness does not ask questions in
+  `asked_at` order and a shared container would let an April question read August turns.
+  No Supermemory number is published anywhere here, because nobody has run it. The
+  report's title now counts the arms that ran instead of always saying five.
 
 ### Changed
 

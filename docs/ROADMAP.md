@@ -779,7 +779,19 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
    metric — the column a before/after claim would rest on — produced **no signal at all**,
    because the reader never gave a superseded value. Still missing on *this* corpus: a
    run with the hosted reader, at both corpus sizes now that `--corpus-scale` supplies
-   the second, and any comparison against mem0 on answers rather than on architecture.
+   the second.
+
+   The comparison against mem0 **on answers** now has its apparatus but not its run.
+   `--arm-mem0` adds the real `mem0ai` package as a sixth arm, driven by the same oracle
+   `bench/mem0_real.py` uses, so it is handed exactly the facts `memvara_structured` is
+   handed and only architecture differs. What that already shows, without a reader: over
+   the fifteen questions with a superseded value to be wrong with, mem0 asserts that value
+   as a current fact in 13 of 15, and both memvara arms in 0 of 15. That is where a value
+   sits in a prompt, not whether a model was fooled by it, and the second is the number
+   this item is about. `--arm-supermemory` exists too and **has never been run**: it needs
+   an account nobody here has, and the write and search endpoints have no default because
+   the only Supermemory call this repository has ever made is a read. See
+   [`demo/README.md`](../demo/README.md#two-other-systems-as-arms).
    A hosted reader has since been run on a different corpus — 0.11.0's
    ranked recall, judged on LongMemEval-S through the MemoryBench harness, in
    [`docs/BENCHMARKS.md`](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness)

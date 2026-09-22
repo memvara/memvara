@@ -551,6 +551,19 @@ def hosted_reads(items: Sequence[Item], arms: Mapping[str, Arm]) -> list[str]:
     return ["", *lines] if lines else []
 
 
+#: Arm counts as words, for the report's title. The default run is five arms and its
+#: report is pinned byte for byte, so five must still read "five"; a run that added a
+#: competitor arm and still called itself five-arm would be miscounting itself in its own
+#: headline. Anything past the table falls back to the digit rather than growing a
+#: number-speller nobody needs.
+_ARM_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+              7: "seven", 8: "eight", 9: "nine"}
+
+
+def _spelled(count: int) -> str:
+    return _ARM_WORDS.get(count, str(count))
+
+
 def report(items: Sequence[Item], scored: Sequence[Scored], *, reader: ek.Reader,
            judge: ek.Judge, arms: Mapping[str, Arm] | None = None,
            ledger: ek.TokenLedger | None = None, corpus: str = "",
@@ -563,7 +576,7 @@ def report(items: Sequence[Item], scored: Sequence[Scored], *, reader: ek.Reader
     """
     arms = resolve_arms(arms)
     order = list(arms)
-    out = ["", "  five-arm answer quality, blinded", ""]
+    out = ["", f"  {_spelled(len(arms))}-arm answer quality, blinded", ""]
     if corpus:
         out += [corpus, ""]
     if backend:
@@ -784,34 +797,69 @@ def load_scenario() -> tuple[list[Question], list[Turn]]:
     return list(scenario.questions()), list(scenario.conversation())
 
 
+def ordered_arms(extra: Mapping[str, Arm]) -> dict[str, Arm]:
+    """`ARMS`, with any competitor arms between `naive_rag` and the two memvara arms.
+
+    `ARMS` is ordered deliberately — floor, ceiling, competitor, product on its defaults,
+    product integrated — and that order is the report's. Another system belongs beside
+    `naive_rag`, in the competitor band, rather than appended after the product: a table
+    that ends with the competition reads as an afterthought, and one that puts the product
+    in the middle is harder to check at a glance.
+
+    Anything `extra` names that `ARMS` does not is appended rather than dropped, so a new
+    arm cannot go missing because this function did not expect it.
+    """
+    if not extra:
+        return dict(ARMS)
+    out: dict[str, Arm] = {}
+    for name, arm in ARMS.items():
+        if name == "memvara":
+            out.update(extra)
+        out[name] = arm
+    for name, arm in extra.items():
+        out.setdefault(name, arm)
+    return out
+
+
 def build_arms(args: Any) -> tuple[dict[str, Arm], str]:
     """The arms this run compares, and the backend note the report carries.
 
-    `--memory local` is `ARMS` exactly, with an empty note, so the offline report does
-    not change. `--memory hosted` replaces the two memvara arms with `demo/hosted.py`'s,
-    after refusing a credential that could reach this machine's own store, and returns
-    the note naming the project, the run and what that store does differently. The
-    hosted module is imported only here, because a local run has no use for it.
+    With no optional flag `--memory local` is `ARMS` exactly, with an empty note, so the
+    offline report does not change. `--memory hosted` replaces the two memvara arms with
+    `demo/hosted.py`'s, after refusing a credential that could reach this machine's own
+    store, and returns the note naming the project, the run and what that store does
+    differently. `--arm-mem0` and `--arm-supermemory` add `demo/competitors.py`'s arms,
+    each of which refuses here — while the arms are being built, before a reader has been
+    called — if what it needs is missing.
+
+    Both modules are imported only where they are used, because a plain local run has no
+    use for either and `demo/competitors.py` reaches an optional dependency.
     """
-    arms: dict[str, Arm] = dict(ARMS)
-    if args.memory != "hosted":
-        return arms, ""
-    from datetime import datetime, timezone
+    from demo import competitors as cp
 
-    from demo import hosted as ho
+    extra, notes = cp.build_competitors(args)
+    arms = ordered_arms(extra)
+    if args.memory == "hosted":
+        from datetime import datetime, timezone
 
-    credential = ho.load_demo_credential(args.hosted_credentials)
-    run_id = args.hosted_run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    manifest = ho.Manifest(args.hosted_manifest
-                           or _ROOT / "demo" / "runs" / f"{run_id}.hosted.jsonl")
-    hosted_arms = ho.HostedMemvara(ho.connect(credential), run_id=run_id,
-                                   scale=args.corpus_scale, manifest=manifest)
-    arms.update(hosted_arms.arms())
-    return arms, hosted_arms.backend_note(credential)
+        from demo import hosted as ho
+
+        credential = ho.load_demo_credential(args.hosted_credentials)
+        run_id = args.hosted_run_id or datetime.now(timezone.utc).strftime(
+            "%Y%m%dT%H%M%SZ")
+        manifest = ho.Manifest(args.hosted_manifest
+                               or _ROOT / "demo" / "runs" / f"{run_id}.hosted.jsonl")
+        hosted_arms = ho.HostedMemvara(ho.connect(credential), run_id=run_id,
+                                       scale=args.corpus_scale, manifest=manifest)
+        arms.update(hosted_arms.arms())
+        notes.insert(0, hosted_arms.backend_note(credential))
+    return arms, "\n".join(notes)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Blinded five-arm answer-quality run.")
+    parser = argparse.ArgumentParser(
+        description="Blinded answer-quality run: five arms, plus any competitor arm "
+                    "asked for with --arm-mem0 or --arm-supermemory.")
     parser.add_argument("--reader", default="file",
                         choices=["file", "stub", "anthropic", "openai"],
                         help="file: the two-phase blinded round trip for a person or an "
@@ -855,6 +903,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--hosted-manifest", metavar="PATH", default=None,
                         help="--memory hosted: the JSON-lines record of which scopes this "
                              "run has written. Default demo/runs/<run id>.hosted.jsonl")
+    # The two competitor arms. Off unless asked for, because each needs something a clean
+    # checkout does not have, and the offline run CI depends on must keep working without
+    # either. See demo/competitors.py.
+    parser.add_argument("--arm-mem0", action="store_true",
+                        help="add a mem0 arm, driven by the same ground-truth facts the "
+                             "memvara_structured arm gets. Needs the mem0ai package "
+                             "(pip install mem0ai); no key and no network")
+    parser.add_argument("--arm-supermemory", action="store_true",
+                        help="add a Supermemory arm. Needs an account: a key, a container "
+                             "tag of its own, and the two endpoint paths, which have no "
+                             "default because nothing here has ever called them")
+    parser.add_argument("--supermemory-key-file", metavar="PATH", default=None,
+                        help="--arm-supermemory: the file holding the API key, read at "
+                             "run time and never printed. Defaults to the Supermemory "
+                             "plugin's own credentials file")
+    parser.add_argument("--supermemory-container", metavar="TAG", default=None,
+                        help="--arm-supermemory: the container tag every document this "
+                             "run writes is filed under. Required: it is what keeps a run "
+                             "out of whatever space the account defaults to")
+    parser.add_argument("--supermemory-base-url", metavar="URL",
+                        default=None,
+                        help="--arm-supermemory: the API host. Defaults to "
+                             "https://api.supermemory.ai")
+    parser.add_argument("--supermemory-ingest-path", metavar="PATH", default=None,
+                        help="--arm-supermemory: the path that writes one document. No "
+                             "default: this repository has only ever called "
+                             "POST /v3/documents/list, so it has nothing to default to "
+                             "and will not guess")
+    parser.add_argument("--supermemory-search-path", metavar="PATH", default=None,
+                        help="--arm-supermemory: the path that searches. No default, for "
+                             "the same reason as --supermemory-ingest-path")
     # --model, --effort, --max-tokens, --thinking, --temperature, --sampling-seed,
     # --base-url, --api-key-file, --extra-body, --concurrency and --checkpoint: one
     # definition, shared with the bench/ runners.

@@ -21,14 +21,16 @@ answer quality with no error, no exception and nothing in any log.
   `bench/extract_cost.py`, `bench/perf.py`, `bench/evalkit.py`.
 - Against a hosted store: `bench/hosted.py`.
 - End-to-end answer quality: `demo/harness.py`, `demo/scenario.py`, `demo/distractors.py`
-  (the second corpus size), `demo/baselines.py`, and `demo/hosted.py` (the two memvara
-  arms against a hosted deployment, under `--memory hosted`), with recorded runs under
-  `demo/runs/`.
+  (the second corpus size), `demo/baselines.py`, `demo/hosted.py` (the two memvara
+  arms against a hosted deployment, under `--memory hosted`), and `demo/competitors.py`
+  (mem0 and Supermemory as arms, under `--arm-mem0` and `--arm-supermemory`, both off by
+  default), with recorded runs under `demo/runs/`.
 - The public benchmark others can enter: `benchmarks/agent_memory/`, with its own
   `benchmarks/agent_memory/README.md` and adapters under
   `benchmarks/agent_memory/adapters/`.
 - Tests: `tests/test_telemetry.py`, `tests/test_bench_eval.py`, `tests/test_bench_hosted.py`,
   `tests/test_agent_memory_bench.py`, `tests/test_demo.py`, `tests/test_demo_scenario.py`,
+  `tests/test_demo_hosted.py`, `tests/test_demo_competitors.py`,
   `tests/test_plugin_recall_bench.py`.
 - Documentation: [BENCHMARKS.md](../BENCHMARKS.md) is the results document — every number,
   what it measures, and what it does not.

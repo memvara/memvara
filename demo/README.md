@@ -7,16 +7,18 @@ that as the first item under *What is still missing* since it was written, and t
 directory is the corpus, the arms and the harness for closing it.
 
 The apparatus is complete: the corpus, the five arms, a blinded round trip for a person or
-an agent, a reader behind an API with every parameter pinned and printed, and a second
-corpus size ([Two corpus sizes](#two-corpus-sizes)). The one run recorded below still
-used an agent as the reader, which makes it a sanity check and not a benchmark;
-[What one run produced](#what-one-run-produced) is specific about the difference, and a
-run with the hosted reader at both sizes is the next thing to record.
+an agent, a reader behind an API with every parameter pinned and printed, a second
+corpus size ([Two corpus sizes](#two-corpus-sizes)), and two other memory systems that can
+be run as arms beside them ([Two other systems, as arms](#two-other-systems-as-arms)). The
+one run recorded below still used an agent as the reader, which makes it a sanity check and
+not a benchmark; [What one run produced](#what-one-run-produced) is specific about the
+difference, and a run with the hosted reader at both sizes is the next thing to record.
 
 ```
 demo/scenario.py    the support history and the question set
 demo/distractors.py generated tickets that scale the history without moving any fact
 demo/baselines.py   the five context-building arms, and the structured integration
+demo/competitors.py mem0 and Supermemory as arms, neither on unless asked for
 demo/harness.py     the blinded run over those arms, and the scoring
 ```
 
@@ -560,6 +562,109 @@ without writing them again, which is how the noise-floor repeat measures the rea
 over the same stored contexts. A scope left `started` by a run that died is refused, because
 replaying the fact table into it would close values at instants they were never closed at;
 start again with a new run id.
+
+---
+
+## Two other systems, as arms
+
+The five arms are controls and memvara. Neither of the two below is on unless you ask for
+it, and each needs something a fresh checkout does not have, which is why they live in
+`demo/competitors.py` rather than in `ARMS`: an arm that cannot run on a clean machine must
+not be able to break the offline run that CI depends on.
+
+```bash
+PYTHONPATH=. python3 demo/harness.py --reader stub --arm-mem0
+```
+
+### mem0
+
+Needs the package and nothing else — `pip install mem0ai`, no key, no network. The arm is
+driven by the oracle `bench/mem0_real.py` uses: a perfect extractor in mem0's own shape
+that emits the ground-truth fact for the turn being added. So mem0 is given exactly the
+facts `memvara_structured` is given, with complete extraction recall and no
+hallucinations. That is better than any real model manages, and it is deliberate. Anything
+mem0 gets wrong here, it gets wrong because of how it is built.
+
+What it is built like is the point. mem0 2.x's add path emits only `ADD` — its extraction
+prompt says so in as many words — so a new value is linked to the one it contradicts
+rather than retiring it, and both stay live. The arm holds both, and a reader asked which
+plan the account is on today sees the old one and the new one with nothing to choose on.
+
+Measured on the authored corpus with mem0ai 2.1.0, over the fifteen questions whose answer
+has a superseded value to be wrong with:
+
+| arm | asserts the superseded value as fact | carries it only as a quoted excerpt |
+| --- | --- | --- |
+| `mem0` | 13 / 15 | 0 / 15 |
+| `memvara` | 0 / 15 | 12 / 15 |
+| `memvara_structured` | 0 / 15 | 10 / 15 |
+
+Read that carefully, because it is narrower than it looks. It says where a value appears,
+not whether a reader was fooled by it — no model was asked. Both systems put the old value
+in front of the reader; the difference is that mem0 puts it in the block of asserted
+memories, while memvara puts it only under the episode header, which says in the prompt
+that these are things that were said and are unverified. `full_transcript` and `naive_rag`
+have no asserted-fact block at all — every line they carry is a dated quotation — so the
+column does not apply to them and they are left out rather than given a misleading zero.
+
+**The judged comparison is still missing**, and this arm is what it was waiting on. See
+[What is still missing](../docs/ROADMAP.md#what-is-still-missing).
+
+Two things found by running it, both of which cost an afternoon and neither of which is
+visible by reading mem0:
+
+* The oracle must be handed the current turn by the caller. mem0's additive prompt embeds
+  the last k messages, so an oracle that looks for known turns in the prompt re-extracts
+  every earlier turn in the window; and `messages[-1]["content"]` is the whole rendered
+  prompt rather than the turn, so keying on that stores nothing at all. Both failures are
+  silent, and one of them flatters memvara.
+* `on_disk: False` does not make qdrant in-memory. mem0 hands it a default storage folder
+  and qdrant locks it, so the second store a process builds dies with "already accessed by
+  another instance". `"path": ":memory:"` is the spelling that means no folder.
+
+### Supermemory
+
+Needs an account, and this repository does not have one. What it knows about Supermemory
+is one endpoint: `memvara/compat/supermemory_import.py` reads `POST /v3/documents/list`,
+which lists documents that already exist. An arm has to write a corpus and then query it,
+and neither of those calls has ever been made from here.
+
+So the arm ships with **no default write path and no default search path**. Both are
+settings with no value, and turning the arm on without them is refused, with the reason.
+A default that looked plausible would be a guess that reads like a documented fact, and
+the next person to quote it would have no way to tell which it was. Anyone with an account
+can supply the two paths from Supermemory's own documentation and run the arm.
+
+It also refuses without an explicit container tag. A run writes one document per visible
+turn — six hundred at `--corpus-scale 10` — into an account this code cannot clean up
+afterwards. `demo/hosted.py` refuses this machine's own memvara credentials for the same
+reason and at the same moment: before anything is sent.
+
+The tag you give is a prefix, not the container: the arm writes one container per question
+instant, `<tag>-<instant>`. That is not tidiness. The harness asks questions in the order
+the scenario lists them, which is not `asked_at` order — the eight August questions come
+first and the April one is ninth — so a single container would already hold the whole
+history by the time the April question searched it. Measured with a shared container, that
+question could match 64 documents instead of the 32 turns it was allowed to see, 32 of them
+dated after it was asked and some of them nearly four months later. It would also write
+every overlapping turn twice. `demo/hosted.py` splits hosted scopes by instant for the
+same reason.
+
+```bash
+PYTHONPATH=. python3 demo/harness.py --reader stub --arm-supermemory \
+    --supermemory-key-file ~/.config/memvara/supermemory.key \
+    --supermemory-container memvara-demo-2026-09 \
+    --supermemory-ingest-path <from their docs> \
+    --supermemory-search-path <from their docs>
+```
+
+The key is read from the file at run time and is never printed, logged or put on a command
+line. Requests go through the importer's own injectable `fetch`, `(url, key, body) ->
+payload`, rather than a second HTTP client written for the demo.
+
+**No Supermemory number is published anywhere in this repository**, because nobody here
+has run the arm. That is the honest state and it is recorded here rather than filled in
+with something plausible.
 
 ---
 
