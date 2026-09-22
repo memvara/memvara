@@ -2988,8 +2988,15 @@ def test_a_key_file_that_cannot_be_trusted_is_refused_without_quoting_it(tmp_pat
 
 def test_the_key_file_path_expands_a_home_directory(tmp_path, monkeypatch):
     """`~/.config/memvara/qwen.key` is how the path is written in the instructions, and a
-    shell does not expand a tilde inside `--api-key-file=~/...`."""
+    shell does not expand a tilde inside `--api-key-file=~/...`.
+
+    Both variables are set because `Path.expanduser()` does not read the same one on every
+    platform: POSIX takes `HOME`, and Windows takes `USERPROFILE` first. Setting only
+    `HOME` left the tilde expanding into the real profile directory on the Windows job,
+    where there is no key file, so the test failed there and nowhere else.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     _key_file(tmp_path)
     assert ek.read_api_key_file("~/qwen.key") == _SECRET
 
