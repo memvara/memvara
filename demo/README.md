@@ -18,6 +18,7 @@ difference, and a run with the hosted reader at both sizes is the next thing to 
 demo/scenario.py    the support history and the question set
 demo/distractors.py generated tickets that scale the history without moving any fact
 demo/baselines.py   the five context-building arms, and the structured integration
+demo/hosted.py      the two memvara arms against a memvara-cloud project
 demo/competitors.py mem0 and Supermemory as arms, neither on unless asked for
 demo/harness.py     the blinded run over those arms, and the scoring
 ```

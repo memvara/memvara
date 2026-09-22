@@ -83,11 +83,8 @@ from memvara import HashingEmbedder, Memvara, NullLLM
 from memvara.retrieve import EpisodeResult
 from memvara.schema import PredicateRegistry
 
-__all__ = ["HOSTED_ARMS", "HostedCredential", "HostedMemvara", "Manifest",
+__all__ = ["HostedCredential", "HostedMemvara", "Manifest",
            "apply_facts_hosted", "connect", "load_demo_credential", "render_dated"]
-
-#: The arms this module replaces. Every other arm is unchanged by `--memory hosted`.
-HOSTED_ARMS = ("memvara", "memvara_structured")
 
 #: Turns per `add` request. Small enough that one failed request loses little and a
 #: request body stays well under any proxy's limit; large enough that the scale-10 corpus
@@ -125,6 +122,11 @@ def load_demo_credential(path: str | os.PathLike[str], *,
 
     A missing or keyless file is refused too, naming the command that writes one. No
     message quotes a key.
+
+    Those three cover every key the library will read. `CREDENTIALS_PATH` is a fixed
+    constant in `memvara/server/config.py` with no environment variable behind it, so the
+    default file and `MEMVARA_API_KEY` are the only two places a key comes from, and both
+    are checked here.
     """
     from memvara.remote.creds import read_credentials_file
     from memvara.server.config import CREDENTIALS_PATH
@@ -305,7 +307,7 @@ class HostedMemvara:
     def scope_name(self, arm: str, question: Question) -> str:
         """The `user` a scope is written under: run, scale, arm and question instant."""
         at = question.asked_at.astimezone(timezone.utc)
-        return f"demo-{self.run_id}-s{self.scale}-{arm}-{at:%Y%m%dT%H%M}"
+        return f"demo-{self.run_id}-s{self.scale}-{arm}-{bl.instant_tag(at)}"
 
     def arms(self) -> dict[str, Any]:
         return {"memvara": self.memvara, "memvara_structured": self.memvara_structured}

@@ -78,11 +78,8 @@ from memvara.compat.supermemory_import import (
     read_supermemory_key,
 )
 
-__all__ = ["COMPETITOR_ARMS", "CompetitorUnavailable", "Mem0Arm", "SupermemoryArm",
+__all__ = ["CompetitorUnavailable", "Mem0Arm", "SupermemoryArm",
            "build_competitors"]
-
-#: The arms this module can add, in reporting order. Neither is in `ARMS`.
-COMPETITOR_ARMS = ("mem0", "supermemory")
 
 #: The one Supermemory endpoint anything in this repository has ever called. Named here
 #: because the arm's refusal quotes it: it is the whole evidence base for what this
@@ -95,6 +92,26 @@ SUPERMEMORY_BASE_URL = "https://api.supermemory.ai"
 #: Documents per search request, and memories per mem0 search: `DEFAULT_K`, the same slot
 #: budget `naive_rag` and both memvara arms are held to.
 _K = bl.DEFAULT_K
+
+
+def stored_notes(arm: str, notes: Sequence[str], *, seen: Sequence[Turn],
+                 max_chars: int) -> Context:
+    """One arm's retrieved notes as the context a reader sees.
+
+    Both arms here return a list of stored sentences and have to turn it into the same
+    shape: `recall()`'s own header, one bullet per note, the shared character cap, and the
+    entry count taken from the rendered text after the cap rather than from the list that
+    went in. Written once because the three parts are each load-bearing and each easy to
+    get subtly differently. The header carries the framing that tells a model the lines
+    below are reference data and not instructions, and it is `recall()`'s so that a block
+    of stored notes looks the same whichever system produced it — the harness blinds the
+    reader to which arm it is reading, and that blinding is only as good as the prompts
+    look alike.
+    """
+    lines = [f"- {' '.join(str(note).split())}" for note in notes if str(note).strip()]
+    text = bl.clip("\n".join([Memvara.RECALL_HEADER, *lines]), max_chars)
+    return Context(arm=arm, text=text, turns_visible=len(seen),
+                   items_used=bl.count_entries(text))
 
 
 class CompetitorUnavailable(SystemExit):
@@ -187,10 +204,8 @@ class Mem0Arm:
         found = store.search(question.text, filters={"user_id": self.USER},
                              top_k=self.k)
         rows = found["results"] if isinstance(found, dict) else found
-        lines = [f"- {' '.join(str(row.get('memory', '')).split())}" for row in rows]
-        text = bl.clip("\n".join([Memvara.RECALL_HEADER, *lines]), self.max_chars)
-        return Context(arm="mem0", text=text, turns_visible=len(seen),
-                       items_used=bl.count_entries(text))
+        return stored_notes("mem0", [row.get("memory", "") for row in rows],
+                            seen=seen, max_chars=self.max_chars)
 
     def _store_for(self, question: Question, turns: Sequence[Turn]) -> Any:
         """The store for this question's instant, filled the first time it is asked for."""
@@ -293,7 +308,7 @@ class Mem0Arm:
     @staticmethod
     def _collection(instant: Any) -> str:
         """A qdrant collection per instant. In memory, so the name only has to be unique."""
-        return f"demo{instant:%Y%m%dT%H%M}"
+        return f"demo{bl.instant_tag(instant)}"
 
     def check(self) -> None:
         """Import mem0 now, so a missing package is refused while the arms are built.
@@ -391,7 +406,7 @@ class SupermemoryArm:
         clean up. Neither failure shows in the report. `demo/hosted.py` splits hosted
         scopes by instant for the same reason.
         """
-        return f"{self.container}-{question.asked_at:%Y%m%dT%H%M}"
+        return f"{self.container}-{bl.instant_tag(question.asked_at)}"
 
     def __call__(self, question: Question, turns: Sequence[Turn]) -> Context:
         seen = bl.visible_turns(question, turns)
@@ -401,11 +416,8 @@ class SupermemoryArm:
                            {"q": question.text, "limit": self.k,
                             "containerTags": [container]})
         rows = found.get("results") or found.get("memories") or []
-        lines = [f"- {' '.join(str(self._text_of(row)).split())}" for row in rows
-                 if self._text_of(row)]
-        text = bl.clip("\n".join([Memvara.RECALL_HEADER, *lines]), self.max_chars)
-        return Context(arm="supermemory", text=text, turns_visible=len(seen),
-                       items_used=bl.count_entries(text))
+        return stored_notes("supermemory", [self._text_of(row) for row in rows],
+                            seen=seen, max_chars=self.max_chars)
 
     def _fill(self, container: str, seen: Sequence[Turn]) -> None:
         """Write this instant's visible turns into its own container, once."""

@@ -228,6 +228,18 @@ class Context:
 Arm = Callable[[Question, Sequence[Turn]], Context]
 
 
+def instant_tag(at: datetime) -> str:
+    """One question instant, as it appears in the name of a store built for it.
+
+    `demo/hosted.py` names a hosted scope with it, and `demo/competitors.py` names both a
+    qdrant collection and a Supermemory container. Spelled once because the format is
+    load-bearing rather than cosmetic: it is the whole of what keeps one instant's store
+    apart from another's, and a caller that wrote it a minute coarser would still look
+    right while quietly sharing a store between two instants.
+    """
+    return f"{at:%Y%m%dT%H%M}"
+
+
 def visible_turns(question: Question, turns: Sequence[Turn]) -> list[Turn]:
     """The turns that had happened when the question was asked, chronologically.
 

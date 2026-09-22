@@ -2525,14 +2525,118 @@ def test_a_checkpointed_reader_replays_a_stored_answer_without_calling_the_model
     second = reader.answer("sys", "prompt")
     assert (first.text, second.text) == ("Lisbon", "Lisbon")
     assert len(inner.prompts) == 1
-    assert (reader.calls, reader.replayed) == (2, 1)
+    # Counted on the checkpoint, which is where the numbers the report prints live.
+    # The reader keeps no tally of its own: two of them can share one checkpoint —
+    # a reader and the judge spawned from it do — and per-reader counts would each
+    # describe a part of a run that is reported as a whole.
+    assert (checkpoint.hits + checkpoint.misses, checkpoint.hits) == (2, 1)
+    assert (checkpoint.repeated, checkpoint.resumed) == (1, 0)
     assert (reader.name, reader.is_stub, reader.is_human) == ("scripted", False, False)
 
     # A fresh process, a fresh inner reader, the same file: still no model call.
-    resumed = ek.CheckpointedReader(_ScriptedReader(["Porto"]),
-                                    ek.Checkpoint(tmp_path / "run.jsonl"))
+    resumed_checkpoint = ek.Checkpoint(tmp_path / "run.jsonl")
+    resumed = ek.CheckpointedReader(_ScriptedReader(["Porto"]), resumed_checkpoint)
     assert resumed.answer("sys", "prompt").text == "Lisbon"
-    assert resumed.replayed == 1
+    assert (resumed_checkpoint.hits, resumed_checkpoint.resumed) == (1, 1)
+
+
+def test_two_threads_asking_the_identical_question_make_one_model_call(tmp_path):
+    """A checkpoint miss has to claim the call, not merely observe that there is none.
+
+    Under `--concurrency N` two threads can put the byte-identical prompt to a reader at
+    the same moment. It is not a corner case: the judge is asked to grade an answer, and
+    two arms that answered a question the same way produce the same grading call, so the
+    collision happens on exactly the input the checkpoint exists to charge once.
+
+    Looking the key up and deciding to pay used to be two steps with nothing between
+    them, so both threads missed, both paid, and the file ended with one row and the
+    report with two misses. The duplicate is a real call on a real invoice and nothing
+    distinguished it from a genuine miss.
+
+    The double answers differently each time, which is what makes a second call visible
+    rather than merely counted: if both threads reached it, one of them would come back
+    holding "Porto" and the stored row and the returned answer would disagree. The
+    barrier lines the two threads up so they are inside `answer` together, and the sleep
+    holds the first one there long enough that a second unguarded thread would get past
+    the lookup.
+    """
+    import threading
+    import time
+
+    class _SlowScriptedReader(_ScriptedReader):
+        def answer(self, system, prompt):
+            time.sleep(0.05)
+            return super().answer(system, prompt)
+
+    inner = _SlowScriptedReader(["Lisbon", "Porto"])
+    checkpoint = ek.Checkpoint(tmp_path / "race.jsonl")
+    reader = ek.CheckpointedReader(inner, checkpoint)
+    ready = threading.Barrier(2, timeout=10)
+    out: list[ek.Answer] = []
+    lock = threading.Lock()
+
+    def ask() -> None:
+        ready.wait()
+        answer = reader.answer("sys", "prompt")
+        with lock:
+            out.append(answer)
+
+    threads = [threading.Thread(target=ask) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert not any(thread.is_alive() for thread in threads), "a waiter never woke"
+
+    assert len(inner.prompts) == 1, "the same call was paid for twice"
+    assert [answer.text for answer in out] == ["Lisbon", "Lisbon"]
+    assert (checkpoint.misses, checkpoint.hits) == (1, 1)
+    assert len((tmp_path / "race.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_a_failed_call_releases_its_claim_instead_of_stranding_the_waiters(tmp_path):
+    """The claim has to be given up when the call raises, or a run hangs instead of dying.
+
+    One thread owns the call and the others wait on it. If the owner's call raises — a
+    connection reset, a rate limit that exhausted its retries — and the claim were left
+    standing, every waiter would block until the run was killed, and a crash that should
+    have taken one item down would take the whole run with it and leave no report.
+    """
+    import threading
+
+    class _Angry:
+        name = "angry"
+        is_stub = False
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def answer(self, system, prompt):
+            self.calls += 1
+            raise RuntimeError("connection reset")
+
+    inner = _Angry()
+    checkpoint = ek.Checkpoint(tmp_path / "angry.jsonl")
+    reader = ek.CheckpointedReader(inner, checkpoint)
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        reader.answer("sys", "prompt")
+
+    # The key is free again, so the next caller tries rather than waiting for ever.
+    done = threading.Event()
+
+    def ask() -> None:
+        try:
+            reader.answer("sys", "prompt")
+        except RuntimeError:
+            pass
+        done.set()
+
+    thread = threading.Thread(target=ask)
+    thread.start()
+    thread.join(timeout=10)
+    assert done.is_set(), "the second caller was left waiting on an abandoned claim"
+    assert inner.calls == 2
 
 
 def test_a_checkpointed_reader_carries_the_inner_readers_model_and_settings():
@@ -3090,12 +3194,13 @@ def test_a_run_that_died_halfway_resumes_from_its_checkpoint_and_scores_identica
     assert len(path.read_text(encoding="utf-8").splitlines()) == 2
 
     inner = _ScriptedReaderByPrompt()
-    resumed_reader = ek.CheckpointedReader(inner, ek.Checkpoint(path))
+    resumed_checkpoint = ek.Checkpoint(path)
+    resumed_reader = ek.CheckpointedReader(inner, resumed_checkpoint)
     resumed = runner.run(fixture(), reader=resumed_reader, judge=ek.ContainmentJudge(),
                          embedder=ek.build_embedder("hashing"), **kwargs)
     assert _timeless(whole[0]) == _timeless(resumed[0]) and len(whole[0]) > 2
     assert whole[3].rows() == resumed[3].rows()
-    assert resumed_reader.replayed == 2
+    assert resumed_checkpoint.hits == 2
     assert len(inner.prompts) == len(whole[0]) - 2
 
 

@@ -41,6 +41,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import re
 import sys
 import textwrap
 import types
@@ -2080,3 +2081,146 @@ def _statements(fn) -> int:
         body = body[1:]
     return sum(1 for top in body for node in ast.walk(top)
                if isinstance(node, ast.stmt))
+
+
+# --- the judge, when the reader cannot be its twin --------------------------------
+
+
+def _replayed(printed: str) -> tuple[int, int]:
+    """The checkpoint note's "replayed X of Y model calls", as numbers."""
+    found = re.search(r"replayed ([\d,]+) of ([\d,]+) model calls", printed)
+    assert found, f"no checkpoint note in:\n{printed}"
+    return int(found.group(1).replace(",", "")), int(found.group(2).replace(",", ""))
+
+
+def test_a_checkpointed_stub_run_checkpoints_its_judge_calls_too(tmp_path, monkeypatch,
+                                                                 capsys):
+    """`--reader stub --judge llm --checkpoint PATH` must store the grading calls.
+
+    The stub answers offline and costs nothing, so with `--judge llm` the *judge* is the
+    only thing the run pays for. The reader cannot be the judge's twin here — a stub has
+    no provider — so one is built beside it, and it was being built without the run's
+    checkpoint. The grading calls were then neither written nor replayed: a resumed run
+    paid for every one of them again, which is the opposite of what `Checkpoint`
+    documents for a reader and its judge alike. Nothing in the report said so, because
+    the note counts what the checkpoint was asked for and it was never asked.
+
+    Checked by running twice with a second client that would answer nothing: the second
+    run must make no call at all and still score exactly what the first scored.
+    """
+    _install_stub_scenario(monkeypatch)
+    first_client = _FakeAnthropicClient()
+    _install_fake_anthropic(monkeypatch, first_client)
+    checkpoint = tmp_path / "judged.jsonl"
+    first_out = tmp_path / "first.jsonl"
+    assert hz.main(["--reader", "stub", "--judge", "llm", "--checkpoint", str(checkpoint),
+                    "--out", str(first_out)]) == 0
+    first = capsys.readouterr().out
+    calls = len(first_client.calls)
+    assert calls, "the judge made no call, so this test proves nothing"
+    # Rows on disk are one per distinct grading call; the note counts every ask, which is
+    # larger, because two arms that gave the same answer ask the judge the same question
+    # and the second reuses the first's verdict. Those in-run repeats are hits too, so
+    # the thing that says nothing was resumed is the absence of the on-disk kind.
+    _, asked = _replayed(first)
+    assert asked >= calls
+    assert "from rows already on disk" not in first
+    # The file holds the stub's own answers as well, under model "stub"; the rows that
+    # matter here are the graded ones, and there must be exactly one per call the judge
+    # actually made. Before the fix there were none of them at all.
+    rows = [json.loads(line) for line
+            in checkpoint.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len([row for row in rows if row["model"] != "stub"]) == calls
+
+    second_client = _FakeAnthropicClient(stops=["refusal"] * calls)
+    _install_fake_anthropic(monkeypatch, second_client)
+    second_out = tmp_path / "second.jsonl"
+    assert hz.main(["--reader", "stub", "--judge", "llm", "--checkpoint", str(checkpoint),
+                    "--out", str(second_out)]) == 0
+    second = capsys.readouterr().out
+    assert second_client.calls == [], "a stored grading call was paid for again"
+    assert _replayed(second) == (asked, asked)
+    assert "from rows already on disk" in second
+    assert first_out.read_text(encoding="utf-8") == second_out.read_text(encoding="utf-8")
+
+
+def test_the_stub_report_says_what_its_checkpoint_replayed(tmp_path, monkeypatch,
+                                                           capsys):
+    """A rehearsal that prints nothing about what it replayed cannot be checked.
+
+    `run_header` returns nothing for a stub, because a stub has no parameters to pin and
+    the offline report is held byte-identical. The checkpoint note is the one thing a
+    stub run does have to say, and a stub run with a checkpoint is exactly how the
+    checkpoint is rehearsed before a paid run is pointed at it.
+    """
+    _install_stub_scenario(monkeypatch)
+    checkpoint = tmp_path / "rehearsal.jsonl"
+    assert hz.main(["--reader", "stub", "--checkpoint", str(checkpoint)]) == 0
+    first = capsys.readouterr().out
+    assert str(checkpoint) in first and "replayed 0 of" in first
+
+    assert hz.main(["--reader", "stub", "--checkpoint", str(checkpoint)]) == 0
+    second = capsys.readouterr().out
+    assert "checkpoint" in second and "replayed 0 of" not in second
+
+
+def test_the_plain_stub_report_still_says_nothing_about_a_checkpoint(monkeypatch,
+                                                                    capsys):
+    """The byte-identical offline report, which the note must not disturb.
+
+    `test_the_offline_run_is_identical_twice` pins the stub report, and the note was
+    added to the one branch that used to return an empty string unconditionally. A stub
+    run with no checkpoint has to come out exactly as it did before.
+    """
+    _install_stub_scenario(monkeypatch)
+    assert hz.main(["--reader", "stub"]) == 0
+    assert "checkpoint" not in capsys.readouterr().out
+
+
+def test_the_file_round_trips_judge_can_use_a_server_of_your_own(tmp_path, monkeypatch,
+                                                                 capsys):
+    """`--reader file --judge llm` with the OpenAI-only flags must not be a refusal.
+
+    The reader is a person, so the judge is a model of its own, and the provider it was
+    built on used to be Anthropic whatever the command line said. `hosted_reader` refuses
+    `--base-url`, `--api-key-file` and `--extra-body` on the Anthropic path — rightly,
+    since an Anthropic reader cannot honour them — so the combination died with a
+    `SystemExit`. That combination is the one judged run available to somebody with no
+    paid key: a blinded round trip answered by hand, graded by the server they already
+    run. The provider now follows the flags.
+    """
+    _install_stub_scenario(monkeypatch)
+
+    class _FakeOpenAIClient:
+        def __init__(self) -> None:
+            self.chat = types.SimpleNamespace(completions=self)
+            self.calls: list[dict] = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"choices": [{"message": {"content": "yes"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 1}}
+
+    client = _FakeOpenAIClient()
+    sdk = types.ModuleType("openai")
+    sdk.OpenAI = lambda **kw: client  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", sdk)
+    key_file = tmp_path / "key"
+    key_file.write_text("sk-local\n", encoding="utf-8")
+    key_file.chmod(0o600)
+
+    dump_path = tmp_path / "dump.jsonl"
+    assert hz.main(["--reader", "file", "--dump", str(dump_path)]) == 0
+    capsys.readouterr()
+    items = hz.plan(QUESTIONS, CONVERSATION)
+    answers = _answer_file(tmp_path, items,
+                           {f"{i.arm}/{i.qid}": "Home." for i in items})
+
+    assert hz.main(["--reader", "file", "--dump", str(dump_path), "--answers",
+                    str(answers), "--judge", "llm", "--judge-model", "qwen-local",
+                    "--base-url", "http://127.0.0.1:8888/v1",
+                    "--api-key-file", str(key_file)]) == 0
+    printed = capsys.readouterr().out
+    assert "judge llm-judge/openai/qwen-local" in printed
+    assert client.calls, "the judge made no call"
+    assert {c["model"] for c in client.calls} == {"qwen-local"}

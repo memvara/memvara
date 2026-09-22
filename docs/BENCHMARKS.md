@@ -1191,6 +1191,7 @@ tells the customer the right thing. [`demo/`](../demo/) is the apparatus for tha
 demo/scenario.py    64 turns of one customer's support history, and 20 questions
 demo/distractors.py generated tickets that scale the history without moving any fact
 demo/baselines.py   five context-building arms
+demo/hosted.py      the two memvara arms against a memvara-cloud project
 demo/competitors.py two more arms, mem0 and Supermemory, off unless asked for
 demo/harness.py     a blinded dump/answer round trip over those arms, and the scoring
 ```

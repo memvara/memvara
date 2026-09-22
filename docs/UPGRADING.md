@@ -7,6 +7,30 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `--judge-model` is honoured with `--reader openai`, where it used to be ignored
+
+### What changed
+
+The benchmark runners and `demo/harness.py` build the model judge from the reader — same
+provider and same pinned settings, with `--judge-model` swapped in. Before, an OpenAI run
+that passed `--judge-model` got an Anthropic judge on its own defaults, and the flag had
+no effect on it. A run that named a judge model now grades with that model, on the same
+provider as the reader.
+
+This is a change in what a command does, not in what it accepts. Nothing starts failing,
+but a number produced by a run that passed `--judge-model` beside `--reader openai` was
+graded by a different model than the command said, so it is not comparable with the same
+command run today.
+
+### How you find your instances
+
+**A script or a recorded run that passes `--judge-model` with `--reader openai`.** Grep
+your run logs for a report header naming a judge; the header has always printed the judge
+it used, so a stored report says which model actually graded. Re-run anything you intend
+to compare against a new number.
+
+---
+
 ## A `memvara` console script, and `login --project` takes an id or nothing
 
 ### What changed

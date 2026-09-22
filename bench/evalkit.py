@@ -1266,6 +1266,9 @@ class Checkpoint:
         self.path = Path(path)
         self._rows: dict[str, Answer] = {}
         self._lock = threading.Lock()
+        #: Keys a caller has claimed and not yet stored, each with the event that other
+        #: callers wait on. See `begin`.
+        self._inflight: dict[str, threading.Event] = {}
         self.unreadable = 0
         self.resumed = 0
         self.repeated = 0
@@ -1304,9 +1307,51 @@ class Checkpoint:
     def get(self, key: str) -> Answer | None:
         return self._rows.get(key)
 
+    def begin(self, key: str) -> tuple[Answer | None, bool]:
+        """Look `key` up and, on a miss, say whether this caller owns the call.
+
+        Returns `(answer, mine)`. An answer means a hit. `mine` is true when no other
+        caller is already making this call, and the caller that gets it must finish with
+        `put` or `abandon`; false means somebody else is making it, and the caller should
+        `wait` and look again.
+
+        This exists because looking up and deciding to pay have to be one step. Under
+        `--concurrency N` two threads can put the byte-identical prompt to the reader at
+        once — two arms whose contexts produced the same grading call, most often — and
+        with a plain `get` both miss, both pay, and the checkpoint records one row and two
+        misses. The duplicate is a real model call on a real invoice, and nothing in the
+        report distinguishes it from a genuine miss.
+        """
+        with self._lock:
+            row = self._rows.get(key)
+            if row is not None:
+                return row, False
+            if key not in self._inflight:
+                self._inflight[key] = threading.Event()
+                return None, True
+            return None, False
+
+    def wait(self, key: str, timeout: float | None = None) -> None:
+        """Block until whoever claimed `key` stores it or gives it up."""
+        with self._lock:
+            event = self._inflight.get(key)
+        if event is not None:
+            event.wait(timeout)
+
+    def abandon(self, key: str) -> None:
+        """Give up a claim whose call raised, so a waiter retries instead of hanging."""
+        self._release(key)
+
+    def _release(self, key: str) -> None:
+        with self._lock:
+            event = self._inflight.pop(key, None)
+        if event is not None:
+            event.set()
+
     def put(self, key: str, answer: Answer) -> None:
         with self._lock:
             if key in self._rows:
+                self._release_locked(key)
                 return
             self._rows[key] = answer
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1315,6 +1360,13 @@ class Checkpoint:
                     {"id": key, "answer": answer.text,
                      **{name: getattr(answer, name) for name in _CHECKPOINT_FIELDS}},
                     ensure_ascii=False) + "\n")
+            self._release_locked(key)
+
+    def _release_locked(self, key: str) -> None:
+        """`_release`, for a caller that already holds the lock."""
+        event = self._inflight.pop(key, None)
+        if event is not None:
+            event.set()
 
     def count(self, key: str, hit: bool) -> None:
         with self._lock:
@@ -1349,10 +1401,7 @@ class CheckpointedReader:
         # a test double declares only the flags it needs.
         self.is_stub = bool(getattr(inner, "is_stub", False))
         self.is_human = bool(getattr(inner, "is_human", False))
-        self.calls = 0
-        self.replayed = 0
         self._settings = reader_settings(inner)
-        self._lock = threading.Lock()
 
     @property
     def model(self) -> str:
@@ -1366,17 +1415,30 @@ class CheckpointedReader:
         return CheckpointedReader(self.inner.spawn(model), self.checkpoint)
 
     def answer(self, system: str, prompt: str) -> Answer:
+        """The stored answer for this call, or the inner reader's, stored as it returns.
+
+        The loop is what makes one call per key true under `--concurrency N`. `begin`
+        hands exactly one caller the right to make the call; anybody else waits and then
+        looks again, and finds the row the first caller stored — counted as a hit, which
+        is what it is. A call that raises is abandoned rather than left claimed, so the
+        waiters retry instead of blocking until the run is killed.
+        """
         key = call_id(self._settings, system, prompt)
-        stored = self.checkpoint.get(key)
-        with self._lock:
-            self.calls += 1
-            self.replayed += stored is not None
-        self.checkpoint.count(key, hit=stored is not None)
-        if stored is not None:
-            return stored
-        out = self.inner.answer(system, prompt)
-        self.checkpoint.put(key, out)
-        return out
+        while True:
+            stored, mine = self.checkpoint.begin(key)
+            if stored is not None:
+                self.checkpoint.count(key, hit=True)
+                return stored
+            if mine:
+                try:
+                    out = self.inner.answer(system, prompt)
+                except BaseException:
+                    self.checkpoint.abandon(key)
+                    raise
+                self.checkpoint.put(key, out)
+                self.checkpoint.count(key, hit=False)
+                return out
+            self.checkpoint.wait(key)
 
 
 def checkpoint_note(reader: Reader) -> str:

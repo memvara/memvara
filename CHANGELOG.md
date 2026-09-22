@@ -164,7 +164,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   again too high.
 - **`--judge-model` builds the judge from the reader** — the same provider, effort,
   output budget and thinking setting with only the model swapped — instead of a bare
-  Anthropic reader carrying the effort alone, and it now works with `--reader openai`.
+  Anthropic reader carrying the effort alone, and it now works with `--reader openai`,
+  where the flag used to be accepted and ignored. See `docs/UPGRADING.md`.
+- **A checkpoint charges an identical call once, even when two threads ask at the same
+  moment.** Looking the key up and deciding to pay were two steps with nothing between
+  them, so under `--concurrency N` two threads putting the byte-identical prompt both
+  missed and both paid. That is not a corner case: two arms that answered a question the
+  same way produce the same grading call. One caller now claims the call and the others
+  wait for its result, and a call that raises gives the claim up rather than stranding
+  them.
+- **A checkpointed run stores its judge's calls when the reader is the stub or a file.**
+  `--reader stub --judge llm --checkpoint PATH` wrote none of the grading calls, so a
+  resumed run paid for every one of them again — and with a stub reader the judge is the
+  only thing the run pays for. The judge built beside such a reader now shares the run's
+  checkpoint, and a stub run prints the checkpoint note it had been leaving out, which is
+  what makes a rehearsal of the checkpoint checkable.
+- **`--reader file --judge llm` can grade with an OpenAI-compatible server of your own.**
+  The judge was built on Anthropic whatever the command line said, so passing
+  `--base-url`, `--api-key-file` or `--extra-body` beside it was refused outright — and a
+  blinded round trip answered by hand and graded by a server you already run is the one
+  judged configuration available without a paid key. The judge's provider now follows
+  those flags.
 
 ## [0.14.0] — 2026-09-14
 

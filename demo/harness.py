@@ -480,14 +480,18 @@ def run_header(reader: ek.Reader, judge: ek.Judge, arms: Mapping[str, Arm]) -> s
     """What a run is quoted with, printed under the title.
 
     Nothing for the stub, which has no parameters and whose report is pinned byte for
-    byte by `test_the_offline_run_is_identical_twice`. For every other reader: the
+    byte by `test_the_offline_run_is_identical_twice` — except its checkpoint note, if it
+    has a checkpoint. A stub run is how the checkpoint is rehearsed before a paid one, and
+    a rehearsal that prints nothing about what it replayed cannot be checked. The note is
+    empty for a reader with no checkpoint, so the plain stub report is unchanged. For
+    every other reader: the
     reader and its pinned parameters (`ek.run_settings_block`), the judge, which arm is
     the floor and which the ceiling — a memory score without both beside it is
     uninterpretable, and a narrowed run has to say what it lacks rather than be read as
     if it had them — and what the checkpoint replayed.
     """
     if getattr(reader, "is_stub", False):
-        return ""
+        return ek.checkpoint_note(reader)
     lines = [ek.run_settings_block(reader) or f"  reader {reader.name}"]
     # A model judge prints its own parameters: it is the reader's twin by construction
     # on the hosted path, but the header should say so rather than have it inferred.
@@ -759,6 +763,36 @@ def build_reader(args: Any) -> ek.Reader:
     return reader
 
 
+def checkpoint_of(reader: ek.Reader) -> ek.Checkpoint | None:
+    """The checkpoint a reader writes to, or `None` when it has none."""
+    return reader.checkpoint if isinstance(reader, ek.CheckpointedReader) else None
+
+
+def judge_reader(args: Any, checkpoint: ek.Checkpoint | None = None) -> ek.Reader:
+    """The reader a model judge is built from when the run's own reader cannot be it.
+
+    Two runs need one. `--reader stub` answers offline, and grading those answers with a
+    model is a real thing to want while debugging the judge. `--reader file` is answered
+    by a person. In both the judge is a model of its own rather than the reader's twin.
+
+    **The provider follows the flags rather than always being Anthropic.** `--base-url`,
+    `--api-key-file` and `--extra-body` describe an OpenAI-compatible server, and
+    `hosted_reader` refuses them on the Anthropic path — correctly, because an Anthropic
+    reader cannot honour them. Naming Anthropic here unconditionally therefore turned
+    "grade my blinded round trip with the server I already run" into a refusal, and that
+    is the one judge configuration available to somebody with no paid key.
+
+    **`checkpoint` is the run's own**, so grading calls are resumed and replayed beside
+    the reader's. Without it a checkpointed stub run wrote none of its judge calls to the
+    file and paid for every one of them again on resume, which is the opposite of what
+    `Checkpoint` says it does for a reader and its judge alike.
+    """
+    provider = "openai" if any(getattr(args, name, None) for name in
+                               ("base_url", "api_key_file", "extra_body")) else "anthropic"
+    reader = ek.hosted_reader(provider, args)
+    return ek.CheckpointedReader(reader, checkpoint) if checkpoint is not None else reader
+
+
 def build_judge(name: str, *, model: str | None = None,
                 like: ek.Reader | None = None) -> ek.Judge:
     """The judge, by name. Containment works today; llm works the moment a key exists.
@@ -963,7 +997,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         reader = build_reader(args)
         like = None
         if args.judge == "llm":
-            like = reader if hosted(reader) else ek.hosted_reader("anthropic", args)
+            like = (reader if hosted(reader)
+                    else judge_reader(args, checkpoint_of(reader)))
         judge = build_judge(args.judge, model=args.judge_model, like=like)
         run = in_process(questions, turns, reader=reader, judge=judge, arms=arms,
                          concurrency=args.concurrency, corpus=corpus, backend=backend)
@@ -1000,8 +1035,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     reader = ek.FileReader(answers=args.answers)
     judge = build_judge(args.judge, model=args.judge_model,
-                        like=ek.hosted_reader("anthropic", args) if args.judge == "llm"
-                        else None)
+                        like=judge_reader(args) if args.judge == "llm" else None)
     scored = score(items, questions, reader=reader, judge=judge)
     print(report(items, scored, reader=reader, judge=judge, arms=arms, corpus=corpus,
                  backend=backend))
