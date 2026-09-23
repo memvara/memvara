@@ -1271,7 +1271,7 @@ def test_a_dated_miss_names_the_day_the_rewrite_used() -> None:
 
 #: Every call in the package that can reach a model, as `module::function: receiver.method`.
 #: The read side is the three named stages and the one chat call they share; the write side
-#: is extraction, predicate acquisition and replacement advice. A new entry here is a new
+#: is extraction, predicate acquisition and replacement advice, and ingestion reads media. A new entry here is a new
 #: way to reach a model, and `docs/INTERNALS.md` invariant 1 says where one may live.
 MODEL_CALLS = {
     # read path: `ranked`, `query_rewrite`, `synthesis`, and their shared chat call
@@ -1285,10 +1285,13 @@ MODEL_CALLS = {
     "memvara/write/pipeline.py::_tier1: self.fast.extract",
     "memvara/write/pipeline.py::_extract: self.llm.extract",
     "memvara/write/pipeline.py::_acquire: self.llm.classify_predicate",
+    # ingestion, when a document's media is turned into text
+    "memvara/ingest/media.py::media_to_text: llm.describe_image",
+    "memvara/ingest/media.py::media_to_text: llm.transcribe",
 }
 _MODEL_METHODS = {"chat", "extract", "resolve_predicate", "classify_predicate",
                   "judge_replacement", "compose_relations", "select", "rewrite",
-                  "synthesize"}
+                  "synthesize", "describe_image", "transcribe"}
 
 
 def _model_calls() -> set[str]:
