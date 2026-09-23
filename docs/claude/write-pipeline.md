@@ -29,6 +29,7 @@ A write starts as an `Episode` — one raw turn, stored verbatim — and ends as
 - Temporal expressions: `memvara/write/when.py` — `resolve()` turns "last March" into an
   instant and a `Precision`.
 - Model backends: `memvara/llm/base.py` — the `LLM` and `Chat` protocols, `ReplacementJudge`,
+  `Multimodal` (images, audio and video to text, used by `memvara/ingest/`),
   `NullLLM`, `Usage`, `TruncatedResponse`, `bounded_claim_schema()`. Implementations are
   `memvara/llm/anthropic.py` (`AnthropicLLM`) and `memvara/llm/openai.py` (`OpenAILLM`).
 - Tests: `tests/test_pipeline.py`, `tests/test_gate.py`, `tests/test_fast.py`,

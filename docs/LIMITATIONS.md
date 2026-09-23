@@ -136,6 +136,24 @@ the date is here to be read, and to be old enough to disbelieve eventually.
   exactly 1.0000 for the right text and 0.87 for a one-digit-different phone number, so
   it is not merely confirmable, it is hill-climbable. Encrypting the text and not the
   vectors would be theatre.
+- **Reading documents has limits you should know before relying on it.**
+  `memvara.ingest.extract` does no OCR, so a PDF made of scanned pages has no text and is
+  refused with `no_text`. It does not run JavaScript, so a web page that builds its content
+  in the browser comes back nearly empty. For video, only the sound is transcribed, and
+  only in the MP4, MPEG and WebM containers that OpenAI's transcription endpoint accepts;
+  frames are not sampled, because that needs a video decoder this package does not ship.
+  `AnthropicLLM` reads images but cannot transcribe, because the Anthropic API takes no
+  audio. A fetched URL is limited to 10 MB and 20 seconds, and a host that resolves to
+  any non-public address is refused, so an intranet page cannot be fetched by URL; pass
+  its content instead.
+- **A NAT64 gateway on an unlisted prefix can hide a private address from the URL
+  fetcher.** On an IPv6-only network, a NAT64 gateway reaches IPv4 hosts through IPv6
+  addresses that carry the IPv4 address inside them. The fetcher unwraps and checks the
+  IPv4 address for the well-known prefix `64:ff9b::/96`, the local-use prefix
+  `64:ff9b:1::/48`, and any prefix you configure (`SafeFetcher(nat64_prefixes=...)`, or
+  `MEMVARA_NAT64_PREFIXES` for the MCP server). An address translated through any other
+  prefix looks like an ordinary public IPv6 address, so a private IPv4 host behind it
+  cannot be detected. If your network has its own NAT64 prefix, list it.
 - **The built-in redactor is not compliance-grade** and says so in its own docstring. It
   is a default, not a product: the seam is the deliverable, and a serious deployment
   brings its own `Redactor`.

@@ -797,7 +797,7 @@ Issues and pull requests are welcome. Two things to read first:
 
 ```bash
 git clone https://github.com/memvara/memvara && cd memvara
-python3 -m pip install -e ".[dev,cloud]"
+python3 -m pip install -e ".[dev,cloud,ingest]"
 python3 -m pytest -q
 ```
 

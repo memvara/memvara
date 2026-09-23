@@ -92,14 +92,42 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     share a transaction. `update_document(mime=)` names the type of new content; left
     out, bytes are handed to ingestion to detect.
   - A URL, `bytes`, HTML or any non-text type goes through `memvara.ingest.extract()`,
-    the ingestion package built separately. Without it installed the call raises
-    `NotImplementedError` saying so; plain text and Markdown need nothing.
+    with `Memvara(url_fetcher=)` (the MCP server passes one carrying
+    `MEMVARA_NAT64_PREFIXES`), the instance's model backend for media, and the
+    `ingest_urls` and `ingest_media` switches, which `Memvara(ingest_urls=,
+    ingest_media=)` and `MEMVARA_FEATURE_INGEST_URLS=0` / `..._INGEST_MEDIA=0` set. A
+    failure raises `IngestError` and stores nothing. Plain text and Markdown are stored
+    as they are.
   - Four MCP tools: `memory_add_document`, `memory_get_document`,
     `memory_list_documents` and `memory_delete_document`, under the new `documents`
     switch (`MEMVARA_FEATURE_DOCUMENTS=0` hides them). `MEMVARA_FEATURE_RETRIEVAL_CHUNKS=0`,
     or `Memvara(retrieval_chunks=False)`, stores each document as one chunk.
   - SQLite schema 14 adds the `documents` and `document_chunks` tables. See
     `docs/UPGRADING.md`.
+- **Turn a document into text: `memvara.ingest.extract`.** It reads plain text, HTML, PDF,
+  images, audio, video and URLs, and returns `Extracted(text, title, mime, pages)`. The
+  signature is `extract(content=None, *, url=None, mime=None, llm=None, fetcher=None,
+  allow_urls=True, allow_media=True)`. HTML is read with the standard library, dropping
+  scripts, styles and navigation. PDF needs the new `ingest` extra (`pip install
+  'memvara[ingest]'`, which installs `pypdf`) and keeps the text of each page. Images,
+  audio and video need a model backend that implements the new `memvara.llm.Multimodal`
+  protocol. A URL is fetched only over `http` or `https`, and is refused if its host
+  resolves to any address that is not public, including after a redirect; at most 5
+  redirects, 20 seconds and 10 MB. An IPv4 address behind the NAT64 prefixes
+  `64:ff9b::/96` and `64:ff9b:1::/48` is unwrapped and checked, and an operator adds their
+  own prefixes with `SafeFetcher(nat64_prefixes=...)` or the new `MEMVARA_NAT64_PREFIXES`
+  setting. Every failure raises `IngestError` with a `code`, such as
+  `media_unsupported`, `url_refused` or `no_text`. The document store will call this; on
+  its own it stores nothing.
+- **`Multimodal`, a protocol for backends that turn media into text**, with
+  `describe_image(data, mime)` and `transcribe(data, mime)`. `AnthropicLLM` describes
+  images and refuses audio and video. `OpenAILLM` describes images and transcribes audio,
+  and the audio track of MP4, MPEG and WebM video, through a new `transcription_model`
+  argument that defaults to `whisper-1`. Video frames are not sampled. A backend refuses a
+  type it cannot read with `MediaUnsupported` before sending anything.
+- **Two feature switches, `ingest_urls` and `ingest_media`.** `MEMVARA_FEATURE_INGEST_URLS=0`
+  and `MEMVARA_FEATURE_INGEST_MEDIA=0` are now accepted by the MCP server and the plugin
+  hooks. `extract` takes them as `allow_urls` and `allow_media`.
 - **A long turn can be extracted in pieces, switched off by default.**
   `WritePipeline(extraction_chunks=True)`, `Memvara(write_extraction_chunks=True)`, or
   `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` on the MCP server. A turn over 6,000 characters
