@@ -20,25 +20,27 @@ docstring, which this one does not repeat. The only difference method-by-method 
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 from copy import copy
 from datetime import datetime
 from typing import Any, Collection, Literal, Mapping, Sequence, overload
 
 from ..confirm import ConfirmationRefused
+from ..core import _check_k
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import Path, Retrieved
 from ..types import (
     Answer, Claim, DeleteResult, Delta, Document, DocumentStatus, Episode,
     ForgetPreview, ForgetResult, Link, MemoryType, Page, Profile, Provenance, Result,
     Scope, SearchResults, WriteReceipt, closure, closure_reason, link_relation,
-    one_source,
+    one_source, refuse_self_link,
 )
 from . import hydrate
-from .api import (PROJECT_HEADER, _document_body, _document_path, _hit, _iso,
-                  _refuse_project_meta, _sent, _states, _type, _types)
+from .api import (PROJECT_HEADER, _as_local_refusal, _document_body, _document_path, _hit,
+                  _iso, _refuse_project_meta, _sent, _states, _type, _types)
 from .client import DEFAULT_TIMEOUT, AsyncHttpClient
 from .creds import resolve
-from .errors import Conflict, InvalidRequest, NotFound
+from .errors import Conflict, InvalidRequest, NotFound, refuse_project_purge
 
 
 class AsyncRemoteMemvara:
@@ -386,6 +388,7 @@ class AsyncRemoteMemvara:
                       since: datetime | None = None,
                       buckets: Mapping[str, Sequence[str]] | None = None) -> Profile:
         """See `RemoteMemvara.profile`, which documents the request and the reply."""
+        _check_k(k)
         body = await self._request(
             "POST", "/v1/profile", params=self._params(),
             json=_sent({"query": query, "k": k, "since": _iso(since),
@@ -437,8 +440,10 @@ class AsyncRemoteMemvara:
             "until_reason": closure_reason(until_reason),
             "replaces": replaces, "reason": closure_reason(reason),
         }
-        return hydrate.receipt(await self._request(
-            "POST", "/v1/facts", params=self._params(), json=_sent(body), write=True))
+        with _as_local_refusal(replaces) if replaces is not None else nullcontext():
+            out = await self._request(
+                "POST", "/v1/facts", params=self._params(), json=_sent(body), write=True)
+        return hydrate.receipt(out)
 
     async def supersede(self, old_claim_id: str, subject: str, predicate: str, obj: str,
                         *, at: datetime | None = None, close: str = "ended",
@@ -465,9 +470,11 @@ class AsyncRemoteMemvara:
             "recorded_at": _iso(recorded_at),
             "source_ids": ids, "sources": turns, "metadata": meta,
         }
-        return hydrate.receipt(await self._request(
-            "POST", f"/v1/memories/{old_claim_id}/supersede", params=self._params(),
-            json=_sent(body), write=True))
+        with _as_local_refusal(old_claim_id):
+            out = await self._request(
+                "POST", f"/v1/memories/{old_claim_id}/supersede", params=self._params(),
+                json=_sent(body), write=True)
+        return hydrate.receipt(out)
 
     async def forget(self, subject: str, predicate: str, *, at: datetime | None = None,
                      close: str = "retired", reason: str | None = None) -> list[Claim]:
@@ -510,6 +517,7 @@ class AsyncRemoteMemvara:
 
     async def link(self, from_id: str, to_id: str, relation: str, *,
                    by: str = "api") -> Link:
+        refuse_self_link(from_id, to_id)
         try:
             out = await self._request(
                 "POST", "/v1/links", params=self._params(),
@@ -617,7 +625,9 @@ class AsyncRemoteMemvara:
         return bool(body["erased"])
 
     async def purge(self, *, confirm_tenant: str | None = None) -> dict[str, int]:
+        """See `RemoteMemvara.purge`, including its refusal while a project is bound."""
         scope = self.default_scope
+        refuse_project_purge(scope.project)
         body = await self._request(
             "POST", "/v1/erasures", params=self._params(),
             json=_sent({"scope": _sent({"user": scope.user, "agent": scope.agent,

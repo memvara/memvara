@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any, Collection, Iterable, Iterator, Sequence
 import numpy as np
 
 from ..remote.client import HttpClient
+from ..remote.errors import refuse_project_purge
 from ..types import (Claim, Derivation, Document, DocumentChunk, Episode, Link, MemoryType,
                      Scope)
 
@@ -602,16 +603,7 @@ class RemoteStore:
         `embeddings`, `entities` — the same four keys `Store.purge`'s protocol
         docstring promises.
         """
-        if scope.project is not None:
-            # `ErasureScope` has no project field. Sent without it, this purge would
-            # erase the user's memory in every repository rather than in one.
-            # A `ValueError` rather than `NotImplementedError`: the method is wired, and
-            # it is this one scope that it refuses.
-            raise ValueError(
-                "purge() cannot erase one project through POST /v1/erasures, which takes "
-                "a user, an agent and a session but no project. Sending it without the "
-                f"project would erase every project, so nothing was sent for "
-                f"{scope.project!r}.")
+        refuse_project_purge(scope.project)
         body: dict[str, Any] = {
             "scope": {"user": scope.user, "agent": scope.agent, "session": scope.session},
         }

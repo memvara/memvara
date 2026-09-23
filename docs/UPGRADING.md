@@ -7,6 +7,27 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A hosted purge with a project bound is refused instead of erasing every project
+
+### What changed
+
+`RemoteMemvara.purge()` and `AsyncRemoteMemvara.purge()`, and their scoped views, used to
+send `POST /v1/erasures` with the user, agent and session only. From a client bound to a
+project, for example `Memvara(api_key=..., project=...)` or `mem.scope(project=...)`, that
+request erased the user's memory in every project, not just the bound one. They now raise
+`ValueError` and send nothing while a project is bound, as `RemoteStore.purge()` already
+did. The erasure route has no project field yet; memvara-cloud #267 adds one. A client with
+no project bound purges exactly as before.
+
+### How you find your instances
+
+**A hosted `purge()` called on a client or view that has a project.** Search your code for
+`purge(` on a `RemoteMemvara`, an `AsyncRemoteMemvara` or a scoped view of either. To erase
+the user's memory in every project, call it from a client with no project bound, and say
+so in the code, because that is what the call does.
+
+---
+
 ## A `Memvara` with a chat-capable `llm=` now calls it on every read, and `MemoryAPI` gained `query_rewrite` and `synthesize`
 
 ### What changed
