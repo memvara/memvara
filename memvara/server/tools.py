@@ -77,7 +77,7 @@ from .memory_api import MemoryAPI
 from .validate import ToolError, validate
 
 __all__ = ["TOOLS", "Tool", "ToolContext", "ToolError", "anchoring_by_default",
-           "safe_detail", "safe_line"]
+           "safe_detail", "safe_line", "without_reasons"]
 
 #: Framing for any block of stored claims. `Memvara.recall` applies its own; this is for
 #: the tools that render results themselves. It names the text below it as data, which
@@ -247,6 +247,29 @@ def anchoring_by_default(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
         rewritten.append(replace(
             tool, properties={**tool.properties, "anchored": swapped[tool.name]}))
     return tuple(rewritten)
+
+
+#: The arguments the `end_reason` feature adds: a reason on a closure, and a reason on a
+#: planned end. Nothing else about a tool depends on that feature. `replaces` on
+#: `memory_remember` is not among them, because naming the value a write replaces is
+#: lineage, which is worth keeping when reasons are switched off.
+_REASON_ARGUMENTS = ("reason", "until_reason")
+
+
+def without_reasons(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
+    """The same tools with every reason argument removed, for `end_reason` switched off.
+
+    The arguments are removed from the schema rather than accepted and ignored. A reason
+    the server would silently drop tells the model its explanation was recorded when it
+    was not; with the argument gone, a call that still sends one is refused by the
+    validator as an unknown argument. Reasons already stored are still shown by
+    `memory_history` and `memory_why`, because they are records, not a feature.
+    """
+    return tuple(
+        replace(tool, properties={k: v for k, v in tool.properties.items()
+                                  if k not in _REASON_ARGUMENTS})
+        if set(_REASON_ARGUMENTS) & set(tool.properties) else tool
+        for tool in tools)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1714,6 +1737,7 @@ def _matching_tool(close: Closure) -> "Tool":
         handler=_matching(close),
         writes=True,
         destructive=True,
+        feature="forget_matching",
     )
 
 
@@ -2785,6 +2809,7 @@ TOOLS: tuple[Tool, ...] = (
         required=("from_id", "to_id", "relation"),
         handler=_link,
         writes=True,
+        feature="links",
     ),
     Tool(
         name="memory_history",

@@ -57,11 +57,12 @@ client, not run interactively. Configured entirely by environment:
   MEMVARA_FEATURE_<NAME>
                      '0' switches one feature off; every feature is on by default.
                      PROJECT_SCOPE=0 stops the project being derived (an explicit
-                     MEMVARA_PROJECT still applies) and PROFILE=0 hides
-                     memory_profile. INDEX_COMMAND, RESEARCH_AGENT, STATUS_LINE,
-                     RECALL_MARK, FORGET_MATCHING, END_REASON and LINKS are also
-                     accepted, for the plugin and for tools a later version adds.
-                     An unknown name is refused.
+                     MEMVARA_PROJECT still applies), PROFILE=0 hides
+                     memory_profile, FORGET_MATCHING=0 hides memory_end_matching
+                     and memory_forget_matching, LINKS=0 hides memory_link, and
+                     END_REASON=0 removes the reason and until_reason arguments.
+                     INDEX_COMMAND, RESEARCH_AGENT, STATUS_LINE and RECALL_MARK
+                     are also accepted, for the plugin. An unknown name is refused.
   MEMVARA_LLM         'none' (default, offline, extracts only recognised sentence
                      forms) or 'anthropic' (needs ANTHROPIC_API_KEY). Local mode only.
   MEMVARA_EMBEDDER    'hashing' (default, offline, 512-dimensional), 'hashing:<dim>',

@@ -263,6 +263,19 @@ def test_the_async_scoped_view_forwards_the_three_new_methods(wire):
     assert dict(wire.calls[-1].url.params)["agent"] == "a1"
 
 
+def test_the_new_routes_carry_the_bound_project_as_a_header():
+    """Every other route sends `Memvara-Project` when a project is bound, and these three
+    go through the same `_request`, so the deployment narrows them the same way."""
+    wire = Recorded()
+    wire.sync.default_scope = wire.sync.default_scope.__class__(
+        "default", "alice", project="github.com/acme/app")
+    wire.sync.forget_matching("tea", close="retired")
+    wire.sync.link("cl_2", "cl_1", "extends")
+    wire.sync.links("cl_1")
+    assert [r.headers.get("memvara-project") for r in wire.calls] == [
+        "github.com/acme/app"] * 3
+
+
 def test_why_reads_the_links_on_the_provenance_body(wire):
     prov = wire.sync.why("cl_1")
     assert [(k.from_id, k.relation) for k in prov.links] == [("cl_2", "extends")]

@@ -67,8 +67,10 @@ recalled in another one, while a preference whose predicate is declared global i
 without a project and is recalled everywhere. `MEMVARA_FEATURE_PROJECT_SCOPE=0` turns the
 derivation off.
 
-`MEMVARA_READ_ONLY=1` hides every tool that writes, and `MEMVARA_FEATURE_PROFILE=0` hides
-the profile tool listed below.
+`MEMVARA_READ_ONLY=1` hides every tool that writes. `MEMVARA_FEATURE_PROFILE=0` hides the
+profile tool listed below, `MEMVARA_FEATURE_FORGET_MATCHING=0` hides the two `_matching`
+tools, `MEMVARA_FEATURE_LINKS=0` hides the link tool, and `MEMVARA_FEATURE_END_REASON=0`
+removes the `reason` and `until_reason` arguments from every tool that has them.
 
 `MEMVARA_ANCHORED=1` makes the three read tools answer only from memories the question is
 demonstrably about, so a question about an entity this store has never heard of returns

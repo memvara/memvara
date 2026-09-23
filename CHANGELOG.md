@@ -107,8 +107,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   The names are `index_command`, `research_agent`, `project_scope`, `status_line`,
   `recall_mark`, `profile`, `forget_matching`, `end_reason` and `links`
   (`memvara.server.config.FEATURES`). In this release `PROJECT_SCOPE=0` stops the project
-  being derived, and `PROFILE=0` hides `memory_profile`; the rest are accepted for the
-  plugin and for tools a later release adds. An unknown name, or a value that is not a
+  being derived, `PROFILE=0` hides `memory_profile`, `FORGET_MATCHING=0` hides
+  `memory_end_matching` and `memory_forget_matching`, `LINKS=0` hides `memory_link`, and
+  `END_REASON=0` removes the `reason` and `until_reason` arguments from every tool (reasons
+  already stored are still shown). The rest are accepted for the plugin. An unknown name, or a value that is not a
   boolean, stops the server at startup with a message naming the variable and the feature
   it probably meant.
   `MemvaraMCPServer(features_off=...)` is the same switch for a server built in Python,

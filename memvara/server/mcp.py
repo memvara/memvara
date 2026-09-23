@@ -30,7 +30,7 @@ from .protocol import (
 from .config import unknown_features
 from .memory_api import MemoryAPI
 from .tools import (TOOLS, Tool, ToolContext, ToolError, anchoring_by_default,
-                    safe_detail)
+                    safe_detail, without_reasons)
 
 if TYPE_CHECKING:
     # For the annotation alone. `memvara.remote.api` reaches back into
@@ -191,9 +191,14 @@ class MemvaraMCPServer:
         #: place and implemented in another is a default that eventually disagrees with
         #: itself. Fixed at startup like the read-only filter below it, and for the same
         #: reason: both are decisions the operator made before the first tool call.
+        #: `end_reason` is the one feature that owns arguments rather than a tool, so
+        #: switching it off rewrites schemas, the same way `anchoring_by_default` does.
+        tools = anchoring_by_default(TOOLS) if anchored else TOOLS
+        if "end_reason" in self.features_off:
+            tools = without_reasons(tools)
         self._tools: dict[str, Tool] = {
             t.name: t
-            for t in (anchoring_by_default(TOOLS) if anchored else TOOLS)
+            for t in tools
             if not (self.read_only and t.writes) and t.feature not in self.features_off
         }
         #: Negotiated at `initialize`. Recorded rather than enforced: rejecting calls
