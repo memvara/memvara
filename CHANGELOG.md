@@ -154,6 +154,55 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 - **`AsyncMemvara.search()` and `.recall()` run on their own pool** of
   `memvara.aio.READ_THREADS` (8) threads, because a read can now wait on a model for
   seconds and would otherwise hold a thread of the loop's shared default executor.
+- **A document store.** `Memvara.add_document(content | url=, custom_id=, title=,
+  filepath=, mime=, meta=, extract=True)` stores a document whole and returns a
+  `Document`. The text is split into chunks of about 1,000 characters at sentence
+  boundaries, each repeating up to 150 characters from the end of the one before, and
+  each chunk is stored as a `role="system"` episode marked with the document's id, so
+  `search(include_episodes=True)` and `recall(include_episodes=True)` find passages
+  from it. `get_document`, `list_documents` (newest first, one page at a time, filtered
+  by `filepath_prefix` and `status` in the store), `update_document`, `delete_document`,
+  `delete_documents` and `document_status` complete the set, on `ScopedMemvara`,
+  `AsyncMemvara` and `RemoteMemvara` as well.
+  - **Adding a document with a `custom_id` that already exists in the scope updates
+    it.** Each new chunk is matched to an old one by the digest of its text, not by its
+    position. A matched chunk keeps its episode, its vector and the memories that cite
+    it; only new chunks are read by the write pipeline. Chunk boundaries are placed by
+    local content rather than by counting from the top, so an edit near the top of a
+    long document usually changes the chunks it touches and the one after it.
+  - **Deleting a document erases its text and retires, never erases, the memories it
+    was the only source of.** The document row, its chunks and their episodes are
+    erased. A claim whose every source was one of those episodes is retired with the
+    reason "source document deleted"; a claim with another source keeps it.
+    `DeleteResult` lists both.
+  - **New chunks are read for facts**, and the claims found cite the chunk. The salience
+    gate accepts a document chunk whatever its role; the fast path does not run on one,
+    because it reads first-person sentences as the user's own, so facts come from the
+    model tier. `status` is `done` when every chunk has been read, `stored` when a chunk
+    was kept unread with `extract=False` (a later `reextract()` sweep keeps that choice),
+    or `failed` with an `error`. Adding a failed or `stored` document again with
+    extraction on reads the chunks no claim cites yet. A document in any state is stored
+    and searchable.
+  - **A chunk episode belongs to its document.** `erase(sources=True)`, `erase_episode`
+    and `erase_episodes` keep an episode a document still lists, so only
+    `delete_document`, a re-ingest and `purge` remove a document's text. `purge` reports
+    `documents` and `document_chunks` beside its four other counts.
+  - Two concurrent adds of one `custom_id` store one document: the lookup and the write
+    share a transaction. `update_document(mime=)` names the type of new content; left
+    out, bytes are handed to ingestion to detect.
+  - A URL, `bytes`, HTML or any non-text type goes through `memvara.ingest.extract()`,
+    with `Memvara(url_fetcher=)` (the MCP server passes one carrying
+    `MEMVARA_NAT64_PREFIXES`), the instance's model backend for media, and the
+    `ingest_urls` and `ingest_media` switches, which `Memvara(ingest_urls=,
+    ingest_media=)` and `MEMVARA_FEATURE_INGEST_URLS=0` / `..._INGEST_MEDIA=0` set. A
+    failure raises `IngestError` and stores nothing. Plain text and Markdown are stored
+    as they are.
+  - Four MCP tools: `memory_add_document`, `memory_get_document`,
+    `memory_list_documents` and `memory_delete_document`, under the new `documents`
+    switch (`MEMVARA_FEATURE_DOCUMENTS=0` hides them). `MEMVARA_FEATURE_RETRIEVAL_CHUNKS=0`,
+    or `Memvara(retrieval_chunks=False)`, stores each document as one chunk.
+  - SQLite schema 14 adds the `documents` and `document_chunks` tables. See
+    `docs/UPGRADING.md`.
 - **Turn a document into text: `memvara.ingest.extract`.** It reads plain text, HTML, PDF,
   images, audio, video and URLs, and returns `Extracted(text, title, mime, pages)`. The
   signature is `extract(content=None, *, url=None, mime=None, llm=None, fetcher=None,

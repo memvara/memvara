@@ -28,8 +28,10 @@ this is the short form a model needs, and the two must say the same thing.
   the instant it stopped. It keeps answering questions about the period it held.
 - **Retired** says the record was wrong. We stop believing it, and it stays visible to
   `memory_history` and `memory_why`.
-- **Erased** removes the bytes. It is an operator action and is deliberately not exposed as a
-  tool.
+- **Erased** removes the bytes. Erasing a memory is an operator action and is deliberately
+  not exposed as a tool. `memory_delete_document` erases one document's own text and no
+  memory: a memory whose only source was that document is retired, and its description
+  says so in those words.
 
 This has already gone wrong once. A write receipt reported `retired 1` for a fact that had
 merely stopped being true, which left a model reading its own memory tool with three names

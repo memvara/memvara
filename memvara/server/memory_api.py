@@ -41,8 +41,9 @@ from typing import (TYPE_CHECKING, Any, Collection, Literal, Mapping, Protocol, 
                     runtime_checkable)
 
 from ..retrieve import Path
-from ..types import (Answer, Claim, Delta, ForgetPreview, ForgetResult, Link, MemoryType,
-                     Profile, Provenance, Result, Scope, WriteReceipt)
+from ..types import (Answer, Claim, DeleteResult, Delta, Document, ForgetPreview,
+                     ForgetResult, Link, MemoryType, Page, Profile, Provenance, Result,
+                     Scope, WriteReceipt)
 
 __all__ = ["MemoryAPI"]
 
@@ -192,6 +193,26 @@ class MemoryAPI(Protocol):
              by: str = "api") -> Link:
         """Record a typed link. There is no `links` member beside it: `memory_why` reads
         a claim's links off `why().links`, so no tool calls `links` directly."""
+
+    # -- documents -----------------------------------------------------------
+
+    def add_document(self, content: str | bytes | None = None, *, url: str | None = None,
+                     custom_id: str | None = None, title: str | None = None,
+                     filepath: str | None = None, mime: str | None = None,
+                     meta: Mapping[str, Any] | None = None,
+                     extract: bool = True) -> Document:
+        """Store a document, or update the one with this `custom_id` in this scope."""
+
+    def get_document(self, id_or_custom_id: str) -> Document | None: ...
+
+    def list_documents(self, *, filepath_prefix: str | None = None,
+                       status: str | None = None, limit: int = 50,
+                       cursor: str | None = None) -> Page[Document]: ...
+
+    def delete_document(self, id_or_custom_id: str) -> DeleteResult:
+        """Erase a document's text and retire the memories it was the only source of.
+        `update_document`, `delete_documents` and `document_status` are not declared,
+        because no tool calls them."""
 
     # -- reporting -----------------------------------------------------------
 

@@ -41,14 +41,16 @@ from ..retrieve.traverse import Edge, Path
 from ..select.base import Rewrite, Selection
 from ..select.stages import parse_day
 from ..types import (
-    LAST_OBSERVED, SALIENCE_BASE, Answer, Claim, Delta, Derivation, Episode,
-    Explanation, ForgetPreview, ForgetResult, Link, MemoryType, Profile, Provenance,
-    Reading, Result, Row, Scope, WriteReceipt, closure, link_relation,
+    DOCUMENT_STATES, LAST_OBSERVED, SALIENCE_BASE, Answer, Claim, DeleteResult, Delta,
+    Derivation, Document, DocumentState, DocumentStatus, Episode, Explanation,
+    ForgetPreview, ForgetResult, Link, MemoryType, Page, Profile, Provenance, Reading,
+    Result, Row, Scope, WriteReceipt, closure, link_relation,
 )
 
 __all__ = ["claim", "episode", "result", "explanation", "receipt", "provenance",
            "reading", "answer", "delta", "profile", "edge", "path", "scope",
-           "selection", "rewrite", "link", "forget_preview", "forget_result"]
+           "selection", "rewrite", "link", "forget_preview", "forget_result",
+           "document", "document_page", "document_status", "delete_result"]
 
 
 def _dt(value: Any) -> datetime | None:
@@ -395,3 +397,47 @@ def selection(body: dict[str, Any] | None) -> Selection | None:
         candidates=body.get("candidates", 0),
         kept=body.get("kept", 0),
     )
+
+
+def _state(value: Any) -> DocumentState:
+    """A document status off the wire, refused if it is not one of the four. A status
+    the library has no word for would be carried into every `if doc.status == ...` a
+    caller writes, and match none of them."""
+    if value not in DOCUMENT_STATES:
+        raise ValueError(f"document status {value!r} is not one of {DOCUMENT_STATES}")
+    return value  # type: ignore[no-any-return]
+
+
+def document(body: dict[str, Any]) -> Document:
+    """One document, as `POST /v1/documents`, `GET /v1/documents/{id}` and `PATCH` return
+    it."""
+    return Document(
+        id=body["id"], scope=scope(body["scope"]), custom_id=body["custom_id"],
+        title=body["title"], filepath=body["filepath"], source_uri=body["source_uri"],
+        mime=body["mime"], content_hash=body["content_hash"],
+        status=_state(body["status"]), error=body["error"],
+        meta=dict(body["metadata"]),
+        created_at=_required_dt("created_at", body["created_at"]),
+        updated_at=_required_dt("updated_at", body["updated_at"]),
+        chunks=int(body["chunks"]))
+
+
+def document_page(body: dict[str, Any]) -> Page[Document]:
+    """One page of `GET /v1/documents`."""
+    return Page([document(d) for d in body["documents"]], body["next_cursor"])
+
+
+def document_status(body: dict[str, Any]) -> DocumentStatus:
+    """`GET /v1/documents/{id}/status`."""
+    return DocumentStatus(id=body["id"], status=_state(body["status"]),
+                          error=body["error"], chunks=int(body["chunks"]),
+                          updated_at=_required_dt("updated_at", body["updated_at"]))
+
+
+def delete_result(body: dict[str, Any]) -> DeleteResult:
+    """One document delete, as `DELETE /v1/documents/{id}` returns it and
+    `POST /v1/documents/delete` lists it."""
+    return DeleteResult(id=body["id"], deleted=bool(body["deleted"]),
+                        custom_id=body["custom_id"], chunks=int(body["chunks"]),
+                        episodes=int(body["episodes"]), retired=tuple(body["retired"]),
+                        unlinked=tuple(body["unlinked"]))

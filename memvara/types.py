@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Iterable, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Iterable, Literal, TypeVar, cast
 
 from .entities import (OWNER_SEP, entity_key, entity_type_of,
                        split_entity_type, typed_entity_key)
@@ -701,6 +701,16 @@ class Episode:
 
     @property
     def hash(self) -> str:
+        """The digest exact-repeat detection keys on: scope, role and text.
+
+        A document chunk mixes its document id in as well. Two documents that share a
+        paragraph therefore store it as two episodes, one per document, and deleting one
+        document erases only its own copy. Every other episode hashes exactly as it did
+        before documents existed, so no stored hash changes.
+        """
+        document = self.meta.get(DOCUMENT_META)
+        if document:
+            return content_hash(self.scope.key(), self.role, self.content, str(document))
         return content_hash(self.scope.key(), self.role, self.content)
 
     def __repr__(self) -> str:
@@ -2035,3 +2045,154 @@ class WriteReceipt:
     # The dataclass repr dumps every field of every nested Claim, which is unreadable at
     # a REPL and buries the one number the write path exists to minimize.
     __repr__ = __str__
+
+
+# --- documents ------------------------------------------------------------------
+
+#: The `Episode.meta` key that marks a turn as one chunk of a stored document, holding
+#: the document's id. `Episode.hash` mixes it in, so the same paragraph in two documents
+#: is two episodes rather than one episode shared by both, and deleting one document
+#: cannot take the other's text with it.
+DOCUMENT_META = "document_id"
+
+#: The `Episode.meta` key set to `False` on a document chunk stored with
+#: `add_document(extract=False)`. The salience gate refuses such a chunk, so a later
+#: `reextract()` sweep does not read a document its caller said not to extract.
+DOCUMENT_EXTRACT = "extract"
+
+
+def one_source(content: object, url: object) -> None:
+    """Refuse a document request that does not name exactly one of `content` and `url`.
+
+    One check for the library, both hosted clients and the MCP tool, so the four cannot
+    disagree about what a valid request is.
+
+    >>> one_source("text", None)
+    >>> one_source(None, None)
+    Traceback (most recent call last):
+    TypeError: add_document() needs exactly one of content and url
+    """
+    if (content is None) == (url is None):
+        raise TypeError("add_document() needs exactly one of content and url")
+
+#: A document's processing state. `queued` when the row is first written, `extracting`
+#: while the write pipeline reads its new chunks, then one of three outcomes: `done`, every
+#: chunk has been read for facts; `stored`, some chunk was kept unread because a call
+#: passed `extract=False`; `failed`, extraction raised or was deferred, and
+#: `Document.error` says why. A document in any state is stored and searchable.
+DocumentState = Literal["queued", "extracting", "done", "stored", "failed"]
+
+#: Every legal `DocumentState`, in the order a document moves through them.
+DOCUMENT_STATES: tuple[DocumentState, ...] = ("queued", "extracting", "done", "stored",
+                                              "failed")
+
+#: The closure reason recorded on a claim that is retired because the only document it
+#: came from was deleted. `history()` and `why()` show it.
+DOCUMENT_DELETED_REASON = "source document deleted"
+
+#: The longest `custom_id` a document accepts.
+CUSTOM_ID_CHARS = 255
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentChunk:
+    """One retrieval chunk of a document, and the episode it was stored as.
+
+    `hash` is the digest of `text`, and it is what a re-ingest matches on: a chunk whose
+    text is unchanged keeps its episode, its vector and every claim that cites it, and
+    only its `position` moves.
+    """
+
+    position: int
+    text: str
+    hash: str
+    episode_id: str
+
+
+@dataclass(slots=True)
+class Document:
+    """A document stored whole and searchable in chunks.
+
+    The document row holds what describes the text: its title, where it came from, its
+    caller-supplied id and metadata, and its processing state. The text itself is held
+    as chunks, each stored as a `role="system"` episode with `meta["document_id"]` set,
+    so the episode text index and vectors serve documents without a second index.
+
+    `custom_id` is the caller's own name for the document, unique within one scope.
+    Adding a document with a `custom_id` that already exists in the same scope updates
+    that document instead of creating a second one. `chunks` is how many chunks the
+    document is currently stored as.
+    """
+
+    id: str = field(default_factory=lambda: _new_id("doc"))
+    scope: Scope = field(default_factory=Scope)
+    custom_id: str | None = None
+    title: str | None = None
+    filepath: str | None = None
+    source_uri: str | None = None
+    mime: str = "text/plain"
+    content_hash: str = ""
+    status: DocumentState = "queued"
+    error: str | None = None
+    meta: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
+    chunks: int = 0
+
+    def __repr__(self) -> str:
+        name = self.custom_id or self.title or ""
+        return (f"<Document {self.id} {self.scope.key()} {self.status} "
+                f"chunks={self.chunks} {_short(name)!r}>")
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentStatus:
+    """Where one document is in processing. See `DocumentState` for the four values.
+
+    The five processing fields of a `Document`, and nothing else, so a status check
+    carries no title, path or metadata. Built from a document by `of()` locally; the
+    hosted client reads it from the status route.
+    """
+
+    id: str
+    status: DocumentState
+    error: str | None
+    chunks: int
+    updated_at: datetime
+
+    @classmethod
+    def of(cls, doc: "Document") -> "DocumentStatus":
+        return cls(doc.id, doc.status, doc.error, doc.chunks, doc.updated_at)
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteResult:
+    """What deleting one document did.
+
+    `deleted` is false when nothing visible matched the id, and every count is then zero.
+    A document delete **erases** the document row, its chunks and the episodes they were
+    stored as. It erases no memory: a claim whose every source was one of those episodes
+    is **retired** with the reason "source document deleted" and listed in `retired`,
+    and a claim that also had another source keeps that source and is listed in
+    `unlinked`.
+    """
+
+    id: str
+    deleted: bool
+    custom_id: str | None = None
+    chunks: int = 0
+    episodes: int = 0
+    retired: tuple[str, ...] = ()
+    unlinked: tuple[str, ...] = ()
+
+
+_Item = TypeVar("_Item")
+
+
+@dataclass(frozen=True, slots=True)
+class Page(Generic[_Item]):
+    """One page of a listing. `next_cursor` fetches the next page, and is `None` on the
+    last one."""
+
+    items: list[_Item]
+    next_cursor: str | None = None

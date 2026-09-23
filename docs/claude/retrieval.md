@@ -118,6 +118,10 @@ JSON, under a header that names the text as data rather than instruction.
   in the store, not in a comprehension afterwards, or the top of the list is silently wrong.
   `HybridRetriever` filters `memory_types` after fusion on purpose and pays for it with a
   bounded retry when the pool came back full.
+- **A document's passages are episodes.** `add_document()` stores each chunk as a
+  `role="system"` episode with `meta["document_id"]`, so the episode legs find passages
+  from documents with no index of their own, and only when `include_episodes=True` is
+  asked for. The chunker is `memvara/documents/chunk.py`.
 - **A store can only be opened by the embedder that wrote it.** `fingerprint_of()` records
   which embedder and dimension produced the vectors, and `Memvara` refuses a mismatch with a
   message naming the width to use. `reembed()` is the way through.

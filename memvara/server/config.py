@@ -100,16 +100,18 @@ _DEFAULT_EMBEDDER = "hashing"
 #: with 0 duplicates on the longest turn of the extraction spike, and the one measured run
 #: found 4 of 5 (`docs/ROADMAP.md`, the "Reversed" list).
 #:
-#: Only some of these change what this process does. `project_scope` decides whether the
-#: project is derived from the working directory, `profile` decides whether the
-#: `memory_profile` tool is listed, and `extraction_chunks` decides whether a long turn is
-#: extracted in pieces (`WritePipeline.extraction_chunks`). The others belong to the plugin
-#: or to tools that are not in this build yet; they are parsed here so that a typo in any
-#: of them is refused at startup rather than ignored.
+#: Several of these change what this process does. `project_scope` decides whether the
+#: project is derived from the working directory; `profile`, `forget_matching`, `links`
+#: and `documents` decide whether their tools are listed; `end_reason` decides whether the
+#: tools take a reason; `retrieval_chunks` decides whether a local store splits a document
+#: into chunks of about 1,000 characters or keeps it as one; and `extraction_chunks`
+#: decides whether a long turn is extracted in pieces (`WritePipeline.extraction_chunks`).
+#: The others belong to the plugin; they are parsed here so that a typo in any of them is
+#: refused at startup rather than ignored.
 #:
 #: `ingest_urls` and `ingest_media` switch off fetching a URL and reading images, audio and
 #: video when a document is added. `memvara.ingest.extract` takes them as its `allow_urls`
-#: and `allow_media` arguments; no tool in this server adds documents yet.
+#: and `allow_media` arguments, and `build_memvara` hands them to `Memvara`.
 #:
 #: `query_rewrite` and `synthesis` switch off the read path's two model stages
 #: (`memvara.select.stages`). A local store is then built with that stage off, and
@@ -125,6 +127,8 @@ FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
     "forget_matching": True,
     "end_reason": True,
     "links": True,
+    "documents": True,
+    "retrieval_chunks": True,
     "extraction_chunks": False,
     "ingest_urls": True,
     "ingest_media": True,
@@ -475,7 +479,7 @@ def unknown_features(names: Iterable[str]) -> str | None:
     exception, so the two cannot disagree about what a feature is.
 
     >>> unknown_features(["profle"])
-    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, extraction_chunks, ingest_urls, ingest_media, query_rewrite and synthesis."
+    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite and synthesis."
     >>> unknown_features(["profile"]) is None
     True
     """
@@ -952,7 +956,7 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
     table can serve either. It is **not** a `Memvara` over a `RemoteStore`, and that
     distinction is the whole decision — the engine calls `put_claim`, `lexical_search`
     and `competing_claims` on every turn and the facade has an endpoint for none of them,
-    so a server built that way would start, list eighteen tools and fail on the first one
+    so a server built that way would start, list twenty-two tools and fail on the first one
     a model reached for. See `docs/OPEN-CORE.md` for which side of the line each seam is
     on.
     """
@@ -1024,6 +1028,15 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         # `HybridRetriever`'s own default happens to agree.
         read_w_graph=config.read_w_graph,
         confirm_secret=config.confirm_secret,
+        # `MEMVARA_FEATURE_RETRIEVAL_CHUNKS=0` stores each document as one chunk. Under
+        # MEMVARA_MODE=cloud the deployment chunks, and reads the same switch itself.
+        retrieval_chunks="retrieval_chunks" not in config.features_off,
+        # `add_document(url=...)` fetches through the operator's NAT64 prefixes, and the
+        # two ingestion switches reach `memvara.ingest.extract` as `allow_urls` and
+        # `allow_media`.
+        url_fetcher=config.url_fetcher(),
+        ingest_urls="ingest_urls" not in config.features_off,
+        ingest_media="ingest_media" not in config.features_off,
         # The read path's model stages use the `llm` above when it can chat, and these
         # are their switches, `MEMVARA_FEATURE_QUERY_REWRITE` and
         # `MEMVARA_FEATURE_SYNTHESIS`.

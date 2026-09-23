@@ -77,13 +77,14 @@ imports `memvara`, not whichever `python3` a GUI `PATH` finds.
 `npx memvara` bridges a stdio client to the hosted server and signs you in on
 first run, for a machine with no Python at all.
 
-## The eighteen tools
+## The twenty-two tools
 
 `memory_recall`, `memory_search`, `memory_neighborhood`, `memory_paths`,
 `memory_ask`, `memory_since`, `memory_standing`, `memory_profile`,
 `memory_add`, `memory_remember`, `memory_forget`, `memory_end`,
 `memory_end_matching`, `memory_forget_matching`, `memory_link`,
-`memory_history`, `memory_why`, `memory_stats`.
+`memory_history`, `memory_why`, `memory_stats`, `memory_add_document`,
+`memory_get_document`, `memory_list_documents`, `memory_delete_document`.
 
 That is what this library serves. **A hosted deployment can be behind it**, and
 saying so is more useful than a number that is wrong for one of the two: a
@@ -93,7 +94,8 @@ simply whether the tool you want is one you can see. A tool that is absent is a
 deployment that has not caught up, not a tool that was removed.
 
 `erase`, `purge`, `reset`, `consolidate` are not tools. A read-only server
-hides the seven write tools, and a server started with a feature switched
+hides the nine write tools, and a server started with a feature switched
 off hides that feature's tools: `MEMVARA_FEATURE_PROFILE=0` hides
 `memory_profile`, `MEMVARA_FEATURE_FORGET_MATCHING=0` hides the two
-`_matching` tools, and `MEMVARA_FEATURE_LINKS=0` hides `memory_link`.
+`_matching` tools, `MEMVARA_FEATURE_LINKS=0` hides `memory_link`, and
+`MEMVARA_FEATURE_DOCUMENTS=0` hides the four document tools.

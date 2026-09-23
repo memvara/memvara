@@ -460,6 +460,22 @@ def test_turns_the_selector_kept_stay_first_ahead_of_the_fused_rows() -> None:
     assert len(kept) == 1, "a kept turn is not listed again among the fused rows"
 
 
+def test_a_rewritten_read_searches_document_chunks_too() -> None:
+    """Document chunks are episodes, so an alternative phrasing reaches them through the
+    same episode legs the original query uses."""
+    mem = memory(FakeChat(rewrite_reply("rollback runbook")))
+    mem.add_document("To roll back a release, run the rollback runbook step by step.",
+                     title="Release notes", extract=False)
+    # A floor the original query's weak match does not clear and the phrasing's does.
+    plain = mem.search("undo a deploy", include_episodes=True, min_score=0.1,
+                       query_rewrite=False)
+    assert plain == []
+    fused = mem.search("undo a deploy", include_episodes=True, min_score=0.1)
+    [chunk] = fused
+    assert isinstance(chunk, EpisodeResult) and chunk.episode.meta.get("document_id")
+    assert fused.rewrite is not None and fused.rewrite.queries == ("rollback runbook",)
+
+
 def test_a_rewritten_read_is_observed_once() -> None:
     rec = MemoryRecorder()
     mem = memory(FakeChat(rewrite_reply("a", "b")), telemetry=rec)
@@ -1286,6 +1302,7 @@ MODEL_CALLS = {
     "memvara/write/pipeline.py::_extract: self.llm.extract",
     "memvara/write/pipeline.py::_acquire: self.llm.classify_predicate",
     # ingestion, when a document's media is turned into text
+    "memvara/documents/service.py::_text: ingest.extract",
     "memvara/ingest/media.py::media_to_text: llm.describe_image",
     "memvara/ingest/media.py::media_to_text: llm.transcribe",
 }
