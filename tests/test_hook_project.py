@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
+import posixpath
 import pathlib
 import shutil
 import subprocess
@@ -101,12 +103,45 @@ def test_the_case_insensitive_hosts_in_the_vectors_are_the_ones_the_code_folds()
     assert sorted(project.CASE_INSENSITIVE_HOSTS) == sorted(VECTORS["case_insensitive_hosts"])
 
 
-@pytest.mark.parametrize("example", VECTORS["path_form"]["examples"])
-def test_the_path_form_is_a_short_digest_of_the_repository_root(example):
+@pytest.mark.parametrize("example", VECTORS["path_form"]["examples"],
+                         ids=lambda e: e["root"])
+def test_every_path_form_row_hashes_as_recorded(example):
+    """POSIX and Windows roots alike, checked on every platform, because the function is
+    pure: `canonical_project` only puts `realpath` in front of it."""
     assert project.path_identity(example["root"]) == example["project"]
-    digest = hashlib.sha256(example["root"].encode("utf-8")).hexdigest()
-    assert example["project"] == (VECTORS["path_form"]["prefix"]
-                                  + digest[:VECTORS["path_form"]["hex_chars"]])
+
+
+@pytest.mark.parametrize("root", ["C:\\Users\\dev\\memvara", "c:/Users/dev/memvara",
+                                  "C:/Users/dev/memvara/", "C:\\Users\\dev\\memvara\\"])
+def test_every_spelling_of_one_windows_root_hashes_one_string(root):
+    """`realpath` on Windows gives backslashes and whichever drive-letter case the system
+    reports. Hashed as given, one repository would get a different name from the library,
+    or from itself after the drive letter changed case."""
+    expected = hashlib.sha256(b"c:/Users/dev/memvara").hexdigest()[:16]
+    assert project.path_identity(root) == f"path:{expected}"
+
+
+def test_the_rest_of_a_windows_path_keeps_its_case():
+    """Only the drive letter folds; folding the rest would merge two directories on a
+    case-sensitive volume."""
+    assert project.path_identity("C:\\Src\\App") != project.path_identity("C:\\src\\app")
+
+
+def test_the_filesystem_root_is_not_emptied():
+    assert project.path_identity("/") == f"path:{hashlib.sha256(b'/').hexdigest()[:16]}"
+    assert project.path_identity("/srv/app/") == project.path_identity("/srv/app")
+
+
+@pytest.mark.parametrize("paths, common, root", [
+    (ntpath, "C:\\src\\app\\.git", "C:\\src\\app"),
+    (ntpath, "C:\\srv\\app.git", "C:\\srv\\app.git"),
+    (posixpath, "/src/app/.git", "/src/app"),
+    (posixpath, "/srv/app.git", "/srv/app.git"),
+])
+def test_the_main_working_tree_is_found_the_same_way_on_both_platforms(paths, common, root):
+    """The directory holding `.git`, or a bare repository's own directory, with the
+    platform's path rules passed in so that Windows is pinned on any machine."""
+    assert project.main_root(common, paths) == root
 
 
 # -- canonical_project against real repositories -------------------------------------
@@ -255,14 +290,16 @@ def test_a_repository_with_a_remote_costs_one_git_process(monkeypatch, tmp_path)
 
 
 @needs_git
-@pytest.mark.skipif(os.name == "nt", reason="git arguments are bytes only on POSIX")
 def test_a_remote_that_is_not_utf8_means_no_project_rather_than_a_crash(tmp_path):
     """Git hands back raw bytes, and decoding them as text inside `subprocess.run` raised
     `UnicodeDecodeError` from a place nothing caught: every hook in such a repository failed
     its turn. A hook must never fail a turn, so this degrades to no project scope."""
     main = _repo(tmp_path / "main")
-    subprocess.run([b"git", b"config", b"remote.origin.url", b"https://h.example/\xff/r"],
-                   cwd=main, check=True, capture_output=True)
+    # Written into the config file as bytes rather than passed to `git config` as an
+    # argument: Windows decodes a command-line argument before git sees it, and the test
+    # would then fail in its own setup.
+    with open(main / ".git" / "config", "ab") as config:
+        config.write(b'[remote "origin"]\n\turl = https://h.example/\xff/r\n')
     assert project.canonical_project(str(main)) is None
 
 
@@ -471,6 +508,17 @@ def test_both_copies_accept_the_same_project_names(row):
 def test_both_copies_share_the_length_limit(length):
     value = "example.com/" + "a" * (length - len("example.com/"))
     assert project.is_canonical(value) is _library_accepts(value)
+
+
+@pytest.mark.parametrize("example", VECTORS["path_form"]["examples"],
+                         ids=lambda e: e["root"])
+def test_both_copies_spell_and_hash_a_root_the_same_way(example):
+    assert project.path_identity(example["root"]) == library.path_identity(example["root"])
+
+
+@pytest.mark.parametrize("common", ["C:\\src\\app\\.git", "C:\\srv\\app.git"])
+def test_both_copies_find_the_main_working_tree_the_same_way(common):
+    assert project.main_root(common, ntpath) == library.main_root(common, ntpath)
 
 
 def test_both_copies_fold_case_on_the_same_hosts():

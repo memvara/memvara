@@ -1636,7 +1636,9 @@ whole job is to say what was spent.
 **The project a hook works in reaches the server as a header, carried by the environment.**
 `lib/project.py` turns the session's directory into a project: `host/owner/repo` from the
 `origin` remote, which every worktree of a repository shares, or `path:` and 16 hex
-characters of a hash of the main repository's root when there is no usable remote, or
+characters of a hash of the main repository's root when there is no usable remote (the
+root is put in one spelling first, with forward slashes, a lower-case drive letter and no
+trailing slash, so Windows and POSIX agree with each other and with the library), or
 nothing outside a repository. A remote that normalises to a name the server would refuse,
 such as one with a `..` segment, falls back to the path form, as the library's copy does.
 Output from git that is not UTF-8 gives nothing, rather than an exception that would fail

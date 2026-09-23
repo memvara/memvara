@@ -211,12 +211,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 - **The client hooks send the project they are working in.** `plugin/hooks/lib/project.py`
   works out the project from the repository's `origin` remote: `host/owner/repo`, the same
   for every clone and every worktree of one repository, or `path:` and 16 hex characters
-  of a hash of the repository root when there is no remote, or nothing outside a
-  repository. The hosted client sends it as a `Memvara-Project` header on every call. The
-  answer is cached for an hour, one small file per directory in
-  `~/.memvara/.hooks/projects/`, because working it out costs one or two `git` processes
-  and the recall hook runs on every prompt. A
-  resident recall daemon now serves one project, so a daemon started in one repository
+  of a hash of the repository root, spelled the same way on Windows and POSIX, when there
+  is no remote, or nothing outside a repository. The hosted client sends it as a
+  `Memvara-Project` header on every call. The answer is cached for an hour, one small
+  file per directory in `~/.memvara/.hooks/projects/`, because working it out costs one
+  or two `git` processes and the recall hook runs on every prompt. A resident recall daemon now serves one project, so a daemon started in one repository
   never answers for another. The hooks cannot import the library, so this is a second copy
   of the library's own function; the normalisation rules both copies must agree on are in
   `plugin/hooks/lib/project_vectors.json`, including which names the server accepts: a

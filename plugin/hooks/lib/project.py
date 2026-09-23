@@ -157,14 +157,36 @@ def is_canonical(value: str) -> bool:
     return all(segment not in ("", ".", "..") for segment in rest.split("/"))
 
 
+def main_root(common_dir: str, paths: "ModuleType" = os.path) -> str:
+    """The main working tree for a repository whose common git directory is `common_dir`.
+
+    That is the directory holding `.git`; a bare repository has no working tree, so its own
+    directory is named instead. `paths` is the path module, `os.path` by default; a test
+    passes `ntpath` to pin the Windows behaviour on any machine. The same as the library's
+    `main_root`.
+    """
+    return (paths.dirname(common_dir) if paths.basename(common_dir) == ".git"
+            else common_dir)
+
+
 def path_identity(root: str) -> str:
     """The project for a repository with no usable remote: a digest of its root's path.
 
     `root` should already be a real path, with symlinks resolved, so that two spellings of
     one directory give one project. A digest rather than the path itself, because the path
     names a user's home directory and this value is sent to a server.
+
+    Before hashing, the path is put in one spelling, exactly as the library's
+    `path_identity` does, so every platform and both copies hash the same string for one
+    directory: backslashes become forward slashes, a drive letter is lower-cased, and
+    trailing slashes are removed, keeping `/` for the filesystem root. The rest keeps its
+    case, because folding it would merge two directories on a case-sensitive volume.
     """
-    digest = hashlib.sha256(root.encode("utf-8")).hexdigest()
+    spelled = root.replace("\\", "/")
+    if len(spelled) >= 2 and spelled[1] == ":" and spelled[0].isalpha():
+        spelled = spelled[0].lower() + spelled[1:]
+    spelled = spelled.rstrip("/") or "/"
+    digest = hashlib.sha256(spelled.encode("utf-8")).hexdigest()
     return f"path:{digest[:PATH_HEX_CHARS]}"
 
 
@@ -220,9 +242,7 @@ def canonical_project(cwd: str) -> "str | None":
         return None
     if common is None:
         return None
-    # `<root>/.git` for an ordinary repository; a bare repository is its own root.
-    root = os.path.dirname(common) if os.path.basename(common) == ".git" else common
-    return path_identity(os.path.realpath(root))
+    return path_identity(os.path.realpath(main_root(common)))
 
 
 def _cache_path(key: str) -> str:
