@@ -111,8 +111,9 @@ feature's default. Each of these four is on by default.
   again.
 
 The file lists the library's other switches too, with the same defaults as
-the MCP server. `extraction_chunks` is the one that is off by default. No
-hook reads those; the MCP server reads them from `MEMVARA_FEATURE_<NAME>`.
+the MCP server. `extraction_chunks` and `agentic_extraction` are the two that
+are off by default. No hook reads those; the MCP server reads them from
+`MEMVARA_FEATURE_<NAME>`.
 
 ## Your own agent
 

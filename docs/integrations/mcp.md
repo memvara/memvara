@@ -90,7 +90,11 @@ two arguments stay listed, with a description saying they are refused. A hosted
 deployment does not accept the two arguments yet, so in cloud mode a filtered call fails
 with the deployment's refusal rather than being answered unfiltered.
 `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` (off by default) makes the extraction model read a
-turn over 6,000 characters in pieces, one call per piece. `MEMVARA_FEATURE_ENCRYPTION=0`
+turn over 6,000 characters in pieces, one call per piece.
+`MEMVARA_FEATURE_AGENTIC_EXTRACTION=1` (off by default) lets the extraction model search
+the store and propose new memories, ends, replacements and links through tools, which the
+write path then applies or refuses; it needs `MEMVARA_LLM` set to `anthropic` or `openai`,
+and it costs several model calls per write instead of one. `MEMVARA_FEATURE_ENCRYPTION=0`
 creates a new store unencrypted. A feature marked (off by default)
 stays off until its variable says `1`; every other feature is on until its variable says `0`.
 

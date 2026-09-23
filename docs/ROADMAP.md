@@ -789,6 +789,47 @@ The entry as it was declined:
 > facts with 0 duplicates on `tests/fixtures/phi4_spike/`'s longest episode. Raw measurements
 > are in `memvara-cloud/local/phi4-cpu-spike-2026-09-03/result-quant-comparison.txt`.
 
+**A model on the write path only to extract and to name predicates.** Held as invariant 1
+of `docs/INTERNALS.md`. **Reversed on 2026-09-24 and built, switched off by default.** The
+phase 3 parity design
+(`docs/superpowers/specs/2026-09-23-parity-phase-3-extraction-and-cloud-design.md`,
+section 3.1) asks for agentic extraction: a model that reads the store through tools and
+proposes new memories, ends, replacements and links. The reason is what single-call
+extraction cannot do. It sees the turns and nothing else, so it cannot tell a new fact
+from one already stored, and it cannot connect "my contract with Acme finished" to the
+stored claim that the user works at Acme unless the turn uses a sentence form the fast path
+knows. The design keeps the part of the old invariant the measurements stand on: the model
+**proposes** and the deterministic reconciler **applies**, so every change is one of the
+reconciler's recorded outcomes, and a model can end a memory but never retire or erase one.
+It is `WritePipeline(agentic_extraction=True)`, `Memvara(write_agentic_extraction=True)`,
+or `MEMVARA_FEATURE_AGENTIC_EXTRACTION=1` on the MCP server, and it needs a backend that
+implements `llm.ToolChat` (`AnthropicLLM` or `OpenAILLM`).
+
+**It ships off because its release bar has not been measured.** The design sets two
+conditions before it may default on. First, `demo/harness.py` must show no fewer claims
+and no more duplicates than today's single-call extractor on the same model. Second,
+judged accuracy on the 199-question LongMemEval sample (seed `20260903`) must be within
+the reader noise floor of the current production number. That floor is recorded in
+`docs/BENCHMARKS.md` under "Answer accuracy, judged": reader self-disagreement of 7.8%, so
+a single-run difference under about 8 questions is noise. Both need a model key, and none
+was available when this was built, so there are no numbers here, not even a partial one.
+The hosted half of the measurement, the extraction worker's switch and the benchmark runs,
+is a separate piece of work in the phase 3 plan (stream P3-F).
+
+The invariant as it was held:
+
+> **Claim.** Deterministic stages (deduplication, contradiction resolution, ranking,
+> decay, time travel) never call a model. […]
+> **Scope.** The library. On the write path, only `extract()` and `resolve_predicate()`
+> may touch a model.
+> **Measured.** `bench/mem0_real.py`: 2 write-path LLM calls against mem0's 105 on the
+> same 105-turn transcript, and **identical final state on every run** where mem0's
+> differs.
+
+The measurement is still true of single-call extraction, which is the default. With
+agentic extraction on, the final state is identical across runs only when the model makes
+the same proposals, and a write costs several model calls rather than one.
+
 ## A JavaScript client, and what was built instead
 
 Recorded here because this list is where *considered* belongs, and until 2026-08-25 a JS

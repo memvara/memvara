@@ -139,6 +139,45 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **Agentic extraction, off by default.** `WritePipeline(agentic_extraction=True)`,
+  `Memvara(write_agentic_extraction=True)` or `MEMVARA_FEATURE_AGENTIC_EXTRACTION=1` on the
+  MCP server replaces tier 2's single `llm.extract()` call with a tool loop
+  (`memvara.write.agentic.AgenticExtractor`). The model can call `search_memories(query,
+  k)` and `get_claim(claim_id)` to read what this write's scope can see, and proposes
+  changes with `propose_claim`, `propose_end(claim_id, reason, source_index)`,
+  `propose_supersede(claim_id, reason, …)` and `propose_link(from_ref, to_ref,
+  relation)`. Proposals are not writes. A proposed memory passes the pollution guard, the
+  closed vocabulary, predicate acquisition and the grounding check, and then
+  `Reconciler.apply`, which decides duplicates, conflicts and supersession as before. A
+  proposed end becomes a retraction with `close="ended"` and the model's reason, so it
+  ends a memory and never retires or erases one. A proposed link becomes a `claim_links`
+  row. A proposal is refused when it names a memory the model did not read in this run
+  (`not_read`), ends or replaces a memory with another owner (`out_of_scope`), cannot be
+  shaped (`invalid`), or restates the extractor's instructions (`instruction_echo`); a
+  valid proposal the write path did not carry out, such as a replacement the reconciler
+  stored beside the old value, is `not_applied`. All five land on the new
+  `WriteReceipt.proposals_refused` as `RefusedProposal(tool, target, reason)`. The rules
+  are the system message and the turns are a user message inside `<content>` tags,
+  described as data, and a turn cannot close the tag. At most 12 answers, 8,192 output
+  tokens per answer, 180 seconds per run, one retry per answer; every request is counted
+  in `llm_calls`. The batch falls back to the single call, and the new
+  `WriteReceipt.agentic_fallback` says why, when the backend cannot run tools
+  (`unsupported`), on `timeout`, on an answer that cannot be used twice in a row
+  (`malformed`), when the model is still calling tools after 12 answers (`step_limit`), on
+  a request that fails twice (`error`), or when a batch spans two scopes (`mixed_scope`).
+  New telemetry series `write.agentic` and `write.agentic_refused`, and the MCP write
+  tools add a note line for each. It ships off because its release bar, no fewer claims
+  and no more duplicates than single-call extraction on `demo/harness.py` and judged
+  LongMemEval accuracy within the reader's noise floor, has not been measured.
+- **`llm.ToolChat`, a protocol for tool-using conversations.** `run_tools(system,
+  messages, tools, *, max_steps, timeout, usage=None) -> ToolRun`, with `Message`,
+  `ToolSpec`, `ToolRun`, `ToolRunError`, `ToolRunTimeout` and `MalformedToolOutput` in
+  `memvara.llm.base`. `AnthropicLLM` and `OpenAILLM` implement it with each provider's
+  native tool calling and strict tool schemas; the SDKs stay optional imports. It is its
+  own protocol, so a backend written before it is still an `LLM`.
+- **`Reconciler.apply(..., reason=None)`** records a closure reason on whatever the
+  candidate closes, by supersession or by retraction. It changes nothing the reconciler
+  decides.
 - **Query rewrite on `search()` and `recall()`.** Before retrieval, one call to the
   configured chat backend sends the query and today's date, and reads back JSON with up
   to three alternative queries and an optional date range. The original query and each

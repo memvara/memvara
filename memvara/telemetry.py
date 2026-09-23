@@ -368,6 +368,25 @@ WRITE_DISPUTED = "write.disputed"
 #: held for no time.
 WRITE_COLLAPSED = "write.collapsed"
 
+#: One per batch that reached the model with agentic extraction switched on, tagged
+#: `outcome` (`agentic` when the tool loop's proposals were used, `fallback` when the batch
+#: went to single-call extraction instead) and `reason` (`none`, or the fallback reason the
+#: receipt carries in `agentic_fallback`). See `memvara.write.agentic`.
+#:
+#: **What a non-zero `fallback` means.** The deployment is paying for a switch it is not
+#: getting. `unsupported` on every batch says the configured backend cannot run tools and
+#: the switch should be off. `timeout`, `malformed` and `step_limit` say the model is
+#: struggling with the loop, and each such batch cost the failed loop's requests plus one
+#: more call; those requests are in `write.llm_calls` and the tokens in `write.tokens_*`.
+WRITE_AGENTIC = "write.agentic"
+
+#: One per proposal agentic extraction did not apply, tagged `reason` with the values of
+#: `types.RefusalReason`. A steady `not_read` rate says the model names memories it never
+#: looked at; `instruction_echo` above zero says turns are quoting the extractor's
+#: instructions and the guard is catching them; `not_applied` is the reconciler
+#: disagreeing with the model, which is the design working rather than a fault.
+WRITE_AGENTIC_REFUSED = "write.agentic_refused"
+
 #: One per `search()`, tagged `script`. Pairs with the gate slices: a script with query
 #: volume and no `gate.pass` is a population whose writes are being dropped.
 RETRIEVAL_QUERY = "retrieval.query"

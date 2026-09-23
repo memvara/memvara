@@ -272,7 +272,8 @@ class Reconciler:
 
     def apply(self, claim: Claim, *, now: datetime | None = None,
               close: Closure = "ended",
-              asserted_type: MemoryType | None = None) -> ReconcileResult:
+              asserted_type: MemoryType | None = None,
+              reason: str | None = None) -> ReconcileResult:
         """Reconcile one candidate against the claims already on record.
 
         `close` decides which clock stops on whatever this candidate displaces, and
@@ -281,6 +282,12 @@ class Reconciler:
         against the record. `close="retired"` is the caller saying the thing they are
         replacing was never true — a correction rather than a change — and only a caller
         can know that. See `memvara.types.Closure`.
+
+        `reason` is recorded on every claim this candidate closes, by supersession or by
+        retraction, where `history()` and `why()` show it. It decides nothing: the same
+        candidate closes the same claims with or without one. The caller validates it
+        first with `types.closure_reason`. Agentic extraction passes the reason the model
+        gave with a proposal (`memvara.write.agentic`); every other caller passes none.
         """
         t = now or utcnow()
         self._canonicalize(claim)
@@ -329,7 +336,7 @@ class Reconciler:
 
         # 2. Retraction: the user is taking something back.
         if claim.polarity < 0:
-            return self._retract(claim, t, owner, close)
+            return self._retract(claim, t, owner, close, reason)
 
         # 3. Conflict, then 4. accumulate.
         superseded, newer = self._victims(claim, t, owner)
@@ -354,7 +361,7 @@ class Reconciler:
             # The new value's `valid_from` is when the old one stopped being true — not
             # `t`, which is merely when we found out.
             collapsed = self._retire(superseded, t, claim.id, claim.valid_from,
-                                     close=close)
+                                     close=close, reason=reason)
             return ReconcileResult("supersede", claim, superseded,
                                    disputed=disputed, collapsed=collapsed,
                                    retyped=refiled)
@@ -768,7 +775,7 @@ class Reconciler:
 
     def _retire(self, victims: Sequence[Claim], t: datetime, by: str | None,
                 valid_to: datetime | None = None, *,
-                close: Closure = "ended") -> list[Collapse]:
+                close: Closure = "ended", reason: str | None = None) -> list[Collapse]:
         """Close out displaced claims on **one** axis: the one that says why.
 
         `close="ended"` stops the world clock at `valid_to`: the claim was true and is
@@ -803,7 +810,7 @@ class Reconciler:
         emptied: list[Collapse] = []
         for v in victims:
             began = as_utc(v.valid_from)
-            close_out(v, t if close == "retired" else boundary, by, close)
+            close_out(v, t if close == "retired" else boundary, by, close, reason)
             # `put_claim` rather than `store.invalidate`, because the Store protocol has
             # no way to set `valid_to`, and no way to write `invalidated_by` without also
             # writing `invalidated_at` — which is exactly the conflation this method
@@ -820,7 +827,7 @@ class Reconciler:
         return emptied
 
     def _retract(self, claim: Claim, t: datetime, owner: str,
-                 close: Closure = "ended") -> ReconcileResult:
+                 close: Closure = "ended", reason: str | None = None) -> ReconcileResult:
         tenant = claim.scope.tenant
         slot = [c for c in self.store.competing_claims(tenant, claim.fact_key,
                                                        valid_at=t, known_at=t)
@@ -904,7 +911,8 @@ class Reconciler:
             #
             # A retraction dated in the past ("I stopped working there in March") closes
             # the interval in March, not today — same distinction as a supersession.
-            collapsed = self._retire(matches, t, claim.id, claim.valid_from, close=close)
+            collapsed = self._retire(matches, t, claim.id, claim.valid_from, close=close,
+                                     reason=reason)
         return ReconcileResult("retract", claim, matches, collapsed=collapsed)
 
 

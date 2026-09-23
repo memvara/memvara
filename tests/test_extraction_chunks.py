@@ -445,7 +445,8 @@ def test_one_table_holds_every_feature_and_its_default():
 def test_the_help_text_names_the_features_that_are_off_by_default_from_the_table(
         monkeypatch):
     from memvara.server import cli
-    assert "Every feature is on by default except EXTRACTION_CHUNKS." in cli.USAGE
+    assert ("Every feature is on by default except AGENTIC_EXTRACTION and "
+            "EXTRACTION_CHUNKS.") in cli.USAGE
     monkeypatch.setattr(cli, "FEATURES_OFF_BY_DEFAULT", frozenset({"links", "profile"}))
     assert cli._feature_defaults() == "Every feature is on by default except LINKS and PROFILE."
     monkeypatch.setattr(cli, "FEATURES_OFF_BY_DEFAULT", frozenset())
@@ -475,13 +476,14 @@ def test_a_server_built_in_python_starts_with_the_same_features_off_as_one_from_
                   user="alice")
     srv = MemvaraMCPServer(mem, user="alice")
     assert srv.features_off == FEATURES_OFF_BY_DEFAULT
-    assert "features switched off: extraction_chunks" in text(srv, "memory_stats")
+    assert "features switched off: agentic_extraction, extraction_chunks" in text(
+        srv, "memory_stats")
     srv.close()
 
 
 def test_the_feature_is_listed_and_off_unless_the_environment_turns_it_on():
     assert "extraction_chunks" in FEATURES
-    assert FEATURES_OFF_BY_DEFAULT == frozenset({"extraction_chunks"})
+    assert FEATURES_OFF_BY_DEFAULT == frozenset({"extraction_chunks", "agentic_extraction"})
     assert "extraction_chunks" in ServerConfig().features_off
     assert "extraction_chunks" in ServerConfig.from_env({"MEMVARA_DB": ":memory:"}).features_off
     on = ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_FEATURE_EXTRACTION_CHUNKS": "1"})

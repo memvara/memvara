@@ -99,7 +99,15 @@ _DEFAULT_EMBEDDER = "hashing"
 #: has not yet passed the test its design says it must pass before it is switched on for
 #: everyone. `extraction_chunks` is off for that reason: its test asks for 5 of 5 key facts
 #: with 0 duplicates on the longest turn of the extraction spike, and the one measured run
-#: found 4 of 5 (`docs/ROADMAP.md`, the "Reversed" list).
+#: found 4 of 5 (`docs/ROADMAP.md`, the "Reversed" list). `agentic_extraction` is off for
+#: the same reason: its test asks for no fewer claims and no more duplicates than
+#: single-call extraction on `demo/harness.py`, and judged LongMemEval accuracy within the
+#: reader's noise floor, and neither has been measured yet.
+#:
+#: `agentic_extraction` decides whether the extraction model works through tools and
+#: proposals (`WritePipeline.agentic_extraction`, `memvara.write.agentic`). It matters only
+#: when `MEMVARA_LLM` names a model whose backend implements `llm.ToolChat`; with any other
+#: backend every write falls back to single-call extraction and says so on its receipt.
 #:
 #: Several of these change what this process does. `project_scope` decides whether the
 #: project is derived from the working directory; `profile`, `forget_matching`, `links`
@@ -146,6 +154,7 @@ FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
     "synthesis": True,
     "metadata_filters": True,
     "encryption": True,
+    "agentic_extraction": False,
 })
 
 #: Every feature name, in the order `FEATURE_DEFAULTS` lists them.
@@ -498,7 +507,7 @@ def unknown_features(names: Iterable[str]) -> str | None:
     exception, so the two cannot disagree about what a feature is.
 
     >>> unknown_features(["profle"])
-    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite, synthesis, metadata_filters and encryption."
+    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite, synthesis, metadata_filters, encryption and agentic_extraction."
     >>> unknown_features(["profile"]) is None
     True
     """
@@ -1087,6 +1096,7 @@ def _local_memvara(config: ServerConfig, encryption: bool) -> Memvara:
         advise_replacements=config.advise_replacements,
         write_closed_vocabulary=config.closed_vocabulary,
         write_extraction_chunks="extraction_chunks" not in config.features_off,
+        write_agentic_extraction="agentic_extraction" not in config.features_off,
         # Explicit at its own default, like `llm` and `embedder` above and for a related
         # reason: this is the one line that says which retrieval legs this store reads
         # with, and a reader of this function should not have to know that

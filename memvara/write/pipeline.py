@@ -13,6 +13,8 @@ needed it.
              plus one resolve_predicate() per *novel surface form*, ever
              (under `extraction_chunks`, a turn over 6,000 characters is
              extracted in pieces instead                               -- 1 call per piece)
+             (under `agentic_extraction`, a tool loop in which the model
+             proposes and the reconciler applies                      -- up to 12 calls)
 
 Reconciliation, deduplication and contradiction resolution sit below all of this and
 never call a model at all.
@@ -59,7 +61,9 @@ from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 
 from ..embed.base import Embedder
 from ..llm._shape import finite_amount
-from ..llm.base import LLM, Usage
+from ..llm.base import (
+    LLM, MalformedToolOutput, ToolChat, ToolRunError, ToolRunTimeout, Usage,
+)
 from ..redact import Redactor, redact_claim, redact_episode
 from . import pollution, split
 from ..schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
@@ -78,6 +82,8 @@ from ..telemetry import (
     WRITE_DISPUTED,
     WRITE_EMBEDDING_REJECTED,
     WRITE_EMBEDDING_UNUSABLE,
+    WRITE_AGENTIC,
+    WRITE_AGENTIC_REFUSED,
     WRITE_EXTRACT_MS,
     WRITE_LATENCY_MS,
     WRITE_MEMORY_CLAIMS,
@@ -93,8 +99,10 @@ from ..telemetry import (
     script_of,
 )
 from ..types import (
-    SELF_SUBJECT, Claim, Closure, Derivation, Episode, MemoryType, WriteReceipt, utcnow,
+    SELF_SUBJECT, Claim, Closure, Derivation, Episode, Link, MemoryType, WriteReceipt,
+    utcnow,
 )
+from .agentic import AgenticExtractor, AgenticResult, ProposalPlan
 from .fast import FastExtractor
 from .when import normalize_unit, resolve
 from .gate import SalienceGate
@@ -231,7 +239,8 @@ class WritePipeline:
                  extraction_deferred: bool = False,
                  reject_polluted: bool = True,
                  closed_vocabulary: bool = False,
-                 extraction_chunks: bool = False) -> None:
+                 extraction_chunks: bool = False,
+                 agentic_extraction: bool = False) -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
@@ -279,6 +288,16 @@ class WritePipeline:
         #: `docs/ROADMAP.md` has not been met: the one measured chunked run on a long turn
         #: found 4 of 5 key facts where the whole turn found 5 of 5.
         self.extraction_chunks = bool(extraction_chunks)
+        #: Off by default. On, tier 2 runs `memvara.write.agentic` instead of one
+        #: `llm.extract()` call: the model searches the store and proposes new memories,
+        #: ends, replacements and links through tools, and every proposal then goes
+        #: through the same guards and the same `Reconciler.apply` as single-call output.
+        #: A backend without `llm.ToolChat`, a timeout, an answer that cannot be used, a
+        #: run past 12 steps or a batch spanning two scopes falls back to single-call
+        #: extraction for that batch, and the receipt says why in `agentic_fallback`.
+        #: `extraction_chunks` applies to the single-call path only. Off because the
+        #: release bar in `docs/ROADMAP.md` (the "Reversed" list) has not been measured.
+        self.agentic_extraction = bool(agentic_extraction)
         if not (reject_ungrounded is True or reject_ungrounded is False
                 or reject_ungrounded == "auto"):
             raise TypeError(
@@ -377,7 +396,7 @@ class WritePipeline:
 
         kept = self._tier0_near_dupes(fresh, receipt, now, pending)
         gated, fast_claims = self._tier1(kept, receipt, pre_redaction_script)
-        llm_claims = self._tier2(gated, receipt, now)
+        llm_claims, plan = self._tier2(gated, receipt, now)
 
         # Reconcile in input order so a batch containing two claims for the same slot
         # resolves the same way every run.
@@ -413,10 +432,7 @@ class WritePipeline:
                 receipt.reinforced.append(
                     self.reconciler.reinforce(claim, sources, observed_at))
             to_embed: list[Claim] = []
-            for claim in candidates:
-                claim.recorded_at = now
-                self._absorb(claim, self.reconciler.apply(claim, now=now),
-                             receipt, to_embed)
+            self._reconcile(candidates, plan, receipt, now, to_embed)
             self._write_embeddings(to_embed)
 
         receipt.latency_ms = (perf_counter() - t0) * 1000.0
@@ -488,7 +504,7 @@ class WritePipeline:
         receipt.episode_ids = [ep.id for ep in fresh]
 
         gated, fast_claims = self._tier1(fresh, receipt)
-        llm_claims = self._tier2(gated, receipt, now)
+        llm_claims, plan = self._tier2(gated, receipt, now)
 
         candidates: list[Claim] = []
         for ep in fresh:
@@ -504,10 +520,7 @@ class WritePipeline:
         lock_t0 = perf_counter() if rec is not None else 0.0
         with self._transaction():
             to_embed: list[Claim] = []
-            for claim in candidates:
-                claim.recorded_at = now
-                self._absorb(claim, self.reconciler.apply(claim, now=now),
-                             receipt, to_embed)
+            self._reconcile(candidates, plan, receipt, now, to_embed)
             self._write_embeddings(to_embed)
 
         receipt.latency_ms = (perf_counter() - t0) * 1000.0
@@ -521,6 +534,73 @@ class WritePipeline:
             # would be indistinguishable from a write that stored none and was charged
             # for it, which is the confusion that series was added to end.
         return receipt
+
+    def _reconcile(self, candidates: Sequence[Claim], plan: ProposalPlan | None,
+                   receipt: WriteReceipt, now: datetime, to_embed: list[Claim]) -> None:
+        """Reconcile every candidate, in order, then apply agentic ends and links.
+
+        Called inside the claim transaction. With no plan this is the loop `add()` has
+        always run. With one, a proposed replacement passes the model's reason to
+        `Reconciler.apply`, which records it on whatever the candidate closes, and the
+        plan learns which stored claim each proposal became, so a link can name it.
+        """
+        for claim in candidates:
+            claim.recorded_at = now
+            reason = plan.reason_for(claim) if plan is not None else None
+            res = self.reconciler.apply(claim, now=now, reason=reason)
+            if plan is not None:
+                plan.observe(claim, res.action, res.claim, res.invalidated)
+            self._absorb(claim, res, receipt, to_embed)
+        if plan is not None:
+            self._apply_proposals(plan, receipt, now, to_embed)
+
+    def _apply_proposals(self, plan: ProposalPlan, receipt: WriteReceipt, now: datetime,
+                         to_embed: list[Claim]) -> None:
+        """Apply what an agentic run proposed beyond new memories, and report the rest.
+
+        A proposed replacement whose new value the reconciler stored without closing the
+        claim it named is reported as `not_applied`; the named claim stays live, because
+        whether two values compete is the reconciler's decision. A proposed end becomes a
+        retraction of exactly the named value, through `Reconciler.apply` with
+        `close="ended"` and the model's reason, cited to the turn the model named. A
+        proposed link becomes a `claim_links` row, written only when both sides name a
+        stored claim.
+        """
+        for sup in plan.unapplied_supersedes():
+            plan.refuse("propose_supersede", sup.claim_id, "not_applied")
+        name = getattr(self.llm, "name", "llm")
+        for end in plan.ends:
+            target = self.store.get_claim(end.claim_id)
+            if target is None or not target.is_live(now):
+                plan.refuse("propose_end", end.claim_id, "not_applied")
+                continue
+            turn = plan.episodes[end.source_index]
+            # The stored claim's own scope, so the retraction addresses exactly the slot
+            # the claim is in. `agentic._Session._closable` has already checked that the
+            # claim has the same owner as this write, which is as far as the reconciler
+            # reaches on its own.
+            retraction = Claim(
+                subject=target.subject, predicate=target.predicate, object=target.object,
+                scope=target.scope, polarity=-1, memory_type=target.memory_type,
+                valid_from=min(turn.ts, now), recorded_at=now, confidence=0.9,
+                sources=[turn.id], derivation=Derivation.LLM_EXTRACT, extractor=name)
+            res = self.reconciler.apply(retraction, now=now, close="ended",
+                                        reason=end.reason)
+            self._absorb(retraction, res, receipt, to_embed)
+            if end.claim_id not in {c.id for c in res.invalidated}:
+                plan.refuse("propose_end", end.claim_id, "not_applied")
+        put_link = getattr(self.store, "put_link", None)
+        for link in plan.links:
+            first, second = plan.resolve(link.from_ref), plan.resolve(link.to_ref)
+            if put_link is None or first is None or second is None or first == second:
+                plan.refuse("propose_link", link.from_ref, "not_applied")
+                continue
+            put_link(plan.episodes[0].scope.tenant,
+                     Link(first, second, link.relation, now, name))
+        receipt.proposals_refused.extend(plan.refused)
+        if self.telemetry is not None:
+            for refusal in plan.refused:
+                self.telemetry.counter(WRITE_AGENTIC_REFUSED, reason=refusal.reason)
 
     def _transaction(self):
         """Batch commits when the store supports it; a no-op otherwise.
@@ -737,10 +817,16 @@ class WritePipeline:
     # -- tier 2 ---------------------------------------------------------------
 
     def _tier2(self, episodes: Sequence[Episode], receipt: WriteReceipt,
-               now) -> dict[str, list[Claim]]:
+               now) -> tuple[dict[str, list[Claim]], ProposalPlan | None]:
+        """Model extraction for the turns tier 1 left, and an agentic run's plan, if any.
+
+        The plan is `None` unless agentic extraction ran and its proposals were used. It
+        carries the proposed ends and links, and the reasons for proposed replacements,
+        into the claim transaction, where `_reconcile` applies them.
+        """
         out: dict[str, list[Claim]] = {}
         if not episodes:
-            return out
+            return out, None
 
         if getattr(self.llm, "is_noop", False):
             # A backend that consults no model must not be billed for one. These turns
@@ -753,7 +839,7 @@ class WritePipeline:
                 receipt.deferred = True
             else:
                 receipt.unextracted = len(episodes)
-            return out
+            return out, None
 
         # One call for the whole batch, not one per turn. Turns share context, and the
         # per-request overhead dominates at this size. The exception is a turn cut into
@@ -766,19 +852,24 @@ class WritePipeline:
         usage = Usage() if getattr(self.llm, "reports_usage", False) else None
         # Once per batch, not once per piece: every call is offered the same vocabulary.
         vocabulary = self.registry.prompt_vocabulary()
-        calls = self._plan_calls(episodes)
-        if calls is None:
+        result = (self._agentic(episodes, vocabulary, usage, receipt, now)
+                  if self.agentic_extraction else None)
+        plan = None if result is None else ProposalPlan(result, episodes)
+        calls = None if plan is not None else self._plan_calls(episodes)
+        if plan is not None:
+            raw, made = plan.items(), plan.requests
+        elif calls is None:
             try:
                 raw = self._extract(episodes, vocabulary, usage)
             except Exception:
                 return self._extraction_failed(receipt, usage, 1, len(episodes),
-                                               extract_t0)
+                                               extract_t0), None
             made = 1
         else:
             raw, failed, made = self._extract_in_pieces(calls, vocabulary, usage)
             if len(failed) == len(episodes):
                 return self._extraction_failed(receipt, usage, made, len(episodes),
-                                               extract_t0)
+                                               extract_t0), None
             if failed:
                 # Some turns lost a call and the rest did not. The rest keep their
                 # claims; the turns with a failed call keep none, are deferred, and are
@@ -813,8 +904,60 @@ class WritePipeline:
             claim = self._claim_from_dict(item, episodes, now, receipt)
             if claim is not None:
                 out.setdefault(claim.sources[0], []).append(claim)
-        receipt.unextracted = sum(1 for ep in episodes if ep.id not in out)
-        return out
+                if plan is not None:
+                    plan.track(claim, item)
+        # A turn the model read and only proposed ending a memory from was extracted:
+        # the retraction written for it will cite it.
+        ending = set() if plan is None else {
+            episodes[end.source_index].id for end in plan.ends}
+        receipt.unextracted = sum(1 for ep in episodes
+                                  if ep.id not in out and ep.id not in ending)
+        return out, plan
+
+    def _agentic(self, episodes: Sequence[Episode], vocabulary: Sequence[str],
+                 usage: Usage | None, receipt: WriteReceipt,
+                 now: datetime) -> AgenticResult | None:
+        """Run agentic extraction over `episodes`, or say why the batch falls back.
+
+        Returns `None` for a fallback, after recording the reason on
+        `receipt.agentic_fallback` and billing every request the failed run sent, since
+        each may have been charged; their tokens are already in `usage`. The caller then
+        runs single-call extraction for the batch, exactly as with the switch off.
+        """
+        reason: str | None = None
+        spent = 0
+        result: AgenticResult | None = None
+        if not isinstance(self.llm, ToolChat):
+            reason = "unsupported"
+        elif len({ep.scope for ep in episodes}) > 1:
+            # A run searches, reads and closes on behalf of one scope. Turns from two
+            # scopes in one run would let one scope's turns end another's memories.
+            reason = "mixed_scope"
+        else:
+            extractor = AgenticExtractor(self.llm, self.store, self.embedder)
+            try:
+                result = extractor.run(episodes, vocabulary, now=now, usage=usage)
+            except ToolRunTimeout as exc:
+                reason, spent = "timeout", exc.requests
+            except MalformedToolOutput as exc:
+                reason, spent = "malformed", exc.requests
+            except ToolRunError as exc:
+                reason, spent = "error", exc.requests
+            except Exception:
+                # A third-party `ToolChat` that raised something of its own. It sent at
+                # least one request, and that one can be counted.
+                reason, spent = "error", 1
+            else:
+                if not result.run.finished:
+                    reason, spent, result = "step_limit", result.run.requests, None
+        if self.telemetry is not None:
+            self.telemetry.counter(WRITE_AGENTIC,
+                                   outcome="fallback" if reason else "agentic",
+                                   reason=reason or "none")
+        if reason is not None:
+            receipt.agentic_fallback = reason
+            receipt.llm_calls += spent
+        return result
 
     def _extraction_failed(self, receipt: WriteReceipt, usage: Usage | None, made: int,
                            turns: int, extract_t0: float) -> dict[str, list[Claim]]:

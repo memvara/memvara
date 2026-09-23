@@ -85,6 +85,9 @@ client, not run interactively. Configured entirely by environment:
                      END_REASON=0 removes the reason and until_reason arguments.
                      EXTRACTION_CHUNKS decides whether a turn over 6,000
                      characters is extracted in pieces, one model call per piece.
+                     AGENTIC_EXTRACTION=1 lets the extraction model search the
+                     store and propose memories, ends, replacements and links
+                     through tools, which the reconciler then applies or refuses.
                      ENCRYPTION=0 creates a new store unencrypted; with it on, a
                      new store needs pip install "memvara[encrypt]", and an
                      existing store opens as whatever it already is.

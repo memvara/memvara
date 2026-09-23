@@ -81,8 +81,8 @@ from ..schema import _slugify
 from ..select import Rewrite, SelectorBusy
 from ..types import (CUSTOM_ID_CHARS, DOCUMENT_STATES, LINK_RELATIONS, REASON_CHARS,
                      Accumulation, Claim, Closure, Collapse, DeleteResult, Dispute, Document,
-                     ForgetPreview, MemoryType, RecallResult, Retype, Row, SearchResults,
-                     WriteReceipt, closure_reason, closure_reasons, utcnow)
+                     ForgetPreview, MemoryType, RecallResult, RefusedProposal, Retype, Row,
+                     SearchResults, WriteReceipt, closure_reason, closure_reasons, utcnow)
 from .memory_api import MemoryAPI
 from .validate import ToolError, validate
 
@@ -1186,7 +1186,38 @@ def _receipt_summary(ctx: ToolContext, receipt: WriteReceipt) -> list[str]:
         lines.append(_retyped_note(receipt.retyped))
     if receipt.may_replace:
         lines.append(_may_replace_note(receipt.may_replace))
+    if receipt.agentic_fallback:
+        lines.append(_agentic_fallback_note(receipt.agentic_fallback))
+    if receipt.proposals_refused:
+        lines.append(_proposals_refused_note(receipt.proposals_refused))
     return lines
+
+
+def _agentic_fallback_note(reason: str) -> str:
+    """Say when a write that should have used agentic extraction used one call instead.
+
+    The facts are still extracted, so the write itself is not in doubt. What the note
+    reports is that the deployment's `agentic_extraction` switch did not take effect for
+    this write, and why, because a switch that silently does nothing looks exactly like a
+    switch that works.
+    """
+    return (f"note: agentic extraction fell back to single-call extraction for this write "
+            f"({reason}).")
+
+
+def _proposals_refused_note(refused: Sequence[RefusedProposal]) -> str:
+    """Count the extraction model's proposals this write did not make, by reason.
+
+    Counts rather than a line per proposal, because the proposals were the model's and
+    the caller cannot act on any one of them; the reasons say whether the model, the
+    guards or the reconciler turned them down.
+    """
+    counts: dict[str, int] = {}
+    for item in refused:
+        counts[item.reason] = counts.get(item.reason, 0) + 1
+    listed = ", ".join(f"{reason} {n}" for reason, n in sorted(counts.items()))
+    return (f"note: {len(refused)} change(s) the extraction model proposed were not made "
+            f"({listed}).")
 
 
 def _may_replace_note(claims: Sequence[Claim]) -> str:
