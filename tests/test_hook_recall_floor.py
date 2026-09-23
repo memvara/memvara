@@ -35,6 +35,9 @@ class Rejects:
 def client(monkeypatch, server) -> HostedRecall:
     made = HostedRecall("key")
     monkeypatch.setattr(made, "_call", server)
+    # No network: the handshake and the `tools/list` probe answer here.
+    monkeypatch.setattr(made, "_ensure_session", lambda: True)
+    monkeypatch.setattr(made, "accepts", lambda tool, argument: False)
     return made
 
 
