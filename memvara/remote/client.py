@@ -44,7 +44,7 @@ import asyncio
 import random
 import time
 import uuid
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine, Mapping
 
 from .errors import RemoteError, error_from_response
 
@@ -95,7 +95,8 @@ class HttpClient:
 
     def request(self, method: str, path: str, *, params: dict[str, Any] | None = None,
                 json: Any = None, write: bool = False,
-                attempts: int | None = None, timeout: float | None = None) -> Any:
+                attempts: int | None = None, timeout: float | None = None,
+                headers: Mapping[str, str] | None = None) -> Any:
         """One call, decoded, retried where retrying is safe.
 
         `attempts` and `timeout` override this client's own for one call, and exist for
@@ -119,10 +120,13 @@ class HttpClient:
         to wait is waited, up to `MAX_RETRY_AFTER`; a longer `Retry-After` raises the
         `RateLimited` immediately rather than blocking on it, with the server's own number
         on the exception.
+
+        `headers` are sent on this call beside the client's own. `RemoteMemvara` uses it
+        for `Memvara-Project`, which can differ between two views sharing one client.
         """
         import httpx
 
-        headers = {"Idempotency-Key": uuid.uuid4().hex} if write else None
+        sent = _headers(write, headers)
         # Only when given: httpx reads `timeout=None` as "no timeout at all", which is the
         # opposite of "use the client's", so an unconditional keyword would turn an
         # override into a hang.
@@ -133,7 +137,7 @@ class HttpClient:
             try:
                 response = self._client.request(
                     method, path,
-                    params=_drop_none(params), json=json, headers=headers, **extra)
+                    params=_drop_none(params), json=json, headers=sent, **extra)
             except httpx.TransportError as exc:
                 last = exc
             else:
@@ -180,12 +184,13 @@ class AsyncHttpClient:
     async def request(self, method: str, path: str, *,
                       params: dict[str, Any] | None = None,
                       json: Any = None, write: bool = False,
-                      attempts: int | None = None, timeout: float | None = None) -> Any:
+                      attempts: int | None = None, timeout: float | None = None,
+                      headers: Mapping[str, str] | None = None) -> Any:
         """`HttpClient.request`, awaited. See there for the retry rule itself, and for
-        what the two per-call overrides are for."""
+        what the per-call overrides are for."""
         import httpx
 
-        headers = {"Idempotency-Key": uuid.uuid4().hex} if write else None
+        sent = _headers(write, headers)
         extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
         tries = self._attempts if attempts is None else max(1, attempts)
         last: Exception | None = None
@@ -193,7 +198,7 @@ class AsyncHttpClient:
             try:
                 response = await self._client.request(
                     method, path,
-                    params=_drop_none(params), json=json, headers=headers, **extra)
+                    params=_drop_none(params), json=json, headers=sent, **extra)
             except httpx.TransportError as exc:
                 last = exc
             else:
@@ -206,6 +211,19 @@ class AsyncHttpClient:
             if attempt + 1 < tries:
                 await self._sleep(_delay(attempt, last))
         raise last if isinstance(last, RemoteError) else _wrapped(last)
+
+
+def _headers(write: bool, extra: Mapping[str, str] | None) -> dict[str, str] | None:
+    """The per-call headers: an idempotency key for a write, plus whatever the caller adds.
+
+    The key is minted once per call, before the retry loop, so every retry of one write
+    carries the same key. `None` when there is nothing to add, so a read sends exactly
+    the headers it sent before the `headers` parameter existed.
+    """
+    out = dict(extra or {})
+    if write:
+        out["Idempotency-Key"] = uuid.uuid4().hex
+    return out or None
 
 
 def _outcome(response: Any) -> tuple[Any, RemoteError | None]:

@@ -131,7 +131,7 @@ distinguishes them afterwards if the write got it wrong.
 
 ## Wiring it into an actual agent
 
-**In an editor.** Install the MCP plugin and the agent gets fourteen tools; the packaged
+**In an editor.** Install the MCP plugin and the agent gets fifteen tools; the packaged
 skill tells it when to write and how to correct. See [MCP](../integrations/mcp.md).
 
 **In a loop you are writing.** Two calls per turn:

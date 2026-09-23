@@ -89,22 +89,18 @@ def test_both_implementations_provide_every_declared_member(impl):
     assert not missing, f"{impl.__name__} is missing: {sorted(missing)}"
 
 
-def test_standing_is_optional_and_only_the_remote_view_has_it():
-    """`standing` is deliberately outside `MemoryAPI`.
-
-    A `Protocol` has no optional members: declaring it would make `ScopedMemvara` — which
-    has no `standing` and does not need one — stop satisfying the protocol its own server
-    is typed against. So `_standing` asks for it with `getattr` and keeps today's path
-    when it is absent, and the optionality is pinned here rather than in the type.
-    """
-    assert "standing" not in declared()
+def test_standing_is_declared_because_both_views_answer_it():
+    """`standing` used to sit outside `MemoryAPI`, because the local view had no such
+    method and a `Protocol` has no optional members. `Memvara.standing()` gave it one, so
+    the member is declared and both engines answer it through the same call."""
+    assert "standing" in declared()
     assert hasattr(ScopedRemoteMemvara, "standing")
-    assert not hasattr(ScopedMemvara, "standing")
+    assert hasattr(ScopedMemvara, "standing")
 
 
-def test_standing_prefers_the_server_side_endpoint_when_the_view_offers_one():
+def test_standing_asks_the_engine_rather_than_paging_the_scope():
+    """The old local path paged every live memory and filtered it in the tool. That was
+    the fallback for a view without `standing`, and no view lacks it now."""
     source = inspect.getsource(tools._standing)
-    assert 'getattr(ctx.memory, "standing", None)' in source, \
-        "the endpoint has to be asked for by name, or a remote view silently pages"
-    assert 'get_all(states=["live"])' in source, \
-        "and the local path has to stay, because ScopedMemvara has no standing()"
+    assert "ctx.memory.standing(" in source
+    assert "get_all" not in source

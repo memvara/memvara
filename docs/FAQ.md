@@ -109,7 +109,7 @@ re-queries every table the content could survive in.
 ## Can I use Memvara with coding agents?
 
 Yes, and it is one of the cases the design is aimed at. Install the MCP plugin
-(`/plugin marketplace add memvara/claude-memvara`) and the agent gets fourteen tools plus
+(`/plugin marketplace add memvara/claude-memvara`) and the agent gets fifteen tools plus
 a packaged skill telling it when to write and how to correct.
 
 The one piece of setup that is not optional is vocabulary: the built-in predicates are a

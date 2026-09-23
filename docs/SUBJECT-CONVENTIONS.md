@@ -1,6 +1,8 @@
 # Subject, entity and predicate conventions for memory writes
 
-**Status: design settled, revision 4, 2026-09-08. Nothing described here is implemented yet.**
+**Status: design settled, revision 4, 2026-09-08. Steps 2, 3, 4a and 8 are implemented, and
+step 12 is implemented in part; [What has been built since](#what-has-been-built-since) says
+which parts.**
 The six questions that blocked implementation were answered on 2026-09-08 and are recorded as
 [decisions](#the-six-decisions) at the end. Those decisions are the implementation contract;
 the sections above them are the reasoning that produced it.
@@ -107,6 +109,26 @@ still outstanding.
 - **Step 4a, the object kind.** `Claim.object_kind` is `ENTITY`, `VALUE` or `None`, decided
   at write time, persisted, and gating both the SQL and the Python side of traversal.
   `None` means the claim predates the rule and keeps its edges, which is decision C below.
+- **Step 8, canonical project identity** (2026-09-23, parity phase 1).
+  `memvara/project.py`'s `canonical_project(cwd)` implements section 7 with these
+  differences from its text. With no remote, the name is `path:` plus 16 hexadecimal
+  characters of the SHA-256 of the main working tree's real path rather than the directory
+  name, because two unrelated repositories often share a directory name and section 12
+  requires zero collisions; the `path:` prefix is what marks it provisional.
+  URL-encoded path segments are left encoded rather than decoded. SSH host aliases from
+  `~/.ssh/config` are **not** resolved yet, so an alias is taken as the host. Owner and
+  repository fold to lower case on `github.com`, `gitlab.com` and `bitbucket.org` only. A
+  port written in the remote is kept, so an ssh clone on a non-default port and an https
+  clone of one self-hosted repository are two projects. The plugin hooks carry a copy of
+  the rules, and both copies are tested against one vectors file.
+- **Step 12, project scope behaviour, in part** (2026-09-23, parity phase 1). The
+  configuration channel exists: the local MCP server reads `MEMVARA_PROJECT` or derives the
+  project from its working directory and binds it into the scope, `Memvara.scope(project=)`
+  binds it in Python, and the hosted clients send it as the `Memvara-Project` header. Default
+  recall is therefore project-local, with globally declared predicates still written at user
+  level. **The traversal policy is not built**: a graph walk does not yet cross into a
+  related project through `fork_of` or `belongs_to`, so `graph_scope` is still the same as
+  `visibility_scope`.
 
 **A claim carries an edge only when both halves are declared.** `carries_edge` is
 `objects_are_entities and graph`, because section 5's point is that an entity-valued object
@@ -434,10 +456,11 @@ behaviour — a correctness bug waiting to happen rather than a convenience.
 subject to provide isolation is the most likely way to introduce reconciliation bugs while
 fixing connectivity.
 
-Scope today is the four-part `Scope` in `memvara/types.py`, bound at startup and not settable
-per call (`docs/claude/mcp-server.md`). There is no project dimension, and the plugin's
-`plugin/mcp.json` declares an HTTP server with no environment block at all, so there is
-currently no channel to carry one.
+Scope today is the five-part `Scope` in `memvara/types.py`, bound at startup and not settable
+per call (`docs/claude/mcp-server.md`). The project part and its channel were added by steps
+4 and 12; this section records the reasoning that chose them. When it was written there was
+no project dimension, and the plugin's `plugin/mcp.json` declared an HTTP server with no
+environment block at all, so there was no channel to carry one.
 
 Three architectures, with their consequences:
 

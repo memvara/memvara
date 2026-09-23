@@ -7,6 +7,70 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## The local MCP server files memory under the repository it starts in
+
+### What changed
+
+`memvara-mcp` in local mode now binds a project, the fifth part of the scope, unless you
+switch it off. When `MEMVARA_PROJECT` is unset, the server works the project out at startup
+from the git remote of the directory the client started it in, for example
+`github.com/acme/app`. Outside a git repository nothing changes.
+
+With a project bound, a new fact is filed under that repository when its predicate is
+project-relative, which is the default for any predicate not declared otherwise. It is then
+recalled in that repository and not in another one. A predicate declared global, which
+includes every built-in person fact such as `prefers` or `lives_in`, is written without a
+project, exactly as before, and is recalled everywhere.
+
+Memories written before this release have no project, so they stay visible from every
+repository. A new value for a project-relative predicate that holds one value at a time is
+filed in the repository's own slot and does not end the older value written without a
+project, because that value is still the answer everywhere else. Inside the repository,
+reads return the repository's value and leave the older one out; in every other repository
+the older value still answers. If the repository's value is later ended, the older one
+answers there again.
+
+The hosted clients are unaffected unless a project is given. `memvara-mcp` in cloud mode
+derives the project the same way and sends it as the `Memvara-Project` header; a deployment
+that does not read the header yet ignores it.
+
+### How you find your instances
+
+**A local `memvara-mcp` launched from inside a git repository.** Call `memory_stats`: the
+scope line reads `tenant/user/project/agent/session`, and a project part other than `*`
+means the server bound one. To keep the old behaviour, set
+`MEMVARA_FEATURE_PROJECT_SCOPE=0` in the server's environment block. To pin a project
+instead of deriving it, set `MEMVARA_PROJECT` to a name such as `github.com/acme/app`; a
+value that is not in that form stops the server at startup.
+
+**Any `MEMVARA_FEATURE_*` variable already in your environment.** The server now reads
+these and refuses to start on a name it does not know or a value that is not a boolean.
+
+**A call that passes `project=` as metadata.** `remember(..., project="x")` used to store
+`project` as an annotation on a claim filed without a project. It now raises `TypeError`,
+on the local engine and the hosted clients alike, and the fix is to bind the project with
+`Memvara(project=...)` or `mem.scope(project=...)`. Search your code for `project=` on a
+`remember(` or `supersede(` call.
+
+---
+
+## `memory_standing` asks the engine, and `MemoryAPI` gained `standing` and `profile`
+
+### What changed
+
+`MemoryAPI`, the protocol the MCP tools are written against, now declares `standing` and
+`profile` and no longer declares `get_all`, which the tools stopped calling. A third-party
+view passed to `MemvaraMCPServer` through `ToolContext` has to provide the two new
+members.
+
+### How you find your instances
+
+**A class of your own used as `ToolContext.memory`.** Search your code for `ToolContext(`
+or `MemoryAPI`. The two concrete views that ship, `ScopedMemvara` and
+`ScopedRemoteMemvara`, already have both methods.
+
+---
+
 ## `--judge-model` is honoured with `--reader openai`, where it used to be ignored
 
 ### What changed

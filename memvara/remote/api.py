@@ -37,13 +37,30 @@ from typing import Any, Collection, Literal, Mapping, Sequence, overload
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import EpisodeResult, Path, Retrieved
 from ..types import (
-    Answer, Claim, Delta, Episode, MemoryType, Provenance, Result, Scope, SearchResults,
-    WriteReceipt, closure,
+    Answer, Claim, Delta, Episode, MemoryType, Profile, Provenance, Result, Scope,
+    SearchResults, WriteReceipt, closure,
 )
+from ..types import PROJECT_META, PROJECT_META_REFUSAL
 from . import hydrate
 from .client import DEFAULT_TIMEOUT, HttpClient
 from .creds import resolve
 from .errors import NotFound
+
+
+#: The header that carries the bound project to the deployment. The deployment reads it
+#: as a narrowing inside the tenant the credential binds, and refuses a value that is not
+#: a canonical project name (`memvara.project.check_project`) with a 400.
+PROJECT_HEADER = "Memvara-Project"
+
+
+def _refuse_project_meta(meta: Mapping[str, Any], method: str) -> None:
+    """Refuse `project=` arriving as metadata, for the reason `Memvara.remember` gives.
+
+    Here the project also travels as a header, so a `project` key in the body would be a
+    second, contradicting statement of it that the deployment would store as metadata.
+    """
+    if PROJECT_META in meta:
+        raise TypeError(PROJECT_META_REFUSAL.format(method=method))
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -128,6 +145,7 @@ class RemoteMemvara:
     def __init__(self, *, api_key: str | None = None, base_url: str | None = None,
                  tenant: str = "default", user: str | None = None,
                  agent: str | None = None, session: str | None = None,
+                 project: str | None = None,
                  timeout: float = DEFAULT_TIMEOUT,
                  redactor: Redactor | None = None) -> None:
         key, url = resolve(api_key, base_url)
@@ -135,7 +153,13 @@ class RemoteMemvara:
         #: The scope this client narrows to. `tenant` is held for `default_scope`'s sake
         #: and never sent: the facade resolves it from the bearer token, and a `tenant`
         #: parameter a caller could set would be a request to be trusted about identity.
-        self.default_scope = Scope(tenant, user, agent, session)
+        #:
+        #: `project` is sent, as the `Memvara-Project` header on every request, and it can
+        #: only narrow: the deployment files and reads memories under that project inside
+        #: the tenant the credential already binds. It is not a query parameter because
+        #: the facade reads scope from the credential and one header, never from a tool
+        #: argument.
+        self.default_scope = Scope(tenant, user, agent, session, project=project)
         #: Rewrites text on its way out, or None. Runs here rather than server-side on
         #: purpose: redaction that happens after the text has left the process is not
         #: redaction.
@@ -154,13 +178,15 @@ class RemoteMemvara:
         return f"<RemoteMemvara {self.default_scope.key()}>"
 
     def scope(self, *, user: str | None = None, agent: str | None = None,
-              session: str | None = None) -> "ScopedRemoteMemvara":
+              session: str | None = None,
+              project: str | None = None) -> "ScopedRemoteMemvara":
         """A view bound to a narrower scope, with no way back out.
 
         The narrowing is against this client's own scope, and the facade enforces the
         same rule again from the credential — naming an agent or a session requires
         naming a user, because an agent under *every* user is a read across users dressed
-        up as a narrowing.
+        up as a narrowing. `project` replaces this client's project for the view, and is
+        sent as the `Memvara-Project` header.
         """
         current = self.default_scope
         narrowed = Scope(
@@ -168,6 +194,7 @@ class RemoteMemvara:
             user if user is not None else current.user,
             agent if agent is not None else current.agent,
             session if session is not None else current.session,
+            project=project if project is not None else current.project,
         )
         return ScopedRemoteMemvara(self, narrowed)
 
@@ -181,6 +208,17 @@ class RemoteMemvara:
         twin = copy(self)
         twin.default_scope = scope
         return twin
+
+    def _request(self, method: str, path: str, **kw: Any) -> Any:
+        """One `/v1` call, carrying the bound project as the `Memvara-Project` header.
+
+        No header is sent when no project is bound, so a client without one sends exactly
+        what it sent before projects existed.
+        """
+        project = self.default_scope.project
+        if project is not None:
+            kw["headers"] = {PROJECT_HEADER: project}
+        return self._http.request(method, path, **kw)
 
     def _params(self, **extra: Any) -> dict[str, Any]:
         """Scope on every call, plus whatever this call adds. `None` values are dropped
@@ -247,8 +285,8 @@ class RemoteMemvara:
         addresses one memory, and `forget(close="ended")` addresses a slot; all three
         state that the value was true and the world moved.
         """
-        out = self._http.request("POST", "/v1/end", params=self._params(),
-                                 json=_sent(body), write=True)
+        out = self._request("POST", "/v1/end", params=self._params(),
+                            json=_sent(body), write=True)
         return [hydrate.claim(c) for c in out["ended"]]
 
     # -- service -------------------------------------------------------------
@@ -257,12 +295,12 @@ class RemoteMemvara:
         """Whether the deployment is answering. The one route that takes no credential,
         and it discloses nothing else — a 200 here is not a promise that a read will
         succeed, because it does not touch the store. `stats()` is the check that does."""
-        return self._http.request("GET", "/v1/health")
+        return self._request("GET", "/v1/health")
 
     def whoami(self) -> dict[str, Any]:
         """What the presented credential authorizes: its scope, its privilege, its
         expiry. Answered from the token alone, so it never reports on the store."""
-        return self._http.request("GET", "/v1/whoami", params=self._params())
+        return self._request("GET", "/v1/whoami", params=self._params())
 
     def stats(self) -> dict[str, int]:
         """Row counts for the whole tenant, whatever this client's scope.
@@ -274,7 +312,7 @@ class RemoteMemvara:
         `stats()["claims"]` a `KeyError` against a hosted deployment and a number against
         a local one.
         """
-        body = self._http.request("GET", "/v1/stats", params=self._params())
+        body = self._request("GET", "/v1/stats", params=self._params())
         return dict(body["tenant_counts"])
 
     def service(self, *, attempts: int | None = None,
@@ -302,8 +340,8 @@ class RemoteMemvara:
         startup before a hanging deployment degrades to the safe default — which is the
         opposite of what degrading gracefully is for.
         """
-        return dict(self._http.request("GET", "/v1/stats", params=self._params(),
-                                       attempts=attempts, timeout=timeout))
+        return dict(self._request("GET", "/v1/stats", params=self._params(),
+                                  attempts=attempts, timeout=timeout))
 
     def connectivity(self) -> dict[str, int]:
         """`live_claims` and `joinable_claims`, or `{}` when the deployment does not
@@ -376,7 +414,7 @@ class RemoteMemvara:
         always a `SearchResults`, whose `.selection` is read off the response body's
         `selection` and is `None` against a plain read or a server that sends none.
         """
-        body = self._http.request(
+        body = self._request(
             "POST", "/v1/search", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,
                         "anchored": anchored or None, "ranked": ranked or None,
@@ -427,7 +465,7 @@ class RemoteMemvara:
                 "recall(valid_at=...) is not available against a hosted deployment: "
                 "POST /v1/recall has no time axis. Use search(valid_at=...) and render "
                 "your own block.")
-        body = self._http.request(
+        body = self._request(
             "POST", "/v1/recall", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,
                         "anchored": anchored or None, "ranked": ranked or None,
@@ -440,8 +478,8 @@ class RemoteMemvara:
         well as one that never existed — the facade gives the same answer for both so
         that this cannot be used to test whether an id exists elsewhere."""
         try:
-            body = self._http.request("GET", f"/v1/memories/{claim_id}",
-                                      params=self._params())
+            body = self._request("GET", f"/v1/memories/{claim_id}",
+                                 params=self._params())
         except NotFound:
             return None
         return hydrate.claim(body)
@@ -457,7 +495,7 @@ class RemoteMemvara:
         server-side and caps `limit` at 500, so a scope holding a million claims cannot
         be pulled across a network in one call. `count()` is how many matched.
         """
-        body = self._http.request(
+        body = self._request(
             "GET", "/v1/memories",
             params=self._params(limit=limit, offset=offset, states=_states(states),
                                 include_invalidated=include_invalidated,
@@ -471,7 +509,7 @@ class RemoteMemvara:
               known_at: datetime | None = None) -> int:
         """How many memories match, without fetching them: one row asked for, `total`
         read off the page."""
-        body = self._http.request(
+        body = self._request(
             "GET", "/v1/memories",
             params=self._params(limit=1, states=_states(states),
                                 include_invalidated=include_invalidated,
@@ -488,7 +526,7 @@ class RemoteMemvara:
         whose default was now would drop every superseded value, which is the whole
         content of a timeline.
         """
-        body = self._http.request(
+        body = self._request(
             "GET", "/v1/history",
             params=self._params(subject=subject, predicate=predicate, as_of=_iso(as_of),
                                 valid_at=_iso(valid_at), known_at=_iso(known_at)))
@@ -501,7 +539,7 @@ class RemoteMemvara:
         replaced. `None` for an id that is not visible here, matching `Memvara.why` —
         the facade answers 404 for a missing id and for one in another tenant alike."""
         try:
-            body = self._http.request(
+            body = self._request(
                 "GET", f"/v1/memories/{claim_id}/why",
                 params=self._params(as_of=_iso(as_of), valid_at=_iso(valid_at),
                                     known_at=_iso(known_at)))
@@ -517,7 +555,7 @@ class RemoteMemvara:
         corrected after the moment asked about, so the answer somebody acted on is not
         the answer they would get today.
         """
-        body = self._http.request(
+        body = self._request(
             "POST", "/v1/ask", params=self._params(),
             json=_sent({"question": question, "at": _iso(at), "k": k,
                         "min_score": min_score, "anchored": anchored or None}))
@@ -530,8 +568,8 @@ class RemoteMemvara:
         replacement under `added` — so a client that syncs only `added` ends up holding
         both.
         """
-        body = self._http.request("GET", "/v1/since",
-                                  params=self._params(since=_iso(when)))
+        body = self._request("GET", "/v1/since",
+                             params=self._params(since=_iso(when)))
         return hydrate.delta(body)
 
     def produced(self, episode_id: str, *, as_of: datetime | None = None,
@@ -544,7 +582,7 @@ class RemoteMemvara:
         nothing, and one whose memories belong elsewhere — the same non-answer for all
         three, because telling them apart confirms an id.
         """
-        body = self._http.request(
+        body = self._request(
             "GET", f"/v1/episodes/{episode_id}/produced",
             params=self._params(as_of=_iso(as_of), valid_at=_iso(valid_at),
                                 known_at=_iso(known_at)))
@@ -560,7 +598,7 @@ class RemoteMemvara:
         `depth` sets what the call costs: a hop is worth roughly three of the one before
         it, and the deployment prices each depth separately.
         """
-        body = self._http.request(
+        body = self._request(
             "GET", "/v1/neighborhood",
             params=self._params(entity=entity, depth=depth, k=k, min_hops=min_hops,
                                 predicates=list(predicates) if predicates else None,
@@ -576,7 +614,7 @@ class RemoteMemvara:
         """How two entities are connected, if they are. An empty list means not within
         `depth` hops at the clocks asked about, which is a different answer from an empty
         `search`: that one means nothing *resembled* the question."""
-        body = self._http.request(
+        body = self._request(
             "GET", "/v1/paths",
             params=self._params(source=source, target=target, depth=depth, k=k,
                                 predicates=list(predicates) if predicates else None,
@@ -590,12 +628,31 @@ class RemoteMemvara:
 
         Deliberately not a search, and the reason was measured: a client wanting standing
         preferences had to invent a sentence to rank them against, and a rule stored at
-        confidence 1.00 scored zero against it and never reached a session. The local
-        engine has no such method — `get_all` has no `memory_types` filter, so a local
-        caller pages the scope and filters in Python. This does it server-side.
+        confidence 1.00 scored zero against it and never reached a session. This is
+        `Memvara.standing` served by the deployment, which filters server-side.
         """
-        body = self._http.request("GET", "/v1/standing", params=self._params(limit=k))
+        body = self._request("GET", "/v1/standing", params=self._params(limit=k))
         return [hydrate.claim(c) for c in body["memories"]]
+
+    def profile(self, query: str | None = None, *, k: int = 8,
+                since: datetime | None = None,
+                buckets: Mapping[str, Sequence[str]] | None = None) -> Profile:
+        """Standing preferences, recent changes, search hits and buckets in one request.
+
+        See `Memvara.profile` for what each section holds. This sends `POST /v1/profile`
+        with a JSON body of `query`, `k`, `since` and `buckets`, leaving out any that are
+        unset, and the scope as query parameters like every other call. The deployment
+        answers with `standing`, `recent` and `relevant` as lists of rows, `buckets` as
+        an object of bucket name to a list of rows, and `warnings` as a list of strings.
+        A row is `{"claim_id", "text", "inferred"}`.
+        """
+        body = self._request(
+            "POST", "/v1/profile", params=self._params(),
+            json=_sent({"query": query, "k": k, "since": _iso(since),
+                        "buckets": ({name: list(predicates)
+                                     for name, predicates in buckets.items()}
+                                    if buckets is not None else None)}))
+        return hydrate.profile(body)
 
     # -- writing -------------------------------------------------------------
 
@@ -616,7 +673,7 @@ class RemoteMemvara:
             payload = [self._turn(messages)]
         else:
             payload = [self._turn(m) for m in messages]
-        body = self._http.request(
+        body = self._request(
             "POST", "/v1/memories", params=self._params(),
             json=_sent({"messages": payload, "role": role, "ts": _iso(ts)}),
             write=True)
@@ -638,6 +695,7 @@ class RemoteMemvara:
         already knows — contradiction handling is an exact match on the slot, so a
         synonym opens a second one instead of correcting the first.
         """
+        _refuse_project_meta(meta, "remember()")
         ids, turns = self._cite(sources)
         body = {
             "subject": self._redact(subject, CLAIM_SUBJECT),
@@ -650,7 +708,7 @@ class RemoteMemvara:
             "recorded_at": _iso(recorded_at),
             "source_ids": ids, "sources": turns, "metadata": meta,
         }
-        return hydrate.receipt(self._http.request(
+        return hydrate.receipt(self._request(
             "POST", "/v1/facts", params=self._params(), json=_sent(body), write=True))
 
     def supersede(self, old_claim_id: str, subject: str, predicate: str, obj: str, *,
@@ -681,6 +739,7 @@ class RemoteMemvara:
         `Claim` here to take it apart again would put this layer in the business of
         inventing ids and timestamps the server is about to overwrite.
         """
+        _refuse_project_meta(meta, "supersede()")
         ids, turns = self._cite(sources)
         body = {
             "subject": self._redact(subject, CLAIM_SUBJECT),
@@ -694,7 +753,7 @@ class RemoteMemvara:
             "recorded_at": _iso(recorded_at),
             "source_ids": ids, "sources": turns, "metadata": meta,
         }
-        return hydrate.receipt(self._http.request(
+        return hydrate.receipt(self._request(
             "POST", f"/v1/memories/{old_claim_id}/supersede", params=self._params(),
             json=_sent(body), write=True))
 
@@ -720,7 +779,7 @@ class RemoteMemvara:
         """
         if closure(close) == "ended":
             return self._end({"subject": subject, "predicate": predicate, "at": _iso(at)})
-        body = self._http.request(
+        body = self._request(
             "POST", "/v1/forget", params=self._params(),
             json=_sent({"subject": subject, "predicate": predicate, "at": _iso(at)}),
             write=True)
@@ -749,8 +808,8 @@ class RemoteMemvara:
         """
         if closure(close) == "ended":
             return self.end(claim_id=claim_id, at=at)
-        body = self._http.request("DELETE", f"/v1/memories/{claim_id}",
-                                  params=self._params(), write=True)
+        body = self._request("DELETE", f"/v1/memories/{claim_id}",
+                             params=self._params(), write=True)
         return bool(body["retired"])
 
     def end(self, *, claim_id: str | None = None, subject: str | None = None,
@@ -793,7 +852,7 @@ class RemoteMemvara:
         for the reason every id-addressed route refuses to distinguish gone from not
         yours. Needs an `admin` credential.
         """
-        body = self._http.request(
+        body = self._request(
             "POST", "/v1/erasures", params=self._params(),
             json={"memory_id": claim_id, "sources": sources}, write=True)
         return bool(body["erased"])
@@ -811,7 +870,7 @@ class RemoteMemvara:
         the credential decides the tenant, and any other value is refused.
         """
         scope = self.default_scope
-        body = self._http.request(
+        body = self._request(
             "POST", "/v1/erasures", params=self._params(),
             json=_sent({"scope": _sent({"user": scope.user, "agent": scope.agent,
                                         "session": scope.session}),
@@ -834,8 +893,8 @@ class RemoteMemvara:
         Needs an `admin` credential, and the pass covers the whole tenant whatever scope
         this client narrows to.
         """
-        return self._http.request("POST", "/v1/maintenance/consolidate",
-                                  params=self._params(), write=True)
+        return self._request("POST", "/v1/maintenance/consolidate",
+                             params=self._params(), write=True)
 
 
 class ScopedRemoteMemvara:
@@ -1031,6 +1090,11 @@ class ScopedRemoteMemvara:
 
     def standing(self, *, k: int | None = None) -> list[Claim]:
         return self._mem.standing(k=k)
+
+    def profile(self, query: str | None = None, *, k: int = 8,
+                since: datetime | None = None,
+                buckets: Mapping[str, Sequence[str]] | None = None) -> Profile:
+        return self._mem.profile(query, k=k, since=since, buckets=buckets)
 
     # -- writing -------------------------------------------------------------
 

@@ -3,11 +3,11 @@
 `memvara-mcp` is the console script that serves this library's memory to a coding agent over
 the Model Context Protocol. It speaks JSON-RPC on stdin and stdout, is meant to be launched
 by an MCP client rather than run by hand, and is configured entirely from the environment.
-Fourteen tools are exposed, from `memory_recall` and `memory_search` through the writes to
+Fifteen tools are exposed, from `memory_recall` and `memory_search` through the writes to
 `memory_stats`.
 
 The server has two modes. In local mode it opens a SQLite file on this machine and runs the
-whole engine in process. In cloud mode it opens no file at all and serves the same fourteen
+whole engine in process. In cloud mode it opens no file at all and serves the same fifteen
 tools from a hosted deployment over that deployment's `/v1` API.
 
 ## Where the code is
@@ -20,8 +20,11 @@ tools from a hosted deployment over that deployment's `/v1` API.
 - Protocol: `memvara/server/mcp.py` — `MemvaraMCPServer`, `SUPPORTED_PROTOCOLS`,
   `INSTRUCTIONS`; `memvara/server/protocol.py` — `serve_stdio()`, `success()`, `failure()`,
   and the JSON-RPC error codes.
-- Configuration: `memvara/server/config.py` — `ServerConfig` and `ConfigError`. Every
-  `MEMVARA_*` variable is read here and nowhere else.
+- Configuration: `memvara/server/config.py` — `ServerConfig`, `ConfigError` and
+  `FEATURES`. Every `MEMVARA_*` variable is read here and nowhere else.
+- Project identity: `memvara/project.py` — `canonical_project()`, which turns the server's
+  working directory into the project part of the scope, and `check_project()`, which
+  validates an explicit `MEMVARA_PROJECT`.
 - Argument checking: `memvara/server/validate.py` — `validate()` and `ToolError`, which turn
   a bad tool argument into a message that names the part that was wrong.
 - Setup: `memvara/server/init.py` — what `memvara-mcp init` writes, including `AGENTS`,
@@ -32,7 +35,7 @@ tools from a hosted deployment over that deployment's `/v1` API.
   `RemoteMemvara`.
 - Tests: `tests/test_server.py`, `tests/test_init.py`, `tests/test_login.py`,
   `tests/test_config_cloud.py`, `tests/test_memory_api_protocol.py`.
-- Documentation: [the MCP integration page](../integrations/mcp.md) lists the fourteen tools
+- Documentation: [the MCP integration page](../integrations/mcp.md) lists the fifteen tools
   and the three ways to reach them; [DEPLOY.md](../DEPLOY.md) has the environment table.
 
 ## How the pieces fit
@@ -59,6 +62,10 @@ that table as the source and this paragraph as the map. Every setting is an envi
 variable read by `memvara/server/config.py`.
 `MEMVARA_MODE` chooses local or cloud. `MEMVARA_DB` is the SQLite path, required in local
 mode. `MEMVARA_TENANT`, `MEMVARA_USER`, `MEMVARA_AGENT` and `MEMVARA_SESSION` bind the scope.
+`MEMVARA_PROJECT` binds the project part of it; when unset, `memvara/project.py` derives it
+from the git remote of the working directory, and in cloud mode it travels as the
+`Memvara-Project` header. `MEMVARA_FEATURE_<NAME>=0` switches one feature off; the names
+are `FEATURES` in `memvara/server/config.py`, and an unknown name is refused.
 `MEMVARA_LLM` chooses the extraction backend from `none`, `anthropic` and `openai`, with the
 `MEMVARA_LLM_MODEL`, `MEMVARA_LLM_MAX_TOKENS`, `MEMVARA_LLM_MAX_CLAIMS`,
 `MEMVARA_LLM_TERSE_CLAIMS`, `MEMVARA_LLM_EXTRACT_SYSTEM` and `MEMVARA_LLM_EXTRA_BODY`

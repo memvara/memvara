@@ -916,6 +916,115 @@ slot — and makes the drop take the two together.
 
 ---
 
+## `memvara/project.py` — one project name per repository
+
+```python
+def canonical_project(cwd, *, run=None) -> str | None
+def normalize_remote(url) -> str | None
+def check_project(value) -> str          # raises ValueError with the rule it broke
+```
+
+`canonical_project` asks git two questions through `run`, which a test replaces: the
+repository's common git directory (`rev-parse --path-format=absolute --git-common-dir`,
+which needs git 2.31 or later), and the `origin` remote read through that directory
+(`--git-dir <common> remote get-url origin`). Reading from the common directory is what
+makes a linked worktree resolve to the same name as its main checkout. The remote is
+normalised to `host/owner/repo`: whitespace, credentials, the query, the fragment, empty
+segments, trailing slashes and one `.git` are dropped, the host is lower-cased, and a port
+written in the URL is kept. The owner and repository are lower-cased only on `github.com`,
+`gitlab.com` and `bitbucket.org`, where case does not distinguish repositories; elsewhere
+folding could merge two projects. Percent-encoding is left as written.
+
+The plugin hooks carry a copy of the normaliser in `plugin/hooks/lib/project.py`, because
+they run without the library. The rules are pinned as data: `tests/fixtures/project_vectors.json`
+is a byte-identical copy of the hooks' `project_vectors.json`, `tests/test_project.py` runs
+the library against every row, and the hooks' tests run their copy against the same rows.
+A change to either copy starts with a row in that file. The same file's `check_project`
+rows pin which names the server accepts, which both copies use to decide when to fall
+back to the path form. Git output that is not UTF-8, such as a remote holding the byte
+`0xff`, is read as no answer, so such a remote gives the path form rather than an
+exception at startup.
+
+With no remote, or a remote that is a local path or would not pass `check_project`, the
+name is `path:` plus the first 16 hexadecimal characters of the SHA-256 of the main working
+tree's real path. It is provisional: it changes if the directory moves, and becomes the
+remote form once the repository is pushed. Outside a git repository the answer is `None`.
+SSH host aliases from `~/.ssh/config` are not resolved, so `git@work-github:o/r` is the
+project `work-github/o/r`.
+
+`ServerConfig.from_env` calls it once at startup when `MEMVARA_PROJECT` is unset and the
+`project_scope` feature is on. The project then reaches the engine in two ways. Locally,
+`Memvara.scope(project=...)` returns a view over a shallow copy of the `Memvara` whose
+`default_scope.project` is that project, because every public method reads the project
+from `default_scope` rather than taking it as an argument; the copy shares the store, the
+models and the registry. No read or write takes a per-call `project=`, and `project` is in
+`RESERVED_META`, so `remember(..., project="x")` is refused with the reason instead of
+being stored as an annotation on a claim filed without a project. The hosted clients refuse
+it the same way on `remember()` and `supersede()`. Against a hosted deployment,
+`RemoteMemvara` sends the project as the `Memvara-Project` header on every request, and
+sends no header when no project is bound. `Scope.contains()` compares the project like
+every other field, so a slot operation's boundary does not rest on fact keys alone.
+
+### A repository's own value shadows the user-wide one
+
+Before project scope, the local server wrote every fact without a project. Inside a
+repository, a new value for a single-valued, project-relative predicate now lands in the
+repository's slot, whose key includes the project, so it cannot end the older user-wide
+value. Ending it would be wrong anyway, because that value is still the answer in every
+other repository. So both are stored, and `memvara/retrieve/shadow.py` decides at read
+time. A present-tense read bound to project P leaves out a live claim with no project when
+the same owner, subject and single-valued predicate has a live claim in P's slot. The check
+is one indexed `count_competing` per distinct slot among those candidates, and a read with
+no project pays nothing.
+
+It applies to `get_all()` (and so to `standing()`, `profile()` and the MCP tools built on
+them), to `since()`'s `added` half, and to `search()` and `recall()` inside
+`HybridRetriever`, after the graph walk. It does not apply to a read at another instant
+(`valid_at`, `known_at` or `as_of`), because at that instant the repository may not have
+had a value of its own; to many-valued predicates, where both values hold at once; to
+predicates declared global, which are never written with a project; or to `count()` and
+id-addressed reads such as `get()` and `why()`. When the repository's value ends, the
+user-wide value answers there again. Nothing is written.
+
+## `Memvara.standing()` and `Memvara.profile()`
+
+```python
+def standing(self, *, k=None, tenant=None, user=None, agent=None,
+             session=None) -> list[Claim]
+def profile(self, query=None, *, k=8, since=None, buckets=None, tenant=None, user=None,
+            agent=None, session=None) -> Profile
+```
+
+`standing()` is every live `procedural` claim in the scope, sorted by `standing_order`:
+stated before inferred (`is_derived`), then confidence, then newest, then id. The MCP tool
+`memory_standing` sorts a hosted deployment's answer with the same key, so both engines
+return one order.
+
+`profile()` makes three reads: the scope's live claims (`get_all()`), the ids believed
+at `since` on both clocks (`since()`'s "then" scan), and `search(query, k=k)` when there is
+a query. `AsyncMemvara.profile()` runs the three on separate threads at once.
+`_assemble_profile` builds every section from them without touching the store. `standing`
+is `standing(k)`. `recent` is the live claims not believed at `since`, which equals
+`since(since).added[:k]` without `since()`'s second scan for what left; `since` defaults to
+seven days before now, and what left is not reported because a profile is read as current
+context. Because `get_all()` already returns newest first, `recent` and the buckets are
+filters over one list with no sort of their own.
+`buckets` defaults to one bucket per pack in `PROFILE_PACKS` (`decisions`, `engineering`,
+`events`), holding that pack's predicate names; each bucket lists the newest `k` live
+claims whose predicate it names. A caller's bucket predicate is kept when the registry
+knows it (its canonical spelling is added), a shipped pack declares it, or a live claim in
+the scope uses it; anything else goes to `Profile.warnings`. On Python 3.10 the packs
+cannot be read, so the default buckets are missing, and with caller buckets the pack
+failure is reported before any "nothing declares" warning it caused.
+
+`RemoteMemvara.profile()` sends `POST /v1/profile` with a JSON body of `query`, `k`,
+`since` and `buckets` (unset ones left out) and the scope as query parameters, and expects
+`standing`, `recent`, `relevant` (lists of `{claim_id, text, inferred}`), `buckets` (name to
+list of rows) and `warnings` (strings). `hydrate.profile` indexes every key, so a reply
+missing a section raises instead of reading as empty.
+
+---
+
 ## `memvara/store/`
 
 ### The two time axes

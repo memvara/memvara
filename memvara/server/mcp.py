@@ -12,7 +12,7 @@ load-bearing rather than merely tidy.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Mapping, TextIO
+from typing import TYPE_CHECKING, Any, Collection, Mapping, TextIO
 
 from .. import __version__
 from ..core import Memvara
@@ -27,6 +27,7 @@ from .protocol import (
     serve_stdio,
     success,
 )
+from .config import unknown_features
 from .memory_api import MemoryAPI
 from .tools import (TOOLS, Tool, ToolContext, ToolError, anchoring_by_default,
                     safe_detail)
@@ -69,7 +70,7 @@ INSTRUCTIONS = (
 
 
 def _bind(memory: "Memvara | RemoteMemvara", *, tenant: str | None, user: str | None,
-          agent: str | None, session: str | None) -> MemoryAPI:
+          agent: str | None, session: str | None, project: str | None) -> MemoryAPI:
     """Bind the scope once, from configuration the client supplied at launch.
 
     Two engines, one binding, and the difference is where the tenant comes from. A local
@@ -79,10 +80,15 @@ def _bind(memory: "Memvara | RemoteMemvara", *, tenant: str | None, user: str | 
     be a request to be trusted about identity. `build_memvara` has already put
     `MEMVARA_TENANT` on the client for `memory_stats` to report; the credential decides
     what is actually read.
+
+    The project is bound the same way on both. Locally it becomes the `project` part of
+    the scope. Against a hosted deployment it becomes the `Memvara-Project` header, which
+    the deployment reads as a narrowing inside the tenant the credential binds.
     """
     if isinstance(memory, Memvara):
-        return memory.scope(tenant=tenant, user=user, agent=agent, session=session)
-    return memory.scope(user=user, agent=agent, session=session)
+        return memory.scope(tenant=tenant, user=user, agent=agent, session=session,
+                            project=project)
+    return memory.scope(user=user, agent=agent, session=session, project=project)
 
 
 #: Seconds a startup probe may spend before this server gives up and says "unknown".
@@ -148,8 +154,15 @@ class MemvaraMCPServer:
     def __init__(self, memory: "Memvara | RemoteMemvara", *, tenant: str | None = None,
                  user: str | None = None, agent: str | None = None,
                  session: str | None = None, read_only: bool = False,
-                 anchored: bool = False) -> None:
+                 anchored: bool = False, project: str | None = None,
+                 features_off: Collection[str] = ()) -> None:
+        problem = unknown_features(features_off)
+        if problem is not None:
+            raise ValueError(f"features_off: {problem}")
         self._memory = memory
+        #: Features this server was told to leave off. A tool that belongs to one of them
+        #: is not listed, for the reason a read-only server hides its write tools.
+        self.features_off = frozenset(features_off)
         extractor, credential_is_read_only = _service_facts(memory)
         #: **OR-ed, never overridden.** A server configured read-only stays read-only
         #: whatever the credential says, because `MEMVARA_READ_ONLY` is a decision somebody
@@ -157,9 +170,11 @@ class MemvaraMCPServer:
         #: revoke it. The credential can only narrow.
         self.read_only = read_only or credential_is_read_only
         self._ctx = ToolContext(
-            memory=_bind(memory, tenant=tenant, user=user, agent=agent, session=session),
+            memory=_bind(memory, tenant=tenant, user=user, agent=agent, session=session,
+                         project=project),
             extractor=extractor,
             read_only=self.read_only,
+            features_off=self.features_off,
         )
         #: Fixed at startup, because that is when the deployment's answer is known — and
         #: `self.read_only` rather than the `read_only` argument, so a read-only credential
@@ -179,7 +194,7 @@ class MemvaraMCPServer:
         self._tools: dict[str, Tool] = {
             t.name: t
             for t in (anchoring_by_default(TOOLS) if anchored else TOOLS)
-            if not (self.read_only and t.writes)
+            if not (self.read_only and t.writes) and t.feature not in self.features_off
         }
         #: Negotiated at `initialize`. Recorded rather than enforced: rejecting calls
         #: that arrive before the handshake would add a failure mode that fires only for
@@ -296,9 +311,19 @@ class MemvaraMCPServer:
 
         tool = self._tools.get(name)
         if tool is None:
+            known = next((t for t in TOOLS if t.name == name), None)
+            if (known is not None and known.feature is not None
+                    and known.feature in self.features_off):
+                # Checked before the read-only case, because a switched-off read tool is
+                # not unavailable for that reason, and the message has to name the right
+                # one for the user to be able to turn it back on.
+                return _text(
+                    f"{name} is unavailable: the {known.feature} feature is switched off "
+                    f"on this memory server (MEMVARA_FEATURE_{known.feature.upper()}=0).",
+                    is_error=True)
             # A write tool asked for on a read-only server is not the model's mistake, so
             # it gets a result it can act on rather than a protocol error the client eats.
-            if any(t.name == name for t in TOOLS):
+            if known is not None:
                 return _text(
                     f"{name} is unavailable: this memory server is read-only. Tell the "
                     "user their memory cannot be changed from here.", is_error=True)

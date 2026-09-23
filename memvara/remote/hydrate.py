@@ -39,11 +39,13 @@ from ..retrieve.traverse import Edge, Path
 from ..select.base import Selection
 from ..types import (
     LAST_OBSERVED, SALIENCE_BASE, Answer, Claim, Delta, Derivation, Episode,
-    Explanation, MemoryType, Provenance, Reading, Result, Scope, WriteReceipt,
+    Explanation, MemoryType, Profile, Provenance, Reading, Result, Row, Scope,
+    WriteReceipt,
 )
 
 __all__ = ["claim", "episode", "result", "explanation", "receipt", "provenance",
-           "reading", "answer", "delta", "edge", "path", "scope", "selection"]
+           "reading", "answer", "delta", "profile", "edge", "path", "scope",
+           "selection"]
 
 
 def _dt(value: Any) -> datetime | None:
@@ -99,7 +101,10 @@ def scope(body: dict[str, Any]) -> Scope:
     # `user`, `agent` and `session` are required on `ScopeModel` even though each is
     # nullable, so indexing them is what makes a renamed field raise instead of a null
     # scope component silently reading as "unbound".
-    return Scope(body["tenant"], body["user"], body["agent"], body["session"])
+    # `project` is read with `get`, because a deployment that predates project scope
+    # renders no such field, and a scope without one is a scope with no project.
+    return Scope(body["tenant"], body["user"], body["agent"], body["session"],
+                 project=body.get("project"))
 
 
 def claim(body: dict[str, Any]) -> Claim:
@@ -254,6 +259,22 @@ def delta(body: dict[str, Any]) -> Delta:
     return Delta(since=_required_dt("since", body["since"]),
                  added=tuple(claim(c) for c in body["added"]),
                  gone=tuple(claim(c) for c in body["gone"]))
+
+
+def _row(body: dict[str, Any]) -> Row:
+    return Row(claim_id=body["claim_id"], text=body["text"],
+               inferred=bool(body["inferred"]))
+
+
+def profile(body: dict[str, Any]) -> Profile:
+    """`POST /v1/profile`'s reply. Every key is indexed rather than read with `get`, so a
+    deployment that renamed a section raises here instead of reading as an empty one."""
+    return Profile(standing=[_row(r) for r in body["standing"]],
+                   recent=[_row(r) for r in body["recent"]],
+                   relevant=[_row(r) for r in body["relevant"]],
+                   buckets={name: [_row(r) for r in rows]
+                            for name, rows in body["buckets"].items()},
+                   warnings=[str(w) for w in body["warnings"]])
 
 
 def edge(body: dict[str, Any]) -> Edge:

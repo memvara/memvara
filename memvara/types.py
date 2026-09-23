@@ -178,6 +178,20 @@ PREDICATE_REKEY = "predicate_rekey"
 #: `ENTITY_REKEY` for the same reason.
 CLOSURE = "closure"
 
+#: Not a meta key the engine writes, but one it refuses. The project is part of a claim's
+#: scope, bound once where the store or view is opened, so a `project=` reaching `**meta`
+#: is a caller who believes they chose the project for this one claim. Storing it would
+#: record an annotation while the claim was filed without a project.
+PROJECT_META = "project"
+
+#: Why a `project=` passed as metadata is refused. Shared by `Memvara.remember` and the
+#: hosted clients, whose `remember()` and `supersede()` take `**meta` as well.
+PROJECT_META_REFUSAL = (
+    "{method} does not take project=. The project is bound once, with "
+    "Memvara(project=...) or mem.scope(project=...), and every call on that object is "
+    "filed under it. Passed through **meta it would have been stored as an annotation "
+    "while the claim was filed without a project.")
+
 #: The `meta` keys above, as one set: everything in `Claim.meta` that the engine owns
 #: rather than the caller. Two surfaces need it and they need it for opposite reasons —
 #: `Memvara.remember` **rejects** them on the way in, because `salience_base` reaching
@@ -187,7 +201,7 @@ CLOSURE = "closure"
 #: adding a sixth cannot leave one of those two surfaces behind.
 RESERVED_META = frozenset({
     SALIENCE_BASE, LAST_OBSERVED, SUBJECT_ENTITY, OBJECT_ENTITY, ENTITY_REKEY,
-    PREDICATE_REKEY, CLOSURE,
+    PREDICATE_REKEY, CLOSURE, PROJECT_META,
 })
 
 #: Decimal places kept on a stored salience. Salience is a ranking weight, not an
@@ -455,7 +469,7 @@ class Derivation(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class Scope:
-    """Hierarchical addressing: tenant > user > agent > session.
+    """Hierarchical addressing: tenant > user > project > agent > session.
 
     Visibility widens *upward only*. A search at session scope also sees that agent's,
     that user's, and the tenant's memory (see `ancestors`), but a search at user scope
@@ -552,11 +566,16 @@ class Scope:
 
         The downward-reaching predicate: an unset field is a wildcard. Use `sees` for
         read authorization — see there for why the two must not be confused.
+
+        The project is compared like every other field. Fact keys also include it, so a
+        slot operation could not reach another project's claims today, but this boundary
+        should not depend on how a key happens to be built.
         """
         if self.tenant != other.tenant:
             return False
         for mine, theirs in (
             (self.user, other.user),
+            (self.project, other.project),
             (self.agent, other.agent),
             (self.session, other.session),
         ):
@@ -1283,6 +1302,60 @@ class Delta:
     def __repr__(self) -> str:
         return (f"<Delta since {self.since.isoformat()} "
                 f"+{len(self.added)} -{len(self.gone)}>")
+
+
+@dataclass(frozen=True, slots=True)
+class Row:
+    """One memory in a `Profile`: its claim id, its text, and whether a machine derived it.
+
+    `inferred` is true when a model, a hook or consolidation derived the memory rather
+    than a person stating it. It is the same rule `memory_standing` uses to mark a row,
+    so a caller can show stated facts ahead of inferred ones. Use `claim_id` with `why()`
+    or `history()` to see where the memory came from.
+
+    >>> Row("cl_1", "user prefers pytest", inferred=False)
+    Row(claim_id='cl_1', text='user prefers pytest', inferred=False)
+    """
+
+    claim_id: str
+    text: str
+    inferred: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class Profile:
+    """What `profile()` returns: one call's worth of context about a user, in sections.
+
+    - `standing` holds the standing preferences, which are the procedural memories, in
+      the order `standing()` returns them: stated before inferred, then by confidence,
+      then newest first.
+    - `recent` holds memories that arrived since the instant asked about, newest first.
+      These are the `added` half of `since()`. Memories that stopped being believed are
+      left out, because a profile is read as current context and a withdrawn fact must
+      not appear in it.
+    - `relevant` holds search results for the query, best first, and is empty when no
+      query was given.
+    - `buckets` maps each bucket name to the live memories whose predicate the bucket
+      lists, newest first. A bucket with nothing in it is present and empty.
+    - `warnings` lists anything the call ignored, such as a bucket predicate that
+      nothing declares and no memory uses. An empty list means nothing was ignored.
+
+    Each section holds at most the `k` rows the call asked for.
+
+    >>> Profile()
+    <Profile standing=0 recent=0 relevant=0 buckets=0 warnings=0>
+    """
+
+    standing: list[Row] = field(default_factory=list)
+    recent: list[Row] = field(default_factory=list)
+    relevant: list[Row] = field(default_factory=list)
+    buckets: dict[str, list[Row]] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+
+    def __repr__(self) -> str:
+        return (f"<Profile standing={len(self.standing)} recent={len(self.recent)} "
+                f"relevant={len(self.relevant)} buckets={len(self.buckets)} "
+                f"warnings={len(self.warnings)}>")
 
 
 @dataclass(frozen=True, slots=True)

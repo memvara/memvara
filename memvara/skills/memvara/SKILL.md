@@ -93,6 +93,10 @@ Read before you assert. Anything you say about what is remembered — "you told
 me X", "I have nothing on file" — must come from a tool result **in the current
 turn**. If you have not looked, say so, then look.
 
+To open a session, one `memory_profile` call does the work of calling
+`memory_standing` and then `memory_since`. When the server does not list it,
+make those two calls instead.
+
 When they say a memory is wrong, do this order: `memory_recall`,
 `memory_search` (you need the claim id), `memory_why` (put the excerpt in front
 of them). The excerpt is the **evidence for** which write comes next, not their

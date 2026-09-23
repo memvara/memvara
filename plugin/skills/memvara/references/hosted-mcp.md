@@ -77,12 +77,12 @@ imports `memvara`, not whichever `python3` a GUI `PATH` finds.
 `npx memvara` bridges a stdio client to the hosted server and signs you in on
 first run, for a machine with no Python at all.
 
-## The fourteen tools
+## The fifteen tools
 
 `memory_recall`, `memory_search`, `memory_neighborhood`, `memory_paths`,
-`memory_ask`, `memory_since`, `memory_standing`, `memory_add`,
-`memory_remember`, `memory_forget`, `memory_end`, `memory_history`,
-`memory_why`, `memory_stats`.
+`memory_ask`, `memory_since`, `memory_standing`, `memory_profile`,
+`memory_add`, `memory_remember`, `memory_forget`, `memory_end`,
+`memory_history`, `memory_why`, `memory_stats`.
 
 That is what this library serves. **A hosted deployment can be behind it**, and
 saying so is more useful than a number that is wrong for one of the two: a
@@ -92,4 +92,5 @@ simply whether the tool you want is one you can see. A tool that is absent is a
 deployment that has not caught up, not a tool that was removed.
 
 `erase`, `purge`, `reset`, `consolidate` are not tools. A read-only server
-hides the four write tools.
+hides the four write tools, and a server started with
+`MEMVARA_FEATURE_PROFILE=0` hides `memory_profile`.

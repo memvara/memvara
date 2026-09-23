@@ -180,6 +180,33 @@ def _credentials_never_touch_home(tmp_path, tmp_path_factory, monkeypatch):
     return where
 
 
+def pytest_configure(config: Any) -> None:
+    config.addinivalue_line(
+        "markers",
+        "derives_project: let ServerConfig.from_env() derive the project from a git "
+        "remote, which tests/conftest.py otherwise switches off")
+
+
+@pytest.fixture(autouse=True)
+def _no_project_from_the_checkout(request, monkeypatch):
+    """Stop every test from binding the project of whatever checkout runs the suite.
+
+    `ServerConfig.from_env()` derives the project from the working directory's git
+    remote, and pytest runs inside a git repository. Left alone, every test that builds a
+    config would shell out to git and bind `github.com/memvara/memvara`, or a fork's
+    name, or nothing on a machine without git, so a test's scope would depend on where
+    it ran. Two levers, because a test can reach the derivation two ways:
+    `MEMVARA_FEATURE_PROJECT_SCOPE=0` for anything that reads the process environment,
+    including a child process, and a stub for a test that passes its own `env` mapping.
+
+    A test that is about the derivation opts back in with `@pytest.mark.derives_project`.
+    """
+    if request.node.get_closest_marker("derives_project") is not None:
+        return
+    monkeypatch.setenv("MEMVARA_FEATURE_PROJECT_SCOPE", "0")
+    monkeypatch.setattr(config_module, "canonical_project", lambda cwd: None)
+
+
 _HOME_CREDENTIALS = pathlib.Path.home() / ".memvara" / "credentials.json"
 _CREDENTIALS_SNAPSHOT: Any = None
 _CREDENTIALS_EXISTED = False

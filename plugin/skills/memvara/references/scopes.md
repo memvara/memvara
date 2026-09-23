@@ -1,7 +1,7 @@
 # Scope
 
-A store is partitioned as `tenant / user / agent / session`. `*` means that
-field is unbound.
+A store is partitioned as `tenant / user / project / agent / session`. `*`
+means that field is unbound.
 
 On MCP the scope is fixed when the server starts. No tool argument changes
 it. Call `memory_stats` once, early, in any conversation where you expect to
@@ -28,12 +28,19 @@ your machine.
 For a custom Python loop, `mem.scope(user=...)` per request. One `Memvara`
 per process.
 
-## What the four fields mean
+## What the five fields mean
 
 - **tenant** — the isolation boundary above a user. Default `default`.
 - **user** — who the facts are about. Unset on a local server means the
   whole tenant, which is right for a single-person machine and wrong for a
   product with customers.
+- **project** — the repository the facts were learned in, as
+  `host/owner/repo`. A local server works it out from the git remote of the
+  directory it started in, so every clone and worktree of one repository
+  shares it. A preference whose predicate is declared global is written
+  without a project, so it follows the user into every repository; a fact
+  about one codebase stays with that codebase. `MEMVARA_PROJECT` names it
+  explicitly, and `MEMVARA_FEATURE_PROJECT_SCOPE=0` stops it being worked out.
 - **agent** — which program wrote it. Usually unbound.
 - **session** — this conversation. Leave unbound for anything that should
   still be true tomorrow.

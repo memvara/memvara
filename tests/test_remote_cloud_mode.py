@@ -288,7 +288,7 @@ class _Answering:
             raise self._body
         return self._body
 
-    def scope(self, *, user=None, agent=None, session=None):
+    def scope(self, *, user=None, agent=None, session=None, project=None):
         """`RemoteMemvara.scope`'s narrowing, so the fake's shape is not a lie — no
         `tenant` parameter, and the current scope supplies whatever is not named."""
         from memvara.remote.api import ScopedRemoteMemvara
@@ -301,7 +301,8 @@ class _Answering:
             current.tenant,
             user if user is not None else current.user,
             agent if agent is not None else current.agent,
-            session if session is not None else current.session))
+            session if session is not None else current.session,
+            project=project if project is not None else current.project))
         return view
 
     def close(self):

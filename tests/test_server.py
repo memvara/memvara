@@ -198,7 +198,7 @@ def test_no_tool_can_erase_anything():
     names = {t.name for t in TOOLS}
     assert names == {
         "memory_recall", "memory_search", "memory_neighborhood", "memory_paths",
-        "memory_ask", "memory_since", "memory_standing", "memory_add",
+        "memory_ask", "memory_since", "memory_standing", "memory_profile", "memory_add",
         "memory_remember", "memory_forget",
         "memory_end", "memory_history", "memory_why", "memory_stats",
     }
@@ -257,6 +257,8 @@ _FORWARDING_CASES = {
                    {"question": "where do they live", "at": "2024-03-01"}],
     "memory_since": [{"since": "2024-03-01"}],
     "memory_standing": [{"k": 5}],
+    "memory_profile": [{"query": "anything", "k": 3, "since": "2024-03-01",
+                        "buckets": {"stack": ["depends_on"]}}],
     "memory_add": [{"text": "I live in Lisbon"}],
     "memory_remember": [{"predicate": "lives_in", "object": "Lisbon",
                          "memory_type": "semantic", "sources": []}],
@@ -3158,6 +3160,7 @@ def test_read_only_hides_the_write_tools(read_only):
     names = [t["name"] for t in request(read_only, "tools/list")["result"]["tools"]]
     assert names == ["memory_recall", "memory_search", "memory_neighborhood",
                      "memory_paths", "memory_ask", "memory_since", "memory_standing",
+                     "memory_profile",
                      "memory_history", "memory_why", "memory_stats"], (
         "traversal is read-only and must survive here: a deployment that cannot be "
         "written to is exactly the one that wants to be asked about connections"
@@ -3297,11 +3300,11 @@ def test_config_reads_the_whole_scope_from_the_environment():
     config = ServerConfig.from_env({
         "MEMVARA_DB": "~/memory.db", "MEMVARA_TENANT": "acme", "MEMVARA_USER": "alice",
         "MEMVARA_AGENT": "coder", "MEMVARA_SESSION": "s1", "MEMVARA_READ_ONLY": "yes",
-        "MEMVARA_LLM": "NONE",
+        "MEMVARA_LLM": "NONE", "MEMVARA_FEATURE_PROJECT_SCOPE": "0",
     })
     assert not config.path.startswith("~"), "a settings file is where people type ~"
     assert config.scope_kwargs == {"tenant": "acme", "user": "alice", "agent": "coder",
-                                   "session": "s1"}
+                                   "session": "s1", "project": None}
     assert config.read_only is True and config.llm == "none"
 
 

@@ -9,7 +9,63 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Changed
+
+- **`memory_stats` labels the scope line with its five parts**,
+  `tenant/user/project/agent/session`. It said four while printing five.
+- **The local MCP server now has fifteen tools**, with `memory_profile` after
+  `memory_standing`.
+
 ### Added
+
+- **The local MCP server scopes memory to the repository it runs in.** A new
+  `memvara.project.canonical_project(cwd)` turns a working directory into one project name:
+  the `origin` remote normalised to `host/owner/repo`, read from the repository's common
+  git directory so every worktree resolves like its main checkout, or
+  `path:<16 hex characters>` of the main working tree's real path when there is no usable
+  remote, or `None` outside a git repository. An `https` and an `ssh` remote for one
+  repository give the same name. `ServerConfig` has a new `project` field, read from
+  `MEMVARA_PROJECT` or derived from the server's working directory, and it is part of
+  `scope_kwargs`, so a fact is filed under the repository it was learned in. A fact whose
+  predicate is declared global, which includes the 23 built-in person facts such as
+  `prefers`, is still written without a project and is recalled in every repository.
+  `check_project()` is the validator the hosted deployment uses for the same names.
+- **Inside a repository, its own value shadows the user-wide one.** A single-valued,
+  project-relative fact written in a repository does not end the value written without a
+  project, which still answers everywhere else. A present-tense read bound to that
+  repository (`get_all`, `search`, `recall`, `standing`, `profile`, `since`) returns the
+  repository's value and leaves the user-wide one out. Reads elsewhere, reads at another
+  instant and many-valued predicates are unchanged. See `memvara/retrieve/shadow.py`.
+- **`remember(..., project=...)` is refused.** `project` joins `RESERVED_META`, so it can
+  no longer be stored as metadata on a claim filed without a project; the hosted clients'
+  `remember()` and `supersede()` refuse it too. `Scope.contains()` now compares the project.
+- **`Memvara.scope(project=...)`** binds a view to a project. `AsyncMemvara.scope`,
+  `RemoteMemvara.scope` and `AsyncRemoteMemvara.scope` take the same argument, and the two
+  hosted clients take `project=` in their constructors. Against a hosted deployment the
+  project travels as the `Memvara-Project` header on every request; a client with no
+  project sends no header.
+- **`MEMVARA_FEATURE_<NAME>=0` switches a feature off.** Every feature is on by default.
+  The names are `index_command`, `research_agent`, `project_scope`, `status_line`,
+  `recall_mark`, `profile`, `forget_matching`, `end_reason` and `links`
+  (`memvara.server.config.FEATURES`). In this release `PROJECT_SCOPE=0` stops the project
+  being derived, and `PROFILE=0` hides `memory_profile`; the rest are accepted for the
+  plugin and for tools a later release adds. An unknown name, or a value that is not a
+  boolean, stops the server at startup with a message naming the variable and the feature
+  it probably meant.
+  `MemvaraMCPServer(features_off=...)` is the same switch for a server built in Python,
+  and `memory_stats` reports which features are off.
+- **`Memvara.standing()`** returns every standing preference in a scope, in the order
+  `memory_standing` uses: stated before inferred, then by confidence, then newest first.
+  The local engine used to have no such method, so the MCP tool paged the whole scope and
+  filtered it; both engines now answer the same call.
+- **`Memvara.profile()` and the `memory_profile` tool** return standing preferences,
+  memories that arrived since a given instant (seven days by default), search hits for an
+  optional query, and memories grouped into named buckets, in one call. The default
+  buckets are `decisions`, `engineering` and `events`, each holding the predicates of the
+  shipped pack with that name; a caller's `buckets` replace them. A bucket predicate that
+  nothing declares and no stored memory uses is ignored and listed in
+  `Profile.warnings`. `RemoteMemvara.profile()` calls `POST /v1/profile`. `Profile` and
+  `Row` are exported from `memvara`.
 
 - **`demo/harness.py` can put a model behind an API in the reader's seat.** `--reader
   anthropic` and `--reader openai` answer every arm's questions in one process, with the
