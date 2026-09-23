@@ -1,4 +1,4 @@
-# Parity phase 1: the Claude Code experience
+# Parity phase 1: the coding-agent experience
 
 **Date:** 2026-09-23. **Status:** design approved in conversation on 2026-09-23, not built.
 Line numbers are from agent-memory `origin/main` at `b57ef714` (called **core** below),

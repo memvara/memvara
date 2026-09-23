@@ -3,7 +3,7 @@
 **Date:** 2026-09-23. **Status:** design approved in conversation on 2026-09-23, not built.
 Line numbers are from agent-memory `origin/main` at `b57ef714` (**core**) and memvara-cloud
 `origin/main` at `c1ab3ab` (**cloud**). Phase 1 is
-`2026-09-23-parity-phase-1-claude-code-experience-design.md`; its switch store (§3 there) is
+`2026-09-23-parity-phase-1-coding-agent-experience-design.md`; its switch store (§3 there) is
 reused here.
 
 ## 1. What this phase delivers, and which decisions it reverses
