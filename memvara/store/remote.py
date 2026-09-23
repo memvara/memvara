@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any, Collection, Iterable, Iterator, Sequence
 
 import numpy as np
 
+from ..filters import SearchFilter
 from ..remote.client import HttpClient
 from ..remote.errors import refuse_project_purge
 from ..types import (Claim, Derivation, Document, DocumentChunk, Episode, Link, MemoryType,
@@ -393,7 +394,8 @@ class RemoteStore:
 
     def episodes_near(self, anchor: datetime, scopes: Sequence[Scope], limit: int, *,
                       valid_at: datetime | None = None,
-                      known_at: datetime | None = None) -> list[tuple[str, float]]:
+                      known_at: datetime | None = None,
+                      where: SearchFilter | None = None) -> list[tuple[str, float]]:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="episodes_near",
             why="No episode listing or search exists on the data plane today; turns are "
@@ -528,7 +530,8 @@ class RemoteStore:
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
                       states: Collection[str] | None = None,
-                      include_invalidated: bool | None = None) -> list[str]:
+                      include_invalidated: bool | None = None,
+                      where: SearchFilter | None = None) -> list[str]:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="candidate_ids",
             why="No endpoint returns bare ids for a scope set; the nearest facade route, "
@@ -540,7 +543,8 @@ class RemoteStore:
                        valid_at: datetime | None = None,
                        known_at: datetime | None = None,
                        states: Collection[str] | None = None,
-                       include_invalidated: bool | None = None
+                       include_invalidated: bool | None = None,
+                       where: SearchFilter | None = None
                        ) -> list[tuple[str, float]]:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="lexical_search",
@@ -554,7 +558,8 @@ class RemoteStore:
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
                       states: Collection[str] | None = None,
-                      include_invalidated: bool | None = None
+                      include_invalidated: bool | None = None,
+                      where: SearchFilter | None = None
                       ) -> list[tuple[str, float]]:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="vector_search",
@@ -564,14 +569,16 @@ class RemoteStore:
 
     def episode_candidate_ids(self, scopes: Sequence[Scope], *,
                               valid_at: datetime | None = None,
-                              known_at: datetime | None = None) -> list[str]:
+                              known_at: datetime | None = None,
+                              where: SearchFilter | None = None) -> list[str]:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="episode_candidate_ids", why="See candidate_ids; no episode listing "
                 "endpoint exists at all (see iter_episodes above)."))
 
     def lexical_search_episodes(self, query: str, scopes: Sequence[Scope], limit: int, *,
                                 valid_at: datetime | None = None,
-                                known_at: datetime | None = None
+                                known_at: datetime | None = None,
+                                where: SearchFilter | None = None
                                 ) -> list[tuple[str, float]]:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="lexical_search_episodes", why="See lexical_search; POST /v1/search's "
@@ -580,7 +587,8 @@ class RemoteStore:
 
     def vector_search_episodes(self, qvec: np.ndarray, scopes: Sequence[Scope],
                                limit: int, *, valid_at: datetime | None = None,
-                               known_at: datetime | None = None
+                               known_at: datetime | None = None,
+                               where: SearchFilter | None = None
                                ) -> list[tuple[str, float]]:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="vector_search_episodes", why="See vector_search."))

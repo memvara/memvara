@@ -26,7 +26,9 @@ tools from a hosted deployment over that deployment's `/v1` API.
   working directory into the project part of the scope, and `check_project()`, which
   validates an explicit `MEMVARA_PROJECT`.
 - Argument checking: `memvara/server/validate.py` — `validate()` and `ToolError`, which turn
-  a bad tool argument into a message that names the part that was wrong.
+  a bad tool argument into a message that names the part that was wrong. It understands a
+  list of types, `pattern` and `propertyNames`, which the `filters` argument of
+  `memory_search` and `memory_recall` uses.
 - Setup: `memvara/server/init.py` — what `memvara-mcp init` writes, including `AGENTS`,
   `MARKER` and `client_entry()`. `memvara/server/login.py` — `login()`, the device-code flow
   that writes a cloud credential.

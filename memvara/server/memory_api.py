@@ -40,6 +40,7 @@ from datetime import datetime
 from typing import (TYPE_CHECKING, Any, Collection, Literal, Mapping, Protocol, Sequence,
                     runtime_checkable)
 
+from ..filters import FilterValue
 from ..retrieve import Path
 from ..types import (Answer, Claim, DeleteResult, Delta, Document, ForgetPreview,
                      ForgetResult, Link, MemoryType, Page, Profile, Provenance, Result,
@@ -80,6 +81,8 @@ class MemoryAPI(Protocol):
                states: Collection[str] | None = None,
                include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType] | None = None,
+               filters: Mapping[str, FilterValue] | None = None,
+               filepath_prefix: str | None = None,
                include_episodes: Literal[False] = False) -> list[Result]:
         """Hybrid retrieval over claims.
 
@@ -87,6 +90,9 @@ class MemoryAPI(Protocol):
         makes, and it is what makes the return `list[Result]` rather than the wider
         `list[Retrieved]`: an episode hit has no `.claim`, and `_search` reads `.claim` on
         every row.
+
+        `filters` and `filepath_prefix` are declared because `_search` passes both on
+        every call, as `None` unless the model asked for a filter.
         """
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
@@ -95,7 +101,9 @@ class MemoryAPI(Protocol):
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False,
                budget: int | None = None,
-               valid_at: datetime | None = None) -> str:
+               valid_at: datetime | None = None,
+               filters: Mapping[str, FilterValue] | None = None,
+               filepath_prefix: str | None = None) -> str:
         """Retrieval already rendered for a system prompt.
 
         `budget` is declared because `_recall` passes it on every call, as `None` unless

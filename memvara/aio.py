@@ -76,6 +76,7 @@ from typing import Any, Callable, Collection, Literal, Mapping, Sequence, overlo
 from .core import (Memvara, Messages, ScopedMemvara, _approx_tokens, _check_k,
                    _profile_since)
 from .embed import Embedder
+from .filters import FilterValue
 from .retrieve import Path, Retrieved
 from .select import PLAIN_READ
 from .write.reconcile import MergeReport
@@ -358,6 +359,8 @@ class AsyncMemvara:
                      states: Collection[str] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      include_episodes: Literal[False] = ...) -> list[Result]: ...
 
     @overload
@@ -370,6 +373,8 @@ class AsyncMemvara:
                      states: Collection[str] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
@@ -382,6 +387,8 @@ class AsyncMemvara:
                      states: Collection[str] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      include_episodes: bool) -> list[Retrieved]: ...
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
@@ -393,6 +400,8 @@ class AsyncMemvara:
                      states: Collection[str] | None = None,
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType] | None = None,
+                     filters: Mapping[str, FilterValue] | None = None,
+                     filepath_prefix: str | None = None,
                      include_episodes: bool = False) -> list[Any]:
         """See `Memvara.search`. Runs on the read pool; see `_read`."""
         return await _read(
@@ -403,7 +412,8 @@ class AsyncMemvara:
             user=user, agent=agent, session=session, as_of=as_of, valid_at=valid_at,
             known_at=known_at, states=states,
             include_invalidated=include_invalidated,
-            memory_types=memory_types, include_episodes=include_episodes)
+            memory_types=memory_types, filters=filters,
+            filepath_prefix=filepath_prefix, include_episodes=include_episodes)
 
     # Mirrored from `Memvara.recall`, overloads included, for the reason given above
     # `search`: a return type that is precise on one facade and a union on the other is
@@ -418,6 +428,8 @@ class AsyncMemvara:
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
                      valid_at: datetime | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      with_ids: Literal[False] = ...) -> str: ...
 
     @overload
@@ -430,6 +442,8 @@ class AsyncMemvara:
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
                      valid_at: datetime | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      with_ids: Literal[True]) -> RecallResult: ...
 
     @overload
@@ -442,6 +456,8 @@ class AsyncMemvara:
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
                      valid_at: datetime | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      with_ids: bool) -> str | RecallResult: ...
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
@@ -456,6 +472,8 @@ class AsyncMemvara:
                      budget: int | None = None,
                      counter: Callable[[str], int] = _approx_tokens,
                      valid_at: datetime | None = None,
+                     filters: Mapping[str, FilterValue] | None = None,
+                     filepath_prefix: str | None = None,
                      with_ids: bool = False) -> Any:
         """See `Memvara.recall`. Runs on the read pool; see `_read`."""
         return await _read(
@@ -467,7 +485,8 @@ class AsyncMemvara:
             memory_types=memory_types, include_episodes=include_episodes,
             episode_header=episode_header, include_history=include_history,
             history_header=history_header, budget=budget, counter=counter,
-            valid_at=valid_at, with_ids=with_ids)
+            valid_at=valid_at, filters=filters, filepath_prefix=filepath_prefix,
+            with_ids=with_ids)
 
     async def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
                   min_score: float = 0.0, anchored: bool = False, tenant=None, user=None,
@@ -865,6 +884,8 @@ class AsyncScopedMemvara:
                      states: Collection[str] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      include_episodes: Literal[False] = ...) -> list[Result]: ...
 
     @overload
@@ -876,6 +897,8 @@ class AsyncScopedMemvara:
                      states: Collection[str] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
@@ -887,6 +910,8 @@ class AsyncScopedMemvara:
                      states: Collection[str] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      include_episodes: bool) -> list[Retrieved]: ...
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
@@ -897,6 +922,8 @@ class AsyncScopedMemvara:
                      states: Collection[str] | None = None,
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType] | None = None,
+                     filters: Mapping[str, FilterValue] | None = None,
+                     filepath_prefix: str | None = None,
                      include_episodes: bool = False) -> list[Any]:
         return await self._amem.search(
             query, k=k, min_score=min_score, anchored=anchored, ranked=ranked,
@@ -904,7 +931,9 @@ class AsyncScopedMemvara:
             as_of=as_of, valid_at=valid_at,
             known_at=known_at, states=states,
             include_invalidated=include_invalidated,
-            memory_types=memory_types, include_episodes=include_episodes, **self._kw)
+            memory_types=memory_types, filters=filters,
+            filepath_prefix=filepath_prefix, include_episodes=include_episodes,
+            **self._kw)
 
     # The same three variants again, for the reason given on `ScopedMemvara.recall`.
     @overload
@@ -917,6 +946,8 @@ class AsyncScopedMemvara:
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
                      valid_at: datetime | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      with_ids: Literal[False] = ...) -> str: ...
 
     @overload
@@ -929,6 +960,8 @@ class AsyncScopedMemvara:
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
                      valid_at: datetime | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      with_ids: Literal[True]) -> RecallResult: ...
 
     @overload
@@ -941,6 +974,8 @@ class AsyncScopedMemvara:
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
                      valid_at: datetime | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      with_ids: bool) -> str | RecallResult: ...
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
@@ -955,6 +990,8 @@ class AsyncScopedMemvara:
                      budget: int | None = None,
                      counter: Callable[[str], int] = _approx_tokens,
                      valid_at: datetime | None = None,
+                     filters: Mapping[str, FilterValue] | None = None,
+                     filepath_prefix: str | None = None,
                      with_ids: bool = False) -> Any:
         return await self._amem.recall(
             query, k=k, min_score=min_score, anchored=anchored, ranked=ranked,
@@ -963,8 +1000,8 @@ class AsyncScopedMemvara:
             memory_types=memory_types,
             include_episodes=include_episodes, episode_header=episode_header,
             include_history=include_history, history_header=history_header,
-            budget=budget, counter=counter, valid_at=valid_at, with_ids=with_ids,
-            **self._kw)
+            budget=budget, counter=counter, valid_at=valid_at, filters=filters,
+            filepath_prefix=filepath_prefix, with_ids=with_ids, **self._kw)
 
     async def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
                   min_score: float = 0.0, anchored: bool = False) -> Answer:

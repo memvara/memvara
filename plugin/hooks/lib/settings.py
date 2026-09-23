@@ -53,6 +53,7 @@ FEATURE_DEFAULTS = {
     "ingest_media": True,
     "query_rewrite": True,
     "synthesis": True,
+    "metadata_filters": True,
 }
 
 #: Every feature name, in the order `FEATURE_DEFAULTS` lists them.
