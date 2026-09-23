@@ -69,6 +69,12 @@ contributor guide and a CLI rather than a script per corpus.
 - **Telemetry adds no required dependency and no background thread.** `MemoryRecorder` keeps
   series in memory for a deployment to scrape; the protocol is what a real backend
   implements.
+- **A graph harness declares its corpus's relations, or it measures a store with no edges.**
+  A relation nobody has declared takes values, and a value carries no edge, so
+  `bench/multihop.py` builds its registry in `vocabulary()` and `bench/twowiki.py` loads
+  `bench/packs/twowiki.toml`. Without them both harnesses printed `+graph` equal to `search`
+  in every row and every traversal column at 0.0%, and the footnote explained the number as
+  the gate's cost. `tests/test_predicate_packs.py` pins both registries.
 
 ## Read next
 

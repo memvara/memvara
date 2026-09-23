@@ -637,6 +637,43 @@ class TestTwoWikiPack:
         assert offenders == [], offenders
 
 
+class TestTheGraphHarnessesDeclareTheirVocabularies:
+    """`bench/multihop.py` and `bench/twowiki.py` load the vocabulary their corpus needs.
+
+    A relation nobody has declared takes values, and a value carries no edge, so a harness
+    that declares nothing measures a store with no edges in it. That is what happened when
+    the rule reached the store: both harnesses printed `+graph` equal to `search` in every
+    row and every traversal column at 0.0%, and nothing in the output said the number was
+    about the vocabulary rather than about the leg. The published tables kept quoting a
+    gate cost that neither harness could reproduce. These pin each harness's registry to
+    the shape its corpus needs, so the next change of that kind fails here rather than in
+    a table.
+    """
+
+    def test_the_multihop_relations_carry_edges_and_the_padding_does_not(self):
+        import bench.multihop as mh
+
+        registry = mh.vocabulary()
+        for name in mh.RELATIONS:
+            assert registry.spec(name).carries_edge, name
+        assert registry.spec("noted").carries_edge is False
+        # The two builtins are extended rather than replaced: the questions say "the
+        # company X works at" and "based in", which are aliases, and a person works at
+        # one place.
+        assert registry.normalize("company") == "works_at"
+        assert registry.normalize("based_in") == "lives_in"
+        assert registry.spec("works_at").cardinality is Cardinality.ONE
+
+    @needs_toml
+    def test_the_twowiki_harness_loads_its_pack(self):
+        import bench.twowiki as tw
+
+        registry = tw.vocabulary()
+        assert registry.spec("director").carries_edge
+        assert registry.spec("born_on").carries_edge is False
+        assert registry.normalize("date_of_birth") == "born_on"
+
+
 @needs_toml
 class TestPredicateAudit:
     """`bench.predicate_audit.audit`, which encodes decision 3's classification rule.

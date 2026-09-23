@@ -9,6 +9,43 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A question that says one relation two ways is a lookup again, and the intent gate
+  sees the vocabulary a registry holds right now.** The gate counts the distinct
+  predicates a question names, and two is a chain that opens the graph leg. It counted
+  each word on its own, and a word that answers to two predicates once the prepositions
+  are dropped — `work` is the content of both `works_at` and `job_title`'s alias
+  `works_as` — could add a second name from one relation: "what company does Ada work at"
+  read as a chain and opened the walk on the plainest lookup there is. The count is now
+  the fewest predicates one greedy pass needs to account for everything the question
+  said; "who founded the
+  company that Ada works at" still names `works_at` and `founded_by`. `predicate_refs`
+  also stops memoising a registry's phrases. The memo was keyed on the registry's `id()`
+  and its `learned_count`, which `register()` and `learn_alias()` do not move and which a
+  registry created after another was garbage-collected can repeat, so a fresh registry
+  could answer with a dead one's vocabulary. Both changes are visible only on a read with
+  `w_graph > 0` against a declared vocabulary; `docs/UPGRADING.md` has the direction.
+
+- **`bench/multihop.py` and `bench/twowiki.py` declare their corpus's relations, so the
+  graph benchmarks measure the graph leg again.** Since 0.12 only a declared relation
+  carries an edge. Neither harness declared one, so both measured a store with no edges:
+  every traversal column read 0.0%, `+graph` equalled `search` in every row, and
+  the footnote explained the number as the gate's cost. `bench/multihop.py` builds its
+  registry in `vocabulary()`, `bench/twowiki.py` loads `bench/packs/twowiki.toml`, and
+  `tests/test_predicate_packs.py` pins both. Re-measured on 2026-09-13 at k=12: the leg
+  takes `bench/multihop.py` from 2.9% to 20.0% with the gate on and to 20.0% with it off,
+  where the published table said 6.4% against 20.0%. The last gated family, "who founded
+  the company that X works at", was closed by #150's stemming, and the roadmap paragraph
+  that said a stemmer would close it now says that it did. On `bench/twowiki.py` chained
+  questions go from 28.2% to 48.3% with the gate on (43.8% published) and to 67.3% with
+  it off (72.3% published). The ungated arm reaches less because the four date relations
+  are values now, which removes the year-hub join decision 3 exists to prevent, and the
+  gated arm reaches more because the declared vocabulary is visible to the classifier.
+  `docs/BENCHMARKS.md` carries every cell. `bench/anchoring.py` ingests through the same
+  path, so its three `anchored + graph leg` rows were re-measured on the same day and
+  moved by about a point, to 55.0, 54.8 and 55.0; the other six rows did not move.
+
 ## [0.14.0] — 2026-09-14
 
 ### Added

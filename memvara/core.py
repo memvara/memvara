@@ -3387,7 +3387,7 @@ class Memvara:
         the ratio is the share of this memory that leads to more of it. It is what
         decides whether `read_w_graph > 0` can pay for itself: the walk spends its budget
         following edges, and on a store where nothing joins there is nowhere to go. Two
-        public corpora, same retrieval code: 40.6% joinable and the graph leg gains 13
+        public corpora, same retrieval code: 29.0% joinable and the graph leg gains 20
         points on chained questions; 0.0% joinable and it loses 1.6.
 
         A rate near zero usually means a **star** — every fact hanging off one subject —
