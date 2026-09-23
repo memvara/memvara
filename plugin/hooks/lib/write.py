@@ -307,9 +307,9 @@ def new_claim_id(receipt: object) -> "str | None":
     if isinstance(receipt, str):
         for line in receipt.splitlines():
             if line.startswith("+ ["):
-                found = CLAIM_ID.search(line)
+                found = CLAIM_ID.findall(line)
                 if found:
-                    return found.group(0)
+                    return found[0]
         return None
     for field in ("added", "reinforced"):
         claims = getattr(receipt, field, None) or []
