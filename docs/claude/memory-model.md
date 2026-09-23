@@ -81,7 +81,11 @@ The distinction is the product, and it appears in three places that must agree.
   closure value `"retired"` write it. The claim stops answering present-tense questions but
   stays visible to `history()` and `why()`.
 - **Erased** is the only one that removes bytes. `erase()` deletes the row and its residue,
-  and `prove_erased()` returns an `ErasureProof` with per-table counts as evidence.
+  and `prove_erased()` returns an `ErasureProof` with per-table counts as evidence. The
+  engine erases on its own in one case only: a claim written with `expires_at`, once that
+  instant has passed. `erase_expired()` does it through the same path as `erase()`, when
+  the store opens and hourly in the MCP server. `expires_at` is not `valid_to`: a claim
+  whose `valid_to` has passed is ended and kept.
 
 A document sits beside this rather than inside it. `add_document()` stores a document's
 text as chunks, each an episode, and `delete_document()` erases that text. It never
@@ -121,11 +125,14 @@ either claim removes them. `docs/INTERNALS.md` has all three under *`memvara/sto
 - **The three states do not tile the store.** Asking for all three collapses to the belief
   floor alone, which readmits a claim recorded but not yet in force. That is deliberate and
   `tests/test_bitemporal.py` pins it.
-- **No engine write deletes a row, and no write closes both clocks.** Superseding a value
-  sets `valid_to` and leaves `invalidated_at` unset, because the old value stopped being
-  true and we were never mistaken about it. `erase()`, `purge()` and `reset()` delete, on
-  purpose and by name, and they are the caller's decision rather than the engine's. This is
-  invariant 3 in [INTERNALS.md](../INTERNALS.md).
+- **The engine deletes a row only when a claim's explicit expiry has passed, and no write
+  closes both clocks.** Superseding a value sets `valid_to` and leaves `invalidated_at`
+  unset, because the old value stopped being true and we were never mistaken about it.
+  Ending and superseding never delete. The one deletion the engine makes by itself is
+  `erase_expired()`, which erases only claims carrying an `expires_at` the caller set, only
+  after it passes, and always with a proof. `erase()`, `purge()` and `reset()` delete on
+  purpose and by name, as the caller's decision. This is invariant 3 in
+  [INTERNALS.md](../INTERNALS.md).
 - **A filter and a limit may not live in different layers.** Whatever narrows rows has to
   run where the truncation runs, or the top of the list is wrong with nothing saying it was
   partial. This is invariant 7, and it is why `states=` is a store parameter rather than a

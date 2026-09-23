@@ -81,7 +81,7 @@ from .retrieve import Path, Retrieved
 from .select import PLAIN_READ
 from .write.reconcile import MergeReport
 from .types import (Answer, Claim, DeleteResult, Delta, Document, DocumentStatus,
-                    Episode, ErasureProof, ForgetPreview, ForgetResult, Link, MemoryType,
+                    Episode, ErasedClaim, ErasureProof, ForgetPreview, ForgetResult, Link, MemoryType,
                     Page, Profile, Provenance, RecallResult, Result, Scope, WriteReceipt)
 
 
@@ -266,6 +266,10 @@ class AsyncMemvara:
     async def prove_erased(self, claim_id: str) -> "ErasureProof":
         """See `Memvara.prove_erased`."""
         return await asyncio.to_thread(self.memvara.prove_erased, claim_id)
+
+    async def erase_expired(self, now: datetime | None = None) -> list[ErasedClaim]:
+        """See `Memvara.erase_expired` — irreversible, and across every tenant."""
+        return await asyncio.to_thread(self.memvara.erase_expired, now)
 
     async def add_document(self, content: str | bytes | None = None, *,
                            url: str | None = None, custom_id: str | None = None,

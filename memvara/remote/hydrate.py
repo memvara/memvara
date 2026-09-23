@@ -148,6 +148,10 @@ def claim(body: dict[str, Any]) -> Claim:
     out.recorded_at = _required_dt("recorded_at", txn["recorded_at"])
     out.invalidated_at = _dt(txn["invalidated_at"])
     out.invalidated_by = txn["invalidated_by"]
+    # `.get`, because a deployment from before expiry renders neither field, and a claim
+    # it sends has no expiry.
+    out.expires_at = _dt(body.get("expires_at"))
+    out.expire_reason = body.get("expire_reason")
     return out
 
 

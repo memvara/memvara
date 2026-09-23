@@ -322,6 +322,14 @@ class Reconciler:
                     # the type asserted for the claim on record.
                     asserted_type = MemoryType.SEMANTIC
                 retyped = self._retype(keep, asserted_type) or self.file_by_subject(keep)
+                if claim.expires_at is not None:
+                    # A repeat that names an expiry puts it on the claim on record,
+                    # which `reinforce` then writes. Otherwise the expiry would be
+                    # dropped with the candidate, and a fact the caller asked to have
+                    # erased would stay forever. A repeat that names none leaves an
+                    # existing expiry alone, as an omitted `memory_type` does.
+                    keep.expires_at = claim.expires_at
+                    keep.expire_reason = claim.expire_reason
                 return ReconcileResult(
                     "reinforce",
                     self.reinforce(keep, claim.sources, self._observed_at(claim, t)),

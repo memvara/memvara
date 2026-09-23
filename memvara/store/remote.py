@@ -414,6 +414,13 @@ class RemoteStore:
             method="erasure_record",
             why="No erasure-audit endpoint exists on the data plane today."))
 
+    def expired_claims(self, now: datetime) -> list[Claim]:
+        raise NotImplementedError(_NO_ENDPOINT.format(
+            method="expired_claims",
+            why="The deployment erases expired claims itself, with its own sweep, and "
+                "exposes no route that lists them. Opening a Memvara over this store "
+                "skips the sweep for that reason."))
+
     def put_link(self, tenant: str, link: Link) -> Link:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="put_link",

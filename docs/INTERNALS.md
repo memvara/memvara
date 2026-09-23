@@ -155,31 +155,63 @@ was being read as holding further than it does.
    > stops_superseding_silently` removes one declaration from a working configuration and
    > watches the slot come back with two answers.
 
-3. **Nothing is ever hard-deleted by the engine, and end-of-life moves exactly one
-   clock.** Closing valid time (`valid_to`) says *the world changed*; closing transaction
-   time (`invalidated_at`) says *the record was wrong*. They are different events and no
-   write may assert both. Superseding a claim therefore sets `valid_to` and
-   `invalidated_by` and leaves `invalidated_at` unset — the old value stopped being true,
-   and we were never mistaken about it. `Claim.state` names the outcome: `live`, `ended`,
-   `retired`. History must stay queryable via `known_at` **and** `valid_at`; the second
-   of those returned nothing on any history the engine wrote itself for as long as
-   supersession closed both clocks. The correcting reading is reachable, never guessed:
-   `close="retired"` on `remember`, `supersede`, `forget` and `delete`, defaulting to
-   `"ended"` everywhere except `forget`/`delete`, which are belief operations by name.
+3. **The engine hard-deletes only claims that carry an explicit `expires_at`, only after
+   it passes, and always with a proof record; ending and superseding never delete. And
+   end-of-life moves exactly one clock.** Closing valid time (`valid_to`) says *the world
+   changed*; closing transaction time (`invalidated_at`) says *the record was wrong*. They
+   are different events and no write may assert both. Superseding a claim therefore sets
+   `valid_to` and `invalidated_by` and leaves `invalidated_at` unset — the old value
+   stopped being true, and we were never mistaken about it. `Claim.state` names the
+   outcome: `live`, `ended`, `retired`. History must stay queryable via `known_at` **and**
+   `valid_at`; the second of those returned nothing on any history the engine wrote itself
+   for as long as supersession closed both clocks. The correcting reading is reachable,
+   never guessed: `close="retired"` on `remember`, `supersede`, `forget` and `delete`,
+   defaulting to `"ended"` everywhere except `forget`/`delete`, which are belief operations
+   by name.
 
-   > **Claim.** No engine write deletes a row, and no write closes both clocks.
+   **Expiry is not `valid_to`.** A caller who writes a fact with `expires_at` asks for it to
+   be **erased** once that instant passes: the row, its text index entry and its vector are
+   deleted, the erasure is recorded in `erasures`, and `prove_erased` checks the disk. That
+   is a third ending, beside ended and retired, and it is the only one the engine carries
+   out by itself. It cannot be keyed on `valid_to`, because the engine also sets `valid_to`
+   when it ends or supersedes a claim, and erasing on it would erase history. A claim
+   without an `expires_at` is never erased by the engine, however old it is and whatever
+   its `valid_to` says.
+
+   > **Claim.** No engine write deletes a row except `erase_expired`, which deletes only
+   > claims whose explicit `expires_at` is at or before the sweep's instant, and records
+   > an erasure row and an `ErasureProof` for each. No write closes both clocks.
    > **Scope.** The *engine*. `erase()`, `purge()` and `reset()` delete, on purpose and by
    > name, and they are the caller's decision rather than the engine's — see invariant 8's
    > neighbour below and `Memvara.prove_erased`. `delete_document()` is the fourth: it
    > erases one document's text, and it deletes no claim row, because a claim whose only
    > source was the document is retired (see *Documents* under `memvara/store/`). A
    > re-ingest by `custom_id` erases the text of the chunks the new version no longer
-   > has, under the same rule.
+   > has, under the same rule. The expiry sweep runs when a `Memvara` opens a store and
+   > hourly in the MCP server, so a claim can be read for up to an hour after its
+   > `expires_at`; `expiry_erasure=False` (`MEMVARA_FEATURE_EXPIRY_ERASURE=0`) stops both
+   > and leaves `expires_at` stored. The sweep keeps a claim's source turns, as `erase()`
+   > does by default.
    > **Sketch.** `close_out` is the single place any claim ends and takes one `Closure`;
    > `Claim.state` derives `live`/`ended`/`retired` from which column is set.
+   > `Memvara.erase_expired` lists due claims with `Store.expired_claims`, which reads
+   > `expires_at` and never `valid_to`, re-reads each one, and erases it through
+   > `_erase_proved`, the same code `erase()` runs after its scope check.
    > **Measured.** `bench/compare.py`: **0 stale values left live** against 7 for a
    > mem0-style baseline, on a transcript where 10 facts are revised. `tests/
-   > test_bitemporal.py` holds the two-clock reads.
+   > test_bitemporal.py` holds the two-clock reads. The expiry side is not measured; there
+   > is no number to produce. `tests/test_expiry.py::test_ended_superseded_and_retired_
+   > claims_are_kept_however_old_they_are` holds that ended, superseded and retired claims
+   > survive a sweep dated a century ahead, and `test_nothing_is_erased_before_the_instant_
+   > and_everything_due_is_erased_after` holds the instant and the proof.
+
+   **What changed on 2026-09-24.** Until then this invariant said that nothing is ever
+   hard-deleted by the engine. The phase 3 parity design
+   (`docs/superpowers/specs/2026-09-23-parity-phase-3-extraction-and-cloud-design.md`,
+   §3.4) added erasure on expiry, on by default with a switch, and reversed the sentence
+   for this one case. What did not change: ending and superseding still keep every row,
+   the two clocks still close separately, and the measurement above still stands, because
+   a sweep erases nothing that was written without an `expires_at`.
 
 4. **Every claim carries provenance.**
 
@@ -322,7 +354,9 @@ nothing rather than a wrong triple; the LLM tier is the fallback. Set
 ```python
 def residue(self, claim_id: str) -> dict[str, int]           # Store, optional
 def erasure_record(self, claim_id: str) -> dict | None       # Store, optional
+def expired_claims(self, now: datetime) -> list[Claim]       # Store, optional
 def prove_erased(self, claim_id: str) -> ErasureProof        # Memvara
+def erase_expired(self, now=None) -> list[ErasedClaim]       # Memvara
 ```
 
 `erase()` reported success from `erase_claim`'s return code, which proves the code took
@@ -359,6 +393,21 @@ queries):
 operator with write access can remove a row. A hash-chained log is a different feature and
 is commercial (`docs/ROADMAP.md`); what this defends against is a delete that no record was
 ever written for.
+
+**Erasure on expiry uses the same path.** `erase_expired(now)` lists every claim whose
+`expires_at` is at or before `now` with `Store.expired_claims`, in every tenant, re-reads
+each one, and erases it with `_erase_proved`, which is the part of `erase()` after the
+scope check: `erase_claim` (audit row, then delete, in one transaction) and then
+`prove_erased`. Each erased claim comes back as an `ErasedClaim` with its id, scope,
+`expires_at`, `expire_reason` and proof, and no subject, predicate, object or text. The
+re-read is there because a write between the listing and the delete can move the expiry
+later; that claim is left alone. A failed proof raises `ErasureIncomplete`, and the claims
+erased before it stay erased and recorded. `erase_expired` runs when a `Memvara` opens a
+store, unless `expiry_erasure=False`, and hourly while the MCP server's `serve()` loop
+runs (`server.mcp.ExpirySweeper`, on a daemon thread, which warns and carries on when a
+sweep fails). A store with no `expired_claims` is skipped at open, and so is one whose
+`expired_claims` raises `NotImplementedError`, as `RemoteStore`'s does: the hosted
+deployment runs its own sweep. Called by name, `erase_expired` raises in both cases.
 ### `write/reconcile.py`
 
 ```python
@@ -541,12 +590,22 @@ class WritePipeline:
                  reinforce_bump: float = 0.25,
                  reject_ungrounded: bool | str = "auto",
                  closed_vocabulary: bool = False,
-                 extraction_chunks: bool = False) -> None
+                 extraction_chunks: bool = False,
+                 guidance: Guidance | None = None) -> None
 
     def add(self, episodes: Sequence[Episode]) -> WriteReceipt
     def reextract(self, episodes: Sequence[Episode]) -> WriteReceipt
     def assert_claim(self, claim: Claim) -> WriteReceipt
 ```
+
+`guidance` is per-project extraction guidance (`memvara.llm.guidance`), reached from
+`Memvara(write_guidance=...)`. Every tier-2 call passes it to `llm.extract(guidance=...)`,
+which appends it to the system message, and an extractor that builds its own system
+message reads it from `WritePipeline.guidance` and appends it with `with_guidance`. An
+empty `Guidance` is stored as `None`. A non-empty one is refused with `TypeError` for a
+backend whose `accepts_guidance` is not true, because an older backend's `extract` has no
+such argument and the guidance would otherwise reach no extraction. Without guidance the
+argument is not passed at all, so such a backend keeps working.
 
 `add()` runs the tiers in order and must populate every field of `WriteReceipt`,
 including `llm_calls` (0 whenever the LLM is not consulted) and `latency_ms`. One field
@@ -1905,10 +1964,26 @@ class AnthropicLLM:
     name: str                    # e.g. "anthropic/claude-opus-5"
     def __init__(self, model: str = "claude-opus-5", client=None,
                  effort: str = "low", max_tokens: int = 8192) -> None
-    def extract(self, episodes, known_predicates) -> list[dict]
+    def extract(self, episodes, known_predicates, *, usage=None,
+                guidance=None) -> list[dict]
     def resolve_predicate(self, surface: str, candidates: Sequence[str]) -> dict
     def classify_predicate(self, predicate: str, example: str) -> dict  # legacy fallback
 ```
+
+**Extraction guidance.** `Guidance` (`memvara/llm/guidance.py`) holds a project
+description (`context`, at most 1,500 characters) and two lists of rules (`include` and
+`exclude`, at most 20 rules of 200 characters each). Anything longer is refused with
+`GuidanceError`, never cut. `with_guidance(system, guidance)` appends it to a system
+message under the fixed heading `GUIDANCE_HEADING`, and returns the message unchanged for
+`None` or an empty guidance. Both backends call it on their extraction prompt: the shipped
+`EXTRACT_SYSTEM` for `AnthropicLLM`, and for `OpenAILLM` whichever prompt is in use,
+including a full replacement from `MEMVARA_LLM_EXTRACT_SYSTEM`. The guidance stays in the
+system message; the turns go in the user message as data. `accepts_guidance = True` on
+a backend is the advertisement `WritePipeline` checks, and it is read with `getattr` rather
+than declared on the `LLM` protocol, because a new protocol member would make every older
+backend fail `isinstance`. `load_guidance(path)` reads the three fields from TOML and
+refuses an unknown key; it needs `tomllib`, so on Python 3.10 it raises, for the reason
+`schema._toml_reader` gives.
 
 Hard API requirements — these are current and getting them wrong is a 400:
 

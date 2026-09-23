@@ -32,6 +32,10 @@ A write starts as an `Episode` — one raw turn, stored verbatim — and ends as
   `Multimodal` (images, audio and video to text, used by `memvara/ingest/`),
   `NullLLM`, `Usage`, `TruncatedResponse`, `bounded_claim_schema()`. Implementations are
   `memvara/llm/anthropic.py` (`AnthropicLLM`) and `memvara/llm/openai.py` (`OpenAILLM`).
+- Per-project extraction guidance: `memvara/llm/guidance.py` — `Guidance`,
+  `with_guidance()` and `load_guidance()`. `WritePipeline.guidance` holds it, and every
+  extraction call appends it to its system message. Tests in
+  `tests/test_extraction_guidance.py`.
 - Tests: `tests/test_pipeline.py`, `tests/test_gate.py`, `tests/test_fast.py`,
   `tests/test_reconcile.py`, `tests/test_pollution.py`, `tests/test_when.py`,
   `tests/test_llm.py`, `tests/test_advisory.py`, `tests/test_extraction_chunks.py`.
@@ -92,6 +96,10 @@ exception the caller retries.
   `receipt.unregistered`, and never spends a model call learning it. Off by default; on for
   a deployment whose predicates are deliberate, because an unregistered predicate is
   multi-valued forever and supersedes nothing, so all it adds is noise in every recall.
+- **Guidance adds to the extraction prompt and never replaces it.** It is appended to the
+  system message under a fixed heading, after the shipped rules or a replacement prompt,
+  and never goes in the user message beside the turns. It is refused rather than cut when
+  it is too long, and refused for a backend that does not set `accepts_guidance`.
 - **The fast path chooses precision over recall.** It emits nothing rather than a wrong
   triple, sets `Derivation.FAST_PATH`, and leaves the rest to tier 2.
 - **`reject_ungrounded` defaults to `"auto"`.** A model-proposed claim whose object shares

@@ -75,6 +75,7 @@ from .types import (
     Document,
     DocumentStatus,
     Episode,
+    ErasedClaim,
     ErasureProof,
     ForgetPreview,
     ForgetResult,
@@ -840,6 +841,7 @@ class Memvara:
         metadata_filters: bool = True,
         encryption: bool = False,
         key_env: Mapping[str, str] | None = None,
+        expiry_erasure: bool = True,
         **tuning: Any,
     ) -> None:
         # Present so that a local construction that named them still binds. `__new__`
@@ -1022,11 +1024,21 @@ class Memvara:
         #: `MEMVARA_FEATURE_METADATA_FILTERS=0`.
         self.metadata_filters = metadata_filters
         self._documents = DocumentService(self)
+        #: Whether opening this store erases the claims whose `expires_at` has passed.
+        #: The MCP server reads the same switch (`MEMVARA_FEATURE_EXPIRY_ERASURE`) for its
+        #: hourly sweep. Off, `expires_at` is still stored and nothing erases on its own;
+        #: `erase_expired()` called directly still erases, because then the caller asked.
+        self.expiry_erasure = expiry_erasure
 
         # Last, because both need the fully wired object: the migration path calls
         # `reembed()`, and neither is worth doing if construction is going to fail.
         self._check_embedder(reembed)
         self._warn_if_degraded(llm is not None)
+        # After everything else, because it erases: a construction that was going to fail
+        # must not delete anything first. A store that cannot list expired claims is
+        # skipped here, and `erase_expired()` says so if it is called.
+        if expiry_erasure and getattr(self.store, "expired_claims", None) is not None:
+            self._erase_expired(utcnow(), at_open=True)
 
     # -- construction helpers ------------------------------------------------
 
@@ -1442,6 +1454,8 @@ class Memvara:
                  until_reason: str | None = None,
                  replaces: str | None = None,
                  reason: str | None = None,
+                 expires_at: datetime | None = None,
+                 expire_reason: str | None = None,
                  **meta: Any) -> WriteReceipt:
         """Assert a structured fact directly, bypassing extraction.
 
@@ -1519,6 +1533,18 @@ class Memvara:
         has no caller-named claim to attach a reason to. Both reasons are at most 500
         characters (`types.REASON_CHARS`).
 
+        `expires_at` is the instant after which the claim is **erased**: its row, its text
+        index entry and its vector are deleted and a proof is recorded, by
+        `erase_expired()`, which runs when the store opens and hourly in the MCP server.
+        That is not ending (`valid_to`, the fact stopped being true and is kept) and not
+        retiring (the record was wrong and is kept); an erased claim is gone, and
+        `history()` shows a gap. It must be in the future, or it is a `ValueError`: a
+        claim that is already due would be erased by the next sweep, so storing it
+        writes something only to delete it. `expire_reason` says why ("a temporary access
+        code"), is erased with the claim, and is a `ValueError` without `expires_at`, like
+        `until_reason` without `valid_to`. It is at most 500 characters. Writing a fact
+        the store already holds puts the expiry on the claim on record.
+
         `**meta` is the caller's, with the exception of the keys the engine stores there
         itself — see `RESERVED_META`, and note that two of them are a ranking override.
         Rejected here at the boundary rather than stripped, because a silently dropped
@@ -1578,6 +1604,12 @@ class Memvara:
                 ) from exc
         why_until = closure_reason(until_reason)
         why_replaced = closure_reason(reason)
+        why_expires = closure_reason(expire_reason)
+        if why_expires is not None and expires_at is None:
+            raise ValueError(
+                "expire_reason= says why the fact will be erased, and no expires_at= was "
+                "given, so nothing will erase it. Pass expires_at with it, or leave "
+                "expire_reason out.")
         if why_replaced is not None and replaces is None:
             raise ValueError(
                 "reason= says why the claim named by replaces= was closed, and no claim "
@@ -1588,6 +1620,12 @@ class Memvara:
         pred = self.registry.normalize(predicate)
         now = utcnow()
         began = valid_from or recorded_at or now
+        if expires_at is not None and as_utc(expires_at) <= now:
+            raise ValueError(
+                f"expires_at ({as_utc(expires_at).isoformat()}) is not in the future. A "
+                "claim that is already due would be erased by the next sweep, so this "
+                "would write a fact only to delete it. If the fact should not be kept, "
+                "do not store it; if it should be kept for a while, give a later instant.")
         if valid_to is not None and as_utc(valid_to) <= as_utc(began):
             raise ValueError(
                 f"valid_to ({as_utc(valid_to).isoformat()}) is not after the instant the "
@@ -1610,6 +1648,8 @@ class Memvara:
             recorded_at=recorded_at or now,
             text=text or "",   # empty means "render the triple"; see `Claim.__post_init__`
             derivation=Derivation.USER, extractor=extractor, meta=meta,
+            expires_at=as_utc(expires_at) if expires_at is not None else None,
+            expire_reason=why_expires,
         )
         if why_until is not None:
             planned_end(claim, why_until)
@@ -2647,6 +2687,16 @@ class Memvara:
         if self.get(claim_id, tenant=tenant, user=user, agent=agent,
                     session=session) is None:
             return False
+        return self._erase_proved(claim_id, sources=sources) is not None
+
+    def _erase_proved(self, claim_id: str, *, sources: bool) -> ErasureProof | None:
+        """Erase one claim and prove it against the disk. `None` if nothing was erased.
+
+        The part of `erase()` after the scope check, shared with `erase_expired()` so
+        there is one erasure path: the store's `erase_claim`, which writes the audit row
+        in the same transaction as the delete, then `prove_erased`. Raises
+        `ErasureIncomplete` when the proof fails.
+        """
         erase = getattr(self.store, "erase_claim", None)
         if erase is None:
             # Deliberately not falling back to `delete()`. A caller who asked to erase
@@ -2661,11 +2711,81 @@ class Memvara:
         if not erased:
             # Raced with another erasure between `get` and here. Nothing was deleted, so
             # there is nothing to prove and nothing to refuse.
-            return False
+            return None
         proof = self.prove_erased(claim_id)
         if not proof.proven:
             raise ErasureIncomplete(proof)
-        return True
+        return proof
+
+    def erase_expired(self, now: datetime | None = None) -> list[ErasedClaim]:
+        """Erase every claim whose `expires_at` is at or before `now`, with proof.
+
+        `now` defaults to this moment. Each claim goes through the same path `erase()`
+        takes: the store deletes the row, its text index entry and its vector and writes
+        an erasure record in the same transaction, then `prove_erased` re-queries the
+        disk. The source turns are kept, as `erase()` keeps them by default, because a
+        turn can hold other facts. What comes back is one `ErasedClaim` per claim, with
+        the proof and no copy of the fact.
+
+        **Every tenant in the store, not this instance's scope.** The expiry is a rule
+        the caller wrote on the claim, so it holds however the store is opened.
+
+        **Only claims that carry an `expires_at`.** An ended claim, a superseded one and
+        a retired one are kept, whatever their `valid_to` says; that is invariant 3 in
+        `docs/INTERNALS.md`, and this method is its one exception.
+
+        This runs when a `Memvara` opens a store (unless `expiry_erasure=False`) and
+        hourly in the MCP server. It is safe to run at any time and as often as you like:
+        a claim is re-read just before it is erased, so one whose expiry a later write
+        moved is left alone. A store without `expired_claims()` raises
+        `NotImplementedError`, and a failed proof raises `ErasureIncomplete` with the
+        claims before it already erased and recorded.
+
+        >>> from datetime import timedelta
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> code = mem.remember("user", "door_code", "4411",
+        ...                     expires_at=utcnow() + timedelta(days=1)).added[0]
+        >>> mem.erase_expired()
+        []
+        >>> [e.claim_id == code.id and e.proof.proven
+        ...  for e in mem.erase_expired(now=utcnow() + timedelta(days=2))]
+        [True]
+        >>> mem.get(code.id) is None
+        True
+        """
+        find = getattr(self.store, "expired_claims", None)
+        if find is None:
+            raise NotImplementedError(
+                f"{type(self.store).__name__} does not implement expired_claims(), so "
+                "it cannot say which claims have expired and none can be erased.")
+        return self._erase_expired(as_utc(now) if now is not None else utcnow())
+
+    def _erase_expired(self, at: datetime, *, at_open: bool = False) -> list[ErasedClaim]:
+        """`erase_expired` at `at`. When the store opens, a listing the store has only as
+        a stub that raises `NotImplementedError` is skipped: `RemoteStore` has one, and
+        the deployment behind it runs its own sweep."""
+        try:
+            listed = self.store.expired_claims(at)
+        except NotImplementedError:
+            if at_open:
+                return []
+            raise
+        erased: list[ErasedClaim] = []
+        for due in listed:
+            # Read again, because a write since the listing may have moved the expiry
+            # or erased the claim. The window left is the few statements between this
+            # read and the delete.
+            current = self.store.get_claim(due.id)
+            if (current is None or current.expires_at is None
+                    or as_utc(current.expires_at) > at):
+                continue
+            proof = self._erase_proved(current.id, sources=False)
+            if proof is None:
+                continue
+            erased.append(ErasedClaim(claim_id=current.id, scope=current.scope,
+                                      expires_at=current.expires_at, proof=proof,
+                                      expire_reason=current.expire_reason))
+        return erased
 
     def prove_erased(self, claim_id: str) -> ErasureProof:
         """Check the disk, not the return code: is this claim actually gone?

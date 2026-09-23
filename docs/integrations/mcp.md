@@ -122,7 +122,7 @@ measurements and the case for each.
 | `memory_standing` | Every standing preference recorded, with no query and no ranking |
 | `memory_profile` | Standing preferences, recent arrivals, memories grouped into buckets and, with a query, relevant memories, in one call |
 | `memory_add` | Store what the user just said, in their own words |
-| `memory_remember` | Record one exact fact as a triple, skipping extraction entirely. With `replaces`, it ends one named fact in the same write and records why |
+| `memory_remember` | Record one exact fact as a triple, skipping extraction entirely. With `replaces`, it ends one named fact in the same write and records why. With `expires_at`, the store **erases** the fact once that instant passes (within the hour), and `expire_reason` says why |
 | `memory_forget` | Retire a fact **because the record was wrong**, with an optional reason |
 | `memory_end` | Close out a fact that **has stopped being true**, with an optional reason |
 | `memory_end_matching` | End every live fact that matches a query: a preview first, then a confirming call that ends exactly the facts it listed |

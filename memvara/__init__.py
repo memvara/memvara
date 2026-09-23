@@ -52,7 +52,7 @@ from .embed import (
     HashingEmbedder,
     default_embedder,
 )
-from .llm import LLM, NullLLM
+from .llm import LLM, Guidance, NullLLM
 from .retrieve import (
     HOP_DAMPING,
     Edge,
@@ -81,6 +81,7 @@ from .types import (
     DocumentStatus,
     Retype,
     Episode,
+    ErasedClaim,
     ErasureProof,
     Explanation,
     ForgetPreview,
@@ -167,13 +168,15 @@ __all__ = [
     "Embedder", "HashingEmbedder", "CachedEmbedder", "default_embedder",
     "EmbedderFingerprint",
     "LLM", "NullLLM", "AnthropicLLM", "OpenAILLM",
+    # per-project extraction guidance, appended to the extraction prompt
+    "Guidance",
     # diagnostics: importable so they can be filtered or caught by category
     "DegradedExtractionWarning", "EmbedderChangedWarning", "EmbedderMismatchError",
     # encryption at rest: a store that cannot be opened with the key it found, and the
     # warnings about an unencrypted store or a key kept in a file
     "EncryptionError", "EncryptionWarning",
     # erasure, and the evidence for it
-    "ErasureIncomplete", "ErasureProof",
+    "ErasureIncomplete", "ErasureProof", "ErasedClaim",
     # subsystems
     "WritePipeline", "SalienceGate", "FastExtractor", "Reconciler",
     "UnembeddableTextWarning",

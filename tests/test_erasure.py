@@ -250,9 +250,13 @@ def test_the_erasures_table_is_schema_seven():
     added a table, `claim_links`, and backfills nothing into it; it neither reads nor
     writes `erasures`, so the sentence holds. Version 14 added two tables, `documents`
     and `document_chunks`, and backfills nothing into them; it neither reads nor writes
-    `erasures`, so the sentence holds.
+    `erasures`, so the sentence holds. Version 15 added two nullable columns to `claims`,
+    `expires_at` and `expire_reason`, and no table. The migration neither reads nor writes
+    `erasures`; the expiry sweep writes a row there for each claim it erases, through the
+    same `erase_claim` that `erase()` uses, and only after the upgrade. So an empty table
+    still means "nothing erased since the upgrade", and the sentence holds.
     """
-    assert SCHEMA_VERSION == 14
+    assert SCHEMA_VERSION == 15
     store = SQLiteStore(":memory:")
     try:
         assert store.erasure_record("anything") is None

@@ -447,6 +447,24 @@ volatility = "fast"     # static | slow | fast -> 36500 | 730 | 7 day half-life
 A declaration outranks a guess, so a pack corrects a store that already classified
 something wrongly rather than only shaping a fresh one.
 
+### Tell the extractor what this project cares about
+
+The extraction instructions are written for everyone. Guidance adds one project's own
+rules to them: a short description, what to extract, and what to leave out. It is added
+after the shipped instructions, never in place of them.
+
+```toml
+# guidance.toml, then MEMVARA_EXTRACT_GUIDANCE=./guidance.toml memvara-mcp
+context = "A payments service. The team cares about incidents and why they happened."
+include = ["decisions about retries and timeouts", "who owns which service"]
+exclude = ["stack traces", "anything about the weekend"]
+```
+
+In Python, `Memvara(llm=..., write_guidance=Guidance(context=..., include=[...]))` does
+the same. The description is at most 1,500 characters, and each list at most 20 rules of
+200 characters; longer guidance is refused rather than cut. Reading the file needs Python
+3.11 or later.
+
 ### Merge the spellings a store already has
 
 Two sessions that store the same fact under `known_bug` and `known_defect` get two slots,
@@ -496,10 +514,22 @@ afterwards:**
 |---|---|---|
 | **ended** | The world changed. It was true, and then it wasn't. | a superseding write, or `forget(close="ended")` |
 | **retired** | The record was wrong. It was never true. | `forget()`, `delete()` — the default |
-| **erased** | The text itself is gone. Not recoverable. | `erase()`, `purge()`, and `delete_document()` for a document's own text |
+| **erased** | The text itself is gone. Not recoverable. | `erase()`, `purge()`, `delete_document()` for a document's own text, and the store itself once a fact's `expires_at` has passed |
 
 *Served a value that expired* and *served a value that was never true* are one column apart
 and are not the same finding. Only the third deletes anything.
+
+A fact can be written to be erased later. `remember(..., expires_at=...)` stores it as
+usual, and once that instant passes the store erases it with a proof, when it next opens
+and hourly in the MCP server. This is not `valid_to`: a fact whose `valid_to` has passed
+is ended and kept, while a fact whose `expires_at` has passed is gone. Ending and
+superseding never delete anything.
+
+```python
+mem.remember("user", "door_code", "4411", expires_at=friday,
+             expire_reason="rental ends Friday")
+mem.erase_expired()   # runs on its own; returns what it erased, each with a proof
+```
 
 Each closure can also say why. `delete()`, `forget()` and `remember(replaces=...)` take a
 `reason`, `remember(valid_to=..., until_reason=...)` records why a fact will end, and

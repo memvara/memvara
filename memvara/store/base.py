@@ -365,6 +365,9 @@ OMITTABLE: dict[str, str] = {
     "put_link": "Memvara.link() raises NotImplementedError naming the store, rather "
                 "than reporting a link it did not keep.",
     "claim_links": "links() and why().links report no links. Nothing else reads them.",
+    "expired_claims": "erase_expired() raises NotImplementedError naming the store, and "
+                      "the sweep when the store opens is skipped. A claim's expires_at "
+                      "is kept if the store keeps it, and the claim is never erased.",
     # The nine document members are one capability, and a store that has it says so
     # with `holds_documents = True`; `Memvara` asks that marker rather than the methods,
     # because `RemoteStore` has every method as a stub that raises.
@@ -932,6 +935,17 @@ class Store(Protocol):
         correct for a memory that *is* its source text, wrong for a fact extracted from
         a conversation turn that holds much else besides. Those turns are what `episodes`
         counts, so it is 0 without the flag.
+        """
+        ...
+
+    def expired_claims(self, now: datetime) -> list[Claim]:
+        """Every claim, in every tenant, whose `expires_at` is at or before `now`.
+
+        What `Memvara.erase_expired` erases. Across tenants, because an expiry is a rule
+        the caller wrote on the claim, not a request made from one scope. A claim with no
+        `expires_at` is never returned, however old it is and whatever its `valid_to`.
+
+        Optional; see `OMITTABLE`.
         """
         ...
 
