@@ -1932,12 +1932,29 @@ rather than `OSError`.
 
 **Each of those three features has a switch.** `lib/settings.py` reads
 `~/.memvara/settings.json`, a flat object of `feature_name: true|false`, where a missing key
-means on. `MEMVARA_FEATURE_<NAME>=0|1` overrides the file. The names are `project_scope`,
-`status_line` and `recall_mark`. The hooks know the same list of feature names as
-`ServerConfig`, kept as a copy in `lib/settings.FEATURES` that a test compares with the
-library's. The file is read at most once per process. Capture drops
+means the feature's default. `MEMVARA_FEATURE_<NAME>=0|1` overrides the file. The names are
+`project_scope`, `status_line` and `recall_mark`, all on by default. The hooks know the same
+feature names and defaults as `ServerConfig`, kept as a copy in
+`lib/settings.FEATURE_DEFAULTS` that a test compares with the library's. The file is read at
+most once per process. Capture drops
 marked lines whatever `recall_mark` says, because a transcript can hold lines injected before
 the switch changed.
+
+**The recall hook asks for a query rewrite only after setup verified a key.** A local
+store whose model can chat rewrites every read by default (invariant 1 names `query_rewrite`
+as one of the read path's model stages), and on the recall hook that is one model call per
+prompt. `lib/read_model.allowed()` says yes only when the `query_rewrite` switch is on, the
+settings file records under `read_model` that `/memvara:setup verify-key` made one test
+rewrite through the library and the model answered it (outcome `applied`), and the
+configured `MEMVARA_LLM` and `MEMVARA_LLM_MODEL` are the ones that were checked. Every other
+read from the hooks is plain: `lib/fast.rewrite_kwargs` passes `query_rewrite=False` to a
+`recall()` that takes it, and nothing to a library released before query rewrite, which
+never rewrites. A rewritten read gets `lib/fast.REWRITE_WAIT_SEC` (5 seconds), then the
+plain read is served, because the model call's own deadline is 10 seconds and so is the
+hook's allowance. When a daemon took a rewrite and did not serve it in time, the fallback
+read is plain, so one prompt is never billed twice. The hooks' hosted client always asks for
+a plain read: a hosted server would rewrite with the organisation's key, which the user's
+machine cannot check.
 
 **A hook may never fail a turn.** Every path out of `run.py` returns 0, including the ones
 it does not know about — the `__main__` block catches `BaseException`. That is the rule

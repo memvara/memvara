@@ -377,6 +377,18 @@ class HostedRecall:
         if not query.strip():
             return ""
         args: dict = {"query": query, "k": k, "budget": budget}
+        # Asked before the call that needs it, and a failure raised here rather than
+        # inside the retries below, which would try the handshake once per optional
+        # argument they drop.
+        if not self._ensure_session():
+            raise HostedError("no session on the hosted endpoint for memory_recall")
+        if self.accepts("memory_recall", "query_rewrite"):
+            # Always a plain read. A server that offers query rewrite runs it by default,
+            # with the organisation's own model key, and setup cannot check that key from
+            # this machine or show what it costs. The per-prompt rewrite the recall hook
+            # can turn on is the local store's (`lib.read_model`). Only sent to a server
+            # that offers the argument, because an unknown argument is refused outright.
+            args["query_rewrite"] = False
         if min_score:
             args["min_score"] = min_score
         if include_episodes:

@@ -27,6 +27,20 @@ Order of preference, and what each costs when it fails:
 Spawning is deliberately *after* answering. The first prompt of a session should not wait
 on a process that cannot help it yet, so the daemon is started for the benefit of the next
 one and this prompt takes the slow path.
+
+**Every read says whether the library may rewrite its query.** A library store whose model
+can chat rewrites by default, so a plain read has to ask for one: `query_rewrite=False`.
+`recall(query_rewrite=True)` is how the recall hook asks for a rewrite, and it does that
+only when `lib.read_model.allowed()` says setup verified a key. A library released before
+query rewrite has no such argument and never rewrites, so it is asked exactly as before
+(`rewrite_kwargs`). The hosted route never asks for a rewrite; see `lib.hosted`.
+
+A rewrite is one model call with a 10-second deadline, and the hook's own allowance is 10
+seconds in all. So a rewritten read gets `rewrite_wait` seconds, `REWRITE_WAIT_SEC` unless
+the caller says otherwise, and after that the plain read is served instead. Once a daemon
+has been handed a rewrite and did not answer in time, or answered with a failure, the
+fallback below it is a plain read: the daemon may still be making that model call, and a
+second one here would be billed twice for one prompt.
 """
 
 from __future__ import annotations
@@ -34,11 +48,78 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
-from .ipc import send, socket_path, store_key
+from .ipc import CLIENT_TIMEOUT_SEC, log_line, send, socket_path, store_key
 
 #: Set in a spawned daemon's environment so a daemon can never spawn a daemon.
 SENTINEL = "MEMVARA_DAEMON"
+
+#: How long a read that asks for a query rewrite may take before the plain read is served
+#: instead, in seconds. The library's own deadline for the model call is 10 seconds, which
+#: is the recall hook's whole allowance, so the hook stops waiting sooner. Five seconds is
+#: long enough for a small model's reply of up to 300 tokens and leaves the hook time to
+#: serve the plain read and print its banner. `recall.py` starts a rewrite only when this
+#: much of its own budget is left.
+REWRITE_WAIT_SEC = 5.0
+
+#: The clock the daemon wait is measured with. A name here so a test can move it.
+_clock = time.monotonic
+
+
+def rewrite_kwargs(method: object, query_rewrite: bool) -> dict:
+    """`{"query_rewrite": query_rewrite}` when `method` takes that argument, else `{}`.
+
+    A library store has taken `query_rewrite` since query rewrite was added, and rewrites
+    unless it is told `False`. Every library released before that has no such argument and
+    raises `TypeError` when handed one, which the hook would report as a store it could not
+    ask; those never rewrite, so leaving the argument out is the plain read. The hooks' own
+    hosted client has no such argument either. A method that forwards `**kwargs` is taken to
+    accept it, since the library's wrappers do exactly that.
+
+    The call site spells the result `**read_kind`, which is how
+    `tests/test_read_stages.py` knows that the read says which kind it is.
+    """
+    import inspect  # noqa: PLC0415 - only the in-process route and the daemon need it
+
+    try:
+        parameters = inspect.signature(method).parameters.values()  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return {}
+    if any(p.name == "query_rewrite" or p.kind is p.VAR_KEYWORD for p in parameters):
+        return {"query_rewrite": bool(query_rewrite)}
+    return {}
+
+
+def _within(wait: float, call, fallback):
+    """`call()` when it returns within `wait` seconds, else `fallback()`.
+
+    `call` runs on a daemon thread, so a model call still in flight when the wait ends does
+    not hold the hook's process open: the process exits when the hook is done, and the
+    call's reply is never read. An exception from `call` is raised here, as it would have
+    been without the thread.
+    """
+    import threading  # noqa: PLC0415 - only a rewritten read needs it
+
+    box: list = []
+
+    def run() -> None:
+        try:
+            box.append((True, call()))
+        except BaseException as exc:  # noqa: BLE001 - handed back to the caller below
+            box.append((False, exc))
+
+    worker = threading.Thread(target=run, name="memvara-rewrite", daemon=True)
+    worker.start()
+    worker.join(wait)
+    if not box:
+        log_line("recall", f"query rewrite still running after {wait:g}s; "
+                           "served the plain read")
+        return fallback()
+    finished, value = box[0]
+    if not finished:
+        raise value
+    return value
 
 
 def _spawn(root: str) -> None:
@@ -94,7 +175,8 @@ def _reason(exc: "BaseException") -> str:
 
 def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = None,
            include_episodes: bool = False, memory_types: "list[str] | None" = None,
-           min_score: float = 0.0,
+           min_score: float = 0.0, query_rewrite: bool = False,
+           rewrite_wait: float = REWRITE_WAIT_SEC,
            spawn: bool = True) -> "tuple[str, bool | None, str]":
     """Recall text for `query`, by whatever route is available.
 
@@ -120,6 +202,9 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
     A plain tuple rather than a NamedTuple on purpose: `typing` is not imported anywhere on
     this path, and this file runs on every prompt against a ~30ms budget. A third slot
     costs nothing; a class would cost the import.
+
+    `query_rewrite=True` asks a library store to rewrite the query first, and the read is
+    abandoned for the plain one after `rewrite_wait` seconds. See the module docstring.
     """
     if not query.strip():
         return "", True, ""
@@ -144,13 +229,26 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
             request["include_episodes"] = True
         if memory_types:
             request["memory_types"] = list(memory_types)
-        answer = send(path, request)
+        if query_rewrite:
+            # Sent only when asked, like the floor: the daemon reads a missing key as a
+            # plain read.
+            request["query_rewrite"] = True
+        wait = rewrite_wait if query_rewrite else CLIENT_TIMEOUT_SEC
+        began = _clock()
+        answer = send(path, request, timeout=wait)
         served = _served(answer)
         if served is not None:
             # `""` from a healthy daemon is a real answer -- this store has nothing
             # relevant -- and must not send the slow path off to ask again. A daemon
             # reporting failure is the opposite and falls through.
             return served, True, ""
+        if query_rewrite and (answer is not None or _clock() - began >= wait):
+            # The daemon took the rewrite and did not serve it. A refused connection
+            # returns at once, so a wait this long means a daemon was there. It may still
+            # be making the model call, so the read below must not make a second one.
+            log_line("recall", "the daemon did not serve the rewritten read in time; "
+                               "reading without a rewrite")
+            query_rewrite = False
 
     from .open import open_store
 
@@ -166,6 +264,8 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
             # with, and no credentials file. Distinct from a store that would not answer.
             return "", None, ""
         try:
+            # No `query_rewrite` here, whatever the caller asked: the hosted client always
+            # asks its server for a plain read. See `lib.read_model`.
             text = client.recall(query, k=k, budget=budget, header=header,
                                  include_episodes=include_episodes,
                                  memory_types=memory_types, min_score=min_score)
@@ -191,7 +291,14 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
             kwargs["include_episodes"] = True
         if memory_types:
             kwargs["memory_types"] = list(memory_types)
-        text = str(store.recall(query, **kwargs) or "")
+        plain_read = rewrite_kwargs(store.recall, False)
+        read_kind = rewrite_kwargs(store.recall, True) if query_rewrite else plain_read
+        if read_kind.get("query_rewrite"):
+            text = str(_within(rewrite_wait,
+                               lambda: store.recall(query, **kwargs, **read_kind),
+                               lambda: store.recall(query, **kwargs, **plain_read)) or "")
+        else:
+            text = str(store.recall(query, **kwargs, **plain_read) or "")
     except Exception as exc:
         if spawn and path is not None:
             _spawn(root)

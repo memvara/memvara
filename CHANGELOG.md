@@ -66,6 +66,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 - **The `memory_recall` tool description and the MCP server's instructions** no longer
   say that recall involves no model; they say it calls one only on a server that has one
   configured.
+- **The hooks' hosted client always asks for a plain read.** A server that offers
+  `query_rewrite` on `memory_recall` rewrites by default, with the organisation's own model
+  key, which setup cannot check from the user's machine. The client now sends
+  `query_rewrite: false` to such a server, and nothing to a server that does not offer the
+  argument. Finding out costs one `tools/list` call per client, which a resident daemon
+  pays once. The client also asks for its session once before the call rather than inside
+  each retry, so an endpoint that cannot be reached is reported after one handshake
+  instead of one per optional argument the retries drop.
+- **The session-start hook and the daemon's warm-up read no longer pass `query_rewrite`
+  to a library released before query rewrite.** Such a library raises `TypeError` on the
+  unknown argument, which the session-start hook reported as a store it could not ask.
+  The argument is now passed only to a `recall()` that takes it (`lib.fast.rewrite_kwargs`).
 
 ### Added
 
@@ -465,6 +477,29 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `project_scope`, `status_line` and `recall_mark` as `true` or `false`; a missing key
   means on. `MEMVARA_FEATURE_<NAME>=0` or `=1` overrides the file for one process. The
   hooks use the same feature names as the MCP server's `MEMVARA_FEATURE_*` switches.
+- **The per-prompt recall hook rewrites its query only after setup has verified a key.**
+  A local store whose model can chat rewrites every query by default, which on the recall
+  hook would be one model call per prompt. The hook now asks for a plain read unless three
+  things hold: the `query_rewrite` switch is on; `/memvara:setup verify-key` in the plugin
+  made one test rewrite through the library and the model answered it; and the model
+  configured now (`MEMVARA_LLM` and `MEMVARA_LLM_MODEL`, read from the environment and
+  then from the client's MCP server block) is the one that was checked. The check is
+  recorded in `~/.memvara/settings.json` under `read_model`, with the outcome, the backend,
+  the model and the time. `plugin/hooks/lib/read_model.py` has `check()`, which setup
+  calls, and `allowed()`, which the hook calls. A rewritten read gets at most
+  `REWRITE_WAIT_SEC` (5 seconds) before the hook serves the plain read instead, because
+  the model call's own deadline is 10 seconds and so is the hook's whole allowance; the
+  hook starts a rewrite only when that much of its budget is left. A rewrite that fails or
+  is refused serves the plain read, as the library already does. When a daemon was handed
+  a rewrite and did not serve it in time, the fallback read is plain, so one prompt is
+  never billed for two model calls. The episode-widening retry is always plain, and the
+  hook never asks for a summary.
+- **The hooks' copy of the feature switches carries the library's defaults.**
+  `plugin/hooks/lib/settings.FEATURE_DEFAULTS` is a copy of
+  `memvara.server.config.FEATURE_DEFAULTS`, and a test compares the names, the order and
+  the defaults. A missing switch now reads as its default, so `extraction_chunks` reads as
+  off, as it does in the library. `settings.stored(key)` hands over an entry of the file
+  that is not a switch.
 
 ### Changed
 
