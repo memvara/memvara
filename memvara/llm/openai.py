@@ -24,12 +24,17 @@ things here are genuinely OpenAI-specific and neither is optional:
 
 from __future__ import annotations
 
+import base64
 from typing import Any, Mapping, Sequence
 
+from ..ingest.errors import MediaUnsupported
 from ..types import Episode
 from . import _shape
 from .base import (
     CLAIM_SCHEMA,
+    DESCRIBE_IMAGE_MAX_TOKENS,
+    DESCRIBE_IMAGE_PROMPT,
+    DESCRIBE_IMAGE_SYSTEM,
     EXTRACT_SYSTEM,
     JUDGE_SCHEMA,
     JUDGE_SYSTEM,
@@ -51,6 +56,33 @@ _SCHEMA_NAMES = {
     id(PREDICATE_SCHEMA): "predicate_spec",
     id(JUDGE_SCHEMA): "replacement_verdict",
 }
+
+#: The image types Chat Completions accepts as image input.
+IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
+
+#: The largest image sent. OpenAI documents 20 MB per image.
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+#: The media types the transcription endpoint accepts, with the file extension it reads
+#: the format from. The video types are here because the endpoint takes those containers
+#: and transcribes their audio track. Other video containers (QuickTime, AVI, Matroska)
+#: are refused: turning them into one of these needs a video decoder, and this package
+#: does not ship one.
+AUDIO_TYPES = {
+    "audio/flac": "flac",
+    "audio/mpeg": "mp3",
+    "audio/mp4": "m4a",
+    "audio/m4a": "m4a",
+    "audio/ogg": "ogg",
+    "audio/wav": "wav",
+    "audio/webm": "webm",
+    "video/mp4": "mp4",
+    "video/mpeg": "mpeg",
+    "video/webm": "webm",
+}
+
+#: The transcription endpoint refuses a file larger than this.
+MAX_AUDIO_BYTES = 25 * 1024 * 1024
 
 
 def _first_text(response: Any) -> str:
@@ -102,8 +134,14 @@ class OpenAILLM:
         terse: bool = False,
         extra_body: Mapping[str, Any] | None = None,
         timeout: float | None = None,
+        transcription_model: str = "whisper-1",
     ) -> None:
         self.model = model
+        # The model `transcribe` asks for. A separate name from `model` because a chat
+        # model cannot transcribe. `whisper-1` is the default because every
+        # OpenAI-compatible server that offers transcription accepts that name, including
+        # Azure deployments and the common self-hosted Whisper servers.
+        self.transcription_model = transcription_model
         self.max_tokens = max_tokens
         # How long one call may take before the client gives up. `None` keeps the SDK's
         # own default of 600 seconds, and that default is why this exists: a self-hosted
@@ -273,6 +311,71 @@ class OpenAILLM:
         response = self._client.chat.completions.create(**kwargs)
         _shape.record_usage(response, usage, "prompt_tokens", "completion_tokens")
         return _first_text(response)
+
+    # -- Multimodal protocol ------------------------------------------------
+
+    def describe_image(self, data: bytes, mime: str) -> str:
+        """A text description of an image, through one Chat Completions request.
+
+        Refuses, without a request, an image type the API does not accept and an image
+        over its size limit, so the caller gets the reason rather than a 400. A refusal by
+        the model comes back as an empty string, which `memvara.ingest.extract` reports
+        as `no_text`.
+        """
+        if mime not in IMAGE_TYPES:
+            raise MediaUnsupported(
+                f"OpenAILLM reads JPEG, PNG, GIF and WebP images, not {mime}")
+        if len(data) > MAX_IMAGE_BYTES:
+            raise MediaUnsupported(
+                f"the image is {len(data)} bytes, and OpenAILLM sends at most "
+                f"{MAX_IMAGE_BYTES} bytes per image")
+        encoded = base64.b64encode(data).decode("ascii")
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_completion_tokens": DESCRIBE_IMAGE_MAX_TOKENS,
+            "messages": [
+                {"role": "system", "content": DESCRIBE_IMAGE_SYSTEM},
+                {"role": "user", "content": [
+                    {"type": "text", "text": DESCRIBE_IMAGE_PROMPT},
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:{mime};base64,{encoded}"}},
+                ]},
+            ],
+        }
+        if self.extra_body is not None:
+            kwargs["extra_body"] = self.extra_body
+        if self.timeout is not None:
+            kwargs["timeout"] = self.timeout
+        return _first_text(self._client.chat.completions.create(**kwargs)).strip()
+
+    def transcribe(self, data: bytes, mime: str) -> str:
+        """A transcript of audio, or of a video's audio track, from the transcription
+        endpoint.
+
+        Only the sound is transcribed. Frames of a video are not sampled or described,
+        because that needs a video decoder and this package does not ship one.
+        """
+        extension = AUDIO_TYPES.get(mime)
+        if extension is None:
+            raise MediaUnsupported(
+                f"OpenAILLM cannot transcribe {mime}. The transcription endpoint accepts "
+                "FLAC, MP3, M4A, Ogg, WAV and WebM audio, and MP4, MPEG and WebM video; "
+                "convert the file to one of those first")
+        if len(data) > MAX_AUDIO_BYTES:
+            raise MediaUnsupported(
+                f"the recording is {len(data)} bytes, and the transcription endpoint "
+                f"accepts at most {MAX_AUDIO_BYTES} bytes")
+        kwargs: dict[str, Any] = {
+            "model": self.transcription_model,
+            "file": (f"upload.{extension}", data, mime),
+        }
+        if self.timeout is not None:
+            kwargs["timeout"] = self.timeout
+        response = self._client.audio.transcriptions.create(**kwargs)
+        # The SDK returns an object with `.text`; a plain-text response format returns a
+        # string, and a test double may return a dict.
+        text = response if isinstance(response, str) else _get(response, "text")
+        return str(text or "").strip()
 
     # -- LLM protocol -------------------------------------------------------
 
