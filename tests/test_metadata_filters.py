@@ -640,3 +640,21 @@ def test_results_are_the_ordinary_result_types():
     mem.remember("user", "prefers", "dark mode", team="web")
     hits = mem.search("prefers", filters={"team": "web"})
     assert all(isinstance(h, Result) for h in hits)
+
+
+def test_every_phrasing_of_a_rewritten_read_is_filtered():
+    """A query rewrite searches more phrasings and fuses the lists. Each phrasing is a
+    separate retrieval, so each has to carry the filter, or an alternative phrasing would
+    bring back a row the filter excludes."""
+    from memvara.select.stages import QueryRewriter
+    from test_read_stages import FakeChat, rewrite_reply
+
+    mem = make(read_rewriter=QueryRewriter(FakeChat(rewrite_reply("bicycle"))))
+    mem.remember("user", "likes", "green tea", team="web")
+    mem.remember("user", "owns", "bicycle", team="infra")
+    unfiltered = mem.search("green tea", k=2)
+    assert unfiltered.rewrite.outcome == "applied"
+    assert {r.claim.object for r in unfiltered} == {"green tea", "bicycle"}
+    filtered = mem.search("green tea", k=2, filters={"team": "web"})
+    assert filtered.rewrite.outcome == "applied"
+    assert [r.claim.object for r in filtered] == ["green tea"]

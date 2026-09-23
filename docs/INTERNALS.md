@@ -1520,7 +1520,8 @@ as `where=`, to every store method that caps rows: `candidate_ids`, `lexical_sea
 `tests/test_metadata_filters.py` builds forty rows that do not match above five that do,
 shows that an unfiltered read fifteen deep holds none of the five, and asserts that a
 filtered read with `k=3` returns three of them, for the whole search and for each store
-method.
+method. A read with a query rewrite retrieves every phrasing with the same filter before
+the lists are fused.
 
 **What matches.** A filter is an equality test on a top-level key of `meta`, a list means
 any one of its values, and every key must match. A string matches only the same string,
