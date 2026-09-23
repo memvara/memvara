@@ -225,9 +225,10 @@ def test_a_relative_common_directory_is_resolved_against_the_working_directory(t
     sub = tmp_path / "repo" / "src"
     sub.mkdir()
     git = FakeGit(common="../.git", remote=None)
-    expected = hashlib.sha256(
-        os.path.realpath(tmp_path / "repo").encode()).hexdigest()[:16]
-    assert canonical_project(str(sub), run=git) == f"path:{expected}"
+    # `path_identity` rather than a bare SHA-256, because the hashed string is the path in
+    # its one canonical spelling, which on Windows differs from what `realpath` prints.
+    expected = project_module.path_identity(os.path.realpath(tmp_path / "repo"))
+    assert canonical_project(str(sub), run=git) == expected
 
 
 def test_without_a_remote_a_worktree_and_its_main_checkout_share_the_path_name(tmp_path):
@@ -248,8 +249,7 @@ def test_a_bare_repository_is_named_by_its_own_directory(tmp_path):
     bare = tmp_path / "repo.git"
     bare.mkdir()
     name = canonical_project(str(bare), run=FakeGit(str(bare), None))
-    expected = hashlib.sha256(os.path.realpath(bare).encode()).hexdigest()[:16]
-    assert name == f"path:{expected}"
+    assert name == project_module.path_identity(os.path.realpath(bare))
 
 
 @pytest.mark.parametrize("remote", ["/srv/git/app.git", "https://git.lan/team/../app"])
