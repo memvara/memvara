@@ -227,7 +227,9 @@ def test_a_bad_guidance_file_is_refused_with_the_file_named(tmp_path, body, mess
     path.write_text(body, encoding="utf-8")
     with pytest.raises(GuidanceError, match=message) as caught:
         load_guidance(path)
-    assert str(path) in str(caught.value)
+    # Quoted with repr, as every path in a configuration error is, so on Windows the
+    # message holds the backslashes doubled.
+    assert repr(str(path)) in str(caught.value)
 
 
 @needs_toml
