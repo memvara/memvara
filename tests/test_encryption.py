@@ -229,7 +229,10 @@ def test_a_key_file_that_stays_empty_is_an_error_after_the_wait(monkeypatch):
     monkeypatch.setattr(enc.time, "sleep", naps.append)
     with pytest.raises(EncryptionError, match="0 characters"):
         resolve_key(create=False)
-    assert sum(naps) <= 1.0 and len(naps) > 1
+    # Compared as a list, not as a sum: before Python 3.12, `sum()` of twenty 0.05s is
+    # 1.0000000000000002, and a bound on the total failed on 3.10 and 3.11 only.
+    assert naps == [enc._KEY_FILE_PAUSE] * enc._KEY_FILE_READS
+    assert enc._KEY_FILE_PAUSE * enc._KEY_FILE_READS == pytest.approx(1.0)
 
 
 def test_the_loser_of_a_generation_race_waits_for_the_winners_key(monkeypatch):
