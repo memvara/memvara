@@ -56,8 +56,13 @@ client, not run interactively. Configured entirely by environment:
                      MEMVARA_LLM and MEMVARA_EMBEDDER — extraction and embedding run
                      inside the deployment, so a value set here would never be used.
   MEMVARA_DB          required in local mode. Path to the SQLite file; created on
-                     first use. ':memory:' for a throwaway store that dies with the
-                     process.
+                     first use, encrypted unless MEMVARA_FEATURE_ENCRYPTION=0.
+                     ':memory:' for a throwaway store that dies with the process.
+  MEMVARA_DB_KEY      the key of an encrypted store, as 64 hexadecimal characters.
+                     Read when the OS keychain has none (service memvara, account
+                     db-key), and before ~/.memvara/db.key, where a key is generated
+                     if none exists. A store whose key is lost cannot be read; back
+                     it up with `memvara encrypt --export-key`.
   MEMVARA_USER        who this server remembers for. Unset means the whole tenant.
   MEMVARA_TENANT      isolation boundary above the user. Default 'default'.
   MEMVARA_AGENT       narrows further; unset is usually right.
@@ -80,6 +85,9 @@ client, not run interactively. Configured entirely by environment:
                      END_REASON=0 removes the reason and until_reason arguments.
                      EXTRACTION_CHUNKS decides whether a turn over 6,000
                      characters is extracted in pieces, one model call per piece.
+                     ENCRYPTION=0 creates a new store unencrypted; with it on, a
+                     new store needs pip install "memvara[encrypt]", and an
+                     existing store opens as whatever it already is.
                      INDEX_COMMAND, RESEARCH_AGENT, STATUS_LINE and RECALL_MARK
                      are also accepted, for the plugin. An unknown name is refused.
   MEMVARA_LLM         'none' (default, offline, extracts only recognised sentence

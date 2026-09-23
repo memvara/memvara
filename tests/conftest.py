@@ -64,6 +64,7 @@ from memvara.embed import default_embedder as _real_default_embedder
 from memvara.remote import creds as creds_module
 from memvara.server import config as config_module
 from memvara.server import login as login_module
+from memvara.store import encryption as encryption_module
 
 #: The two constants as the source defines them, read once before any fixture has
 #: redirected them. `test_credentials_path_constant_matches_logins_own` asserts the
@@ -72,6 +73,9 @@ from memvara.server import login as login_module
 #: tmp_path would pass no matter what the source said.
 REAL_LOGIN_CREDENTIALS_PATH = login_module._CREDENTIALS_PATH
 REAL_CONFIG_CREDENTIALS_PATH = config_module.CREDENTIALS_PATH
+#: The real keychain lookup, kept so `tests/test_encryption.py` can exercise it against a
+#: fake `keyring` module after the fixture below has replaced it for everyone else.
+REAL_READ_KEYCHAIN = encryption_module._read_keychain
 
 _TESTS = str(pathlib.Path(__file__).resolve().parent) + os.sep
 
@@ -180,6 +184,25 @@ def _credentials_never_touch_home(tmp_path, tmp_path_factory, monkeypatch):
     return where
 
 
+@pytest.fixture(autouse=True)
+def _store_keys_never_touch_the_keychain(monkeypatch):
+    """Keep every test away from the developer's OS keychain.
+
+    An encrypted store looks for its key in the OS keychain first. On a developer's Mac
+    that is the real login keychain, and a read of it can raise a permission dialog in the
+    middle of a test run, or find a real key and quietly use it. So the lookup is replaced
+    for every test with one that finds nothing, and `PYTHON_KEYRING_BACKEND` points any
+    child process at keyring's null backend, which finds nothing either.
+
+    The key file needs no fixture of its own: it lives under `Path.home()`, and
+    `_credentials_never_touch_home` above has already pointed `HOME` at a temporary
+    directory for this test and its children.
+    """
+    monkeypatch.setattr(encryption_module, "_read_keychain", lambda: (None, None))
+    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
+    monkeypatch.delenv("MEMVARA_DB_KEY", raising=False)
+
+
 def pytest_configure(config: Any) -> None:
     config.addinivalue_line(
         "markers",
@@ -211,20 +234,34 @@ _HOME_CREDENTIALS = pathlib.Path.home() / ".memvara" / "credentials.json"
 _CREDENTIALS_SNAPSHOT: Any = None
 _CREDENTIALS_EXISTED = False
 _CREDENTIALS_SEEN = False
+#: The store key file gets the same detector. Overwriting it would make every encrypted
+#: store on the developer's machine unreadable, which is worse than losing an API key:
+#: an API key can be minted again, and a store key cannot.
+_HOME_DB_KEY = pathlib.Path.home() / ".memvara" / "db.key"
+_DB_KEY_SNAPSHOT: Any = None
 
 
 def pytest_sessionstart(session: Any) -> None:
-    global _CREDENTIALS_SNAPSHOT, _CREDENTIALS_EXISTED, _CREDENTIALS_SEEN
+    global _CREDENTIALS_SNAPSHOT, _CREDENTIALS_EXISTED, _CREDENTIALS_SEEN, _DB_KEY_SNAPSHOT
     _CREDENTIALS_SEEN = True
     _CREDENTIALS_EXISTED = _HOME_CREDENTIALS.is_file()
     _CREDENTIALS_SNAPSHOT = (
         _HOME_CREDENTIALS.read_bytes() if _CREDENTIALS_EXISTED else None
     )
+    _DB_KEY_SNAPSHOT = _HOME_DB_KEY.read_bytes() if _HOME_DB_KEY.is_file() else None
 
 
 def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
     if not _CREDENTIALS_SEEN:
         return
+    key_after = _HOME_DB_KEY.read_bytes() if _HOME_DB_KEY.is_file() else None
+    if key_after != _DB_KEY_SNAPSHOT:
+        raise AssertionError(
+            f"{_HOME_DB_KEY} was created, deleted or rewritten during this suite. That "
+            "file is the key to every encrypted store on this machine. A test reached "
+            "memvara.store.encryption.key_file() without the HOME redirect in "
+            "_credentials_never_touch_home, probably from a subprocess that set its own "
+            "environment.")
     existed = _HOME_CREDENTIALS.is_file()
     after = _HOME_CREDENTIALS.read_bytes() if existed else None
     if existed == _CREDENTIALS_EXISTED and after == _CREDENTIALS_SNAPSHOT:

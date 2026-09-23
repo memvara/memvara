@@ -7,6 +7,53 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## The MCP server creates new stores encrypted, and needs the `encrypt` extra to do it
+
+### What changed
+
+`encryption` is a new feature switch, on by default. With it on, the MCP server creates a
+new store encrypted: the database with SQLCipher, and every row of the vector file with
+AES-256-GCM. That needs `pip install 'memvara[encrypt]'`, and without it the server refuses
+to start rather than create the store unencrypted. The key is read from the OS keychain
+(service `memvara`, account `db-key`), then `MEMVARA_DB_KEY`, then `~/.memvara/db.key`,
+where one is generated with mode 0600 if none exists. **A store whose key is lost cannot
+be read**, so back the key up with `memvara encrypt --export-key`.
+
+Nothing changes for a store that already exists. It opens as it is, with a warning at
+start and a `storage: NOT encrypted` line in `memory_stats`, until you convert it with
+`memvara encrypt <path>` (stop every process that uses it first). The library's
+`Memvara(path)` and `SQLiteStore(path)` are unchanged; `encryption=True` asks for it there.
+
+Separately, `erase_claim()` and `purge()` now blank a vector's row in `<db>.vecs` even when
+the process has not searched yet. They used to leave it, which kept the erased text
+recoverable from the vector.
+
+### Who this changes, and in which direction
+
+**If you start the MCP server against a path that does not exist yet**, such as a new
+machine or a test, install the extra or set `MEMVARA_FEATURE_ENCRYPTION=0`. The server's
+message names both. Find your launch configurations with
+`grep -rn MEMVARA_DB ~/.claude.json .mcp.json`.
+
+**If you run the server in a container**, pass `MEMVARA_DB_KEY` from a secret manager. The
+image this repository builds installs the extra and sets `HOME=/data`, so without the
+variable the key is generated onto the volume beside the store. An image of your own that
+leaves `HOME` inside the container loses a generated key with the container, and the
+store on the volume cannot be read on the next run.
+
+**If you read the store file with other tools** (the `sqlite3` shell, a backup script
+using `.backup`), they cannot open an encrypted store. Stop the server and copy the files,
+and keep the key with the backup, stored apart from it.
+
+**If you keep a copy of the feature names**, as the plugin hooks do in
+`plugin/hooks/lib/settings.py`, add `encryption`.
+
+**If you run several processes against one encrypted store**, each holds its own
+decrypted copy of the vector matrix in memory, where an unencrypted store's memory-mapped
+matrix was shared between them.
+
+---
+
 ## A hosted purge with a project bound is refused instead of erasing every project
 
 ### What changed

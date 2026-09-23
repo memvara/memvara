@@ -185,7 +185,9 @@ jobs:
         # job avoids by *calling* the matrix rather than repeating it. Caught on the
         # first real run of this workflow: 0.2.0 was published by hand before the file
         # existed, so nothing had ever executed this step.
-        run: python -m pip install -e ".[dev,cloud]"
+        # `encrypt` too: the server creates new stores encrypted by default, so the
+        # server tests need SQLCipher installed to create one.
+        run: python -m pip install -e ".[dev,cloud,encrypt]"
 
       - name: The whole suite again, now that dist/ exists
         # The `ci` job already ran this suite six ways — and every dist-gated test skipped

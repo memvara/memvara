@@ -16,7 +16,7 @@ point of the project and it is also the development setup:
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-python3 -m pip install -e ".[dev]"
+python3 -m pip install -e ".[dev,cloud,ingest,encrypt]"
 
 python3 -m pytest -q                                              # 4,757 tests
 python3 -m coverage run -m pytest && python3 -m coverage report    # gated at 100%
@@ -50,7 +50,12 @@ document; `conftest.py` says which and why. The server tests used to be exempt t
 build a `Memvara` through `build_memvara()` and had no keyword to pass it — and are not
 any more, now that `MEMVARA_EMBEDDER` gives them one.
 
-`[dev]` is pytest, pytest-asyncio, coverage and mypy — no provider SDKs. The suite runs
+`[dev]` is pytest, pytest-asyncio, coverage and mypy — no provider SDKs. `cloud`, `ingest`
+and `encrypt` are what CI installs beside it: the remote-store tests need `httpx` to be
+collected at all, the PDF tests read real PDFs with `pypdf`, and the server tests create
+stores the way the server does, encrypted, which needs SQLCipher. The encrypted-store tests
+never read your OS keychain or `~/.memvara`: `tests/conftest.py` replaces the keychain
+lookup and points `HOME` at a temporary directory for every test. The suite runs
 entirely offline against `HashingEmbedder` and `NullLLM`; a test that needs a model uses a
 fake that counts its own calls. **If a test you add reaches the network, it is wrong.**
 

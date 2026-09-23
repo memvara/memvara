@@ -29,6 +29,7 @@ from ..project import canonical_project, check_project
 from .validate import _suggest
 from ..schema import (BUILTIN_PREDICATES, PredicatePackError,
                       PredicateRegistry, load_all_specs)
+from ..store.encryption import EncryptionError, EncryptionUnavailable
 
 if TYPE_CHECKING:
     # Imported for the annotation alone. At runtime `memvara.remote.api` reaches back
@@ -117,6 +118,11 @@ _DEFAULT_EMBEDDER = "hashing"
 #: (`memvara.select.stages`). A local store is then built with that stage off, and
 #: `memory_search` and `memory_recall` no longer offer the `query_rewrite` or
 #: `synthesize` argument.
+#:
+#: `encryption` decides whether a new local store file is created encrypted
+#: (`SQLiteStore(encryption=True)`). An existing store opens as whatever it already is.
+#: With the switch on and the `encrypt` extra missing, a new store is refused rather than
+#: created unencrypted; see `build_memvara`.
 FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
     "index_command": True,
     "research_agent": True,
@@ -134,6 +140,7 @@ FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
     "ingest_media": True,
     "query_rewrite": True,
     "synthesis": True,
+    "encryption": True,
 })
 
 #: Every feature name, in the order `FEATURE_DEFAULTS` lists them.
@@ -479,7 +486,7 @@ def unknown_features(names: Iterable[str]) -> str | None:
     exception, so the two cannot disagree about what a feature is.
 
     >>> unknown_features(["profle"])
-    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite and synthesis."
+    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite, synthesis and encryption."
     >>> unknown_features(["profile"]) is None
     True
     """
@@ -997,6 +1004,29 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
             base_url=config.server_url,
             **config.scope_kwargs,
         )
+    encryption = "encryption" not in config.features_off
+    try:
+        return _local_memvara(config, encryption)
+    except EncryptionUnavailable:
+        # Refused rather than created unencrypted. A store file is created once, and one
+        # created without encryption stays that way until somebody converts it; the
+        # warning that could say so goes to stderr, which under stdio nobody reads. So the
+        # moment the client shows "the server failed to start" is the one moment this can
+        # be said to a person. An existing unencrypted store never gets here: it opens,
+        # with a warning and a line in memory_stats.
+        raise ConfigError(
+            "The encryption feature is on (it is on by default), so a new store is "
+            "created encrypted, and that needs the encrypt extra: "
+            "pip install 'memvara[encrypt]'. To create this store without encryption "
+            "instead, set MEMVARA_FEATURE_ENCRYPTION=0.") from None
+    except EncryptionError as exc:
+        # No key, a malformed key, or a key that does not open the store. The message
+        # says where the key was looked for and never what it is.
+        raise ConfigError(str(exc)) from None
+
+
+def _local_memvara(config: ServerConfig, encryption: bool) -> Memvara:
+    """The local engine `build_memvara` serves, over the store `config.path` names."""
     return Memvara(
         config.path,
         # Passed explicitly even when it is the default: `Memvara()` warns about a missing
@@ -1042,5 +1072,8 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         # `MEMVARA_FEATURE_SYNTHESIS`.
         query_rewrite="query_rewrite" not in config.features_off,
         synthesis="synthesis" not in config.features_off,
+        # A new store file is created encrypted when the switch is on. An existing one
+        # opens as what it is; see `SQLiteStore`.
+        encryption=encryption,
         **config.scope_kwargs,
     )

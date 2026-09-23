@@ -528,6 +528,27 @@ def test_purged_rows_are_reused_rather_than_leaked(tmp_path):
         assert store.vector_search(onehot(8, 2), [SCOPE], limit=1)[0][0] == fresh[2].id
 
 
+@pytest.mark.parametrize("how", ["erase_claim", "purge"])
+def test_an_erasure_before_any_search_still_blanks_the_row_on_disk(tmp_path, how):
+    """The name-to-row map is loaded on the first search, not at open. Erasure used to
+    blank a row only through that map, so a process that opened a store and erased a
+    claim before searching it left the vector in the file, where the text can be
+    recovered from it by inversion. The slot now comes from the database."""
+    path = str(tmp_path / "e.db")
+    vec = np.arange(1, 9, dtype=np.float32)
+    with SQLiteStore(path) as store:
+        c = embed(store, vec)
+        raw = store.get_embedding(c.id).tobytes()
+    assert raw in open(path + ".vecs", "rb").read()
+    with SQLiteStore(path) as store:
+        assert not store._vec._row, "this test needs a process that has not searched"
+        if how == "erase_claim":
+            store.erase_claim(c.id)
+        else:
+            store.purge(SCOPE)
+    assert raw not in open(path + ".vecs", "rb").read()
+
+
 def test_a_bare_index_reuses_the_slot_it_removed():
     idx = _VecIndex()
     idx.add("a", onehot(4, 0))

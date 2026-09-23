@@ -33,6 +33,7 @@ there is no `npx` equivalent of this command and none is implied.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import sys
@@ -393,6 +394,18 @@ def _report(steps: Sequence[_Step]) -> list[str]:
             for step in steps]
 
 
+def _needs_encrypt_extra(db: Path, env: Mapping[str, str]) -> bool:
+    """Whether the server this writes would refuse to start for want of SQLCipher.
+
+    True only for a store that does not exist yet, with the `encryption` switch left on,
+    on an interpreter without `sqlcipher3`. An existing store opens as whatever it is.
+    """
+    switch = (env.get("MEMVARA_FEATURE_ENCRYPTION") or "").strip().lower()
+    new = not db.exists() or db.stat().st_size == 0
+    return (new and switch not in ("0", "false", "off", "no")
+            and importlib.util.find_spec("sqlcipher3") is None)
+
+
 def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
          stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
     """Write the configuration, the skill and the snippet. Returns an exit status."""
@@ -517,6 +530,15 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
         lines += ["", "No MEMVARA_USER, so this server remembers for the whole tenant —",
                   "right on a single-person machine. Rerun with --user to bind it to one",
                   "person."]
+    if _needs_encrypt_extra(db, env):
+        # Said here because this is the one moment a person reads this program's output.
+        # The server refuses to create a new store unencrypted while the `encryption`
+        # switch is on, and under stdio its refusal reaches a client log, not a person.
+        lines += ["", "The store will be created encrypted, because the encryption feature",
+                  "is on by default, and that needs pip install 'memvara[encrypt]'.",
+                  "Install it before restarting the client, or add",
+                  "MEMVARA_FEATURE_ENCRYPTION=0 to the server's env block to create the",
+                  "store unencrypted."]
     lines += ["", "The client launches the server itself, so restart it before expecting",
               "the tools to appear. Every other variable keeps its default, including",
               "offline extraction, which stores only the sentence forms it recognises;",

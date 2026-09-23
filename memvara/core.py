@@ -763,6 +763,10 @@ class Memvara:
         # so `True` asks for nothing. `False` would switch a stage off in a process that
         # does not run it; say so, and point at the per-call switch that does reach it.
         named += [n for n in ("query_rewrite", "synthesis") if kwargs.pop(n, True) is False]
+        # Same reading: a hosted deployment's database is the operator's to encrypt, so
+        # asking for encryption here would be accepted and never done.
+        if kwargs.pop("encryption", False):
+            named.append("encryption")
         # The same reading for the local options whose default is true: chunking and
         # ingestion run inside the deployment, so turning one off here would be accepted
         # and never used.
@@ -832,6 +836,7 @@ class Memvara:
         url_fetcher: "Fetcher | None" = None,
         ingest_urls: bool = True,
         ingest_media: bool = True,
+        encryption: bool = False,
         **tuning: Any,
     ) -> None:
         # Present so that a local construction that named them still binds. `__new__`
@@ -856,6 +861,12 @@ class Memvara:
                 "where the data lives, so the path would be silently ignored. Pass one "
                 f"of Memvara({path!r}) or Memvara(store={type(store).__name__}(...))."
             )
+        if encryption and store is not None:
+            raise TypeError(
+                "encryption=True and store= cannot be combined: the store was opened "
+                "before this call, so whether it is encrypted is already decided. Pass "
+                "SQLiteStore(path, encryption=True) as the store, or Memvara(path, "
+                "encryption=True).")
         scope_kw: dict[str, str | None] = {"user": user, "agent": agent,
                                            "session": session, "project": project}
         self._absorb_scope_aliases(tuning, scope_kw)
@@ -885,7 +896,13 @@ class Memvara:
         #: `remember(sources=...)` door. One policy per instance, however it is spelled.
         self.redactor = write_kw["redactor"]
 
-        self.store = store if store is not None else SQLiteStore(path or ":memory:")
+        # `encryption` decides what a *new* store file becomes: encrypted with SQLCipher
+        # and AES-256-GCM (the `encrypt` extra), or not. An existing file opens as what
+        # it is. Off by default here, unlike the MCP server's `encryption` switch, because
+        # an encrypted store reads a key from the OS keychain or writes one to
+        # ~/.memvara/db.key, and a library call should not do either unless asked.
+        self.store = store if store is not None else SQLiteStore(path or ":memory:",
+                                                                 encryption=encryption)
         self.embedder = embedder if embedder is not None else default_embedder()
         # Default to no LLM on purpose: the deterministic path is the product, and the
         # library must be fully usable with no API key. What is *not* on purpose is

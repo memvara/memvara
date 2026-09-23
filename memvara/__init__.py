@@ -66,6 +66,7 @@ from .retrieve import (
 )
 from .schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
 from .store import SQLiteStore, Store
+from .store.encryption import EncryptionError, EncryptionWarning
 from .types import (
     Accumulation,
     Answer,
@@ -168,6 +169,9 @@ __all__ = [
     "LLM", "NullLLM", "AnthropicLLM", "OpenAILLM",
     # diagnostics: importable so they can be filtered or caught by category
     "DegradedExtractionWarning", "EmbedderChangedWarning", "EmbedderMismatchError",
+    # encryption at rest: a store that cannot be opened with the key it found, and the
+    # warnings about an unencrypted store or a key kept in a file
+    "EncryptionError", "EncryptionWarning",
     # erasure, and the evidence for it
     "ErasureIncomplete", "ErasureProof",
     # subsystems

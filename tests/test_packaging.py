@@ -124,7 +124,8 @@ EXTRAS = {name: value for name, value in _toml_table("project.optional-dependenc
 # because the person reading that traceback has no other way to learn that the fix is one
 # `pip install` away. `ModuleNotFoundError: No module named 'x'` is not that error.
 ADAPTER_EXTRAS = {"anthropic", "openai", "local-embed", "rerank",
-                  "langchain", "llama-index", "crewai", "langgraph", "cloud", "ingest"}
+                  "langchain", "llama-index", "crewai", "langgraph", "cloud", "ingest",
+                  "encrypt"}
 # A **reserved** extra buys nothing yet and says so. `http` names the REST layer's
 # dependencies before the REST layer exists. That is defensible — it fixes the dependency
 # set publicly before anything depends on it — and it is one letter away from the
@@ -164,6 +165,15 @@ def _read_a_pdf() -> None:
     from memvara.ingest import extract
 
     extract(b"%PDF-1.4", mime="application/pdf")
+
+
+def _create_an_encrypted_store() -> None:
+    import tempfile
+
+    from memvara.store import SQLiteStore
+
+    with tempfile.TemporaryDirectory() as where:
+        SQLiteStore(f"{where}/m.db", key=bytes(32))
 
 
 def _construct_remote_store() -> None:
@@ -219,7 +229,18 @@ ADAPTERS = {
     "langgraph": ("langgraph", _resolve_langgraph_store),
     "cloud": ("httpx", _construct_remote_store),
     "ingest": ("pypdf", _read_a_pdf),
+    # SQLCipher is the first thing an encrypted store needs, so blocking it is what the
+    # missing-extra test below exercises. The extra installs two more SDKs, listed in
+    # `SECOND_SDKS`.
+    "encrypt": ("sqlcipher3", _create_an_encrypted_store),
 }
+
+#: SDKs an extra installs besides the one `ADAPTERS` names for it. The `encrypt` extra
+#: needs three libraries for three jobs: SQLCipher for the database, `cryptography` for
+#: the vector file, and `keyring` for the OS keychain. Each is imported only by the code
+#: that needs it, inside a function, so the static walk below finds them by name and the
+#: import-time walk does not.
+SECOND_SDKS = {"cryptography", "keyring"}
 
 #: The subset of `ADAPTERS` whose SDK name never appears in an `import` statement,
 #: because `memvara.integrations._common.require()` reaches it through
@@ -525,7 +546,7 @@ def test_the_only_sdks_the_package_names_anywhere_are_the_ones_an_extra_installs
     anywhere: set[str] = set()
     for tree in _module_trees():
         anywhere |= _absolute_imports(ast.walk(tree))
-    named = {module for module, _ in ADAPTERS.values()} - DYNAMIC_SDKS
+    named = ({module for module, _ in ADAPTERS.values()} | SECOND_SDKS) - DYNAMIC_SDKS
     assert _third_party(anywhere) == {"numpy"} | named, (
         "an SDK named in the source with no extra declaring it, or an extra whose SDK is "
         "no longer imported. Note that a framework reached through "
@@ -552,7 +573,8 @@ def test_every_module_imports_cleanly_in_a_process_that_has_only_numpy() -> None
         "    except ImportError as exc:\n"
         "        bad.append((m.name, str(exc)))\n"
         "leaked = sorted({'anthropic', 'openai', 'sentence_transformers', 'fastapi',\n"
-        "                 'uvicorn', 'pydantic', 'pypdf'} & set(sys.modules))\n"
+        "                 'uvicorn', 'pydantic', 'pypdf', 'sqlcipher3',\n"
+        "                 'cryptography', 'keyring'} & set(sys.modules))\n"
         "print(bad or '', leaked or '', sep='|')\n"
     )
     done = subprocess.run([sys.executable, "-c", probe], cwd=REPO, check=False,
@@ -591,6 +613,7 @@ def test_every_adapter_extra_has_a_call_that_actually_needs_its_sdk() -> None:
     "openai",
     "local-embed",
     "rerank",
+    "encrypt",
 ])
 def test_an_adapter_whose_sdk_is_absent_raises_an_error_naming_the_extra(
         extra: str, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -147,9 +147,15 @@ repository is in it.
 As an MCP server on the same machine:
 
 ```bash
+pip install 'memvara[encrypt]'
 MEMVARA_DB=~/memory.db memvara-mcp
 memvara-mcp init --agent claude
 ```
+
+The server encrypts the store it creates, database and vectors both, which is what the
+`encrypt` extra is for. The key goes in `~/.memvara/db.key` unless the OS keychain or
+`MEMVARA_DB_KEY` has one; back it up with `memvara encrypt --export-key`, because a lost
+key is a lost store. `MEMVARA_FEATURE_ENCRYPTION=0` creates it unencrypted instead.
 
 JSON-RPC 2.0 over stdio, twenty-two tools, no SDK dependency. Claude Code, Claude Desktop,
 Cursor, VS Code, Windsurf and Zed each have their own one-liner at
@@ -575,7 +581,7 @@ hypothetical extension point.
 | Conflict handling | predicate-aware and deterministic, decided on write |
 | Provenance | the source episodes, the derivation, and the claim superseded |
 | Retrieval | vector and BM25 fused by rank, optionally a graph leg, decayed per predicate |
-| Storage | SQLite with FTS5, plus an mmap vector sidecar |
+| Storage | SQLite with FTS5, plus an mmap vector sidecar; optionally encrypted at rest, vectors included |
 | Dependencies | numpy. Everything else is an extra |
 | Model dependency | none for `remember()`; `add()` reaches for one only where no rule matches the prose |
 | Python | 3.10 and later |
@@ -810,7 +816,7 @@ Issues and pull requests are welcome. Two things to read first:
 
 ```bash
 git clone https://github.com/memvara/memvara && cd memvara
-python3 -m pip install -e ".[dev,cloud,ingest]"
+python3 -m pip install -e ".[dev,cloud,ingest,encrypt]"
 python3 -m pytest -q
 ```
 

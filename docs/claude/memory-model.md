@@ -27,6 +27,10 @@ landing beside them unnoticed.
   `state_predicate()`, `stored_state_predicate()`, `live_predicate()`.
 - Storage backends: `memvara/store/sqlite.py` — `SQLiteStore`, the default;
   `memvara/store/remote.py` — `RemoteStore`, the same protocol against a hosted deployment.
+- Encryption at rest for `SQLiteStore`: `memvara/store/encryption.py` — `resolve_key()`,
+  `VectorSealer` (the encrypted vector file), `encrypt_store()` (behind
+  `memvara encrypt`), `EncryptionError`, `EncryptionWarning`. Tests:
+  `tests/test_encryption.py`. INTERNALS.md section *Encryption at rest*.
 - Entities and predicates: `memvara/entities.py` — `EntityRegistry`, `entity_key()` and
   `typed_entity_key()`, which keeps a `type:` namespace so `company:apple` and `fruit:apple`
   are two entities;

@@ -141,6 +141,32 @@ def test_the_store_directory_is_created_and_the_store_is_not(tmp_path) -> None:
     assert not (tmp_path / "store" / "memory.db").exists()
 
 
+@pytest.mark.parametrize("installed, env, existing, says", [
+    (False, {}, False, True),
+    (True, {}, False, False),
+    (False, {"MEMVARA_FEATURE_ENCRYPTION": "0"}, False, False),
+    (False, {}, True, False),
+])
+def test_init_says_when_the_server_would_need_the_encrypt_extra(
+        tmp_path, monkeypatch, installed, env, existing, says) -> None:
+    """The server refuses to create a new store unencrypted while the `encryption` switch
+    is on, and its refusal lands in a client log. `init` is the one moment a person reads
+    this program's output, so it says so then, and only when it would happen: a new store,
+    the switch on, and no SQLCipher on this interpreter."""
+    import importlib.util
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: (
+        (object() if installed else None) if name == "sqlcipher3" else real(name, *a)))
+    if existing:
+        (tmp_path / "store").mkdir()
+        (tmp_path / "store" / "memory.db").write_bytes(b"SQLite format 3\x00")
+    status, out, _ = _run(tmp_path, env=env)
+    assert status == 0
+    assert ("pip install 'memvara[encrypt]'" in out) is says
+    assert ("MEMVARA_FEATURE_ENCRYPTION=0" in out) is says
+
+
 def test_the_command_is_the_interpreter_that_can_import_memvara(tmp_path) -> None:
     """`python3` is the documented example and the wrong thing to write down.
 
