@@ -1674,8 +1674,9 @@ finish in under 50ms.
 **Every hook state file goes through `lib/state_file.py`.** The recall hook's per-session
 state, the counters, the project cache and the capture alerts all need an atomic write (a
 temporary file renamed over the real one), and the first two also need a read-modify-write
-under an exclusive `fcntl` lock, because two hooks for one session can run at once. Without
-the lock the second writer replaced the first: a lost count, or a seen-set missing the
+under an exclusive lock (`fcntl` on POSIX, `msvcrt` on Windows), because two hooks for one
+session can run at once. Without the lock the second writer replaced the first: a lost
+count, or a seen-set missing the
 memories another prompt had just injected. The module also prunes files by age. Nothing in
 it raises, including for a path with a NUL byte, which makes `os` calls raise `ValueError`
 rather than `OSError`.

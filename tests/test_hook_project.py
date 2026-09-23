@@ -200,6 +200,12 @@ def test_a_missing_git_binary_means_no_project(monkeypatch, tmp_path):
     assert project.canonical_project(str(tmp_path)) is None
 
 
+#: Directories the cache tests resolve. Made absolute the way `resolve` makes them, so the
+#: keys are the same on Windows, where "/a" becomes "D:\\a".
+A = os.path.abspath("/a")
+B = os.path.abspath("/b")
+
+
 # -- the switch, the cache and the channel --------------------------------------------
 
 
@@ -217,65 +223,65 @@ def test_resolve_caches_per_directory_so_a_prompt_does_not_pay_for_git(monkeypat
 
     def fake(cwd: str) -> "str | None":
         calls.append(cwd)
-        return "github.com/o/r" if cwd == "/a" else None
+        return "github.com/o/r" if cwd == A else None
 
     monkeypatch.setattr(project, "canonical_project", fake)
-    assert project.resolve("/a", now=1000.0) == "github.com/o/r"
-    assert project.resolve("/a", now=1001.0) == "github.com/o/r"
-    assert project.resolve("/b", now=1002.0) is None
-    assert project.resolve("/b", now=1003.0) is None, "an answer of None is cached too"
-    assert calls == ["/a", "/b"]
+    assert project.resolve(A, now=1000.0) == "github.com/o/r"
+    assert project.resolve(A, now=1001.0) == "github.com/o/r"
+    assert project.resolve(B, now=1002.0) is None
+    assert project.resolve(B, now=1003.0) is None, "an answer of None is cached too"
+    assert calls == [A, B]
 
     later = 1000.0 + project.CACHE_TTL_SECONDS + 10
-    assert project.resolve("/a", now=later) == "github.com/o/r"
-    assert calls == ["/a", "/b", "/a"], "a stale entry is recomputed"
+    assert project.resolve(A, now=later) == "github.com/o/r"
+    assert calls == [A, B, A], "a stale entry is recomputed"
 
 
 def test_each_directory_has_its_own_cache_file(monkeypatch):
     """One shared file meant a whole-file rewrite, unlocked, by every repository's hooks."""
-    monkeypatch.setattr(project, "canonical_project", lambda cwd: f"example.com/o/{cwd[1:]}")
-    project.resolve("/a", now=1.0)
-    project.resolve("/b", now=1.0)
+    monkeypatch.setattr(project, "canonical_project", lambda cwd: f"example.com/o/{os.path.basename(cwd)}")
+    project.resolve(A, now=1.0)
+    project.resolve(B, now=1.0)
     files = sorted(pathlib.Path(project.CACHE_DIR).glob("*.json"))
     assert len(files) == 2
     entries = sorted(json.loads(f.read_text(encoding="utf-8"))["cwd"] for f in files)
-    assert entries == ["/a", "/b"]
+    assert entries == sorted([A, B])
 
 
 def test_a_cache_entry_for_another_directory_is_a_miss(monkeypatch):
     """The entry repeats its directory, so a hash collision cannot answer for another one."""
     monkeypatch.setattr(project, "canonical_project", lambda cwd: "example.com/o/right")
-    path = pathlib.Path(project._cache_path("/a"))
+    path = pathlib.Path(project._cache_path(A))
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({"cwd": "/elsewhere", "project": "example.com/o/wrong",
                                 "at": 1.0}), encoding="utf-8")
-    assert project.resolve("/a", now=2.0) == "example.com/o/right"
+    assert project.resolve(A, now=2.0) == "example.com/o/right"
 
 
 def test_resolve_survives_a_corrupt_or_unwritable_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(project, "canonical_project", lambda cwd: "github.com/o/r")
-    path = pathlib.Path(project._cache_path("/a"))
+    path = pathlib.Path(project._cache_path(A))
     path.parent.mkdir(parents=True)
     path.write_text("not json", encoding="utf-8")
-    assert project.resolve("/a") == "github.com/o/r"
+    assert project.resolve(A) == "github.com/o/r"
     path.write_text('["a list"]', encoding="utf-8")
-    assert project.resolve("/a", now=5.0) == "github.com/o/r"
+    assert project.resolve(A, now=5.0) == "github.com/o/r"
     blocker = tmp_path / "file-not-dir"
     blocker.write_text("", encoding="utf-8")
     monkeypatch.setattr(project, "CACHE_DIR", str(blocker / "projects"))
-    assert project.resolve("/a") == "github.com/o/r"
+    assert project.resolve(A) == "github.com/o/r"
 
 
 def test_prune_removes_cache_files_past_their_lifetime(monkeypatch):
     monkeypatch.setattr(project, "canonical_project", lambda cwd: None)
-    project.resolve("/a")
-    old = pathlib.Path(project._cache_path("/a"))
+    project.resolve(A)
+    old = pathlib.Path(project._cache_path(A))
     stale = old.stat().st_mtime - project.CACHE_TTL_SECONDS - 60
     os.utime(old, (stale, stale))
-    project.resolve("/b")
+    project.resolve(B)
     project.prune()
     assert not old.exists()
-    assert pathlib.Path(project._cache_path("/b")).exists()
+    assert pathlib.Path(project._cache_path(B)).exists()
 
 
 @needs_git
