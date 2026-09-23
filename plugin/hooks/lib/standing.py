@@ -42,6 +42,9 @@ import re
 import unicodedata
 from typing import Any, Callable, NamedTuple
 
+from .mark import marked
+from .mark import on as mark_on
+
 #: A row of the "Believed now, not believed then" half of a `memory_since` reply. The other
 #: half is claims the store STOPPED believing, and parsing it into the standing set would
 #: re-assert every preference the user has ever withdrawn. `_from_since` stops reading at
@@ -323,6 +326,7 @@ def render(notes: "list[Note]", header: str, budget: int) -> str:
     """
     if not notes:
         return ""
+    mark = mark_on()
     lines, used, kept = [header], len(header), 0
     for note in notes:
         # The marker goes on the row, not in the header. The header already says some of
@@ -332,7 +336,10 @@ def render(notes: "list[Note]", header: str, budget: int) -> str:
         # the block is ordered so stated rules come first, and order tells a reader the
         # list is sorted without telling them WHERE the boundary falls. In twenty-two
         # rows, row twelve is unknowable.
-        line = f"- {note.text}{MARKER if note.inferred else ''}"
+        #
+        # Each row also starts with the recall mark (`lib.mark`), so the block reads as
+        # recalled memory and capture never mines it back in.
+        line = marked(f"- {note.text}{MARKER if note.inferred else ''}", mark)
         if kept and used + 1 + len(line) > budget:
             break
         lines.append(line)

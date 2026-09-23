@@ -81,6 +81,20 @@ Seven repositories vendor this one tree and each registers a different
 client, so a `hooks.json` committed here would be one of them shipped to all
 of them. This repository ignores that path for exactly that reason.
 
+Three hook features can be switched off in `~/.memvara/settings.json`, a
+flat object of `feature_name: true|false` where a missing key means on.
+`MEMVARA_FEATURE_<NAME>=0|1` overrides the file for one process.
+
+- `project_scope`: the hooks work out the project from the repository's
+  `origin` remote and send it to the server as a `Memvara-Project` header.
+  Every clone and worktree of one repository gives the same project.
+- `recall_mark`: every memory line the hooks inject starts with `⋈ `, so a
+  reader can tell recalled memory from the rest of the context. Capture never
+  mines a marked line, with the switch on or off.
+- `status_line`: the hooks count, per session, the memory lines recalled,
+  the read-only memory tools called and the facts captured, in
+  `~/.memvara/.hooks/counts/<session>.json`.
+
 ## Your own agent
 
 A plugin does not install into LangChain, CrewAI, or a loop you wrote.

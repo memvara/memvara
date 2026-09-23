@@ -46,6 +46,11 @@ Per-turn costs more and loses nothing. The two guards that remain:
   and a refusal raises rather than returning quietly. See `lib/write.py`.
 * **It repeats.** `Stop` can fire more than once over one reply, so the size of the
   transcript at the last run is recorded and an unchanged size means there is nothing new.
+
+Two smaller jobs ride along. The hosted client sends the project worked out from the
+repository's remote (`lib.project.bind`) with every write. And the number of facts a turn
+stored is added to the session's `captured` count for the status line (`lib.counts`), after
+the write succeeds and never before.
 """
 
 from __future__ import annotations
@@ -59,8 +64,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.envelope import read_event  # noqa: E402
 from core.host import active  # noqa: E402
+from lib import counts  # noqa: E402
 from lib.extract import project_subject, triples  # noqa: E402
 from lib.ipc import payload  # noqa: E402
+from lib.project import bind as bind_project  # noqa: E402
 from lib.transcript import last_turn_with_injections  # noqa: E402
 from lib.write import (EPISODE_ROLE, log, open_writer, store_facts,  # noqa: E402
                        turn_ids)
@@ -255,6 +262,8 @@ def main() -> int:
         log(f"turn={len(turn)}c skipped={why}")
         return 0
 
+    # Before the store is opened: the hosted client sends this project with every write.
+    bind_project(event.cwd)
     store, close = open_writer()
     if store is None:
         log(f"turn={len(turn)}c stored=0 failed=no store or login")
@@ -275,6 +284,8 @@ def main() -> int:
     log(f"turn={len(turn)}c facts={len(facts)} stored={stored} "
         f"episode={'yes' if kept else 'no'}"
         + ("; failed=" + "; ".join(failed) if failed else ""))
+    if stored and counts.enabled():
+        counts.bump(event.session, "captured", stored)
 
     return 0
 

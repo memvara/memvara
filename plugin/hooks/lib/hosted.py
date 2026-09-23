@@ -39,6 +39,7 @@ import os.path
 import ssl
 
 from .ipc import log_line
+from .project import ENV as PROJECT_ENV
 
 #: Anything but the stdlib default. See the module docstring: this single header is the
 #: difference between reaching the application and being refused at the edge.
@@ -55,6 +56,25 @@ MCP_PATH = "/mcp"
 TIMEOUT_SEC = 6.0
 
 PROTOCOL_VERSION = "2025-06-18"
+
+#: The header that narrows every call to one project inside the tenant the credential
+#: already binds. The server treats it as a narrowing only: it can never widen a
+#: credential to another tenant's data.
+PROJECT_HEADER = "memvara-project"
+
+
+def _project_header() -> "str | None":
+    """The project this process speaks for, if it can travel as a header.
+
+    `lib.project.bind` publishes it on `PROJECT_ENV` when the `project_scope` setting is on.
+    A value is refused here if it is not printable ASCII: a line break would inject a second
+    header, and a non-ASCII character makes `http.client` raise, which would turn every
+    call this client makes into a failure rather than dropping one header.
+    """
+    value = os.environ.get(PROJECT_ENV) or ""
+    if not value or not value.isascii() or not value.isprintable():
+        return None
+    return value
 
 
 #: Statuses that mean "the session id you are holding is not one I know" -- a server that
@@ -205,6 +225,9 @@ class HostedRecall:
         }
         if self._session:
             headers["mcp-session-id"] = self._session
+        project = _project_header()
+        if project:
+            headers[PROJECT_HEADER] = project
 
         try:
             if self._conn is None:
