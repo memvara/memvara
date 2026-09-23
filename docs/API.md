@@ -252,6 +252,8 @@ which model wrote it.
 ```python
 mem = Memvara("memory.db", encryption=True)        # pip install 'memvara[encrypt]'
 store = SQLiteStore("memory.db", key=key_bytes)    # 32 bytes; skips the key lookup
+mem = Memvara("memory.db", encryption=True,        # read MEMVARA_DB_KEY from this
+              key_env={"MEMVARA_DB_KEY": hex_key}) # mapping, not from os.environ
 store.encrypted, store.key_source                  # True, and where the key came from, never the key
 ```
 

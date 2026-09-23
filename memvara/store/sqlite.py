@@ -65,7 +65,7 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 from io import BufferedRandom
 from typing import (TYPE_CHECKING, Any, Callable, Collection, Iterable, Iterator,
-                    Sequence, cast)
+                    Mapping, Sequence, cast)
 
 import numpy as np
 
@@ -1018,20 +1018,19 @@ class _VecIndex:
     def _attach_sealed(self, fd: int, head: bytes, dim: int, rows: int) -> bool:
         """`attach` for an encrypted file. Reads no rows; `load` reads them one by one.
 
-        A header that is missing, of another format, or written for another width is
-        replaced by a fresh one with a new salt, and the caller rebuilds every row from
-        the database, exactly as a stale plaintext file is rebuilt. That is safe to do
-        without asking, because the database holds the same vectors and authenticates
-        them itself.
+        A header that is missing, of another format, written for another width or
+        carrying another database's salt is replaced, and the caller rebuilds every row
+        from the database, exactly as a stale plaintext file is rebuilt. That is safe to
+        do without asking, because the database holds the same vectors and authenticates
+        them itself. The replacement header is the same bytes in every process that opens
+        this database, because nothing in it is chosen here; see `VectorSealer`.
         """
         assert self._sealer is not None
-        salt = self._sealer.parse(head, dim)
-        usable = salt is not None
-        if salt is None:
-            salt = os.urandom(VectorSealer.SALT)
+        usable = self._sealer.matches(head, dim)
+        if not usable:
             os.ftruncate(fd, 0)
-            _write_at(fd, self._sealer.header(dim, salt).ljust(_VEC_HEADER, b"\0"), 0)
-        self._sealer.bind(dim, salt)
+            _write_at(fd, self._sealer.header(dim).ljust(_VEC_HEADER, b"\0"), 0)
+        self._sealer.bind(dim)
         self._rows = 0
         self._mat = None
         self._ensure_rows(max(rows, self._INITIAL_ROWS))
@@ -1331,6 +1330,9 @@ class SQLiteStore:
     beside it row by row with AES-256-GCM. The key is `key` when given, and otherwise
     the one `memvara.store.encryption.resolve_key` finds (the OS keychain, then
     `MEMVARA_DB_KEY`, then `~/.memvara/db.key`, generated there if none exists).
+    `key_env` is the mapping `MEMVARA_DB_KEY` is read from, when it is not the process
+    environment; the MCP server passes the environment its configuration was read from,
+    which for the plugin's hooks is the client's server block.
 
     An existing file is opened as whatever it already is, whatever `encryption` says. An
     encrypted one is opened with the key, and an unencrypted one is opened as it is, with
@@ -1346,7 +1348,8 @@ class SQLiteStore:
     holds_documents = True
 
     def __init__(self, path: str = ":memory:", *, encryption: bool = False,
-                 key: bytes | None = None) -> None:
+                 key: bytes | None = None,
+                 key_env: Mapping[str, str] | None = None) -> None:
         if key is not None and len(key) != 32:
             raise ValueError(f"key must be 32 bytes, got {len(key)}")
         self.path = path
@@ -1372,7 +1375,7 @@ class SQLiteStore:
             if key is not None:
                 self._key, self.key_source = key, "the key passed to SQLiteStore"
             else:
-                found = resolve_key(create=kind == "new")
+                found = resolve_key(create=kind == "new", env=key_env)
                 self._key, self.key_source = found.key, found.describe()
             self.encrypted = True
         if self._sql.sqlite_version_info < _MIN_SQLITE:
@@ -1403,9 +1406,9 @@ class SQLiteStore:
         # put the index back in step with the database.
         self._touched: set[tuple[_VecTable, str]] = set()
         self._cleared = False
-        self._vec = _VecIndex(
-            path=_vec_path(path), count=self._count_vectors,
-            sealer=VectorSealer(self._key) if self._key is not None else None)
+        sealer = VectorSealer(self._key) if self._key is not None else None
+        self._vec = _VecIndex(path=_vec_path(path), count=self._count_vectors,
+                              sealer=sealer)
         self._index_loaded = False
         # One write watermark per vector table: `_read_map` folds in everything written
         # past it, and the two tables count independently.
@@ -1421,6 +1424,12 @@ class SQLiteStore:
             self._migrate()
             self._db.executescript(_LATE_INDEXES)
             self._db.commit()
+            if sealer is not None:
+                # Read after the first commit: a new database has no salt on disk until
+                # its first page is written, and this is the value every other process
+                # reads from the file.
+                sealer.salt = bytes.fromhex(
+                    self._db.execute("PRAGMA cipher_salt").fetchone()[0])
             self._attach_vectors()
 
     # -- connections ---------------------------------------------------------

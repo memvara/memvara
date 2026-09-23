@@ -726,7 +726,7 @@ class Memvara:
     #: out, before anything leaves this process, which is the one privacy control that
     #: matters *more* against a hosted deployment than against a local file.
     _LOCAL_ONLY = ("path", "store", "embedder", "llm", "registry", "telemetry",
-                   "advise_replacements", "synthesizer", "url_fetcher")
+                   "advise_replacements", "synthesizer", "url_fetcher", "key_env")
 
     #: The prefixes `_split_tuning` routes to the write, read and graph subsystems. Every
     #: one of those subsystems runs server-side against a hosted deployment, so the
@@ -837,6 +837,7 @@ class Memvara:
         ingest_urls: bool = True,
         ingest_media: bool = True,
         encryption: bool = False,
+        key_env: Mapping[str, str] | None = None,
         **tuning: Any,
     ) -> None:
         # Present so that a local construction that named them still binds. `__new__`
@@ -861,12 +862,12 @@ class Memvara:
                 "where the data lives, so the path would be silently ignored. Pass one "
                 f"of Memvara({path!r}) or Memvara(store={type(store).__name__}(...))."
             )
-        if encryption and store is not None:
+        if (encryption or key_env is not None) and store is not None:
             raise TypeError(
-                "encryption=True and store= cannot be combined: the store was opened "
-                "before this call, so whether it is encrypted is already decided. Pass "
-                "SQLiteStore(path, encryption=True) as the store, or Memvara(path, "
-                "encryption=True).")
+                "encryption=True or key_env= cannot be combined with store=: the store "
+                "was opened before this call, so whether it is encrypted, and with which "
+                "key, is already decided. Pass SQLiteStore(path, encryption=True) as the "
+                "store, or Memvara(path, encryption=True).")
         scope_kw: dict[str, str | None] = {"user": user, "agent": agent,
                                            "session": session, "project": project}
         self._absorb_scope_aliases(tuning, scope_kw)
@@ -901,8 +902,10 @@ class Memvara:
         # it is. Off by default here, unlike the MCP server's `encryption` switch, because
         # an encrypted store reads a key from the OS keychain or writes one to
         # ~/.memvara/db.key, and a library call should not do either unless asked.
-        self.store = store if store is not None else SQLiteStore(path or ":memory:",
-                                                                 encryption=encryption)
+        # `key_env` is the mapping `MEMVARA_DB_KEY` is read from instead of the process
+        # environment; the MCP server passes the environment its configuration came from.
+        self.store = store if store is not None else SQLiteStore(
+            path or ":memory:", encryption=encryption, key_env=key_env)
         self.embedder = embedder if embedder is not None else default_embedder()
         # Default to no LLM on purpose: the deterministic path is the product, and the
         # library must be fully usable with no API key. What is *not* on purpose is

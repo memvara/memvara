@@ -117,7 +117,7 @@ transport is stdio and the configuration is entirely environment.
 | variable | meaning |
 |---|---|
 | `MEMVARA_DB` | **required.** Path to the SQLite file, created on first use, encrypted unless `MEMVARA_FEATURE_ENCRYPTION=0` (see [Encryption at rest](#encryption-at-rest)). `:memory:` for a smoke test that forgets everything on exit. |
-| `MEMVARA_DB_KEY` | The store key, as 64 hexadecimal characters, for a server with no OS keychain, such as one in a container. Read only when the OS keychain has no key under service `memvara`, account `db-key`, and read before `~/.memvara/db.key`. Fill it from a secret manager, not a file in the repository. See [Encryption at rest](#encryption-at-rest). |
+| `MEMVARA_DB_KEY` | The store key, as 64 hexadecimal characters, for a server with no OS keychain, such as one in a container. Read only when the OS keychain has no key under service `memvara`, account `db-key`, and read before `~/.memvara/db.key`. It is read from the server's own environment, so a key set in the client's server block also reaches the plugin's hooks, which read that block. A malformed value is refused at startup without being repeated. Fill it from a secret manager, not a file in the repository. See [Encryption at rest](#encryption-at-rest). |
 | `MEMVARA_USER` | who this server remembers for. Unset means the whole tenant. |
 | `MEMVARA_TENANT` | isolation boundary above the user. Default `default`. |
 | `MEMVARA_AGENT`, `MEMVARA_SESSION` | narrow further. Leave unset for durable facts — memory written at session scope is invisible to the next session. |
@@ -672,8 +672,9 @@ up in this order:
    keychain. Fill it from a secret manager.
 3. `~/.memvara/db.key`. When none of the three has a key and a new store is being
    created, one is generated here with mode 0600, and the server warns at start every time
-   the key comes from this file. The file is in the same home directory as the store, so a
-   copy of the home directory is a copy of both.
+   the key comes from this file. On macOS and Linux the warning also names the file's mode
+   and says to run `chmod 600` when other users can read it. The file is in the same home
+   directory as the store, so a copy of the home directory is a copy of both.
 
 **Losing the key makes the store unreadable, permanently.** Run
 `memvara encrypt --export-key` right after the first encrypted store is created, and keep

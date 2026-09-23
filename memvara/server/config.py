@@ -29,7 +29,7 @@ from ..project import canonical_project, check_project
 from .validate import _suggest
 from ..schema import (BUILTIN_PREDICATES, PredicatePackError,
                       PredicateRegistry, load_all_specs)
-from ..store.encryption import EncryptionError, EncryptionUnavailable
+from ..store.encryption import KEY_ENV, EncryptionError, EncryptionUnavailable, parse_key
 
 if TYPE_CHECKING:
     # Imported for the annotation alone. At runtime `memvara.remote.api` reaches back
@@ -330,6 +330,12 @@ class ServerConfig:
     #: another. Unset, each process generates its own, which is right for a single stdio
     #: server. Kept out of `repr` because it is a secret.
     confirm_secret: str | None = field(default=None, repr=False)
+    #: `MEMVARA_DB_KEY` as it appeared in the environment this config was read from, for
+    #: an encrypted local store. Read here rather than from `os.environ` at open, because
+    #: the plugin's hooks build their configuration from the client's server block, which
+    #: never reaches `os.environ`; a key that lived only there opened the server's store
+    #: and not the hooks'. Kept out of `repr` because it is the key.
+    db_key: str | None = field(default=None, repr=False)
     #: The operator's own NAT64 prefixes, from `MEMVARA_NAT64_PREFIXES` (comma-separated).
     #: A URL whose host resolves into one is checked as the IPv4 address inside it, so a
     #: private IPv4 host reached through the gateway is refused. The well-known and
@@ -465,6 +471,7 @@ class ServerConfig:
             # reach `Confirmer`, which refuses an empty key; unset is the intended reading.
             confirm_secret=_optional(env.get("MEMVARA_CONFIRM_SECRET")),
             nat64_prefixes=nat64_prefixes,
+            db_key=_db_key(env.get(KEY_ENV)),
         )
 
     def url_fetcher(self) -> SafeFetcher:
@@ -703,6 +710,22 @@ def _read_extract_system(path: str | None) -> str | None:
         raise ConfigError(
             f"MEMVARA_LLM_EXTRACT_SYSTEM={path!r} is empty. A model told nothing extracts "
             "nothing; unset it to use the extraction instructions memvara ships.")
+    return text
+
+
+def _db_key(raw: str | None) -> str | None:
+    """`MEMVARA_DB_KEY`, checked at startup, or None when unset or blank.
+
+    Checked here so a malformed key is a startup error beside the rest of the
+    configuration. The message says what is wrong with it and never repeats it.
+    """
+    text = _optional(raw)
+    if text is None:
+        return None
+    try:
+        parse_key(text, KEY_ENV)
+    except EncryptionError as exc:
+        raise ConfigError(str(exc)) from None
     return text
 
 
@@ -1026,7 +1049,13 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
 
 
 def _local_memvara(config: ServerConfig, encryption: bool) -> Memvara:
-    """The local engine `build_memvara` serves, over the store `config.path` names."""
+    """The local engine `build_memvara` serves, over the store `config.path` names.
+
+    A new store file is created encrypted when the switch is on; an existing one opens as
+    what it is. The key is looked up in the environment this config was read from
+    (`ServerConfig.db_key`), never in `os.environ` directly, so the hooks, whose
+    environment is the client's server block, find the same key the server does.
+    """
     return Memvara(
         config.path,
         # Passed explicitly even when it is the default: `Memvara()` warns about a missing
@@ -1067,13 +1096,12 @@ def _local_memvara(config: ServerConfig, encryption: bool) -> Memvara:
         url_fetcher=config.url_fetcher(),
         ingest_urls="ingest_urls" not in config.features_off,
         ingest_media="ingest_media" not in config.features_off,
+        encryption=encryption,
+        key_env={KEY_ENV: config.db_key} if config.db_key else {},
         # The read path's model stages use the `llm` above when it can chat, and these
         # are their switches, `MEMVARA_FEATURE_QUERY_REWRITE` and
         # `MEMVARA_FEATURE_SYNTHESIS`.
         query_rewrite="query_rewrite" not in config.features_off,
         synthesis="synthesis" not in config.features_off,
-        # A new store file is created encrypted when the switch is on. An existing one
-        # opens as what it is; see `SQLiteStore`.
-        encryption=encryption,
         **config.scope_kwargs,
     )

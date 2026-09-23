@@ -191,6 +191,105 @@ def test_two_processes_generating_at_once_end_up_with_one_key(monkeypatch):
     assert (found.key, found.source) == (KEY, "file")
 
 
+def test_generating_leaves_no_temporary_file_and_never_replaces_a_key(monkeypatch):
+    """The key is written to a temporary file and linked into place, so no other process
+    can ever see the key file half written, and a key that is already there stays."""
+    with pytest.warns(EncryptionWarning):
+        made = resolve_key(create=True)
+    assert sorted(p.name for p in key_file().parent.iterdir()) == ["db.key"]
+    monkeypatch.setattr(Path, "is_file", lambda self: False)
+    again = resolve_key(create=True)
+    assert again.key == made.key
+    assert sorted(p.name for p in key_file().parent.iterdir()) == ["db.key"]
+
+
+def test_a_key_file_still_being_written_is_waited_for(monkeypatch):
+    """A key file that exists but is still empty belongs to a process that is writing it.
+    It is read again, briefly, instead of being reported as a malformed key."""
+    key_file().parent.mkdir(parents=True)
+    key_file().write_text("")
+    naps: list[float] = []
+
+    def nap(seconds: float) -> None:
+        naps.append(seconds)
+        if len(naps) == 3:
+            key_file().write_text(KEY.hex() + "\n")
+
+    monkeypatch.setattr(enc.time, "sleep", nap)
+    with pytest.warns(EncryptionWarning):
+        found = resolve_key(create=False)
+    assert found.key == KEY and len(naps) == 3
+
+
+def test_a_key_file_that_stays_empty_is_an_error_after_the_wait(monkeypatch):
+    key_file().parent.mkdir(parents=True)
+    key_file().write_text("")
+    naps: list[float] = []
+    monkeypatch.setattr(enc.time, "sleep", naps.append)
+    with pytest.raises(EncryptionError, match="0 characters"):
+        resolve_key(create=False)
+    assert sum(naps) <= 1.0 and len(naps) > 1
+
+
+def test_the_loser_of_a_generation_race_waits_for_the_winners_key(monkeypatch):
+    """Two processes generating at once: the loser finds the winner's file, possibly
+    before the winner has finished writing it, and waits for the key rather than failing.
+    """
+    key_file().parent.mkdir(parents=True)
+    key_file().write_text("")
+    monkeypatch.setattr(Path, "is_file", lambda self: False)
+
+    def nap(seconds: float) -> None:
+        key_file().write_text(KEY.hex())
+
+    monkeypatch.setattr(enc.time, "sleep", nap)
+    assert resolve_key(create=True).key == KEY
+    assert sorted(p.name for p in key_file().parent.iterdir()) == ["db.key"]
+
+
+def test_generating_where_hard_links_are_not_supported_still_writes_the_key(monkeypatch):
+    """Some file systems (FAT, some network shares) refuse a hard link. The key is then
+    created in place with O_EXCL, which still never overwrites a key."""
+    def refuse(src, dst):
+        raise OSError("hard links are not supported here")
+
+    monkeypatch.setattr(enc.os, "link", refuse)
+    with pytest.warns(EncryptionWarning):
+        made = resolve_key(create=True)
+    assert key_file().read_text().strip() == made.key.hex()
+    assert sorted(p.name for p in key_file().parent.iterdir()) == ["db.key"]
+    monkeypatch.setattr(Path, "is_file", lambda self: False)
+    assert resolve_key(create=True).key == made.key
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_key_file_others_can_read_is_named_in_the_warning():
+    """As ssh does for a private key, a key file readable by the group or by everyone is
+    reported with its mode and the command that fixes it."""
+    key_file().parent.mkdir(parents=True)
+    key_file().write_text(KEY.hex())
+    key_file().chmod(0o644)
+    with pytest.warns(EncryptionWarning) as caught:
+        resolve_key(create=False)
+    message = str(caught[0].message)
+    assert "mode is 644" in message and f"chmod 600 {key_file()}" in message
+    key_file().chmod(0o600)
+    with pytest.warns(EncryptionWarning) as caught:
+        resolve_key(create=False)
+    assert "chmod" not in str(caught[0].message)
+
+
+def test_windows_modes_are_not_read_as_permissions(monkeypatch):
+    """On Windows the mode bits do not say who can read a file, so nothing is claimed."""
+    key_file().parent.mkdir(parents=True)
+    key_file().write_text(KEY.hex())
+    key_file().chmod(0o644)
+    monkeypatch.setattr(enc, "_POSIX_MODES", False)
+    with pytest.warns(EncryptionWarning) as caught:
+        resolve_key(create=False)
+    assert "chmod" not in str(caught[0].message)
+
+
 def test_no_key_anywhere_is_an_error_when_not_creating():
     with pytest.raises(EncryptionError, match="No store key was found"):
         resolve_key(create=False)
@@ -368,10 +467,14 @@ def test_an_encrypted_file_without_the_extra_is_refused_naming_it(tmp_path, monk
 
 
 def test_memvara_refuses_encryption_it_could_not_apply():
-    with pytest.raises(TypeError, match="encryption=True and store="):
+    with pytest.raises(TypeError, match="cannot be combined with store="):
         Memvara(store=SQLiteStore(), encryption=True, embedder=HashingEmbedder(dim=8))
+    with pytest.raises(TypeError, match="cannot be combined with store="):
+        Memvara(store=SQLiteStore(), key_env={}, embedder=HashingEmbedder(dim=8))
     with pytest.raises(TypeError, match="encryption"):
         Memvara(api_key="k", encryption=True)
+    with pytest.raises(TypeError, match="key_env"):
+        Memvara(api_key="k", key_env={"MEMVARA_DB_KEY": KEY.hex()})
 
 
 # --- the encrypted vector file ------------------------------------------------
@@ -435,17 +538,86 @@ def test_an_edited_record_fails_to_load(tmp_path):
 
 @needs_extra
 def test_a_record_from_a_file_written_with_another_key_fails_to_load(tmp_path):
-    """Same store, same rows, a vector file sealed under a different key: the header is
-    well formed, so it is not rebuilt, and every record fails."""
-    path, _ = _written(tmp_path)
+    """Same store, same rows, same header, records sealed under a different key: the
+    header is the one this store writes, so it is not rebuilt, and every record fails."""
+    path, ids = _written(tmp_path)
+    with SQLiteStore(path, key=KEY) as store:
+        salt = store._vec._sealer.salt
+        slots = dict(store._db.execute("SELECT claim_id, slot FROM embeddings").fetchall())
+    forger = VectorSealer(OTHER)
+    forger.salt = salt
+    forger.bind(DIM)
+    for i, cid in enumerate(ids):
+        _put_record(path, slots[cid], forger.seal(slots[cid], cid, onehot(i).tobytes()))
+    with SQLiteStore(path, key=KEY) as store:
+        with pytest.raises(EncryptionError, match="another key"):
+            hits(store, 0)
+
+
+@needs_extra
+def test_a_vector_file_from_another_store_is_rebuilt_not_trusted(tmp_path):
+    """Another store's file carries another database's salt in its header, so this store
+    does not recognise it as its own and rebuilds it from the database."""
+    path, ids = _written(tmp_path)
     other = str(tmp_path / "other.db")
-    with SQLiteStore(other, key=OTHER) as store:
+    with SQLiteStore(other, key=KEY) as store:
         for i in range(4):
             embed(store, i)
     Path(path + ".vecs").write_bytes(Path(other + ".vecs").read_bytes())
     with SQLiteStore(path, key=KEY) as store:
-        with pytest.raises(EncryptionError, match="another key"):
-            hits(store, 0)
+        assert [hits(store, i) for i in range(4)] == [[c] for c in ids]
+
+
+@needs_extra
+def test_two_processes_rewriting_a_missing_vector_file_agree_on_its_key(tmp_path):
+    """The vector file's key is derived from a salt both processes read from the database,
+    so two processes that each find the header missing write the same header.
+
+    The interleaving that broke it: process A opens the store and rebuilds the file;
+    process B, which also found the header missing a moment earlier, truncates the file
+    and writes its own header; A then seals a new vector. With a salt chosen at random by
+    each process, A's new record is under a key B's header does not describe, and the
+    next open refuses the store. The third open here must succeed and find every vector.
+    """
+    path, ids = _written(tmp_path)
+    os.remove(path + ".vecs")
+    a = SQLiteStore(path, key=KEY)               # rebuilds the file, header included
+    with open(path + ".vecs", "r+b") as fh:      # B found it missing too and starts over
+        fh.truncate(0)
+    b = SQLiteStore(path, key=KEY)
+    late = embed(a, 9).id
+    a.close()
+    b.close()
+    with SQLiteStore(path, key=KEY) as third:
+        assert [hits(third, i) for i in range(4)] == [[c] for c in ids]
+        assert hits(third, 9) == [late]
+
+
+@needs_extra
+def test_two_stores_opening_a_missing_vector_file_at_once_leave_it_readable(tmp_path):
+    """The same race with real threads rather than a scripted interleaving."""
+    import threading
+
+    path, ids = _written(tmp_path, n=8)
+    os.remove(path + ".vecs")
+    opened: list[SQLiteStore] = []
+    start = threading.Barrier(2)
+
+    def open_one() -> None:
+        start.wait()
+        opened.append(SQLiteStore(path, key=KEY))
+
+    threads = [threading.Thread(target=open_one) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    extra = [embed(store, 10 + n).id for n, store in enumerate(opened)]
+    for store in opened:
+        store.close()
+    with SQLiteStore(path, key=KEY) as third:
+        assert [hits(third, i) for i in range(8)] == [[c] for c in ids]
+        assert [hits(third, 10 + n) for n in range(2)] == [[c] for c in extra]
 
 
 @needs_extra
@@ -506,16 +678,18 @@ def test_an_owner_erased_or_moved_while_loading_takes_the_databases_answer(tmp_p
 
 @needs_extra
 def test_a_damaged_header_or_a_missing_file_is_rebuilt_from_the_database(tmp_path):
-    """Neither is data loss: the database holds every vector. The file is rewritten with
-    a fresh salt, so the old records cannot be reused under the new header."""
+    """Neither is data loss: the database holds every vector. The rewritten header is the
+    same one every process opening this database writes, because its salt is the
+    database's own."""
     path, ids = _written(tmp_path)
-    old_salt = Path(path + ".vecs").read_bytes()[16:32]
+    before = Path(path + ".vecs").read_bytes()[:32]
     with open(path + ".vecs", "r+b") as fh:
         fh.write(b"XXXXXXXX")
     with SQLiteStore(path, key=KEY) as store:
         assert hits(store, 3) == [ids[3]]
+        salt = store._vec._sealer.salt
     head = Path(path + ".vecs").read_bytes()[:32]
-    assert head[:8] == VectorSealer.MAGIC and head[16:32] != old_salt
+    assert head == before and head[:8] == VectorSealer.MAGIC and head[16:32] == salt
     os.remove(path + ".vecs")
     with SQLiteStore(path, key=KEY) as store:
         assert hits(store, 2) == [ids[2]]
@@ -588,13 +762,17 @@ def test_clearing_embeddings_drops_the_encrypted_file_and_starts_a_new_one(tmp_p
 
 
 @needs_extra
-def test_the_sealer_refuses_a_header_for_another_width():
+def test_the_sealer_accepts_only_its_own_header():
     sealer = VectorSealer(KEY)
-    head = sealer.header(8, b"s" * 16)
-    assert sealer.parse(head, 8) == b"s" * 16
-    assert sealer.parse(head, 16) is None
-    assert sealer.parse(head[:20], 8) is None
-    assert sealer.parse(b"NOTMAGIC" + head[8:], 8) is None
+    sealer.salt = b"s" * 16
+    head = sealer.header(8)
+    assert sealer.matches(head, 8)
+    assert not sealer.matches(head, 16)
+    assert not sealer.matches(head[:20], 8)
+    assert not sealer.matches(b"NOTMAGIC" + head[8:], 8)
+    other = VectorSealer(KEY)
+    other.salt = b"t" * 16
+    assert not other.matches(head, 8)
 
 
 # --- converting an existing store ---------------------------------------------
@@ -881,6 +1059,53 @@ def test_a_store_the_server_cannot_find_the_key_for_is_a_config_error(tmp_path, 
     monkeypatch.delenv("MEMVARA_DB_KEY")
     with pytest.raises(ConfigError, match="No store key was found"):
         build_memvara(ServerConfig.from_env(_server_env(tmp_path)))
+
+
+@needs_extra
+def test_the_server_reads_the_key_from_the_environment_it_was_given(tmp_path):
+    """`ServerConfig.from_env(env)` reads MEMVARA_DB_KEY from `env`, not from the process
+    environment, and the key never reaches the config's repr."""
+    config = ServerConfig.from_env(_server_env(tmp_path, MEMVARA_DB_KEY=KEY.hex()))
+    assert KEY.hex() not in repr(config)
+    memory = build_memvara(config)
+    assert memory.store.encrypted
+    assert memory.store.key_source == "the MEMVARA_DB_KEY environment variable"
+    memory.close()
+    with SQLiteStore(str(tmp_path / "m.db"), key=KEY) as store:
+        assert store.encrypted
+
+
+def test_a_malformed_key_in_the_server_environment_is_refused_at_startup(tmp_path):
+    with pytest.raises(ConfigError) as caught:
+        ServerConfig.from_env(_server_env(tmp_path, MEMVARA_DB_KEY="not-a-key-at-all"))
+    assert "MEMVARA_DB_KEY" in str(caught.value)
+    assert "not-a-key-at-all" not in str(caught.value)
+
+
+@needs_extra
+def test_the_hooks_open_a_store_whose_key_is_only_in_the_server_block(tmp_path,
+                                                                      monkeypatch):
+    """The hooks read the MCP client's server block into a dict and never into
+    `os.environ`. A key that lives only in that block must still open the store, or every
+    prompt silently gets no memory while the server itself works."""
+    hooks = Path(__file__).resolve().parent.parent / "plugin" / "hooks"
+    monkeypatch.syspath_prepend(str(hooks))
+    from lib import ipc
+    from lib import open as opener
+
+    block = _server_env(tmp_path, MEMVARA_DB_KEY=KEY.hex())
+    SQLiteStore(block["MEMVARA_DB"], key=KEY).close()
+    monkeypatch.setattr(ipc, "server_env", lambda: dict(block))
+    for name in ("MEMVARA_DB", "MEMVARA_DB_KEY", "MEMVARA_EMBEDDER", "MEMVARA_MODE"):
+        monkeypatch.delenv(name, raising=False)
+    memory = opener.open_store()
+    assert memory is not None, "the hooks could not open the store"
+    try:
+        assert memory.store.encrypted
+        assert memory.store.key_source == "the MEMVARA_DB_KEY environment variable"
+    finally:
+        memory.close()
+    assert not key_file().exists(), "the key came from the block, not a generated file"
 
 
 def test_memory_stats_says_an_in_memory_store_never_reaches_disk():

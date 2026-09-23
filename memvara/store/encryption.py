@@ -31,6 +31,7 @@ import secrets
 import sqlite3
 import struct
 import tempfile
+import time
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,8 +40,8 @@ from typing import Any, Mapping
 __all__ = [
     "EncryptionError", "EncryptionUnavailable", "EncryptionWarning", "EncryptResult",
     "KEY_ENV", "KEYRING_SERVICE", "KEYRING_USERNAME", "StoreKey", "VectorSealer",
-    "encrypt_store", "export_key", "file_kind", "key_file", "require_sqlcipher",
-    "resolve_key",
+    "encrypt_store", "export_key", "file_kind", "key_file", "parse_key",
+    "require_sqlcipher", "resolve_key",
 ]
 
 #: Where the key is looked up in the OS keychain. Documented, because a user who wants the
@@ -115,7 +116,7 @@ class StoreKey:
         return f"the key file {self.path}"
 
 
-def _parse(text: str, where: str) -> bytes:
+def parse_key(text: str, where: str) -> bytes:
     """A key from its 64-character hexadecimal form. The error never repeats the text."""
     value = text.strip()
     if len(value) != 64:
@@ -172,19 +173,19 @@ def resolve_key(*, create: bool, env: Mapping[str, str] | None = None) -> StoreK
     environ = os.environ if env is None else env
     text, unavailable = _read_keychain()
     if text:
-        return StoreKey(_parse(text, "The OS keychain entry memvara/db-key"), "keychain")
+        return StoreKey(parse_key(text, "The OS keychain entry memvara/db-key"), "keychain")
     raw = (environ.get(KEY_ENV) or "").strip()
     if raw:
-        return StoreKey(_parse(raw, KEY_ENV), "environment")
+        return StoreKey(parse_key(raw, KEY_ENV), "environment")
     path = key_file()
     if path.is_file():
-        found = StoreKey(_parse(path.read_text(encoding="utf-8"), f"The key file {path}"),
-                         "file", str(path))
+        found = StoreKey(_read_key_file(path), "file", str(path))
         warnings.warn(EncryptionWarning(
             f"The store key was read from {path}. That file is in the same home "
             "directory as your stores, so a copy of the directory is a copy of the key. "
             "Putting the key in the OS keychain (python3 -m keyring set memvara db-key) "
-            f"or in {KEY_ENV} from a secret manager keeps the two apart."), stacklevel=3)
+            f"or in {KEY_ENV} from a secret manager keeps the two apart."
+            + _loose_mode(path)), stacklevel=3)
         return found
     if not create:
         looked = f"the OS keychain ({unavailable})" if unavailable else "the OS keychain"
@@ -195,22 +196,84 @@ def resolve_key(*, create: bool, env: Mapping[str, str] | None = None) -> StoreK
     return _generate(path)
 
 
+#: How long a reader waits for a key file another process is still writing: 20 reads,
+#: 50 ms apart, one second in all. Writing 65 bytes takes far less; the wait exists for
+#: the one case below where the file can be seen before it is complete.
+_KEY_FILE_READS = 20
+_KEY_FILE_PAUSE = 0.05
+
+
+def _read_key_file(path: Path) -> bytes:
+    """The key in `path`, waiting briefly while it is shorter than a key.
+
+    `_generate` links a complete file into place, so a key file is never seen half
+    written when it made the file. On a file system without hard links it falls back to
+    creating the file in place, and another process can then open it between its
+    creation and its write. A file that is still short after the wait is reported as the
+    malformed key it is.
+    """
+    text = path.read_text(encoding="utf-8")
+    for _ in range(_KEY_FILE_READS):
+        if len(text.strip()) >= 64:
+            break
+        time.sleep(_KEY_FILE_PAUSE)
+        text = path.read_text(encoding="utf-8")
+    return parse_key(text, f"The key file {path}")
+
+
+#: Whether file mode bits say who can read a file. False on Windows; see `_loose_mode`.
+_POSIX_MODES = os.name == "posix"
+
+
+def _loose_mode(path: Path) -> str:
+    """A sentence about a key file other users can read, or nothing.
+
+    POSIX only, as ssh does for a private key. On Windows the mode bits Python reports do
+    not describe who can read a file (that is an access control list), so there is
+    nothing true to say from them, and this says nothing.
+    """
+    if not _POSIX_MODES:
+        return ""
+    mode = path.stat().st_mode & 0o777
+    if not mode & 0o077:
+        return ""
+    return (f" The file's mode is {mode:o}, so other users on this machine may be able "
+            f"to read the key; run `chmod 600 {path}`.")
+
+
 def _generate(path: Path) -> StoreKey:
     """Write a new random key to `path`, mode 0600, and warn that it must be backed up.
 
-    `O_EXCL`, so a key that already exists is never overwritten. Two processes creating
-    their first encrypted stores at the same moment both get here; the one that loses the
-    race reads the key the winner wrote, and both stores share it.
+    The key is written to a temporary file in the same directory and then hard-linked to
+    `path`. A link fails when `path` exists, so a key already there is never replaced,
+    and it makes the whole file appear at once, so no other process can read it half
+    written. Two processes creating their first encrypted stores at the same moment both
+    get here; the one whose link fails reads the key the other wrote, and both stores
+    share it. Where the file system has no hard links, the key is created in place with
+    `O_EXCL`, which still never replaces a key, and a reader waits for it
+    (`_read_key_file`).
     """
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     key = secrets.token_bytes(32)
+    fd, staged = tempfile.mkstemp(prefix=".db.key-", dir=str(path.parent))
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return StoreKey(_parse(path.read_text(encoding="utf-8"), f"The key file {path}"),
-                        "file", str(path))
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(key.hex() + "\n")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(key.hex() + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.link(staged, path)
+        except FileExistsError:
+            return StoreKey(_read_key_file(path), "file", str(path))
+        except OSError:
+            try:
+                made = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                return StoreKey(_read_key_file(path), "file", str(path))
+            with os.fdopen(made, "w", encoding="utf-8") as fh:
+                fh.write(key.hex() + "\n")
+    finally:
+        os.remove(staged)
     warnings.warn(EncryptionWarning(
         f"Generated a new store key in {path}. Back it up now: run "
         "`memvara encrypt --export-key` and keep the output somewhere other than this "
@@ -278,11 +341,18 @@ class VectorSealer:
     width or salt all fail authentication. A file cut short loses the records past the
     cut, and the store reports them missing. None of these loads silently.
 
-    **The key.** Each file has its own random 16-byte salt in its header, and the row key
-    is derived from the store key with HKDF-SHA256 under that salt. Two consequences: the
-    AES key is never the key SQLCipher uses, and every file (including a new one written
-    after `clear_embeddings`) starts a fresh key, so the random 96-bit nonces stay well
-    inside the bound AES-GCM needs, which is about 2^32 records per key.
+    **The key.** The row key is derived from the store key with HKDF-SHA256, under the
+    database's own 16-byte salt (`PRAGMA cipher_salt`, the first 16 bytes of the
+    encrypted database file), and the header repeats that salt. The salt is not secret.
+    Taking it from the database is what makes every process that opens the store agree
+    on the vector file's key: two processes that find the header missing at the same
+    moment both write the same header, where a salt each picked at random would leave
+    one process sealing records under a key the header no longer describes. The salt is
+    fixed for the life of the database file, and a converted store is a new file with a
+    new salt, so its old vector file is recognised as foreign and rebuilt. HKDF with its
+    own `info` string keeps this key apart from the keys SQLCipher derives, and random
+    96-bit nonces stay inside the bound AES-GCM needs, about 2^32 records per key, for
+    as long as any store will realistically be written.
 
     **What it does not do.** A record can be replaced by an older record for the same row
     and the same owner, and that passes authentication: a search would then use that
@@ -300,29 +370,28 @@ class VectorSealer:
         self._master = key
         self._aead: Any = None
         self._bound = b""
+        #: The database's salt. `SQLiteStore` sets it once the database file exists,
+        #: because a new database has no salt until its first page is written.
+        self.salt = b""
 
-    def header(self, dim: int, salt: bytes) -> bytes:
-        """The header's meaningful 32 bytes: magic, format, width and salt."""
-        return self.MAGIC + struct.pack("<II", self.FORMAT, dim) + salt
+    def header(self, dim: int) -> bytes:
+        """The header's meaningful 32 bytes: magic, format, width and the salt."""
+        return self.MAGIC + struct.pack("<II", self.FORMAT, dim) + self.salt
 
-    def parse(self, head: bytes, dim: int) -> bytes | None:
-        """The salt from a header written for `dim`, or None if it was not."""
-        if len(head) < 16 + self.SALT or head[:8] != self.MAGIC:
-            return None
-        if struct.unpack_from("<II", head, 8) != (self.FORMAT, dim):
-            return None
-        return head[16:16 + self.SALT]
+    def matches(self, head: bytes, dim: int) -> bool:
+        """Whether `head` is the header this store writes for vectors of width `dim`."""
+        return head[:16 + self.SALT] == self.header(dim)
 
-    def bind(self, dim: int, salt: bytes) -> None:
-        """Derive the row key for the file whose header carries `salt`."""
+    def bind(self, dim: int) -> None:
+        """Derive the row key, and the associated data every record carries."""
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-        derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=salt,
+        derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=self.salt,
                        info=self._INFO).derive(self._master)
         self._aead = AESGCM(derived)
-        self._bound = self.header(dim, salt)
+        self._bound = self.header(dim)
 
     def record_size(self, dim: int) -> int:
         return self.NONCE + dim * 4 + self.TAG

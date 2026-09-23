@@ -234,8 +234,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   memory on the first search instead of being memory-mapped. The key is a 32-byte key read
   from the OS keychain (service `memvara`, account `db-key`), then `MEMVARA_DB_KEY`, then
   `~/.memvara/db.key`, where one is generated with mode 0600 when a new store needs one;
-  a key from that file is announced with an `EncryptionWarning` at every open. `key=` passes
-  one directly. **A store whose key is lost cannot be read.** `SQLiteStore.encrypted` and
+  a key from that file is announced with an `EncryptionWarning` at every open, which on
+  POSIX also names a mode that lets other users read it. The key file is written to a
+  temporary file and linked into place, so it is never replaced and never seen half
+  written. `key=` passes a key directly, and `key_env=` (on `SQLiteStore` and `Memvara`)
+  is the mapping `MEMVARA_DB_KEY` is read from instead of `os.environ`. The MCP server
+  passes the environment it was configured from, so the plugin's hooks, which read the
+  client's server block, find a key that is set only there. The vector file's key is
+  derived from the database's own salt, so two processes that rewrite a missing vector
+  file at the same moment agree on it. **A store whose key is lost cannot be read.** `SQLiteStore.encrypted` and
   `SQLiteStore.key_source` say which kind of store it is and where the key came from,
   never the key. An existing file opens as whatever it is, whatever `encryption` says. It
   needs `pip install 'memvara[encrypt]'` (`sqlcipher3`, `cryptography`, `keyring`).
