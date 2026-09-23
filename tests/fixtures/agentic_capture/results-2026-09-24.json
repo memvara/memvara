@@ -1,0 +1,556 @@
+[
+  {
+    "turn": "new standing instruction",
+    "path": "single",
+    "round": 0,
+    "seconds": 12.1,
+    "fell_back": false,
+    "tokens_in": 45245,
+    "cache_write": 19277,
+    "tokens_out": 559,
+    "found": 1,
+    "expected": 1,
+    "new": [
+      "user prefers Always run `ruff format .` before committing anything. CI's lint job fails on unformatted code and then the"
+    ],
+    "unwanted": 0
+  },
+  {
+    "turn": "new standing instruction",
+    "path": "agentic",
+    "round": 0,
+    "seconds": 13.9,
+    "fell_back": false,
+    "tokens_in": 21746,
+    "cache_write": 3961,
+    "tokens_out": 804,
+    "found": 1,
+    "expected": 1,
+    "new": [
+      "user prefers always run ruff format before you commit anything. The CI lint job fails on unformatted code and then the p"
+    ],
+    "unwanted": 0
+  },
+  {
+    "turn": "restated instruction already stored",
+    "path": "single",
+    "round": 0,
+    "seconds": 21.5,
+    "fell_back": false,
+    "tokens_in": 45143,
+    "cache_write": 19175,
+    "tokens_out": 1791,
+    "found": 0,
+    "expected": 0,
+    "new": [
+      "user prefers Always run hook tests in tests/test_hook_*.py with stdin closed by redirecting from /dev/null (e.g., `pytho"
+    ],
+    "unwanted": 1
+  },
+  {
+    "turn": "restated instruction already stored",
+    "path": "agentic",
+    "round": 0,
+    "seconds": 17.3,
+    "fell_back": false,
+    "tokens_in": 22077,
+    "cache_write": 4325,
+    "tokens_out": 1136,
+    "found": 0,
+    "expected": 0,
+    "new": [],
+    "unwanted": 0
+  },
+  {
+    "turn": "deployment target changed",
+    "path": "single",
+    "round": 0,
+    "seconds": 13.0,
+    "fell_back": false,
+    "tokens_in": 45260,
+    "cache_write": 19292,
+    "tokens_out": 683,
+    "found": 0,
+    "expected": 1,
+    "new": [
+      "memvara deploys_to Hetzner"
+    ],
+    "unwanted": 0
+  },
+  {
+    "turn": "deployment target changed",
+    "path": "agentic",
+    "round": 0,
+    "seconds": 12.4,
+    "fell_back": false,
+    "tokens_in": 21623,
+    "cache_write": 3887,
+    "tokens_out": 778,
+    "found": 1,
+    "expected": 1,
+    "new": [
+      "memvara deploys_to Hetzner"
+    ],
+    "unwanted": 0
+  },
+  {
+    "turn": "work item finished",
+    "path": "single",
+    "round": 0,
+    "seconds": 18.1,
+    "fell_back": false,
+    "tokens_in": 45163,
+    "cache_write": 19195,
+    "tokens_out": 1031,
+    "found": 2,
+    "expected": 2,
+    "new": [
+      "user working_on search ranking"
+    ],
+    "unwanted": 0
+  },
+  {
+    "turn": "work item finished",
+    "path": "agentic",
+    "round": 0,
+    "seconds": 16.7,
+    "fell_back": false,
+    "tokens_in": 22100,
+    "cache_write": 4343,
+    "tokens_out": 1028,
+    "found": 2,
+    "expected": 2,
+    "new": [
+      "user working_on search ranking"
+    ],
+    "unwanted": 0
+  },
+  {
+    "turn": "temporary timezone",
+    "path": "single",
+    "round": 0,
+    "seconds": 32.7,
+    "fell_back": false,
+    "tokens_in": 45167,
+    "cache_write": 19199,
+    "tokens_out": 2795,
+    "found": 1,
+    "expected": 1,
+    "new": [
+      "user timezone Europe/Lisbon",
+      "user prefers Times should be presented in Europe/Lisbon timezone until 2026-10-31, not Asia/Kolkata, as the user will be",
+      "user located_now Lisbon"
+    ],
+    "unwanted": 2
+  },
+  {
+    "turn": "temporary timezone",
+    "path": "agentic",
+    "round": 0,
+    "seconds": 27.5,
+    "fell_back": false,
+    "tokens_in": 22702,
+    "cache_write": 4962,
+    "tokens_out": 2221,
+    "found": 1,
+    "expected": 1,
+    "new": [
+      "user timezone Europe/Lisbon",
+      "user located_now Lisbon"
+    ],
+    "unwanted": 1
+  },
+  {
+    "turn": "pasted extractor prompt",
+    "path": "single",
+    "round": 0,
+    "seconds": 13.2,
+    "fell_back": false,
+    "tokens_in": 45210,
+    "cache_write": 19242,
+    "tokens_out": 493,
+    "found": 0,
+    "expected": 0,
+    "new": [],
+    "unwanted": 0
+  },
+  {
+    "turn": "pasted extractor prompt",
+    "path": "agentic",
+    "round": 0,
+    "seconds": 9.5,
+    "fell_back": false,
+    "tokens_in": 10507,
+    "cache_write": 3221,
+    "tokens_out": 487,
+    "found": 0,
+    "expected": 0,
+    "new": [],
+    "unwanted": 0
+  },
+  {
+    "turn": "fact only in the earlier turns",
+    "path": "single",
+    "round": 0,
+    "seconds": 9.7,
+    "fell_back": false,
+    "tokens_in": 45253,
+    "cache_write": 19285,
+    "tokens_out": 301,
+    "found": 0,
+    "expected": 0,
+    "new": [],
+    "unwanted": 0
+  },
+  {
+    "turn": "fact only in the earlier turns",
+    "path": "agentic",
+    "round": 0,
+    "seconds": 10.9,
+    "fell_back": false,
+    "tokens_in": 10472,
+    "cache_write": 3186,
+    "tokens_out": 571,
+    "found": 0,
+    "expected": 0,
+    "new": [],
+    "unwanted": 0
+  },
+  {
+    "turn": "known defect with evidence",
+    "path": "single",
+    "round": 0,
+    "seconds": 38.0,
+    "fell_back": false,
+    "tokens_in": 45266,
+    "cache_write": 19298,
+    "tokens_out": 2904,
+    "found": 0,
+    "expected": 1,
+    "new": [],
+    "unwanted": 0
+  },
+  {
+    "turn": "known defect with evidence",
+    "path": "agentic",
+    "round": 0,
+    "seconds": 12.5,
+    "fell_back": false,
+    "tokens_in": 10521,
+    "cache_write": 3235,
+    "tokens_out": 792,
+    "found": 0,
+    "expected": 1,
+    "new": [],
+    "unwanted": 0
+  },
+  {
+    "turn": "rejected alternative",
+    "path": "single",
+    "round": 0,
+    "seconds": 19.2,
+    "fell_back": false,
+    "tokens_in": 45296,
+    "cache_write": 19328,
+    "tokens_out": 1430,
+    "found": 1,
+    "expected": 1,
+    "new": [
+      "memvara rejected Jest for dashboard tests was rejected because its ESM support broke the build twice. Stay on Vitest for"
+    ],
+    "unwanted": 0
+  },
+  {
+    "turn": "rejected alternative",
+    "path": "agentic",
+    "round": 0,
+    "seconds": 30.0,
+    "fell_back": false,
+    "tokens_in": 22009,
+    "cache_write": 4302,
+    "tokens_out": 2293,
+    "found": 1,
+    "expected": 1,
+    "new": [
+      "memvara rejected Jest for dashboard tests \u2014 its ESM support broke the build twice and blocked the CI pipeline. Continue "
+    ],
+    "unwanted": 0
+  },
+  {
+    "turn": "new standing instruction",
+    "path": "single",
+    "round": 1,
+    "seconds": 15.0,
+    "fell_back": false,
+    "tokens_in": 45315,
+    "cache_write": 19347,
+    "tokens_out": 796,
+    "found": 1,
+    "expected": 1,
+    "new": [
+      "user prefers Always run ruff format before committing code. The CI lint job fails on unformatted code, which prevents th"
+    ],
+    "unwanted": 0
+  },
+  {
+    "turn": "new standing instruction",
+    "path": "agentic",
+    "round": 1,
+    "seconds": 12.6,
+    "fell_back": false,
+    "tokens_in": 21673,
+    "cache_write": 3911,
+    "tokens_out": 721,
+    "found": 1,
+    "expected": 1,
+    "new": [
+      "user prefers always run ruff format before committing code. The CI lint job fails on unformatted code and prevents pull "
+    ],
+    "unwanted": 0
+  },
+  {
+    "turn": "restated instruction already stored",
+    "path": "single",
+    "round": 1,
+    "seconds": 18.8,
+    "fell_back": false,
+    "tokens_in": 45312,
+    "cache_write": 19344,
+    "tokens_out": 1009,
+    "found": 0,
+    "expected": 0,
+    "new": [
+      "user prefers Hook tests hang waiting for stdin events if stdin is open. Always run hook tests with stdin closed using </"
+    ],
+    "unwanted": 1
+  },
+  {
+    "turn": "restated instruction already stored",
+    "path": "agentic",
+    "round": 1,
+    "seconds": 16.7,
+    "fell_back": false,
+    "tokens_in": 21858,
+    "cache_write": 4124,
+    "tokens_out": 1147,
+    "found": 0,
+    "expected": 0,
+    "new": [
+      "memvara known_defect Hook tests hang if stdin is left open, waiting for an event. Always run with stdin closed: use </de"
+    ],
+    "unwanted": 1
+  },
+  {
+    "turn": "deployment target changed",
+    "path": "single",
+    "round": 1,
+    "seconds": 13.1,
+    "fell_back": false,
+    "tokens_in": 45260,
+    "cache_write": 19292,
+    "tokens_out": 573,
+    "found": 0,
+    "expected": 1,
+    "new": [
+      "memvara deploys_to Hetzner"
+    ],
+    "unwanted": 0
+  },
+  {
+    "turn": "deployment target changed",
+    "path": "agentic",
+    "round": 1,
+    "seconds": 12.0,
+    "fell_back": false,
+    "tokens_in": 21529,
+    "cache_write": 3785,
+    "tokens_out": 600,
+    "found": 1,
+    "expected": 1,
+    "new": [
+      "memvara deploys_to Hetzner"
+    ],
+    "unwanted": 0
+  },
+  {
+    "turn": "work item finished",
+    "path": "single",
+    "round": 1,
+    "seconds": 20.4,
+    "fell_back": false,
+    "tokens_in": 45202,
+    "cache_write": 19234,
+    "tokens_out": 1281,
+    "found": 0,
+    "expected": 2,
+    "new": [],
+    "unwanted": 0
+  },
+  {
+    "turn": "work item finished",
+    "path": "agentic",
+    "round": 1,
+    "seconds": 14.9,
+    "fell_back": false,
+    "tokens_in": 22076,
+    "cache_write": 4319,
+    "tokens_out": 995,
+    "found": 2,
+    "expected": 2,
+    "new": [
+      "user working_on search ranking"
+    ],
+    "unwanted": 0
+  },
+  {
+    "turn": "temporary timezone",
+    "path": "single",
+    "round": 1,
+    "seconds": 34.0,
+    "fell_back": false,
+    "tokens_in": 45324,
+    "cache_write": 19356,
+    "tokens_out": 2739,
+    "found": 0,
+    "expected": 1,
+    "new": [
+      "user prefers receive all times in Europe/Lisbon timezone until 2026-10-31, not Asia/Kolkata",
+      "user located_now Lisbon (until 2026-10-31)"
+    ],
+    "unwanted": 2
+  },
+  {
+    "turn": "temporary timezone",
+    "path": "agentic",
+    "round": 1,
+    "seconds": 38.6,
+    "fell_back": false,
+    "tokens_in": 22222,
+    "cache_write": 4477,
+    "tokens_out": 3128,
+    "found": 1,
+    "expected": 1,
+    "new": [
+      "user timezone Europe/Lisbon",
+      "user prefers through 2026-10-31, always give times in Europe/Lisbon timezone, not Asia/Kolkata. The user is in Lisbon du",
+      "user located_now Lisbon"
+    ],
+    "unwanted": 2
+  },
+  {
+    "turn": "pasted extractor prompt",
+    "path": "single",
+    "round": 1,
+    "seconds": 10.8,
+    "fell_back": false,
+    "tokens_in": 45363,
+    "cache_write": 19395,
+    "tokens_out": 355,
+    "found": 0,
+    "expected": 0,
+    "new": [],
+    "unwanted": 0
+  },
+  {
+    "turn": "pasted extractor prompt",
+    "path": "agentic",
+    "round": 1,
+    "seconds": 18.1,
+    "fell_back": false,
+    "tokens_in": 10478,
+    "cache_write": 3192,
+    "tokens_out": 1296,
+    "found": 0,
+    "expected": 0,
+    "new": [],
+    "unwanted": 0
+  },
+  {
+    "turn": "fact only in the earlier turns",
+    "path": "single",
+    "round": 1,
+    "seconds": 12.4,
+    "fell_back": false,
+    "tokens_in": 45298,
+    "cache_write": 19330,
+    "tokens_out": 496,
+    "found": 0,
+    "expected": 0,
+    "new": [],
+    "unwanted": 0
+  },
+  {
+    "turn": "fact only in the earlier turns",
+    "path": "agentic",
+    "round": 1,
+    "seconds": 12.4,
+    "fell_back": false,
+    "tokens_in": 10453,
+    "cache_write": 3167,
+    "tokens_out": 761,
+    "found": 0,
+    "expected": 0,
+    "new": [],
+    "unwanted": 0
+  },
+  {
+    "turn": "known defect with evidence",
+    "path": "single",
+    "round": 1,
+    "seconds": 26.4,
+    "fell_back": false,
+    "tokens_in": 45381,
+    "cache_write": 19413,
+    "tokens_out": 1956,
+    "found": 0,
+    "expected": 1,
+    "new": [],
+    "unwanted": 0
+  },
+  {
+    "turn": "known defect with evidence",
+    "path": "agentic",
+    "round": 1,
+    "seconds": 16.0,
+    "fell_back": false,
+    "tokens_in": 10539,
+    "cache_write": 3253,
+    "tokens_out": 1056,
+    "found": 0,
+    "expected": 1,
+    "new": [],
+    "unwanted": 0
+  },
+  {
+    "turn": "rejected alternative",
+    "path": "single",
+    "round": 1,
+    "seconds": 24.9,
+    "fell_back": false,
+    "tokens_in": 45182,
+    "cache_write": 19214,
+    "tokens_out": 1699,
+    "found": 1,
+    "expected": 1,
+    "new": [
+      "memvara rejected Jest was rejected for the dashboard test suite because its ESM support broke the build twice; continue "
+    ],
+    "unwanted": 0
+  },
+  {
+    "turn": "rejected alternative",
+    "path": "agentic",
+    "round": 1,
+    "seconds": 18.9,
+    "fell_back": false,
+    "tokens_in": 45272,
+    "cache_write": 4633,
+    "tokens_out": 1124,
+    "found": 1,
+    "expected": 1,
+    "new": [
+      "memvara rejected Jest for the dashboard test suite: its ESM support broke the build twice, and the team chose to stay on"
+    ],
+    "unwanted": 0
+  }
+]

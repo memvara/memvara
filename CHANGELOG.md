@@ -11,6 +11,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The plugin's capture hook can write to a local store again.** It passed a fact's
+  memory type to the library as a string, and the library takes the `MemoryType` enum, so
+  every fact the hook wrote to a local store failed with `AttributeError: 'str' object has
+  no attribute 'value'` and was logged under `failed=` in `capture.log`. The hook now
+  passes the enum to a local store and the name to the hosted server.
+
 - **A hosted client bound to a project refuses to purge.** `RemoteMemvara.purge()` and
   `AsyncRemoteMemvara.purge()`, and their scoped views, sent `POST /v1/erasures` with the
   user, agent and session only. From a client bound to one project that would have erased
@@ -139,6 +145,34 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **Agentic capture in the plugin.** When a turn ends, the capture hook runs the headless
+  agent command with read-only access to the user's memory. The model may search up to
+  four times, then returns proposals: a new fact, a supersede of a stored claim id with a
+  new value and a reason, an end of a claim id with a reason, or an `extends` or
+  `derives` link between two claims. The model cannot write. The hook checks each
+  proposal with the same rules as a single-call fact (`extract.vet`), refuses any claim id
+  that did not appear in a tool result during the run, refuses an object that repeats the
+  extractor's own rules or comes only from the earlier turns, and applies the rest with
+  `remember` (with `replaces` for a supersede), `memory_end` and `memory_link`. The model
+  sees up to 4,000 characters of the earlier turns for reference; only the new turn is
+  mined. The rules are the system prompt and the conversation is a delimited data block.
+  The run connects only to the memvara server (hosted with the hooks' own key, or the
+  client's local server block), has no built-in tools, and is stopped at the fifth tool
+  call or after 60 seconds. If it cannot use the store, fails or times out, the turn falls
+  back to the single-call extraction and `capture.log` says why; the capture alert still
+  fires when the single-call extraction fails too. `expires_at` is passed only to a store
+  whose `remember` takes it. The switch is `agentic_capture`, on by default, in
+  `FEATURE_DEFAULTS` and the hooks' copy. It runs only on a host whose first extractor is
+  the headless agent command. The capture hook's timeout on Claude Code is now 180
+  seconds. Measured on nine synthetic turns replayed twice
+  (`tests/fixtures/agentic_capture/replay.py`): it made 12 of 14 expected changes against
+  7 of 14 for the single call, ended 6 of 6 stored values the turns changed against 2 of
+  6, and wrote 4 unwanted claims against 6. A turn cost a mean 19,436 input and 1,163
+  output tokens and 17.3 seconds, against 45,258, 1,272 and 19.6 for the single call on the
+  same machine; the single call's input is that high because it loads the user's
+  instruction files and plugins, and with small ones it is about 21,000, which is then
+  about what an agentic turn costs. See `plugin/hooks/lib/agentic.py` and section 3.7 of the
+  phase 3 design.
 - **Query rewrite on `search()` and `recall()`.** Before retrieval, one call to the
   configured chat backend sends the query and today's date, and reads back JSON with up
   to three alternative queries and an optional date range. The original query and each

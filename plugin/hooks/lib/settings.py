@@ -34,8 +34,8 @@ SETTINGS = os.path.join(os.path.expanduser("~"), ".memvara", "settings.json")
 #: refuses a `MEMVARA_FEATURE_<NAME>` that is not in it. The hooks cannot import the library,
 #: so this is a copy, and `tests/test_hook_project.py` fails when the two differ in a name,
 #: in the order or in a default. The hooks read `project_scope`, `status_line`,
-#: `recall_mark` and `query_rewrite`. The other names are listed so that `/memvara:setup`
-#: can show every switch with its true default.
+#: `recall_mark`, `query_rewrite` and `agentic_capture`. The other names are listed so that
+#: `/memvara:setup` can show every switch with its true default.
 FEATURE_DEFAULTS = {
     "index_command": True,
     "research_agent": True,
@@ -55,6 +55,7 @@ FEATURE_DEFAULTS = {
     "synthesis": True,
     "metadata_filters": True,
     "encryption": True,
+    "agentic_capture": True,
 }
 
 #: Every feature name, in the order `FEATURE_DEFAULTS` lists them.

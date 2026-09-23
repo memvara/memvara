@@ -501,7 +501,10 @@ class HostedRecall:
                  memory_type: "str | None" = None,
                  true_since: "str | None" = None,
                  extractor: "str | None" = None,
-                 sources: "list[str] | None" = None) -> str:
+                 sources: "list[str] | None" = None,
+                 replaces: "str | None" = None,
+                 reason: "str | None" = None,
+                 expires_at: "str | None" = None) -> str:
         """Write one triple, or raise. Returns the server's receipt line.
 
         Reads and writes both raise now, but for different reasons, and the write's is the
@@ -541,7 +544,45 @@ class HostedRecall:
             # and is unreleased as of 2026-08-25, so on today's endpoint the probe answers
             # False and a fact is written exactly as before -- unexplainable, but written.
             args["sources"] = list(sources)
+        if replaces:
+            # Sent as given, not probed here. The caller (`lib.agentic`) asks `accepts`
+            # before it chooses a replacement, because a server without the argument
+            # needs a different write -- a plain fact -- and only the caller knows that
+            # losing `replaces` also means the old value stays live.
+            args["replaces"] = replaces
+            if reason:
+                args["reason"] = reason
+        if expires_at:
+            # Also chosen by the caller after `accepts`: an older server refuses it.
+            args["expires_at"] = expires_at
         return self._call("memory_remember", args)
+
+    def end(self, claim_id: str, *, reason: "str | None" = None) -> str:
+        """End one claim by id, or raise. Returns the server's receipt line.
+
+        The tool answers an id it cannot see with ordinary text beginning "Nothing
+        ended", not with an error flag, so that sentence is turned into a `HostedError`
+        here. Without this a refused end would be counted as one that landed.
+        """
+        args: dict = {"claim_id": claim_id}
+        if reason:
+            args["reason"] = reason
+        text = self._call("memory_end", args)
+        if text.startswith("Nothing ended"):
+            raise HostedError(text)
+        return text
+
+    def link(self, from_id: str, to_id: str, relation: str) -> str:
+        """Record `from_id <relation> to_id`, or raise. Returns the server's receipt line.
+
+        A server with the `links` feature switched off does not list `memory_link` at
+        all, and calling it would be refused as an unknown tool. That is asked first, so
+        the failure names the cause.
+        """
+        if self.offers("memory_link", "relation") is False:
+            raise HostedError("this server does not offer memory_link")
+        return self._call("memory_link", {"from_id": from_id, "to_id": to_id,
+                                          "relation": relation})
 
 
 def _reheader(text: str, header: "str | None") -> str:

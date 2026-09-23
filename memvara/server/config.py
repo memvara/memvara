@@ -127,6 +127,12 @@ _DEFAULT_EMBEDDER = "hashing"
 #: (`SQLiteStore(encryption=True)`). An existing store opens as whatever it already is.
 #: With the switch on and the `encrypt` extra missing, a new store is refused rather than
 #: created unencrypted; see `build_memvara`.
+#:
+#: `agentic_capture` belongs to the plugin. With it on, the capture hook lets the headless
+#: agent command search the user's memory with read-only tools before it proposes facts,
+#: supersedes, ends and links, which the hook checks and applies
+#: (`plugin/hooks/lib/agentic.py`). With it off, capture makes one extraction call per turn
+#: as before.
 FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
     "index_command": True,
     "research_agent": True,
@@ -146,6 +152,7 @@ FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
     "synthesis": True,
     "metadata_filters": True,
     "encryption": True,
+    "agentic_capture": True,
 })
 
 #: Every feature name, in the order `FEATURE_DEFAULTS` lists them.
@@ -498,7 +505,7 @@ def unknown_features(names: Iterable[str]) -> str | None:
     exception, so the two cannot disagree about what a feature is.
 
     >>> unknown_features(["profle"])
-    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite, synthesis, metadata_filters and encryption."
+    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite, synthesis, metadata_filters, encryption and agentic_capture."
     >>> unknown_features(["profile"]) is None
     True
     """
