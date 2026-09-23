@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import LLM, Chat, NullLLM, ReplacementJudge, TruncatedResponse, Usage
+from .base import (LLM, Chat, Multimodal, NullLLM, ReplacementJudge, TruncatedResponse,
+                   Usage)
 
 # `Usage` is exported because implementing `LLM` outside this package requires it:
 # a backend that sets `reports_usage` is handed one and has to type against it. `Chat`
@@ -15,8 +16,10 @@ from .base import LLM, Chat, NullLLM, ReplacementJudge, TruncatedResponse, Usage
 # caller cannot name is one they can only catch by catching everything.
 # `ReplacementJudge` is exported for the same reason as `Chat`: a backend that wants
 # `Memvara.remember` to give replacement advice implements this beside `LLM`.
-__all__ = ["LLM", "Chat", "NullLLM", "ReplacementJudge", "TruncatedResponse", "Usage",
-           "AnthropicLLM", "OpenAILLM"]
+# `Multimodal` is exported for the same reason: a backend that wants
+# `memvara.ingest.extract` to read images, audio or video implements it beside `LLM`.
+__all__ = ["LLM", "Chat", "Multimodal", "NullLLM", "ReplacementJudge", "TruncatedResponse",
+           "Usage", "AnthropicLLM", "OpenAILLM"]
 
 
 def __getattr__(name: str) -> Any:

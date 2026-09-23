@@ -482,37 +482,6 @@ not close this specific gap.
 
 ## Deliberately deferred
 
-**Splitting a long turn into chunks before extraction.** Measured on 2026-09-03 and
-declined, so that it is not rebuilt. Generation time grows with the answer, so the obvious
-fix for a long turn is to split it and extract from each piece, bounding the worst call
-instead of scaling it. It was tried on the longest episode in the spike (a sentence-boundary
-split into 3,500-character pieces, `phi-4-mini` Q8_0 at three threads) and it cost more than
-it bought:
-
-| | calls | generated tokens | wall | claims | key facts | duplicates |
-|---|---:|---:|---:|---:|---:|---:|
-| whole turn | 1 | 433 | 280 s | 8 | **5 of 5** | 0 |
-| chunked | 4 | 902 | 268 s | 16 | **4 of 5** | 3 |
-
-Twelve seconds saved, one key fact lost across a chunk boundary, generated tokens doubled
-because the model fills its claim cap in each chunk and restates what it already said, and
-three duplicates for the reconciler to absorb. Q4_K_M and Q5_K_M were worse on the same
-split. Prefill per chunk really is cheap, which was the argument for it; the generation side
-is what doubled, and generation is the side that costs.
-
-Two things also have to be true before it would help, and neither is. It does not bound a
-runaway: the failure that wedged the worker was 3,200 output tokens against a twelve-claim
-cap, and a runaway inside a 1,000-token chunk still runs to `max_tokens`. And the
-empty-list defect it might once have dodged — the shipped prompt's closing sentence, which
-made a small model return nothing past roughly 1,300 tokens — was fixed in #178, and a
-4,117-token turn now extracts to the claim cap.
-
-If it is built later it belongs in core, not in the worker, because `source_index` has to
-keep pointing at the whole episode rather than at a chunk or `why()` breaks, and because
-only core can be held to a fixture. The acceptance test is the table above: beat 5 of 5 key
-facts with 0 duplicates on `tests/fixtures/phi4_spike/`'s longest episode. Raw measurements
-are in `memvara-cloud/local/phi4-cpu-spike-2026-09-03/result-quant-comparison.txt`.
-
 **A memvara-paid allowance on ranked reads.** `search(ranked=True)` (`memvara.select`)
 puts one per-query model call on the *customer's* key, so memvara's own cost per call is
 $0 and nothing here is metered. Phase 2 — memvara fronting the call on its own key, with
@@ -728,6 +697,67 @@ sending every live value for every subject costs prompt tokens on every call and
 the model to restate what it sees; and matching the turn's subject to the stored one
 through entity resolution rather than string equality, or the values are never found for
 exactly the turns that need them.
+
+## Reversed
+
+Decisions that were recorded as declined and have since been reversed. Each entry keeps the
+measurements from when it was declined, because they are still true, and says what changed.
+
+**Splitting a long turn into chunks before extraction.** Declined on 2026-09-03 after
+measurement. **Reversed on 2026-09-23 and built, switched off by default.** The phase 2
+parity design (`docs/superpowers/specs/2026-09-23-parity-phase-2-documents-and-retrieval-design.md`,
+section 4.3) needs it, because documents bring turns far longer than a conversation does.
+It is `WritePipeline(extraction_chunks=True)`, `Memvara(write_extraction_chunks=True)`, or
+`MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` on the MCP server. A turn over 6,000 characters is
+cut at paragraph and sentence ends into pieces of at most 6,000 characters, and each piece
+is one extraction call. It is built in core, as the entry below required, so every claim
+still cites the whole episode and `why()` still shows the turn the user wrote. A fact two
+pieces both state reaches the reconciler twice, exactly as if the turn had stated it twice,
+so it is stored once and counted as observed twice.
+
+**It ships off because the release bar below is not met.** The one chunked run on a long
+turn, the spike's gate turn padded to 13,687 characters, found 4 of 5 key facts. Its 3
+duplicates were repeats of the same predicate and object, which the reconciler stores once
+when the subject matches too. Nothing after the model can recover a fact the model never
+stated. That run's per-piece outputs were not kept, and the fixture in
+`tests/fixtures/phi4_spike/` holds only three turns of 750 to 902 characters, all under the
+threshold, so the bar cannot be re-measured from recorded material.
+`tests/test_extraction_chunks.py` pins what the fixture can show: with the three recorded
+turns joined and cut back into exactly those turns, chunked extraction finds the same key
+facts as separate extraction in all six recorded configurations, with 0 duplicates. To
+switch it on by default, record a model's output for the pieces of a turn over 6,000
+characters, pin it in that file, and show 5 of 5 with 0 duplicates.
+
+The entry as it was declined:
+
+> Generation time grows with the answer, so the obvious fix for a long turn is to split it
+> and extract from each piece, bounding the worst call instead of scaling it. It was tried on the longest episode in the spike (a sentence-boundary
+> split into 3,500-character pieces, `phi-4-mini` Q8_0 at three threads) and it cost more than
+> it bought:
+>
+> | | calls | generated tokens | wall | claims | key facts | duplicates |
+> |---|---:|---:|---:|---:|---:|---:|
+> | whole turn | 1 | 433 | 280 s | 8 | **5 of 5** | 0 |
+> | chunked | 4 | 902 | 268 s | 16 | **4 of 5** | 3 |
+>
+> Twelve seconds saved, one key fact lost across a chunk boundary, generated tokens doubled
+> because the model fills its claim cap in each chunk and restates what it already said, and
+> three duplicates for the reconciler to absorb. Q4_K_M and Q5_K_M were worse on the same
+> split. Prefill per chunk really is cheap, which was the argument for it; the generation side
+> is what doubled, and generation is the side that costs.
+>
+> Two things also have to be true before it would help, and neither is. It does not bound a
+> runaway: the failure that wedged the worker was 3,200 output tokens against a twelve-claim
+> cap, and a runaway inside a 1,000-token chunk still runs to `max_tokens`. And the
+> empty-list defect it might once have dodged — the shipped prompt's closing sentence, which
+> made a small model return nothing past roughly 1,300 tokens — was fixed in #178, and a
+> 4,117-token turn now extracts to the claim cap.
+>
+> If it is built later it belongs in core, not in the worker, because `source_index` has to
+> keep pointing at the whole episode rather than at a chunk or `why()` breaks, and because
+> only core can be held to a fixture. The acceptance test is the table above: beat 5 of 5 key
+> facts with 0 duplicates on `tests/fixtures/phi4_spike/`'s longest episode. Raw measurements
+> are in `memvara-cloud/local/phi4-cpu-spike-2026-09-03/result-quant-comparison.txt`.
 
 ## A JavaScript client, and what was built instead
 

@@ -199,6 +199,49 @@ class ReplacementJudge(Protocol):
         ...
 
 
+@runtime_checkable
+class Multimodal(Protocol):
+    """A backend that can turn an image, audio or video into text.
+
+    `memvara.ingest.extract` uses it when a document is an image, a recording or a video:
+    the description or the transcript becomes the document's text. It is its own protocol
+    for the reason `Chat` is, so a backend written before it existed still passes
+    `isinstance(backend, LLM)`.
+
+    A backend implements both methods, and raises `memvara.ingest.MediaUnsupported` with
+    the reason for any media type it cannot handle. `AnthropicLLM` reads images and
+    refuses audio and video. `OpenAILLM` reads images, and transcribes audio and the audio
+    track of video in the container formats its transcription endpoint accepts.
+    """
+
+    def describe_image(self, data: bytes, mime: str) -> str:
+        """A plain-text description of the image, including any text it shows."""
+        ...
+
+    def transcribe(self, data: bytes, mime: str) -> str:
+        """A transcript of the speech in an audio recording or a video's audio track."""
+        ...
+
+
+#: The instructions sent with an image. The description replaces the image in memory, so
+#: it must carry what a later search would look for: the text in the image, names,
+#: numbers, and what the image is.
+DESCRIBE_IMAGE_SYSTEM = (
+    "You turn an image into text that will be stored and searched later in place of the "
+    "image. First copy out any text that appears in the image, exactly as written. Then "
+    "describe what the image shows: what kind of image it is (photo, screenshot, diagram, "
+    "chart, document scan), the people, objects, places, names, numbers and dates in it, "
+    "and what a chart or diagram says. Write plain prose with no preamble. Do not guess "
+    "at anything you cannot see.")
+
+#: The user message sent beside the image.
+DESCRIBE_IMAGE_PROMPT = "Describe this image for a searchable record."
+
+#: The most tokens an image description may use. A description is a paragraph or two,
+#: and a screenshot full of text is the long case.
+DESCRIBE_IMAGE_MAX_TOKENS = 2048
+
+
 class NullLLM:
     """No-op backend. Deterministic paths still work; extraction simply yields nothing."""
 

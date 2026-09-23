@@ -228,6 +228,61 @@ is transport and response-shape only — every rule about what counts as a valid
 shared in `memvara/llm/_shape.py`, so the same turn produces the same claim regardless of
 which model wrote it.
 
+### Turning a document into text
+
+`memvara.ingest.extract` reads one document and returns its text. The document store calls
+it before it splits a document into chunks, and you can call it yourself.
+
+```python
+from memvara.ingest import extract
+
+extract("Our office moved to Lisbon in May.")          # plain text
+extract(html_bytes, mime="text/html")                  # the readable text and the <title>
+extract(pdf_bytes)                                     # needs pip install 'memvara[ingest]'
+extract(png_bytes, llm=AnthropicLLM())                 # a description of the image
+extract(mp3_bytes, llm=OpenAILLM())                    # a transcript
+extract(url="https://example.com/handbook")            # fetched, then read as its type
+# -> Extracted(text, title, mime, pages)
+```
+
+The full signature is `extract(content=None, *, url=None, mime=None, llm=None,
+fetcher=None, allow_urls=True, allow_media=True)`. Give exactly one of `content` and `url`.
+
+- **The type.** `mime` names the media type and may carry a `charset`. For a URL it
+  overrides the server's `Content-Type`. With no type from either, the first bytes decide:
+  PDF, PNG, JPEG, GIF, WebP and HTML are recognised, and anything else must be UTF-8 text.
+- **What comes back.** `Extracted.text` is the text. `title` is the HTML title or the PDF's
+  metadata title, or `None`. `mime` is the type the content was read as. `pages` is set for
+  a PDF only: the text of each page, so page `n` is `pages[n - 1]`.
+- **HTML** is read with the standard library. Scripts, styles, navigation, headers, footers
+  and forms are dropped, and when the page has a `<main>` or `<article>` element only its
+  text is kept. JavaScript is not run.
+- **PDF** is read with `pypdf`, from the `ingest` extra. Only the text layer is read, so a
+  scanned PDF has no text and is refused with `no_text`. No OCR is done.
+- **Images, audio and video** need `llm=` set to a backend that implements
+  `memvara.llm.Multimodal`. `AnthropicLLM` describes JPEG, PNG, GIF and WebP images up to
+  5 MB and refuses audio and video. `OpenAILLM` describes the same image types up to 20 MB,
+  and transcribes FLAC, MP3, M4A, Ogg, WAV and WebM audio and MP4, MPEG and WebM video up to
+  25 MB through its transcription endpoint (`transcription_model=`, default `whisper-1`).
+  For video only the sound is transcribed; frames are not sampled, because that needs a
+  video decoder this package does not ship.
+- **URLs** are fetched by `SafeFetcher`: `http` and `https` only, and the fetch is refused
+  if the host resolves to any address that is not public (private, loopback, link-local,
+  multicast, reserved, unspecified, including IPv4 written inside IPv6). The connection
+  goes to the address that was checked, every redirect is checked again, at most 5 are
+  followed, and the whole fetch has 20 seconds and 10 MB. IPv4 behind the NAT64 prefixes
+  `64:ff9b::/96` and `64:ff9b:1::/48` is unwrapped and checked; on a network with its own
+  NAT64 prefix, pass `fetcher=SafeFetcher(nat64_prefixes=["<prefix>/96"])` so that one is
+  unwrapped too. `fetcher=` replaces the default fetcher, which
+  is how a test avoids the network.
+- **Switches.** `allow_urls` and `allow_media` are the `ingest_urls` and `ingest_media`
+  features. When one is `False`, a URL or a piece of media is refused with `feature_off`.
+
+Every failure raises `memvara.ingest.IngestError`, whose `code` is one of
+`media_unsupported`, `url_refused`, `fetch_failed`, `too_large`, `timeout`, `unreadable`,
+`no_text`, `feature_off` and `bad_input`, and whose `reason` says what happened.
+`MediaUnsupported` is the subclass for content that nothing configured can read.
+
 ### A hosted deployment
 
 `Memvara(api_key=...)` returns a `RemoteMemvara`: the same methods, served by the `/v1`

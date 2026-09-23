@@ -493,7 +493,8 @@ class WritePipeline:
                  near_dup_threshold: float = 0.97,
                  reinforce_bump: float = 0.25,
                  reject_ungrounded: bool | str = "auto",
-                 closed_vocabulary: bool = False) -> None
+                 closed_vocabulary: bool = False,
+                 extraction_chunks: bool = False) -> None
 
     def add(self, episodes: Sequence[Episode]) -> WriteReceipt
     def reextract(self, episodes: Sequence[Episode]) -> WriteReceipt
@@ -564,6 +565,30 @@ suggestion must not turn it into an exception the caller retries.
   2,555 claims under about a hundred invented predicates in one afternoon, every one
   unregistered, multi-valued and retiring nothing, and recall for a short query about a
   repository's CI returned five commit hashes ahead of the note that answered it.
+- **`extraction_chunks`** (default `False`) extracts a long turn in pieces. A turn longer
+  than `write/split.EXTRACTION_CHUNK_CHARS` (6,000 characters) is cut by
+  `split_for_extraction()` into pieces of at most that size. Whole paragraphs go into a
+  piece where they fit, a longer paragraph is cut after a sentence or at a line break, and
+  only a single sentence longer than a piece is cut mid-sentence. Turns under the limit
+  still share the batch's one call, and each piece of a long turn is a call of its own, so
+  `llm_calls` counts one per piece. A piece is a copy of the episode with the same id, and
+  `source_index` from a piece's call is mapped back to the long turn's position in the
+  batch, so every claim cites the whole episode and `why()` shows what the user wrote. An
+  index that names no turn in its call is dropped, not moved. Nothing merges repeats
+  across pieces: a fact stated in two pieces reaches `Reconciler.apply` twice and is
+  stored once and reinforced, exactly as when one call states it twice. The calls run one
+  after another because they share one `Usage` accumulator. A turn is extracted whole or
+  not at all: when a call carrying a turn fails, that turn's later pieces are not sent,
+  what its earlier pieces returned is dropped, and the turn is deferred, because
+  `reextract()` skips a turn that has claims and would never read the missing piece. The
+  other turns of the batch keep their claims; only when every turn failed is the batch
+  reported as a failed extraction. A turn of only whitespace, which the splitter returns
+  as no pieces, goes in the call for whole turns. The predicate vocabulary is built once
+  per batch, not once per call. Off by default because its release bar is not met: see
+  the "Reversed" list in `docs/ROADMAP.md` and `tests/test_extraction_chunks.py`. The MCP
+  server turns it on with `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1`; the feature is marked off
+  by default in `FEATURE_DEFAULTS` in `server/config.py`, the one table of features and
+  their defaults.
 
 `reextract()` is `add()` with tier 0 removed, for turns already in the store: a
 deployment that ran without a model, or a batch a provider failure left `deferred` — or
@@ -1582,6 +1607,75 @@ Hard API requirements — these are current and getting them wrong is a 400:
 - Validate and coerce the model's output before returning: drop claims with a missing or
   out-of-range `source_index`, clamp `confidence` to `[0, 1]`, and normalize predicates to
   snake_case. The engine trusts these dicts, so this is the trust boundary.
+
+### The `Multimodal` protocol
+
+```python
+@runtime_checkable
+class Multimodal(Protocol):          # memvara/llm/base.py
+    def describe_image(self, data: bytes, mime: str) -> str
+    def transcribe(self, data: bytes, mime: str) -> str
+```
+
+It is a separate protocol, like `Chat` and `ReplacementJudge`, so a backend written before
+it still passes `isinstance(backend, LLM)`. A backend that cannot handle a media type
+raises `memvara.ingest.MediaUnsupported` with the reason, **before** it sends a request,
+so the caller gets a sentence rather than a provider's 400. `AnthropicLLM` describes JPEG,
+PNG, GIF and WebP images up to 5 MB and refuses every `transcribe` call, because the
+Messages API takes no audio. `OpenAILLM` describes the same image types up to 20 MB through
+Chat Completions, and transcribes through `client.audio.transcriptions.create` with
+`transcription_model` (default `whisper-1`, because every OpenAI-compatible transcription
+server accepts that name). The transcription endpoint reads the format from the file name,
+so the file is sent as `upload.<extension>` from the `AUDIO_TYPES` table; MP4, MPEG and WebM
+video are in that table because the endpoint transcribes their audio track. Video frames
+are not sampled: that needs a decoder, and no extra ships one.
+
+The prompts are `DESCRIBE_IMAGE_SYSTEM` and `DESCRIBE_IMAGE_PROMPT` in `base.py`. The
+description replaces the image in memory, so the prompt asks for the text in the image
+first and then what it shows.
+
+---
+
+## `memvara/ingest/`
+
+One entry point, `extract(content | url, mime, ...) -> Extracted(text, title, mime,
+pages)`, and one module per source type: `plain`, `html_text`, `pdf`, `media` and `url`.
+`_mime` parses a `Content-Type` value and recognises file signatures; `errors` holds
+`IngestError` and its codes. The document store calls `extract` before chunking.
+
+- **Choosing the reader.** The caller's `mime` wins, then the server's `Content-Type`, then
+  the first bytes. `application/octet-stream` counts as no type. Bytes that match no
+  signature must decode as UTF-8, or they are refused as `media_unsupported`; a `str` with
+  no type is text, or HTML when it starts like a page.
+- **Every failure is an `IngestError` with a `code`.** A server can put the code in its
+  response unchanged. An empty result is `no_text`, never an empty `Extracted`, because a
+  document with no text cannot be chunked or found and a silent empty one looks stored.
+- **`pypdf` is imported inside `pdf_pages`** (invariant 5). Without it a PDF is refused
+  with `media_unsupported` naming `memvara[ingest]`, not with an `ImportError`, because
+  the upload is what cannot be read and a server should answer it like any other.
+- **The network is reached only through `url.SafeFetcher`, and only when the caller passes
+  `url=`.** `import memvara.ingest` opens nothing, so invariant 5 holds. The fetcher's
+  rules, in the order they run on every hop: the scheme is `http` or `https`; the host is
+  resolved and refused if *any* address is not public, with IPv4-mapped, NAT64, 6to4 and
+  Teredo forms unwrapped to their IPv4 address first; the socket connects to the checked
+  address while `Host` and TLS use the name, so DNS rebinding cannot move the request;
+  redirects are followed by hand, at most `MAX_REDIRECTS` (5), each one checked again;
+  one deadline of `TIMEOUT_SEC` (20 s) covers every hop, and each read's socket timeout is
+  set to the time left; the body stops at `MAX_BYTES` (10 MB). The transport, resolver
+  and clock are constructor arguments so `tests/test_ingest_url.py` needs no network and
+  no sleep.
+- **NAT64 prefixes.** A NAT64 address carries its IPv4 address in bytes that depend on the
+  prefix length (RFC 6052): after a /96 it is the last four bytes, and after a /32 to /64
+  it starts right after the prefix, skipping byte 8. `_nat64_ipv4` reads it that way.
+  `NAT64_PREFIXES` holds the well-known `64:ff9b::/96` and the RFC 8215 local-use
+  `64:ff9b:1::/48`; `SafeFetcher(nat64_prefixes=...)` adds an operator's own, and the MCP
+  server reads those from `MEMVARA_NAT64_PREFIXES` in `ServerConfig` and hands them over
+  through `ServerConfig.url_fetcher()`. A prefix of any other length is refused, because no
+  layout is defined for it. An address behind a prefix nobody listed looks like an ordinary
+  global IPv6 address, so it cannot be caught; `docs/LIMITATIONS.md` says so.
+- **The switches.** `allow_urls` and `allow_media` are the `ingest_urls` and
+  `ingest_media` features in `memvara/server/config.py`'s `FEATURES`. `extract` does not
+  read the environment itself; the caller passes them.
 
 ---
 
