@@ -27,6 +27,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import os
+import re
 import sqlite3
 import sys
 import types
@@ -340,7 +341,7 @@ def test_an_unencrypted_store_opens_with_a_warning_when_encryption_is_asked_for(
     path = str(tmp_path / "m.db")
     with SQLiteStore(path) as store:
         embed(store, 1)
-    with pytest.warns(EncryptionWarning, match=f"memvara encrypt {path}"):
+    with pytest.warns(EncryptionWarning, match=re.escape(f"memvara encrypt {path}")):
         store = SQLiteStore(path, encryption=True)
     with store:
         assert store.encrypted is False and hits(store, 1)

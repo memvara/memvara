@@ -711,8 +711,16 @@ process rather than shared between them. The key comes from the OS keychain, the
 `MEMVARA_DB_KEY`, then `~/.memvara/db.key` (generated there with mode 0600 if none exists),
 and a store whose key is lost cannot be read. `memvara encrypt <db>` converts an existing
 store in place. It needs the `encrypt` extra. Postgres is unchanged: its operator encrypts
-its disks. The pull request that built it has the before and after measurements on the
-store `bench/perf.py` builds, and `bench/encryption.py` reproduces them.
+its disks.
+
+Measured on 2026-09-23 with `bench/encryption.py` on the store `bench/perf.py` builds
+(`HashingEmbedder(dim=256)`, Python 3.13, one Apple Silicon Mac, 300 operations each). At
+20,000 claims: a write went from 0.30 to 0.53 ms at the median (+76%; SQLCipher alone was
+the +43–48% below, and the rest is the vector record); a search went from 6.5 to 4.8 ms
+(−26%), because the matrix is in memory rather than read through page faults; the first
+search after opening, which decrypts every row, went from 62 to 153 ms; and peak resident
+memory went from 71 to 122 MB. At 8,000 claims the same four were +81%, −14%, 27 to 68 ms,
+and 60 to 85 MB.
 
 The entry as it was declined:
 

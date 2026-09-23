@@ -76,17 +76,19 @@ def child(mode: str, n: int, reps: int, directory: str, key_hex: str) -> dict:
         mem.close()
         return {"build_ms": build * 1000}
 
+    from memvara.select import PLAIN_READ
+
     t0 = time.perf_counter()
     mem = _memvara(path, key)
     opened = time.perf_counter() - t0
     t0 = time.perf_counter()
-    assert mem.search("Berlin lives", k=10, user="u1"), "search must hit a populated scope"
+    assert mem.search("Berlin lives", k=10, user="u1", **PLAIN_READ), "search must hit a populated scope"
     first = time.perf_counter() - t0
 
     searches = []
     for _ in range(reps):
         t0 = time.perf_counter()
-        mem.search("Berlin lives", k=10, user="u1")
+        mem.search("Berlin lives", k=10, user="u1", **PLAIN_READ)
         searches.append(time.perf_counter() - t0)
     writes = []
     for i in range(reps):

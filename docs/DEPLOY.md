@@ -697,9 +697,11 @@ process has the store open. The old unencrypted files are replaced, not overwrit
 disk without its own encryption their blocks can survive until the file system reuses them.
 
 **The cost.** An encrypted store holds its vector matrix in memory, decrypted, instead of
-memory-mapping the file, so every process that searches it holds its own copy. The pull
-request that built this measured write latency, search latency and memory before and after;
-`bench/encryption.py` reproduces the measurement.
+memory-mapping the file, so every process that searches it holds its own copy. Measured
+with `PYTHONPATH=. python3 bench/encryption.py` on 20,000 claims (256-dimensional vectors,
+one Apple Silicon Mac): a write takes 0.53 ms instead of 0.30 at the median, a search takes
+4.8 ms instead of 6.5, the first search after opening takes 153 ms instead of 62 because it
+decrypts every row, and peak memory is 122 MB instead of 71.
 
 **Postgres is not covered.** A Postgres store is the operator's to encrypt, with the
 database's own tools or the disk's; nothing in memvara changes for it.
