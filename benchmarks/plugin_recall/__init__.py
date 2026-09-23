@@ -28,6 +28,22 @@ question "is this plugin worth its tokens" is unanswerable without it.
 
 from __future__ import annotations
 
+import os
+
+
+def local_store_env(db: str) -> dict[str, str]:
+    """The environment `seed` and `calibrate` open the benchmark store with.
+
+    The process environment, pointed at `db` in local mode, and never scoped to a
+    repository: project derivation is switched off and any `MEMVARA_PROJECT` is dropped.
+    Otherwise the facts would be filed under whatever repository the command ran in, and
+    a run from another checkout, or a hook reading with no project, would not see them.
+    """
+    env = {key: value for key, value in os.environ.items() if key != "MEMVARA_PROJECT"}
+    env.update({"MEMVARA_DB": db, "MEMVARA_MODE": "local",
+                "MEMVARA_FEATURE_PROJECT_SCOPE": "0"})
+    return env
+
 __all__ = ["__version__"]
 
 #: Bumped when a change would move a published number. The report prints it, so a result

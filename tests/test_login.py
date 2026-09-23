@@ -163,6 +163,36 @@ def test_a_project_name_is_refused_before_a_browser_is_opened():
     assert "project id" in err.getvalue() and "Omit --project" in err.getvalue()
 
 
+@pytest.mark.parametrize("spelling", [
+    PROJECT_ID,
+    PROJECT_ID.upper(),
+    PROJECT_ID.replace("-", ""),
+    "{" + PROJECT_ID + "}",
+    "urn:uuid:" + PROJECT_ID,
+])
+def test_every_spelling_of_a_project_id_is_sent_in_the_canonical_form(monkeypatch, spelling):
+    """`--project` is parsed with `uuid.UUID`, so it accepts every form that parser
+    accepts: hyphenated or not, either case, in braces, or as a `urn:uuid:`. What reaches
+    the server is always the lower-case hyphenated form, which is how the console shows a
+    project's id, so the authorize route sees one spelling of one project."""
+    _no_browser(monkeypatch)
+    _no_loopback(monkeypatch)
+    client = _install_fake_httpx(monkeypatch, {
+        "device/authorize": [FakeResponse(200, AUTH_BODY)],
+        "device/token": [FakeResponse(200, approved())],
+    })
+    assert login(["--project", spelling], env={}, stdout=io.StringIO(),
+                 stderr=io.StringIO()) == 0
+    assert client.calls[0][1]["project"] == PROJECT_ID
+
+
+@pytest.mark.parametrize("value", ["dev", PROJECT_ID[:-1], PROJECT_ID + "0", "not-a-uuid-at-all"])
+def test_anything_that_is_not_a_uuid_is_refused_before_a_browser_is_opened(value):
+    err = io.StringIO()
+    assert login(["--project", value], env={}, stderr=err) == 2
+    assert "project id" in err.getvalue()
+
+
 def test_unexpected_argument_is_a_usage_error():
     err = io.StringIO()
     assert login(["--bogus", "x"], env={}, stderr=err) == 2

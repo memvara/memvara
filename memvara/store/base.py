@@ -352,6 +352,12 @@ OMITTABLE: dict[str, str] = {
     "put_link": "Memvara.link() raises NotImplementedError naming the store, rather "
                 "than reporting a link it did not keep.",
     "claim_links": "links() and why().links report no links. Nothing else reads them.",
+    "count_competing": "the write receipt's accumulation report falls back to "
+                       "len(competing_claims()), and read-side shadowing uses it only "
+                       "when occupied_slots is missing too.",
+    "occupied_slots": "read-side shadowing falls back to one count_competing per slot, "
+                      "and without that too, a read bound to a project returns a "
+                      "user-wide value beside the project's own.",
 }
 
 
@@ -408,6 +414,16 @@ class Store(Protocol):
         one moment in both clocks — but the parameters stay separate so that this
         predicate is literally the one `candidate_ids` applies, rather than a second
         definition of liveness that could drift from it.
+        """
+        ...
+
+    def occupied_slots(self, tenant: str, fact_keys: Collection[str]) -> set[str]:
+        """The keys among `fact_keys` whose slot holds at least one live claim, now.
+
+        The batched form of `count_competing(...) > 0`, for read-side shadowing
+        (`memvara/retrieve/shadow.py`), which has to ask it about every candidate slot of
+        one read. One query per read rather than one per slot. Present tense only, with
+        the same liveness predicate as `competing_claims`.
         """
         ...
 
@@ -746,6 +762,9 @@ class Store(Protocol):
         request, because the text stays readable — and an index entry outliving the row
         it describes leaves the purged text searchable, which is the same failure with
         an extra step.
+
+        A bound `scope.project` limits the erasure to that project. A store that cannot
+        express the project must refuse rather than erase more than was asked.
         """
         ...
 

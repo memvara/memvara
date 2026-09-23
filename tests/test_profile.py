@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -31,10 +30,33 @@ from memvara.server.validate import ToolError, validate
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
-#: For the one test that compares the line reader with the TOML reader, which needs
-#: `tomllib` and therefore Python 3.11.
-needs_toml = pytest.mark.skipif(sys.version_info < (3, 11),
-                                reason="tomllib arrives in 3.11")
+#: Python 3.10 has no `tomllib`, so the shipped predicate packs cannot be read there, by
+#: the decision `schema._toml_reader` records. `profile()` then reports each default
+#: bucket as unavailable and leaves every other section as it is. The tests below state
+#: both behaviours rather than skipping on 3.10.
+PACKS_READABLE = sys.version_info >= (3, 11)
+
+
+def unavailable():
+    """The warnings `profile()` gives on Python 3.10 for default buckets it cannot read."""
+    return list(_UNAVAILABLE)
+
+
+def _pack_error():
+    from memvara.schema import PredicatePackError, load_specs
+    try:
+        load_specs("engineering")
+    except PredicatePackError as exc:
+        return str(exc)
+    return None
+
+
+_UNAVAILABLE = ([] if PACKS_READABLE else
+                [f"the {p!r} bucket is unavailable: {_pack_error()}"
+                 for p in ("decisions", "engineering", "events")])
+_UNREADABLE = ([] if PACKS_READABLE else
+               [f"the {p!r} pack could not be read, so its predicates count as "
+                f"undeclared: {_pack_error()}" for p in ("decisions", "engineering", "events")])
 
 
 def make(**kw):
@@ -125,10 +147,18 @@ def test_a_query_adds_the_relevant_section_and_only_then():
 def test_default_buckets_are_the_three_shipped_packs():
     mem = make()
     mem.remember("api", "depends_on", "postgres")
+    rule(mem, "pytest")
     profile = mem.profile()
+    if not PACKS_READABLE:
+        # Python 3.10: no bucket, one warning per pack, and the rest of the profile intact.
+        assert profile.buckets == {}
+        assert profile.warnings == unavailable()
+        assert [r.text for r in profile.standing] == ["user prefers pytest"]
+        return
     assert list(profile.buckets) == ["decisions", "engineering", "events"]
     assert [r.text for r in profile.buckets["engineering"]] == ["api depends on postgres"]
     assert profile.buckets["decisions"] == [] and profile.buckets["events"] == []
+    assert profile.warnings == []
 
 
 def test_caller_buckets_replace_the_defaults_and_hold_the_newest_k():
@@ -146,9 +176,26 @@ def test_a_bucket_predicate_nothing_declares_is_ignored_and_reported():
     mem = make()
     profile = mem.profile(buckets={"stack": ["depends_on", "no_such_verb"]})
     assert profile.buckets == {"stack": []}
-    assert profile.warnings == [
+    # `depends_on` is declared by the engineering pack. On Python 3.10 that pack cannot be
+    # read, so the predicate counts as undeclared too, and the warnings say why first.
+    undeclared = [] if PACKS_READABLE else [
+        "bucket 'stack' names 'depends_on', which nothing declares or uses, so it "
+        "was ignored."]
+    assert profile.warnings == _UNREADABLE + undeclared + [
         "bucket 'stack' names 'no_such_verb', which nothing declares or uses, so it "
         "was ignored."]
+
+
+def test_buckets_that_name_known_predicates_never_ask_the_packs(monkeypatch):
+    """A registered or stored predicate needs no pack, so on Python 3.10 such a profile
+    carries no warning about packs it had no reason to read."""
+    def unreadable(pack):
+        raise PredicatePackError("needs Python 3.11")
+    monkeypatch.setattr(core_module, "_pack_predicates", unreadable)
+    mem = make()
+    mem.remember("api", "frobnicates", "widgets")
+    profile = mem.profile(buckets={"home": ["lives_in"], "odd": ["frobnicates"]})
+    assert profile.warnings == []
 
 
 def test_a_bucket_matches_the_predicate_the_store_actually_wrote():
@@ -205,9 +252,10 @@ def test_a_profile_and_standing_for_another_project_read_that_project():
     app = mem.scope(project="github.com/acme/app")
     app.remember("api", "depends_on", "postgres")
     app.remember("user", "prefers", "pytest", memory_type=MemoryType.PROCEDURAL)
-    assert [r.text for r in app.profile().buckets["engineering"]] == \
+    stack = {"stack": ["depends_on"]}
+    assert [r.text for r in app.profile(buckets=stack).buckets["stack"]] == \
         ["api depends on postgres"]
-    assert mem.profile().buckets["engineering"] == []
+    assert mem.profile(buckets=stack).buckets["stack"] == []
     # `prefers` is declared global, so the rule is written without a project and is
     # seen from the unscoped instance as well as from the project.
     assert [c.object for c in app.standing()] == ["pytest"]
@@ -279,12 +327,14 @@ def test_the_tool_renders_every_section_with_ids_and_the_inferred_mark():
     assert "Arrived since 2020-01-01 00:00Z (3):" in lines
     assert any(line.startswith("Relevant to 'postgres' (") for line in lines)
     assert "Bucket 'stack' (1):" in lines
-    assert lines[-2:] == ["Ignored:", "  bucket 'stack' names 'no_such_verb', which "
-                          "nothing declares or uses, so it was ignored."]
+    ignored = lines[lines.index("Ignored:") + 1:]
+    assert ignored == [f"  {w}" for w in _UNREADABLE] + [
+        "  bucket 'stack' names 'no_such_verb', which nothing declares or uses, so it "
+        "was ignored."]
 
 
 def test_an_empty_section_says_so_and_no_query_means_no_relevant_section():
-    body, _ = call(server(), "memory_profile", {"buckets": {"stack": ["depends_on"]}})
+    body, _ = call(server(), "memory_profile", {"buckets": {"home": ["lives_in"]}})
     assert "Standing preferences (0):\n  (none)" in body
     assert "Relevant to" not in body and "Ignored:" not in body
     since = body.splitlines()[3]
@@ -451,92 +501,8 @@ def test_a_profile_reads_the_scope_once_and_asks_the_store_once_more_for_recent(
     assert len(calls) == 2
 
 
-
-# -- the pack names, with and without tomllib ---------------------------------------------
-#
-# Python 3.10 has no `tomllib`, so there the default buckets read the shipped packs' names
-# with a line reader. Two tests keep that reader honest. The first runs on every version,
-# including 3.10 where the reader is the one in use, and compares it with a checked-in
-# list of names. The second runs where `tomllib` exists and checks that list against the
-# real parser, so the list cannot go stale when a pack changes.
-
-PACK_NAMES = pathlib.Path(__file__).resolve().parent / "fixtures" / \
-    "pack_predicate_names.json"
-
-
-def expected_pack_names():
-    return json.loads(PACK_NAMES.read_text(encoding="utf-8"))
-
-
-def test_the_expected_names_cover_every_shipped_pack():
-    from memvara.schema import available_packs
-    assert sorted(expected_pack_names()) == available_packs()
-    assert set(core_module.PROFILE_PACKS) <= set(expected_pack_names())
-
-
-@pytest.mark.parametrize("pack", sorted(expected_pack_names()))
-def test_the_line_reader_finds_the_checked_in_names_on_every_python(pack):
-    assert list(core_module._scan_pack_names(pack)) == expected_pack_names()[pack]
-
-
-@needs_toml
-@pytest.mark.parametrize("pack", sorted(expected_pack_names()))
-def test_the_checked_in_names_are_what_the_toml_reader_finds(pack):
-    """If a pack changes, this fails until the list is updated, so the every-version test
-    above is always checking the reader against the real parser's answer."""
-    from memvara.schema import load_specs
-    assert expected_pack_names()[pack] == [s.name for s in load_specs(pack)]
-
-
-@pytest.mark.parametrize("line", [
-    "[[predicate]] # a comment on the header",
-    "[[ predicate ]]",
-    "[[predicate]]x",
-])
-def test_the_line_reader_refuses_a_predicate_header_it_does_not_understand(
-        monkeypatch, tmp_path, line):
-    """Skipping such a header would drop the predicate under it and return fewer names
-    with nothing said, so the reader refuses the file instead."""
-    monkeypatch.setattr(core_module, "PACKS_DIR", tmp_path)
-    (tmp_path / "odd.toml").write_text(
-        f'[[predicate]]\nname = "first"\n{line}\nname = "second"\n', encoding="utf-8")
-    with pytest.raises(PredicatePackError, match="predicate table header"):
-        core_module._scan_pack_names("odd")
-
-
-@pytest.mark.parametrize("line", [
-    'name = "a\\"b"',
-    "name = 'single'",
-    'name = """triple"""',
-    'name = "unterminated',
-    "name = bare",
-    'name = ""',
-])
-def test_the_line_reader_refuses_a_name_line_it_does_not_understand(
-        monkeypatch, tmp_path, line):
-    monkeypatch.setattr(core_module, "PACKS_DIR", tmp_path)
-    (tmp_path / "odd.toml").write_text(f"[[predicate]]\n{line}\n", encoding="utf-8")
-    with pytest.raises(PredicatePackError, match="name line"):
-        core_module._scan_pack_names("odd")
-
-
-def test_the_line_reader_accepts_a_comment_after_a_name_and_other_keys():
-    """What the shipped packs actually write must keep reading."""
-    assert core_module._PACK_NAME_LINE.match('name = "x"   # why')
-    assert not core_module._NAME_KEY.match('name_alias = "x"')
-
-
-def test_without_tomllib_the_default_buckets_still_have_their_predicates(monkeypatch):
-    monkeypatch.setitem(sys.modules, "tomllib", None)
-    names = core_module._pack_predicates.__wrapped__("engineering")
-    assert "depends_on" in names and names == core_module._scan_pack_names("engineering")
-
-
-def test_the_line_reader_refuses_a_pack_it_cannot_read_or_that_names_nothing(
-        monkeypatch, tmp_path):
-    monkeypatch.setattr(core_module, "PACKS_DIR", tmp_path)
-    with pytest.raises(PredicatePackError, match="could not be read"):
-        core_module._scan_pack_names("absent")
-    (tmp_path / "empty.toml").write_text("# nothing here\n[meta]\nname = \"x\"\n")
-    with pytest.raises(PredicatePackError, match="declares no predicate names"):
-        core_module._scan_pack_names("empty")
+def test_the_tool_and_the_library_share_one_recent_window():
+    """Declared once, in the library, so the tool's header and the library's default
+    cannot come to name two different instants."""
+    from memvara.server import tools
+    assert tools.PROFILE_WINDOW is core_module.PROFILE_WINDOW

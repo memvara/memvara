@@ -275,3 +275,25 @@ class EnvTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class BenchmarkStoreIsNeverScopedToARepository(unittest.TestCase):
+    """The seed and calibrate commands build a server config to open the benchmark
+    store. Left to the default, that config would work out a project from whatever
+    repository the command runs in, and file the benchmark's facts under it, so a run
+    from another checkout, or a hook reading without a project, would find nothing."""
+
+    def test_the_environment_switches_derivation_off_and_names_no_project(self):
+        from benchmarks.plugin_recall import local_store_env
+        from memvara.server.config import ServerConfig
+
+        os.environ["MEMVARA_PROJECT"] = "github.com/acme/app"
+        try:
+            env = local_store_env("/tmp/bench.db")
+        finally:
+            del os.environ["MEMVARA_PROJECT"]
+        self.assertEqual(env["MEMVARA_FEATURE_PROJECT_SCOPE"], "0")
+        self.assertNotIn("MEMVARA_PROJECT", env)
+        self.assertEqual((env["MEMVARA_DB"], env["MEMVARA_MODE"]), ("/tmp/bench.db", "local"))
+        self.assertIsNone(ServerConfig.from_env(env).project)

@@ -30,15 +30,17 @@ def shadowed(store: Store, registry: PredicateRegistry, claims: Iterable[Claim],
              scope: Scope) -> frozenset[str]:
     """The ids among `claims` that a present-tense read at `scope` must leave out.
 
-    Costs one indexed slot count per distinct slot among the candidates that could be
-    shadowed, which are the live, user-wide claims of single-valued, project-relative
-    predicates. A read with no project costs nothing.
+    Pass the claims the read would otherwise return, after its cheap filters, because
+    each distinct candidate slot is a lookup. The lookups are one store query:
+    `Store.occupied_slots`. Both slot lookups are optional on the store protocol, so a
+    store without `occupied_slots` is asked one `count_competing` per slot, and a store
+    with neither, or one that raises `NotImplementedError` from them, leaves the read
+    unshadowed rather than failing it. A read with no project costs nothing.
     """
     project = scope.project
     if project is None:
         return frozenset()
-    occupied: dict[str, bool] = {}
-    hidden: set[str] = set()
+    slot_of: dict[str, str] = {}
     for claim in claims:
         if claim.scope.project is not None or claim.state != "live":
             continue
@@ -47,10 +49,23 @@ def shadowed(store: Store, registry: PredicateRegistry, claims: Iterable[Claim],
         # project slot can never hold a value for it and there is nothing to ask.
         if not spec.functional or not spec.project_scoped:
             continue
-        key = fact_key_for(replace(claim.scope, project=project), claim.subject_key,
-                           claim.predicate)
-        if key not in occupied:
-            occupied[key] = store.count_competing(claim.scope.tenant, key) > 0
-        if occupied[key]:
-            hidden.add(claim.id)
-    return frozenset(hidden)
+        slot_of[claim.id] = fact_key_for(replace(claim.scope, project=project),
+                                         claim.subject_key, claim.predicate)
+    if not slot_of:
+        return frozenset()
+    occupied = _occupied(store, scope.tenant, set(slot_of.values()))
+    return frozenset(cid for cid, key in slot_of.items() if key in occupied)
+
+
+def _occupied(store: Store, tenant: str, keys: set[str]) -> set[str]:
+    """Which of `keys` hold a live claim, by whichever lookup this store offers."""
+    batched = getattr(store, "occupied_slots", None)
+    try:
+        if batched is not None:
+            return set(batched(tenant, keys))
+        single = getattr(store, "count_competing", None)
+        if single is None:
+            return set()
+        return {key for key in keys if single(tenant, key) > 0}
+    except NotImplementedError:
+        return set()

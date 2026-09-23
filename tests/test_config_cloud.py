@@ -70,6 +70,21 @@ def test_cloud_mode_falls_back_to_the_credentials_file(tmp_path, monkeypatch):
     assert config.server_url == "https://f.example"
 
 
+def test_the_server_reads_a_credentials_file_exactly_as_whoami_does(tmp_path, monkeypatch):
+    """One reader for one file. The server used to read it with its own parser, which kept
+    surrounding whitespace on the key, so `memvara whoami` and the MCP server could give
+    two answers about the same file."""
+    from memvara.remote.creds import read_credentials_file
+    creds = tmp_path / "credentials.json"
+    creds.write_text(json.dumps({"api_key": "  k-file\n",
+                                 "server_url": " https://f.example "}))
+    monkeypatch.setattr("memvara.server.config.CREDENTIALS_PATH", creds)
+    config = ServerConfig.from_env({"MEMVARA_MODE": "cloud"})
+    stored = read_credentials_file(creds)
+    assert (config.api_key, config.server_url) == \
+        (stored["api_key"], stored["server_url"]) == ("k-file", "https://f.example")
+
+
 def test_an_explicit_server_url_env_var_overrides_the_credentials_file_url(tmp_path,
                                                                            monkeypatch):
     creds = tmp_path / "credentials.json"

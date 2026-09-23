@@ -42,10 +42,10 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import socket
 import sys
 import time
+import uuid
 import webbrowser
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -90,6 +90,8 @@ is printed here.
                   at all and the person approving it in the browser picks from the
                   projects they hold. A project *name* is refused, here and by the
                   server, because this request has no session to resolve a name against.
+                  The id may be written with or without hyphens, in either case, in
+                  braces or as urn:uuid:...; it is sent as lower-case with hyphens.
   --server URL    the memvara-cloud deployment to sign in to. Default: MEMVARA_SERVER_URL
                   if this shell has one, otherwise {_DEFAULT_SERVER_URL!r}.
   --credentials PATH
@@ -103,12 +105,28 @@ machine; MEMVARA_MODE=cloud picks the default file up automatically after that.
 
 _OPTIONS = ("--project", "--server", "--credentials")
 
-#: A project id, as the authorize route requires it. Anything else is a name or a slug,
-#: which that route refuses 400 — it is unauthenticated, so it has no organization to
-#: resolve a name against and will not guess across every organization on the
-#: deployment. Checked here so the refusal arrives before a browser opens.
-_UUID = re.compile(r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-                   r"[0-9a-fA-F]{12}\Z")
+def _project_id(value: str) -> str | None:
+    """`value` as the authorize route takes a project id, or `None` if it is not one.
+
+    The authorize route needs an id. Anything else is a name or a slug, which that route
+    refuses 400 — it is unauthenticated, so it has no organization to resolve a name
+    against and will not guess across every organization on the deployment. Checked here
+    so the refusal arrives before a browser opens.
+
+    Parsed with `uuid.UUID`, so every form that parser accepts is accepted: hyphenated or
+    not, either case, in braces, or as a `urn:uuid:`. The value returned is always the
+    lower-case hyphenated form, which is how the console shows a project's id, so the
+    route sees one spelling of one project.
+
+    >>> _project_id("{3F1C9B2E7A414D6E9C058B2D1F4A6E70}")
+    '3f1c9b2e-7a41-4d6e-9c05-8b2d1f4a6e70'
+    >>> _project_id("dev") is None
+    True
+    """
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        return None
 
 
 class _Usage(Exception):
@@ -287,12 +305,14 @@ def login(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
     try:
         options = _parse(argv)
         project = options.get("--project")
-        if project is not None and not _UUID.match(project):
+        if project is not None and _project_id(project) is None:
             raise _Usage(
                 f"--project takes a project id (a uuid), and {project!r} is not one. "
                 "Omit --project: the sign-in then names no project at all, and you pick "
                 "one in the browser from the projects you hold. A project's id is in "
                 "the console, on that project's own settings page.")
+        if project is not None:
+            project = _project_id(project)
         credentials = Path(options["--credentials"]) if "--credentials" in options \
             else None
         server_url = (options.get("--server") or env.get("MEMVARA_SERVER_URL") or "").strip() \

@@ -25,7 +25,6 @@ import difflib
 import inspect
 import json
 import os
-import re
 import warnings
 from contextlib import nullcontext
 from copy import copy
@@ -49,8 +48,8 @@ from .llm import LLM, NullLLM, ReplacementJudge, Usage
 from .redact import Redactor, redact_episode
 from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retrieved
 from .retrieve.shadow import shadowed
-from .schema import (PACKS_DIR, Cardinality, PredicatePackError, PredicateRegistry,
-                     _slugify, load_specs)
+from .schema import (Cardinality, PredicatePackError, PredicateRegistry, _slugify,
+                     load_specs)
 from .store import SQLiteStore, Store, bulk_claims, resolve_states
 from .telemetry import WRITE_LLM_CALLS, WRITE_TOKENS_IN, WRITE_TOKENS_OUT, Recorder
 from dataclasses import replace
@@ -665,71 +664,13 @@ def _pack_predicates(pack: str) -> tuple[str, ...]:
     """The predicate names a shipped pack declares. Cached, because the files never change
     while the process runs and `profile()` is called at the start of every session.
 
-    Read with `tomllib` where it exists. Python 3.10, which this package supports, has no
-    `tomllib`, and a profile only needs the names, so there the line reader
-    `_scan_pack_names` supplies them. A test holds the line reader to the TOML reader on
-    every shipped pack, which is what makes the second reader safe to keep.
+    Read with the TOML reader and nothing else. On Python 3.10, which has no `tomllib`,
+    this raises `PredicatePackError`, and `profile()` reports each default bucket as
+    unavailable in `Profile.warnings` while every other section still answers. That is the
+    decision `schema._toml_reader` records: no second reader and no `tomli` fallback,
+    because refusing one optional feature on one interpreter is the smaller loss.
     """
-    try:
-        import tomllib  # noqa: F401 - asked for its presence only
-    except ModuleNotFoundError:
-        return _scan_pack_names(pack)
     return tuple(spec.name for spec in load_specs(pack))
-
-
-#: A `name = "..."` line at the top level of a `[[predicate]]` table, as the shipped
-#: packs write it, with an optional trailing comment. The name may not contain a quote or a
-#: backslash, so an escape, which this reader does not interpret, cannot match.
-_PACK_NAME_LINE = re.compile(r'^name\s*=\s*"([^"\\]+)"\s*(?:#.*)?$')
-
-#: Any line assigning the `name` key, understood or not. A line this matches and
-#: `_PACK_NAME_LINE` does not is refused, rather than skipped.
-_NAME_KEY = re.compile(r"^name\s*=")
-
-#: The one table header the shipped packs use, written exactly as they write it.
-_PREDICATE_HEADER = "[[predicate]]"
-
-
-def _scan_pack_names(pack: str) -> tuple[str, ...]:
-    """The predicate names in a shipped pack, read line by line without a TOML parser.
-
-    Only for the packs this package ships, whose layout it controls: a flat list of
-    `[[predicate]]` tables, each with one `name = "..."` line. Other keys and other tables
-    are skipped. A line the reader cannot be sure about is refused with
-    `PredicatePackError` instead of skipped, because skipping it would return fewer names
-    with nothing said: a header that mentions `predicate` but is not exactly
-    `[[predicate]]` (for example with a comment after it), or a `name =` line inside a
-    predicate table that is not one plain double-quoted value (for example with an
-    escaped quote). A pack that cannot be read, or in which no name is found, raises the
-    same error. `profile()` reports it as a warning.
-    """
-    path = PACKS_DIR / f"{pack}.toml"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise PredicatePackError(f"{path} could not be read: {exc}") from None
-    names: list[str] = []
-    table = ""
-    for number, line in enumerate(text.splitlines(), start=1):
-        stripped = line.strip()
-        if stripped.startswith("["):
-            if "predicate" in stripped and stripped != _PREDICATE_HEADER:
-                raise PredicatePackError(
-                    f"{path}, line {number}: {stripped!r} is not a predicate table header "
-                    f"this reader understands. Write it as {_PREDICATE_HEADER} on a line "
-                    "of its own.")
-            table = stripped
-        elif table == _PREDICATE_HEADER and _NAME_KEY.match(stripped):
-            found = _PACK_NAME_LINE.match(stripped)
-            if found is None:
-                raise PredicatePackError(
-                    f"{path}, line {number}: {stripped!r} is not a name line this reader "
-                    'understands. Write it as name = "..." with no quote or backslash '
-                    "inside the value.")
-            names.append(found.group(1))
-    if not names:
-        raise PredicatePackError(f"{path} declares no predicate names this reader can see.")
-    return tuple(names)
 
 
 #: Nearest live claims `remember()` asks the judge about when replacement advice is on.
@@ -3232,8 +3173,13 @@ class Memvara:
         >>> p = mem.profile("database", buckets={"stack": ["depends_on", "no_such_verb"]})
         >>> [r.text for r in p.standing], [r.text for r in p.buckets["stack"]]
         (['user prefers pytest'], ['api depends on postgres'])
-        >>> p.warnings
-        ["bucket 'stack' names 'no_such_verb', which nothing declares or uses, so it was ignored."]
+        >>> p.warnings[-1]
+        "bucket 'stack' names 'no_such_verb', which nothing declares or uses, so it was ignored."
+
+        On Python 3.10 there is no `tomllib`, so the shipped packs cannot be read. The
+        default buckets are then missing, and `warnings` holds one line for each of them
+        (or, with caller buckets, one line for each pack that had to be asked). Every other
+        section is unaffected, which is why the example above reads the last warning.
         """
         _check_k(k)
         scope_kw = {"tenant": tenant, "user": user, "agent": agent, "session": session}
@@ -3287,22 +3233,33 @@ class Memvara:
                     # missing rather than leaving it silently absent.
                     warnings.append(f"the {pack!r} bucket is unavailable: {exc}")
             return defaults
-        declared: set[str] = set()
-        for pack in PROFILE_PACKS:
-            try:
-                declared.update(_pack_predicates(pack))
-            except PredicatePackError as exc:
-                # Said before any "nothing declares" warning below, so that one is not
-                # read as a verdict on the predicate: no pack could be asked.
-                warnings.append(f"the {pack!r} pack could not be read, so its predicates "
-                                f"count as undeclared: {exc}")
+        # The packs are read only when a predicate is neither registered nor stored, so a
+        # caller whose buckets name known predicates never pays for them, and on Python
+        # 3.10, where they cannot be read, never sees a warning about them.
+        declared: set[str] | None = None
+
+        def pack_declared() -> set[str]:
+            nonlocal declared
+            if declared is None:
+                declared = set()
+                for pack in PROFILE_PACKS:
+                    try:
+                        declared.update(_pack_predicates(pack))
+                    except PredicatePackError as exc:
+                        # Said before the "nothing declares" warning that follows, so
+                        # that one is not read as a verdict on the predicate: no pack
+                        # could be asked.
+                        warnings.append(f"the {pack!r} pack could not be read, so its "
+                                        f"predicates count as undeclared: {exc}")
+            return declared
+
         out: dict[str, frozenset[str]] = {}
         for name, predicates in buckets.items():
             kept: set[str] = set()
             for predicate in predicates:
                 if self.registry.known(predicate):
                     kept.update({predicate, self.registry.normalize(predicate)})
-                elif predicate in declared or predicate in stored:
+                elif predicate in stored or predicate in pack_declared():
                     kept.add(predicate)
                 else:
                     warnings.append(
