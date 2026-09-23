@@ -14,7 +14,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 - **`profile()`'s default buckets work on Python 3.10.** They read predicate names from
   the shipped packs, which needed `tomllib`, and 3.10 has none, so every profile there
   came back with no buckets and three warnings. The names are now read with a line reader
-  for the shipped packs where `tomllib` is missing, held to the TOML reader by a test.
+  for the shipped packs where `tomllib` is missing. It is tested on every Python version
+  against a checked-in list of names, which is itself checked against the TOML reader
+  where that exists, and it refuses a header or a name line it does not understand
+  rather than returning fewer names.
 - **The `path:` project name is the same on Windows as on other systems.** The main
   working tree's path is hashed in one spelling: forward slashes, a lower-case drive
   letter, no trailing slash. Before, a Windows path was hashed with backslashes, so the

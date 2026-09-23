@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -452,15 +453,77 @@ def test_a_profile_reads_the_scope_once_and_asks_the_store_once_more_for_recent(
 
 
 # -- the pack names, with and without tomllib ---------------------------------------------
+#
+# Python 3.10 has no `tomllib`, so there the default buckets read the shipped packs' names
+# with a line reader. Two tests keep that reader honest. The first runs on every version,
+# including 3.10 where the reader is the one in use, and compares it with a checked-in
+# list of names. The second runs where `tomllib` exists and checks that list against the
+# real parser, so the list cannot go stale when a pack changes.
+
+PACK_NAMES = pathlib.Path(__file__).resolve().parent / "fixtures" / \
+    "pack_predicate_names.json"
+
+
+def expected_pack_names():
+    return json.loads(PACK_NAMES.read_text(encoding="utf-8"))
+
+
+def test_the_expected_names_cover_every_shipped_pack():
+    from memvara.schema import available_packs
+    assert sorted(expected_pack_names()) == available_packs()
+    assert set(core_module.PROFILE_PACKS) <= set(expected_pack_names())
+
+
+@pytest.mark.parametrize("pack", sorted(expected_pack_names()))
+def test_the_line_reader_finds_the_checked_in_names_on_every_python(pack):
+    assert list(core_module._scan_pack_names(pack)) == expected_pack_names()[pack]
+
 
 @needs_toml
-@pytest.mark.parametrize("pack", core_module.PROFILE_PACKS)
-def test_the_line_reader_finds_exactly_the_names_the_toml_reader_finds(pack):
-    """Python 3.10 has no `tomllib`, so the default buckets read the shipped packs' names
-    with a line reader instead. It is only trusted because this test holds it to the real
-    parser on every pack that ships."""
+@pytest.mark.parametrize("pack", sorted(expected_pack_names()))
+def test_the_checked_in_names_are_what_the_toml_reader_finds(pack):
+    """If a pack changes, this fails until the list is updated, so the every-version test
+    above is always checking the reader against the real parser's answer."""
     from memvara.schema import load_specs
-    assert core_module._scan_pack_names(pack) == tuple(s.name for s in load_specs(pack))
+    assert expected_pack_names()[pack] == [s.name for s in load_specs(pack)]
+
+
+@pytest.mark.parametrize("line", [
+    "[[predicate]] # a comment on the header",
+    "[[ predicate ]]",
+    "[[predicate]]x",
+])
+def test_the_line_reader_refuses_a_predicate_header_it_does_not_understand(
+        monkeypatch, tmp_path, line):
+    """Skipping such a header would drop the predicate under it and return fewer names
+    with nothing said, so the reader refuses the file instead."""
+    monkeypatch.setattr(core_module, "PACKS_DIR", tmp_path)
+    (tmp_path / "odd.toml").write_text(
+        f'[[predicate]]\nname = "first"\n{line}\nname = "second"\n', encoding="utf-8")
+    with pytest.raises(PredicatePackError, match="predicate table header"):
+        core_module._scan_pack_names("odd")
+
+
+@pytest.mark.parametrize("line", [
+    'name = "a\\"b"',
+    "name = 'single'",
+    'name = """triple"""',
+    'name = "unterminated',
+    "name = bare",
+    'name = ""',
+])
+def test_the_line_reader_refuses_a_name_line_it_does_not_understand(
+        monkeypatch, tmp_path, line):
+    monkeypatch.setattr(core_module, "PACKS_DIR", tmp_path)
+    (tmp_path / "odd.toml").write_text(f"[[predicate]]\n{line}\n", encoding="utf-8")
+    with pytest.raises(PredicatePackError, match="name line"):
+        core_module._scan_pack_names("odd")
+
+
+def test_the_line_reader_accepts_a_comment_after_a_name_and_other_keys():
+    """What the shipped packs actually write must keep reading."""
+    assert core_module._PACK_NAME_LINE.match('name = "x"   # why')
+    assert not core_module._NAME_KEY.match('name_alias = "x"')
 
 
 def test_without_tomllib_the_default_buckets_still_have_their_predicates(monkeypatch):
