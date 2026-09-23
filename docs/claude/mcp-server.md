@@ -3,11 +3,11 @@
 `memvara-mcp` is the console script that serves this library's memory to a coding agent over
 the Model Context Protocol. It speaks JSON-RPC on stdin and stdout, is meant to be launched
 by an MCP client rather than run by hand, and is configured entirely from the environment.
-Eighteen tools are exposed, from `memory_recall` and `memory_search` through the writes to
-`memory_stats`.
+Twenty-two tools are exposed, from `memory_recall` and `memory_search` through the writes
+to `memory_stats` and the four document tools after it.
 
 The server has two modes. In local mode it opens a SQLite file on this machine and runs the
-whole engine in process. In cloud mode it opens no file at all and serves the same eighteen
+whole engine in process. In cloud mode it opens no file at all and serves the same twenty-two
 tools from a hosted deployment over that deployment's `/v1` API.
 
 ## Where the code is
@@ -35,7 +35,7 @@ tools from a hosted deployment over that deployment's `/v1` API.
   `RemoteMemvara`.
 - Tests: `tests/test_server.py`, `tests/test_init.py`, `tests/test_login.py`,
   `tests/test_config_cloud.py`, `tests/test_memory_api_protocol.py`.
-- Documentation: [the MCP integration page](../integrations/mcp.md) lists the eighteen tools
+- Documentation: [the MCP integration page](../integrations/mcp.md) lists the twenty-two tools
   and the three ways to reach them; [DEPLOY.md](../DEPLOY.md) has the environment table.
 
 ## How the pieces fit

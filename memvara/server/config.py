@@ -91,13 +91,16 @@ _DEFAULT_EMBEDDER = "hashing"
 #: and the hosted deployment read the same names, so that one variable switches a feature
 #: off on every surface.
 #:
-#: Only two of these change what this process does. `project_scope` decides whether the
-#: project is derived from the working directory, and `profile` decides whether the
-#: `memory_profile` tool is listed. The others belong to the plugin or to tools that are not
-#: in this build yet; they are parsed here so that a typo in any of them is refused at
-#: startup rather than ignored.
+#: Several of these change what this process does. `project_scope` decides whether the
+#: project is derived from the working directory; `profile`, `forget_matching`, `links`
+#: and `documents` decide whether their tools are listed; `end_reason` decides whether the
+#: tools take a reason; and `retrieval_chunks` decides whether a local store splits a
+#: document into chunks of about 1,000 characters or keeps it as one. The others belong to
+#: the plugin; they are parsed here so that a typo in any of them is refused at startup
+#: rather than ignored.
 FEATURES = ("index_command", "research_agent", "project_scope", "status_line",
-            "recall_mark", "profile", "forget_matching", "end_reason", "links")
+            "recall_mark", "profile", "forget_matching", "end_reason", "links",
+            "documents", "retrieval_chunks")
 
 _FEATURE_PREFIX = "MEMVARA_FEATURE_"
 
@@ -413,7 +416,7 @@ def unknown_features(names: Iterable[str]) -> str | None:
     exception, so the two cannot disagree about what a feature is.
 
     >>> unknown_features(["profle"])
-    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason and links."
+    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents and retrieval_chunks."
     >>> unknown_features(["profile"]) is None
     True
     """
@@ -884,7 +887,7 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
     table can serve either. It is **not** a `Memvara` over a `RemoteStore`, and that
     distinction is the whole decision — the engine calls `put_claim`, `lexical_search`
     and `competing_claims` on every turn and the facade has an endpoint for none of them,
-    so a server built that way would start, list eighteen tools and fail on the first one
+    so a server built that way would start, list twenty-two tools and fail on the first one
     a model reached for. See `docs/OPEN-CORE.md` for which side of the line each seam is
     on.
     """
@@ -955,5 +958,8 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         # `HybridRetriever`'s own default happens to agree.
         read_w_graph=config.read_w_graph,
         confirm_secret=config.confirm_secret,
+        # `MEMVARA_FEATURE_RETRIEVAL_CHUNKS=0` stores each document as one chunk. Under
+        # MEMVARA_MODE=cloud the deployment chunks, and reads the same switch itself.
+        retrieval_chunks="retrieval_chunks" not in config.features_off,
         **config.scope_kwargs,
     )

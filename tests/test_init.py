@@ -617,7 +617,8 @@ def test_the_skill_carries_what_no_single_description_can(carries: str, marker: 
 _NUMBER_WORDS = (
     "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
     "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
-    "seventeen", "eighteen", "nineteen", "twenty",
+    "seventeen", "eighteen", "nineteen", "twenty", "twenty-one", "twenty-two",
+    "twenty-three", "twenty-four", "twenty-five", "twenty-six",
 )
 
 

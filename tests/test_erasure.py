@@ -248,9 +248,11 @@ def test_the_erasures_table_is_schema_seven():
     no table, does not read or write `erasures`, and rewriting a slot key cannot conjure a
     record of an erasure that happened before the upgrade, so it holds again. Version 13
     added a table, `claim_links`, and backfills nothing into it; it neither reads nor
-    writes `erasures`, so the sentence holds.
+    writes `erasures`, so the sentence holds. Version 14 added two tables, `documents`
+    and `document_chunks`, and backfills nothing into them; it neither reads nor writes
+    `erasures`, so the sentence holds.
     """
-    assert SCHEMA_VERSION == 13
+    assert SCHEMA_VERSION == 14
     store = SQLiteStore(":memory:")
     try:
         assert store.erasure_record("anything") is None

@@ -5,7 +5,10 @@ against exactly these signatures, so treat them as fixed. Everything here is alr
 importable from the foundation modules:
 
 - `memvara/types.py` — `Claim`, `Episode`, `Scope`, `Result`, `Explanation`, `WriteReceipt`,
-  `MemoryType`, `Derivation`, `utcnow()`, `content_hash()`
+  `MemoryType`, `Derivation`, `utcnow()`, `content_hash()`, and for documents `Document`,
+  `DocumentChunk`, `DocumentStatus`, `DeleteResult`, `Page`
+- `memvara/documents/` — `split()` and `normalise()`, the retrieval chunker, and
+  `DocumentService`, which the document methods on `Memvara` delegate to
 - `memvara/compat/supermemory_import.py` — `import_supermemory`, `SupermemoryReceipt`
 - `memvara/schema.py` — `PredicateRegistry`, `PredicateSpec`, `Cardinality`, `Volatility`
 - `memvara/store/` — `Store` and `SQLStore` protocols, `SQLiteStore`, `STATES`,
@@ -133,7 +136,11 @@ was being read as holding further than it does.
    > **Claim.** No engine write deletes a row, and no write closes both clocks.
    > **Scope.** The *engine*. `erase()`, `purge()` and `reset()` delete, on purpose and by
    > name, and they are the caller's decision rather than the engine's — see invariant 8's
-   > neighbour below and `Memvara.prove_erased`.
+   > neighbour below and `Memvara.prove_erased`. `delete_document()` is the fourth: it
+   > erases one document's text, and it deletes no claim row, because a claim whose only
+   > source was the document is retired (see *Documents* under `memvara/store/`). A
+   > re-ingest by `custom_id` erases the text of the chunks the new version no longer
+   > has, under the same rule.
    > **Sketch.** `close_out` is the single place any claim ends and takes one `Closure`;
    > `Claim.state` derives `live`/`ended`/`retired` from which column is set.
    > **Measured.** `bench/compare.py`: **0 stale values left live** against 7 for a
@@ -145,7 +152,10 @@ was being read as holding further than it does.
    > **Claim.** `sources` holds the episode ids the claim came from, and `derivation`
    > reflects how it was produced.
    > **Scope.** Claims the engine writes. A `Claim` a caller constructs by hand and hands
-   > to `remember()` carries what the caller put in it.
+   > to `remember()` carries what the caller put in it. Deleting a document removes its
+   > erased episodes from `sources`, so a claim whose only source was the document ends
+   > with none; it is retired in the same write, and its closure reason, "source document
+   > deleted", is what `why()` shows in place of the source.
    > **Sketch.** `FastExtractor._claim` and the LLM tier both stamp `sources=[ep.id]` and
    > a `Derivation`; `claim_sources` indexes the reverse direction so `why()` is a lookup.
    > **Measured.** Not measured — there is no number here to produce.
@@ -1313,6 +1323,74 @@ clock only: `known_at` drops a link recorded after it.
 
 `Memvara.links(claim_id)` returns both directions, and leaves out a link whose far end
 the caller cannot see, because the link would otherwise disclose that id.
+
+### Documents
+
+Schema 14 adds two tables. `documents` holds one row per document, keyed on `(tenant,
+id)`: `custom_id`, the scope both as its five parts and as `scope_key`, `title`,
+`filepath`, `source_uri`, `mime`, `content_hash` (blake2b-16 of the normalised text),
+`status` (`queued`, `extracting`, `done` or `failed`, enforced by a `CHECK`), `error`,
+`meta`, `created_at` and `updated_at`. A unique index on `(tenant, scope_key, custom_id)`
+makes a caller's own id unique per scope. `document_chunks` holds one row per chunk,
+keyed on `(tenant, document_id, position)`, with the chunk's `text`, its `hash` and the
+`episode_id` it was stored as.
+
+**A chunk is an episode.** Each one is written as a `role="system"` episode with
+`meta["document_id"]` set, so the episode text index, the episode vectors and
+`search(include_episodes=True)` serve documents with no second index, and `why()` on a
+claim extracted from a document quotes the chunk. `Episode.hash` mixes the document id
+in, so the same paragraph in two documents is two episodes and deleting one document
+cannot erase the other's text. Episodes without the key hash exactly as before.
+
+**Chunking** (`memvara/documents/chunk.py`) splits the normalised text into runs of whole
+sentences of at most 1,000 characters, each preceded by up to 150 characters repeated
+from the end of the chunk before. A sentence is cut only when it is longer than a chunk
+on its own. A chunk ends at a *cut point*, a sentence whose own digest falls below a
+threshold proportional to its length (one every 600 characters on average), once the
+chunk holds 300 characters, or earlier when the next sentence would overflow it. Because
+a boundary depends on the sentences around it and not on the distance from the top, an
+edit usually changes the chunks it touches and the one after it. On a 27,000-character
+document of generated prose, an edit at the top, the middle or the end left 37 or 38 of
+39 chunks unchanged. `Memvara(retrieval_chunks=False)` stores a document as one chunk.
+
+**Re-ingest matches chunks by content, not position.** `add_document` with a `custom_id`
+that already exists at the same scope, and `update_document` with new content, chunk the
+new text and match each chunk to an unused old chunk with the same `hash`. A match keeps
+its episode, vector and citations, and only its position changes. An unmatched chunk
+becomes a new episode, and only new episodes go to `WritePipeline.reextract`. An old
+chunk with no match is released the way a delete releases every chunk (next paragraph).
+
+**Delete erases text and retires memory.** `delete_document` detaches every claim that
+cites one of the document's episodes. A claim whose every source is among them is
+retired first, with the closure reason `"source document deleted"`; a claim with another
+source keeps it. Both lose the erased episodes from `sources`. Then the document row, its
+chunk rows and its episodes are erased, the episodes through `erase_episode`, all in one
+`batch()`. `erase_episode`, `erase_claim(sources=True)` and `purge` delete the chunk row
+that repeats an erased episode's text, and `purge` deletes the scope's document rows,
+because both hold text the caller was told is gone.
+
+**Status and failure.** A document is written `queued`, becomes `extracting` while
+`reextract` runs over its new chunks, and ends `done` or `failed`. The chunks are stored
+and indexed before extraction runs, so a failure, or a deferred extraction, is recorded
+on the document and does not remove it. Chunks are system-role episodes, and the default
+salience gate reads user turns only, so with the default gate nothing is extracted from a
+document; it is stored and searchable.
+
+**Content that is not plain text** — a URL, `bytes`, HTML or any non-text mime — is handed
+to `memvara.ingest.extract(content, url=, mime=)`, looked up by name at call time, which
+returns an object with `text`, `title` and `mime`. Without that package the call raises
+`NotImplementedError`. A configured redactor runs over the whole text and the title
+before chunking, so every stored digest is of redacted text.
+
+`list_documents` filters by scope, `filepath_prefix` (compared with `substr`, so `%` and
+`_` match only themselves) and `status` in the same statement as its `LIMIT`, per
+invariant 7, and pages on `(created_at, id)` newest first.
+
+The seven store methods (`put_document`, `get_document`, `find_document`,
+`list_documents`, `document_chunks`, `put_document_chunks`, `delete_document`) are
+optional as a group; see `OMITTABLE`. `RemoteStore` raises on each and names the
+`RemoteMemvara` method to use, because the facade chunks, scope-checks and extracts
+server-side.
 
 ### Erasure removes the bytes, not just the rows
 

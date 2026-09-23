@@ -27,8 +27,11 @@ live set by construction and still there when you ask about February.
 ## Is Memvara a replacement for RAG?
 
 No. They answer different questions and the useful arrangement is both — RAG answers from
-your corpus, memory supplies the state the corpus does not know. A policy document should
-stay a document; a customer's current plan should be a slot with one value and a history.
+your corpus, memory supplies the state the corpus does not know. A customer's current plan
+should be a slot with one value and a history. A policy document should stay a document,
+and Memvara can now hold it as one: `add_document()` keeps the text whole and returns its
+passages beside the facts. A corpus of thousands of documents still belongs in a
+retrieval system, because Memvara's vector index is exact and in-process.
 [RAG and memory](concepts/rag-vs-memory.md) has the composition, including where to put
 the seam.
 
@@ -109,7 +112,7 @@ re-queries every table the content could survive in.
 ## Can I use Memvara with coding agents?
 
 Yes, and it is one of the cases the design is aimed at. Install the MCP plugin
-(`/plugin marketplace add memvara/claude-memvara`) and the agent gets eighteen tools plus
+(`/plugin marketplace add memvara/claude-memvara`) and the agent gets twenty-two tools plus
 a packaged skill telling it when to write and how to correct.
 
 The one piece of setup that is not optional is vocabulary: the built-in predicates are a

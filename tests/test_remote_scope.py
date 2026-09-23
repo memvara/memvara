@@ -212,6 +212,8 @@ def _answer(request):
     failures ambiguous between the two.
     """
     path, method = request.url.path, request.method
+    if path.startswith("/v1/documents"):
+        return _document_answer(request)
     if path == "/v1/health":
         return httpx.Response(200, json={"status": "ok", "memvara_version": "0.2.0"})
     if path == "/v1/whoami":
@@ -295,6 +297,21 @@ def _answer(request):
     return httpx.Response(200, json=_memory("cl_1"))
 
 
+def _document_answer(request):
+    """The `/v1/documents` routes, the shapes `tests/test_remote_documents.py` decodes."""
+    from test_remote_documents import DELETED, DOCUMENT, STATUS
+    path, method = request.url.path, request.method
+    if path.endswith("/status"):
+        return httpx.Response(200, json=STATUS)
+    if path == "/v1/documents/delete":
+        return httpx.Response(200, json={"results": [DELETED]})
+    if path == "/v1/documents" and method == "GET":
+        return httpx.Response(200, json={"documents": [DOCUMENT], "next_cursor": None})
+    if method == "DELETE":
+        return httpx.Response(200, json=DELETED)
+    return httpx.Response(200, json=DOCUMENT)
+
+
 DELEGATIONS = [
     ("health", lambda v: v.health(), "/v1/health"),
     ("whoami", lambda v: v.whoami(), "/v1/whoami"),
@@ -328,6 +345,16 @@ DELEGATIONS = [
     ("erase", lambda v: v.erase("cl_1"), "/v1/erasures"),
     ("purge", lambda v: v.purge(), "/v1/erasures"),
     ("consolidate", lambda v: v.consolidate(), "/v1/maintenance/consolidate"),
+    ("add_document", lambda v: v.add_document("Text."), "/v1/documents"),
+    ("get_document", lambda v: v.get_document("doc_1"), "/v1/documents/doc_1"),
+    ("list_documents", lambda v: v.list_documents(), "/v1/documents"),
+    ("update_document", lambda v: v.update_document("doc_1", title="T"),
+     "/v1/documents/doc_1"),
+    ("delete_document", lambda v: v.delete_document("doc_1"), "/v1/documents/doc_1"),
+    ("delete_documents", lambda v: v.delete_documents(["doc_1"]),
+     "/v1/documents/delete"),
+    ("document_status", lambda v: v.document_status("doc_1"),
+     "/v1/documents/doc_1/status"),
 ]
 
 

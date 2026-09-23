@@ -188,12 +188,18 @@ def test_a_write_through_the_tool_surface_is_recorded_now_however_it_is_dated():
         server.close()
 
 
-def test_no_tool_can_erase_anything():
+def test_no_tool_can_erase_a_memory():
     """`purge`, `reset` and `consolidate` are not one tool call away from a model.
 
     The first is an operator action an agent will call in a loop; the other two are
     irreversible erasure. Their absence is a design decision, so it is asserted rather
     than left to be quietly undone by a later hand.
+
+    `memory_delete_document` is the one tool whose name says delete, and it is named
+    here rather than let through by a looser check. It erases one document's own text
+    and no memory: a memory whose only source was the document is retired, which
+    `test_deleting_a_document_through_the_tool_retires_and_never_erases_a_memory` checks
+    by behaviour.
     """
     names = {t.name for t in TOOLS}
     assert names == {
@@ -201,10 +207,14 @@ def test_no_tool_can_erase_anything():
         "memory_ask", "memory_since", "memory_standing", "memory_profile", "memory_add",
         "memory_remember", "memory_forget",
         "memory_end", "memory_end_matching", "memory_forget_matching", "memory_link",
-        "memory_history", "memory_why", "memory_stats",
+        "memory_history", "memory_why", "memory_stats", "memory_add_document",
+        "memory_get_document", "memory_list_documents", "memory_delete_document",
     }
     forbidden = ("purge", "reset", "consolidate", "reembed", "erase", "delete")
     for tool in TOOLS:
+        if tool.name == "memory_delete_document":
+            assert tool.destructive and tool.writes
+            continue
         assert not any(word in tool.name for word in forbidden)
 
 
@@ -278,6 +288,16 @@ _FORWARDING_CASES = {
     "memory_history": [{"predicate": "lives_in"}],
     "memory_why": [{"claim_id": "cl_absent"}],
     "memory_stats": [{}],
+    # One set reaches every property: the handler reads `url` as well as `content` to
+    # refuse a call carrying both, so the text form covers it.
+    "memory_add_document": [{"content": "Refunds take 14 days.", "custom_id": "refunds",
+                             "title": "Refunds", "filepath": "policies/refunds.md",
+                             "mime": "text/markdown", "metadata": {"team": "support"}}],
+    "memory_get_document": [{"id": "refunds"}],
+    "memory_list_documents": [{"filepath_prefix": "policies/", "status": "done",
+                               "limit": 5},
+                              {"cursor": "2026-01-01T00:00:00+00:00|doc_x"}],
+    "memory_delete_document": [{"id": "doc_absent"}],
 }
 
 
@@ -309,8 +329,13 @@ _NUMBER_WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
     "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
     "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
-    "nineteen": 19, "twenty": 20,
+    "nineteen": 19, "twenty": 20, "twenty-one": 21, "twenty-two": 22,
+    "twenty-three": 23, "twenty-four": 24, "twenty-five": 25, "twenty-six": 26,
 }
+
+#: A count as prose writes it: one word, or two joined by a hyphen ("twenty-two"). The
+#: hyphenated form is matched whole, so "twenty-two tools" is not read as "two tools".
+_COUNT = re.compile(r"\b([A-Za-z]+(?:-[A-Za-z]+)?) tools\b")
 
 #: Spelling, for deriving a wrong-but-plausible count in the non-vacuity check and for
 #: refusing to run at all once the surface outgrows what this table can say.
@@ -367,12 +392,12 @@ def test_every_stated_tool_count_matches_the_tool_surface(relative):
     text = (root / relative).read_text(encoding="utf-8")
 
     expected = _WORD_FOR[len(TOOLS)]
-    words = [w.lower() for w in re.findall(r"\b([A-Za-z]+) tools\b", text)]
+    words = [w.lower() for w in _COUNT.findall(text)]
     totals = [w for w in words if _NUMBER_WORDS.get(w, 0) >= _MIN_TOTAL]
 
     # Stated positively, and that is what makes an unreadable count impossible to miss.
     # Scanning only for *wrong* numbers passes when the count is spelled in a way this
-    # regex cannot see — "twenty-one tools", a digit, a rewritten sentence — because
+    # regex cannot see — "21 tools", a rewritten sentence — because
     # there is nothing left to object to. Requiring the right word to be present turns
     # every one of those into the same failure as deleting it.
     assert expected in totals, (
@@ -402,22 +427,23 @@ def test_the_tool_count_guard_is_not_vacuous():
 
     for delta in (-1, +1):
         wrong = _WORD_FOR[len(TOOLS) + delta]
-        totals = [w.lower() for w in re.findall(r"\b([A-Za-z]+) tools\b",
-                                                f"The {wrong} tools, and no way to erase.")
+        totals = [w.lower() for w in _COUNT.findall(
+                      f"The {wrong} tools, and no way to erase.")
                   if _NUMBER_WORDS.get(w.lower(), 0) >= _MIN_TOTAL]
         assert totals == [wrong]
         assert expected not in totals, "a wrong count must not satisfy the positive check"
 
     # A count the scan cannot read must fail too, or the guard passes on prose it never
     # understood — the failure mode the positive assertion exists for.
-    assert expected not in [w.lower() for w in re.findall(r"\b([A-Za-z]+) tools\b",
-                                                          "twenty-one tools, hand-rolled")]
+    assert expected not in [w.lower() for w in _COUNT.findall(
+        f"{len(TOOLS)} tools, hand-rolled")]
 
     # And the phrase that must never be read as a total, or the guard cries wolf on
     # every file that argues why the two closures are two tools.
-    assert not [w for w in re.findall(r"\b([A-Za-z]+) tools\b",
-                                      "the two closures are two tools, not one tool")
+    assert not [w for w in _COUNT.findall("the two closures are two tools, not one tool")
                 if _NUMBER_WORDS.get(w.lower(), 0) >= _MIN_TOTAL]
+    # A hyphenated count is read whole, never as its last word.
+    assert _COUNT.findall("The twenty-two tools") == ["twenty-two"]
 
 
 @pytest.mark.parametrize("tool", TOOLS, ids=lambda t: t.name)
@@ -3168,7 +3194,8 @@ def test_read_only_hides_the_write_tools(read_only):
     assert names == ["memory_recall", "memory_search", "memory_neighborhood",
                      "memory_paths", "memory_ask", "memory_since", "memory_standing",
                      "memory_profile",
-                     "memory_history", "memory_why", "memory_stats"], (
+                     "memory_history", "memory_why", "memory_stats",
+                     "memory_get_document", "memory_list_documents"], (
         "traversal is read-only and must survive here: a deployment that cannot be "
         "written to is exactly the one that wants to be asked about connections"
     )

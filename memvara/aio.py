@@ -73,9 +73,9 @@ from .core import (Memvara, Messages, ScopedMemvara, _approx_tokens, _check_k,
 from .embed import Embedder
 from .retrieve import Path, Retrieved
 from .write.reconcile import MergeReport
-from .types import (Answer, Claim, Delta, Episode, ErasureProof, ForgetPreview,
-                    ForgetResult, Link, MemoryType, Profile, Provenance, RecallResult,
-                    Result, Scope, WriteReceipt)
+from .types import (Answer, Claim, DeleteResult, Delta, Document, DocumentStatus,
+                    Episode, ErasureProof, ForgetPreview, ForgetResult, Link, MemoryType,
+                    Page, Profile, Provenance, RecallResult, Result, Scope, WriteReceipt)
 
 
 async def _nothing() -> list[Result]:
@@ -228,6 +228,70 @@ class AsyncMemvara:
     async def prove_erased(self, claim_id: str) -> "ErasureProof":
         """See `Memvara.prove_erased`."""
         return await asyncio.to_thread(self.memvara.prove_erased, claim_id)
+
+    async def add_document(self, content: str | bytes | None = None, *,
+                           url: str | None = None, custom_id: str | None = None,
+                           title: str | None = None, filepath: str | None = None,
+                           mime: str | None = None, meta: Mapping[str, Any] | None = None,
+                           extract: bool = True, tenant=None, user=None, agent=None,
+                           session=None) -> Document:
+        """See `Memvara.add_document`."""
+        return await asyncio.to_thread(
+            self.memvara.add_document, content, url=url, custom_id=custom_id,
+            title=title, filepath=filepath, mime=mime, meta=meta, extract=extract,
+            tenant=tenant, user=user, agent=agent, session=session)
+
+    async def get_document(self, id_or_custom_id: str, *, tenant=None, user=None,
+                           agent=None, session=None) -> Document | None:
+        """See `Memvara.get_document`."""
+        return await asyncio.to_thread(
+            self.memvara.get_document, id_or_custom_id, tenant=tenant, user=user,
+            agent=agent, session=session)
+
+    async def list_documents(self, *, filepath_prefix: str | None = None,
+                             status: str | None = None, limit: int = 50,
+                             cursor: str | None = None, tenant=None, user=None,
+                             agent=None, session=None) -> Page[Document]:
+        """See `Memvara.list_documents`."""
+        return await asyncio.to_thread(
+            self.memvara.list_documents, filepath_prefix=filepath_prefix, status=status,
+            limit=limit, cursor=cursor, tenant=tenant, user=user, agent=agent,
+            session=session)
+
+    async def update_document(self, id_or_custom_id: str, *,
+                              content: str | bytes | None = None,
+                              title: str | None = None,
+                              meta: Mapping[str, Any] | None = None,
+                              filepath: str | None = None, extract: bool = True,
+                              tenant=None, user=None, agent=None,
+                              session=None) -> Document:
+        """See `Memvara.update_document`."""
+        return await asyncio.to_thread(
+            self.memvara.update_document, id_or_custom_id, content=content, title=title,
+            meta=meta, filepath=filepath, extract=extract, tenant=tenant, user=user,
+            agent=agent, session=session)
+
+    async def delete_document(self, id_or_custom_id: str, *, tenant=None, user=None,
+                              agent=None, session=None) -> DeleteResult:
+        """See `Memvara.delete_document` — erases the document's text."""
+        return await asyncio.to_thread(
+            self.memvara.delete_document, id_or_custom_id, tenant=tenant, user=user,
+            agent=agent, session=session)
+
+    async def delete_documents(self, ids_or_custom_ids: Sequence[str], *, tenant=None,
+                               user=None, agent=None,
+                               session=None) -> list[DeleteResult]:
+        """See `Memvara.delete_documents`."""
+        return await asyncio.to_thread(
+            self.memvara.delete_documents, ids_or_custom_ids, tenant=tenant, user=user,
+            agent=agent, session=session)
+
+    async def document_status(self, id_or_custom_id: str, *, tenant=None, user=None,
+                              agent=None, session=None) -> DocumentStatus:
+        """See `Memvara.document_status`."""
+        return await asyncio.to_thread(
+            self.memvara.document_status, id_or_custom_id, tenant=tenant, user=user,
+            agent=agent, session=session)
 
     async def purge(self, *, tenant=None, user=None, agent=None,
                     session=None) -> dict[str, int]:
@@ -686,6 +750,44 @@ class AsyncScopedMemvara:
 
     async def prove_erased(self, claim_id: str) -> "ErasureProof":
         return await self._amem.prove_erased(claim_id)
+
+    async def add_document(self, content: str | bytes | None = None, *,
+                           url: str | None = None, custom_id: str | None = None,
+                           title: str | None = None, filepath: str | None = None,
+                           mime: str | None = None, meta: Mapping[str, Any] | None = None,
+                           extract: bool = True) -> Document:
+        return await self._amem.add_document(
+            content, url=url, custom_id=custom_id, title=title, filepath=filepath,
+            mime=mime, meta=meta, extract=extract, **self._kw)
+
+    async def get_document(self, id_or_custom_id: str) -> Document | None:
+        return await self._amem.get_document(id_or_custom_id, **self._kw)
+
+    async def list_documents(self, *, filepath_prefix: str | None = None,
+                             status: str | None = None, limit: int = 50,
+                             cursor: str | None = None) -> Page[Document]:
+        return await self._amem.list_documents(
+            filepath_prefix=filepath_prefix, status=status, limit=limit, cursor=cursor,
+            **self._kw)
+
+    async def update_document(self, id_or_custom_id: str, *,
+                              content: str | bytes | None = None,
+                              title: str | None = None,
+                              meta: Mapping[str, Any] | None = None,
+                              filepath: str | None = None,
+                              extract: bool = True) -> Document:
+        return await self._amem.update_document(
+            id_or_custom_id, content=content, title=title, meta=meta, filepath=filepath,
+            extract=extract, **self._kw)
+
+    async def delete_document(self, id_or_custom_id: str) -> DeleteResult:
+        return await self._amem.delete_document(id_or_custom_id, **self._kw)
+
+    async def delete_documents(self, ids_or_custom_ids: Sequence[str]) -> list[DeleteResult]:
+        return await self._amem.delete_documents(ids_or_custom_ids, **self._kw)
+
+    async def document_status(self, id_or_custom_id: str) -> DocumentStatus:
+        return await self._amem.document_status(id_or_custom_id, **self._kw)
 
     async def supersede(self, old_claim_id: str, new_claim: Claim, *,
                         at: datetime | None = None,

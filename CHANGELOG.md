@@ -55,6 +55,40 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **A document store.** `Memvara.add_document(content | url=, custom_id=, title=,
+  filepath=, mime=, meta=, extract=True)` stores a document whole and returns a
+  `Document`. The text is split into chunks of about 1,000 characters at sentence
+  boundaries, each repeating up to 150 characters from the end of the one before, and
+  each chunk is stored as a `role="system"` episode marked with the document's id, so
+  `search(include_episodes=True)` and `recall(include_episodes=True)` find passages
+  from it. `get_document`, `list_documents` (newest first, one page at a time, filtered
+  by `filepath_prefix` and `status` in the store), `update_document`, `delete_document`,
+  `delete_documents` and `document_status` complete the set, on `ScopedMemvara`,
+  `AsyncMemvara` and `RemoteMemvara` as well.
+  - **Adding a document with a `custom_id` that already exists in the scope updates
+    it.** Each new chunk is matched to an old one by the digest of its text, not by its
+    position. A matched chunk keeps its episode, its vector and the memories that cite
+    it; only new chunks are read by the write pipeline. Chunk boundaries are placed by
+    local content rather than by counting from the top, so an edit near the top of a
+    long document usually changes the chunks it touches and the one after it.
+  - **Deleting a document erases its text and retires, never erases, the memories it
+    was the only source of.** The document row, its chunks and their episodes are
+    erased. A claim whose every source was one of those episodes is retired with the
+    reason "source document deleted"; a claim with another source keeps it.
+    `DeleteResult` lists both.
+  - **A failed extraction keeps the document.** Its `status` is `failed` with an
+    `error`, and its chunks stay searchable. Chunks are system-role episodes, so with the
+    default salience gate, which reads user turns only, no fact is extracted from a
+    document.
+  - A URL, `bytes`, HTML or any non-text type goes through `memvara.ingest.extract()`,
+    the ingestion package built separately. Without it installed the call raises
+    `NotImplementedError` saying so; plain text and Markdown need nothing.
+  - Four MCP tools: `memory_add_document`, `memory_get_document`,
+    `memory_list_documents` and `memory_delete_document`, under the new `documents`
+    switch (`MEMVARA_FEATURE_DOCUMENTS=0` hides them). `MEMVARA_FEATURE_RETRIEVAL_CHUNKS=0`,
+    or `Memvara(retrieval_chunks=False)`, stores each document as one chunk.
+  - SQLite schema 14 adds the `documents` and `document_chunks` tables. See
+    `docs/UPGRADING.md`.
 - **End or retire every memory that matches a query, after seeing exactly which.**
   `Memvara.forget_matching(query, close=, k=20, reason=None, confirm=None)` without
   `confirm` changes nothing and returns a `ForgetPreview`: the matching claim ids with

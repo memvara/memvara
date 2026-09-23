@@ -26,7 +26,7 @@ from typing import (TYPE_CHECKING, Any, Collection, Iterable, Literal, Protocol,
 
 import numpy as np
 
-from ..types import Claim, Episode, Link, Scope
+from ..types import Claim, Document, DocumentChunk, Episode, Link, Scope
 
 if TYPE_CHECKING:
     # Only for annotations: a `Store` implementation should not have to import
@@ -352,6 +352,15 @@ OMITTABLE: dict[str, str] = {
     "put_link": "Memvara.link() raises NotImplementedError naming the store, rather "
                 "than reporting a link it did not keep.",
     "claim_links": "links() and why().links report no links. Nothing else reads them.",
+    # The seven document members are one capability: a store has all of them or none.
+    "put_document": "the document methods on Memvara raise NotImplementedError naming "
+                    "the store. Every other read and write is unaffected.",
+    "get_document": "as put_document.",
+    "find_document": "as put_document.",
+    "list_documents": "as put_document.",
+    "document_chunks": "as put_document.",
+    "put_document_chunks": "as put_document.",
+    "delete_document": "as put_document.",
     "count_competing": "the write receipt's accumulation report falls back to "
                        "len(competing_claims()), and read-side shadowing uses it only "
                        "when occupied_slots is missing too.",
@@ -889,6 +898,65 @@ class Store(Protocol):
 
         Optional, like `put_link`. A store without it has no links to report, and
         `Memvara.links` and `why()` report none.
+        """
+        ...
+
+    # --- documents --------------------------------------------------------
+    def put_document(self, doc: "Document") -> None:
+        """Insert or replace one document row, keyed on `(scope.tenant, id)`.
+
+        The row describes the text and does not hold it. The text is held as chunks,
+        written by `put_document_chunks`, each naming the episode it was stored as.
+        `doc.chunks` is ignored here; a read counts the chunk rows instead.
+
+        Optional, together with the other six document members. A store without them
+        cannot hold documents, and `Memvara.add_document` raises `NotImplementedError`
+        naming the store.
+        """
+        ...
+
+    def get_document(self, tenant: str, document_id: str) -> "Document | None":
+        """One document by id, with `chunks` counted, or `None`. No scope check: the
+        caller authorizes, as `get_claim` leaves it to `Memvara.get`."""
+        ...
+
+    def find_document(self, scope: Scope, custom_id: str) -> "Document | None":
+        """The document with this caller-supplied id at exactly this scope, or `None`.
+
+        Exactly this scope and not its ancestors, because a `custom_id` is unique per
+        scope: two scopes may each hold a document called `handbook`, and they are two
+        documents.
+        """
+        ...
+
+    def list_documents(self, scopes: Sequence[Scope], *,
+                       filepath_prefix: str | None = None, status: str | None = None,
+                       limit: int = 50,
+                       after: "tuple[datetime, str] | None" = None) -> list["Document"]:
+        """Documents written at any of `scopes`, newest first, at most `limit`.
+
+        The filters run in the same query as the limit (invariant 7). `after` is the
+        `(created_at, id)` of the last document on the previous page, and the listing
+        continues strictly after it in the same order.
+        """
+        ...
+
+    def document_chunks(self, tenant: str, document_id: str) -> list["DocumentChunk"]:
+        """Every chunk of one document, in position order."""
+        ...
+
+    def put_document_chunks(self, tenant: str, document_id: str,
+                            chunks: Sequence["DocumentChunk"]) -> None:
+        """Replace every chunk row of one document with `chunks`."""
+        ...
+
+    def delete_document(self, tenant: str, document_id: str) -> int:
+        """Delete one document row and all its chunk rows. Returns how many chunk rows
+        were deleted.
+
+        It leaves the chunk episodes alone. `Memvara.delete_document` erases those
+        through `erase_episode`, after it has retired the claims whose only sources they
+        were.
         """
         ...
 

@@ -28,13 +28,13 @@ from ..confirm import ConfirmationRefused
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import Path, Retrieved
 from ..types import (
-    Answer, Claim, Delta, Episode, ForgetPreview, ForgetResult, Link, MemoryType,
-    Profile, Provenance, Result, Scope, SearchResults, WriteReceipt, closure,
-    closure_reason, link_relation,
+    Answer, Claim, DeleteResult, Delta, Document, DocumentStatus, Episode,
+    ForgetPreview, ForgetResult, Link, MemoryType, Page, Profile, Provenance, Result,
+    Scope, SearchResults, WriteReceipt, closure, closure_reason, link_relation,
 )
 from . import hydrate
-from .api import (PROJECT_HEADER, _hit, _iso, _refuse_project_meta, _sent, _states,
-                  _type, _types)
+from .api import (PROJECT_HEADER, _document_fields, _document_path, _hit, _iso,
+                  _refuse_project_meta, _sent, _states, _type, _types)
 from .client import DEFAULT_TIMEOUT, AsyncHttpClient
 from .creds import resolve
 from .errors import Conflict, NotFound
@@ -515,6 +515,76 @@ class AsyncRemoteMemvara:
             body["predicate"] = predicate
         return bool(await self._end(body))
 
+    # -- documents -----------------------------------------------------------
+
+    async def add_document(self, content: str | bytes | None = None, *,
+                           url: str | None = None, custom_id: str | None = None,
+                           title: str | None = None, filepath: str | None = None,
+                           mime: str | None = None, meta: Mapping[str, Any] | None = None,
+                           extract: bool = True) -> Document:
+        """See `RemoteMemvara.add_document`."""
+        if (content is None) == (url is None):
+            raise TypeError("add_document() needs exactly one of content and url")
+        body = {**_document_fields(content, self.redactor is not None, self._redact),
+                "url": url, "custom_id": custom_id,
+                "title": self._redact(title, EPISODE), "filepath": filepath,
+                "mime": mime, "metadata": None if meta is None else dict(meta),
+                "extract": extract}
+        return hydrate.document(await self._request(
+            "POST", "/v1/documents", params=self._params(), json=_sent(body),
+            write=True))
+
+    async def get_document(self, id_or_custom_id: str) -> Document | None:
+        try:
+            return hydrate.document(await self._request(
+                "GET", _document_path(id_or_custom_id), params=self._params()))
+        except NotFound:
+            return None
+
+    async def list_documents(self, *, filepath_prefix: str | None = None,
+                             status: str | None = None, limit: int = 50,
+                             cursor: str | None = None) -> Page[Document]:
+        return hydrate.document_page(await self._request(
+            "GET", "/v1/documents",
+            params=self._params(filepath_prefix=filepath_prefix, status=status,
+                                limit=limit, cursor=cursor)))
+
+    async def update_document(self, id_or_custom_id: str, *,
+                              content: str | bytes | None = None,
+                              title: str | None = None,
+                              meta: Mapping[str, Any] | None = None,
+                              filepath: str | None = None,
+                              extract: bool = True) -> Document:
+        body = {**_document_fields(content, self.redactor is not None, self._redact),
+                "title": self._redact(title, EPISODE), "filepath": filepath,
+                "metadata": None if meta is None else dict(meta), "extract": extract}
+        try:
+            return hydrate.document(await self._request(
+                "PATCH", _document_path(id_or_custom_id), params=self._params(),
+                json=_sent(body), write=True))
+        except NotFound:
+            raise KeyError(f"no document {id_or_custom_id!r} is visible here") from None
+
+    async def delete_document(self, id_or_custom_id: str) -> DeleteResult:
+        try:
+            return hydrate.delete_result(await self._request(
+                "DELETE", _document_path(id_or_custom_id), params=self._params(),
+                write=True))
+        except NotFound:
+            return DeleteResult(id=id_or_custom_id, deleted=False)
+
+    async def delete_documents(self, ids_or_custom_ids: Sequence[str]) -> list[DeleteResult]:
+        body = await self._request("POST", "/v1/documents/delete", params=self._params(),
+                                   json={"ids": list(ids_or_custom_ids)}, write=True)
+        return [hydrate.delete_result(r) for r in body["results"]]
+
+    async def document_status(self, id_or_custom_id: str) -> DocumentStatus:
+        try:
+            return hydrate.document_status(await self._request(
+                "GET", _document_path(id_or_custom_id, "/status"), params=self._params()))
+        except NotFound:
+            raise KeyError(f"no document {id_or_custom_id!r} is visible here") from None
+
     # -- erasure -------------------------------------------------------------
 
     async def erase(self, claim_id: str, *, sources: bool = False) -> bool:
@@ -768,6 +838,43 @@ class AsyncScopedRemoteMemvara:
 
     async def erase(self, claim_id: str, *, sources: bool = False) -> bool:
         return await self._mem.erase(claim_id, sources=sources)
+
+    async def add_document(self, content: str | bytes | None = None, *,
+                           url: str | None = None, custom_id: str | None = None,
+                           title: str | None = None, filepath: str | None = None,
+                           mime: str | None = None, meta: Mapping[str, Any] | None = None,
+                           extract: bool = True) -> Document:
+        return await self._mem.add_document(
+            content, url=url, custom_id=custom_id, title=title, filepath=filepath,
+            mime=mime, meta=meta, extract=extract)
+
+    async def get_document(self, id_or_custom_id: str) -> Document | None:
+        return await self._mem.get_document(id_or_custom_id)
+
+    async def list_documents(self, *, filepath_prefix: str | None = None,
+                             status: str | None = None, limit: int = 50,
+                             cursor: str | None = None) -> Page[Document]:
+        return await self._mem.list_documents(filepath_prefix=filepath_prefix,
+                                              status=status, limit=limit, cursor=cursor)
+
+    async def update_document(self, id_or_custom_id: str, *,
+                              content: str | bytes | None = None,
+                              title: str | None = None,
+                              meta: Mapping[str, Any] | None = None,
+                              filepath: str | None = None,
+                              extract: bool = True) -> Document:
+        return await self._mem.update_document(
+            id_or_custom_id, content=content, title=title, meta=meta, filepath=filepath,
+            extract=extract)
+
+    async def delete_document(self, id_or_custom_id: str) -> DeleteResult:
+        return await self._mem.delete_document(id_or_custom_id)
+
+    async def delete_documents(self, ids_or_custom_ids: Sequence[str]) -> list[DeleteResult]:
+        return await self._mem.delete_documents(ids_or_custom_ids)
+
+    async def document_status(self, id_or_custom_id: str) -> DocumentStatus:
+        return await self._mem.document_status(id_or_custom_id)
 
     async def purge(self, *, confirm_tenant: str | None = None) -> dict[str, int]:
         return await self._mem.purge(confirm_tenant=confirm_tenant)

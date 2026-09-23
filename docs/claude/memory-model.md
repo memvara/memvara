@@ -44,8 +44,10 @@ landing beside them unnoticed.
 `remember()`, `forget()`, `forget_matching()`, `supersede()`, `delete()`, `link()`,
 `erase()`), the reads (`search()`,
 `recall()`, `ask()`, `get()`, `get_all()`, `since()`, `history()`, `why()`, `produced()`,
-`neighborhood()`, `paths_between()`) and the maintenance calls (`consolidate()`, `stats()`,
-`connectivity()`, `reembed()`, `merge_predicate()`).
+`neighborhood()`, `paths_between()`), the document calls (`add_document()`,
+`get_document()`, `list_documents()`, `update_document()`, `delete_document()`,
+`delete_documents()`, `document_status()`) and the maintenance calls (`consolidate()`,
+`stats()`, `connectivity()`, `reembed()`, `merge_predicate()`).
 
 A write becomes an `Episode` (the raw turn) and zero or more `Claim` rows that cite it. A
 read returns `Result` objects that wrap a claim with its score and an `Explanation`, so the
@@ -76,6 +78,12 @@ The distinction is the product, and it appears in three places that must agree.
   stays visible to `history()` and `why()`.
 - **Erased** is the only one that removes bytes. `erase()` deletes the row and its residue,
   and `prove_erased()` returns an `ErasureProof` with per-table counts as evidence.
+
+A document sits beside this rather than inside it. `add_document()` stores a document's
+text as chunks, each an episode, and `delete_document()` erases that text. It never
+erases a claim: a claim whose every source was one of the document's chunks is retired,
+with the closure reason "source document deleted", and a claim with another source keeps
+it. `docs/INTERNALS.md` has the details under *Documents*.
 
 The MCP tool descriptions in `memvara/server/tools.py` state the same three words for a
 model that cannot read this page; `.claude/rules/tool-descriptions.md` covers that side and

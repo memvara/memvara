@@ -7,6 +7,44 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## The schema is version 14, four MCP tools are new, and deleting a document erases its text
+
+### What changed
+
+`SCHEMA_VERSION` moves from 13 to 14. The migration adds two tables: `documents`, one row
+per stored document, and `document_chunks`, one row per chunk, each naming the episode
+the chunk was stored as. Nothing is copied into them, because no earlier version stored a
+document. As with every schema bump, a file opened by this build is refused by an older
+build rather than written to. Take a copy first if you may need to go back.
+
+`Episode.hash` now mixes in `meta["document_id"]` when an episode has one. Only document
+chunks carry that key, so the hash of every episode you already have is unchanged.
+
+The MCP server serves twenty-two tools instead of eighteen: `memory_add_document`,
+`memory_get_document`, `memory_list_documents` and `memory_delete_document` are new, and
+the `documents` feature switch hides all four. `memory_delete_document` is the first
+tool that erases stored text. What it erases is one document's own chunks; it erases no
+memory, and a memory whose only source was the document is retired with the reason
+"source document deleted".
+
+### Who this changes, and in which direction
+
+**If you implement `Store` yourself**, seven document methods are new: `put_document`,
+`get_document`, `find_document`, `list_documents`, `document_chunks`,
+`put_document_chunks` and `delete_document`. They are optional as a group: without them
+`add_document()` and the methods beside it raise `NotImplementedError` naming your
+store, and nothing else changes. If your store keeps a copy of a chunk's text outside the
+episode, erase it wherever you erase the episode, including in `purge()`, or an erasure
+leaves the text behind.
+
+**If you serve MCP to a model with a fixed tool budget**, set
+`MEMVARA_FEATURE_DOCUMENTS=0` to keep the list at eighteen.
+
+**If you list a store's episodes**, document chunks appear among them with
+`role="system"` and `meta["document_id"]` set. Filter on that key to leave them out.
+
+---
+
 ## The schema is version 13, three MCP tools are new, erasure proofs count a fifth table, and `supersede()` ends where the new value begins
 
 ### What changed
