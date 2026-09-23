@@ -30,11 +30,10 @@ from memvara.server.validate import ToolError, validate
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
-#: The default buckets are read from the shipped predicate packs, which need `tomllib`, and
-#: that arrives in Python 3.11. `test_a_pack_that_cannot_be_read_costs_its_bucket_and_says_so`
-#: covers what 3.10 gets instead.
+#: For the one test that compares the line reader with the TOML reader, which needs
+#: `tomllib` and therefore Python 3.11.
 needs_toml = pytest.mark.skipif(sys.version_info < (3, 11),
-                                reason="tomllib arrives in 3.11; the packs cannot be read")
+                                reason="tomllib arrives in 3.11")
 
 
 def make(**kw):
@@ -122,7 +121,6 @@ def test_a_query_adds_the_relevant_section_and_only_then():
     assert [r.text for r in hits] == ["api depends on postgres"]
 
 
-@needs_toml
 def test_default_buckets_are_the_three_shipped_packs():
     mem = make()
     mem.remember("api", "depends_on", "postgres")
@@ -143,7 +141,6 @@ def test_caller_buckets_replace_the_defaults_and_hold_the_newest_k():
         ["api depends on lib2", "api depends on lib1"]
 
 
-@needs_toml
 def test_a_bucket_predicate_nothing_declares_is_ignored_and_reported():
     mem = make()
     profile = mem.profile(buckets={"stack": ["depends_on", "no_such_verb"]})
@@ -202,7 +199,6 @@ def test_k_below_one_is_refused():
         make().profile(k=0)
 
 
-@needs_toml
 def test_a_profile_and_standing_for_another_project_read_that_project():
     mem = make()
     app = mem.scope(project="github.com/acme/app")
@@ -452,3 +448,32 @@ def test_a_profile_reads_the_scope_once_and_asks_the_store_once_more_for_recent(
     monkeypatch.setattr(mem.store, "candidate_ids", counting)
     mem.profile(since=T0, buckets={})
     assert len(calls) == 2
+
+
+
+# -- the pack names, with and without tomllib ---------------------------------------------
+
+@needs_toml
+@pytest.mark.parametrize("pack", core_module.PROFILE_PACKS)
+def test_the_line_reader_finds_exactly_the_names_the_toml_reader_finds(pack):
+    """Python 3.10 has no `tomllib`, so the default buckets read the shipped packs' names
+    with a line reader instead. It is only trusted because this test holds it to the real
+    parser on every pack that ships."""
+    from memvara.schema import load_specs
+    assert core_module._scan_pack_names(pack) == tuple(s.name for s in load_specs(pack))
+
+
+def test_without_tomllib_the_default_buckets_still_have_their_predicates(monkeypatch):
+    monkeypatch.setitem(sys.modules, "tomllib", None)
+    names = core_module._pack_predicates.__wrapped__("engineering")
+    assert "depends_on" in names and names == core_module._scan_pack_names("engineering")
+
+
+def test_the_line_reader_refuses_a_pack_it_cannot_read_or_that_names_nothing(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(core_module, "PACKS_DIR", tmp_path)
+    with pytest.raises(PredicatePackError, match="could not be read"):
+        core_module._scan_pack_names("absent")
+    (tmp_path / "empty.toml").write_text("# nothing here\n[meta]\nname = \"x\"\n")
+    with pytest.raises(PredicatePackError, match="declares no predicate names"):
+        core_module._scan_pack_names("empty")
