@@ -70,6 +70,17 @@ subject_type = ["component"]
 object_type = ["person", "team"]
 graph = true
 
+# What a repository is for, as `/memvara:index` records it. Single-valued: a project has
+# one purpose at a time, so a restated purpose is the old one changing and must end it,
+# where a many-valued slot would keep both and answer "what is this for?" twice.
+[[predicate]]
+name = "purpose"
+cardinality = "one"
+volatility = "slow"
+aliases = ["project_purpose"]
+subject_type = ["component"]
+object_type = ["value"]
+
 # Multi-valued on purpose. A project rejects many things and depends on many things, and
 # declaring these is not a formality: it is what stops the accumulation note firing on
 # writes that are completely correct.
@@ -108,7 +119,36 @@ subject_type = ["component"]
 object_type = ["component"]
 graph = true
 
-# ## Why five of these declare `graph` and six declare `value`
+# Three more that `/memvara:index` writes, multi-valued for the same reason as the four
+# above: a repository follows many conventions, has several entry points (a CLI, a server,
+# a worker) and is built, tested and run with several commands. A second value is another
+# true fact, and a single-valued slot would end the first one on every index run.
+
+[[predicate]]
+name = "convention"
+cardinality = "many"
+volatility = "slow"
+aliases = ["coding_convention", "house_rule"]
+subject_type = ["component"]
+object_type = ["value"]
+
+[[predicate]]
+name = "entry_point"
+cardinality = "many"
+volatility = "slow"
+aliases = ["entrypoint", "main_module"]
+subject_type = ["component"]
+object_type = ["value"]
+
+[[predicate]]
+name = "runs_with"
+cardinality = "many"
+volatility = "slow"
+aliases = ["run_command", "build_command", "test_command"]
+subject_type = ["component"]
+object_type = ["value"]
+
+# ## Why five of these declare `graph` and ten declare `value`
 #
 # A claim carries a graph edge only when its predicate declares both that the object is an
 # entity and that walking the relation helps — `carries_edge` is `objects_are_entities and
@@ -123,8 +163,9 @@ graph = true
 # component to a person, which is how "who owns the thing that is blocking me" is answered
 # in two hops rather than two queries.
 #
-# The six that do not are not a judgement about how clean their objects are. A version
-# string, a branch name, a URL and a defect description are values: nothing else in the
+# The ten that do not are not a judgement about how clean their objects are. A version
+# string, a branch name, a URL, a defect description, a purpose, a convention, a file path
+# and a command line are values: nothing else in the
 # store is ever their subject, so an edge from them would go nowhere. `rejected` is the
 # one that could have gone either way — sometimes a rejected thing is a component — and it
 # is declared `value` because the object is more often a sentence about an approach than a
