@@ -20,11 +20,27 @@ from typing import Mapping, Sequence, TextIO
 
 from .. import __version__
 from ..core import EmbedderMismatchError
-from .config import EXAMPLE_CONFIG, ConfigError, ServerConfig, build_memvara
+from .config import (
+    EXAMPLE_CONFIG,
+    FEATURES_OFF_BY_DEFAULT,
+    ConfigError,
+    ServerConfig,
+    build_memvara,
+)
 from .init import init
 from .mcp import MemvaraMCPServer
 
 __all__ = ["main"]
+
+
+def _feature_defaults() -> str:
+    """The `--help` sentence saying which features are on by default, from the table."""
+    off = sorted(name.upper() for name in FEATURES_OFF_BY_DEFAULT)
+    if not off:
+        return "Every feature is on by default."
+    listed = off[0] if len(off) == 1 else f"{', '.join(off[:-1])} and {off[-1]}"
+    return f"Every feature is on by default except {listed}."
+
 
 USAGE = f"""\
 memvara-mcp {__version__} — Memvara memory as an MCP server over stdio.
@@ -55,12 +71,15 @@ client, not run interactively. Configured entirely by environment:
                      whose predicate is declared global, such as a preference, is
                      still seen from every project.
   MEMVARA_FEATURE_<NAME>
-                     '0' switches one feature off; every feature is on by default.
+                     '0' switches one feature off and '1' switches it on.
+                     {_feature_defaults()}
                      PROJECT_SCOPE=0 stops the project being derived (an explicit
                      MEMVARA_PROJECT still applies), PROFILE=0 hides
                      memory_profile, FORGET_MATCHING=0 hides memory_end_matching
                      and memory_forget_matching, LINKS=0 hides memory_link, and
                      END_REASON=0 removes the reason and until_reason arguments.
+                     EXTRACTION_CHUNKS decides whether a turn over 6,000
+                     characters is extracted in pieces, one model call per piece.
                      INDEX_COMMAND, RESEARCH_AGENT, STATUS_LINE and RECALL_MARK
                      are also accepted, for the plugin. An unknown name is refused.
   MEMVARA_LLM         'none' (default, offline, extracts only recognised sentence
