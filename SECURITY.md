@@ -212,11 +212,15 @@ on the list above.
   a serious deployment brings its own `Redactor`. The telemetry pair `redact.inspected` /
   `redact.changed`, tagged by field and script, exists precisely because a rule set that
   stops matching is otherwise silent.
-- **No encryption at rest.** Documented in the README with the reasoning: SQLCipher works
-  and costs +43–48% on writes, but the mmap-backed `.vecs` sidecar sits *outside* its
-  page-level boundary, and a plaintext vector beside encrypted text is a confirmation
-  oracle you can hill-climb. Encrypting one and not the other would be theatre. Full-disk
-  encryption is the honest answer today.
+- **The documented limits of encryption at rest.** A local store created with encryption
+  (the MCP server's default) has its database encrypted by SQLCipher and every row of its
+  vector file encrypted with AES-256-GCM. `docs/LIMITATIONS.md` lists what that does not
+  cover: a lost key, a key kept in `~/.memvara/db.key` beside the store, an existing store
+  nobody has converted, the replay of an older record for the same row and item, the
+  `<db>.embedder.json` file, and Postgres, whose encryption belongs to its operator. A
+  report that one of those is true is not a vulnerability. A way to read an encrypted
+  store without its key, to make a tampered vector file load silently, or to get a key
+  printed where it was not asked for is one, and is in scope.
 - **`-wal` residue after erasure.** Erasure removes the rows, the index entries and the
   vectors, and overwrites the pages they occupied — `PRAGMA secure_delete=ON` and FTS5's
   own `secure-delete` are both set by the store, so the text is gone from the main

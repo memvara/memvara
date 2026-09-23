@@ -29,6 +29,7 @@ from ..project import canonical_project, check_project
 from .validate import _suggest
 from ..schema import (BUILTIN_PREDICATES, PredicatePackError,
                       PredicateRegistry, load_all_specs)
+from ..store.encryption import KEY_ENV, EncryptionError, EncryptionUnavailable, parse_key
 
 if TYPE_CHECKING:
     # Imported for the annotation alone. At runtime `memvara.remote.api` reaches back
@@ -121,6 +122,11 @@ _DEFAULT_EMBEDDER = "hashing"
 #: `metadata_filters` decides whether `memory_search` and `memory_recall` accept `filters`
 #: and `filepath_prefix`. Switched off, a call carrying either is refused with a message
 #: naming the switch, and the argument descriptions say so; it is never run unfiltered.
+#:
+#: `encryption` decides whether a new local store file is created encrypted
+#: (`SQLiteStore(encryption=True)`). An existing store opens as whatever it already is.
+#: With the switch on and the `encrypt` extra missing, a new store is refused rather than
+#: created unencrypted; see `build_memvara`.
 FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
     "index_command": True,
     "research_agent": True,
@@ -139,6 +145,7 @@ FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
     "query_rewrite": True,
     "synthesis": True,
     "metadata_filters": True,
+    "encryption": True,
 })
 
 #: Every feature name, in the order `FEATURE_DEFAULTS` lists them.
@@ -328,6 +335,12 @@ class ServerConfig:
     #: another. Unset, each process generates its own, which is right for a single stdio
     #: server. Kept out of `repr` because it is a secret.
     confirm_secret: str | None = field(default=None, repr=False)
+    #: `MEMVARA_DB_KEY` as it appeared in the environment this config was read from, for
+    #: an encrypted local store. Read here rather than from `os.environ` at open, because
+    #: the plugin's hooks build their configuration from the client's server block, which
+    #: never reaches `os.environ`; a key that lived only there opened the server's store
+    #: and not the hooks'. Kept out of `repr` because it is the key.
+    db_key: str | None = field(default=None, repr=False)
     #: The operator's own NAT64 prefixes, from `MEMVARA_NAT64_PREFIXES` (comma-separated).
     #: A URL whose host resolves into one is checked as the IPv4 address inside it, so a
     #: private IPv4 host reached through the gateway is refused. The well-known and
@@ -463,6 +476,7 @@ class ServerConfig:
             # reach `Confirmer`, which refuses an empty key; unset is the intended reading.
             confirm_secret=_optional(env.get("MEMVARA_CONFIRM_SECRET")),
             nat64_prefixes=nat64_prefixes,
+            db_key=_db_key(env.get(KEY_ENV)),
         )
 
     def url_fetcher(self) -> SafeFetcher:
@@ -484,7 +498,7 @@ def unknown_features(names: Iterable[str]) -> str | None:
     exception, so the two cannot disagree about what a feature is.
 
     >>> unknown_features(["profle"])
-    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite, synthesis and metadata_filters."
+    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite, synthesis, metadata_filters and encryption."
     >>> unknown_features(["profile"]) is None
     True
     """
@@ -701,6 +715,22 @@ def _read_extract_system(path: str | None) -> str | None:
         raise ConfigError(
             f"MEMVARA_LLM_EXTRACT_SYSTEM={path!r} is empty. A model told nothing extracts "
             "nothing; unset it to use the extraction instructions memvara ships.")
+    return text
+
+
+def _db_key(raw: str | None) -> str | None:
+    """`MEMVARA_DB_KEY`, checked at startup, or None when unset or blank.
+
+    Checked here so a malformed key is a startup error beside the rest of the
+    configuration. The message says what is wrong with it and never repeats it.
+    """
+    text = _optional(raw)
+    if text is None:
+        return None
+    try:
+        parse_key(text, KEY_ENV)
+    except EncryptionError as exc:
+        raise ConfigError(str(exc)) from None
     return text
 
 
@@ -1003,6 +1033,35 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
             metadata_filters="metadata_filters" not in config.features_off,
             **config.scope_kwargs,
         )
+    encryption = "encryption" not in config.features_off
+    try:
+        return _local_memvara(config, encryption)
+    except EncryptionUnavailable:
+        # Refused rather than created unencrypted. A store file is created once, and one
+        # created without encryption stays that way until somebody converts it; the
+        # warning that could say so goes to stderr, which under stdio nobody reads. So the
+        # moment the client shows "the server failed to start" is the one moment this can
+        # be said to a person. An existing unencrypted store never gets here: it opens,
+        # with a warning and a line in memory_stats.
+        raise ConfigError(
+            "The encryption feature is on (it is on by default), so a new store is "
+            "created encrypted, and that needs the encrypt extra: "
+            "pip install 'memvara[encrypt]'. To create this store without encryption "
+            "instead, set MEMVARA_FEATURE_ENCRYPTION=0.") from None
+    except EncryptionError as exc:
+        # No key, a malformed key, or a key that does not open the store. The message
+        # says where the key was looked for and never what it is.
+        raise ConfigError(str(exc)) from None
+
+
+def _local_memvara(config: ServerConfig, encryption: bool) -> Memvara:
+    """The local engine `build_memvara` serves, over the store `config.path` names.
+
+    A new store file is created encrypted when the switch is on; an existing one opens as
+    what it is. The key is looked up in the environment this config was read from
+    (`ServerConfig.db_key`), never in `os.environ` directly, so the hooks, whose
+    environment is the client's server block, find the same key the server does.
+    """
     return Memvara(
         config.path,
         # Passed explicitly even when it is the default: `Memvara()` warns about a missing
@@ -1043,6 +1102,8 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         url_fetcher=config.url_fetcher(),
         ingest_urls="ingest_urls" not in config.features_off,
         ingest_media="ingest_media" not in config.features_off,
+        encryption=encryption,
+        key_env={KEY_ENV: config.db_key} if config.db_key else {},
         # The read path's model stages use the `llm` above when it can chat, and these
         # are their switches, `MEMVARA_FEATURE_QUERY_REWRITE` and
         # `MEMVARA_FEATURE_SYNTHESIS`.

@@ -126,16 +126,35 @@ the date is here to be read, and to be old enough to disbelieve eventually.
   foreign interface intact. What it loses is the predicate registry: a stored `home_city`
   does not contradict an extracted `lives_in`. Each adapter says which it is; see
   `memvara/integrations/`.
-- **No encryption at rest.** `purge()`, `erase()` and the redaction hook cover the
-  deletion and ingestion halves of a privacy story; the storage half is the deployment's
-  problem, and full-disk encryption is the honest answer today. It is not laziness:
-  SQLCipher works here — measured, +43–48% on writes, search unchanged, and FTS5 keeps
-  working because page-level encryption sits *beneath* SQLite — but the mmap-backed
-  `.vecs` sidecar stays plaintext outside that boundary, and a plaintext vector is a
-  confirmation oracle. Encoding a guess and taking the cosine against that file returns
-  exactly 1.0000 for the right text and 0.87 for a one-digit-different phone number, so
-  it is not merely confirmable, it is hill-climbable. Encrypting the text and not the
-  vectors would be theatre.
+- **Encryption at rest covers the local SQLite store, and has limits worth knowing.**
+  A store created with `encryption=True`, or by the MCP server with its `encryption`
+  switch on (the default), has its database encrypted by SQLCipher and every row of its
+  vector file encrypted with AES-256-GCM. What it does not cover:
+  - **A lost key is a lost store.** The key is in the OS keychain, in `MEMVARA_DB_KEY`, or
+    in `~/.memvara/db.key`. Nothing can read an encrypted store without it, including
+    memvara. Back it up with `memvara encrypt --export-key`.
+  - **A key in `~/.memvara/db.key` sits in the same home directory as the store**, so a
+    copy of the whole home directory is a copy of both. It protects a store file copied
+    on its own, such as a backup or a file attached somewhere by mistake. The OS keychain,
+    or `MEMVARA_DB_KEY` filled from a secret manager, keeps the key apart.
+  - **An existing store is not converted for you.** It keeps opening as it is, with a
+    warning and a `memory_stats` line, until `memvara encrypt <path>` is run with every
+    process that uses it stopped. The conversion replaces the old files rather than
+    overwriting them, so on a disk without its own encryption their blocks can survive
+    until the file system reuses them.
+  - **The encrypted vectors are held in memory, not memory-mapped.** Each process that
+    searches an encrypted store holds its own decrypted copy of the vector matrix, so N
+    processes use N times the memory an unencrypted store's shared mapping uses.
+  - **`<db>.embedder.json` is not encrypted.** It names the embedding model and its
+    width, and nothing written to the store.
+  - **Postgres is not covered.** Encrypting a Postgres database, and the disks under it,
+    belongs to the operator who runs it, with the database's own tools or the disk's.
+    The same is true of a hosted deployment.
+
+  One tampering case passes authentication: replacing a record in the vector file with
+  an older record for the same row and the same item. A search would then use that
+  item's older vector. It cannot make a search use another item's vector, or any vector
+  the key did not write.
 - **Reading documents has limits you should know before relying on it.**
   `memvara.ingest.extract` does no OCR, so a PDF made of scanned pages has no text and is
   refused with `no_text`. It does not run JavaScript, so a web page that builds its content

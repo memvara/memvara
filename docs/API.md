@@ -10,8 +10,11 @@ omitted below for readability.
 
 ```python
 mem = Memvara(path=":memory:", *, store=, embedder=, llm=, registry=, telemetry=,
-             redactor=, tenant=, user=, agent=, session=, reembed=False, **tuning)
+             redactor=, tenant=, user=, agent=, session=, reembed=False,
+             encryption=False, **tuning)
 # api_key= or base_url= instead returns a RemoteMemvara — see "A hosted deployment" below
+# encryption=True creates a new store file encrypted (pip install 'memvara[encrypt]');
+#   an existing file opens as whatever it already is — see "Encryption at rest" below
 
 # write
 mem.add(messages, *, role="user", ts=None)        -> WriteReceipt
@@ -261,6 +264,26 @@ install stays a two-package install (`memvara` and `numpy`, verified in CI). Eac
 is transport and response-shape only — every rule about what counts as a valid claim is
 shared in `memvara/llm/_shape.py`, so the same turn produces the same claim regardless of
 which model wrote it.
+
+### Encryption at rest
+
+```python
+mem = Memvara("memory.db", encryption=True)        # pip install 'memvara[encrypt]'
+store = SQLiteStore("memory.db", key=key_bytes)    # 32 bytes; skips the key lookup
+mem = Memvara("memory.db", encryption=True,        # read MEMVARA_DB_KEY from this
+              key_env={"MEMVARA_DB_KEY": hex_key}) # mapping, not from os.environ
+store.encrypted, store.key_source                  # True, and where the key came from, never the key
+```
+
+A new store file is created with its database encrypted by SQLCipher and every row of its
+vector file encrypted with AES-256-GCM. The key is looked up in the OS keychain (service
+`memvara`, account `db-key`), then `MEMVARA_DB_KEY`, then `~/.memvara/db.key`, where one is
+generated with mode 0600 if none exists. An existing file opens as whatever it is: an
+encrypted one needs its key and raises `EncryptionError` without it, and an unencrypted
+one opens with an `EncryptionWarning` when `encryption=True`. `:memory:` is never
+encrypted. `memvara encrypt PATH` converts an existing store, and
+`memvara encrypt --export-key` prints the key. A lost key cannot be recovered. See
+[DEPLOY.md](DEPLOY.md#encryption-at-rest).
 
 ### Turning a document into text
 

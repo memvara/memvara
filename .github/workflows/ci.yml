@@ -76,7 +76,11 @@ jobs:
           # extra installed the module fails to collect at all rather than skipping.
           # `ingest` so the PDF tests read a real PDF with the real `pypdf`; without it
           # they run only against a stand-in module and the real ones skip.
-          python -m pip install -e ".[dev,cloud,ingest]"
+          # `encrypt` so the encrypted-store tests run on every interpreter and every OS
+          # here: SQLCipher is a compiled library, and "its wheel installs and works on
+          # Windows" is a claim only this matrix can check. It is also needed by the
+          # server tests, because the server creates new stores encrypted by default.
+          python -m pip install -e ".[dev,cloud,ingest,encrypt]"
 
       - name: Test
         env:
@@ -103,8 +107,9 @@ jobs:
           python -m pip install --upgrade pip
           # See the `test` job: RemoteStore's tests need `httpx` (the `cloud` extra) to
           # collect at all, and every line in memvara/store/remote.py is covered only
-          # when they run. `ingest` for the same reason as in the `test` job.
-          python -m pip install -e ".[dev,cloud,ingest]"
+          # when they run. `ingest` and `encrypt` for the same reasons as in the `test`
+          # job; memvara/store/encryption.py is covered only when SQLCipher is installed.
+          python -m pip install -e ".[dev,cloud,ingest,encrypt]"
       # `coverage report` exits non-zero below fail_under, so this step is the gate.
       - run: |
           python -m coverage run -m pytest -q
@@ -130,8 +135,10 @@ jobs:
           # `memvara/server/init.py` import `httpx` under `TYPE_CHECKING`/lazily; mypy
           # still needs it installed to resolve the import, or every annotated use of it
           # is an `import-not-found` error regardless of whether the code is correct.
-          # `ingest` so `memvara/ingest/pdf.py` is checked against `pypdf`'s own types.
-          python -m pip install -e ".[dev,cloud,ingest]"
+          # `ingest` so `memvara/ingest/pdf.py` is checked against `pypdf`'s own types,
+          # and `encrypt` so memvara/store/encryption.py is checked against the types
+          # `cryptography` and `keyring` ship.
+          python -m pip install -e ".[dev,cloud,ingest,encrypt]"
       - run: python -m mypy -p memvara
       # The benchmark's adapter interface is a `Protocol`, and a Protocol nothing checks
       # is decorative — an adapter can drift out of conformance with no runtime symptom

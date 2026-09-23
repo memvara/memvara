@@ -336,7 +336,7 @@ and does not satisfy an erasure request.
 | Tamper-evident hash-chained audit log | **commercial** |
 | Retention policies on a schedule | **commercial** |
 | RBAC / SSO | **commercial** |
-| Encryption at rest | **deferred** — see below |
+| Encryption at rest | **done, open** — reversed from deferred on 2026-09-23; see the "Reversed" list |
 
 The dividing rule, stated once because it decides every future case: **a seam is worth
 nothing to a competitor and everything to a deployment; a policy is the opposite.** A
@@ -553,14 +553,8 @@ then, with usage behind it rather than a taxonomy.
 Each of these was considered and declined for a reason. They are recorded here so they stop
 reading as things that are coming.
 
-**Encryption at rest.** SQLCipher works — measured at +43–48% on writes, search unchanged,
-and FTS5 keeps working because page-level encryption sits *beneath* SQLite. It is not
-shipped because the mmap-backed `.vecs` sidecar stays plaintext outside that boundary, and
-a plaintext vector is a confirmation oracle: encoding a guess and taking the cosine against
-that file returns exactly 1.0000 for the right text and 0.87 for a one-digit-different
-phone number, so it is not merely confirmable, it is hill-climbable. Encrypting the text and
-not the vectors would be theatre. Full-disk encryption is the honest answer for the open
-core; a storage-layer answer belongs with the backend that has one.
+**Encryption at rest** was on this list until 2026-09-23. It is now built, and its entry,
+with the measurements that kept it here, is under "Reversed" below.
 
 **Database-enforced row-level security.** Scope isolation here is enforced in the query
 layer — `Scope.sees` for reads, `Scope.ancestors()` in SQL for enumeration — and it fails
@@ -702,6 +696,42 @@ exactly the turns that need them.
 
 Decisions that were recorded as declined and have since been reversed. Each entry keeps the
 measurements from when it was declined, because they are still true, and says what changed.
+
+**Encryption at rest for the local store.** Declined after measurement. **Reversed on
+2026-09-23 and built, on by default for the MCP server.** The phase 2 parity design
+(`docs/superpowers/specs/2026-09-23-parity-phase-2-documents-and-retrieval-design.md`,
+section 4.6) asks for it, and it removes the objection that kept it here: the vector file is
+now encrypted too. `SQLiteStore(path, encryption=True)`, `Memvara(path, encryption=True)`,
+or the MCP server's `encryption` switch (`MEMVARA_FEATURE_ENCRYPTION`, on unless set to `0`)
+creates a new store with its database encrypted by SQLCipher and every row of its vector
+file encrypted with AES-256-GCM, bound to its row number and its owner's id. The encrypted
+matrix is decrypted into memory when the store first searches, instead of being
+memory-mapped, which is the cost the old entry did not have to pay: it is private to each
+process rather than shared between them. The key comes from the OS keychain, then
+`MEMVARA_DB_KEY`, then `~/.memvara/db.key` (generated there with mode 0600 if none exists),
+and a store whose key is lost cannot be read. `memvara encrypt <db>` converts an existing
+store in place. It needs the `encrypt` extra. Postgres is unchanged: its operator encrypts
+its disks.
+
+Measured on 2026-09-23 with `bench/encryption.py` on the store `bench/perf.py` builds
+(`HashingEmbedder(dim=256)`, Python 3.13, one Apple Silicon Mac, 300 operations each). At
+20,000 claims: a write went from 0.30 to 0.53 ms at the median (+76%; SQLCipher alone was
+the +43–48% below, and the rest is the vector record); a search went from 6.5 to 4.8 ms
+(−26%), because the matrix is in memory rather than read through page faults; the first
+search after opening, which decrypts every row, went from 62 to 153 ms; and peak resident
+memory went from 71 to 122 MB. At 8,000 claims the same four were +81%, −14%, 27 to 68 ms,
+and 60 to 85 MB.
+
+The entry as it was declined:
+
+> **Encryption at rest.** SQLCipher works — measured at +43–48% on writes, search unchanged,
+> and FTS5 keeps working because page-level encryption sits *beneath* SQLite. It is not
+> shipped because the mmap-backed `.vecs` sidecar stays plaintext outside that boundary, and
+> a plaintext vector is a confirmation oracle: encoding a guess and taking the cosine against
+> that file returns exactly 1.0000 for the right text and 0.87 for a one-digit-different
+> phone number, so it is not merely confirmable, it is hill-climbable. Encrypting the text and
+> not the vectors would be theatre. Full-disk encryption is the honest answer for the open
+> core; a storage-layer answer belongs with the backend that has one.
 
 **Splitting a long turn into chunks before extraction.** Declined on 2026-09-03 after
 measurement. **Reversed on 2026-09-23 and built, switched off by default.** The phase 2

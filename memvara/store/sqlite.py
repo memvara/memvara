@@ -23,6 +23,10 @@ Design notes:
   pages are shared between processes rather than copied per worker, and growth is a
   file extension instead of an `np.vstack` that transiently holds four times the old
   matrix.
+* An encrypted store (`encryption=True`, the `encrypt` extra) is the exception to the
+  point above. Its database is SQLCipher, and its vector file holds one AES-256-GCM record
+  per row, so the matrix is decrypted onto the heap on the first search instead of being
+  mapped. See `memvara/store/encryption.py` and `_load_sealed`.
 
 The whole thing runs in WAL mode, with **one connection per writer and one per reading
 thread**. That second half is what makes the first half true. WAL lets any number of
@@ -55,12 +59,13 @@ import os
 import sqlite3
 import struct
 import threading
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from io import BufferedRandom
 from typing import (TYPE_CHECKING, Any, Callable, Collection, Iterable, Iterator,
-                    Sequence, cast)
+                    Mapping, Sequence, cast)
 
 import numpy as np
 
@@ -82,6 +87,8 @@ from ..types import (
     utcnow,
 )
 from .base import BELIEVED, resolve_states, state_predicate, stored_state_predicate
+from .encryption import (EncryptionError, EncryptionWarning, VectorSealer, file_kind,
+                         require_sqlcipher, resolve_key)
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..schema import PredicateSpec
@@ -947,9 +954,14 @@ class _VecIndex:
     _DENSE_SHARE = 0.35
 
     def __init__(self, dim: int | None = None, path: str | None = None,
-                 count: "Callable[[], int] | None" = None) -> None:
+                 count: "Callable[[], int] | None" = None,
+                 sealer: VectorSealer | None = None) -> None:
         self.dim = dim
         self.path = path
+        # Set for an encrypted store. The matrix then lives on the heap, decrypted, and
+        # the file holds one AES-GCM record per row; see `VectorSealer`. A memory-mapped
+        # matrix cannot be encrypted, because every read would see the ciphertext.
+        self._sealer = sealer if path is not None else None
         # How many vectors exist, asked of whoever owns durability. Without it an index
         # that has not yet needed its map would report itself empty, and "empty" is a
         # different claim from "not looked at".
@@ -966,6 +978,11 @@ class _VecIndex:
         # Its own lock, always taken inside the store's: growth swaps the mapping out
         # from under anything reading it.
         self._lock = threading.RLock()
+
+    @property
+    def sealed(self) -> bool:
+        """Whether the file beside the matrix is encrypted, row by row."""
+        return self._sealer is not None
 
     # -- backing store -------------------------------------------------------
 
@@ -986,6 +1003,8 @@ class _VecIndex:
             self._fh = os.fdopen(fd, "r+b")
             size = os.fstat(fd).st_size
             head = _read_at(fd, _VEC_HEADER, 0) if size >= _VEC_HEADER else b""
+            if self._sealer is not None:
+                return self._attach_sealed(fd, head, dim, rows)
             usable = (head[:8] == _VEC_MAGIC
                       and struct.unpack_from("<II", head, 8) == (_VEC_FORMAT, dim))
             if not usable:
@@ -997,11 +1016,80 @@ class _VecIndex:
             self._ensure_rows(max(rows, self._INITIAL_ROWS))
             return usable
 
+    def _attach_sealed(self, fd: int, head: bytes, dim: int, rows: int) -> bool:
+        """`attach` for an encrypted file. Reads no rows; `load` reads them one by one.
+
+        A header that is missing, of another format, written for another width or
+        carrying another database's salt is replaced, and the caller rebuilds every row
+        from the database, exactly as a stale plaintext file is rebuilt. That is safe to
+        do without asking, because the database holds the same vectors and authenticates
+        them itself. The replacement header is the same bytes in every process that opens
+        this database, because nothing in it is chosen here; see `VectorSealer`.
+        """
+        assert self._sealer is not None
+        usable = self._sealer.matches(head, dim)
+        if not usable:
+            os.ftruncate(fd, 0)
+            _write_at(fd, self._sealer.header(dim).ljust(_VEC_HEADER, b"\0"), 0)
+        self._sealer.bind(dim)
+        self._rows = 0
+        self._mat = None
+        self._ensure_rows(max(rows, self._INITIAL_ROWS))
+        return usable
+
+    def _record(self, slot: int) -> tuple[int, int]:
+        """Where row `slot` sits in the encrypted file, and how many bytes it takes."""
+        assert self._sealer is not None and self.dim is not None
+        size = self._sealer.record_size(self.dim)
+        return _VEC_HEADER + slot * size, size
+
+    def load(self, item_id: str, slot: int) -> str:
+        """Read row `slot` of the encrypted file for `item_id`, and map it if it opens.
+
+        Returns "ok", or why not: "short" when the file ends before the record does,
+        "blank" when the record is all zero bytes (never written, or erased), and "bad"
+        when the record is there and fails authentication. The store decides what each
+        means, because only the database can say whether `item_id` still owns the row.
+        """
+        with self._lock:
+            assert self._sealer is not None and self._fh is not None
+            offset, size = self._record(slot)
+            record = _read_at(self._fh.fileno(), size, offset)
+            if len(record) < size:
+                return "short"
+            if not record.strip(b"\0"):
+                return "blank"
+            data = self._sealer.open(slot, item_id, record)
+            if data is None:
+                return "bad"
+            self.put_mem(item_id, slot, np.frombuffer(data, dtype=np.float32))
+            return "ok"
+
+    def put_mem(self, item_id: str, slot: int, vec: np.ndarray) -> None:
+        """Set the decrypted row and map `item_id` to it, without writing the file.
+
+        For a vector whose record another process has already written, or one read from
+        the database because its record could not be used.
+        """
+        with self._lock:
+            self._ensure_rows(slot + 1)
+            assert self._mat is not None
+            self._mat[slot] = vec
+            self._row[item_id] = slot
+            self._high = max(self._high, slot + 1)
+
+    def _seal(self, item_id: str, slot: int) -> None:
+        """Write row `slot` of the heap matrix to the file as one encrypted record."""
+        assert self._sealer is not None and self._fh is not None and self._mat is not None
+        offset, _ = self._record(slot)
+        _write_at(self._fh.fileno(),
+                  self._sealer.seal(slot, item_id, self._mat[slot].tobytes()), offset)
+
     def _ensure_rows(self, need: int) -> None:
         if self._mat is not None and need <= self._rows:
             return
         assert self.dim is not None
-        if self.path is None:
+        if self.path is None or self._sealer is not None:
             target = max(need, self._rows * 2, self._INITIAL_ROWS)
             grown = np.zeros((target, self.dim), dtype=np.float32)
             if self._mat is not None:
@@ -1054,6 +1142,8 @@ class _VecIndex:
             self._mat[slot] = vec
             self._row[item_id] = slot
             self._high = max(self._high, slot + 1)
+            if self._sealer is not None:
+                self._seal(item_id, slot)
 
     def map(self, item_id: str, slot: int) -> None:
         """Point `item_id` at a row that already holds its vector.
@@ -1083,18 +1173,30 @@ class _VecIndex:
                 slot = self._free.pop() if self._free else self._high
             self.put(item_id, slot, v)
 
-    def forget(self, item_id: str) -> int | None:
+    def forget(self, item_id: str, slot: int | None = None) -> int | None:
         """Unmap an item and blank its row, returning the slot it held.
 
         Zeroing matters for erasure: purged text stays reconstructible from
         its embedding, and the file outlives the process. The slot is handed back to
         the caller rather than reused here, because when a store is present the free
         list has to be durable and shared.
+
+        `slot` is the row the database says the item holds. The store passes it when it
+        erases, because the name-to-row map is loaded lazily: a process that erases
+        before it has searched has no entry for the item, and without the slot the row
+        would stay in the file with the vector in it.
         """
         with self._lock:
-            slot = self._row.pop(item_id, None)
+            mapped = self._row.pop(item_id, None)
+            slot = mapped if mapped is not None else slot
             if slot is not None and self._mat is not None and slot < self._rows:
                 self._mat[slot] = 0.0
+            if slot is not None and self._sealer is not None and self._fh is not None:
+                # The ciphertext goes too. It is encrypted, but whoever holds the key
+                # could still decrypt it, and "erased" has to mean gone from the file.
+                offset, size = self._record(slot)
+                if offset < os.fstat(self._fh.fileno()).st_size:
+                    _write_at(self._fh.fileno(), bytes(size), offset)
             return slot
 
     def reset(self) -> None:
@@ -1241,15 +1343,18 @@ def _register_functions(conn: sqlite3.Connection) -> None:
     conn.create_function("mv_meta_match", 2, meta_matches, deterministic=True)
 
 
-def _has_json_functions(conn: sqlite3.Connection) -> bool:
+def _has_json_functions(conn: sqlite3.Connection,
+                        error: type[Exception] = sqlite3.OperationalError) -> bool:
     """Whether this SQLite was built with its JSON functions.
 
     They are built in from SQLite 3.38 and optional before it, and this library supports
-    3.35, so the answer is asked of the library rather than assumed.
+    3.35, so the answer is asked of the library rather than assumed. `error` is the
+    driver's `OperationalError`: SQLCipher's module has its own, which `sqlite3`'s does
+    not catch.
     """
     try:
         conn.execute("SELECT json_type('{}')")
-    except sqlite3.OperationalError:
+    except error:
         return False
     return True
 
@@ -1330,27 +1435,74 @@ _SLOT_CHUNK = 900
 
 
 class SQLiteStore:
-    """Reference `Store` implementation. Single file, no server, no Docker."""
+    """Reference `Store` implementation. Single file, no server, no Docker.
+
+    **Encryption at rest** (`encryption=True`, which needs the `encrypt` extra). A new
+    store file is created encrypted: the database with SQLCipher, and the vector file
+    beside it row by row with AES-256-GCM. The key is `key` when given, and otherwise
+    the one `memvara.store.encryption.resolve_key` finds (the OS keychain, then
+    `MEMVARA_DB_KEY`, then `~/.memvara/db.key`, generated there if none exists).
+    `key_env` is the mapping `MEMVARA_DB_KEY` is read from, when it is not the process
+    environment; the MCP server passes the environment its configuration was read from,
+    which for the plugin's hooks is the client's server block.
+
+    An existing file is opened as whatever it already is, whatever `encryption` says. An
+    encrypted one is opened with the key, and an unencrypted one is opened as it is, with
+    an `EncryptionWarning` when encryption was asked for; `memvara encrypt <path>`
+    converts it. `encryption` decides only what a new file becomes, because refusing to
+    open the store someone already has would lock them out of their own memory. A store
+    with no file (`:memory:`) is never encrypted, since nothing of it reaches the disk.
+    `encrypted` says which one this is.
+    """
 
     #: This store implements the document methods. `Memvara` asks this marker rather
     #: than the methods' presence; see `OMITTABLE`.
     holds_documents = True
 
-    def __init__(self, path: str = ":memory:") -> None:
-        if sqlite3.sqlite_version_info < _MIN_SQLITE:
+    def __init__(self, path: str = ":memory:", *, encryption: bool = False,
+                 key: bytes | None = None,
+                 key_env: Mapping[str, str] | None = None) -> None:
+        if key is not None and len(key) != 32:
+            raise ValueError(f"key must be 32 bytes, got {len(key)}")
+        self.path = path
+        #: The DB-API module this store connects with: `sqlite3`, or SQLCipher's for an
+        #: encrypted store. They are separate libraries with separate exception classes,
+        #: so the store catches `self._sql.Error` rather than `sqlite3.Error`.
+        self._sql: Any = sqlite3
+        self._key: bytes | None = None
+        #: Whether this store's files are encrypted. See the class docstring.
+        self.encrypted = False
+        #: Where the key came from, in words, when the store is encrypted. Never the key.
+        self.key_source: str | None = None
+        kind = "memory" if path in (":memory:", "") else file_kind(path)
+        wanted = encryption or key is not None
+        if kind == "plain" and wanted:
+            warnings.warn(EncryptionWarning(
+                f"{path} is not encrypted, although encryption was asked for. It was "
+                "opened as it is, because it already holds data. Stop every process "
+                f"using it and run `memvara encrypt {path}` to encrypt it in place."),
+                stacklevel=2)
+        elif kind == "other" or (kind == "new" and wanted):
+            self._sql = require_sqlcipher()
+            if key is not None:
+                self._key, self.key_source = key, "the key passed to SQLiteStore"
+            else:
+                found = resolve_key(create=kind == "new", env=key_env)
+                self._key, self.key_source = found.key, found.describe()
+            self.encrypted = True
+        if self._sql.sqlite_version_info < _MIN_SQLITE:
             need = ".".join(str(n) for n in _MIN_SQLITE)
             raise RuntimeError(
                 f"memvara needs SQLite {need} or newer; this interpreter is linked "
-                f"against {sqlite3.sqlite_version}. The Python version is not the "
+                f"against {self._sql.sqlite_version}. The Python version is not the "
                 f"problem — SQLite is a C library bundled with the interpreter, so the "
                 f"fix is a newer build of Python (or of libsqlite3), not a newer memvara."
             )
-        self.path = path
-        self._db = sqlite3.connect(path, check_same_thread=False)
-        self._db.row_factory = sqlite3.Row
-        _register_functions(self._db)
+        self._db = self._connect()
+        if kind == "other":
+            self._check_key()
         #: Whether metadata filters use SQLite's JSON functions or `mv_meta_match`.
-        self._json_functions = _has_json_functions(self._db)
+        self._json_functions = _has_json_functions(self._db, self._sql.OperationalError)
         self._lock = threading.RLock()
         # Per-thread: the snapshot connection this thread reads through, how deep it is
         # inside `batch()`, and the last `data_version` it saw. Each of those three is a
@@ -1368,7 +1520,9 @@ class SQLiteStore:
         # put the index back in step with the database.
         self._touched: set[tuple[_VecTable, str]] = set()
         self._cleared = False
-        self._vec = _VecIndex(path=_vec_path(path), count=self._count_vectors)
+        sealer = VectorSealer(self._key) if self._key is not None else None
+        self._vec = _VecIndex(path=_vec_path(path), count=self._count_vectors,
+                              sealer=sealer)
         self._index_loaded = False
         # One write watermark per vector table: `_read_map` folds in everything written
         # past it, and the two tables count independently.
@@ -1384,9 +1538,52 @@ class SQLiteStore:
             self._migrate()
             self._db.executescript(_LATE_INDEXES)
             self._db.commit()
+            if sealer is not None:
+                # Read after the first commit: a new database has no salt on disk until
+                # its first page is written, and this is the value every other process
+                # reads from the file.
+                sealer.salt = bytes.fromhex(
+                    self._db.execute("PRAGMA cipher_salt").fetchone()[0])
             self._attach_vectors()
 
     # -- connections ---------------------------------------------------------
+
+    def _connect(self) -> sqlite3.Connection:
+        """A new connection to this store's file, with the key applied if it has one."""
+        conn = self._sql.connect(self.path, check_same_thread=False)
+        if self._key is not None:
+            # The raw-key form, `x'<hex>'`, which skips SQLCipher's password stretching:
+            # the key is already 32 random bytes, and stretching it would cost every new
+            # connection a quarter of a second for nothing. It is the one statement that
+            # carries the key, and SQLite does not put statement text in its errors.
+            conn.execute(f"PRAGMA key = \"x'{self._key.hex()}'\"")
+            # Temporary tables and sort spills stay in memory, so nothing unencrypted
+            # is written beside the store. The SQLCipher wheels are built this way
+            # already; saying it here keeps that true for a build that is not.
+            conn.execute("PRAGMA temp_store = MEMORY")
+        conn.row_factory = self._sql.Row
+        # Here rather than at each caller, so the writer and every reading thread's
+        # connection get the SQL functions a filtered read needs, encrypted or not.
+        _register_functions(conn)
+        return cast(sqlite3.Connection, conn)
+
+    def _check_key(self) -> None:
+        """Fail with a sentence, not "file is not a database", when the key is wrong.
+
+        SQLCipher cannot tell a wrong key from a file that is not a database, because an
+        encrypted page decrypted with the wrong key looks like noise either way. So the
+        message says both, and says what losing the key means.
+        """
+        try:
+            self._db.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+        except self._sql.DatabaseError:
+            self._db.close()
+            raise EncryptionError(
+                f"{self.path} could not be opened with the key from {self.key_source}. "
+                "Either that is not the key this store was encrypted with, or the file "
+                "is not a memvara store. memvara looks for the key in the OS keychain, "
+                "then in MEMVARA_DB_KEY, then in ~/.memvara/db.key, and uses the first "
+                "it finds. A store whose key is lost cannot be read.") from None
 
     @property
     def _batch_depth(self) -> int:
@@ -1457,9 +1654,7 @@ class SQLiteStore:
             return None
         conn = getattr(self._local, "db", None)
         if conn is None:
-            conn = sqlite3.connect(self.path, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            _register_functions(conn)
+            conn = self._connect()
             # `_readers_lock`, emphatically not `_lock`: a thread taking its very first
             # read while a sweep holds the write lock would otherwise wait out the sweep
             # to open the connection that exists so it does not have to.
@@ -1976,13 +2171,35 @@ class SQLiteStore:
         return int(self._db.execute(
             f"SELECT COALESCE(MAX(seq), -1) FROM {t.name}").fetchone()[0])
 
-    def _read_map(self) -> None:
+    def _read_map(self, *, first: bool = False) -> None:
         """Fold every vector written since the watermarks into the name-to-row map.
 
         Serves both the first use and every refresh after it. The ORDER BY is what
         makes SQLite answer from `emb_seq`, which carries all three columns — without
         it the scan walks the table itself and reads a page per 3 KB blob.
+
+        An encrypted store has no shared mapping, so learning about a row means reading
+        its vector as well as its slot. The first load reads each row's record from the
+        encrypted file (`_load_sealed`). A refresh reads the few rows another process
+        wrote from the database instead, which is the same snapshot the slots came from:
+        a record read from the file at that moment could already belong to a write that
+        process has not committed.
         """
+        if self._vec.sealed:
+            if first:
+                self._load_sealed()
+                return
+            with self._read() as conn:
+                cur = conn.cursor()
+                cur.row_factory = None
+                for t in _VEC_TABLES:
+                    cur.execute(f"SELECT {t.key}, slot, seq, vec FROM {t.name} "
+                                "WHERE seq > ? ORDER BY seq", (self._seq[t.name],))
+                    for item_id, slot, seq, vec in cur.fetchall():
+                        self._vec.put_mem(item_id, slot,
+                                          np.frombuffer(vec, dtype=np.float32))
+                        self._seq[t.name] = seq
+            return
         with self._read() as conn:
             cur = conn.cursor()
             cur.row_factory = None  # 100k Row objects cost more than the query does
@@ -1992,6 +2209,56 @@ class SQLiteStore:
                 for item_id, slot, seq in cur.fetchall():
                     self._vec.map(item_id, slot)
                     self._seq[t.name] = seq
+
+    def _load_sealed(self) -> None:
+        """Decrypt every row the database says exists from the encrypted vector file.
+
+        Each record is authenticated against its row number and its owner's id. A record
+        that does not open is not trusted, and not immediately an error either, because
+        another process may be changing it: erasing its owner (which blanks the record
+        before the erasure commits), or reusing the row for a new owner. So each such
+        row is looked up again in the database, which is the authority:
+
+        * the owner is gone, or has moved to another row: the file was ahead of this
+          snapshot, and the database's answer is used;
+        * the record is blank and the owner is still there: an erasure is in flight in
+          another process, or somebody zeroed the record; the vector is read from the
+          database, which is encrypted and authenticated too;
+        * the record is short or fails authentication, and the owner is still there,
+          after one more read in case the first caught a write half-done: the file was
+          truncated, reordered, edited or written under another key.
+          `EncryptionError`, rather than a search that silently lacks that vector.
+        """
+        suspects: list[tuple[_VecTable, str, int, str]] = []
+        with self._read() as conn:
+            cur = conn.cursor()
+            cur.row_factory = None
+            for t in _VEC_TABLES:
+                cur.execute(f"SELECT {t.key}, slot, seq FROM {t.name} WHERE seq > ? "
+                            "ORDER BY seq", (self._seq[t.name],))
+                for item_id, slot, seq in cur.fetchall():
+                    status = self._vec.load(item_id, slot)
+                    if status != "ok":
+                        suspects.append((t, item_id, slot, status))
+                    self._seq[t.name] = seq
+            for t, item_id, slot, status in suspects:
+                row = conn.execute(f"SELECT slot, vec FROM {t.name} WHERE {t.key}=?",
+                                   (item_id,)).fetchone()
+                if row is None:
+                    continue
+                if row[0] != slot or status == "blank":
+                    self._vec.put_mem(item_id, row[0],
+                                      np.frombuffer(row[1], dtype=np.float32))
+                elif self._vec.load(item_id, slot) != "ok":
+                    how = ("ends before it" if status == "short"
+                           else "fails authentication")
+                    raise EncryptionError(
+                        f"The encrypted vector file {self._vec.path} is damaged: the "
+                        f"record for row {slot} ({t.key} {item_id}) {how}. The file was "
+                        "truncated, reordered or altered, or was written with another "
+                        "key. The same vectors are stored in the encrypted database, so "
+                        "deleting the vector file is safe: the store rebuilds it from "
+                        "the database the next time it opens.")
 
     def _ensure_index(self) -> None:
         """Make the map usable and current before a read resolves through it.
@@ -2014,7 +2281,7 @@ class SQLiteStore:
             # that only ever runs under a race and can therefore never be tested.
             with self._lock, self._index_lock:
                 self._ensure_dim()
-                self._read_map()
+                self._read_map(first=True)
                 self._index_loaded = True
                 self._data_version = self._version()
             return
@@ -2726,14 +2993,17 @@ class SQLiteStore:
         if row is None:
             return False, 0
         self._db.execute(f"DELETE FROM {fts} WHERE rowid=?", (row["rowid"],))
+        held = self._db.execute(
+            f"SELECT slot FROM {t.name} WHERE {t.key}=?", (item_id,)).fetchone()
         self._db.execute(
             f"INSERT OR IGNORE INTO vec_free (slot) SELECT slot FROM {t.name} "
             f"WHERE {t.key}=? AND slot IS NOT NULL", (item_id,))
         vectors = self._db.execute(
             f"DELETE FROM {t.name} WHERE {t.key}=?", (item_id,)).rowcount
         # Zeroes the matrix row as well as unmapping it: the file outlives the process,
-        # and a vector left behind is the text left behind.
-        self._vec.forget(item_id)
+        # and a vector left behind is the text left behind. The slot comes from the
+        # database, so the row is blanked even when this process never loaded its map.
+        self._vec.forget(item_id, held["slot"] if held is not None else None)
         self._mark(t, item_id)
         self._db.execute(f"DELETE FROM {table} WHERE id=?", (item_id,))
         return True, vectors
@@ -2948,7 +3218,7 @@ class SQLiteStore:
                     self._db.execute(
                         "DELETE FROM erasures WHERE claim_id=? AND erased_at=?",
                         (claim_id, stamp))
-                except sqlite3.Error:
+                except self._sql.Error:
                     # The cleanup failed too, which usually means the same damage that
                     # broke the delete. Swallowed so the original exception is what the
                     # caller sees: it names the actual fault, and a secondary error from
@@ -3217,7 +3487,8 @@ class SQLiteStore:
                                       (_EPISODE_VECS, "episodes", params)):
                 doomed = f"SELECT id FROM {table} WHERE {where}"
                 rows = self._db.execute(
-                    f"SELECT {t.key} AS k FROM {t.name} WHERE {t.key} IN ({doomed})",
+                    f"SELECT {t.key} AS k, slot FROM {t.name} "
+                    f"WHERE {t.key} IN ({doomed})",
                     params2,
                 ).fetchall()
                 self._db.execute(
@@ -3226,7 +3497,7 @@ class SQLiteStore:
                 self._db.execute(
                     f"DELETE FROM {t.name} WHERE {t.key} IN ({doomed})", params2)
                 for r in rows:
-                    self._vec.forget(r["k"])
+                    self._vec.forget(r["k"], r["slot"])
                     self._mark(t, r["k"])
                 gone += len(rows)
             # FTS entries are keyed on their row's rowid, so they must go before the

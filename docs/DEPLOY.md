@@ -116,12 +116,13 @@ transport is stdio and the configuration is entirely environment.
 
 | variable | meaning |
 |---|---|
-| `MEMVARA_DB` | **required.** Path to the SQLite file, created on first use. `:memory:` for a smoke test that forgets everything on exit. |
+| `MEMVARA_DB` | **required.** Path to the SQLite file, created on first use, encrypted unless `MEMVARA_FEATURE_ENCRYPTION=0` (see [Encryption at rest](#encryption-at-rest)). `:memory:` for a smoke test that forgets everything on exit. |
+| `MEMVARA_DB_KEY` | The store key, as 64 hexadecimal characters, for a server with no OS keychain, such as one in a container. Read only when the OS keychain has no key under service `memvara`, account `db-key`, and read before `~/.memvara/db.key`. It is read from the server's own environment, so a key set in the client's server block also reaches the plugin's hooks, which read that block. A malformed value is refused at startup without being repeated. Fill it from a secret manager, not a file in the repository. See [Encryption at rest](#encryption-at-rest). |
 | `MEMVARA_USER` | who this server remembers for. Unset means the whole tenant. |
 | `MEMVARA_TENANT` | isolation boundary above the user. Default `default`. |
 | `MEMVARA_AGENT`, `MEMVARA_SESSION` | narrow further. Leave unset for durable facts — memory written at session scope is invisible to the next session. |
 | `MEMVARA_PROJECT` | the repository this memory belongs to, as `host/owner/repo` (for example `github.com/acme/app`) or `path:` followed by 16 lower-case hexadecimal characters. Unset means the server works it out at startup from the git remote of the directory it was started in, so every clone and worktree of one repository shares one project; outside a git repository there is no project. A fact whose predicate is project-relative is then filed under the repository and not recalled in another one, while a predicate declared global, such as `prefers`, is written without a project and recalled everywhere. A value not in either form is refused at startup. Under `MEMVARA_MODE=cloud` it is sent as the `Memvara-Project` header. |
-| `MEMVARA_FEATURE_<NAME>` | `0` switches one feature off and `1` switches it on. Every feature is on by default except the ones marked (off by default) here, which are off until their variable says `1`. `MEMVARA_FEATURE_PROJECT_SCOPE=0` stops the project being worked out from the working directory (an explicit `MEMVARA_PROJECT` still applies), `MEMVARA_FEATURE_PROFILE=0` hides `memory_profile`, `MEMVARA_FEATURE_FORGET_MATCHING=0` hides `memory_end_matching` and `memory_forget_matching`, `MEMVARA_FEATURE_LINKS=0` hides `memory_link`, `MEMVARA_FEATURE_DOCUMENTS=0` hides `memory_add_document`, `memory_get_document`, `memory_list_documents` and `memory_delete_document`, `MEMVARA_FEATURE_RETRIEVAL_CHUNKS=0` stores each document as one chunk instead of passages of about 1,000 characters, `MEMVARA_FEATURE_METADATA_FILTERS=0` makes `memory_search` and `memory_recall` refuse the `filters` and `filepath_prefix` arguments with a message naming the switch, and `MEMVARA_FEATURE_END_REASON=0` removes the `reason` and `until_reason` arguments from every tool that has them (reasons already stored are still shown). `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` (off by default) extracts a turn over 6,000 characters in pieces, one model call per piece; it is off because its release bar is not met (`docs/ROADMAP.md`, the "Reversed" list), and it matters only when `MEMVARA_LLM` names a model. `MEMVARA_FEATURE_QUERY_REWRITE=0` stops reads asking the `MEMVARA_LLM` model to rephrase the query and removes the `query_rewrite` argument from `memory_search` and `memory_recall`; `MEMVARA_FEATURE_SYNTHESIS=0` removes the `synthesize` argument from `memory_recall`. With `MEMVARA_LLM=none` neither stage has a model to call, so neither setting changes what a read costs. `INDEX_COMMAND`, `RESEARCH_AGENT`, `STATUS_LINE` and `RECALL_MARK` are accepted as well and change nothing in this server; they are for the plugin. `MEMVARA_FEATURE_INGEST_URLS=0` refuses a document given as a URL, and `MEMVARA_FEATURE_INGEST_MEDIA=0` refuses images, audio and video, both with the code `feature_off`. An unknown name, or a value that is not a boolean, is refused at startup. `memory_stats` lists the features that are off. |
+| `MEMVARA_FEATURE_<NAME>` | `0` switches one feature off and `1` switches it on. Every feature is on by default except the ones marked (off by default) here, which are off until their variable says `1`. `MEMVARA_FEATURE_PROJECT_SCOPE=0` stops the project being worked out from the working directory (an explicit `MEMVARA_PROJECT` still applies), `MEMVARA_FEATURE_PROFILE=0` hides `memory_profile`, `MEMVARA_FEATURE_FORGET_MATCHING=0` hides `memory_end_matching` and `memory_forget_matching`, `MEMVARA_FEATURE_LINKS=0` hides `memory_link`, `MEMVARA_FEATURE_DOCUMENTS=0` hides `memory_add_document`, `memory_get_document`, `memory_list_documents` and `memory_delete_document`, `MEMVARA_FEATURE_RETRIEVAL_CHUNKS=0` stores each document as one chunk instead of passages of about 1,000 characters, `MEMVARA_FEATURE_METADATA_FILTERS=0` makes `memory_search` and `memory_recall` refuse the `filters` and `filepath_prefix` arguments with a message naming the switch, and `MEMVARA_FEATURE_END_REASON=0` removes the `reason` and `until_reason` arguments from every tool that has them (reasons already stored are still shown). `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` (off by default) extracts a turn over 6,000 characters in pieces, one model call per piece; it is off because its release bar is not met (`docs/ROADMAP.md`, the "Reversed" list), and it matters only when `MEMVARA_LLM` names a model. `MEMVARA_FEATURE_QUERY_REWRITE=0` stops reads asking the `MEMVARA_LLM` model to rephrase the query and removes the `query_rewrite` argument from `memory_search` and `memory_recall`; `MEMVARA_FEATURE_SYNTHESIS=0` removes the `synthesize` argument from `memory_recall`. With `MEMVARA_LLM=none` neither stage has a model to call, so neither setting changes what a read costs. `INDEX_COMMAND`, `RESEARCH_AGENT`, `STATUS_LINE` and `RECALL_MARK` are accepted as well and change nothing in this server; they are for the plugin. `MEMVARA_FEATURE_INGEST_URLS=0` refuses a document given as a URL, and `MEMVARA_FEATURE_INGEST_MEDIA=0` refuses images, audio and video, both with the code `feature_off`. `MEMVARA_FEATURE_ENCRYPTION=0` creates a new store unencrypted; with it on, a new store is encrypted and the server refuses to start if `memvara[encrypt]` is not installed, and an existing store opens as whatever it already is. An unknown name, or a value that is not a boolean, is refused at startup. `memory_stats` lists the features that are off. |
 | `MEMVARA_LLM` | `none` (default, offline), `anthropic` (needs `ANTHROPIC_API_KEY` and `memvara[anthropic]`), or `openai` (needs `OPENAI_API_KEY` and `memvara[openai]`). |
 | `MEMVARA_LLM_MODEL` | Model name for `MEMVARA_LLM=openai`. Unset uses the adapter's own default. Point `OPENAI_BASE_URL` at a self-hosted OpenAI-compatible server (vLLM, llama.cpp, Ollama's shim) and name its model here. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_LLM_MAX_CLAIMS` | Cap on the claims array for `MEMVARA_LLM=openai`. Unset means uncapped, which is right for hosted OpenAI — it closes the array itself, and OpenAI documents `maxItems` as unsupported under strict mode. Set it for a self-hosted server that constrains decoding, where an uncapped array gives the grammar no way to end a response. A positive integer; anything else is refused at startup. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
@@ -512,6 +513,16 @@ docker run --rm -i \
   memvara-mcp:0.1.0
 ```
 
+**The store it creates is encrypted.** The image installs `memvara[encrypt]`, and a
+container has no OS keychain, so the key comes from `MEMVARA_DB_KEY` when you pass it
+(`-e MEMVARA_DB_KEY`, filled from a secret manager), and is otherwise generated into
+`/data/.memvara/db.key`. The image sets `HOME=/data` for exactly this: a key generated in
+the container's own home directory would be deleted with the container, and the store on
+the volume would be unreadable on the next run. A key on the volume survives, but it sits
+beside the store it opens, so anyone with a copy of the volume can read the store.
+Passing `MEMVARA_DB_KEY` keeps the key off the volume. See
+[Encryption at rest](#encryption-at-rest).
+
 **`-i`, never `-it`.** The container's stdin and stdout *are* the MCP transport. A TTY
 adds line discipline — input echo, and `\n` → `\r\n` on the way out — both of which
 corrupt a newline-framed JSON stream. Docker refuses the combination outright when stdin
@@ -577,6 +588,11 @@ There is no dependency tree to trim; the base image is the image. Dropping pip o
 venv before it is copied into the runtime stage is worth 17 MB unpacked and 3.7 MB
 compressed, and is the only trim here that measurably moved the number.
 
+Those figures are from before the image installed the `encrypt` extra. With it, on
+2026-09-23, the same build on linux/arm64 is **364 MB unpacked and about 82 MB of
+compressed layers**: SQLCipher, `cryptography`, `keyring` and their dependencies add about
+72 MB unpacked.
+
 An Alpine base is the one lever that moves it — 169 MB unpacked / 38.6 MB pulled, a 39%
 saving, by changing `slim` to `alpine` in both `FROM` lines and `useradd --create-home
 --uid 10001 memvara` to `adduser -D -u 10001 memvara`. It is not the default for two
@@ -597,14 +613,17 @@ mistake. After a write to `memory.db` the directory holds:
 
 | file | what it is | losing it costs |
 |---|---|---|
-| `memory.db` | claims, episodes, predicates, the FTS index | everything |
-| `memory.db.vecs` | the mmapped vector matrix | every embedding — search degrades to BM25 only, silently |
+| `memory.db` | claims, episodes, predicates, the FTS index, and every vector | everything |
+| `memory.db.vecs` | the vector matrix: memory-mapped in an unencrypted store, one encrypted record per row in an encrypted one | nothing that cannot be rebuilt: the next open rewrites it from the vectors in `memory.db`, which takes a while on a large store |
 | `memory.db.embedder.json` | which embedder wrote those vectors | the ability to detect a model swap, which then goes undetected |
 | `memory.db-wal`, `memory.db-shm` | SQLite write-ahead log, while open | recently committed writes |
 
 So **mount, back up and copy the directory, not the file.** A Docker bind mount of
-`memory.db` alone persists the rows and throws away the vectors on every restart, and
-nothing raises: the store re-opens, BM25 keeps working, and semantic recall quietly stops.
+`memory.db` alone loses the `-wal` on every restart, and with it any write not yet
+checkpointed into the database, and it makes every start rebuild the vector file from the
+database, which takes a while on a large store. (This paragraph used to say the vectors
+themselves were lost. They were not: the database has always held every vector, and a
+missing vector file is rebuilt from it.)
 
 Two further notes on volumes:
 
@@ -621,7 +640,72 @@ Two further notes on volumes:
 because the committed tail is in the `-wal`. Either stop the writer, or use
 `sqlite3 memory.db ".backup out.db"` — and copy `memory.db.vecs` and
 `memory.db.embedder.json` alongside it either way. Copying the database without the
-vectors produces a restore that looks healthy and has lost its vector index.
+vectors produces a restore that looks healthy and has to rebuild its vector index on the
+first open. An encrypted store cannot be read by the plain `sqlite3` tool, so stop the
+server and copy the files. **Back up the key as well, somewhere else**: a backup of an
+encrypted store without its key is a backup of nothing.
+
+### Encryption at rest
+
+A store the MCP server creates is encrypted unless `MEMVARA_FEATURE_ENCRYPTION=0`. In
+Python, `Memvara("memory.db", encryption=True)` asks for the same thing; the library's
+default is off, because an encrypted store reads the OS keychain or writes a key file, and
+a library call should not do either unless asked. Both need
+`pip install 'memvara[encrypt]'`.
+
+**What is encrypted.** The database, with SQLCipher: every page, including the full-text
+index, the write-ahead log and the vectors the database keeps. The vector file
+`memory.db.vecs`, with AES-256-GCM: one record per row, each with its own nonce, bound to
+its row number and to the id of the claim or episode it belongs to, so a record moved to
+another row, a record from another store, an edited record and a file cut short all fail
+with an error that names the file rather than loading. Deleting the vector file is always
+safe; the store rebuilds it from the database. `memory.db.embedder.json` is not encrypted;
+it holds the embedding model's name and width, and nothing written to the store.
+
+**Where the key comes from.** A 32-byte key, written as 64 hexadecimal characters, looked
+up in this order:
+
+1. The OS keychain: the macOS Keychain or the Linux Secret Service, under service
+   `memvara` and account `db-key`. Put it there with
+   `python3 -m keyring set memvara db-key`.
+2. `MEMVARA_DB_KEY`, which is the right place in a container or on a server with no
+   keychain. Fill it from a secret manager.
+3. `~/.memvara/db.key`. When none of the three has a key and a new store is being
+   created, one is generated here with mode 0600, and the server warns at start every time
+   the key comes from this file. On macOS and Linux the warning also names the file's mode
+   and says to run `chmod 600` when other users can read it. The file is in the same home
+   directory as the store, so a copy of the home directory is a copy of both.
+
+**Losing the key makes the store unreadable, permanently.** Run
+`memvara encrypt --export-key` right after the first encrypted store is created, and keep
+what it prints somewhere other than this machine. It prints the key and nothing else on
+stdout.
+
+**An existing store is not converted for you.** An unencrypted store keeps opening as it
+is, with a warning at start and a `storage: NOT encrypted` line in `memory_stats`. To
+convert it, stop every process that uses it (the MCP server included) and run:
+
+```bash
+memvara encrypt ~/.memvara/memory.db
+```
+
+The conversion works on a copy in the same directory: it exports the database into a new
+encrypted file, writes the encrypted vector file, reopens the copy and reads every vector
+back through authentication, compares the row counts with the original, and only then
+renames the copy over the original. If anything fails before that rename, the copy is
+deleted and the original is exactly as it was. The command refuses to run while another
+process has the store open. The old unencrypted files are replaced, not overwritten, so on a
+disk without its own encryption their blocks can survive until the file system reuses them.
+
+**The cost.** An encrypted store holds its vector matrix in memory, decrypted, instead of
+memory-mapping the file, so every process that searches it holds its own copy. Measured
+with `PYTHONPATH=. python3 bench/encryption.py` on 20,000 claims (256-dimensional vectors,
+one Apple Silicon Mac): a write takes 0.53 ms instead of 0.30 at the median, a search takes
+4.8 ms instead of 6.5, the first search after opening takes 153 ms instead of 62 because it
+decrypts every row, and peak memory is 122 MB instead of 71.
+
+**Postgres is not covered.** A Postgres store is the operator's to encrypt, with the
+database's own tools or the disk's; nothing in memvara changes for it.
 
 ### Consolidation is a job you have to schedule
 

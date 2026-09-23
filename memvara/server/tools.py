@@ -224,6 +224,9 @@ class ToolContext:
     read_only: bool = False
     #: Features the server was started with switched off, for `memory_stats` to report.
     features_off: frozenset[str] = field(default_factory=frozenset)
+    #: Whether the local store is encrypted on disk, in one sentence for `memory_stats`,
+    #: or `None` when this server has no local store to describe (a hosted deployment).
+    storage: str | None = None
 
 
 Handler = Callable[[ToolContext, dict[str, Any]], str]
@@ -2211,6 +2214,7 @@ def _stats(ctx: ToolContext, _args: dict[str, Any]) -> str:
         ("features: all on" if not ctx.features_off else
          f"features switched off: {', '.join(sorted(ctx.features_off))}"),
         f"writes: {'disabled — this server is read-only' if ctx.read_only else 'enabled'}",
+        *([f"storage: {ctx.storage}"] if ctx.storage else []),
         f"visible at this scope: {ctx.memory.count()} claim(s)",
         f"tenant {scope.tenant!r}: {counts['live_claims']} live of {counts['claims']} "
         f"claim(s), {counts['episodes']} source turn(s), {counts['embeddings']} embedded",
@@ -3151,8 +3155,9 @@ TOOLS: tuple[Tool, ...] = (
         name="memory_stats",
         description=(
             "Report what this memory server is bound to: the scope it reads and writes, "
-            "how many memories it holds, whether it can extract facts from prose, and "
-            "whether writes are enabled. Call it when the user asks how much you "
+            "how many memories it holds, whether it can extract facts from prose, "
+            "whether writes are enabled, and, for a store on this machine, whether its "
+            "files are encrypted on disk. Call it when the user asks how much you "
             "remember, or when memory looks unexpectedly empty and you need to tell the "
             "difference between 'nothing is stored' and 'this server is misconfigured' "
             "before telling the user you have forgotten them. It also reports the join "

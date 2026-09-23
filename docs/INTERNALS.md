@@ -1636,6 +1636,99 @@ answered correctly — that is precisely why it went unnoticed. See
 The remaining residue is the write-ahead log, which a checkpoint or a clean `close()`
 clears. `SECURITY.md` states that as the boundary.
 
+The vector file is blanked by row number, and the row comes from the database, not from
+the process's map of ids to rows. That map is loaded on the first search, so a process that
+opened a store and erased a claim before searching used to leave the vector in `<db>.vecs`.
+`tests/test_vecindex.py::test_an_erasure_before_any_search_still_blanks_the_row_on_disk`
+reads the file.
+
+### Encryption at rest
+
+`SQLiteStore(path, encryption=True)` creates a new store encrypted. An existing file is
+opened as whatever its first 16 bytes say it is: `SQLite format 3\0` is unencrypted, and
+anything else is treated as encrypted and needs a key. `encryption` therefore decides only
+what a new file becomes, and `:memory:` is never encrypted. `memvara/store/encryption.py`
+holds the key lookup, the vector file's record format and the conversion.
+
+**Two files, two mechanisms, one key.** The database is SQLCipher: every connection, the
+writer's and each reading thread's, is opened through `SQLiteStore._connect`, which issues
+`PRAGMA key` with the raw-key form (`x'<hex>'`, no password stretching) and
+`PRAGMA temp_store = MEMORY`. The store keeps a `_sql` module reference, `sqlite3` or
+`sqlcipher3.dbapi2`, because the two libraries have separate exception classes. The vector
+file is `VectorSealer`: a 64-byte header (magic `MEMVASEA`, format, width, and the
+database's 16-byte salt) and one record per row, `nonce(12) | AES-256-GCM(float32 row) |
+tag(16)`. The row key is HKDF-SHA256 of the store key under that salt, with its own `info`
+string, so the AES key is never a key SQLCipher uses. The associated data of a record is
+the header, the row number and the owner's id. An all-zero record is an empty row.
+
+**The salt comes from the database, so every process agrees on it.** `SQLiteStore` reads
+`PRAGMA cipher_salt` (the first 16 bytes of the encrypted database file) after its first
+commit and gives it to the sealer. Nothing in the header is chosen by the process writing
+it, so two processes that each find the header missing, for example after the vector file
+was deleted, write the same bytes and seal records under the same key. An earlier draft
+picked a random salt per file. Two processes rewriting a missing file then each bound to
+their own salt, the last header written won, and the next open refused the store because
+the other process's records no longer authenticated. The salt is fixed for the life of the
+database file, and a converted store is a new file, so a vector file written for the old
+one is recognised as foreign and rebuilt.
+
+**The matrix is on the heap, decrypted.** A memory-mapped matrix would expose the
+ciphertext to every read, so `_VecIndex` keeps the path for the file and the matrix in
+memory: `attach` checks the header and reads no rows; `put` writes one sealed record;
+`forget` zeroes one. The cost is memory. Each process holds its own copy, where the mapped
+file shared its pages between processes.
+
+**Loading is where authentication is checked.** The first search runs
+`SQLiteStore._load_sealed`: for every row the database lists, `_VecIndex.load` reads the
+record and opens it against its row and owner. A record that does not open is looked up
+again in the database before anything is decided, because another process may be changing
+it: an owner that is gone or moved takes the database's answer; a blank record whose owner
+is still there is an erasure in flight, and the vector is read from the database; a short
+or failing record whose owner is still there, after one more read in case the first caught
+a write half done, raises `EncryptionError` naming the file and the row. A later refresh,
+after another process commits, reads the new rows' vectors from the database rather than
+from the file, because the file may already hold that process's next, uncommitted write.
+
+**A damaged header is not an error**: it is rewritten and every row is rebuilt from the
+database, as a stale unencrypted file is. The database is the authority
+and authenticates its own pages, so a rebuild cannot load anything wrong.
+
+**The key** is looked up by `resolve_key`: the OS keychain through `keyring`, then
+`MEMVARA_DB_KEY`, then `~/.memvara/db.key`. Only the creation of a new store may generate
+one (`create=True`). The key is written to a temporary file in the same directory and
+hard-linked into place. The link fails if a key is already there, so a key is never
+replaced, and another process never sees the file half written. Where hard links are not
+supported it falls back to `O_EXCL`, and a reader that finds a key file shorter than a key
+reads it again for up to a second. A key from the file, generated or read, raises
+`EncryptionWarning`. On POSIX the warning also names the file's mode and `chmod 600` when
+the group or other users can read it. No message in the module includes a key, and
+`StoreKey` keeps the key out of its `repr`.
+
+**The server reads `MEMVARA_DB_KEY` from the environment it was configured from**, not
+from `os.environ` at open. `ServerConfig.from_env(env)` checks it and keeps it as
+`ServerConfig.db_key` (out of `repr`). `build_memvara` passes it to
+`Memvara(key_env=...)`, which passes it to `SQLiteStore(key_env=...)` and on to
+`resolve_key(env=...)`, so the keychain still comes first. This is what lets the plugin's
+hooks open the store: they build their configuration from the MCP client's server block,
+which never reaches `os.environ`. A key that lived only there used to open the server's
+store and silently not the hooks'.
+
+**Conversion** (`encrypt_store`, the `memvara encrypt` command) exports the database with
+`sqlcipher_export` into a temporary file in the same directory, copies `user_version`
+(which the export does not), opens the copy once to write its vector file and once more to
+read every record back, compares row counts, checks the original has not changed and has
+no `-wal` or `-shm` (the sign of another open connection), and only then renames the copy
+over the original. The vector file is renamed second; if that rename fails, the next open
+finds a header it did not write and rebuilds the file.
+
+**The switch.** `encryption` is in `FEATURE_DEFAULTS`, on. `build_memvara` passes it to
+`Memvara(encryption=...)` and turns `EncryptionUnavailable` into a `ConfigError` naming the
+extra and `MEMVARA_FEATURE_ENCRYPTION=0`, because a new store created unencrypted would stay
+that way, and under stdio a warning would reach nobody. An existing unencrypted store is
+not refused; `memory_stats` reports it on its `storage:` line (`ToolContext.storage`, set
+by `mcp._storage_fact`). The library's `Memvara` defaults to `encryption=False`, because a
+library call should not read the OS keychain or write a key file unless asked.
+
 ### `stats()`
 
 ```python

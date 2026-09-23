@@ -48,7 +48,11 @@ COPY memvara ./memvara
 # `.` and not `-e .`: an editable install would leave the runtime image pointing at
 # /src, which is not copied forward, and the failure would be an ImportError on first
 # launch rather than at build time.
-RUN pip install .
+#
+# With the `encrypt` extra, because the server's `encryption` switch is on by default and
+# refuses to create a new store unencrypted when the extra is missing. Without it this
+# image would fail on its first launch against an empty volume.
+RUN pip install ".[encrypt]"
 
 # The venv's own pip and setuptools are build tooling that a running server never calls.
 # Deleting them *here*, before the runtime stage copies the venv, is what makes it a
@@ -103,9 +107,19 @@ RUN useradd --create-home --uid 10001 memvara \
 # `/data` is a directory, not a file, because the store is more than one file — the
 # SQLite database, its `-wal` and `-shm` siblings, the `<db>.vecs` mmapped vector matrix
 # and the `<db>.embedder.json` fingerprint that says which model wrote it. Bind-mounting
-# just `memory.db` would persist the rows and silently discard every embedding.
+# just `memory.db` would lose the `-wal`, and with it any write not yet checkpointed, and
+# would make every start rebuild the vector file from the database.
 USER memvara
 WORKDIR /data
+
+# The home directory is the volume, so the store key lands on it. With no OS keychain in
+# a container and no MEMVARA_DB_KEY passed in, the server generates a key into
+# ~/.memvara/db.key. In the user's real home, which is part of the container, that file
+# would be deleted with the container, and the store on the volume would be unreadable on
+# the next run. On the volume, the key survives beside the store. Passing MEMVARA_DB_KEY
+# from a secret store keeps the key off the volume entirely, which is better, and
+# docs/DEPLOY.md says how.
+ENV HOME=/data
 
 # MEMVARA_DB is deliberately unset. The server refuses to start without it and prints the
 # client configuration block, which is the behaviour that stops a misconfigured client

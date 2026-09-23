@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Collection, Mapping, TextIO
 
 from .. import __version__
 from ..core import Memvara
+from ..store import SQLiteStore
 from .protocol import (
     INVALID_PARAMS,
     INVALID_REQUEST,
@@ -149,6 +150,27 @@ def _service_facts(memory: "Memvara | RemoteMemvara") -> tuple[str, bool]:
             bool(body.get("read_only", False)))
 
 
+def _storage_fact(memory: "Memvara | RemoteMemvara") -> str | None:
+    """Whether the local store is encrypted on disk, as `memory_stats` states it.
+
+    This line is how an unencrypted store stays visible under stdio, where the warning
+    the store raises at open goes to a stderr nobody reads. `None` for anything without
+    a local SQLite store: a hosted deployment's disks are its operator's to encrypt, and
+    a third-party store's are its author's.
+    """
+    store = getattr(memory, "store", None)
+    if not isinstance(store, SQLiteStore):
+        return None
+    if store.path in (":memory:", ""):
+        return "in memory only; nothing is written to disk"
+    if store.encrypted:
+        return (f"encrypted on disk (SQLCipher database, AES-256-GCM vector file), key "
+                f"from {store.key_source}")
+    return ("NOT encrypted on disk. Anyone who can read the store file can read every "
+            "memory in it. Stop this server and run `memvara encrypt <store file>` to "
+            "encrypt it in place.")
+
+
 class MemvaraMCPServer:
     """An `Memvara` exposed as MCP tools over JSON-RPC.
 
@@ -189,6 +211,7 @@ class MemvaraMCPServer:
             extractor=extractor,
             read_only=self.read_only,
             features_off=self.features_off,
+            storage=_storage_fact(memory),
         )
         #: Fixed at startup, because that is when the deployment's answer is known — and
         #: `self.read_only` rather than the `read_only` argument, so a read-only credential

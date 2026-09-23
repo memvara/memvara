@@ -36,7 +36,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `memory_forget_matching` and `memory_link`, and three customer pages stated an old tool
   count. The pages no longer state a count, and a test holds the reference table to the
   server's tool list.
-
+- **Erasing a claim before the process has searched now blanks its vector on disk.**
+  `erase_claim()` and `purge()` blanked a row of the vector file only through the map
+  from ids to rows, and that map is loaded on the first search. A process that opened a
+  store and erased something before searching left the vector in `<db>.vecs`, where the
+  erased text can be recovered from it by inversion. The row now comes from the database.
+- **`docs/DEPLOY.md` said a store without its `.vecs` file loses its vectors.** It does
+  not: the database holds every vector and the file is rebuilt from it on the next open.
+  What a bind mount of the database file alone loses is the `-wal`.
 - **`profile()` on Python 3.10 reports its default buckets as unavailable.** They are
   read from the shipped predicate packs, which need `tomllib`, and 3.10 has none. A line
   reader that supplied the names there was added and is now withdrawn, because it
@@ -69,6 +76,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   name differed from the plugin hooks' copy. The shared vectors file gains Windows roots.
 
 ### Changed
+
+- **The MCP server creates a new store encrypted.** The new `encryption` switch
+  (`MEMVARA_FEATURE_ENCRYPTION`) is on by default. With it on, a new store needs
+  `pip install 'memvara[encrypt]'`, and the server refuses to start without it rather than
+  create the store unencrypted; the message names the extra and
+  `MEMVARA_FEATURE_ENCRYPTION=0`. An existing store opens as whatever it already is, and an
+  unencrypted one is reported by a warning at start and a `storage:` line in
+  `memory_stats`. `memvara-mcp init` says when the extra is missing. The library's
+  `Memvara(path)` is unchanged: encryption there is `encryption=True`.
+- **The Docker image installs the `encrypt` extra and sets `HOME=/data`**, so a key the
+  server generates is written to the volume beside the store rather than into the
+  container, where it would be deleted with it. Passing `MEMVARA_DB_KEY` keeps the key
+  off the volume.
 
 - **`memvara login --project` accepts any spelling of a project id** that `uuid.UUID`
   reads (with or without hyphens, either case, in braces, or as `urn:uuid:`), and sends
@@ -204,6 +224,38 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 - **`AsyncMemvara.search()` and `.recall()` run on their own pool** of
   `memvara.aio.READ_THREADS` (8) threads, because a read can now wait on a model for
   seconds and would otherwise hold a thread of the loop's shared default executor.
+- **Encryption at rest for a local store, vectors included.** `SQLiteStore(path,
+  encryption=True)` and `Memvara(path, encryption=True)` create a new store whose
+  database is encrypted by SQLCipher and whose vector file has every row encrypted with
+  AES-256-GCM, each record bound to its row number and to the id of the claim or episode
+  it belongs to. A record moved to another row, edited, cut short or written with another
+  key fails to open with an `EncryptionError` naming the file, and deleting the vector file
+  is always safe because the database holds every vector. The vectors are decrypted into
+  memory on the first search instead of being memory-mapped. The key is a 32-byte key read
+  from the OS keychain (service `memvara`, account `db-key`), then `MEMVARA_DB_KEY`, then
+  `~/.memvara/db.key`, where one is generated with mode 0600 when a new store needs one;
+  a key from that file is announced with an `EncryptionWarning` at every open, which on
+  POSIX also names a mode that lets other users read it. The key file is written to a
+  temporary file and linked into place, so it is never replaced and never seen half
+  written. `key=` passes a key directly, and `key_env=` (on `SQLiteStore` and `Memvara`)
+  is the mapping `MEMVARA_DB_KEY` is read from instead of `os.environ`. The MCP server
+  passes the environment it was configured from, so the plugin's hooks, which read the
+  client's server block, find a key that is set only there. The vector file's key is
+  derived from the database's own salt, so two processes that rewrite a missing vector
+  file at the same moment agree on it. **A store whose key is lost cannot be read.** `SQLiteStore.encrypted` and
+  `SQLiteStore.key_source` say which kind of store it is and where the key came from,
+  never the key. An existing file opens as whatever it is, whatever `encryption` says. It
+  needs `pip install 'memvara[encrypt]'` (`sqlcipher3`, `cryptography`, `keyring`).
+  `EncryptionError` and `EncryptionWarning` are exported from `memvara`. Postgres is
+  unchanged: its encryption belongs to its operator.
+- **`memvara encrypt PATH` converts an existing store in place**, vectors included. It
+  exports the database into an encrypted copy, writes the encrypted vector file, reads
+  every vector back, compares the row counts, and only then renames the copy over the
+  original; a failure before the rename leaves the original byte for byte as it was. It
+  refuses while another process has the store open. **`memvara encrypt --export-key`**
+  prints the key, alone, on stdout, for a backup.
+- **`bench/encryption.py`** measures write latency, search latency, open time and peak
+  memory for the same store unencrypted and encrypted.
 - **A document store.** `Memvara.add_document(content | url=, custom_id=, title=,
   filepath=, mime=, meta=, extract=True)` stores a document whole and returns a
   `Document`. The text is split into chunks of about 1,000 characters at sentence

@@ -65,14 +65,19 @@ answer may already have encountered them during its own training, which is a sep
 reason to treat a very strong end-to-end score with some skepticism, while treating a weak
 one as fairly solid evidence of a real gap.
 
-## No encryption of stored data by default
+## Encryption of stored data covers the local store, and depends on one key
 
-Memvara handles data deletion and redaction, but it does not encrypt the database file
-itself — that's left to however you deploy it (full-disk encryption is the straightforward
-answer for most self-hosted setups). This is a deliberate scope decision rather than an
-oversight: encrypting the searchable text while leaving the raw vector embeddings
-unencrypted would provide very little real protection, since a plaintext embedding can be
-used to confirm a guess about the underlying text with very high accuracy.
+A local store can be encrypted on disk: the database with SQLCipher, and the vector
+embeddings beside it with AES-256-GCM, so neither the text nor the embeddings can be read
+from the files without the key. The MCP server creates new stores this way by default;
+in Python you ask for it with `Memvara("memory.db", encryption=True)`. Both need
+`pip install 'memvara[encrypt]'`.
+
+Three things are worth knowing before relying on it. First, the store is only as safe as
+its key, and a lost key means a store nobody can read, so back the key up with
+`memvara encrypt --export-key`. Second, a store created before encryption was turned on
+stays unencrypted until you run `memvara encrypt <path>` on it. Third, a Postgres
+database is not covered: encrypting it, and the disks under it, is up to whoever runs it.
 
 ## The built-in redaction tool is a starting point, not a compliance guarantee
 

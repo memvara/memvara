@@ -1,9 +1,12 @@
-"""`memvara` — sign in to a hosted deployment, sign out of it, and ask who you are.
+"""`memvara` — sign in to a hosted deployment, sign out of it, ask who you are, and
+encrypt a local store.
 
-Three commands, and they are the three a person needs before any hosted code of theirs
-runs: `login` obtains an API key, `whoami` says what that key authorizes, and `logout`
-removes it from this machine. Everything else this package does is a library call or the
-MCP server, and both are documented where they live.
+Three commands are the three a person needs before any hosted code of theirs runs:
+`login` obtains an API key, `whoami` says what that key authorizes, and `logout` removes
+it from this machine. The fourth, `encrypt`, is for a store on this machine: it converts
+an unencrypted store to an encrypted one in place, and prints the store key for a backup.
+Everything else this package does is a library call or the MCP server, and both are
+documented where they live.
 
 `memvara-mcp` keeps its own `login`, unchanged, because it is in published instructions
 and in configuration files people have already written. Both spellings run the same flow
@@ -28,6 +31,11 @@ Never the key. `whoami` holds a live credential in order to describe it, and a k
 once ends up in a terminal transcript, a screenshot or a CI log — so this module prints
 the *path* the key came from, the project it is for and what the server says it
 authorizes, and nothing that could be pasted into an Authorization header.
+
+The one exception is `memvara encrypt --export-key`, which prints the store key because
+that is what it was asked for: a key nobody has a copy of is a store nobody can recover.
+It prints the key alone on stdout, so it can be piped into a password manager, and says
+where it came from on stderr.
 """
 
 from __future__ import annotations
@@ -52,15 +60,17 @@ memvara {__version__} — memory for AI agents. https://memvara.dev
   memvara login      sign in to a memvara-cloud deployment and store an API key
   memvara logout     remove a stored API key from this machine
   memvara whoami     say what the stored credential is, and what it authorizes
+  memvara encrypt    encrypt a local store in place, or print its key for a backup
 
-Each command takes --help. All three take --credentials PATH, which is how one machine
-holds keys for two projects: the default file, {_DEFAULT_CREDENTIALS}, is
-the one MEMVARA_MODE=cloud and Memvara.connect() read, and a key written anywhere else
+Each command takes --help. The first three take --credentials PATH, which is how one
+machine holds keys for two projects: the default file, {_DEFAULT_CREDENTIALS},
+is the one MEMVARA_MODE=cloud and Memvara.connect() read, and a key written anywhere else
 moves nothing.
 
 The library itself needs none of this. `pip install memvara` and `Memvara("memory.db")`
 is a local store on this machine, with no account and no network. These commands are for
-a hosted deployment, and they need pip install "memvara[cloud]".
+a hosted deployment, and they need pip install "memvara[cloud]". `encrypt` needs
+pip install "memvara[encrypt]".
 
 The MCP server is a separate command, `memvara-mcp`. It carries its own `login`, which is
 this one under the older name.
@@ -238,6 +248,82 @@ def whoami(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
     return 0
 
 
+ENCRYPT_USAGE = """\
+memvara encrypt — encrypt a local store in place, or print the store key for a backup.
+
+  memvara encrypt PATH
+      Converts the unencrypted store at PATH, and the vector file beside it, to an
+      encrypted store: the database with SQLCipher and the vectors with AES-256-GCM.
+      The work is done on a copy that is checked and then renamed over the original,
+      so a failure part-way leaves the original as it was. Stop every process that has
+      the store open first, such as the MCP server. A store that is already encrypted
+      is left alone.
+
+  memvara encrypt --export-key
+      Prints the store key, and nothing else, on stdout. Keep the copy somewhere other
+      than this machine. Without the key an encrypted store cannot be read, and there
+      is no way to recover it.
+
+The key is looked up in the OS keychain (service "memvara", account "db-key"), then in
+MEMVARA_DB_KEY, then in ~/.memvara/db.key. If none of them has one, `memvara encrypt
+PATH` generates one into ~/.memvara/db.key with mode 0600. To keep it in the keychain
+instead, run `python3 -m keyring set memvara db-key` and paste the exported key.
+
+Needs pip install "memvara[encrypt]".
+"""
+
+
+def encrypt(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
+            stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
+    """Convert a store to an encrypted one, or print the key that encrypts stores."""
+    out = sys.stdout if stdout is None else stdout
+    err = sys.stderr if stderr is None else stderr
+    args = list(argv)
+    if "--help" in args or "-h" in args:
+        print(ENCRYPT_USAGE, file=out)
+        return 0
+    if len(args) != 1 or (args[0].startswith("-") and args[0] != "--export-key"):
+        print(f"memvara encrypt: give one store path, or --export-key.\n\n"
+              f"{ENCRYPT_USAGE}", file=err)
+        return 2
+
+    # Imported here rather than at module scope, for the reason `whoami` gives: this
+    # module has to import on a bare install. `encryption` itself imports no SDK until a
+    # function in it needs one, which is where a missing extra is caught below.
+    from .store.encryption import EncryptionUnavailable, encrypt_store, export_key
+
+    try:
+        if args[0] == "--export-key":
+            found = export_key(env)
+            print(found.key.hex(), file=out)
+            print(f"memvara encrypt: that is the store key from {found.describe()}. "
+                  "Anyone who has it and a copy of a store can read every memory in it, "
+                  "so keep it somewhere safe and apart from the store.", file=err)
+            return 0
+        path = os.path.expanduser(args[0])
+        result = encrypt_store(path)
+    except EncryptionUnavailable as exc:
+        print(f"memvara encrypt: {exc}", file=err)
+        return 2
+    except (RuntimeError, OSError) as exc:
+        # `EncryptionError` is a `RuntimeError`, and so is the store's refusal to open a
+        # file a newer memvara wrote. Neither message carries the key.
+        print(f"memvara encrypt: {exc}", file=err)
+        return 1
+    if result.already:
+        print(f"{path} is already encrypted; nothing was changed. It opens with the key "
+              f"from {result.key_source}.", file=out)
+        return 0
+    print(f"Encrypted {path}: {result.claims} claim(s), {result.episodes} source "
+          f"turn(s) and {result.vectors} vector(s). The key is in "
+          f"{result.key_source}.", file=out)
+    print("Back up the key now with `memvara encrypt --export-key`: without it this "
+          "store cannot be read. The old unencrypted files were replaced, not "
+          "overwritten, so on a disk without its own encryption their blocks can "
+          "survive until the file system reuses them.", file=out)
+    return 0
+
+
 def _login(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
            stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
     """`memvara login`, which is `server/login.py` under this command's name."""
@@ -253,6 +339,7 @@ COMMANDS: dict[str, Callable[..., int]] = {
     "login": _login,
     "logout": logout,
     "whoami": whoami,
+    "encrypt": encrypt,
 }
 
 

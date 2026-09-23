@@ -32,13 +32,23 @@ its own.
 ## On your own machine
 
 ```bash
-pip install memvara
+pip install 'memvara[encrypt]'
 MEMVARA_DB=~/.memvara/memory.db memvara-mcp
 ```
 
 JSON-RPC 2.0 over stdio, no SDK dependency — the server frames one JSON object per line in
 about a hundred lines rather than pulling the reference SDK's dozen-package tree, which is
 how the "numpy and nothing else" claim survives the server.
+
+The `encrypt` extra is there because the server creates a new store encrypted: the
+database with SQLCipher and the vectors with AES-256-GCM. Without the extra it refuses to
+create one, and says so, rather than creating it unencrypted. `MEMVARA_FEATURE_ENCRYPTION=0`
+creates it unencrypted with a plain `pip install memvara`. The key comes from the OS
+keychain, then `MEMVARA_DB_KEY`, then `~/.memvara/db.key`, where one is generated if none
+exists. A lost key is a lost store, so back it up with `memvara encrypt --export-key`. An
+existing unencrypted store keeps opening as it is, with a warning, and
+`memvara encrypt <path>` converts it. See
+[DEPLOY.md](../DEPLOY.md#encryption-at-rest).
 
 It **refuses to start without `MEMVARA_DB`** and prints the client configuration block
 instead, so if your client says the server failed, run the command by hand and read what
@@ -80,7 +90,8 @@ two arguments stay listed, with a description saying they are refused. A hosted
 deployment does not accept the two arguments yet, so in cloud mode a filtered call fails
 with the deployment's refusal rather than being answered unfiltered.
 `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` (off by default) makes the extraction model read a
-turn over 6,000 characters in pieces, one call per piece. A feature marked (off by default)
+turn over 6,000 characters in pieces, one call per piece. `MEMVARA_FEATURE_ENCRYPTION=0`
+creates a new store unencrypted. A feature marked (off by default)
 stays off until its variable says `1`; every other feature is on until its variable says `0`.
 
 With `MEMVARA_LLM` set to a model, the search and recall tools also ask that model for a
