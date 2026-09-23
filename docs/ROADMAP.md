@@ -711,15 +711,15 @@ It is `WritePipeline(extraction_chunks=True)`, `Memvara(write_extraction_chunks=
 `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` on the MCP server. A turn over 6,000 characters is
 cut at paragraph and sentence ends into pieces of at most 6,000 characters, and each piece
 is one extraction call. It is built in core, as the entry below required, so every claim
-still cites the whole episode and `why()` still shows the turn the user wrote. A claim two
-pieces both produce, with the same slot and the same value, is merged into one before
-reconciliation, which is aimed at the duplicates measured below.
+still cites the whole episode and `why()` still shows the turn the user wrote. A fact two
+pieces both state reaches the reconciler twice, exactly as if the turn had stated it twice,
+so it is stored once and counted as observed twice.
 
 **It ships off because the release bar below is not met.** The one chunked run on a long
 turn, the spike's gate turn padded to 13,687 characters, found 4 of 5 key facts. Its 3
-duplicates were repeats of the same predicate and object, which is what the merge removes
-when the subject matches too, but no merge can recover a fact the model never stated. That
-run's per-piece outputs were not kept, and the fixture in
+duplicates were repeats of the same predicate and object, which the reconciler stores once
+when the subject matches too. Nothing after the model can recover a fact the model never
+stated. That run's per-piece outputs were not kept, and the fixture in
 `tests/fixtures/phi4_spike/` holds only three turns of 750 to 902 characters, all under the
 threshold, so the bar cannot be re-measured from recorded material.
 `tests/test_extraction_chunks.py` pins what the fixture can show: with the three recorded

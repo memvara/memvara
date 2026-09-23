@@ -546,7 +546,7 @@ def test_a_fact_about_one_repository_stays_there_and_a_preference_follows_the_us
     stats = _tool(a, "memory_stats", {})
     assert "default/alice/github.com%2Facme%2Fapp/*/*" in stats
     assert "(tenant/user/project/agent/session; '*' means unbound)" in stats
-    assert "features: all on" in stats
+    assert "features switched off: extraction_chunks" in stats, "the default-off feature"
 
 
 def test_the_command_line_binds_the_project_and_the_switches(tmp_path):

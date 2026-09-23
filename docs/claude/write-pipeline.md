@@ -55,8 +55,8 @@ A write starts as an `Episode` — one raw turn, stored verbatim — and ends as
    after a restart and including by another process. With `extraction_chunks=True`, a turn
    over 6,000 characters is the exception to the one call: it is cut into pieces at
    paragraph and sentence ends and each piece is its own call. The claims still cite the
-   whole episode, and a claim that two pieces both produced is merged into one before
-   reconciliation. The option is off by default, because the release bar recorded in the
+   whole episode, and a fact two pieces both state reaches the reconciler twice, as it
+   would if the turn had stated it twice. The option is off by default, because the release bar recorded in the
    "Reversed" list of `docs/ROADMAP.md` has not been met.
 
 Every claim that reaches the store passes through `Reconciler.apply()`, which decides one of
@@ -107,9 +107,10 @@ exception the caller retries.
   counts it on `receipt.deferred` instead, for a deployment where a worker calls
   `reextract()` later. The option changes what is said, not what is stored.
 - **A long turn is extracted whole or not at all.** Under `extraction_chunks`, if the call
-  for any piece fails, the batch is deferred and no claim from the other pieces is kept.
-  `reextract()` skips any turn that already has claims, so keeping part of a turn's claims
-  would mean the missing piece is never read.
+  for any piece of a turn fails, that turn keeps no claim from its other pieces and is
+  deferred. `reextract()` skips any turn that already has claims, so keeping part of a
+  turn's claims would mean the missing piece is never read. The other turns in the batch
+  keep their claims.
 
 ## Read next
 

@@ -562,17 +562,21 @@ suggestion must not turn it into an exception the caller retries.
   `llm_calls` counts one per piece. A piece is a copy of the episode with the same id, and
   `source_index` from a piece's call is mapped back to the long turn's position in the
   batch, so every claim cites the whole episode and `why()` shows what the user wrote. An
-  index that names no turn in its call is dropped, not moved. After `_claim_from_dict`, a
-  claim from a later piece with the same `fact_key` and `value_key` as one from an earlier
-  piece of the same turn is folded into it, keeping the higher confidence, so it reaches
-  the reconciler once and is not counted as a second observation. Repeats inside one call
-  are left to the reconciler, as before. If any piece's call fails, the whole batch is
-  deferred and no claim from the other pieces is kept, because `reextract()` skips a turn
-  that has claims and would never read the missing piece. Off by default because its
-  release bar is not met: see the "Reversed" list in `docs/ROADMAP.md` and
-  `tests/test_extraction_chunks.py`. The MCP server turns it on with
-  `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1`, the one feature switch that is off by default
-  (`FEATURES_OFF_BY_DEFAULT` in `server/config.py`).
+  index that names no turn in its call is dropped, not moved. Nothing merges repeats
+  across pieces: a fact stated in two pieces reaches `Reconciler.apply` twice and is
+  stored once and reinforced, exactly as when one call states it twice. The calls run one
+  after another because they share one `Usage` accumulator. A turn is extracted whole or
+  not at all: when a call carrying a turn fails, that turn's later pieces are not sent,
+  what its earlier pieces returned is dropped, and the turn is deferred, because
+  `reextract()` skips a turn that has claims and would never read the missing piece. The
+  other turns of the batch keep their claims; only when every turn failed is the batch
+  reported as a failed extraction. A turn of only whitespace, which the splitter returns
+  as no pieces, goes in the call for whole turns. The predicate vocabulary is built once
+  per batch, not once per call. Off by default because its release bar is not met: see
+  the "Reversed" list in `docs/ROADMAP.md` and `tests/test_extraction_chunks.py`. The MCP
+  server turns it on with `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1`; the feature is marked off
+  by default in `FEATURE_DEFAULTS` in `server/config.py`, the one table of features and
+  their defaults.
 
 `reextract()` is `add()` with tier 0 removed, for turns already in the store: a
 deployment that ran without a model, or a batch a provider failure left `deferred` — or

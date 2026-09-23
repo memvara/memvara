@@ -18,6 +18,7 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from ..core import Memvara
@@ -86,11 +87,17 @@ _DEFAULT_DIM = 512
 #: read from an environment that sets nothing must open the same store.
 _DEFAULT_EMBEDDER = "hashing"
 
-#: Every feature a user can switch off, by the name `MEMVARA_FEATURE_<NAME>` spells in
-#: upper case. Each one is on unless its variable says `0`, except the ones in
-#: `FEATURES_OFF_BY_DEFAULT`, which are off unless their variable says `1`. The design has
-#: the plugin hooks and the hosted deployment read the same names, so that one variable
-#: switches a feature on or off on every surface.
+#: Every feature a user can switch on or off, by the name `MEMVARA_FEATURE_<NAME>` spells
+#: in upper case, and whether it is on when nothing sets it. This table is the one place a
+#: feature and its default are written down; `FEATURES` and `FEATURES_OFF_BY_DEFAULT` are
+#: derived from it. The design has the plugin hooks and the hosted deployment read the same
+#: names, so that one variable switches a feature on or off on every surface.
+#:
+#: The design puts every feature on by default. A feature is off by default only while it
+#: has not yet passed the test its design says it must pass before it is switched on for
+#: everyone. `extraction_chunks` is off for that reason: its test asks for 5 of 5 key facts
+#: with 0 duplicates on the longest turn of the extraction spike, and the one measured run
+#: found 4 of 5 (`docs/ROADMAP.md`, the "Reversed" list).
 #:
 #: Only some of these change what this process does. `project_scope` decides whether the
 #: project is derived from the working directory, `profile` decides whether the
@@ -98,16 +105,25 @@ _DEFAULT_EMBEDDER = "hashing"
 #: extracted in pieces (`WritePipeline.extraction_chunks`). The others belong to the plugin
 #: or to tools that are not in this build yet; they are parsed here so that a typo in any
 #: of them is refused at startup rather than ignored.
-FEATURES = ("index_command", "research_agent", "project_scope", "status_line",
-            "recall_mark", "profile", "forget_matching", "end_reason", "links",
-            "extraction_chunks")
+FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
+    "index_command": True,
+    "research_agent": True,
+    "project_scope": True,
+    "status_line": True,
+    "recall_mark": True,
+    "profile": True,
+    "forget_matching": True,
+    "end_reason": True,
+    "links": True,
+    "extraction_chunks": False,
+})
 
-#: Features that are off unless `MEMVARA_FEATURE_<NAME>=1` turns them on. The design has
-#: every feature on by default; a feature is here only when it has not met the release bar
-#: its design set. `extraction_chunks` is here because its bar, 5 of 5 key facts with 0
-#: duplicates on the longest turn of the extraction spike, is not met: the one measured
-#: run found 4 of 5 (`docs/ROADMAP.md`, the "Reversed" list).
-FEATURES_OFF_BY_DEFAULT = frozenset({"extraction_chunks"})
+#: Every feature name, in the order `FEATURE_DEFAULTS` lists them.
+FEATURES = tuple(FEATURE_DEFAULTS)
+
+#: The features that are off unless `MEMVARA_FEATURE_<NAME>=1` turns them on.
+FEATURES_OFF_BY_DEFAULT = frozenset(
+    name for name, on in FEATURE_DEFAULTS.items() if not on)
 
 _FEATURE_PREFIX = "MEMVARA_FEATURE_"
 

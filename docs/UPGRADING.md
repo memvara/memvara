@@ -22,6 +22,10 @@ unless you turn it on.
 **If you build `ServerConfig` in Python and compare `features_off` with an empty set**, it
 is now `{"extraction_chunks"}` by default, the same value `ServerConfig.from_env()` returns
 for an environment that sets nothing. Compare with `FEATURES_OFF_BY_DEFAULT` instead.
+`MemvaraMCPServer(features_off=...)` defaults to the same set, so a server you build in
+Python without that argument lists `extraction_chunks` as off. If you pass `features_off`
+yourself, what you pass is the whole set: add `extraction_chunks` to it to keep that
+feature reported as off.
 
 **If you read `memory_stats` output**, a server started from the environment with no
 feature variables now says `features switched off: extraction_chunks` where it said

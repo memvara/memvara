@@ -1,9 +1,9 @@
-"""Cutting a long turn into pieces for extraction, at sentence boundaries.
+"""Cutting a long turn into pieces for extraction, at paragraph and sentence ends.
 
 `WritePipeline(extraction_chunks=True)` sends a turn longer than `EXTRACTION_CHUNK_CHARS`
 to the model one piece at a time instead of in one call. This module decides where the
 pieces start and end. It does nothing else: the claims each piece yields still cite the
-whole episode, and the pipeline merges repeats across pieces before reconciliation.
+whole episode, and a fact stated in two pieces is reconciled as a repeat.
 
 A piece holds whole paragraphs where it can, and whole sentences otherwise. A paragraph
 (text between blank lines) goes into a piece intact if it fits in one; a paragraph too
@@ -12,10 +12,12 @@ line break, so a fact stated in one sentence is never split across two model cal
 single sentence longer than a whole piece is the only thing cut mid-sentence, at the last
 space that fits, or at the limit when it has no space at all.
 
-This is a separate splitter from the one that cuts documents for retrieval. The two have
-different jobs: a retrieval chunk is small and overlaps its neighbours so a search can
-land on it, and an extraction piece is as large as the limit allows, with no overlap,
-because an overlap would make the model state the facts in it twice.
+The phase 2 parity design plans a second splitter, for cutting documents into chunks for
+retrieval (`docs/superpowers/specs/2026-09-23-parity-phase-2-documents-and-retrieval-design.md`,
+section 4.3). It is not built yet. The two have different jobs: a retrieval chunk is small
+and overlaps its neighbours so a search can land on it, and an extraction piece is as large
+as the limit allows, with no overlap, because an overlap would make the model state the
+facts in it twice.
 """
 
 from __future__ import annotations
@@ -45,7 +47,8 @@ def split_for_extraction(text: str, limit: int | None = None) -> list[str]:
     text no longer than the limit comes back whole and unchanged, as a list of one.
     Otherwise paragraphs, or the sentences of a paragraph too long for one piece, are
     packed into each piece in order until the next one would not fit, and each piece is
-    returned with its surrounding whitespace removed.
+    returned with its surrounding whitespace removed. A text of only whitespace that is
+    longer than the limit comes back as no pieces at all.
 
     >>> split_for_extraction("Short turn.", limit=100)
     ['Short turn.']

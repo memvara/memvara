@@ -62,8 +62,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   piece is one extraction call, counted in `llm_calls`. Every claim still cites the whole
   episode. A fact stated in two pieces reaches the reconciler twice, exactly as it would
   if the turn had stated it twice, so it is stored once with both observations counted.
-  If any piece's call fails, the batch is deferred
-  and nothing from the other pieces is kept, so `reextract()` reads the whole turn again.
+  If any piece's call fails, that turn keeps nothing from its other pieces and is
+  deferred, so `reextract()` reads the whole turn again; the other turns in the batch keep
+  their claims.
   This reverses a declined ROADMAP entry. It is off by default because its release bar,
   5 of 5 key facts with 0 duplicates on a long turn, has not been met: the one measured
   chunked run found 4 of 5. `extraction_chunks` is the first feature switch that is off by

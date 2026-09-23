@@ -65,9 +65,10 @@ mode. `MEMVARA_TENANT`, `MEMVARA_USER`, `MEMVARA_AGENT` and `MEMVARA_SESSION` bi
 `MEMVARA_PROJECT` binds the project part of it; when unset, `memvara/project.py` derives it
 from the git remote of the working directory, and in cloud mode it travels as the
 `Memvara-Project` header. `MEMVARA_FEATURE_<NAME>=0` switches one feature off and `=1`
-switches it on; the names are `FEATURES` in `memvara/server/config.py`, the ones off by
-default are `FEATURES_OFF_BY_DEFAULT` (only `extraction_chunks` today), and an unknown name
-is refused.
+switches it on. Every feature and its default are in one table, `FEATURE_DEFAULTS` in
+`memvara/server/config.py`; `FEATURES` and `FEATURES_OFF_BY_DEFAULT` are derived from it,
+and so is the `--help` sentence that names the features off by default. An unknown name is
+refused.
 `MEMVARA_LLM` chooses the extraction backend from `none`, `anthropic` and `openai`, with the
 `MEMVARA_LLM_MODEL`, `MEMVARA_LLM_MAX_TOKENS`, `MEMVARA_LLM_MAX_CLAIMS`,
 `MEMVARA_LLM_TERSE_CLAIMS`, `MEMVARA_LLM_EXTRACT_SYSTEM` and `MEMVARA_LLM_EXTRA_BODY`

@@ -27,7 +27,7 @@ from .protocol import (
     serve_stdio,
     success,
 )
-from .config import unknown_features
+from .config import FEATURES_OFF_BY_DEFAULT, unknown_features
 from .memory_api import MemoryAPI
 from .tools import (TOOLS, Tool, ToolContext, ToolError, anchoring_by_default,
                     safe_detail, without_reasons)
@@ -155,13 +155,16 @@ class MemvaraMCPServer:
                  user: str | None = None, agent: str | None = None,
                  session: str | None = None, read_only: bool = False,
                  anchored: bool = False, project: str | None = None,
-                 features_off: Collection[str] = ()) -> None:
+                 features_off: Collection[str] = FEATURES_OFF_BY_DEFAULT) -> None:
         problem = unknown_features(features_off)
         if problem is not None:
             raise ValueError(f"features_off: {problem}")
         self._memory = memory
         #: Features this server was told to leave off. A tool that belongs to one of them
-        #: is not listed, for the reason a read-only server hides its write tools.
+        #: is not listed, for the reason a read-only server hides its write tools. The
+        #: default is the features that are off by default, the same set
+        #: `ServerConfig.from_env` gives for an environment that sets nothing, so a server
+        #: built in Python and one started from the command line report the same.
         self.features_off = frozenset(features_off)
         extractor, credential_is_read_only = _service_facts(memory)
         #: **OR-ed, never overridden.** A server configured read-only stays read-only

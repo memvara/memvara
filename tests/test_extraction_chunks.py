@@ -2,10 +2,10 @@
 
 With the switch on, a turn longer than `EXTRACTION_CHUNK_CHARS` (6,000 characters) is sent
 to the model one piece at a time. Every claim still cites the whole episode, so `why()`
-keeps pointing at the turn the user wrote, and a claim that two pieces both produced is
-merged into one before reconciliation. The switch is off by default because the release
-bar in `docs/ROADMAP.md` ("Reversed" list) has not been met; the last group of tests
-below holds the evidence the fixture allows.
+keeps pointing at the turn the user wrote, and a fact two pieces both state reaches the
+reconciler twice, as it would if the turn had stated it twice. The switch is off by
+default because the release bar in `docs/ROADMAP.md` ("Reversed" list) has not been met;
+the last group of tests below holds the evidence the fixture allows.
 
 Every test counts model calls, as `tests/test_pipeline.py` does, because a call per piece
 is the cost this feature adds.
@@ -25,6 +25,7 @@ from memvara.embed import HashingEmbedder
 from memvara.llm.base import Usage
 from memvara.schema import PredicateRegistry
 from memvara.server.config import (
+    FEATURE_DEFAULTS,
     FEATURES,
     FEATURES_OFF_BY_DEFAULT,
     ConfigError,
@@ -228,57 +229,61 @@ def test_a_source_index_outside_the_piece_is_dropped_not_moved():
     store.close()
 
 
-# -- merging across pieces ----------------------------------------------------------------
+# -- repeats across pieces --------------------------------------------------------------
 
 
-def test_the_same_claim_from_two_pieces_is_merged_before_reconciliation():
-    """The measured failure in the ROADMAP entry: each piece restates what the model
-    already said, and the reconciler absorbs the repeats as reinforcements, which raises
-    the claim's salience for no new evidence. Merged, it is one claim at the higher of
-    the two confidences."""
-    def respond(eps):
-        conf = 0.6 if "Lisbon" in eps[0].content else 0.8
-        return [item("user", "lives_in", "Lisbon", confidence=conf)]
+def _one_claim(store):
+    claims = list(store.iter_claims("acme"))
+    assert len(claims) == 1
+    c = claims[0]
+    return (c.predicate, c.object, c.observation_count, c.sources, c.salience_base,
+            c.confidence)
 
-    llm = PieceLLM(respond)
-    pipe, store = build(llm, extraction_chunks=True)
-    receipt = pipe.add([ep(long_turn("The offsite is booked in Lisbon for May.",
-                                     "The gate runs on port 61434."))])
-    assert len(llm.calls) == 2
-    assert [(c.predicate, c.object) for c in receipt.added] == [("lives_in", "Lisbon")]
-    assert receipt.reinforced == [], "a merged repeat is not a second observation"
-    assert receipt.added[0].confidence == pytest.approx(0.8)
+
+@pytest.mark.parametrize("reject_polluted", [False, True])
+def test_a_fact_stated_in_two_pieces_ends_as_a_fact_stated_twice_in_one_call(
+        reject_polluted):
+    """Nothing merges repeats before reconciliation. A fact the model states in two pieces
+    reaches the reconciler twice, exactly as two statements in one call do, so the two
+    paths end in the same claim: one row, observed twice, citing the turn once. The
+    pollution guard does not change this, because it refuses one value under several
+    predicates and these are one value under one predicate."""
+    turn_text = long_turn("The offsite is booked in Lisbon for May.",
+                          "The gate runs on port 61434.")
+
+    pieces_llm = PieceLLM(lambda eps: [item("user", "lives_in", "Lisbon")])
+    pipe, store = build(pieces_llm, extraction_chunks=True, reject_polluted=reject_polluted)
+    turn = ep(turn_text)
+    pipe.add([turn])
+    assert len(pieces_llm.calls) == 2
+    in_pieces = _one_claim(store)
     store.close()
 
+    whole_llm = PieceLLM(lambda eps: [item("user", "lives_in", "Lisbon")] * 2)
+    pipe, store = build(whole_llm, reject_polluted=reject_polluted)
+    whole = ep(turn_text)
+    pipe.add([whole])
+    assert len(whole_llm.calls) == 1
+    in_one_call = _one_claim(store)
+    store.close()
 
-def test_a_merge_needs_the_same_value_and_the_same_slot():
-    """Two pieces giving two different values for one slot are two claims, and the
-    reconciler decides between them as it would for any two claims."""
+    assert in_pieces[:3] == ("lives_in", "Lisbon", 2)
+    assert in_pieces[3] == [turn.id] and in_one_call[3] == [whole.id]
+    assert in_pieces[:3] + in_pieces[4:] == in_one_call[:3] + in_one_call[4:]
+
+
+def test_two_pieces_giving_different_values_leave_two_claims():
+    """Different values in one many-valued slot are two claims, whichever piece gave them."""
     def respond(eps):
         value = "Lisbon" if "Lisbon" in eps[0].content else "61434"
         return [item("user", "mentions", value), item("gate", "mentions", value)]
 
     llm = PieceLLM(respond)
     pipe, store = build(llm, extraction_chunks=True)
-    pipe.add([ep(long_turn("The offsite is booked in Lisbon for May.", "The gate runs on port 61434."))])
+    pipe.add([ep(long_turn("The offsite is booked in Lisbon for May.",
+                           "The gate runs on port 61434."))])
     assert sorted((c.subject, c.object) for c in store.iter_claims("acme")) == [
         ("gate", "61434"), ("gate", "Lisbon"), ("user", "61434"), ("user", "Lisbon")]
-    store.close()
-
-
-def test_a_repeat_inside_one_piece_is_left_to_the_reconciler_as_before():
-    """The merge is for repeats across pieces. Inside one call nothing changes, so a
-    turn that is not cut behaves exactly as it did before the switch existed."""
-    def respond(eps):
-        if "Lisbon" not in eps[0].content:
-            return []
-        return [item("gate", "port", "61434"), item("gate", "port", "61434")]
-
-    llm = PieceLLM(respond)
-    pipe, store = build(llm, extraction_chunks=True, reject_polluted=False)
-    receipt = pipe.add([ep(long_turn("The offsite is booked in Lisbon for May.",
-                                     "The gate runs on port 61434."))])
-    assert len(receipt.added) == 1 and len(receipt.reinforced) == 1
     store.close()
 
 
@@ -309,6 +314,88 @@ def test_a_failed_piece_defers_the_whole_batch_so_a_retry_reads_the_turn_again()
         ("lives_in", "Lisbon"), ("port", "61434")]
     assert retry.llm_calls == 2 + llm.classified
     mem.close()
+
+
+class FailsOn(PieceLLM):
+    """Raises for any call whose turns contain `marker`, and answers the rest."""
+
+    def __init__(self, respond, marker: str) -> None:
+        super().__init__(respond)
+        self.marker = marker
+
+    def extract(self, episodes, known_predicates):
+        if any(self.marker in e.content for e in episodes):
+            self.calls.append(list(episodes))
+            raise RuntimeError("timed out")
+        return super().extract(episodes, known_predicates)
+
+
+def test_a_failed_piece_defers_only_its_own_turn_and_the_rest_of_the_batch_keeps_its_claims():
+    """Turn A is short and goes whole; turn B is cut in two and B's second piece times
+    out. A's claim is kept. B keeps nothing, not even what its first piece returned, and
+    is deferred so a retry reads all of it."""
+    llm = FailsOn(_answer_by_content, marker="61434")
+    mem = Memvara(":memory:", llm=llm, embedder=HashingEmbedder(dim=32),
+                  write_extraction_chunks=True, tenant="acme", user="alice")
+    short = "We adopted a cat, Miso, last spring."
+    big = long_turn("The offsite is booked in Lisbon for May.", "The gate runs on port 61434.")
+    receipt = mem.add([{"role": "user", "content": short},
+                       {"role": "user", "content": big}])
+    assert [(c.predicate, c.object) for c in receipt.added] == [("owns_pet", "Miso")]
+    assert receipt.deferred and receipt.unextracted == 1
+    assert [len(call) for call in llm.calls] == [1, 1, 1], "A whole, then B's two pieces"
+    assert [e.content for e in mem.pending_extraction()] == [big], "only B waits for a retry"
+    mem.close()
+
+
+def test_after_a_turn_s_piece_fails_its_later_pieces_are_not_sent():
+    llm = FailsOn(_answer_by_content, marker="Lisbon")
+    pipe, store = build(llm, extraction_chunks=True)
+    receipt = pipe.add([ep(long_turn("The offsite is booked in Lisbon for May.",
+                                     "The gate runs on port 61434."))])
+    assert len(llm.calls) == 1 and receipt.llm_calls == 1
+    assert receipt.deferred and receipt.unextracted == 1 and receipt.added == []
+    store.close()
+
+
+def test_when_the_short_turns_call_fails_the_long_turn_still_keeps_its_claims():
+    llm = FailsOn(_answer_by_content, marker="Miso")
+    pipe, store = build(llm, extraction_chunks=True)
+    receipt = pipe.add([ep("We adopted a cat, Miso, last spring."),
+                        ep(long_turn("The offsite is booked in Lisbon for May.",
+                                     "The gate runs on port 61434."))])
+    assert sorted((c.predicate, c.object) for c in receipt.added) == [
+        ("lives_in", "Lisbon"), ("port", "61434")]
+    assert receipt.deferred and receipt.unextracted == 1
+    store.close()
+
+
+def test_a_long_turn_of_only_whitespace_is_sent_whole_rather_than_left_out():
+    """The splitter returns no pieces for text that is only whitespace. Such a turn goes
+    in the call for whole turns, so a batch in which another turn is cut still sends every
+    turn to the model. The salience gate drops a turn like this before tier 2, so this is
+    checked on the plan itself."""
+    pipe, store = build(PieceLLM(lambda eps: []), extraction_chunks=True)
+    blank = ep(" " * (EXTRACTION_CHUNK_CHARS + 1))
+    big = ep(long_turn("The offsite is booked in Lisbon for May."))
+    assert split_for_extraction(blank.content) == []
+    calls = pipe._plan_calls([blank, big])
+    assert calls[0].shown == [blank] and calls[0].positions == [0]
+    assert [c.positions for c in calls[1:]] == [[1], [1]]
+    store.close()
+
+
+def test_the_predicate_vocabulary_is_built_once_per_batch_not_once_per_piece(monkeypatch):
+    pipe, store = build(PieceLLM(lambda eps: []), extraction_chunks=True)
+    built = []
+    original = pipe.registry.prompt_vocabulary
+    monkeypatch.setattr(pipe.registry, "prompt_vocabulary",
+                        lambda: built.append(1) or original())
+    pipe.add([ep("We adopted a cat, Miso, last spring."),
+              ep(long_turn("The offsite is booked in Lisbon for May.",
+                           "The gate runs on port 61434."))])
+    assert len(built) == 1
+    store.close()
 
 
 def test_tokens_from_every_piece_land_on_one_receipt():
@@ -343,6 +430,53 @@ def test_the_option_reaches_the_pipeline_through_memvara_s_write_prefix():
                   write_extraction_chunks=True)
     assert mem.writer.extraction_chunks is True
     mem.close()
+
+
+def test_one_table_holds_every_feature_and_its_default():
+    """`FEATURES` and `FEATURES_OFF_BY_DEFAULT` are views of `FEATURE_DEFAULTS`, so a
+    feature's default is written down in exactly one place."""
+    assert FEATURES == tuple(FEATURE_DEFAULTS)
+    assert FEATURES_OFF_BY_DEFAULT == {n for n, on in FEATURE_DEFAULTS.items() if not on}
+    assert FEATURE_DEFAULTS["extraction_chunks"] is False
+    with pytest.raises(TypeError):
+        FEATURE_DEFAULTS["extraction_chunks"] = True  # type: ignore[index]
+
+
+def test_the_help_text_names_the_features_that_are_off_by_default_from_the_table(
+        monkeypatch):
+    from memvara.server import cli
+    assert "Every feature is on by default except EXTRACTION_CHUNKS." in cli.USAGE
+    monkeypatch.setattr(cli, "FEATURES_OFF_BY_DEFAULT", frozenset({"links", "profile"}))
+    assert cli._feature_defaults() == "Every feature is on by default except LINKS and PROFILE."
+    monkeypatch.setattr(cli, "FEATURES_OFF_BY_DEFAULT", frozenset())
+    assert cli._feature_defaults() == "Every feature is on by default."
+
+
+#: The pages that describe the feature switches for an operator. Each marks a feature that
+#: is off by default by writing its variable as "`MEMVARA_FEATURE_<NAME>=1` (off by
+#: default)", and never names such a feature any other way.
+FEATURE_PAGES = ("docs/DEPLOY.md", "docs/integrations/mcp.md")
+_OFF_MARK = re.compile(r"`MEMVARA_FEATURE_([A-Z_]+)=1` \(off by default\)")
+
+
+@pytest.mark.parametrize("page", FEATURE_PAGES)
+def test_the_feature_pages_mark_exactly_the_features_that_are_off_by_default(page):
+    text = (Path(__file__).parent.parent / page).read_text()
+    marked = {name.lower() for name in _OFF_MARK.findall(text)}
+    assert marked == set(FEATURES_OFF_BY_DEFAULT), (
+        f"{page} marks {sorted(marked)} as off by default; the table in "
+        f"memvara/server/config.py says {sorted(FEATURES_OFF_BY_DEFAULT)}")
+
+
+def test_a_server_built_in_python_starts_with_the_same_features_off_as_one_from_the_cli():
+    from memvara.server import MemvaraMCPServer
+    from test_server import text
+    mem = Memvara(":memory:", llm=PieceLLM(lambda eps: []), embedder=HashingEmbedder(dim=32),
+                  user="alice")
+    srv = MemvaraMCPServer(mem, user="alice")
+    assert srv.features_off == FEATURES_OFF_BY_DEFAULT
+    assert "features switched off: extraction_chunks" in text(srv, "memory_stats")
+    srv.close()
 
 
 def test_the_feature_is_listed_and_off_unless_the_environment_turns_it_on():
