@@ -784,7 +784,8 @@ class RemoteShaped:
 
     def recall(self, query, *, k=8, min_score=0.0, anchored=False, ranked=False,
                query_rewrite=True, synthesize=False, memory_types=None,
-               include_episodes=False, budget=None, valid_at=None):
+               include_episodes=False, budget=None, valid_at=None, filters=None,
+               filepath_prefix=None):
         self.recall_calls.append({"k": k, "min_score": min_score})
         return "MEMORY\n- a rendered memory"
 
