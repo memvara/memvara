@@ -23,10 +23,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
+from . import local_store_env
 from .cases import DEFAULT_CASES
 
 HITS = DEFAULT_CASES.parent / "v1_hits.jsonl"
@@ -57,8 +57,7 @@ def main(argv: list[str] | None = None) -> int:
               "PYTHONPATH=. or install the library.", file=sys.stderr)
         return 2
 
-    env = {**os.environ, "MEMVARA_DB": str(args.db.expanduser()), "MEMVARA_MODE": "local"}
-    memory = build_memvara(ServerConfig.from_env(env))
+    memory = build_memvara(ServerConfig.from_env(local_store_env(str(args.db.expanduser()))))
     try:
         report = calibrate_min_score(
             lambda query: memory.search(query, k=args.k),

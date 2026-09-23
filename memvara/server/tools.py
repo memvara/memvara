@@ -60,11 +60,13 @@ model chooses between them exactly as it chooses between `memory_end` and `memor
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence, cast
 
 from ..confirm import ConfirmationRefused
-from ..core import Memvara, ScopedMemvara, is_derived, standing_order
+# `PROFILE_WINDOW` is the library's: how far back a profile looks when no `since` is
+# given. The tool resolves the instant itself only so its header can print it.
+from ..core import PROFILE_WINDOW, Memvara, ScopedMemvara, is_derived, standing_order
 # `_slugify` is private and imported anyway, for `Memvara._safe_line`'s reason a few
 # lines below: it is the store's own spelling rule, and a copy of it here would be a
 # second implementation that can disagree about whether a fold happened.
@@ -788,9 +790,6 @@ def _standing(ctx: ToolContext, args: dict[str, Any]) -> str:
 #: `memory_recall`'s default, because a profile is read into a prompt at session start and
 #: every section costs context.
 PROFILE_K = 8
-
-#: How far back `memory_profile` looks for recent changes when no `since` is given.
-PROFILE_WINDOW = timedelta(days=7)
 
 
 def _profile_rows(rows: Sequence[Row]) -> list[str]:

@@ -351,6 +351,10 @@ class RemoteStore:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="count_competing", why="See competing_claims: same missing lookup."))
 
+    def occupied_slots(self, tenant: str, fact_keys: Collection[str]) -> set[str]:
+        raise NotImplementedError(_NO_ENDPOINT.format(
+            method="occupied_slots", why="See competing_claims: same missing lookup."))
+
     def find_by_value(self, tenant: str, value_key: str) -> list[Claim]:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="find_by_value",
@@ -551,6 +555,16 @@ class RemoteStore:
         `embeddings`, `entities` — the same four keys `Store.purge`'s protocol
         docstring promises.
         """
+        if scope.project is not None:
+            # `ErasureScope` has no project field. Sent without it, this purge would
+            # erase the user's memory in every repository rather than in one.
+            # A `ValueError` rather than `NotImplementedError`: the method is wired, and
+            # it is this one scope that it refuses.
+            raise ValueError(
+                "purge() cannot erase one project through POST /v1/erasures, which takes "
+                "a user, an agent and a session but no project. Sending it without the "
+                f"project would erase every project, so nothing was sent for "
+                f"{scope.project!r}.")
         body: dict[str, Any] = {
             "scope": {"user": scope.user, "agent": scope.agent, "session": scope.session},
         }

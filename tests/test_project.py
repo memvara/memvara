@@ -178,6 +178,11 @@ def test_every_name_the_resolver_produces_passes_the_check(value):
     ("github.com//r", "empty, '.' or '..'"),
     ("github.com/o/..", "empty, '.' or '..'"),
     ("github.com/o/r/", "empty, '.' or '..'"),
+    # `$` matches before a final newline, so a pattern anchored with it accepted a name
+    # that a header would then carry with a line break in it.
+    ("path:0123456789abcdef\n", "exactly 16"),
+    ("github.com/o/r\n", "whitespace"),
+    ("github.com\n/o/r", "whitespace"),
 ])
 def test_a_malformed_name_is_refused_with_the_rule_it_broke(value, reason):
     """The hosted deployment returns this message as the reason for a 400, and the MCP

@@ -51,8 +51,10 @@ _GIT_TIMEOUT = 5.0
 #: it on a forge that treats case as significant would merge two different projects.
 _CASE_INSENSITIVE_HOSTS = frozenset({"github.com", "gitlab.com", "bitbucket.org"})
 
-_HOST = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$")
-_PATH_NAME = re.compile(r"^path:[0-9a-f]{16}$")
+#: Anchored with `\A` and `\Z` rather than `^` and `$`, because `$` also matches before a
+#: final newline, and a name ending in one would then pass and be sent in a header.
+_HOST = re.compile(r"\A[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?\Z")
+_PATH_NAME = re.compile(r"\Apath:[0-9a-f]{16}\Z")
 
 #: Longest project name `check_project` accepts. Real remotes are well under 200
 #: characters; the ceiling exists so that a header or an environment variable holding a

@@ -66,7 +66,9 @@
       {"value": "host.com:123456/o/r", "valid": false, "rule": "a port longer than five digits"},
       {"value": "host.com:/o/r", "valid": false, "rule": "a colon with no port"},
       {"value": "github.com/o/r x", "valid": false, "rule": "whitespace"},
-      {"value": "github.com/o/r\u0007", "valid": false, "rule": "a control character"}
+      {"value": "github.com/o/r\u0007", "valid": false, "rule": "a control character"},
+      {"value": "path:0123456789abcdef\n", "valid": false, "rule": "the path form with a trailing newline"},
+      {"value": "github.com/o/r\n", "valid": false, "rule": "a trailing newline"}
     ]
   }
 }

@@ -1133,6 +1133,11 @@ class _VecIndex:
 _MIN_SQLITE = (3, 35, 0)
 
 
+#: Fact keys per `occupied_slots` statement, under SQLite's oldest bound-parameter limit
+#: of 999 with room for the tenant and the liveness clause's own parameters.
+_SLOT_CHUNK = 900
+
+
 class SQLiteStore:
     """Reference `Store` implementation. Single file, no server, no Docker."""
 
@@ -2398,6 +2403,27 @@ class SQLiteStore:
             ).fetchall()
         return [self._row_to_claim(r) for r in rows]
 
+    def occupied_slots(self, tenant: str, fact_keys: Collection[str]) -> set[str]:
+        """The keys among `fact_keys` whose slot holds a live claim. One query per chunk.
+
+        Chunked because SQLite caps the number of bound parameters in one statement, at
+        999 on older builds. `cl_fact` covers (tenant, fact_key), so each chunk walks
+        index entries.
+        """
+        keys = list(dict.fromkeys(fact_keys))
+        live, lp = self._live_clause(None, None, include_invalidated=False)
+        found: set[str] = set()
+        with self._read() as conn:
+            for start in range(0, len(keys), _SLOT_CHUNK):
+                chunk = keys[start:start + _SLOT_CHUNK]
+                marks = ", ".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT DISTINCT fact_key FROM claims WHERE tenant=? AND "
+                    f"fact_key IN ({marks}) AND {live}",
+                    [tenant, *chunk, *lp]).fetchall()
+                found.update(r["fact_key"] for r in rows)
+        return found
+
     def count_competing(self, tenant: str, fact_key: str, *,
                         valid_at: datetime | None = None,
                         known_at: datetime | None = None) -> int:
@@ -2779,11 +2805,16 @@ class SQLiteStore:
         Episodes are erased on the same terms as claims and always were — what is new
         is that they now have indexes, and an FTS row surviving the row it describes is
         not a stale cache entry, it is the purged text still being searchable.
+
+        A scope with a project erases only that project's rows. What was written without
+        a project is user-wide rather than the repository's, so it stays. An unset
+        project is a wildcard like every other unset field, so a purge with none still
+        takes every project.
         """
         conds = ["tenant = ?"]
         params: list = [scope.tenant]
-        for col, val in (("usr", scope.user), ("agent", scope.agent),
-                         ("session", scope.session)):
+        for col, val in (("usr", scope.user), ("project", scope.project),
+                         ("agent", scope.agent), ("session", scope.session)):
             if val is not None:
                 conds.append(f"{col} = ?")
                 params.append(val)

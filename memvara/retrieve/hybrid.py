@@ -1049,19 +1049,11 @@ class HybridRetriever:
             lexical_terms=lexical_terms,
         )
 
-        # A present-tense read bound to a project leaves out a user-wide value its own
-        # value shadows (`retrieve/shadow.py`). Applied after the walk, so a shadowed claim
-        # the graph leg reached is left out as surely as one the lookup legs found.
-        hidden = (shadowed(self.store, self.registry, claims.values(), scope)
-                  if valid_at is None and known_at is None else frozenset())
-
         results: list[Result] = []
         for claim_id, fusion in fused.items():
             claim = claims.get(claim_id)
             if claim is None:
                 continue  # raced with a delete; a missing row is not a ranking error
-            if claim_id in hidden:
-                continue
             if wanted is not None and claim.memory_type not in wanted:
                 continue
             if not self._believed_by(claim, known_at):
@@ -1079,6 +1071,13 @@ class HybridRetriever:
             if result.score < min_score:
                 continue
             results.append(result)
+        # A present-tense read bound to a project leaves out a user-wide value its own
+        # value shadows (`retrieve/shadow.py`). Last, so only a claim every other filter
+        # kept costs a slot lookup, and after the walk, so a shadowed claim the graph leg
+        # reached is left out as surely as one the lookup legs found.
+        if valid_at is None and known_at is None and results:
+            hidden = shadowed(self.store, self.registry, (r.claim for r in results), scope)
+            results = [r for r in results if r.claim.id not in hidden]
         return results, saturated
 
     def _spellings(self, scope: Scope) -> "Callable[[str], Iterable[str]]":

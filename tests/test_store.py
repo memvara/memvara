@@ -3096,3 +3096,23 @@ def test_enumeration_and_id_reads_agree_about_the_project(store):
     sixteen = [c for c in foreign if c.object == "16"]
     assert len(sixteen) == 1
     assert not here.sees(sixteen[0].scope)
+
+
+
+def test_occupied_slots_names_the_slots_that_hold_a_live_claim(store):
+    """The batched form of `count_competing() > 0`, which is what read-side shadowing
+    asks for every candidate slot at once."""
+    from memvara.types import Claim, Scope, close_out, utcnow
+    scope = Scope("t", "alice")
+    live = Claim(subject="user", predicate="editor", object="vim", scope=scope)
+    gone = Claim(subject="user", predicate="shell", object="zsh", scope=scope)
+    other = Claim(subject="user", predicate="pager", object="less", scope=Scope("u", "bob"))
+    for claim in (live, gone, other):
+        store.put_claim(claim)
+    close_out(gone, utcnow(), None, "retired")
+    store.put_claim(gone)
+    keys = [live.fact_key, gone.fact_key, other.fact_key, "absent"]
+    assert store.occupied_slots("t", keys) == {live.fact_key}
+    assert store.occupied_slots("t", []) == set()
+    many = [f"k{n}" for n in range(1500)] + [live.fact_key]
+    assert store.occupied_slots("t", many) == {live.fact_key}, "chunked past SQLite's limit"

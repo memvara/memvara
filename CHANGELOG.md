@@ -11,19 +11,42 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
-- **`profile()`'s default buckets work on Python 3.10.** They read predicate names from
-  the shipped packs, which needed `tomllib`, and 3.10 has none, so every profile there
-  came back with no buckets and three warnings. The names are now read with a line reader
-  for the shipped packs where `tomllib` is missing. It is tested on every Python version
-  against a checked-in list of names, which is itself checked against the TOML reader
-  where that exists, and it refuses a header or a name line it does not understand
-  rather than returning fewer names.
+- **`profile()` on Python 3.10 reports its default buckets as unavailable.** They are
+  read from the shipped predicate packs, which need `tomllib`, and 3.10 has none. A line
+  reader that supplied the names there was added and is now withdrawn, because it
+  contradicted a recorded decision: `schema._toml_reader` refuses a second reader or a
+  `tomli` fallback, since refusing one optional feature on one interpreter is the smaller
+  loss than a second parser to keep in step. On 3.10 each default bucket is listed in
+  `Profile.warnings`, and every other section of the profile is unaffected. Caller
+  buckets that name registered or stored predicates never read the packs, so they carry
+  no such warning.
+- **A purge bound to a project erases only that project.** `Memvara.scope(project=...)
+  .purge()` and `.reset()` used to erase the user's memory in every repository. What was
+  written without a project is user-wide and is kept. A purge with no project still
+  takes every project. `RemoteStore.purge()` refuses a project scope, because the hosted
+  erasure route cannot express one.
+- **Read-side shadowing asks the store once per read.** It now runs after the cheap
+  search filters and looks every candidate slot up in one `Store.occupied_slots` query,
+  a new optional store method. A store without it falls back to one `count_competing`
+  per slot, and a store with neither returns the read unshadowed instead of raising.
+- **The MCP server reads `~/.memvara/credentials.json` with the same reader as `memvara
+  whoami`**, which strips surrounding whitespace from the key, so the two cannot disagree
+  about one file.
+- **A project name ending in a newline is refused.** `check_project()` anchored its
+  patterns with `$`, which also matches before a final newline.
+- **The plugin recall benchmark's `seed` and `calibrate` never scope their store to a
+  repository.** They build a server config, which now derives a project from the working
+  directory; they switch that off and ignore `MEMVARA_PROJECT`.
 - **The `path:` project name is the same on Windows as on other systems.** The main
   working tree's path is hashed in one spelling: forward slashes, a lower-case drive
   letter, no trailing slash. Before, a Windows path was hashed with backslashes, so the
   name differed from the plugin hooks' copy. The shared vectors file gains Windows roots.
 
 ### Changed
+
+- **`memvara login --project` accepts any spelling of a project id** that `uuid.UUID`
+  reads (with or without hyphens, either case, in braces, or as `urn:uuid:`), and sends
+  it as lower-case with hyphens.
 
 - **`memory_stats` labels the scope line with its five parts**,
   `tenant/user/project/agent/session`. It said four while printing five.

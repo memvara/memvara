@@ -91,12 +91,11 @@ def seed_memvara(db: Path, *, llm_model: str = "", llm_url: str = "",
     # `None`, which sends the hook to the hosted store instead. The benchmark then scored
     # a 0% hit rate against a store it had never read: every fact present, every write
     # successful, and the reader looking somewhere else entirely.
-    import os
-
     from memvara.server.config import ServerConfig, build_memvara
 
-    env = {**os.environ, "MEMVARA_DB": str(db), "MEMVARA_MODE": "local"}
-    config = ServerConfig.from_env(env)
+    from benchmarks.plugin_recall import local_store_env
+
+    config = ServerConfig.from_env(local_store_env(str(db)))
     if llm_model:
         # Constructed directly rather than through `build_memvara`, which hardcodes
         # `NullLLM() if config.llm == "none" else _anthropic()` -- `MEMVARA_LLM` has no

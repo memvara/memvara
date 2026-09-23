@@ -313,9 +313,15 @@ class ServerConfig:
         else:
             api_key = _optional(env.get("MEMVARA_API_KEY"))
             if api_key is None:
-                api_key, credentials_url = _read_credentials()
+                # The one reader of this file, shared with `memvara whoami` and
+                # `Memvara.connect()`, so they cannot disagree about what it holds.
+                # Imported here because `memvara.remote.creds` imports this module.
+                from ..remote.creds import read_credentials_file
+
+                stored = read_credentials_file(CREDENTIALS_PATH)
+                api_key = stored.get("api_key")
                 server_url = (env.get("MEMVARA_SERVER_URL") or "").strip() \
-                    or credentials_url or server_url
+                    or stored.get("server_url") or server_url
             if api_key is None:
                 raise ConfigError(
                     "MEMVARA_MODE=cloud needs an API key, and none was found. Set "
@@ -668,25 +674,6 @@ def _embedder_spec(raw: str | None) -> str:
             "'this store holds N-dimensional vectors' in the error that sent you here, "
             "or \"dim\" in memory.db.embedder.json.")
     return f"{kind}:{argument}" if sep else kind
-
-
-def _read_credentials() -> tuple[str | None, str | None]:
-    """Read the api_key and server_url `memvara-mcp login` wrote, or (None, None).
-
-    Any way this file could fail to be a usable credential — missing, unreadable, not
-    JSON, no api_key — is treated the same as "not logged in yet" rather than raised
-    directly, so the caller's ConfigError naming "memvara-mcp login" is the one message
-    the user sees.
-    """
-    try:
-        data = json.loads(CREDENTIALS_PATH.read_text())
-    except (OSError, ValueError):
-        return None, None
-    api_key = data.get("api_key") if isinstance(data, dict) else None
-    server_url = data.get("server_url") if isinstance(data, dict) else None
-    if not isinstance(api_key, str) or not api_key:
-        return None, None
-    return api_key, server_url if isinstance(server_url, str) and server_url else None
 
 
 def _flag(raw: str | None, name: str) -> bool:

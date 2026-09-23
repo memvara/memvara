@@ -342,6 +342,18 @@ def test_purge_a_whole_tenant_sends_confirm_tenant():
     store.close()
 
 
+def test_purge_refuses_a_project_scope_it_cannot_express():
+    """`POST /v1/erasures` takes a user, an agent and a session, and no project. Sending
+    a project-scoped purge without its project would erase every repository's memory for
+    that user, so the call is refused before anything is sent."""
+    transport = FakeTransport()
+    store = make_store(transport)
+    with pytest.raises(ValueError, match="every project"):
+        store.purge(Scope(tenant="acme", user="alice", project="github.com/acme/app"))
+    assert transport.calls == []
+    store.close()
+
+
 def test_erase_claim_found():
     transport = FakeTransport().on("POST", "/v1/erasures",
                                    json_response(200, {"erased": True}))
@@ -465,6 +477,7 @@ CLAIM = Claim(subject="user", predicate="lives_in", object="Lisbon", scope=SCOPE
     lambda s: s.put_claim(CLAIM),
     lambda s: s.competing_claims("acme", "fk"),
     lambda s: s.count_competing("acme", "fk"),
+    lambda s: s.occupied_slots("acme", ["fk"]),
     lambda s: s.find_by_value("acme", "vk"),
     lambda s: s.claims_citing("acme", "ep_1"),
     lambda s: s.slot_history("acme", "fk"),

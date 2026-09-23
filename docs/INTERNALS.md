@@ -979,12 +979,17 @@ value. Ending it would be wrong anyway, because that value is still the answer i
 other repository. So both are stored, and `memvara/retrieve/shadow.py` decides at read
 time. A present-tense read bound to project P leaves out a live claim with no project when
 the same owner, subject and single-valued predicate has a live claim in P's slot. The check
-is one indexed `count_competing` per distinct slot among those candidates, and a read with
-no project pays nothing.
+is one store query per read, `Store.occupied_slots(tenant, fact_keys)`, over the distinct
+slots of the candidates the read would otherwise return; a read with no project pays
+nothing. Both slot lookups are optional on the store protocol: a store without
+`occupied_slots` is asked one `count_competing` per slot, and a store with neither, or one
+that raises `NotImplementedError` from them as `RemoteStore` does, returns the read
+unshadowed rather than failing it.
 
 It applies to `get_all()` (and so to `standing()`, `profile()` and the MCP tools built on
 them), to `since()`'s `added` half, and to `search()` and `recall()` inside
-`HybridRetriever`, after the graph walk. It does not apply to a read at another instant
+`HybridRetriever`, after the graph walk and after every cheaper filter (memory type, belief
+time, anchoring and the score floor), so a candidate those drop never costs a lookup. It does not apply to a read at another instant
 (`valid_at`, `known_at` or `as_of`), because at that instant the repository may not have
 had a value of its own; to many-valued predicates, where both values hold at once; to
 predicates declared global, which are never written with a project; or to `count()` and
@@ -1018,15 +1023,12 @@ filters over one list with no sort of their own.
 `events`), holding that pack's predicate names; each bucket lists the newest `k` live
 claims whose predicate it names. A caller's bucket predicate is kept when the registry
 knows it (its canonical spelling is added), a shipped pack declares it, or a live claim in
-the scope uses it; anything else goes to `Profile.warnings`. Python 3.10 has no
-`tomllib`, so there the pack names come from `_scan_pack_names`, a line reader for the
-shipped packs' fixed layout. On every Python version a test compares its output with
-`tests/fixtures/pack_predicate_names.json`, and on 3.11 and later another test checks
-that list against the TOML reader, so the list cannot go stale. The reader refuses a
-`[[predicate]]` header or a `name =` line it does not understand, such as a header with
-a comment after it or a name with an escaped quote, instead of returning fewer names. A
-pack that cannot be read at all is reported in `warnings`, before any "nothing declares"
-warning it caused.
+the scope uses it; anything else goes to `Profile.warnings`. The packs are read only when a
+caller's predicate is neither registered nor stored. Python 3.10 has no `tomllib`, and by
+the decision `schema._toml_reader` records there is no second reader and no `tomli`
+fallback, so there the packs cannot be read: each default bucket is reported as
+unavailable in `warnings`, and every other section is unaffected. A pack that cannot be
+read is reported before any "nothing declares" warning it caused.
 
 `RemoteMemvara.profile()` sends `POST /v1/profile` with a JSON body of `query`, `k`,
 `since` and `buckets` (unset ones left out) and the scope as query parameters, and expects
