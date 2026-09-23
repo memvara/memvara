@@ -12,7 +12,9 @@ The failures these tests exist to prevent:
 1. **Demo data in somebody's real store.** The machine this runs on already holds a
    credential for a project somebody works in. A run that wrote a few thousand support
    tickets into it could not be taken back by this code, so the demo refuses that
-   credential by path, by key and by project before anything is sent.
+   credential by path and by key. When the two files name the same project, it also asks
+   the server which tenant each key reaches and refuses when it is the same one. All of
+   this happens before anything is written.
 2. **A hosted arm that silently answers a different question.** A hosted project cannot
    declare the support schema, so `plan` is multi-valued there and a new plan would sit
    beside the old one. And `POST /v1/recall` has no time axis, so a dated question read
@@ -117,14 +119,31 @@ class FakeScoped:
 
 
 class FakeHosted:
-    """`RemoteMemvara`: `scope(user=)` hands out one `FakeScoped` per user, kept."""
+    """`RemoteMemvara`: `scope(user=)` hands out one `FakeScoped` per user, kept.
 
-    def __init__(self) -> None:
+    `whoami()` answers the way `GET /v1/whoami` does, with the tenant the key is bound
+    to. Pass `whoami=` to replace that answer with another value, or with an exception to
+    raise instead, which is how a refused key or an unreachable deployment looks.
+    """
+
+    def __init__(self, *, tenant: str = "prj_demo", whoami: Any = None) -> None:
         self.scopes: dict[str, FakeScoped] = {}
         self.calls: list[tuple] = []
+        self.answer = (whoami if whoami is not None
+                       else {"token_id": "tok_1", "scope": {"tenant": tenant}})
+        self.closed = False
 
     def scope(self, *, user: str) -> FakeScoped:
         return self.scopes.setdefault(user, FakeScoped(self, user))
+
+    def whoami(self) -> Any:
+        self.calls.append(("whoami", None, None))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _hosted(tmp_path: Path, *, run_id: str = "r1", scale: int = 1,
@@ -337,12 +356,42 @@ def _write(path: Path, **fields: str) -> Path:
     return path
 
 
-def test_the_demo_refuses_the_credential_this_machine_already_uses(tmp_path):
-    """By path, by key and by project, because each is a different way to end up in the
-    same store: the default file itself, a copy of its key in another file, or a second
-    key minted for the same project. None of the refusals prints a key."""
-    default = _write(tmp_path / "home" / "credentials.json", api_key="mv_home-key",
-                     project="dev", server_url="https://app.memvara.dev")
+def _serve(monkeypatch, by_key: dict[str, Any]) -> dict[str, FakeHosted]:
+    """Put one `FakeHosted` behind each api key, in place of `hosted.connect`.
+
+    `by_key` maps a key to the tenant its `whoami` reports, or to the value or exception
+    its `whoami` returns or raises instead. A key missing from the map fails the test, so
+    a check that should have been settled without asking the server shows up as a lookup
+    nobody expected. Returns the clients by key, so a test can see which keys were looked
+    up and that each client was closed."""
+    served: dict[str, FakeHosted] = {}
+
+    def connect(credential: ho.HostedCredential) -> FakeHosted:
+        assert credential.api_key in by_key, "an unexpected whoami lookup was made"
+        answer = by_key[credential.api_key]
+        client = (FakeHosted(tenant=answer) if isinstance(answer, str)
+                  else FakeHosted(whoami=answer))
+        served[credential.api_key] = client
+        return client
+
+    monkeypatch.setattr(ho, "connect", connect)
+    return served
+
+
+def _home(tmp_path: Path) -> Path:
+    """The default credentials file as it is on the machine this bug was found on: a
+    project named `dev`, on a tenant the demo must never write into."""
+    return _write(tmp_path / "home" / "credentials.json", api_key="mv_home-key",
+                  project="dev", server_url="https://app.memvara.dev")
+
+
+def test_the_demo_refuses_the_credential_this_machine_already_uses(tmp_path, monkeypatch):
+    """By path and by key, because each is a different way to end up in the same store:
+    the default file itself, or a copy of its key (or of `MEMVARA_API_KEY`) in another
+    file. These refusals are decided from the files alone, so no lookup is made for them;
+    the empty `_serve` map fails the test if one is. None of the refusals prints a key."""
+    default = _home(tmp_path)
+    _serve(monkeypatch, {})
 
     def load(path: Path, env: dict[str, str] | None = None) -> Any:
         return ho.load_demo_credential(path, env=env or {}, default_path=default)
@@ -351,10 +400,10 @@ def test_the_demo_refuses_the_credential_this_machine_already_uses(tmp_path):
         (default, None, "default credentials file"),
         (_write(tmp_path / "copy.json", api_key="mv_home-key", project="demo"), None,
          "same key"),
+        (_write(tmp_path / "copy-dev.json", api_key="mv_home-key", project="dev"), None,
+         "same key"),
         (_write(tmp_path / "env.json", api_key="mv_env-key", project="demo"),
          {"MEMVARA_API_KEY": "mv_env-key"}, "same key"),
-        (_write(tmp_path / "sibling.json", api_key="mv_other", project="dev"), None,
-         "same project"),
         (tmp_path / "absent.json", None, "memvara login --credentials"),
     ):
         with pytest.raises(SystemExit) as caught:
@@ -366,6 +415,103 @@ def test_the_demo_refuses_the_credential_this_machine_already_uses(tmp_path):
     good = load(_write(tmp_path / "demo.json", api_key="mv_demo", project="memvara-demo",
                        server_url="https://app.memvara.dev"))
     assert (good.project, good.base_url) == ("memvara-demo", "https://app.memvara.dev")
+
+
+def test_a_demo_project_with_the_same_name_on_another_tenant_is_accepted(tmp_path,
+                                                                         monkeypatch):
+    """The bug. A project's name is not unique across tenants. This machine's own
+    credential is for a project named `dev`, and the demo's project, on a different
+    tenant, is also named `dev`. Comparing the names refused the demo's credential even
+    though it reaches a different store. The server says which tenant each key is bound
+    to, and two different tenants are two different stores, so the credential is
+    accepted."""
+    default = _home(tmp_path)
+    served = _serve(monkeypatch, {"mv_home-key": "prj_home", "mv_demo": "prj_demo"})
+    demo = _write(tmp_path / "demo.json", api_key="mv_demo", project="dev",
+                  server_url="https://app.memvara.dev")
+
+    credential = ho.load_demo_credential(demo, env={}, default_path=default)
+
+    assert (credential.project, credential.api_key) == ("dev", "mv_demo")
+    assert set(served) == {"mv_home-key", "mv_demo"}, "both keys must be looked up"
+    assert all(client.closed for client in served.values())
+
+
+def test_a_second_key_for_the_same_tenant_is_refused(tmp_path, monkeypatch):
+    """What the name check was for. A second key minted for the project this machine
+    already uses is a different key for the same store, and the server reports the same
+    tenant for both. The refusal names the file and the project, and prints no key."""
+    default = _home(tmp_path)
+    _serve(monkeypatch, {"mv_home-key": "prj_home", "mv_other": "prj_home"})
+    sibling = _write(tmp_path / "sibling.json", api_key="mv_other", project="dev")
+
+    with pytest.raises(SystemExit) as caught:
+        ho.load_demo_credential(sibling, env={}, default_path=default)
+
+    message = str(caught.value)
+    assert "same tenant" in message, message
+    assert str(sibling) in message and "'dev'" in message and "prj_home" in message
+    assert "mv_" not in message
+
+
+@pytest.mark.parametrize("failure", [
+    "the demo key is refused",
+    "this machine's key is refused",
+    "the deployment cannot be reached",
+    "the answer names no tenant",
+    "the answer is not a mapping",
+])
+def test_a_tenant_lookup_that_fails_refuses_the_credential(tmp_path, monkeypatch,
+                                                           failure):
+    """Fail closed. When the two files name the same project, only the server can say
+    whether they reach the same store, and a lookup that did not answer has not said
+    that they do not. So every way the lookup can fail (a key the server refuses, a
+    deployment that cannot be reached, an answer with no tenant in it) refuses the
+    credential with a message saying the stores could not be told apart and what to do.
+    The message must not carry a key, even when the error it reports quotes one."""
+    from memvara.remote.errors import AuthError, RemoteError
+
+    default = _home(tmp_path)
+    by_key: dict[str, Any] = {"mv_home-key": "prj_home", "mv_demo": "prj_demo"}
+    if failure == "the demo key is refused":
+        by_key["mv_demo"] = AuthError(401, "unauthorized", "key mv_demo is revoked")
+    elif failure == "this machine's key is refused":
+        by_key["mv_home-key"] = AuthError(401, "unauthorized", "token expired")
+    elif failure == "the deployment cannot be reached":
+        by_key["mv_demo"] = RemoteError(0, "transport",
+                                        "could not reach the deployment: timed out")
+    elif failure == "the answer names no tenant":
+        by_key["mv_demo"] = {"token_id": "tok_1", "scope": {}}
+    else:
+        by_key["mv_home-key"] = ["not", "a", "mapping"]
+    served = _serve(monkeypatch, by_key)
+    demo = _write(tmp_path / "demo.json", api_key="mv_demo", project="dev")
+
+    with pytest.raises(SystemExit) as caught:
+        ho.load_demo_credential(demo, env={}, default_path=default)
+
+    message = str(caught.value)
+    assert "could not confirm" in message, message
+    assert str(demo) in message and "'dev'" in message
+    assert "memvara whoami --credentials" in message
+    assert "mv_" not in message
+    assert all(client.closed for client in served.values())
+
+
+def test_a_lookup_that_cannot_build_a_client_refuses_the_credential(tmp_path,
+                                                                     monkeypatch):
+    """Without the `cloud` extra the hosted client cannot be built at all. That is a
+    failed lookup like any other, so it refuses the credential rather than skipping the
+    check."""
+    default = _home(tmp_path)
+
+    def connect(credential: ho.HostedCredential) -> Any:
+        raise ImportError("httpx is not installed")
+
+    monkeypatch.setattr(ho, "connect", connect)
+    demo = _write(tmp_path / "demo.json", api_key="mv_demo", project="dev")
+    with pytest.raises(SystemExit, match="could not confirm"):
+        ho.load_demo_credential(demo, env={}, default_path=default)
 
 
 # --- the harness, with the hosted backend ----------------------------------------

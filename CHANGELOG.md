@@ -123,6 +123,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The hosted demo no longer refuses a credential because its project has the same name
+  as this machine's project.** `demo/hosted.py` refused a `--hosted-credentials` file
+  whose `project` field matched the one in `~/.memvara/credentials.json`, on the grounds
+  that a second key for the same project reaches the same store. But the field is the
+  project's name, and two tenants can each have a project with the same name, so a
+  dedicated demo project that happened to share a name with the user's own project was
+  refused and the demo could not run. When the two names match, the demo now asks the
+  server which tenant each key reaches, with the same `GET /v1/whoami` request that
+  `memvara whoami` makes, and refuses only if both keys reach the same tenant. If either
+  lookup fails, for example because a key is refused or the server cannot be reached,
+  the credential is still refused, and the message says to run `memvara whoami
+  --credentials PATH` on each file. The refusals of the default file itself and of a
+  copied key are unchanged.
 - **A question that says one relation two ways is a lookup again, and the intent gate
   sees the vocabulary a registry holds right now.** The gate counts the distinct
   predicates a question names, and two is a chain that opens the graph leg. It counted

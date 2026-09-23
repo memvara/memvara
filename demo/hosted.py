@@ -62,9 +62,15 @@ never closed at, and there is no safe way to finish it.
 ## Whose store
 
 Never the one this machine already uses. `load_demo_credential` refuses the default
-credentials file, a file holding the same key as it or as `MEMVARA_API_KEY`, and a file
-for the same project, before anything is sent. Make a dedicated project in the console,
-sign in to it with `memvara login --credentials PATH`, and pass that path.
+credentials file, and a file holding the same key as that file or as `MEMVARA_API_KEY`.
+It also refuses a file whose key reaches the same tenant as the default file's key, since
+a second key for the same tenant writes into the same store. The files record only a
+project's name, and two tenants can have projects with the same name, so when the two
+files name the same project the demo asks the server (`GET /v1/whoami`, the request
+`memvara whoami` makes) which tenant each key reaches. It refuses if the tenants match,
+and also if either lookup fails, because then it cannot tell. All of this happens before
+the demo writes anything. Make a dedicated project in the console, sign in to it with
+`memvara login --credentials PATH`, and pass that path.
 """
 
 from __future__ import annotations
@@ -118,7 +124,17 @@ def load_demo_credential(path: str | os.PathLike[str], *,
 
     * `path` *is* the default credentials file;
     * `path` holds the same key as the default file, or as `MEMVARA_API_KEY` — a copy;
-    * `path` is for the same project as the default file — a second key minted for it.
+    * `path` holds a different key that reaches the same tenant as the default file's —
+      a second key minted for the same project.
+
+    The third check cannot be made from the files. A credentials file records the
+    project's *name*, and names are not unique: two tenants can each hold a project
+    called `dev`. So when the two files name the same project, both keys are looked up
+    with `GET /v1/whoami`, the request `memvara whoami` makes, and the credential is
+    refused only if the server reports the same tenant for both. The tenant is compared
+    and a user or agent narrowing is not, because every scope the demo writes is a user
+    inside the demo key's tenant. If either lookup fails, for any reason, the credential
+    is refused: an unanswered lookup has not shown that the stores differ.
 
     A missing or keyless file is refused too, naming the command that writes one. No
     message quotes a key.
@@ -153,16 +169,74 @@ def load_demo_credential(path: str | os.PathLike[str], *,
             f"--hosted-credentials: {resolved} holds the same key as "
             + ("MEMVARA_API_KEY" if stored["api_key"] == env_key else str(default))
             + ", so it reaches the same store. Use a key minted for the demo's own project.")
-    if stored.get("project") and stored.get("project") == home.get("project"):
-        raise SystemExit(
-            f"--hosted-credentials: {resolved} is for project {stored['project']!r}, the "
-            f"same project as {default}. A second key for the same project is the same "
-            "store. Create a separate project for the demo.")
-    return HostedCredential(
+    credential = HostedCredential(
         api_key=stored["api_key"],
         base_url=(stored.get("server_url") or environ.get("MEMVARA_SERVER_URL")
                   or _DEFAULT_SERVER),
         project=stored.get("project"), path=resolved)
+    if stored.get("project") and stored.get("project") == home.get("project"):
+        at_home = HostedCredential(
+            api_key=home["api_key"],
+            base_url=(home.get("server_url") or environ.get("MEMVARA_SERVER_URL")
+                      or _DEFAULT_SERVER),
+            project=home.get("project"), path=default)
+        keys = (credential.api_key, at_home.api_key)
+        try:
+            tenant, home_tenant = _tenant(credential), _tenant(at_home)
+        except Exception as exc:
+            raise SystemExit(
+                f"--hosted-credentials: {resolved} is for project {stored['project']!r}, "
+                f"and so is {default}. Project names are not unique, so the demo asked "
+                "the server which tenant each key reaches, and could not confirm that "
+                f"they reach different stores: {_redacted(_reason(exc), keys)}. Run "
+                f"`memvara whoami --credentials {resolved}` and `memvara whoami "
+                f"--credentials {default}` to see what each key reaches, fix whichever "
+                "one fails, and run the demo again.") from None
+        if tenant == home_tenant:
+            raise SystemExit(
+                f"--hosted-credentials: {resolved} is for project {stored['project']!r}, "
+                f"and the server reports that its key reaches the same tenant, "
+                f"{tenant}, as the key in {default}. A second key for "
+                "the same tenant reaches the same store. Create a separate project for "
+                "the demo.")
+    return credential
+
+
+def _tenant(credential: HostedCredential) -> str:
+    """The tenant the server says `credential`'s key is bound to.
+
+    Asked with `whoami()`, the call `memvara whoami` makes, so the demo and that command
+    read a key's tenant the same way. Raises if the answer has no tenant in it.
+    """
+    client = connect(credential)
+    try:
+        answer = client.whoami()
+    finally:
+        client.close()
+    scope = answer.get("scope") if isinstance(answer, Mapping) else None
+    tenant = scope.get("tenant") if isinstance(scope, Mapping) else None
+    if not isinstance(tenant, str) or not tenant:
+        raise ValueError(f"the server's whoami answer for {credential.path} named no "
+                         "tenant")
+    return tenant
+
+
+def _reason(exc: Exception) -> str:
+    """One line saying why a lookup failed. `RemoteError` is described the way
+    `memvara whoami` describes it; anything else by its type and message."""
+    from memvara.remote.errors import RemoteError
+
+    if isinstance(exc, RemoteError):
+        return f"{exc.message} ({exc.status_code} {exc.code})"
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _redacted(text: str, keys: Sequence[str]) -> str:
+    """`text` with every key in `keys` masked. A server or transport error can quote the
+    request it failed on, and a refusal message must never print a key."""
+    for key in keys:
+        text = text.replace(key, "[key]")
+    return text
 
 
 def connect(credential: HostedCredential) -> Any:

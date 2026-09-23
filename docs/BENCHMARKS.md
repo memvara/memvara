@@ -1288,7 +1288,8 @@ turns are tested against.
 client a customer uses, so the run can measure the service rather than the library alone.
 The other three arms use no store and are unchanged. It writes to a project made for it:
 the credentials file is refused if it is the machine's default one, holds the same key, or
-names the same project.
+holds a key that the server says reaches the same tenant. The tenant is looked up only
+when the two files name the same project, and a failed lookup also refuses the file.
 
 Two differences are not incidental and are printed above the report's tables. A hosted
 project cannot be sent the support schema, so the arm closes single-valued slots itself

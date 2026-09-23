@@ -528,9 +528,20 @@ PYTHONPATH=. python3 demo/harness.py --reader stub --memory hosted \
 
 **It writes to a project of its own, and refuses to do otherwise.** A run writes a few
 thousand turns, which no code here can take back, so `--hosted-credentials` refuses the
-default credentials file, any file holding the same key as it or as `MEMVARA_API_KEY`, and
-any file for the same project. Make a separate project in the console and sign in to it
-with `memvara login --credentials PATH`.
+default credentials file, and any file holding the same key as that file or as
+`MEMVARA_API_KEY`. It also refuses a file whose key reaches the same tenant as the default
+file's key, because a second key for the same tenant writes into the same store.
+
+A credentials file records only the project's name, and two tenants can each have a
+project with the same name. So when the demo's file and the default file name the same
+project, the demo asks the server which tenant each key reaches, using the request that
+`memvara whoami` makes, and refuses only if the tenants match. If either lookup fails, the
+demo cannot tell whether the stores differ, so it refuses and tells you to run `memvara
+whoami --credentials PATH` on each file. A demo project that shares its name with your own
+project is therefore accepted as long as it is on a different tenant.
+
+Make a separate project in the console and sign in to it with `memvara login --credentials
+PATH`.
 
 Three things differ from the local arms, and the report prints them above its tables
 rather than leaving them to be noticed:
