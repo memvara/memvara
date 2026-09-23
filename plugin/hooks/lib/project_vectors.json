@@ -1,0 +1,72 @@
+{
+  "about": "Test vectors for turning a git remote URL into a canonical project. Two implementations must agree on every row: plugin/hooks/lib/project.py (the hooks, which cannot import the library) and memvara/project.py (the library). A row whose project is null is a remote that names no host/owner/repo; canonical_project then falls back to the path form. Owner and repository names are lower-cased only for the hosts in case_insensitive_hosts, because those forges treat them case-insensitively; on any other host the case is kept, since folding it could merge two different projects.",
+  "case_insensitive_hosts": ["github.com", "gitlab.com", "bitbucket.org"],
+  "path_form": {
+    "about": "Used when the repository has no origin remote, or the remote names no host. The value is 'path:' followed by the first 16 hex characters of the SHA-256 of the real path of the repository root, encoded as UTF-8. For a linked worktree the root is the main repository's root, so every worktree of one repository shares one project. Before hashing, the real path is put in one spelling so that every platform and both copies hash the same string: every backslash becomes a forward slash, a drive letter is lower-cased, and trailing slashes are removed (a root of just '/' stays '/'). The rest of the path keeps its case.",
+    "prefix": "path:",
+    "hex_chars": 16,
+    "examples": [
+      {"root": "/srv/code/memvara", "project": "path:c448437ee234977a"},
+      {"root": "/srv/code/memvara/", "project": "path:c448437ee234977a"},
+      {"root": "C:\\Users\\dev\\memvara", "project": "path:eb570a9124f1d193"},
+      {"root": "c:/Users/dev/memvara", "project": "path:eb570a9124f1d193"},
+      {"root": "C:\\Users\\dev\\memvara\\", "project": "path:eb570a9124f1d193"}
+    ]
+  },
+  "normalise": [
+    {"remote": "https://github.com/memvara/memvara.git", "project": "github.com/memvara/memvara", "rule": "https, .git stripped"},
+    {"remote": "git@github.com:memvara/memvara.git", "project": "github.com/memvara/memvara", "rule": "scp-style ssh becomes host/owner/repo"},
+    {"remote": "ssh://git@github.com/memvara/memvara.git", "project": "github.com/memvara/memvara", "rule": "ssh URL"},
+    {"remote": "git+ssh://git@github.com/memvara/memvara", "project": "github.com/memvara/memvara", "rule": "git+ssh URL"},
+    {"remote": "git://github.com/memvara/memvara.git", "project": "github.com/memvara/memvara", "rule": "git protocol"},
+    {"remote": "https://user:token@github.com/memvara/x", "project": "github.com/memvara/x", "rule": "credentials dropped"},
+    {"remote": "https://oauth2@gitlab.com/memvara/x.git", "project": "gitlab.com/memvara/x", "rule": "user without password dropped"},
+    {"remote": "https://GitHub.COM/Memvara/Memvara-Cloud.git", "project": "github.com/memvara/memvara-cloud", "rule": "host lower-cased; owner and repo folded on a case-insensitive host"},
+    {"remote": "git@GitHub.com:Memvara/Memvara.git", "project": "github.com/memvara/memvara", "rule": "scp-style host lower-cased; owner and repo folded"},
+    {"remote": "https://Git.Example.COM/Team/Repo.git", "project": "git.example.com/Team/Repo", "rule": "unknown host: host lower-cased, owner and repo case kept"},
+    {"remote": "https://github.com/memvara/memvara/", "project": "github.com/memvara/memvara", "rule": "trailing slash stripped"},
+    {"remote": "https://github.com/memvara/memvara.git/", "project": "github.com/memvara/memvara", "rule": "trailing slash, then .git, stripped"},
+    {"remote": "https://github.com/memvara/memvara.git?ref=main#readme", "project": "github.com/memvara/memvara", "rule": "query and fragment stripped"},
+    {"remote": "ssh://git@git.example.com:2222/team/repo.git", "project": "git.example.com:2222/team/repo", "rule": "port kept"},
+    {"remote": "https://git.example.com:8443/team/repo", "project": "git.example.com:8443/team/repo", "rule": "port kept on https"},
+    {"remote": "https://gitlab.com/group/subgroup/repo.git", "project": "gitlab.com/group/subgroup/repo", "rule": "nested groups keep every segment"},
+    {"remote": "https://github.com//memvara//memvara.git", "project": "github.com/memvara/memvara", "rule": "empty path segments dropped"},
+    {"remote": "  https://github.com/memvara/memvara.git\n", "project": "github.com/memvara/memvara", "rule": "surrounding whitespace ignored"},
+    {"remote": "github-work:memvara/memvara.git", "project": "github-work/memvara/memvara", "rule": "an ssh alias is kept as written; it is not resolved through ~/.ssh/config"},
+    {"remote": "/srv/git/memvara.git", "project": null, "rule": "a local path names no host"},
+    {"remote": "file:///srv/git/memvara.git", "project": null, "rule": "a file URL names no host"},
+    {"remote": "../memvara.git", "project": null, "rule": "a relative path names no host"},
+    {"remote": "C:\\repos\\memvara", "project": null, "rule": "a Windows path is not scp-style"},
+    {"remote": "https://github.com", "project": null, "rule": "a host with no path"},
+    {"remote": "https://github.com/.git", "project": null, "rule": "a path that is only .git"},
+    {"remote": "", "project": null, "rule": "empty"},
+    {"remote": "https://github.com:notaport/memvara/memvara", "project": null, "rule": "an unparseable port"}
+  ],
+  "check_project": {
+    "about": "Whether a value is a project name the server accepts; both copies' check (check_project in the library, is_canonical in the hooks) must agree on every row. canonical_project returns the path form, not the normalised remote, when the normalised remote fails this check, so the hooks never send a header the server refuses with a 400.",
+    "rows": [
+      {"value": "github.com/memvara/memvara", "valid": true, "rule": "host and two segments"},
+      {"value": "git.example.com:2222/team/repo", "valid": true, "rule": "a port of up to five digits"},
+      {"value": "gitlab.com/group/subgroup/repo", "valid": true, "rule": "any number of segments"},
+      {"value": "github-work/memvara/memvara", "valid": true, "rule": "an ssh alias is a valid host name"},
+      {"value": "github.com/\u00f6/r", "valid": true, "rule": "a non-ASCII segment is valid; the hooks still do not send it as a header"},
+      {"value": "path:0123456789abcdef", "valid": true, "rule": "the path form"},
+      {"value": "path:0123456789ABCDEF", "valid": false, "rule": "the path form is lower-case hex"},
+      {"value": "path:0123456789abcde", "valid": false, "rule": "the path form has exactly 16 hex characters"},
+      {"value": "", "valid": false, "rule": "empty"},
+      {"value": "my-project", "valid": false, "rule": "no path segment"},
+      {"value": "github.com/", "valid": false, "rule": "an empty path"},
+      {"value": "example.com/team/../repo", "valid": false, "rule": "a .. segment"},
+      {"value": "example.com/./repo", "valid": false, "rule": "a . segment"},
+      {"value": "example.com//repo", "valid": false, "rule": "an empty segment"},
+      {"value": "Example.com/o/r", "valid": false, "rule": "an upper-case host"},
+      {"value": "host_name/o/r", "valid": false, "rule": "an underscore in the host"},
+      {"value": "-host.com/o/r", "valid": false, "rule": "a host that starts with a hyphen"},
+      {"value": "host.com./o/r", "valid": false, "rule": "a host that ends with a dot"},
+      {"value": "host.com:123456/o/r", "valid": false, "rule": "a port longer than five digits"},
+      {"value": "host.com:/o/r", "valid": false, "rule": "a colon with no port"},
+      {"value": "github.com/o/r x", "valid": false, "rule": "whitespace"},
+      {"value": "github.com/o/r\u0007", "valid": false, "rule": "a control character"}
+    ]
+  }
+}

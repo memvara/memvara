@@ -34,9 +34,18 @@ turn 5, so injecting it again buys nothing and spends budget that a genuinely ne
 could have had. Hashes of what has already gone in are kept per session and filtered out,
 so a follow-up gets whatever is new and a banner saying how much it already had.
 
-It does not write. Recording what was said is the `Stop` hook's job, over the prompt and
-the reply together, in one run: two runs per turn cost twice as much and each saw half the
-evidence.
+**It marks what it injects.** Every memory line starts with `⋈ ` (see `lib.mark`), so a
+reader can tell recalled memory from the rest of the context and capture can drop it. The
+dedup hash is taken over the line without the mark, so a session's record of what it has
+already seen is still valid after the mark was introduced.
+
+**It says which project it is asking for.** `lib.project.bind` works out the project from
+the remote of the session's repository, and the hosted client sends it with every call.
+
+It does not write memory. Recording what was said is the `Stop` hook's job, over the prompt
+and the reply together, in one run: two runs per turn cost twice as much and each saw half
+the evidence. It does add the number of lines it injected to the session's `recalled`
+count for the status line (`lib.counts`).
 """
 
 from __future__ import annotations
@@ -53,11 +62,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.envelope import read_event, write  # noqa: E402
 from core.host import Reply, active  # noqa: E402
+from lib import counts, state_file  # noqa: E402
 from lib.fast import recall as fast_recall  # noqa: E402
 from lib.ipc import (  # noqa: E402
     due_alert_for_model, due_capture_alert, log_line, payload, plural, status,
     under_extraction, with_alert,
 )
+from lib.mark import count as count_memories  # noqa: E402
+from lib.mark import marked  # noqa: E402
+from lib.mark import on as mark_on  # noqa: E402
+from lib.mark import unmark_block  # noqa: E402
+from lib.project import bind as bind_project  # noqa: E402
 
 #: The client this process is answering, resolved once. `run.py` binds it before importing
 #: this module; a bare `python3 recall.py` gets Claude Code, which is what that invocation
@@ -287,11 +302,25 @@ HEADER = (
 
 
 def _digest(line: str) -> str:
+    """The dedup hash of one memory line. Always taken over the line WITHOUT the mark.
+
+    Callers hash the bullet as the server rendered it, before `lib.mark` puts `⋈ ` in front.
+    Hashing the marked line instead would make every memory a session had already seen look
+    new on the first prompt after the upgrade, and inject all of them again.
+    """
     return hashlib.sha256(" ".join(line.split()).encode("utf-8")).hexdigest()[:16]
 
 
+def _count_recalled(session: str, n: int) -> None:
+    """Add `n` injected memory lines to this session's status-line count."""
+    if n and counts.enabled():
+        counts.bump(session, "recalled", n)
+
+
 def _seen_path(session: str) -> "str | None":
-    if not session or "/" in session or session in (".", ".."):
+    # A NUL byte makes every `os` call raise `ValueError`, not the `OSError` the state
+    # functions below are written to absorb, so such an id gets no state file at all.
+    if not session or "/" in session or "\0" in session or session in (".", ".."):
         return None
     return os.path.join(SEEN_DIR, f"{session}.json")
 
@@ -310,6 +339,11 @@ def _state_json(session: str) -> dict:
             data = json.load(fh)
     except (OSError, ValueError):
         return {}
+    return _normalised(data)
+
+
+def _normalised(data: object) -> dict:
+    """A state file's contents as a dict, reading the old bare-list format too."""
     if isinstance(data, list):
         return {"seen": [h for h in data if isinstance(h, str)]}
     return data if isinstance(data, dict) else {}
@@ -346,18 +380,7 @@ def _prune_seen(now: float) -> None:
     the one event that already writes to this directory, and a failure is ignored, because
     a tidy directory is worth strictly less than an answered prompt.
     """
-    try:
-        for name in os.listdir(SEEN_DIR):
-            if not name.endswith(".json"):
-                continue
-            path = os.path.join(SEEN_DIR, name)
-            try:
-                if now - os.path.getmtime(path) > SEEN_TTL_SECONDS:
-                    os.unlink(path)
-            except OSError:
-                continue
-    except OSError:
-        pass
+    state_file.prune(SEEN_DIR, SEEN_TTL_SECONDS, now)
 
 
 def _write_state(session: str, hashes: "list[str]", query: str,
@@ -369,22 +392,35 @@ def _write_state(session: str, hashes: "list[str]", query: str,
     with the standing set. Passing None from those would silently reset the refresh clock
     on every turn and re-inject the whole standing block each time -- the failure this is
     supposed to prevent, arriving through the tidier-looking signature.
+
+    The read and the write happen under one lock and the write is atomic (see
+    `lib.state_file`). Two prompts in one session can be answered at the same moment, and a
+    plain rewrite let the second drop the hashes the first had just added. Hashes already
+    in the file and missing from `hashes` are therefore kept, ahead of the caller's, so the
+    newest survive the `MAX_SEEN` cut.
+
+    Dedup and carry-forward are both optimisations. Losing them repeats a memory or weakens
+    one query; failing the prompt over it would be the larger bug, so nothing here raises.
     """
     path = _seen_path(session)
     if path is None:
         return
-    was_digest, was_at = _read_standing(session)
-    digest, at = standing if standing is not None else (was_digest, was_at)
-    try:
-        os.makedirs(SEEN_DIR, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"seen": hashes[-MAX_SEEN:], "query": query[:MAX_CARRY_CHARS],
-                       "standing": digest, "standing_at": at}, fh)
+
+    def change(raw: object) -> dict:
+        was = _normalised(raw)
+        kept = set(hashes)
+        earlier = [h for h in was.get("seen") or [] if isinstance(h, str) and h not in kept]
+        was_digest = was.get("standing")
+        was_at = was.get("standing_at")
+        digest, at = standing if standing is not None else (
+            was_digest if isinstance(was_digest, str) else "",
+            float(was_at) if isinstance(was_at, (int, float)) else 0.0)
+        return {"seen": (earlier + list(hashes))[-MAX_SEEN:],
+                "query": query[:MAX_CARRY_CHARS], "standing": digest, "standing_at": at}
+
+    if state_file.update_json(path, change, lock_path=os.path.join(SEEN_DIR, ".lock"),
+                              prefix=".recalled-"):
         _prune_seen(time.time())
-    except OSError:
-        # Dedup and carry-forward are both optimisations. Losing them repeats a memory or
-        # weakens one query; failing the prompt over it would be the larger bug.
-        pass
 
 
 def _anaphoric(prompt: str) -> bool:
@@ -581,7 +617,10 @@ def _standing_refresh(session: str, now: float, cwd: str = "") -> "tuple[str, tu
         # the next one either.
         return "", (digest, now)
 
-    fresh = _digest(block)
+    # Hashed without the recall mark, as `_digest` promises: the mark is presentation, and
+    # hashing it made every running session report "standing preferences updated" once
+    # after the upgrade and again each time the `recall_mark` switch changed.
+    fresh = _digest(unmark_block(block))
     if not block.strip() or fresh == digest:
         return "", (digest or fresh, now)
     return block.rstrip(), (fresh, now)
@@ -712,6 +751,10 @@ def main() -> int:
         # somewhere before the allowance runs out again.
         log_line("recall", "skipped=machine prompt")
         return 0
+
+    # Before anything that can reach the hosted store or the daemon: both are addressed by
+    # the project, and the header on every hosted call comes from what this sets.
+    bind_project(event.cwd)
 
     # Read once, then every reply from here on goes through `_emit` rather than
     # `write` threaded by hand through each call site -- a first version wrapped five
@@ -847,6 +890,7 @@ def main() -> int:
             # happens to match something.
             _emit(Reply("recall", status=status("standing preferences updated"),
                         context=standing))
+            _count_recalled(session, count_memories(standing))
             return 0
         _emit(Reply("recall", status=note))
         return 0
@@ -857,7 +901,8 @@ def main() -> int:
     # memory, not the excerpt, or raising MAX_INJECTED_CHARS would make everything already
     # in context look new.
     clipped = [_clip(line) for line in fresh]
-    lines = [header] + clipped
+    mark = mark_on()
+    lines = [header] + [marked(line, mark) for line in clipped]
     if any(short != full for short, full in zip(clipped, fresh)):
         lines.append(MORE)
     block_text = "\n".join(lines)
@@ -872,6 +917,7 @@ def main() -> int:
         f"clipped={sum(1 for s_, f_ in zip(clipped, fresh) if s_ != f_)}")
     _sample(prompt, fresh, anaphoric=anaphoric and bool(carried))
     _emit(Reply("recall", status=label, context=block_text))
+    _count_recalled(session, count_memories(block_text))
     return 0
 
 

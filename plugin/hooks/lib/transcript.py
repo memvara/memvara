@@ -8,6 +8,12 @@ typed that as a preference.
 
 Thinking blocks, Memvara's own recall injection, and memory_* tool calls are
 dropped: they are the plumbing of this plugin, not facts about the project.
+
+Recall injection is recognised two ways. A text that contains one of the block headers is
+dropped whole, as it always was. And any single line that starts with the recall mark `⋈ `
+is dropped wherever it appears, because the mark is on every memory line the hooks inject
+(`lib.mark`). The second rule catches what the first cannot: marked lines quoted back
+without their header, or a block whose header was cut off.
 """
 
 from __future__ import annotations
@@ -16,6 +22,8 @@ import json
 from typing import Any
 
 from core.host import active
+
+from .mark import BULLET, MARK, is_memory, unmarked
 
 #: The client whose transcript this module reads. Resolved once, at import: `run.py`
 #: binds the host before importing any hook body, and a body is what pulls this in.
@@ -60,14 +68,20 @@ NOISE = _HOST.noise + RECALL_MARKERS + ("Memvara scope:",)
 
 
 def _injected_lines(text: str) -> list[str]:
-    """The memory bullets out of an injected block, or nothing if this is not one."""
-    if not any(marker in text for marker in RECALL_MARKERS):
-        return []
+    """The memory bullets out of an injected block, or nothing if this is not one.
+
+    A marked line is a memory wherever it appears. An unmarked `- ` line counts only inside
+    a block that carries one of our headers, because outside one it is somebody's ordinary
+    list.
+    """
+    headed = any(marker in text for marker in RECALL_MARKERS)
     out = []
     for line in text.splitlines():
         line = line.strip()
-        if line.startswith("- ") and len(line) > 4:
-            out.append(line[2:].strip())
+        if not (headed or line.startswith(MARK)):
+            continue
+        if is_memory(line) and len(unmarked(line)) > 4:
+            out.append(unmarked(line)[len(BULLET):].strip())
     return out
 
 
@@ -128,6 +142,11 @@ def _clean(text: str) -> str:
         return ""
     if any(marker in text for marker in NOISE):
         return ""
+    if MARK in text:
+        # Only lines that START with the mark are recalled memory. The glyph in the middle
+        # of a line is somebody's own text and stays.
+        text = "\n".join(line for line in text.split("\n")
+                         if not line.lstrip().startswith(MARK)).strip()
     return text
 
 

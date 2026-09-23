@@ -39,6 +39,11 @@ from core.host import Reply, active  # noqa: E402
 from lib.ipc import (  # noqa: E402
     due_capture_alert, payload, plural, status, under_extraction, with_alert,
 )
+from lib import counts, project  # noqa: E402
+from lib.mark import count as count_memories  # noqa: E402
+from lib.mark import mark_block  # noqa: E402
+from lib.mark import on as mark_on  # noqa: E402
+from lib.project import bind as bind_project  # noqa: E402
 from lib.standing import standing_block  # noqa: E402
 from lib.write import open_writer  # noqa: E402
 
@@ -130,7 +135,7 @@ def _hosted_binding(store: object) -> str:
     for line in report.splitlines():
         line = line.strip()
         if line.startswith("scope:"):
-            # "scope: tenant/user/agent/session  (tenant/user/...; '*' means unbound)"
+            # "scope: tenant/user/project/agent/session  (...; '*' means unbound)"
             scope = line[len("scope:"):].strip().split()[0]
         elif line.startswith("visible at this scope:"):
             visible = line[len("visible at this scope:"):].strip()
@@ -140,8 +145,11 @@ def _hosted_binding(store: object) -> str:
 
 
 def _binding_line(scope: str, visible: str) -> str:
-    line = (f"Memvara scope: {scope} (tenant/user/agent/session; '*' means unbound), "
-            f"{visible} visible.")
+    # Five parts, because `Scope.key()` joins five: tenant, user, project, agent and
+    # session. The label said four for as long as the key had a project in it, so a reader
+    # matching the parts to the names got every name after `user` wrong.
+    line = (f"Memvara scope: {scope} (tenant/user/project/agent/session; '*' means "
+            f"unbound), {visible} visible.")
     if not scope.endswith("*"):
         # The session segment is bound, so anything written now is invisible to the next
         # session. Say so here rather than letting it be discovered by a lost fact.
@@ -185,6 +193,12 @@ def main() -> int:
     # which `_mine` treats as "user notes only" -- the safe direction, since the failure it
     # avoids is carrying another project's instructions into this one.
     cwd = read_event(host, "session_start", payload()).cwd
+    # Before the store is opened: the hosted client sends this project with every call.
+    bind_project(cwd)
+    # Once per session rather than on every write: the per-session counters and the
+    # per-directory project cache only grow, and this hook runs once when a session opens.
+    counts.prune()
+    project.prune()
     store, close = open_writer()
     if store is None:
         _emit(Reply("session_start", status=status("not configured")))
@@ -197,6 +211,7 @@ def main() -> int:
     #: What a section could not be fetched for, in words. Set before the `try` so that
     #: every path to the banner below has it, including the ones that leave early.
     missing = ""
+    mark = mark_on()
     try:
         parts = []
         binding = _hosted_binding(store) if hosted else _local_binding(store)
@@ -216,7 +231,9 @@ def main() -> int:
         except Exception:
             standing = ""
         if standing.strip():
-            parts.append(standing.rstrip())
+            # Marked here as well as in `render`, because the legacy fallback returns the
+            # server's own block, whose bullets carry no mark. Marking twice is harmless.
+            parts.append(mark_block(standing.rstrip(), mark))
 
         try:
             notes = str(store.recall(QUERY, k=K, budget=BUDGET, header=HEADER,
@@ -230,7 +247,7 @@ def main() -> int:
             # became two and 13,541, with the banner unchanged.
             notes, missing = "", _why(exc)
         if notes.strip():
-            parts.append(notes.rstrip())
+            parts.append(mark_block(notes.rstrip(), mark))
     finally:
         if close is not None:
             close()
@@ -243,7 +260,7 @@ def main() -> int:
         _emit(Reply("session_start", status=status(missing or "nothing stored yet")))
         return 0
 
-    count = sum(1 for line in "\n\n".join(parts).splitlines() if line.startswith("- "))
+    count = count_memories("\n\n".join(parts))
     opened = (f"session opened with {plural(count)}" if count else "session opened")
     # A count is a claim about what arrived. Saying it while a section is missing is the
     # failure this hook had; naming what is absent is the whole fix.
