@@ -72,9 +72,12 @@ from .types import (
     Claim,
     Closure,
     Collapse,
+    DeleteResult,
     Delta,
     Derivation,
     Dispute,
+    Document,
+    DocumentStatus,
     Retype,
     Episode,
     ErasureProof,
@@ -84,6 +87,7 @@ from .types import (
     Link,
     MemoryType,
     ObjectKind,
+    Page,
     Profile,
     Provenance,
     Reading,
@@ -151,6 +155,10 @@ __all__ = [
     # One typed link between two memories: what `link()` returns and `links()` and
     # `why().links` list.
     "Link",
+    # What the document methods return: a stored document, its processing status, what
+    # a delete did, and one page of `list_documents()`. Exported for the reason the
+    # return types above are.
+    "Document", "DocumentStatus", "DeleteResult", "Page",
     # schema
     "PredicateRegistry", "PredicateSpec", "Cardinality", "Volatility",
     # pluggable backends

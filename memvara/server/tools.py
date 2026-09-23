@@ -1,4 +1,4 @@
-r"""The eighteen tools, their descriptions, and how a stored memory is rendered back.
+r"""The twenty-two tools, their descriptions, and how a stored memory is rendered back.
 
 Four things in here are load-bearing and easy to mistake for boilerplate.
 
@@ -19,12 +19,18 @@ metadata is written in are neutralised *inside* it, so nothing the store contain
 appear to be output of this server — not on the line after a claim, and not on the tail of
 the claim's own.
 
-**No tool erases anything.** `consolidate`, `purge` and `reset` are deliberately absent.
+**No tool erases a memory.** `consolidate`, `purge` and `reset` are deliberately absent.
 The first is an operator action that an agent, given it, will call in a loop; the other
 two are irreversible erasure, which must not be one tool call away from a model that
 misread "forget that" as "delete everything". `memory_forget` retires and `memory_end`
 closes out a fact that stopped being true; both stay visible to `memory_history`, and
 neither removes anything from disk.
+
+`memory_delete_document` is the one tool that erases stored text, and what it erases is
+narrow: one document's own chunks, which the caller put there as a document and names by
+id. It erases no memory. A memory whose only source was that document is retired with
+the reason "source document deleted", so it stays visible to `memory_history` and
+`memory_why`, and a memory with another source keeps it.
 
 **Valid time is the caller's; transaction time is never offered.** `memory_remember`
 takes `true_since` and `true_until` — when the fact began and stopped being true in the
@@ -72,9 +78,10 @@ from ..core import PROFILE_WINDOW, Memvara, ScopedMemvara, is_derived, standing_
 # second implementation that can disagree about whether a fold happened.
 from ..schema import _slugify
 from ..select import SelectorBusy
-from ..types import (LINK_RELATIONS, REASON_CHARS, Accumulation, Claim, Closure, Collapse,
-                     Dispute, ForgetPreview, MemoryType, Retype, Row, WriteReceipt,
-                     closure_reason, closure_reasons, utcnow)
+from ..types import (CUSTOM_ID_CHARS, DOCUMENT_STATES, LINK_RELATIONS, REASON_CHARS,
+                     Accumulation, Claim, Closure, Collapse, DeleteResult, Dispute, Document,
+                     ForgetPreview, MemoryType, Retype, Row, WriteReceipt, closure_reason,
+                     closure_reasons, utcnow)
 from .memory_api import MemoryAPI
 from .validate import ToolError, validate
 
@@ -2028,6 +2035,104 @@ def _stats(ctx: ToolContext, _args: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# -- documents ---------------------------------------------------------------
+
+#: The most documents one `memory_list_documents` page shows. Lower than the library's
+#: ceiling because every row is replayed into a context window.
+_DOCUMENT_PAGE = 100
+
+
+def _document_lines(doc: Document) -> list[str]:
+    """One document's record, every caller-supplied string flattened.
+
+    The title, path, custom id and metadata are text somebody else wrote, replayed into a
+    model's context, so they go through `safe_line` like a stored claim does.
+    """
+    lines = [f"document {doc.id}: {doc.status}, {doc.chunks} chunk(s)"]
+    if doc.error:
+        lines.append(f"error: {safe_detail(doc.error)}")
+    for label, value in (("custom_id", doc.custom_id), ("title", doc.title),
+                         ("filepath", doc.filepath), ("source", doc.source_uri)):
+        if value:
+            lines.append(f"{label}: {_clip(value)}")
+    lines.append(f"mime: {_clip(doc.mime)}")
+    if doc.meta:
+        lines.append("metadata: " + ", ".join(f"{_clip(str(k), 64)}={_clip(str(v), 120)}"
+                                              for k, v in sorted(doc.meta.items())))
+    lines.append(f"stored: {_stamp(doc.created_at)}, updated: {_stamp(doc.updated_at)}")
+    return lines
+
+
+def _add_document(ctx: ToolContext, args: dict[str, Any]) -> str:
+    try:
+        doc = ctx.memory.add_document(
+            args.get("content"), url=args.get("url"), custom_id=args.get("custom_id"),
+            title=args.get("title"), filepath=args.get("filepath"), mime=args.get("mime"),
+            meta=args.get("metadata"))
+    except (TypeError, NotImplementedError, ValueError) as exc:
+        # Neither or both of content and url, no ingestion support for a URL or a
+        # non-text type, or an argument the store refuses. Each message says what to
+        # send instead, which is the thing a model can act on.
+        raise ToolError(f"Nothing stored: {safe_detail(exc)}") from None
+    tail = ("Its chunks are searchable now: memory_recall with include_episodes true "
+            "returns passages from it.")
+    if doc.status == "failed":
+        tail = ("It is stored and its chunks are searchable, but reading facts from it "
+                "failed; the error above says why.")
+    return "\n".join(["Stored."] + _document_lines(doc) + [tail])
+
+
+def _get_document(ctx: ToolContext, args: dict[str, Any]) -> str:
+    doc = ctx.memory.get_document(args["id"])
+    if doc is None:
+        return ("No document with that id or custom_id is visible here. "
+                "memory_list_documents shows the ones that are.")
+    return "\n".join(_document_lines(doc))
+
+
+def _list_documents(ctx: ToolContext, args: dict[str, Any]) -> str:
+    try:
+        page = ctx.memory.list_documents(filepath_prefix=args.get("filepath_prefix"),
+                                         status=args.get("status"), limit=args["limit"],
+                                         cursor=args.get("cursor"))
+    except ValueError as exc:
+        # A cursor this server never issued.
+        raise ToolError(safe_detail(exc)) from None
+    if not page.items:
+        return "No documents are stored here" + (
+            " that match those filters." if args.get("filepath_prefix") or
+            args.get("status") else ".")
+    lines = [f"{len(page.items)} document(s), newest first:"]
+    for doc in page.items:
+        name = doc.title or doc.custom_id or doc.filepath or "(untitled)"
+        path = f" — {_clip(doc.filepath, 120)}" if doc.filepath else ""
+        lines.append(f"- {doc.id} [{doc.status}, {doc.chunks} chunk(s)] "
+                     f"{_clip(name, 120)}{path}")
+    if page.next_cursor is not None:
+        lines.append(f"More documents: call again with cursor {page.next_cursor!r}.")
+    return "\n".join(lines)
+
+
+def _delete_result(result: DeleteResult) -> str:
+    if not result.deleted:
+        return ("Nothing deleted: no document with that id or custom_id is visible here. "
+                "memory_list_documents shows the ones that are.")
+    lines = [f"Deleted document {result.id}: its text is erased ({result.chunks} "
+             "chunk(s)). No memory was erased."]
+    if result.retired:
+        lines.append(f"Retired {len(result.retired)} memory(ies) whose only source was "
+                     "this document, with the reason 'source document deleted': "
+                     + ", ".join(result.retired))
+    if result.unlinked:
+        lines.append(f"{len(result.unlinked)} memory(ies) also had another source and "
+                     "keep it: " + ", ".join(result.unlinked))
+    return "\n".join(lines)
+
+
+def _delete_document(ctx: ToolContext, args: dict[str, Any]) -> str:
+    return _delete_result(ctx.memory.delete_document(args["id"]))
+
+
 # -- the registry ------------------------------------------------------------
 
 TOOLS: tuple[Tool, ...] = (
@@ -2866,6 +2971,162 @@ TOOLS: tuple[Tool, ...] = (
         properties={},
         required=(),
         handler=_stats,
+    ),
+    Tool(
+        name="memory_add_document",
+        description=(
+            "Store a whole document so passages from it can be found later: a policy, a "
+            "README, meeting notes, a specification, a web page. Call it when the user "
+            "hands you a document or a link and wants it kept, or asks you to remember "
+            "what a file says. Do not use it for one fact the user tells you "
+            "(memory_remember) or for the conversation itself (memory_add). Pass exactly "
+            "one of content, the text itself, or url, a page for the server to fetch. "
+            "The text is split into chunks of about 1,000 characters at sentence "
+            "boundaries; memory_recall with include_episodes true returns passages from "
+            "it. Give custom_id, your own stable name such as the file path or the URL, "
+            "whenever the same document may be sent again: adding a document whose "
+            "custom_id already exists here updates that document instead of storing a "
+            "second copy, and every unchanged chunk, with any memory that cites it, "
+            "stays as it was. The server fetches a url itself and refuses one on a "
+            "private network; HTML and PDF are read to text; an image, audio or video "
+            "needs a model that reads media. Anything the server cannot read, or has "
+            "switched off, is refused with a code and the reason, and nothing is "
+            "stored. Facts in the document are extracted and cite the passage "
+            "they came from, when this server has an extraction model. The result gives "
+            "the document id and its status: 'done', or 'failed' with the reason, in "
+            "which case the document is still stored and searchable, and sending it "
+            "again retries what was not read."
+        ),
+        properties={
+            "content": {
+                "type": "string",
+                "description": "The document's text. Omit it when passing url.",
+            },
+            "url": {
+                "type": "string",
+                "description": (
+                    "An http or https address for the server to fetch the document "
+                    "from. Omit it when passing content."),
+            },
+            "custom_id": {
+                "type": "string",
+                "maxLength": CUSTOM_ID_CHARS,
+                "description": (
+                    "Your own stable name for the document, unique in this scope, such "
+                    "as its file path or URL. Sending it again with new content updates "
+                    "the stored document."),
+            },
+            "title": {"type": "string", "description": "A title to show in listings."},
+            "filepath": {
+                "type": "string",
+                "description": (
+                    "Where the document lives, as a '/'-separated path, e.g. "
+                    "'policies/refunds.md'. memory_list_documents can filter by it."),
+            },
+            "mime": {
+                "type": "string",
+                "description": (
+                    "The content type, e.g. 'text/markdown'. Leave it out for plain "
+                    "text."),
+            },
+            "metadata": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "description": (
+                    "Your own labels for the document, as string values, e.g. "
+                    "{\"team\": \"support\"}. Stored with it and shown by "
+                    "memory_get_document."),
+            },
+        },
+        required=(),
+        handler=_add_document,
+        writes=True,
+        feature="documents",
+    ),
+    Tool(
+        name="memory_get_document",
+        description=(
+            "Show one stored document's record: its title, file path, where it came "
+            "from, how many chunks it is stored as, and its processing status, which is "
+            "'queued', 'extracting', 'done', 'stored' (kept without reading it for "
+            "facts), or 'failed' with the reason. Call it when you "
+            "need to check that a document you added was stored, or to look a document "
+            "up by the custom_id you gave it. It does not return the text: memory_recall "
+            "with "
+            "include_episodes true returns passages from it."
+        ),
+        properties={
+            "id": {
+                "type": "string",
+                "description": (
+                    "The document id from memory_add_document or memory_list_documents "
+                    "('doc_...'), or the custom_id it was stored with."),
+            },
+        },
+        required=("id",),
+        handler=_get_document,
+        feature="documents",
+    ),
+    Tool(
+        name="memory_list_documents",
+        description=(
+            "List the documents stored here, newest first, with each one's id, status, "
+            "chunk count, title and file path. Call it when the user asks which "
+            "documents you have, or to find a document's id before reading or deleting "
+            "it. filepath_prefix keeps only the documents whose file path starts with "
+            "it, so 'policies/' lists that folder; status keeps one processing state. "
+            "Results come a page at a time: when a page ends with a cursor, pass it back "
+            "as cursor to get the next page."
+        ),
+        properties={
+            "filepath_prefix": {
+                "type": "string",
+                "description": "Keep documents whose file path starts with this text.",
+            },
+            "status": {
+                "type": "string", "enum": list(DOCUMENT_STATES),
+                "description": "Keep documents in this processing state.",
+            },
+            "limit": {
+                "type": "integer", "minimum": 1, "maximum": _DOCUMENT_PAGE, "default": 20,
+                "description": f"Documents per page, at most {_DOCUMENT_PAGE}.",
+            },
+            "cursor": {
+                "type": "string",
+                "description": "The cursor the previous page ended with.",
+            },
+        },
+        required=(),
+        handler=_list_documents,
+        feature="documents",
+    ),
+    Tool(
+        name="memory_delete_document",
+        description=(
+            "Delete one stored document. Call it when the user asks you to remove a "
+            "document or says it is obsolete and should not be used any more. This "
+            "erases the document's text: its chunks are removed from disk and cannot be "
+            "searched or restored. It erases no memory. A memory whose only source was "
+            "this document is retired, so it stops answering and memory_history and "
+            "memory_why still show it with the reason 'source document deleted'; a "
+            "memory that also came from somewhere else keeps that other source. To "
+            "replace a document with a newer version, do not delete it: call "
+            "memory_add_document again with the same custom_id, which keeps what did not "
+            "change."
+        ),
+        properties={
+            "id": {
+                "type": "string",
+                "description": (
+                    "The document id from memory_list_documents ('doc_...'), or the "
+                    "custom_id it was stored with."),
+            },
+        },
+        required=("id",),
+        handler=_delete_document,
+        writes=True,
+        destructive=True,
+        feature="documents",
     ),
 )
 

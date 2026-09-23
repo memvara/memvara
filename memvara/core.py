@@ -26,7 +26,6 @@ import inspect
 import json
 import os
 import warnings
-from contextlib import nullcontext
 from copy import copy
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -50,7 +49,7 @@ from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retr
 from .retrieve.shadow import shadowed
 from .schema import (Cardinality, PredicatePackError, PredicateRegistry, _slugify,
                      load_specs)
-from .store import SQLiteStore, Store, bulk_claims, resolve_states
+from .store import SQLiteStore, Store, bulk_claims, resolve_states, transaction
 from .telemetry import WRITE_LLM_CALLS, WRITE_TOKENS_IN, WRITE_TOKENS_OUT, Recorder
 from dataclasses import replace
 
@@ -67,14 +66,18 @@ from .types import (
     Claim,
     Closure,
     Collapse,
+    DeleteResult,
     Delta,
     Derivation,
+    Document,
+    DocumentStatus,
     Episode,
     ErasureProof,
     ForgetPreview,
     ForgetResult,
     Link,
     MemoryType,
+    Page,
     Profile,
     Provenance,
     Reading,
@@ -94,6 +97,8 @@ from .types import (
     time_axes,
     utcnow,
 )
+from .documents import DocumentService
+from .ingest import Fetcher
 from .write import WritePipeline
 from .write.reconcile import MergeReport, backfill_predicates
 
@@ -718,7 +723,7 @@ class Memvara:
     #: out, before anything leaves this process, which is the one privacy control that
     #: matters *more* against a hosted deployment than against a local file.
     _LOCAL_ONLY = ("path", "store", "embedder", "llm", "registry", "telemetry",
-                   "advise_replacements")
+                   "advise_replacements", "url_fetcher")
 
     #: The prefixes `_split_tuning` routes to the write, read and graph subsystems. Every
     #: one of those subsystems runs server-side against a hosted deployment, so the
@@ -750,6 +755,12 @@ class Memvara:
         # `Memvara(api_key=..., reembed=False)` an error that asked for nothing.
         if kwargs.pop("reembed", False):
             named.append("reembed")
+        # The same reading for the local options whose default is true: chunking and
+        # ingestion run inside the deployment, so turning one off here would be accepted
+        # and never used.
+        for switch in ("retrieval_chunks", "ingest_urls", "ingest_media"):
+            if kwargs.pop(switch, True) is not True:
+                named.append(switch)
         # Prefix rather than name, and sorted so two of them read the same way twice.
         # Without this the caller still gets a `TypeError`, but from
         # `RemoteMemvara.__init__` naming a class they never mentioned — which says the
@@ -803,6 +814,10 @@ class Memvara:
         reembed: bool = False,
         advise_replacements: bool = False,
         confirm_secret: str | bytes | None = None,
+        retrieval_chunks: bool = True,
+        url_fetcher: "Fetcher | None" = None,
+        ingest_urls: bool = True,
+        ingest_media: bool = True,
         **tuning: Any,
     ) -> None:
         # Present so that a local construction that named them still binds. `__new__`
@@ -933,6 +948,22 @@ class Memvara:
                                          telemetry=telemetry)
         # See `_index_episodes`: warned once per instance, not once per rejected turn.
         self._warned_episode_vectors = False
+        #: Whether `add_document` splits a document into retrieval chunks of about 1,000
+        #: characters (see `memvara.documents.chunk`). With it off, a document is stored
+        #: as one chunk: still searchable, but a question about one paragraph is matched
+        #: against the whole text. The MCP server turns it off with
+        #: `MEMVARA_FEATURE_RETRIEVAL_CHUNKS=0`.
+        self.retrieval_chunks = retrieval_chunks
+        #: What `add_document(url=...)` fetches with, or `None` for ingestion's own
+        #: `SafeFetcher`. The MCP server passes `ServerConfig.url_fetcher()`, which adds
+        #: the operator's NAT64 prefixes.
+        self.url_fetcher = url_fetcher
+        #: The `ingest_urls` and `ingest_media` switches: whether `add_document` may fetch
+        #: a URL, and whether it may read images, audio and video. Refused with the code
+        #: `feature_off` when off.
+        self.ingest_urls = ingest_urls
+        self.ingest_media = ingest_media
+        self._documents = DocumentService(self)
 
         # Last, because both need the fully wired object: the migration path calls
         # `reembed()`, and neither is worth doing if construction is going to fail.
@@ -1204,8 +1235,7 @@ class Memvara:
         # findable by BM25 and by `why()` — only its *vector* is missing — and because
         # `_index_episodes` skips turns that already have one, so a retry converges.
         receipt = self.writer.add(episodes)
-        batch = getattr(self.store, "batch", None)
-        with (batch() if batch is not None else nullcontext()):
+        with transaction(self.store):
             self._index_episodes(receipt.episode_ids)
         return receipt
 
@@ -1693,8 +1723,7 @@ class Memvara:
             for ep in episodes:
                 redact_episode(self.redactor, ep,
                                telemetry=self.writer.telemetry)
-        batch = getattr(self.store, "batch", None)
-        with (batch() if batch is not None else nullcontext()):
+        with transaction(self.store):
             for ep in episodes:
                 self.store.add_episode(ep)
             if retire is not None:
@@ -1935,8 +1964,7 @@ class Memvara:
         point is that the set stops answering, a partial answer is worse than either
         outcome. Nothing displaced these claims, so no successor is named.
         """
-        batch = getattr(self.store, "batch", None)
-        with (batch() if batch is not None else nullcontext()):
+        with transaction(self.store):
             for c in claims:
                 close_out(c, at, None, how, why)
                 self.store.put_claim(c)
@@ -1971,6 +1999,145 @@ class Memvara:
                 "cannot be faked with retirement"
             )
         return purge(scope)
+
+    # -- documents -----------------------------------------------------------
+
+    def add_document(self, content: str | bytes | None = None, *, url: str | None = None,
+                     custom_id: str | None = None, title: str | None = None,
+                     filepath: str | None = None, mime: str | None = None,
+                     meta: Mapping[str, Any] | None = None, extract: bool = True,
+                     tenant=None, user=None, agent=None, session=None) -> Document:
+        """Store a document whole, searchable in chunks. Returns the stored document.
+
+        Pass exactly one of `content` and `url`. A `str` with no `mime`, or a plain-text
+        `mime` such as `text/plain` or `text/markdown`, is stored as it is. A URL,
+        `bytes`, HTML or any other type goes through `memvara.ingest.extract`, which
+        fetches the URL with `url_fetcher` (by default a `SafeFetcher` that refuses
+        private addresses), reads HTML and PDF, and hands images, audio and video to this
+        instance's `llm` when it implements `Multimodal`. A failure raises
+        `memvara.ingest.IngestError`, a `ValueError` whose `code` names it, and nothing is
+        stored.
+
+        The text is split into chunks of about 1,000 characters at sentence boundaries,
+        each repeating up to 150 characters from the end of the one before, and each
+        chunk is stored as a `role="system"` episode. Search finds chunks with
+        `include_episodes=True`, and `recall(include_episodes=True)` renders them under
+        the turns header.
+
+        `custom_id` is your own name for the document, at most 255 characters, unique in
+        this scope. **Adding a document with a `custom_id` that already exists in this
+        scope updates that document**: the new text is chunked, each chunk whose text is
+        unchanged keeps its episode, its vector and the memories that cite it, and only
+        the new chunks are read for facts. Fields you do not pass keep their stored
+        values. `filepath` is a `/`-separated path you can list by later, and `meta` is
+        your own JSON metadata.
+
+        `extract=True` runs the write pipeline over the new chunks, and the claims it
+        finds cite the chunk they came from. The salience gate accepts a document chunk
+        whatever its role. The fast path does not run on one, because it reads
+        first-person sentences as the user's own, so facts come from the model tier: a
+        `Memvara` with no `llm=` stores and indexes the document and extracts nothing.
+        The document's `status` records the outcome: `done` when every chunk has been
+        read, `stored` when a chunk was kept unread because you passed `extract=False`,
+        or `failed` with an `error` when extraction raised or was deferred. Adding a
+        failed or `stored` document again with extraction on reads the chunks no claim
+        cites yet. A document in any state is stored and its chunks are searchable.
+
+        >>> from memvara import Memvara, HashingEmbedder
+        >>> from memvara.llm.base import NullLLM
+        >>> mem = Memvara(":memory:", user="alice", llm=NullLLM(),
+        ...               embedder=HashingEmbedder(dim=32))
+        >>> doc = mem.add_document("Refunds are paid within 14 days.", custom_id="refunds")
+        >>> doc.status, doc.chunks
+        ('done', 1)
+        >>> mem.add_document("Refunds are paid within 30 days.",
+        ...                  custom_id="refunds").id == doc.id
+        True
+        >>> mem.close()
+        """
+        scope = self._scope(tenant, user, agent, session)
+        return self._documents.add(scope, content, url=url, custom_id=custom_id,
+                                   title=title, filepath=filepath, mime=mime, meta=meta,
+                                   extract=extract)
+
+    def get_document(self, id_or_custom_id: str, *, tenant=None, user=None, agent=None,
+                     session=None) -> Document | None:
+        """One document by its id or its `custom_id`, or `None`.
+
+        An id is tried first. A `custom_id` is looked up in this scope and then in each
+        broader one, so a session finds its user's documents. `None` both for a missing
+        document and for one this scope cannot see, as `get()` does.
+        """
+        scope = self._scope(tenant, user, agent, session)
+        return self._documents.resolve(scope, id_or_custom_id)
+
+    def list_documents(self, *, filepath_prefix: str | None = None,
+                       status: str | None = None, limit: int = 50,
+                       cursor: str | None = None, tenant=None, user=None, agent=None,
+                       session=None) -> Page[Document]:
+        """The documents this scope can see, newest first, one page at a time.
+
+        `filepath_prefix` keeps documents whose `filepath` starts with it, compared
+        character for character. `status` keeps one of `queued`, `extracting`, `done`,
+        `stored` and `failed`. `limit` is between 1 and 1,000. Pass the returned page's
+        `next_cursor` as `cursor` for the next page; it is `None` on the last one.
+        """
+        scope = self._scope(tenant, user, agent, session)
+        return self._documents.listing(scope, filepath_prefix=filepath_prefix,
+                                    status=status, limit=limit, cursor=cursor)
+
+    def update_document(self, id_or_custom_id: str, *, content: str | bytes | None = None,
+                        title: str | None = None, meta: Mapping[str, Any] | None = None,
+                        filepath: str | None = None, mime: str | None = None,
+                        extract: bool = True, tenant=None, user=None, agent=None,
+                        session=None) -> Document:
+        """Change a stored document. Arguments left as `None` keep their stored values.
+
+        New `content` is re-ingested the way `add_document` with an existing `custom_id`
+        is: chunks whose text is unchanged keep their episodes and the memories that cite
+        them, and only new chunks are read for facts. `meta` replaces the stored
+        metadata. `mime` is the type of the new content; left out, text keeps a stored
+        text type and bytes are handed to ingestion to detect, never read under the
+        stored type of the content they replace. Raises `KeyError` for a document this
+        scope cannot see, with the same message whether it is missing or elsewhere.
+        """
+        scope = self._scope(tenant, user, agent, session)
+        return self._documents.update(scope, id_or_custom_id, content=content,
+                                      title=title, meta=meta, filepath=filepath,
+                                      mime=mime, extract=extract)
+
+    def delete_document(self, id_or_custom_id: str, *, tenant=None, user=None,
+                        agent=None, session=None) -> DeleteResult:
+        """Erase a document's text, and retire the memories it was the only source of.
+
+        The document row, its chunks and the episodes they were stored as are
+        **erased**: the text is gone from the file, as `erase()` removes a claim's. No
+        memory is erased. A claim whose every source was one of those episodes is
+        **retired** with the reason "source document deleted", so it stops answering and
+        `history()` and `why()` still show it and why; its id is in
+        `DeleteResult.retired`. A claim that also had another source keeps that source
+        and is listed in `DeleteResult.unlinked`.
+
+        `DeleteResult.deleted` is false, and nothing changes, when no document this scope
+        can see matches.
+        """
+        scope = self._scope(tenant, user, agent, session)
+        return self._documents.delete(scope, id_or_custom_id)
+
+    def delete_documents(self, ids_or_custom_ids: Sequence[str], *, tenant=None,
+                         user=None, agent=None, session=None) -> list[DeleteResult]:
+        """`delete_document` for each id in turn, in the order given. Each document is
+        its own transaction, so one missing id does not stop the rest."""
+        scope = self._scope(tenant, user, agent, session)
+        return [self._documents.delete(scope, ref) for ref in ids_or_custom_ids]
+
+    def document_status(self, id_or_custom_id: str, *, tenant=None, user=None,
+                        agent=None, session=None) -> DocumentStatus:
+        """Where a document is in processing: `queued`, `extracting`, `done`, `stored`
+        or `failed`, with the error when it failed. See `types.DocumentState`. Raises `KeyError` for a document this scope cannot
+        see."""
+        scope = self._scope(tenant, user, agent, session)
+        return self._documents.status(scope, id_or_custom_id)
 
     # -- reading -------------------------------------------------------------
 
@@ -3798,8 +3965,7 @@ class Memvara:
 
         _drop_vectors(self.store)
 
-        batch = getattr(self.store, "batch", None)
-        with (batch() if batch is not None else nullcontext()):
+        with transaction(self.store):
             embedded = self._reencode(
                 self.store.iter_claims(include_invalidated=True),
                 lambda c: c.text, self.store.set_embedding, batch_size)
@@ -4065,6 +4231,41 @@ class ScopedMemvara:
         """See `Memvara.prove_erased`. Takes no scope, and passes none: the check is a
         row count over an id, and a scoped view has no narrower version of it."""
         return self._mem.prove_erased(claim_id)
+
+    def add_document(self, content: str | bytes | None = None, *, url: str | None = None,
+                     custom_id: str | None = None, title: str | None = None,
+                     filepath: str | None = None, mime: str | None = None,
+                     meta: Mapping[str, Any] | None = None,
+                     extract: bool = True) -> Document:
+        return self._mem.add_document(content, url=url, custom_id=custom_id, title=title,
+                                      filepath=filepath, mime=mime, meta=meta,
+                                      extract=extract, **self._kw)
+
+    def get_document(self, id_or_custom_id: str) -> Document | None:
+        return self._mem.get_document(id_or_custom_id, **self._kw)
+
+    def list_documents(self, *, filepath_prefix: str | None = None,
+                       status: str | None = None, limit: int = 50,
+                       cursor: str | None = None) -> Page[Document]:
+        return self._mem.list_documents(filepath_prefix=filepath_prefix, status=status,
+                                        limit=limit, cursor=cursor, **self._kw)
+
+    def update_document(self, id_or_custom_id: str, *, content: str | bytes | None = None,
+                        title: str | None = None, meta: Mapping[str, Any] | None = None,
+                        filepath: str | None = None, mime: str | None = None,
+                        extract: bool = True) -> Document:
+        return self._mem.update_document(id_or_custom_id, content=content, title=title,
+                                         meta=meta, filepath=filepath, mime=mime,
+                                         extract=extract, **self._kw)
+
+    def delete_document(self, id_or_custom_id: str) -> DeleteResult:
+        return self._mem.delete_document(id_or_custom_id, **self._kw)
+
+    def delete_documents(self, ids_or_custom_ids: Sequence[str]) -> list[DeleteResult]:
+        return self._mem.delete_documents(ids_or_custom_ids, **self._kw)
+
+    def document_status(self, id_or_custom_id: str) -> DocumentStatus:
+        return self._mem.document_status(id_or_custom_id, **self._kw)
 
     def supersede(self, old_claim_id: str, new_claim: Claim, *,
                   at: datetime | None = None,

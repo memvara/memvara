@@ -30,17 +30,20 @@ its per-table counts as evidence inside the erasure response itself.
 """
 from __future__ import annotations
 
+import base64
 from copy import copy
 from datetime import datetime
-from typing import Any, Collection, Literal, Mapping, Sequence, overload
+from typing import Any, Callable, Collection, Literal, Mapping, Sequence, overload
+from urllib.parse import quote
 
 from ..confirm import ConfirmationRefused
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import EpisodeResult, Path, Retrieved
 from ..types import (
-    Answer, Claim, Delta, Episode, ForgetPreview, ForgetResult, Link, MemoryType,
-    Profile, Provenance, Result, Scope, SearchResults, WriteReceipt, closure,
-    closure_reason, link_relation,
+    Answer, Claim, DeleteResult, Delta, Document, DocumentStatus, Episode,
+    ForgetPreview, ForgetResult, Link, MemoryType, Page, Profile, Provenance, Result,
+    Scope, SearchResults, WriteReceipt, closure, closure_reason, link_relation,
+    one_source,
 )
 from ..types import PROJECT_META, PROJECT_META_REFUSAL
 from . import hydrate
@@ -113,6 +116,45 @@ def _sent(body: dict[str, Any]) -> dict[str, Any]:
     different request from omitting it, and omitting is the one that means "unset".
     """
     return {k: v for k, v in body.items() if v is not None}
+
+
+def _document_path(ref: str, tail: str = "") -> str:
+    """`/v1/documents/{ref}`, with the reference escaped whole.
+
+    A `custom_id` is the caller's own string and may hold a `/`, a `?` or a `#`; left
+    unescaped, `docs/handbook` would address a different route.
+    """
+    return f"/v1/documents/{quote(ref, safe='')}{tail}"
+
+
+def _document_body(redactor: Redactor | None,
+                   redact: Callable[[str | None, str], str | None],
+                   content: str | bytes | None, *, title: str | None,
+                   filepath: str | None, mime: str | None,
+                   meta: Mapping[str, Any] | None, extract: bool,
+                   url: str | None = None, custom_id: str | None = None) -> dict[str, Any]:
+    """The JSON body of `POST /v1/documents` and `PATCH /v1/documents/{id}`, for both
+    clients, with unset fields left out.
+
+    Text travels as `content` and the title as `title`, both redacted here, before they
+    leave the process. Bytes travel as `content_base64`, and are refused when a redactor
+    is configured: nothing here can read a PDF or an image to redact it, and sending it
+    unredacted would be the one thing a redactor is configured to prevent. Extract the
+    text first and pass a `str`.
+    """
+    body: dict[str, Any] = {
+        "url": url, "custom_id": custom_id, "title": redact(title, EPISODE),
+        "filepath": filepath, "mime": mime,
+        "metadata": None if meta is None else dict(meta), "extract": extract}
+    if isinstance(content, str):
+        body["content"] = redact(content, EPISODE)
+    elif content is not None:
+        if redactor is not None:
+            raise ValueError(
+                "a redactor is configured, and bytes cannot be redacted before they "
+                "leave this process. Extract the text yourself and pass it as a str.")
+        body["content_base64"] = base64.b64encode(content).decode("ascii")
+    return _sent(body)
 
 
 def tenant_of(answer: object) -> str | None:
@@ -917,6 +959,87 @@ class RemoteMemvara:
             body["predicate"] = predicate
         return bool(self._end(body))
 
+    # -- documents -----------------------------------------------------------
+
+    def add_document(self, content: str | bytes | None = None, *, url: str | None = None,
+                     custom_id: str | None = None, title: str | None = None,
+                     filepath: str | None = None, mime: str | None = None,
+                     meta: Mapping[str, Any] | None = None,
+                     extract: bool = True) -> Document:
+        """`POST /v1/documents`: store a document, or update the one with this
+        `custom_id` in this scope. See `Memvara.add_document` for what happens to it.
+
+        A `str` and the title are redacted here before they are sent. `bytes` are sent
+        base64-encoded, and refused when a redactor is configured. A `url` is fetched by
+        the deployment, so its content never passes through this process.
+        """
+        one_source(content, url)
+        body = _document_body(self.redactor, self._redact, content, url=url,
+                              custom_id=custom_id, title=title, filepath=filepath,
+                              mime=mime, meta=meta, extract=extract)
+        return hydrate.document(self._request("POST", "/v1/documents",
+                                              params=self._params(), json=body,
+                                              write=True))
+
+    def get_document(self, id_or_custom_id: str) -> Document | None:
+        """`GET /v1/documents/{id}`: one document by id or `custom_id`, or `None` for
+        one that is missing or not visible to this credential alike."""
+        try:
+            return hydrate.document(self._request(
+                "GET", _document_path(id_or_custom_id), params=self._params()))
+        except NotFound:
+            return None
+
+    def list_documents(self, *, filepath_prefix: str | None = None,
+                       status: str | None = None, limit: int = 50,
+                       cursor: str | None = None) -> Page[Document]:
+        """`GET /v1/documents`: one page, newest first. Pass `next_cursor` back as
+        `cursor` for the next page."""
+        return hydrate.document_page(self._request(
+            "GET", "/v1/documents",
+            params=self._params(filepath_prefix=filepath_prefix, status=status,
+                                limit=limit, cursor=cursor)))
+
+    def update_document(self, id_or_custom_id: str, *, content: str | bytes | None = None,
+                        title: str | None = None, meta: Mapping[str, Any] | None = None,
+                        filepath: str | None = None, mime: str | None = None,
+                        extract: bool = True) -> Document:
+        """`PATCH /v1/documents/{id}`: change what is given, keep the rest. `KeyError`
+        for a document that is missing or not visible, as `Memvara.update_document`."""
+        body = _document_body(self.redactor, self._redact, content, title=title,
+                              filepath=filepath, mime=mime, meta=meta, extract=extract)
+        try:
+            return hydrate.document(self._request(
+                "PATCH", _document_path(id_or_custom_id), params=self._params(),
+                json=body, write=True))
+        except NotFound:
+            raise KeyError(f"no document {id_or_custom_id!r} is visible here") from None
+
+    def delete_document(self, id_or_custom_id: str) -> DeleteResult:
+        """`DELETE /v1/documents/{id}`: erase the document's text and retire the
+        memories it was the only source of. See `Memvara.delete_document`."""
+        try:
+            return hydrate.delete_result(self._request(
+                "DELETE", _document_path(id_or_custom_id), params=self._params(),
+                write=True))
+        except NotFound:
+            return DeleteResult(id=id_or_custom_id, deleted=False)
+
+    def delete_documents(self, ids_or_custom_ids: Sequence[str]) -> list[DeleteResult]:
+        """`POST /v1/documents/delete`: `delete_document` for each id, in order."""
+        body = self._request("POST", "/v1/documents/delete", params=self._params(),
+                             json={"ids": list(ids_or_custom_ids)}, write=True)
+        return [hydrate.delete_result(r) for r in body["results"]]
+
+    def document_status(self, id_or_custom_id: str) -> DocumentStatus:
+        """`GET /v1/documents/{id}/status`. `KeyError` for a document that is missing or
+        not visible."""
+        try:
+            return hydrate.document_status(self._request(
+                "GET", _document_path(id_or_custom_id, "/status"), params=self._params()))
+        except NotFound:
+            raise KeyError(f"no document {id_or_custom_id!r} is visible here") from None
+
     # -- erasure -------------------------------------------------------------
 
     def erase(self, claim_id: str, *, sources: bool = False) -> bool:
@@ -1219,6 +1342,41 @@ class ScopedRemoteMemvara:
 
     def erase(self, claim_id: str, *, sources: bool = False) -> bool:
         return self._mem.erase(claim_id, sources=sources)
+
+    def add_document(self, content: str | bytes | None = None, *, url: str | None = None,
+                     custom_id: str | None = None, title: str | None = None,
+                     filepath: str | None = None, mime: str | None = None,
+                     meta: Mapping[str, Any] | None = None,
+                     extract: bool = True) -> Document:
+        return self._mem.add_document(content, url=url, custom_id=custom_id, title=title,
+                                      filepath=filepath, mime=mime, meta=meta,
+                                      extract=extract)
+
+    def get_document(self, id_or_custom_id: str) -> Document | None:
+        return self._mem.get_document(id_or_custom_id)
+
+    def list_documents(self, *, filepath_prefix: str | None = None,
+                       status: str | None = None, limit: int = 50,
+                       cursor: str | None = None) -> Page[Document]:
+        return self._mem.list_documents(filepath_prefix=filepath_prefix, status=status,
+                                        limit=limit, cursor=cursor)
+
+    def update_document(self, id_or_custom_id: str, *, content: str | bytes | None = None,
+                        title: str | None = None, meta: Mapping[str, Any] | None = None,
+                        filepath: str | None = None, mime: str | None = None,
+                        extract: bool = True) -> Document:
+        return self._mem.update_document(id_or_custom_id, content=content, title=title,
+                                         meta=meta, filepath=filepath, mime=mime,
+                                         extract=extract)
+
+    def delete_document(self, id_or_custom_id: str) -> DeleteResult:
+        return self._mem.delete_document(id_or_custom_id)
+
+    def delete_documents(self, ids_or_custom_ids: Sequence[str]) -> list[DeleteResult]:
+        return self._mem.delete_documents(ids_or_custom_ids)
+
+    def document_status(self, id_or_custom_id: str) -> DocumentStatus:
+        return self._mem.document_status(id_or_custom_id)
 
     def purge(self, *, confirm_tenant: str | None = None) -> dict[str, int]:
         return self._mem.purge(confirm_tenant=confirm_tenant)

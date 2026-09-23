@@ -78,6 +78,11 @@ exception the caller retries.
 
 ## Invariants and assumptions
 
+- **A document chunk passes the role check.** `add_document()` stores each chunk as a
+  system turn with `meta["document_id"]`, and the gate accepts it whatever its role,
+  because the caller asked for the document to be read. The fast path still reads user
+  turns only, so a chunk's facts come from the model tier. A chunk stored with
+  `extract=False` carries `meta["extract"] = False` and the gate refuses it.
 - **The gate biases toward recall.** A false positive costs one extraction call; a false
   negative loses a memory permanently. `SalienceGate.DEFAULT_EVIDENCE_ROLES` is the user
   role alone, and passing `evidence_roles=None` is the documented way to handle a transcript

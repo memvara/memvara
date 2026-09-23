@@ -61,8 +61,20 @@ to read:
   thousand claims about one user is a data-modelling mistake.
 
 Memvara stores source turns as **episodes** and returns them alongside claims when you
-ask (`include_episodes=True`), so verbatim text has a home here — but it is a home for the
-evidence behind a fact, not a document store.
+ask (`include_episodes=True`), so verbatim text has a home here.
+
+**Documents have one too.** This page used to say that a policy document should stay a
+document and that Memvara was not a document store. The first half still holds, and it is
+why the second half changed: `add_document()` keeps a document as a document. It splits
+the text into passages of about 1,000 characters at sentence boundaries, stores each
+passage as an episode, and returns them with `include_episodes=True`, beside the facts and
+never mixed into them. Nothing turns the paragraph into triples. A `custom_id` makes a
+second `add_document()` of the same file an update that keeps every unchanged passage, and
+`delete_document()` erases the text and retires any memory whose only source it was.
+
+What did not change is the scale. The documents one agent or one team works with fit
+well; a hundred thousand documents are still a retrieval problem for a dedicated index,
+for the reason in [What Memvara does not claim](#what-memvara-does-not-claim).
 
 ## Using both
 
