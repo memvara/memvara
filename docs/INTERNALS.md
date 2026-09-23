@@ -253,7 +253,10 @@ was being read as holding further than it does.
    > Not a general rule about filtering: `HybridRetriever` applies `memory_types` after
    > fusion on purpose, and pays for it with a bounded retry when the pool came back full.
    > **Sketch.** `Store.adjacent` takes `scopes`; `state_predicate` is a store parameter
-   > rather than a comprehension in the facade.
+   > rather than a comprehension in the facade; the caller's metadata and file-path filter
+   > reaches every capped store method as `where`, and
+   > `tests/test_metadata_filters.py::test_a_filtered_search_returns_k_matches_when_many_
+   > non_matching_rows_rank_higher` asserts it.
    > **Measured.** With one user holding 20 readable claims about a hub, a Python-side
    > filter over a store-side page returned **19** of them against 15,000 competing claims
    > and **8** against 40,000, with nothing in the result to say it was partial. The
@@ -1147,15 +1150,21 @@ competing_claims(tenant, fact_key, *, valid_at=None, known_at=None)
 adjacent(tenant, keys, *, outgoing=True, incoming=True, predicates=None,
          valid_at=None, known_at=None, scopes=None, limit=1000)
 candidate_ids(scopes, *, valid_at=None, known_at=None, states=None,
-              include_invalidated=None)
+              include_invalidated=None, where=None)
 lexical_search(query, scopes, limit, *, valid_at=None, known_at=None, states=None,
-               include_invalidated=None)
+               include_invalidated=None, where=None)
 vector_search(qvec, scopes, limit, *, valid_at=None, known_at=None, states=None,
-              include_invalidated=None)
-episode_candidate_ids(scopes, *, valid_at=None, known_at=None)
-lexical_search_episodes(query, scopes, limit, *, valid_at=None, known_at=None)
-vector_search_episodes(qvec, scopes, limit, *, valid_at=None, known_at=None)
+              include_invalidated=None, where=None)
+episode_candidate_ids(scopes, *, valid_at=None, known_at=None, where=None)
+lexical_search_episodes(query, scopes, limit, *, valid_at=None, known_at=None,
+                        where=None)
+vector_search_episodes(qvec, scopes, limit, *, valid_at=None, known_at=None,
+                       where=None)
+episodes_near(anchor, scopes, limit, *, valid_at=None, known_at=None, where=None)
 ```
+
+`where` is the caller's metadata and file-path filter, a `memvara.filters.SearchFilter`
+or `None`; see "Metadata and file-path filters" below.
 
 A SQL-backed store additionally implements `SQLStore`, a **second** protocol declared in
 `store/base.py` and deliberately not folded into `Store` — the clause builders are SQL
@@ -1499,6 +1508,64 @@ says so with `holds_documents = True`, which is what `Memvara` asks; see `OMITTA
 `RemoteStore` has each as a stub that raises and names the `RemoteMemvara` method to use,
 because the facade chunks, scope-checks and extracts server-side; it sets the marker to
 false, so `Memvara(store=RemoteStore(...)).add_document()` is refused with that advice.
+
+### Metadata and file-path filters
+
+`search()` and `recall()` take `filters` and `filepath_prefix`, and `memvara/filters.py`
+checks them and combines them into one `SearchFilter`. The retriever hands that object,
+as `where=`, to every store method that caps rows: `candidate_ids`, `lexical_search`,
+`vector_search` and the four episode methods. It is a store parameter for the reason
+`states` is (invariant 7): a filter applied to a result the store had already cut to
+`limit` would find a match only when it happened to land inside the cut.
+`tests/test_metadata_filters.py` builds forty rows that do not match above five that do,
+shows that an unfiltered read fifteen deep holds none of the five, and asserts that a
+filtered read with `k=3` returns three of them, for the whole search and for each store
+method.
+
+**What matches.** A filter is an equality test on a top-level key of `meta`, a list means
+any one of its values, and every key must match. A string matches only the same string,
+a number any equal number, and `True` or `False` only a boolean; a stored list or object
+never matches. Keys must match `[A-Za-z0-9_.-]{1,64}`, so a backend can put one inside a
+JSON path without quoting rules of its own, and anything else is a `ValueError` before a
+query runs. A row matches a key through its own `meta` **or** through the `meta` of a
+document it came from: a chunk episode through the document that lists it in
+`document_chunks`, and a claim through `claim_sources` to such a chunk. `filepath_prefix`
+has only the document route. It is compared with `substr`, as `list_documents` compares
+it, so `%` and `_` match only themselves and case matters; `LIKE` would treat both as
+wildcards and ignore ASCII case.
+
+**How SQLite evaluates it.** `_where_clause` in `store/sqlite.py` adds one condition per
+half, with the two `EXISTS` joins above. The metadata test is `mv_meta_match(meta, ?)`, a
+Python function registered on the writer's connection and on every snapshot connection
+`_reader` opens, because a SQL function belongs to one connection. It is Python rather
+than SQLite's JSON functions because those are not compiled into every SQLite this
+library runs on (the same reason `_migrate_to_v5` parses in Python). The spec and the
+prefix are bound as parameters; nothing the caller wrote is placed in the SQL text.
+
+**What does not take the filter.** The graph leg does not run on a filtered search:
+`Store.adjacent` takes no filter, a walk would step onto rows the filter excludes, and
+removing them afterwards would mean reading each row's metadata and documents again
+outside the store. `recall(include_history=True)` renders the past values of the facts the
+filter kept without filtering them again, because they are the same fact at an earlier
+time.
+
+**A store without `where`.** The retriever passes `where` only when the caller filtered,
+so a third-party store written before the parameter serves every unfiltered read as
+before, and a filtered read against it raises `TypeError` naming the argument rather than
+returning rows the filter would have excluded. `RemoteStore` accepts the argument on its
+stubs, which still raise.
+
+**The switch.** `Memvara(metadata_filters=False)` or
+`MEMVARA_FEATURE_METADATA_FILTERS=0` refuses a call that passes either argument with a
+message naming the switch. On the MCP server the two arguments stay in the schema with a
+description saying they are refused, so a call that sends one is refused with the reason
+rather than reported as an unknown argument.
+
+**The hosted deployment.** `RemoteMemvara` sends `filters` and `filepath_prefix` only when
+set, after the same checks. The deployment does not accept them yet; its request models
+refuse an unknown field with 422, so a filtered call fails rather than being answered
+unfiltered. The Postgres store and the cloud routes are stream P2-G of the phase 2 parity
+design, and a Postgres implementation that uses `LIKE` must escape `%` and `_`.
 
 ### Erasure removes the bytes, not just the rows
 

@@ -26,6 +26,7 @@ from typing import (TYPE_CHECKING, Any, Collection, Iterable, Literal, Protocol,
 
 import numpy as np
 
+from ..filters import SearchFilter
 from ..types import Claim, Document, DocumentChunk, Episode, Link, Scope
 
 if TYPE_CHECKING:
@@ -720,24 +721,37 @@ class Store(Protocol):
     # flag means "not passed", and passing both raises. Nothing is deprecated — see
     # `resolve_states`, which is the one place either is interpreted.
 
+    #
+    # **`where` is the caller's metadata and file-path filter** (`memvara.filters`), and it
+    # is a store parameter for the reason `states` is: each of these methods caps its rows,
+    # so a filter applied to what one returned would find a match only when it happened to
+    # land inside the cap. `None` means no filter. The retriever passes `where` only when
+    # the caller filtered, so a store written before the parameter existed still serves
+    # every unfiltered read; a filtered read against it fails with a `TypeError` naming
+    # the argument rather than returning unfiltered rows. See `SearchFilter` for what a
+    # match is, including the route through a document a row came from.
+
     def candidate_ids(self, scopes: Sequence[Scope], *,
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
                       states: Collection[str] | None = None,
-                      include_invalidated: bool | None = None) -> list[str]: ...
+                      include_invalidated: bool | None = None,
+                      where: SearchFilter | None = None) -> list[str]: ...
 
     def lexical_search(self, query: str, scopes: Sequence[Scope], limit: int, *,
                        valid_at: datetime | None = None,
                        known_at: datetime | None = None,
                        states: Collection[str] | None = None,
-                       include_invalidated: bool | None = None
+                       include_invalidated: bool | None = None,
+                       where: SearchFilter | None = None
                        ) -> list[tuple[str, float]]: ...
 
     def vector_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int, *,
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
                       states: Collection[str] | None = None,
-                      include_invalidated: bool | None = None
+                      include_invalidated: bool | None = None,
+                      where: SearchFilter | None = None
                       ) -> list[tuple[str, float]]: ...
 
     # --- episode retrieval ------------------------------------------------
@@ -757,23 +771,32 @@ class Store(Protocol):
     # episode search would hand one session's transcript to a sibling session and one
     # tenant's to another.
 
+    #
+    # `where` is the claim methods' filter, with the same reason and the same default. A
+    # turn matches through its own `meta`, and a document chunk also through its
+    # document's `meta` and `filepath`.
+
     def episode_candidate_ids(self, scopes: Sequence[Scope], *,
                               valid_at: datetime | None = None,
-                              known_at: datetime | None = None) -> list[str]: ...
+                              known_at: datetime | None = None,
+                              where: SearchFilter | None = None) -> list[str]: ...
 
     def lexical_search_episodes(self, query: str, scopes: Sequence[Scope], limit: int, *,
                                 valid_at: datetime | None = None,
-                                known_at: datetime | None = None
+                                known_at: datetime | None = None,
+                                where: SearchFilter | None = None
                                 ) -> list[tuple[str, float]]: ...
 
     def vector_search_episodes(self, qvec: np.ndarray, scopes: Sequence[Scope],
                                limit: int, *, valid_at: datetime | None = None,
-                               known_at: datetime | None = None
+                               known_at: datetime | None = None,
+                               where: SearchFilter | None = None
                                ) -> list[tuple[str, float]]: ...
 
     def episodes_near(self, anchor: datetime, scopes: Sequence[Scope], limit: int, *,
                       valid_at: datetime | None = None,
-                      known_at: datetime | None = None) -> list[tuple[str, float]]:
+                      known_at: datetime | None = None,
+                      where: SearchFilter | None = None) -> list[tuple[str, float]]:
         """The `limit` turns closest in time to `anchor`, nearest first, with their `ts`.
 
         The third episode search, and the only one that ranks on *when* rather than on

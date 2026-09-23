@@ -74,6 +74,7 @@ from typing import (
 import numpy as np
 
 from ..embed.base import Embedder
+from ..filters import SearchFilter
 from ..llm.base import Usage
 from ..rerank import Reranker, rerank
 from ..schema import PredicateRegistry
@@ -554,6 +555,7 @@ class HybridRetriever:
         anchored: bool = ..., include_episodes: Literal[False] = ...,
         now: datetime | None = ..., ranked: bool = ...,
         query_rewrite: bool = ...,
+        where: SearchFilter | None = ...,
     ) -> list[Result]: ...
 
     @overload
@@ -566,6 +568,7 @@ class HybridRetriever:
         anchored: bool = ..., include_episodes: Literal[True],
         now: datetime | None = ..., ranked: bool = ...,
         query_rewrite: bool = ...,
+        where: SearchFilter | None = ...,
     ) -> list[Retrieved]: ...
 
     @overload
@@ -577,6 +580,7 @@ class HybridRetriever:
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         anchored: bool = ..., include_episodes: bool, now: datetime | None = ...,
         ranked: bool = ..., query_rewrite: bool = ...,
+        where: SearchFilter | None = ...,
     ) -> list[Retrieved]: ...
 
     def search(
@@ -597,6 +601,7 @@ class HybridRetriever:
         now: datetime | None = None,
         ranked: bool = False,
         query_rewrite: bool = False,
+        where: SearchFilter | None = None,
     ) -> list[Any]:
         """Return the top `k` results for `query`, each with a populated `Explanation`.
 
@@ -683,6 +688,12 @@ class HybridRetriever:
         outcome but `applied` serves the plain read. It is `False` here, on the engine,
         and `True` on `Memvara.search`. A plain read with `k <= 0` returns nothing,
         makes no call and reports no rewrite.
+
+        `where` is the caller's metadata and file-path filter (`memvara.filters`), or
+        `None`. It is handed to every store method that caps rows, so a filtered search
+        with `k=5` returns five matches whenever five exist, however many other rows would
+        have ranked above them. The graph leg does not run on a filtered search; see
+        `_graph_search`.
         """
         if ranked and (not include_episodes or memory_types is not None):
             raise ValueError(
@@ -698,7 +709,7 @@ class HybridRetriever:
         once = partial(self._search_once, scope=scope, k=k, known_at=known_at,
                        wanted_states=wanted_states, memory_types=memory_types,
                        min_score=min_score, anchored=anchored,
-                       include_episodes=include_episodes)
+                       include_episodes=include_episodes, where=where)
         # A read that returns nothing by construction is not worth a model call.
         if not query_rewrite or (k <= 0 and not ranked):
             return once(query, valid_at=valid_at, now=now, ranked=ranked)
@@ -807,6 +818,7 @@ class HybridRetriever:
         memory_types: Sequence[MemoryType] | None, min_score: float, anchored: bool,
         include_episodes: bool, now: datetime | None, ranked: bool,
         observe: bool = True, rerank_final: bool = True, qvec: Any = None,
+        where: SearchFilter | None = None,
     ) -> SearchResults:
         """One retrieval of one query: everything `search` does except the rewrite.
 
@@ -824,7 +836,7 @@ class HybridRetriever:
                                   memory_types=memory_types, min_score=min_score,
                                   anchored=anchored, include_episodes=include_episodes,
                                   now=now, ranked=ranked, observe=observe,
-                                  rerank_final=rerank_final)
+                                  rerank_final=rerank_final, where=where)
         finally:
             self._pass.vectors = None
 
@@ -843,7 +855,7 @@ class HybridRetriever:
         known_at: datetime | None, wanted_states: tuple[str, ...],
         memory_types: Sequence[MemoryType] | None, min_score: float, anchored: bool,
         include_episodes: bool, now: datetime | None, ranked: bool, observe: bool,
-        rerank_final: bool,
+        rerank_final: bool, where: SearchFilter | None = None,
     ) -> SearchResults:
         # Only a plain read can shortcut here. A ranked read's outcome is never silently
         # absent — `k <= 0` still has to say `unconfigured`, `disabled`, `key_rejected`,
@@ -913,7 +925,7 @@ class HybridRetriever:
 
         results, saturated = self._gather(
             query, scope, limit, valid_at, known_at, wanted_states, wanted, now,
-            min_score, anchored, weights)
+            min_score, anchored, weights, where)
 
         # Filter starvation. `memory_types` is applied after fusion truncated the pool,
         # so a rejected candidate has already consumed a slot and a narrow filter can
@@ -929,7 +941,7 @@ class HybridRetriever:
         if (wanted is not None or anchored) and saturated and len(results) < depth:
             results, _ = self._gather(
                 query, scope, limit * self.filter_retry_multiplier, valid_at, known_at,
-                wanted_states, wanted, now, min_score, anchored, weights)
+                wanted_states, wanted, now, min_score, anchored, weights, where)
 
         claims: list[Retrieved] = list(self._rank(results, depth))
         selection: Selection | None = None
@@ -943,7 +955,8 @@ class HybridRetriever:
                 # `_interleave`'s cut — is what the selector's turn-ordering and admission
                 # act on below, whatever the eventual outcome.
                 episodes = self._episodes(query, scopes, limit, valid_at, known_at,
-                                          min_score, weights, now, cap=self.rerank_top_n)
+                                          min_score, weights, now, where,
+                                          cap=self.rerank_top_n)
                 selection, kept_turns, tail = self._run_ranked_stage(
                     rec, self.selector, query, episodes, now)
                 merged = self._interleave(claims, tail, depth)[:k]
@@ -958,7 +971,8 @@ class HybridRetriever:
                         rec.counter(RETRIEVAL_MODEL_REFUSED, reason="unconfigured")
                     selection = Selection(outcome="unconfigured", candidates=0)
                 episodes = self._episodes(query, scopes, limit, valid_at, known_at,
-                                          min_score, weights, now, cap=self.max_episodes)
+                                          min_score, weights, now, where,
+                                          cap=self.max_episodes)
                 hits = self._interleave(claims, episodes, depth)
         else:
             hits = claims
@@ -1103,6 +1117,7 @@ class HybridRetriever:
         min_score: float,
         anchored: bool,
         weights: _Weights,
+        where: SearchFilter | None = None,
     ) -> tuple[list[Result], bool]:
         """Run the legs at `limit` and return the surviving results, unsorted.
 
@@ -1119,9 +1134,9 @@ class HybridRetriever:
         """
         scopes = scope.ancestors()
         vector_hits = self._vector_search(
-            query, scopes, limit, valid_at, known_at, states)
+            query, scopes, limit, valid_at, known_at, states, where)
         lexical_hits, lexical_terms = self._lexical_search(
-            query, scopes, limit, valid_at, known_at, states)
+            query, scopes, limit, valid_at, known_at, states, where)
 
         fused = reciprocal_rank_fusion(
             {VECTOR: vector_hits, LEXICAL: lexical_hits},
@@ -1222,8 +1237,8 @@ class HybridRetriever:
             # its edge strengths from two instants microseconds apart — coherent within
             # each leg and not between them.
             graph_hits, walked, derived = self._graph_search(
-                claims, fused, scope, limit, valid_at, known_at, states, weights.graph,
-                now, anchored_keys)
+                claims, fused, scope, limit, valid_at, known_at, states,
+                0.0 if where is not None else weights.graph, now, anchored_keys)
         if graph_hits:
             # Re-fused rather than merged, because RRF reads positions and the positions
             # in the two-leg fusion are not the positions in the three-leg one. Doing it
@@ -1383,6 +1398,11 @@ class HybridRetriever:
           a candidate set made entirely of retractions.
         * `states` does not include `live` — see below. Nothing is warned; the leg has
           nothing admissible to contribute rather than something it failed to fetch.
+        * the caller passed a metadata or file-path filter. `_gather` passes a zero weight
+          then, because `Store.adjacent` takes no filter: a walk would step onto rows the
+          filter excludes, and removing them afterwards would mean reading each row's
+          metadata and documents again outside the store. The lookup legs still serve a
+          filtered search in full.
 
         `known_at`/`valid_at` are passed through unchanged, so the walk is evaluated at
         the same pair `search()` was asked about and pins it once before its first hop
@@ -1446,6 +1466,7 @@ class HybridRetriever:
         min_score: float,
         weights: _Weights,
         now: datetime,
+        where: SearchFilter | None = None,
         *,
         cap: int | None = None,
     ) -> list[EpisodeResult]:
@@ -1468,12 +1489,12 @@ class HybridRetriever:
         caller: a plain read.
         """
         vector_hits = self._episode_vector_search(
-            query, scopes, limit, valid_at, known_at)
+            query, scopes, limit, valid_at, known_at, where)
         lexical_hits, terms = self._episode_lexical_search(
-            query, scopes, limit, valid_at, known_at)
+            query, scopes, limit, valid_at, known_at, where)
         anchor = anchor_for(valid_at, known_at, now)
         time_hits = self._episode_time_search(
-            scopes, limit, valid_at, known_at, weights.temporal, anchor)
+            scopes, limit, valid_at, known_at, weights.temporal, anchor, where)
 
         fused = reciprocal_rank_fusion(
             {VECTOR: vector_hits, LEXICAL: lexical_hits, TEMPORAL: time_hits},
@@ -1694,6 +1715,7 @@ class HybridRetriever:
     def _episode_time_search(
         self, scopes: Sequence[Scope], limit: int, valid_at: datetime | None,
         known_at: datetime | None, w_temporal: float, anchor: datetime,
+        where: SearchFilter | None = None,
     ) -> list[tuple[str, float]]:
         """Turns nearest the asked instant, or nothing. Degrades like the other legs.
 
@@ -1710,11 +1732,13 @@ class HybridRetriever:
         if near is None:
             return []
         return rank_by_time(
-            near(anchor, scopes, limit, valid_at=valid_at, known_at=known_at), anchor)
+            near(anchor, scopes, limit, valid_at=valid_at, known_at=known_at,
+                 **_narrowed(where)), anchor)
 
     def _episode_vector_search(
         self, query: str, scopes: Sequence[Scope], limit: int,
         valid_at: datetime | None, known_at: datetime | None,
+        where: SearchFilter | None = None,
     ) -> list[tuple[str, float]]:
         """Vector leg over turns. Abstains on a zero-norm query, as the claim leg does.
 
@@ -1729,11 +1753,13 @@ class HybridRetriever:
         qvec = self._query_vector(query)
         if float(np.linalg.norm(qvec)) <= 0.0:
             return []
-        return list(search(qvec, scopes, limit, valid_at=valid_at, known_at=known_at))
+        return list(search(qvec, scopes, limit, valid_at=valid_at, known_at=known_at,
+                           **_narrowed(where)))
 
     def _episode_lexical_search(
         self, query: str, scopes: Sequence[Scope], limit: int,
         valid_at: datetime | None, known_at: datetime | None,
+        where: SearchFilter | None = None,
     ) -> tuple[list[tuple[str, float]], int]:
         """BM25 over turns, reduced to content terms exactly as the claim leg is.
 
@@ -1747,7 +1773,8 @@ class HybridRetriever:
         reduced = analyze(query)
         if reduced.abstains:
             return [], 0
-        hits = search(reduced.text, scopes, limit, valid_at=valid_at, known_at=known_at)
+        hits = search(reduced.text, scopes, limit, valid_at=valid_at, known_at=known_at,
+                      **_narrowed(where))
         return list(hits), len(reduced.terms)
 
     @staticmethod
@@ -1830,6 +1857,7 @@ class HybridRetriever:
         valid_at: datetime | None,
         known_at: datetime | None,
         states: Sequence[str],
+        where: SearchFilter | None = None,
     ) -> list[tuple[str, float]]:
         """Vector leg, skipped when the query embeds to nothing.
 
@@ -1845,7 +1873,8 @@ class HybridRetriever:
         if float(np.linalg.norm(qvec)) <= 0.0:
             return []
         return list(self.store.vector_search(
-            qvec, scopes, limit, valid_at=valid_at, known_at=known_at, states=states))
+            qvec, scopes, limit, valid_at=valid_at, known_at=known_at, states=states,
+            **_narrowed(where)))
 
     def _lexical_search(
         self,
@@ -1855,6 +1884,7 @@ class HybridRetriever:
         valid_at: datetime | None,
         known_at: datetime | None,
         states: Sequence[str],
+        where: SearchFilter | None = None,
     ) -> tuple[list[tuple[str, float]], int]:
         """Lexical leg, reduced to content terms and skipped when none survive.
 
@@ -1872,7 +1902,7 @@ class HybridRetriever:
             return [], 0
         hits = self.store.lexical_search(
             reduced.text, scopes, limit, valid_at=valid_at, known_at=known_at,
-            states=states)
+            states=states, **_narrowed(where))
         return list(hits), len(reduced.terms)
 
     @staticmethod
@@ -1949,6 +1979,17 @@ class HybridRetriever:
             anchor=anchor,
         )
         return Result(claim=claim, score=score, explain=explain)
+
+
+def _narrowed(where: SearchFilter | None) -> dict[str, Any]:
+    """`where=` as keyword arguments for a store call, or none at all.
+
+    Passed only when the caller filtered, so an unfiltered read calls a store with exactly
+    the arguments it took before filters existed. A store written against the older
+    protocol keeps serving every unfiltered read, and a filtered read against it raises a
+    `TypeError` naming `where` rather than returning rows the filter would have excluded.
+    """
+    return {} if where is None else {"where": where}
 
 
 def _positions(hits: Sequence[tuple[str, float]]) -> dict[str, tuple[int, float]]:

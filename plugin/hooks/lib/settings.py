@@ -28,13 +28,13 @@ SETTINGS = os.path.join(os.path.expanduser("~"), ".memvara", "settings.json")
 #: has the same tuple as `memvara.server.config.FEATURES` and refuses a
 #: `MEMVARA_FEATURE_<NAME>` that is not in it. The hooks cannot import the library, so this
 #: is a copy, and `tests/test_hook_project.py` fails when the two differ. No hook reads
-#: `extraction_chunks`, `ingest_urls` or `ingest_media`; they are listed so the two tuples
-#: stay equal, and the library, not this file, decides that `extraction_chunks` is off by
-#: default.
+#: `extraction_chunks`, `ingest_urls`, `ingest_media` or `metadata_filters`; they are
+#: listed so the two tuples stay equal, and the library, not this file, decides that
+#: `extraction_chunks` is off by default.
 FEATURES = ("index_command", "research_agent", "project_scope", "status_line",
             "recall_mark", "profile", "forget_matching", "end_reason", "links",
             "documents", "retrieval_chunks", "extraction_chunks", "ingest_urls",
-            "ingest_media", "query_rewrite", "synthesis")
+            "ingest_media", "query_rewrite", "synthesis", "metadata_filters")
 
 #: What an override may say. Anything else is ignored and the file decides, because a typo
 #: in an environment variable should not silently flip a feature the file set.

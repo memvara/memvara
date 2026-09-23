@@ -35,6 +35,7 @@ from typing import (Any, Callable, ClassVar, Collection, Iterable, Literal, Mapp
 from .confirm import ConfirmationRefused, Confirmer
 from .consolidate import Consolidator
 from .embed import Embedder, default_embedder
+from .filters import FilterValue, SearchFilter, search_filter
 from .embed.fingerprint import (
     EmbedderFingerprint,
     embedder_name,
@@ -766,7 +767,8 @@ class Memvara:
         # The same reading for the local options whose default is true: chunking and
         # ingestion run inside the deployment, so turning one off here would be accepted
         # and never used.
-        for switch in ("retrieval_chunks", "ingest_urls", "ingest_media"):
+        for switch in ("retrieval_chunks", "ingest_urls", "ingest_media",
+                       "metadata_filters"):
             if kwargs.pop(switch, True) is not True:
                 named.append(switch)
         # Prefix rather than name, and sorted so two of them read the same way twice.
@@ -832,6 +834,7 @@ class Memvara:
         url_fetcher: "Fetcher | None" = None,
         ingest_urls: bool = True,
         ingest_media: bool = True,
+        metadata_filters: bool = True,
         **tuning: Any,
     ) -> None:
         # Present so that a local construction that named them still binds. `__new__`
@@ -994,6 +997,11 @@ class Memvara:
         #: `feature_off` when off.
         self.ingest_urls = ingest_urls
         self.ingest_media = ingest_media
+        #: Whether `search()` and `recall()` accept `filters` and `filepath_prefix`. With
+        #: it off, a call that passes either is refused with `ValueError` rather than run
+        #: without the filter. The MCP server turns it off with
+        #: `MEMVARA_FEATURE_METADATA_FILTERS=0`.
+        self.metadata_filters = metadata_filters
         self._documents = DocumentService(self)
 
         # Last, because both need the fully wired object: the migration path calls
@@ -2243,6 +2251,8 @@ class Memvara:
                states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                include_episodes: Literal[False] = ...) -> list[Result]: ...
 
     @overload
@@ -2253,6 +2263,8 @@ class Memvara:
                states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
@@ -2263,6 +2275,8 @@ class Memvara:
                states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0, tenant=None,
@@ -2272,6 +2286,8 @@ class Memvara:
                states: Collection[str] | None = None,
                include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType] | None = None,
+               filters: Mapping[str, FilterValue] | None = None,
+               filepath_prefix: str | None = None,
                include_episodes: bool = False) -> list[Any]:
         """Hybrid retrieval over current belief, or over any point on either time axis.
 
@@ -2350,15 +2366,47 @@ class Memvara:
         `query_rewrite=False` for a read that must not call a model, and the constructor's
         `query_rewrite=False` to switch the stage off for every read. See
         `HybridRetriever.search` for how the lists are fused.
+
+        `filters` keeps only rows whose metadata matches: each key is a top-level key of
+        `meta` and the value it must equal, and a list means any one of those values.
+        `filepath_prefix` keeps only rows that came from a document whose `filepath`
+        starts with that text, compared exactly. A row also matches a metadata key through
+        the `meta` of a document it came from: a document's chunks are its own text, and a
+        claim came from a document when one of its sources is a chunk of it. Both filters
+        run inside the store, before `k` is applied, so `k` matches come back whenever
+        that many exist. The graph leg does not run on a filtered search. A key outside
+        `[A-Za-z0-9_.-]{1,64}`, or a value that is not a string, number or boolean or a
+        non-empty list of them, is a `ValueError` raised before anything is read; see
+        `memvara.filters` for the exact rules. Constructed with `metadata_filters=False`,
+        this refuses either argument with `ValueError` rather than ignoring it.
+
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> _ = mem.remember("user", "prefers", "tabs", team="infra")
+        >>> _ = mem.remember("user", "prefers", "dark mode", team="web")
+        >>> [r.claim.object for r in mem.search("prefers", filters={"team": "web"})]
+        ['dark mode']
         """
+        where = self._search_filter(filters, filepath_prefix)
         scope = self._scope(tenant, user, agent, session)
         return self.reader.search(
             query, scope, k=k, as_of=as_of, valid_at=valid_at, known_at=known_at,
             min_score=min_score, anchored=anchored, ranked=ranked,
             states=resolve_states(states, include_invalidated),
             memory_types=memory_types, include_episodes=include_episodes,
-            query_rewrite=query_rewrite,
+            query_rewrite=query_rewrite, where=where,
         )
+
+    def _search_filter(self, filters: Mapping[str, FilterValue] | None,
+                       filepath_prefix: str | None) -> SearchFilter | None:
+        """The checked filter for one read, or `None`, refusing it when switched off."""
+        where = search_filter(filters, filepath_prefix)
+        if where is not None and not self.metadata_filters:
+            raise ValueError(
+                "filters and filepath_prefix are switched off for this Memvara "
+                "(metadata_filters=False), so the search was refused rather than run "
+                "without them. Construct it with metadata_filters=True, or leave both "
+                "arguments out.")
+        return where
 
     def get(self, claim_id: str, *, tenant=None, user=None, agent=None,
             session=None) -> Claim | None:
@@ -2854,6 +2902,8 @@ class Memvara:
                include_history: bool = ..., history_header: str | None = ...,
                budget: int | None = ..., counter: Callable[[str], int] = ...,
                valid_at: datetime | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                with_ids: Literal[False] = ...) -> str: ...
 
     @overload
@@ -2866,6 +2916,8 @@ class Memvara:
                include_history: bool = ..., history_header: str | None = ...,
                budget: int | None = ..., counter: Callable[[str], int] = ...,
                valid_at: datetime | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                with_ids: Literal[True]) -> RecallResult: ...
 
     @overload
@@ -2878,6 +2930,8 @@ class Memvara:
                include_history: bool = ..., history_header: str | None = ...,
                budget: int | None = ..., counter: Callable[[str], int] = ...,
                valid_at: datetime | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                with_ids: bool) -> str | RecallResult: ...
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
@@ -2892,6 +2946,8 @@ class Memvara:
                budget: int | None = None,
                counter: Callable[[str], int] = _approx_tokens,
                valid_at: datetime | None = None,
+               filters: Mapping[str, FilterValue] | None = None,
+               filepath_prefix: str | None = None,
                with_ids: bool = False) -> Any:
         """Retrieval formatted for dropping straight into a system prompt.
 
@@ -3045,6 +3101,11 @@ class Memvara:
         claims it rendered, in render order. **`recall()` still returns `str` by
         default** and will keep doing so.
 
+        `filters` and `filepath_prefix` narrow the facts and the turns exactly as they
+        narrow `search()`, before `k` is applied. The `include_history` tail is the past
+        values of the facts the filter kept, and is not filtered again: those values are
+        the same fact at an earlier time, so they belong with it.
+
         It resurrects nothing. The signature above is explicit so that `as_of`, `states`
         and `include_invalidated` cannot be forwarded into a live prompt. `valid_at` is
         allowed because it moves the world clock only and reaches no retired claim. Ids
@@ -3068,6 +3129,7 @@ class Memvara:
             query, k=k, min_score=min_score, tenant=tenant, user=user,
             anchored=anchored, ranked=ranked, valid_at=valid_at,
             agent=agent, session=session, memory_types=memory_types,
+            filters=filters, filepath_prefix=filepath_prefix,
             include_episodes=include_episodes, query_rewrite=query_rewrite))
         claims = [r for r in results if not isinstance(r, EpisodeResult)]
         # A ranked call's kept turns arrived outside `k`, already carrying
@@ -4495,6 +4557,8 @@ class ScopedMemvara:
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                include_episodes: Literal[False] = ...) -> list[Result]: ...
 
     @overload
@@ -4505,6 +4569,8 @@ class ScopedMemvara:
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
@@ -4515,6 +4581,8 @@ class ScopedMemvara:
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
@@ -4525,13 +4593,16 @@ class ScopedMemvara:
                states: Collection[str] | None = None,
                include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType] | None = None,
+               filters: Mapping[str, FilterValue] | None = None,
+               filepath_prefix: str | None = None,
                include_episodes: bool = False) -> list[Any]:
         return self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
                                 anchored=anchored, ranked=ranked,
                                 query_rewrite=query_rewrite,
                                 valid_at=valid_at, known_at=known_at, states=states,
                                 include_invalidated=include_invalidated,
-                                memory_types=memory_types,
+                                memory_types=memory_types, filters=filters,
+                                filepath_prefix=filepath_prefix,
                                 include_episodes=include_episodes, **self._kw)
 
     # The same three variants as `Memvara.recall`, and this is the facade that makes the
@@ -4546,6 +4617,8 @@ class ScopedMemvara:
                include_history: bool = ..., history_header: str | None = ...,
                budget: int | None = ..., counter: Callable[[str], int] = ...,
                valid_at: datetime | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                with_ids: Literal[False] = ...) -> str: ...
 
     @overload
@@ -4557,6 +4630,8 @@ class ScopedMemvara:
                include_history: bool = ..., history_header: str | None = ...,
                budget: int | None = ..., counter: Callable[[str], int] = ...,
                valid_at: datetime | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                with_ids: Literal[True]) -> RecallResult: ...
 
     @overload
@@ -4568,6 +4643,8 @@ class ScopedMemvara:
                include_history: bool = ..., history_header: str | None = ...,
                budget: int | None = ..., counter: Callable[[str], int] = ...,
                valid_at: datetime | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                with_ids: bool) -> str | RecallResult: ...
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
@@ -4582,6 +4659,8 @@ class ScopedMemvara:
                budget: int | None = None,
                counter: Callable[[str], int] = _approx_tokens,
                valid_at: datetime | None = None,
+               filters: Mapping[str, FilterValue] | None = None,
+               filepath_prefix: str | None = None,
                with_ids: bool = False) -> Any:
         return self._mem.recall(query, k=k, min_score=min_score, header=header,
                                 anchored=anchored, ranked=ranked,
@@ -4592,6 +4671,7 @@ class ScopedMemvara:
                                 include_history=include_history,
                                 history_header=history_header, budget=budget,
                                 counter=counter, valid_at=valid_at,
+                                filters=filters, filepath_prefix=filepath_prefix,
                                 with_ids=with_ids, **self._kw)
 
     def ask(self, question: str, *, at: datetime | None = None, k: int = 3,

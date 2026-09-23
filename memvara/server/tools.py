@@ -73,6 +73,7 @@ from ..confirm import ConfirmationRefused
 # `PROFILE_WINDOW` is the library's: how far back a profile looks when no `since` is
 # given. The tool resolves the instant itself only so its header can print it.
 from ..core import PROFILE_WINDOW, Memvara, ScopedMemvara, is_derived, standing_order
+from ..filters import FILTER_KEY, search_filter
 # `_slugify` is private and imported anyway, for `Memvara._safe_line`'s reason a few
 # lines below: it is the store's own spelling rule, and a copy of it here would be a
 # second implementation that can disagree about whether a fold happened.
@@ -611,6 +612,85 @@ _MEMORY_TYPES_FILTER = {
     ),
 }
 
+#: The metadata filter on `memory_search` and `memory_recall`. The key pattern and the
+#: value types are the ones `memvara.filters.search_filter` enforces, so the validator
+#: refuses a bad filter with the argument's name before the engine sees it.
+_FILTERS = {
+    "type": "object",
+    "propertyNames": {"pattern": f"^{FILTER_KEY.pattern}$"},
+    "additionalProperties": {
+        "type": ["string", "number", "boolean", "array"],
+        "items": {"type": ["string", "number", "boolean"]},
+    },
+    "description": (
+        "Keep only memories whose metadata matches, e.g. {\"team\": \"support\"} or "
+        "{\"team\": [\"support\", \"billing\"]}. Each key names one metadata field and "
+        "the value it must equal; a list means any one of those values; every key must "
+        "match. A string matches only the same string, case included; a number matches "
+        "an equal number; true and false match only true and false. A memory matches "
+        "through its own metadata or through the metadata of a document it came from "
+        "(the metadata given to memory_add_document). Keys are 1 to 64 letters, digits, "
+        "'_', '.' or '-', and an empty list is refused. The filter is applied before the "
+        "result count is cut to k, so k matching memories come back when that many "
+        "exist. Omit for no filter."
+    ),
+}
+
+_FILEPATH_PREFIX = {
+    "type": "string",
+    "description": (
+        "Keep only memories that came from a document whose file path starts with this "
+        "text, e.g. 'policies/' for that folder. Compared character for character: case "
+        "matters, and '%' and '_' are ordinary characters. A memory that did not come "
+        "from a document never matches. Omit for no filter."
+    ),
+}
+
+#: What the two filter arguments say on a server started with `metadata_filters` off.
+#: They stay in the schema so that `validate` lets a call carrying one through to the
+#: handler, which refuses it with the reason, rather than reporting an unknown argument.
+_FILTERS_OFF = (
+    "Not accepted on this server: metadata filters are switched off "
+    "(MEMVARA_FEATURE_METADATA_FILTERS=0), and a call carrying this argument is refused "
+    "rather than answered unfiltered. Leave it out."
+)
+
+
+def without_filters(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
+    """The same tools, described for a server with `metadata_filters` switched off.
+
+    The two arguments keep their names and schemas, and only their descriptions change,
+    to say they are refused. A model reading the list is told not to send them, and one
+    that sends them anyway is refused by `_filters_allowed` with the reason.
+    `end_reason` removes its arguments instead (`without_reasons`); here a filtered read
+    that went ahead without its filter would answer a different question, so the refusal
+    names the switch rather than calling the argument unknown.
+    """
+    return tuple(
+        replace(tool, properties={
+            **tool.properties,
+            "filters": {**_FILTERS, "description": _FILTERS_OFF},
+            "filepath_prefix": {**_FILEPATH_PREFIX, "description": _FILTERS_OFF}})
+        if "filters" in tool.properties else tool
+        for tool in tools)
+
+
+def _filters_allowed(ctx: "ToolContext", args: dict[str, Any], tool: str) -> None:
+    """Refuse a filtered call when the switch is off, and a filter the engine would
+    refuse, with the tool's name in the message."""
+    filters, prefix = args.get("filters"), args.get("filepath_prefix")
+    if filters is None and prefix is None:
+        return
+    if "metadata_filters" in ctx.features_off:
+        raise ToolError(
+            f"{tool} cannot filter on this server: metadata filters are switched off "
+            "(MEMVARA_FEATURE_METADATA_FILTERS=0). Call it again without filters and "
+            "filepath_prefix, and read the results knowing they are not narrowed.")
+    try:
+        search_filter(filters, prefix)
+    except ValueError as exc:
+        raise ToolError(f"{tool}.{exc}") from None
+
 #: There is deliberately no `close` property on any write tool here, and the reason is
 #: the module docstring's: the two closures are two tools. A `close=` on `memory_remember`
 #: was written and removed rather than never considered — it put the fork *after* the
@@ -682,12 +762,15 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
             "at once. Send valid_at alone for what is true of that date as far as we "
             "know today, which is what a question about the past usually means; send "
             "as_of alone for what this system believed on that date.")
+    _filters_allowed(ctx, args, "memory_search")
     results = cast(SearchResults, ctx.memory.search(
         args["query"],
         k=args["k"],
         min_score=args["min_score"],
         anchored=bool(args.get("anchored", False)),
         memory_types=_memory_types(args.get("memory_types")),
+        filters=args.get("filters"),
+        filepath_prefix=args.get("filepath_prefix"),
         as_of=_timestamp(as_of, "memory_search.as_of") if as_of is not None else None,
         valid_at=(_timestamp(valid_at, "memory_search.valid_at")
                   if valid_at is not None else None),
@@ -748,6 +831,7 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
     # rewrite dated it to. No id reaches the reply; only `.text` and `.rewrite` are read.
     # A hosted deployment renders its own block and reports no rewrite on this surface.
     extra: dict[str, Any] = {"with_ids": True} if isinstance(ctx.memory, ScopedMemvara) else {}
+    _filters_allowed(ctx, args, "memory_recall")
     try:
         block = ctx.memory.recall(
             args["query"],
@@ -764,6 +848,8 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             include_episodes=bool(args.get("include_episodes", False)),
             valid_at=(_timestamp(valid_at, "memory_recall.valid_at")
                       if valid_at is not None else None),
+            filters=args.get("filters"),
+            filepath_prefix=args.get("filepath_prefix"),
             **extra,
         )
     except SelectorBusy as exc:
@@ -2330,6 +2416,8 @@ TOOLS: tuple[Tool, ...] = (
             "query_rewrite": _QUERY_REWRITE,
             "synthesize": _SYNTHESIZE,
             "memory_types": _MEMORY_TYPES_FILTER,
+            "filters": _FILTERS,
+            "filepath_prefix": _FILEPATH_PREFIX,
         },
         required=("query",),
         handler=_recall,
@@ -2363,6 +2451,8 @@ TOOLS: tuple[Tool, ...] = (
             "anchored": _ANCHORED,
             "query_rewrite": _QUERY_REWRITE,
             "memory_types": _MEMORY_TYPES_FILTER,
+            "filters": _FILTERS,
+            "filepath_prefix": _FILEPATH_PREFIX,
             "as_of": {
                 "type": "string",
                 "description": (

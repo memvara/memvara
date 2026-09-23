@@ -46,8 +46,20 @@ mem.reset()                                       -> dict[str, int] # scope + sc
 # "retired"), defaulting to ["live"]; `include_invalidated=` is its two-valued alias.
 mem.search(query, *, k=10, min_score=0.0, anchored=False, ranked=False,
            query_rewrite=True, T=None, memory_types=None, states=None,
-           include_invalidated=None, include_episodes=False)
+           include_invalidated=None, filters=None, filepath_prefix=None,
+           include_episodes=False)
                                      -> SearchResults  # a list, plus .selection, .rewrite
+#   filters={"team": "web"} keeps only rows whose metadata has that value; a list means
+#     any one of its values, and every key must match. Keys are 1 to 64 characters of
+#     [A-Za-z0-9_.-]. A string matches only the same string, a number any equal number,
+#     True/False only a boolean. A row matches through its own `meta` or through the
+#     `meta` of a document it came from.
+#   filepath_prefix="policies/" keeps only rows that came from a document whose filepath
+#     starts with it, compared exactly: `%` and `_` are ordinary characters.
+#     Both run inside the store, before k is applied, so k matches come back whenever k
+#     exist. The graph leg does not run on a filtered search. A bad key or value is a
+#     ValueError before anything is read, and Memvara(metadata_filters=False) refuses
+#     either argument with ValueError. See memvara/filters.py for the exact rules.
 #   anchored=True keeps only the results the query names an entity of — a claim whose
 #     subject or object the query names, or one the graph leg reached from such a
 #     claim — so a question about an entity the store has never heard of returns []
@@ -70,8 +82,12 @@ mem.search(query, *, k=10, min_score=0.0, anchored=False, ranked=False,
 mem.recall(query, *, k=8, min_score=0.0, anchored=False, ranked=False,
            query_rewrite=True, synthesize=False, header=None, include_episodes=False,
            episode_header=None, include_history=False, history_header=None,
-           budget=None, counter=<internal>, valid_at=None, with_ids=False)
+           budget=None, counter=<internal>, valid_at=None, filters=None,
+           filepath_prefix=None, with_ids=False)
                                                   -> str | RecallResult
+#   filters= and filepath_prefix= narrow the facts and the turns as they do on search().
+#     The include_history tail is the past values of the facts that were kept, and is
+#     not filtered again.
 #   valid_at= only: the world clock. No `as_of=`, no `known_at=`, no `states=`, no
 #     `include_invalidated=` — deliberately; see recall() below. With valid_at the
 #     default header names the day, and include_history lists only values that had
@@ -341,6 +357,12 @@ such filter and would answer with an unfiltered page. `budget` and `valid_at` ar
 refusals rather than omissions: both stay in `recall()`'s signature so that `None` works,
 and a value raises `ValueError`, because a budget silently ignored is an oversized prompt
 with no signal, and a dated read silently answered with the present is a wrong one.
+
+`search()` and `recall()` send `filters` and `filepath_prefix` only when you set them, and
+check them first with the rules the local engine uses. **The hosted deployment does not
+accept these two fields yet.** Its request models refuse a field they do not know, so a
+filtered call answers 422 and the client raises `InvalidRequest`; it is never answered
+unfiltered. An unfiltered call is unchanged.
 
 Two divergences are real and worth knowing before you write against them:
 

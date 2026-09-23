@@ -8,10 +8,12 @@ a JSON-RPC error — the model sees results, whereas protocol errors are address
 client, which typically renders them as a failed call and moves on.
 
 The validated subset of JSON Schema is exactly what the tools in this package declare:
-`type` (string/integer/number/boolean/array/object), `enum`, `minimum`, `maximum`,
-`maxLength`, `default`, `required`, and `additionalProperties`: `false` on a tool's own
-arguments, and a schema for every value of an `object` argument. Anything wider would be
-untested code in a validator, which is the one place that is not acceptable.
+`type` (string/integer/number/boolean/array/object, or a list of those when a value may
+be any of several), `enum`, `minimum`, `maximum`, `maxLength`, `pattern` on a string,
+`default`, `required`, `additionalProperties` (`false` on a tool's own arguments, and a
+schema for every value of an `object` argument), and `propertyNames` for the keys of an
+`object` argument. Anything wider would be untested code in a validator, which is the one
+place that is not acceptable.
 
 That sentence is load-bearing, and `boolean` was missing from it for as long as it was
 missing from the code. `memory_recall` grew an `include_episodes` argument, declared it
@@ -34,11 +36,18 @@ memvara.server.validate.ToolError: demo.k must be an integer, got a string ('8')
 Traceback (most recent call last):
     ...
 memvara.server.validate.ToolError: demo.raw must be a boolean, got a string ('false')
+>>> validate({"v": {"type": ["string", "number"]}}, (), {"v": 2}, tool="demo")
+{'v': 2}
+>>> validate({"v": {"type": ["string", "number"]}}, (), {"v": [2]}, tool="demo")
+Traceback (most recent call last):
+    ...
+memvara.server.validate.ToolError: demo.v must be a string or a number, got an array ([2])
 """
 
 from __future__ import annotations
 
 import difflib
+import re
 from typing import Any, Collection, Mapping, Sequence
 
 __all__ = ["ToolError", "validate"]
@@ -93,9 +102,48 @@ def _suggest(key: str, vocabulary: Sequence[str]) -> str:
     return f"{key!r} (did you mean {' or '.join(repr(c) for c in close)}?)"
 
 
+def _kind_of(value: Any, allowed: Sequence[str]) -> str | None:
+    """Which of the `allowed` schema types `value` arrived as, or `None`.
+
+    An integer is also a number, so it is checked as `integer` when that is allowed and
+    as `number` otherwise.
+    """
+    if isinstance(value, bool):
+        found = "boolean"
+    elif isinstance(value, int):
+        found = "integer" if "integer" in allowed else "number"
+    elif isinstance(value, float):
+        found = "number"
+    elif isinstance(value, str):
+        found = "string"
+    elif isinstance(value, list):
+        found = "array"
+    elif isinstance(value, dict):
+        found = "object"
+    else:
+        return None
+    return found if found in allowed else None
+
+
+def _one_of(kinds: Sequence[str]) -> str:
+    """`a string or a number`, for a message about a value that may be several types."""
+    named = [_ARTICLES[k] for k in kinds]
+    return named[0] if len(named) == 1 else f"{', '.join(named[:-1])} or {named[-1]}"
+
+
 def _checked(label: str, value: Any, spec: Mapping[str, Any],
              siblings: Collection[str] = ()) -> Any:
     kind = spec["type"]
+    if isinstance(kind, list):
+        # A value that may be one of several types, such as a metadata filter's value.
+        # The value's own JSON type picks the branch, so an error from inside that branch
+        # (an array holding an object, say) reaches the caller, rather than a list of
+        # every type that also failed.
+        chosen = _kind_of(value, kind)
+        if chosen is None:
+            raise ToolError(
+                f"{label} must be {_one_of(kind)}, got {_describe(value)} ({value!r})")
+        return _checked(label, value, {**spec, "type": chosen}, siblings)
     if kind in ("integer", "number"):
         # `bool` is a subclass of `int` in Python, so an unguarded isinstance check would
         # accept `true` as a count and then format it as `1` somewhere downstream.
@@ -135,6 +183,12 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
         if not isinstance(value, dict):
             raise ToolError(
                 f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")
+        names = spec.get("propertyNames")
+        if names is not None:
+            # The keys are names the caller chose, such as a metadata field, so each one
+            # is checked like a string argument against the declared pattern.
+            for key in value:
+                _checked(f"{label} key {key!r}", key, {"type": "string", **names})
         return {key: _checked(f"{label}.{key}", item, spec["additionalProperties"])
                 for key, item in value.items()}
     elif not isinstance(value, str):
@@ -159,6 +213,10 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
                 f"({value[exc.start]!r}) and cannot be encoded as UTF-8. It is half of "
                 "a character; the text it came from was probably truncated or decoded "
                 "twice. Send the whole character or drop it.") from None
+
+    pattern = spec.get("pattern")
+    if pattern is not None and not re.search(pattern, value):
+        raise ToolError(f"{label} must match the pattern {pattern}, got {value!r}")
 
     allowed = spec.get("enum")
     if allowed is not None and value not in allowed:

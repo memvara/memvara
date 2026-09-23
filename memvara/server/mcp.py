@@ -30,7 +30,8 @@ from .protocol import (
 from .config import FEATURES_OFF_BY_DEFAULT, unknown_features
 from .memory_api import MemoryAPI
 from .tools import (FEATURE_ARGUMENTS, TOOLS, Tool, ToolContext, ToolError,
-                    anchoring_by_default, safe_detail, without_arguments)
+                    anchoring_by_default, safe_detail, without_arguments,
+                    without_filters)
 
 if TYPE_CHECKING:
     # For the annotation alone. `memvara.remote.api` reaches back into
@@ -205,6 +206,11 @@ class MemvaraMCPServer:
         for feature, arguments in FEATURE_ARGUMENTS.items():
             if feature in self.features_off:
                 tools = without_arguments(tools, arguments)
+        #: `metadata_filters` owns arguments too, but keeps them: a model that
+        #: sends one is refused by `_filters_allowed` in `tools.py` with the
+        #: reason, and the descriptions say so.
+        if "metadata_filters" in self.features_off:
+            tools = without_filters(tools)
         self._tools: dict[str, Tool] = {
             t.name: t
             for t in tools
