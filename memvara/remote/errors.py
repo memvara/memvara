@@ -31,6 +31,16 @@ class RemoteError(Exception):
         #: Whether the *server* said retrying could help. Never inferred here.
         self.retryable = retryable
 
+    def describe(self) -> str:
+        """The error as one line for a person to read: the message, then the status and
+        the code in brackets. `memvara whoami` and the hosted demo's credential check
+        both print a failure this way, so the two read alike.
+
+        >>> RemoteError(401, "unauthorized", "token expired").describe()
+        'token expired (401 unauthorized)'
+        """
+        return f"{self.message} ({self.status_code} {self.code})"
+
 
 class AuthError(RemoteError):
     """The credential is missing, malformed, or not accepted."""

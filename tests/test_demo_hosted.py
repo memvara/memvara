@@ -460,6 +460,8 @@ def test_a_second_key_for_the_same_tenant_is_refused(tmp_path, monkeypatch):
     "the deployment cannot be reached",
     "the answer names no tenant",
     "the answer is not a mapping",
+    "the reply is not JSON",
+    "the reply cannot be decoded",
 ])
 def test_a_tenant_lookup_that_fails_refuses_the_credential(tmp_path, monkeypatch,
                                                            failure):
@@ -482,8 +484,14 @@ def test_a_tenant_lookup_that_fails_refuses_the_credential(tmp_path, monkeypatch
                                         "could not reach the deployment: timed out")
     elif failure == "the answer names no tenant":
         by_key["mv_demo"] = {"token_id": "tok_1", "scope": {}}
-    else:
+    elif failure == "the answer is not a mapping":
         by_key["mv_home-key"] = ["not", "a", "mapping"]
+    elif failure == "the reply is not JSON":
+        # What `response.json()` raises on a success response with an HTML body.
+        by_key["mv_demo"] = json.JSONDecodeError("Expecting value", "<html>", 0)
+    else:
+        httpx = pytest.importorskip("httpx")
+        by_key["mv_demo"] = httpx.DecodingError("malformed gzip body")
     served = _serve(monkeypatch, by_key)
     demo = _write(tmp_path / "demo.json", api_key="mv_demo", project="dev")
 
@@ -502,16 +510,60 @@ def test_a_lookup_that_cannot_build_a_client_refuses_the_credential(tmp_path,
                                                                      monkeypatch):
     """Without the `cloud` extra the hosted client cannot be built at all. That is a
     failed lookup like any other, so it refuses the credential rather than skipping the
-    check."""
+    check. httpx is made unimportable here, as it is on an install without the extra,
+    so the list of lookup errors is built the way it is there."""
+    import sys
+
     default = _home(tmp_path)
 
     def connect(credential: ho.HostedCredential) -> Any:
         raise ImportError("httpx is not installed")
 
     monkeypatch.setattr(ho, "connect", connect)
+    monkeypatch.setitem(sys.modules, "httpx", None)
     demo = _write(tmp_path / "demo.json", api_key="mv_demo", project="dev")
     with pytest.raises(SystemExit, match="could not confirm"):
         ho.load_demo_credential(demo, env={}, default_path=default)
+
+
+def test_a_bug_in_the_lookup_is_raised_rather_than_reported_as_a_failed_lookup(
+        tmp_path, monkeypatch):
+    """The lookup catches only what a lookup can fail with: the client's own errors, a
+    missing extra, and a reply it cannot read. An exception of any other type is a bug
+    in this code, such as a misspelt attribute. Reporting it as "could not confirm"
+    would send the user to check two credentials that are fine, so it is left to raise.
+    The client is still closed."""
+    default = _home(tmp_path)
+    served = _serve(monkeypatch, {"mv_home-key": "prj_home",
+                                  "mv_demo": AttributeError("no attribute 'scpoe'")})
+    demo = _write(tmp_path / "demo.json", api_key="mv_demo", project="dev")
+
+    with pytest.raises(AttributeError, match="scpoe"):
+        ho.load_demo_credential(demo, env={}, default_path=default)
+    assert served["mv_demo"].closed
+
+
+def test_a_key_that_begins_with_the_other_key_is_masked_whole(tmp_path, monkeypatch):
+    """Keys are masked in a failure message one at a time. If the demo's key is a prefix
+    of this machine's key and is masked first, the longer key becomes `[key]` followed by
+    the rest of it, and that remainder is part of a secret. The longer key is masked
+    first, so nothing of either key is printed."""
+    from memvara.remote.errors import AuthError
+
+    default = _write(tmp_path / "home" / "credentials.json",
+                     api_key="mv_dev-home-secret", project="dev")
+    _serve(monkeypatch, {
+        "mv_dev": "prj_demo",
+        "mv_dev-home-secret": AuthError(401, "unauthorized",
+                                        "key mv_dev-home-secret is revoked")})
+    demo = _write(tmp_path / "demo.json", api_key="mv_dev", project="dev")
+
+    with pytest.raises(SystemExit) as caught:
+        ho.load_demo_credential(demo, env={}, default_path=default)
+
+    message = str(caught.value)
+    assert "key [key] is revoked" in message, message
+    assert "home-secret" not in message and "mv_" not in message
 
 
 # --- the harness, with the hosted backend ----------------------------------------

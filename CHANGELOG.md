@@ -135,7 +135,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   lookup fails, for example because a key is refused or the server cannot be reached,
   the credential is still refused, and the message says to run `memvara whoami
   --credentials PATH` on each file. The refusals of the default file itself and of a
-  copied key are unchanged.
+  copied key are unchanged. The demo and `memvara whoami` now read the tenant with the
+  same function, `memvara.remote.api.tenant_of`, and describe a `RemoteError` with the
+  same method, `RemoteError.describe()`. `memvara whoami` prints what it printed before,
+  except that a server reply whose tenant is an empty string or not a string now prints
+  `None` on the tenant line.
 - **A question that says one relation two ways is a lookup again, and the intent gate
   sees the vocabulary a registry holds right now.** The gate counts the distinct
   predicates a question names, and two is a chain that opens the graph leg. It counted

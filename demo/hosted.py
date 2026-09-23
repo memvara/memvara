@@ -169,21 +169,21 @@ def load_demo_credential(path: str | os.PathLike[str], *,
             f"--hosted-credentials: {resolved} holds the same key as "
             + ("MEMVARA_API_KEY" if stored["api_key"] == env_key else str(default))
             + ", so it reaches the same store. Use a key minted for the demo's own project.")
-    credential = HostedCredential(
-        api_key=stored["api_key"],
-        base_url=(stored.get("server_url") or environ.get("MEMVARA_SERVER_URL")
-                  or _DEFAULT_SERVER),
-        project=stored.get("project"), path=resolved)
+    def server(fields: Mapping[str, str]) -> str:
+        # The order `memvara whoami` resolves a server in: the file, then the
+        # environment, then the hosted service.
+        return (fields.get("server_url") or environ.get("MEMVARA_SERVER_URL")
+                or _DEFAULT_SERVER)
+
+    credential = HostedCredential(api_key=stored["api_key"], base_url=server(stored),
+                                  project=stored.get("project"), path=resolved)
     if stored.get("project") and stored.get("project") == home.get("project"):
-        at_home = HostedCredential(
-            api_key=home["api_key"],
-            base_url=(home.get("server_url") or environ.get("MEMVARA_SERVER_URL")
-                      or _DEFAULT_SERVER),
-            project=home.get("project"), path=default)
+        at_home = HostedCredential(api_key=home["api_key"], base_url=server(home),
+                                   project=home.get("project"), path=default)
         keys = (credential.api_key, at_home.api_key)
         try:
             tenant, home_tenant = _tenant(credential), _tenant(at_home)
-        except Exception as exc:
+        except _lookup_errors() as exc:
             raise SystemExit(
                 f"--hosted-credentials: {resolved} is for project {stored['project']!r}, "
                 f"and so is {default}. Project names are not unique, so the demo asked "
@@ -205,20 +205,45 @@ def load_demo_credential(path: str | os.PathLike[str], *,
 def _tenant(credential: HostedCredential) -> str:
     """The tenant the server says `credential`'s key is bound to.
 
-    Asked with `whoami()`, the call `memvara whoami` makes, so the demo and that command
-    read a key's tenant the same way. Raises if the answer has no tenant in it.
+    Asked with `whoami()` and read with `tenant_of`, which is what `memvara whoami` uses,
+    so the demo and that command read a key's tenant the same way. Raises `ValueError`
+    if the answer names no tenant, which includes an answer of the wrong shape.
     """
+    from memvara.remote.api import tenant_of
+
     client = connect(credential)
     try:
         answer = client.whoami()
     finally:
         client.close()
-    scope = answer.get("scope") if isinstance(answer, Mapping) else None
-    tenant = scope.get("tenant") if isinstance(scope, Mapping) else None
-    if not isinstance(tenant, str) or not tenant:
+    tenant = tenant_of(answer)
+    if tenant is None:
         raise ValueError(f"the server's whoami answer for {credential.path} named no "
                          "tenant")
     return tenant
+
+
+def _lookup_errors() -> tuple[type[Exception], ...]:
+    """The exceptions a failed tenant lookup can raise, each of which refuses the
+    credential.
+
+    `RemoteError` covers a refused key, a server error, and a network failure, which the
+    client retries and then raises as a `RemoteError` with code `transport`.
+    `ImportError` means the `cloud` extra is missing, so no client can be built.
+    `ValueError` covers a success response whose body is not JSON, and an answer that
+    names no tenant (see `_tenant`). The httpx errors are the few the client lets
+    through unwrapped: a reply it cannot decode, too many redirects, and an invalid
+    URL. Anything else is a bug in this code and is left to raise, so that it is not
+    reported as a lookup that failed.
+    """
+    from memvara.remote.errors import RemoteError
+
+    errors: tuple[type[Exception], ...] = (RemoteError, ImportError, ValueError)
+    try:
+        import httpx
+    except ImportError:
+        return errors
+    return errors + (httpx.HTTPError, httpx.InvalidURL)
 
 
 def _reason(exc: Exception) -> str:
@@ -227,14 +252,19 @@ def _reason(exc: Exception) -> str:
     from memvara.remote.errors import RemoteError
 
     if isinstance(exc, RemoteError):
-        return f"{exc.message} ({exc.status_code} {exc.code})"
+        return exc.describe()
     return f"{type(exc).__name__}: {exc}"
 
 
 def _redacted(text: str, keys: Sequence[str]) -> str:
     """`text` with every key in `keys` masked. A server or transport error can quote the
-    request it failed on, and a refusal message must never print a key."""
-    for key in keys:
+    request it failed on, and a refusal message must never print a key.
+
+    The longest key is masked first. If one key is a prefix of another, masking the
+    shorter one first would turn the longer key into `[key]` followed by the rest of it,
+    and that remainder is part of a secret.
+    """
+    for key in sorted(keys, key=len, reverse=True):
         text = text.replace(key, "[key]")
     return text
 

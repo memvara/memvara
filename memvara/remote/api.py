@@ -96,6 +96,25 @@ def _sent(body: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in body.items() if v is not None}
 
 
+def tenant_of(answer: object) -> str | None:
+    """The tenant a `whoami()` answer says the key reaches, or None if it names none.
+
+    The answer is read defensively: anything other than a non-empty string at
+    `answer["scope"]["tenant"]` gives None, including an answer or a scope that is not a
+    mapping. `memvara whoami` prints what this returns, and the hosted demo refuses a
+    credential when it returns None, because a key whose tenant is unknown cannot be
+    shown to reach a different store.
+
+    >>> tenant_of({"token_id": "tok_1", "scope": {"tenant": "prj_1", "user": None}})
+    'prj_1'
+    >>> tenant_of({"scope": {}}), tenant_of({"scope": {"tenant": ""}}), tenant_of([])
+    (None, None, None)
+    """
+    scope = answer.get("scope") if isinstance(answer, Mapping) else None
+    tenant = scope.get("tenant") if isinstance(scope, Mapping) else None
+    return tenant if isinstance(tenant, str) and tenant else None
+
+
 class RemoteMemvara:
     """The library's API against a hosted deployment.
 
