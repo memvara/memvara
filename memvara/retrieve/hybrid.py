@@ -59,7 +59,9 @@ order a ranked call takes.
 
 from __future__ import annotations
 
+import threading
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import partial
@@ -78,6 +80,7 @@ from ..schema import PredicateRegistry
 from ..select.base import (
     Candidate, Rewrite, Selection, Selector, SelectorBusy, SelectorRefused,
 )
+from ..select.stages import MAX_QUERIES, run_stage
 from ..store.base import Store, bulk_claims, resolve_states
 from ..telemetry import (
     RETRIEVAL_LATENCY_MS,
@@ -524,6 +527,16 @@ class HybridRetriever:
         #: `Memvara` hands over the writer's live registry, so an alias learned this
         #: process anchors the next search without a round trip through the store.
         self.entities = entities
+        #: Runs a rewritten read's alternative phrasings beside the original query. At
+        #: most `MAX_QUERIES` threads, made on first use and kept, because each thread
+        #: holds its own SQLite read connection and a fresh pool per read would open a
+        #: new connection per read. See `search`'s `query_rewrite`.
+        self._phrasings: ThreadPoolExecutor | None = None
+        self._phrasings_lock = threading.Lock()
+        #: The query vectors of the pass running on this thread, so that the claim leg
+        #: and the episode leg embed one query once. Per thread and per pass: nothing
+        #: is kept between two searches.
+        self._pass = threading.local()
 
     # Three signatures for one method, because `include_episodes` decides what comes
     # back and the caller almost always knows which at the point of the call. Without
@@ -677,17 +690,21 @@ class HybridRetriever:
                 "no memory_types (a type filter skips the episode leg entirely, so a "
                 "ranked call would hand the selector nothing)."
             )
-        # Checked before the model is asked anything, so a call that is going to raise
-        # for its time arguments does not pay for a rewrite first.
-        time_axes(as_of, valid_at, known_at)
-        once = partial(self._search_once, scope=scope, k=k, as_of=as_of,
-                       known_at=known_at, states=states,
-                       include_invalidated=include_invalidated,
-                       memory_types=memory_types, min_score=min_score,
-                       anchored=anchored, include_episodes=include_episodes)
+        # Resolved once, here, and handed down, so no inner call can disagree about which
+        # instant or which population was asked for. Also checked before the model is
+        # asked anything, so a call that is going to raise does not pay for a rewrite.
+        valid_at, known_at = time_axes(as_of, valid_at, known_at)
+        wanted_states = resolve_states(states, include_invalidated)
+        once = partial(self._search_once, scope=scope, k=k, known_at=known_at,
+                       wanted_states=wanted_states, memory_types=memory_types,
+                       min_score=min_score, anchored=anchored,
+                       include_episodes=include_episodes)
         # A read that returns nothing by construction is not worth a model call.
         if not query_rewrite or (k <= 0 and not ranked):
             return once(query, valid_at=valid_at, now=now, ranked=ranked)
+        rec = self.telemetry
+        # Started before the rewrite, because the caller waited through it too.
+        t0 = perf_counter() if rec is not None else 0.0
         # One instant for the whole read: the date the model is told is today, the
         # clock every retrieval below decays from, and the line a date range must end
         # before to be worth using.
@@ -696,38 +713,63 @@ class HybridRetriever:
         alternatives: tuple[str, ...] = ()
         if rewrite.outcome == "applied":
             alternatives = rewrite.queries
-            if rewrite.date_to is not None and valid_at is None and as_of is None:
+            # `valid_at` is already `as_of` folded in, so `None` means the caller named
+            # no instant at all.
+            if rewrite.date_to is not None and valid_at is None:
                 end = datetime(rewrite.date_to.year, rewrite.date_to.month,
                                rewrite.date_to.day, 23, 59, 59, tzinfo=timezone.utc)
                 if end < asked:
                     valid_at = end
                     rewrite = replace(rewrite, valid_at=end)
-        rec = self.telemetry
-        t0 = perf_counter() if rec is not None else 0.0
-        main = once(query, valid_at=valid_at, now=asked, ranked=ranked,
-                    observe=not alternatives)
         if not alternatives:
-            main.rewrite = rewrite
-            return main
-        others = [once(q, valid_at=valid_at, now=asked, ranked=False, observe=False)
-                  for q in alternatives]
-        hits = self._fuse(main, others, k)
+            main = once(query, valid_at=valid_at, now=asked, ranked=ranked, observe=False)
+            hits: list[Retrieved] = list(main)
+        else:
+            # Every phrasing in one `encode` call: an embedder behind a network pays a
+            # round trip per call, not per text.
+            vectors = self.embedder.encode([query, *alternatives])
+            pending = [
+                self._phrasing_pool().submit(
+                    once, q, valid_at=valid_at, now=asked, ranked=False, observe=False,
+                    rerank_final=False, qvec=vec)
+                for q, vec in zip(alternatives, vectors[1:])]
+            main = once(query, valid_at=valid_at, now=asked, ranked=ranked, observe=False,
+                        rerank_final=False, qvec=vectors[0])
+            kept, fused = self._fuse(main, [f.result() for f in pending])
+            # The reranker runs once, on the fused list, rather than once per phrasing.
+            # A ranked read reranked its turns inside the ranked stage and never runs it
+            # here, exactly as without a rewrite.
+            reranker = (None if ranked and self.selector is not None
+                        else None if self.rerank_ranked_only else self.reranker)
+            if reranker is not None:
+                fused = rerank(reranker, query, fused, top_n=self.rerank_top_n)
+            hits = [*kept, *fused[:k]]
         if rec is not None:
             self._observe(rec, query, hits, (perf_counter() - t0) * 1000.0)
         return SearchResults(hits, selection=main.selection, rewrite=rewrite)
 
     def _rewrite(self, query: str, asked: datetime) -> Rewrite:
-        """The rewrite outcome for `query`. The model is called only on the last line."""
-        if not self.rewrite_enabled:
-            return Rewrite(outcome="disabled")
-        if self.rewriter is None:
-            return Rewrite(outcome="unconfigured")
-        return self.rewriter.rewrite(query, today=asked.date())
+        """The rewrite outcome for `query`, counted. See `stages.run_stage`."""
+        return run_stage("rewrite", self.rewriter, self.rewrite_enabled, Rewrite,
+                         lambda stage, usage: stage.rewrite(query, today=asked.date(),
+                                                            usage=usage),
+                         self.telemetry)
+
+    def _phrasing_pool(self) -> ThreadPoolExecutor:
+        with self._phrasings_lock:
+            if self._phrasings is None:
+                self._phrasings = ThreadPoolExecutor(
+                    max_workers=MAX_QUERIES, thread_name_prefix="memvara-phrasing")
+            return self._phrasings
 
     @staticmethod
     def _fuse(main: SearchResults, others: Sequence[SearchResults],
-              k: int) -> list[Retrieved]:
+              ) -> tuple[list[Retrieved], list[Retrieved]]:
         """The original query's rows and each alternative's, fused by rank.
+
+        Returns `(kept, fused)`: the turns a ranked read kept, and every other row in
+        fused order, not yet cut to `k`, so that a reranker can still promote from below
+        the cut.
 
         Turns a ranked read kept stay first and are not fused: they arrived outside `k`
         (see `ranked`), and fusing them would let an alternative phrasing push a turn
@@ -741,8 +783,8 @@ class HybridRetriever:
                 return f"{EPISODE}:{r.episode.id}"
             return f"{CLAIM}:{r.claim.id}"
 
-        kept = [r for r in main
-                if isinstance(r, EpisodeResult) and r.explain.selected is True]
+        kept: list[Retrieved] = [
+            r for r in main if isinstance(r, EpisodeResult) and r.explain.selected is True]
         taken = {key(r) for r in kept}
         first: dict[str, tuple[int, Retrieved]] = {}
         rankings: dict[str, list[tuple[str, float]]] = {}
@@ -757,26 +799,52 @@ class HybridRetriever:
             rankings[str(i)] = ranking
         fused = reciprocal_rank_fusion(rankings)
         order = sorted(fused, key=lambda name: (-fused[name], first[name][0]))
-        return [*kept, *(first[name][1] for name in order[:k])]
+        return kept, [first[name][1] for name in order]
 
     def _search_once(
-        self, query: str, *, scope: Scope, k: int, as_of: datetime | None,
-        valid_at: datetime | None, known_at: datetime | None,
-        states: Collection[str] | None, include_invalidated: bool | None,
+        self, query: str, *, scope: Scope, k: int, valid_at: datetime | None,
+        known_at: datetime | None, wanted_states: tuple[str, ...],
         memory_types: Sequence[MemoryType] | None, min_score: float, anchored: bool,
         include_episodes: bool, now: datetime | None, ranked: bool,
-        observe: bool = True,
+        observe: bool = True, rerank_final: bool = True, qvec: Any = None,
     ) -> SearchResults:
         """One retrieval of one query: everything `search` does except the rewrite.
 
-        `observe=False` skips the retrieval telemetry, for a rewritten read, which is
-        observed once as a whole rather than once per phrasing.
+        The time axes and the states arrive resolved. `observe=False` skips the
+        retrieval telemetry, for a rewritten read, which is observed once as a whole.
+        `rerank_final=False` skips the final reranker pass, which a rewritten read runs
+        once over the fused list instead. `qvec` is this query's vector when the caller
+        already has it.
         """
-        valid_at, known_at = time_axes(as_of, valid_at, known_at)
-        # Resolved once, here, and carried as a tuple from this line down. The alias is
-        # a facade spelling; below it there is one parameter, so no inner call can pass
-        # both and no inner call can disagree about what the flag meant.
-        wanted_states = resolve_states(states, include_invalidated)
+        self._pass.vectors = {} if qvec is None else {
+            query: np.asarray(qvec, dtype=np.float32)}
+        try:
+            return self._retrieve(query, scope=scope, k=k, valid_at=valid_at,
+                                  known_at=known_at, wanted_states=wanted_states,
+                                  memory_types=memory_types, min_score=min_score,
+                                  anchored=anchored, include_episodes=include_episodes,
+                                  now=now, ranked=ranked, observe=observe,
+                                  rerank_final=rerank_final)
+        finally:
+            self._pass.vectors = None
+
+    def _query_vector(self, query: str) -> np.ndarray:
+        """`query` embedded, once per pass: both vector legs call this."""
+        cache = getattr(self._pass, "vectors", None)
+        if cache is not None and query in cache:
+            return cache[query]
+        vec = np.asarray(self.embedder.encode([query])[0], dtype=np.float32)
+        if cache is not None:
+            cache[query] = vec
+        return vec
+
+    def _retrieve(
+        self, query: str, *, scope: Scope, k: int, valid_at: datetime | None,
+        known_at: datetime | None, wanted_states: tuple[str, ...],
+        memory_types: Sequence[MemoryType] | None, min_score: float, anchored: bool,
+        include_episodes: bool, now: datetime | None, ranked: bool, observe: bool,
+        rerank_final: bool,
+    ) -> SearchResults:
         # Only a plain read can shortcut here. A ranked read's outcome is never silently
         # absent — `k <= 0` still has to say `unconfigured`, `disabled`, `key_rejected`,
         # or run the selector and report `applied`/`fallback` — so `ranked=True` falls
@@ -895,7 +963,7 @@ class HybridRetriever:
         else:
             hits = claims
 
-        if reranker_active is not None and not selector_ranked:
+        if reranker_active is not None and not selector_ranked and rerank_final:
             # Last, deliberately. Everything above it — fusion, the recency half-lives,
             # the per-slot diversity cap, the episode discount — is the ranking this
             # library is arguing for, and the reranker is a second opinion on its head,
@@ -1658,7 +1726,7 @@ class HybridRetriever:
         search = getattr(self.store, "vector_search_episodes", None)
         if search is None:
             return []
-        qvec = np.asarray(self.embedder.encode([query])[0], dtype=np.float32)
+        qvec = self._query_vector(query)
         if float(np.linalg.norm(qvec)) <= 0.0:
             return []
         return list(search(qvec, scopes, limit, valid_at=valid_at, known_at=known_at))
@@ -1773,7 +1841,7 @@ class HybridRetriever:
         purely CJK query. Returning nothing lets BM25 answer alone, which for the CJK
         case it does correctly, instead of burying it under fabricated ranks.
         """
-        qvec = np.asarray(self.embedder.encode([query])[0], dtype=np.float32)
+        qvec = self._query_vector(query)
         if float(np.linalg.norm(qvec)) <= 0.0:
             return []
         return list(self.store.vector_search(

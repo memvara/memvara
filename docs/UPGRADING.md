@@ -11,12 +11,26 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ### What changed
 
+**If you configured `llm=` only for extraction, every read now makes a model call too.**
 `search()` and `recall()` gained `query_rewrite: bool = True`, and `recall()` gained
 `synthesize: bool = False`. When `llm=` is a backend that implements `Chat`, which
-`OpenAILLM` and `AnthropicLLM` both do, every `search()` and `recall()` now makes one model
-call before retrieval to rewrite the query, waits up to 10 seconds for it, and may search
-at a `valid_at` read from the question's dates. Before this, such a store called its model
+`OpenAILLM` and `AnthropicLLM` both do, every `search()` and every `recall()` now sends one
+request to that model before retrieving anything, on your key, and waits up to 10 seconds
+for it. It then runs up to four retrievals instead of one, and may read the store at a
+`valid_at` taken from the question's dates. Before this, such a store called its model
 only on writes and on `ranked=True` reads.
+
+What that costs, measured on this change: the extra retrieval work took a read from a
+median of 5.6 ms to 21.0 ms (200 reads, `k=10`, turns included, a local store of 1,000
+claims and 1,000 turns, `HashingEmbedder`, a model stub that answers instantly, Python
+3.13 on macOS). The model call itself comes on top of that, is billed by your provider,
+and was not measured here because no key was available; it is at most the 10-second
+deadline, after which the plain read is served. `retrieval.rewrite_ms` records it on
+every call once you configure `telemetry=`.
+
+To switch it off for every read, pass `query_rewrite=False` to `Memvara(...)`, or set
+`MEMVARA_FEATURE_QUERY_REWRITE=0` on a server. To keep one read model-free, pass
+`query_rewrite=False` to that call, or `**memvara.select.PLAIN_READ`.
 
 Nothing changes for a store opened with the default `NullLLM`, or with any backend that
 cannot chat: no read calls a model, and `.rewrite.outcome` reports `unconfigured`.
@@ -34,8 +48,18 @@ a rewrite, pass `query_rewrite=False` to the constructor. On a server, set
 
 **A benchmark or test that counts model calls.** A fake backend with a `chat` method now
 receives rewrite calls on reads, with the system prompt
-`memvara.select.stages.REWRITE_SYSTEM`. Pass `query_rewrite=False` where the count should
-stay as it was.
+`memvara.select.stages.REWRITE_SYSTEM`. Pass `**PLAIN_READ` (or `query_rewrite=False`)
+where the count should stay as it was. The benchmark harnesses in `bench/` and the demo
+already do.
+
+**A `recall(synthesize=True)` block you parse.** A block without a summary starts with
+`(summary not written — <outcome>.)`, and for a fallback the reason follows the outcome,
+as in `(summary not written — fallback: timeout.)`.
+
+**An `AsyncMemvara` under heavy read load.** `search()` and `recall()` now run on their
+own pool of `memvara.aio.READ_THREADS` (8) threads instead of the loop's default executor,
+so a read waiting on a model cannot hold a thread other `to_thread` work needs. A burst of
+more than eight reads queues.
 
 **A class of your own used as `ToolContext.memory`.** Search your code for `ToolContext(`
 or `MemoryAPI`. Its `search` needs `query_rewrite`, and its `recall` needs `query_rewrite`

@@ -25,7 +25,7 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Protocol, Sequence, runtime_checkable
+from typing import Final, Literal, Protocol, Sequence, TypedDict, runtime_checkable
 
 from ..llm.base import Usage
 
@@ -61,50 +61,74 @@ class Selected:
     span: str | None
 
 
-@dataclass(slots=True, frozen=True)
-class Selection:
-    """How a ranked read's model consultation went. Carried on the result, not raised.
+#: The five ways a read-path model stage can end, shared by `ranked`, `query_rewrite`
+#: and `synthesis`. `applied`: the model answered and its answer was used. `fallback`:
+#: the call failed or its reply could not be read, so the plain read was served.
+#: `key_rejected`: the provider answered 401 or 403; kept apart from `fallback` so that a
+#: revoked key cannot hide behind reads that still work. `disabled`: the stage's switch
+#: is off. `unconfigured`: there is no model to call. Only `applied` changes the read.
+OUTCOMES = ("applied", "fallback", "key_rejected", "disabled", "unconfigured")
 
-    `outcome` is one of `applied`, `fallback`, `unconfigured`, `disabled`,
-    `key_rejected` — see the design spec's "The outcomes" for what puts a read in each.
-    `reason` only accompanies `fallback` (`timeout`, `error`, `provider`, `malformed`);
-    `status` is the provider's HTTP status when there was one. `candidates` is how many
-    turns the selector was handed — a tenant whose store yields fewer than `top_n` turns
-    is visible here rather than silent — and `kept` is how many it named.
+#: Keyword arguments for a read that must not call a model: pass them to `search()` or
+#: `recall()` with `**PLAIN_READ`, or to `Memvara(...)` to switch the stage off for every
+#: read. This is the one way code inside this repository asks for a deterministic read
+#: (a preview before a destructive write, a benchmark, a warm-up), and
+#: `tests/test_read_stages.py` fails when a new `search()` or `recall()` call in the
+#: library, the benchmarks, the demo or the hooks does not say which kind of read it is.
+class PlainRead(TypedDict):
+    """The shape of `PLAIN_READ`, so a type checker can see what `**PLAIN_READ` passes."""
+
+    query_rewrite: Literal[False]
+
+
+PLAIN_READ: Final[PlainRead] = {"query_rewrite": False}
+
+
+@dataclass(slots=True, frozen=True)
+class StageOutcome:
+    """How one read-path model stage went. Carried on the result, not raised.
+
+    `outcome` is one of `OUTCOMES`. `reason` accompanies `fallback` only: `timeout`,
+    `error`, `provider` or `malformed`; `busy` for a rewrite or a synthesis refused
+    admission because the deployment's cap on model calls was full; and for a synthesis
+    also `budget`. `status` is the
+    provider's HTTP status when there was one. `Selection`, `Rewrite` and `Synthesis`
+    add what each stage has to report beyond that.
     """
 
     outcome: str
     reason: str | None = None
     status: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class Selection(StageOutcome):
+    """How a ranked read's model consultation went.
+
+    See `StageOutcome` for the three shared fields, and the design spec's "The outcomes"
+    for what puts a read in each. `candidates` is how many turns the selector was handed
+    — a tenant whose store yields fewer than `top_n` turns is visible here rather than
+    silent — and `kept` is how many it named.
+    """
+
     candidates: int = 0
     kept: int = 0
 
 
 @dataclass(slots=True, frozen=True)
-class Rewrite:
-    """How a read's query rewrite went. Carried on the result, not raised.
-
-    `outcome` uses the five words `Selection.outcome` uses, with the same meanings:
-    `applied` (the model answered and its answer was used), `fallback` (the call failed
-    or its reply could not be read, so the plain read was served), `key_rejected` (the
-    provider answered 401 or 403), `disabled` (the `query_rewrite` switch is off) and
-    `unconfigured` (no chat backend is configured, so no call was made). `reason` only
-    accompanies `fallback` (`timeout`, `error`, `provider`, `malformed`), and `status` is
-    the provider's HTTP status when there was one.
+class Rewrite(StageOutcome):
+    """How a read's query rewrite went. `disabled` means the `query_rewrite` switch is off.
 
     `queries` holds the alternative queries the model wrote, without the caller's own
     query, which is always searched as well. `date_from` and `date_to` are the date
-    range the model read out of the question, or `None` when it found none. `valid_at`
-    is the instant the read actually used because of that range: the last second of
+    range the model read out of the question: both are set or neither is. `valid_at` is
+    the instant the read actually used because of that range: the last second of
     `date_to`, in UTC. It is `None` when the range was not used, which happens when
     there was no range, when the caller passed `valid_at` or `as_of` (the caller's
-    instant always wins), or when the range ends today or later, which is a present-tense
-    read anyway.
+    instant always wins), or when the range ends today or later, which is a
+    present-tense read anyway.
     """
 
-    outcome: str
-    reason: str | None = None
-    status: int | None = None
     queries: tuple[str, ...] = ()
     date_from: date | None = None
     date_to: date | None = None
@@ -112,19 +136,16 @@ class Rewrite:
 
 
 @dataclass(slots=True, frozen=True)
-class Synthesis:
-    """How `recall(synthesize=True)`'s summary went. Carried on the result, not raised.
+class Synthesis(StageOutcome):
+    """How `recall(synthesize=True)`'s summary went. `disabled` means the switch is off.
 
-    `outcome` and `reason` mean what they mean on `Rewrite`, with one more `reason`:
-    `budget`, when the summary was written but did not fit inside the caller's `budget`
-    and was left out so the notes could stay. `text` is the summary the block starts
-    with, and is `None` for every outcome except `applied`. It is also `None` for an
-    `applied` call that had no notes to summarise, because no call is made then.
+    `reason` can also be `budget`: the notes that fit the caller's `budget` left no room
+    for the summary, or no note fitted at all, so no summary is shown. `text` is the
+    summary the block starts with, and is `None` for every outcome except `applied`. It is
+    also `None` for an `applied` call that had no notes to summarise, because no call is
+    made then.
     """
 
-    outcome: str
-    reason: str | None = None
-    status: int | None = None
     text: str | None = None
 
 

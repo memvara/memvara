@@ -52,6 +52,7 @@ os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 os.environ.setdefault("OPENAI_API_KEY", "sk-not-used-by-this-benchmark")
 
 from memvara import Memvara, HashingEmbedder
+from memvara.select import PLAIN_READ
 
 from compare import NEEDLE_VALUE, ScriptedLLM, build_workload, make_extractor
 
@@ -184,7 +185,7 @@ def score_memvara(mem: Memvara, w) -> dict:
         correct += want in got
         stale += len([g for g in got if g != want])
 
-    hits = [r.claim.object for r in mem.search(NEEDLE_VALUE, k=3)]
+    hits = [r.claim.object for r in mem.search(NEEDLE_VALUE, k=3, **PLAIN_READ)]
     return {"correct": correct, "stale": stale, "live": len(live),
             "needle": NEEDLE_VALUE in hits}
 

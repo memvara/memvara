@@ -113,6 +113,7 @@ from memvara import (  # noqa: E402
     PredicateSpec,
 )
 from memvara.schema import BUILTIN_PREDICATES, Cardinality, Volatility  # noqa: E402
+from memvara.select import PLAIN_READ  # noqa: E402
 
 
 # --- the scenario contract, structurally ----------------------------------------
@@ -389,7 +390,10 @@ def build_memory(turns: Sequence[Turn], *, llm: LLM | None = None,
         warnings.simplefilter("ignore", DegradedExtractionWarning)
         mem = Memvara(embedder=HashingEmbedder(dim=dim), llm=llm or NullLLM(),
                       user="customer", read_max_episodes=max_episodes,
-                      registry=registry)
+                      registry=registry,
+                      # The demo measures retrieval with no model on the read path; an
+                      # extraction model that can chat does not turn the rewrite on.
+                      **PLAIN_READ)
     for turn in turns:
         mem.add(turn.text, role=turn.role, ts=turn.at)
     return mem, degraded
@@ -428,7 +432,7 @@ def memvara(question: Question, turns: Sequence[Turn], *, k: int = DEFAULT_K,
     """
     seen = visible_turns(question, turns)
     mem, degraded = build_memory(seen, llm=llm, dim=dim, max_episodes=k)
-    text = clip(mem.recall(question.text, k=k, include_episodes=True), max_chars)
+    text = clip(mem.recall(question.text, k=k, include_episodes=True, **PLAIN_READ), max_chars)
     return Context(arm="memvara", text=text, turns_visible=len(seen),
                    items_used=count_entries(text), degraded=degraded)
 
@@ -772,7 +776,7 @@ def memvara_structured(question: Question, turns: Sequence[Turn], *, k: int = DE
     # `recall(valid_at=)` is the read an integration would make for a question about the
     # past, so the arm makes the same one: a dated question gets the dated header.
     text = clip(mem.recall(question.text, k=k, valid_at=question.about,
-                           include_episodes=True), max_chars)
+                           include_episodes=True, **PLAIN_READ), max_chars)
     return Context(arm="memvara_structured", text=text, turns_visible=len(seen),
                    items_used=count_entries(text), degraded=degraded)
 

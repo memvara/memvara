@@ -45,7 +45,8 @@ Two things worth knowing before relying on it:
 * **It runs on the default executor**, which is shared with every other `to_thread` in
   the process and holds `min(32, cpu_count + 4)` threads. A burst of writes larger than
   that queues behind itself; `loop.set_default_executor(...)` is the knob if that
-  matters.
+  matters. `search()` and `recall()` are the exception: they can wait on a model call
+  for seconds, so they run on their own pool of `READ_THREADS` threads (see `_read`).
 
 Constructing the `Memvara` is left to the caller, and synchronously, on purpose: opening
 the store and loading an embedding model is blocking work that belongs in application
@@ -64,18 +65,54 @@ startup, not hidden inside the first `await`.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from functools import partial
 from typing import Any, Callable, Collection, Literal, Mapping, Sequence, overload
 
 from .core import (Memvara, Messages, ScopedMemvara, _approx_tokens, _check_k,
                    _profile_since)
 from .embed import Embedder
 from .retrieve import Path, Retrieved
+from .select import PLAIN_READ
 from .write.reconcile import MergeReport
 from .types import (Answer, Claim, Delta, Episode, ErasureProof, ForgetPreview,
                     ForgetResult, Link, MemoryType, Profile, Provenance, RecallResult,
                     Result, Scope, WriteReceipt)
+
+
+#: How many `search()` and `recall()` calls may run at once across every `AsyncMemvara`
+#: in the process. See `_read`.
+READ_THREADS = 8
+
+_reads: ThreadPoolExecutor | None = None
+_reads_lock = threading.Lock()
+
+
+async def _read(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Run a read on its own bounded pool, not on the loop's default executor.
+
+    A `search()` or `recall()` can wait up to 10 seconds on the query rewrite's model
+    call, and 10 more on a synthesis, before it reads anything. On the shared default
+    executor, a burst of such reads would hold every thread and stall unrelated
+    `to_thread` work in the process. This pool is separate and bounded at
+    `READ_THREADS`, so a burst of reads queues behind itself instead. Splitting a read
+    into awaited steps was the other option; it would need an async `Chat` protocol,
+    which this library does not have, and would still block a thread on the model call.
+    The context is copied, as `asyncio.to_thread` does.
+    """
+    global _reads
+    with _reads_lock:
+        if _reads is None:
+            _reads = ThreadPoolExecutor(max_workers=READ_THREADS,
+                                        thread_name_prefix="memvara-read")
+        pool = _reads
+    context = contextvars.copy_context()
+    return await asyncio.get_running_loop().run_in_executor(
+        pool, partial(context.run, fn, *args, **kwargs))
 
 
 async def _nothing() -> list[Result]:
@@ -293,8 +330,8 @@ class AsyncMemvara:
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType] | None = None,
                      include_episodes: bool = False) -> list[Any]:
-        """See `Memvara.search`. Encodes the query, so it belongs off the loop too."""
-        return await asyncio.to_thread(
+        """See `Memvara.search`. Runs on the read pool; see `_read`."""
+        return await _read(
             self.memvara.search, query, k=k, min_score=min_score, anchored=anchored,
             ranked=ranked,
             query_rewrite=query_rewrite,
@@ -356,8 +393,8 @@ class AsyncMemvara:
                      counter: Callable[[str], int] = _approx_tokens,
                      valid_at: datetime | None = None,
                      with_ids: bool = False) -> Any:
-        """See `Memvara.recall`."""
-        return await asyncio.to_thread(
+        """See `Memvara.recall`. Runs on the read pool; see `_read`."""
+        return await _read(
             self.memvara.recall, query, k=k, min_score=min_score, anchored=anchored,
             ranked=ranked,
             query_rewrite=query_rewrite, synthesize=synthesize,
@@ -409,7 +446,8 @@ class AsyncMemvara:
         at = _profile_since(since)
 
         def search() -> list[Result]:
-            return mem.search(query or "", k=k, **scope_kw)
+            # A plain read, as in `Memvara.profile`.
+            return mem.search(query or "", k=k, **PLAIN_READ, **scope_kw)
 
         live, then, hits = await asyncio.gather(
             asyncio.to_thread(mem.get_all, states=["live"], **scope_kw),

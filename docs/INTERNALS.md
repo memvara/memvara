@@ -59,15 +59,20 @@ was being read as holding further than it does.
    > and `rewriter=`, both `None` by default; `Memvara` builds a `QueryRewriter` and a
    > `Synthesizer` (`memvara.select.stages`) only when its `llm=` implements `Chat`.
    > `query_rewrite=False` and `synthesis=False` on the constructor are the switches,
-   > and `search(query_rewrite=False)` is the per-call opt-out.
+   > and `search(query_rewrite=False)` is the per-call opt-out; `memvara.select.PLAIN_READ`
+   > spells it for the reads inside this repository that must stay deterministic.
    > **Measured.** `bench/mem0_real.py`: 2 write-path LLM calls against mem0's 105 on the
    > same 105-turn transcript, and **identical final state on every run** where mem0's
    > differs. `tests/test_packaging.py::test_nothing_but_numpy_is_imported_while_the_
    > package_is_being_imported` holds the import side.
    > `tests/test_read_stages.py::test_the_default_read_path_makes_no_model_call_without_a_chat_backend`
    > holds the read side: with a backend that cannot chat, `search()` and
-   > `recall(synthesize=True)` make zero model calls. No measurement of answer quality
-   > with the two new stages exists yet.
+   > `recall(synthesize=True)` make zero model calls.
+   > `tests/test_read_stages.py::test_a_model_is_reached_only_from_the_places_invariant_1_names`
+   > lists every call in the package that can reach a model and fails on a new one, and
+   > `test_every_read_in_this_repository_says_whether_it_may_call_a_model` fails on a
+   > `search()` or `recall()` call that does not say whether it may rewrite. No
+   > measurement of answer quality with the two new stages exists yet.
 
    **What changed on 2026-09-23.** Until then this invariant said that nothing on the read
    path calls a model unless the caller opts in, and `ranked=True` was the one opt-in.

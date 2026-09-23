@@ -48,8 +48,8 @@ from .llm import LLM, Chat, NullLLM, ReplacementJudge, Usage
 from .redact import Redactor, redact_episode
 from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retrieved
 from .retrieve.shadow import shadowed
-from .select.base import Synthesis
-from .select.stages import QueryRewriter, Synthesizer
+from .select.base import PLAIN_READ, Synthesis
+from .select.stages import QueryRewriter, Synthesizer, gate, run_stage
 from .schema import (Cardinality, PredicatePackError, PredicateRegistry, _slugify,
                      load_specs)
 from .store import SQLiteStore, Store, bulk_claims, resolve_states
@@ -720,7 +720,7 @@ class Memvara:
     #: out, before anything leaves this process, which is the one privacy control that
     #: matters *more* against a hosted deployment than against a local file.
     _LOCAL_ONLY = ("path", "store", "embedder", "llm", "registry", "telemetry",
-                   "advise_replacements", "query_rewrite", "synthesis", "synthesizer")
+                   "advise_replacements", "synthesizer")
 
     #: The prefixes `_split_tuning` routes to the write, read and graph subsystems. Every
     #: one of those subsystems runs server-side against a hosted deployment, so the
@@ -752,6 +752,11 @@ class Memvara:
         # `Memvara(api_key=..., reembed=False)` an error that asked for nothing.
         if kwargs.pop("reembed", False):
             named.append("reembed")
+        # The same rule for the two read-stage switches, whose default is `True`: on,
+        # the deployment decides with its own key, which is what the hosted route does,
+        # so `True` asks for nothing. `False` would switch a stage off in a process that
+        # does not run it; say so, and point at the per-call switch that does reach it.
+        named += [n for n in ("query_rewrite", "synthesis") if kwargs.pop(n, True) is False]
         # Prefix rather than name, and sorted so two of them read the same way twice.
         # Without this the caller still gets a `TypeError`, but from
         # `RemoteMemvara.__init__` naming a class they never mentioned — which says the
@@ -763,7 +768,10 @@ class Memvara:
                 f"{', '.join(named)} cannot be combined with api_key= or base_url=: a "
                 "hosted deployment runs extraction, embedding and the predicate "
                 "vocabulary itself, so these would be accepted and never used. Pass "
-                "either Memvara(path) or Memvara(api_key=...).")
+                "either Memvara(path) or Memvara(api_key=...)."
+                + (" The deployment decides whether its reads call a model; to keep one "
+                   "read free of a model call, pass query_rewrite=False to that search() "
+                   "or recall()." if {"query_rewrite", "synthesis"} & set(named) else ""))
         from .remote.api import RemoteMemvara
         # Typed `Any` on the way out, because `RemoteMemvara` is deliberately not a
         # subclass of `Memvara` and this annotation stays `Memvara` deliberately too: a
@@ -2236,7 +2244,7 @@ class Memvara:
             # No rewrite: the preview lists what this query matches, not what a model's
             # paraphrase of it matches, so the caller confirms the query they wrote.
             hits = self.search(query, k=k, tenant=tenant, user=user, agent=agent,
-                               session=session, query_rewrite=False)
+                               session=session, **PLAIN_READ)
             matches = {r.claim.id: r.claim.text for r in hits}
             token, expires = self._confirmer.issue(list(matches), how, now=now)
             return ForgetPreview(close=how, matches=matches, confirm=token,
@@ -2866,11 +2874,18 @@ class Memvara:
                          if selection is not None and selection.outcome != "applied"
                          else None)
 
-        total = keep = len(claims) + len(kept_episodes) + len(episodes)
-        synthesis = (self._synthesize(query, self._recall_block(
-            claims, past, kept_episodes, episodes, total, headers))
-                     if synthesize else None)
-        if budget is not None:
+        total = len(claims) + len(kept_episodes) + len(episodes)
+        # Each note count is rendered at most once, and the block the synthesizer reads
+        # is the very string placed under its summary.
+        rendered: dict[int, str] = {}
+
+        def block(n: int, lead: str | None = None) -> str:
+            if n not in rendered:
+                rendered[n] = self._recall_block(claims, past, kept_episodes, episodes, n,
+                                                 headers, unranked_line)
+            return rendered[n] if lead is None else f"{lead}\n{rendered[n]}"
+
+        def fit(reserve: str | None) -> int:
             # Downwards from the whole block, not upwards from nothing, and measuring the
             # assembled string each time rather than summing per-line costs. Two reasons,
             # and the first is a bug the other direction has: the notice below is itself
@@ -2881,25 +2896,45 @@ class Memvara:
             # costs one measurement and the answer is the largest prefix that fits.
             # Second: a caller's own tokenizer is not additive over a join, so the number
             # that has to fit is the one for the string actually returned.
-            while keep and counter(self._recall_block(
-                    claims, past, kept_episodes, episodes, keep, headers,
-                    unranked_line)) > budget:
-                keep -= 1
+            keep = total
+            if budget is not None:
+                while keep and counter(block(keep, reserve)) > budget:
+                    keep -= 1
+            return keep
 
-        text = self._recall_block(claims, past, kept_episodes, episodes, keep, headers,
-                                  unranked_line)
-        # The summary goes above the notes, and only above notes: an empty block stays
-        # empty, which is how a caller tells that nothing is stored. The notes are fitted
-        # to `budget` first and the summary is added only if it still fits beside them,
-        # because the notes are the record and the summary is a reading of it.
-        lead = self._synthesis_lead(synthesis) if synthesis is not None and total else None
-        if lead is not None:
-            led = f"{lead}\n{text}"
-            if budget is None or counter(led) <= budget:
-                text = led
-            elif synthesis is not None and synthesis.outcome == "applied":
-                synthesis = replace(synthesis, outcome="fallback", reason="budget",
-                                    text=None)
+        # With `synthesize=True` and something to show, the block always starts with one
+        # lead: the summary, or a line saying why there is none. The notes are fitted
+        # first, with room kept for that lead, and the summary is written from exactly
+        # the notes that fitted, so it can never describe a note the block does not show.
+        blocked = gate(self.synthesis_enabled, self.synthesizer, Synthesis)
+        leading = synthesize and total > 0
+        if leading and blocked is None:
+            keep = fit(self._summary_reserve())
+            skip = None
+            if not keep:
+                # Not even one note fits beside a summary. The notes come first, so they
+                # are fitted again beside the one-line notice, and nothing is summarised.
+                skip = Synthesis(outcome="fallback", reason="budget")
+                keep = fit(self._synthesis_lead(skip))
+        else:
+            keep = fit(self._synthesis_lead(blocked) if leading and blocked else None)
+            skip = Synthesis(outcome="applied") if synthesize and not total else None
+        synthesis: Synthesis | None = None
+        lead: str | None = None
+        if synthesize:
+            synthesis = run_stage(
+                "synthesis", self.synthesizer, self.synthesis_enabled, Synthesis,
+                lambda stage, usage: stage.synthesize(query, block(keep),
+                                                      today=utcnow().date(), usage=usage),
+                self.telemetry, skip=skip)
+            if leading:
+                lead = self._synthesis_lead(synthesis)
+                if (budget is not None and synthesis.outcome == "applied"
+                        and counter(block(keep, lead)) > budget):
+                    synthesis = replace(synthesis, outcome="fallback", reason="budget",
+                                        text=None)
+                    lead = self._synthesis_lead(synthesis)
+        text = block(keep, lead)
         if not with_ids:
             return text
         kept = min(keep, len(claims))
@@ -2920,30 +2955,30 @@ class Memvara:
                                "differ, the notes are the record):")
 
     #: The first line of a `synthesize=True` block that has no summary, in the shape of
-    #: `RECALL_UNRANKED`. `outcome` is `Synthesis.outcome`: `unconfigured`, `disabled`,
-    #: `key_rejected` or `fallback`.
-    RECALL_UNSYNTHESIZED = "(summary not written — {outcome}.)"
+    #: `RECALL_UNRANKED`. `why` is `Synthesis.outcome` — `unconfigured`, `disabled`,
+    #: `key_rejected` or `fallback` — followed, for a fallback, by its reason, as in
+    #: `fallback: timeout` or `fallback: budget`. The line and `RecallResult.synthesis`
+    #: always name the same outcome.
+    RECALL_UNSYNTHESIZED = "(summary not written — {why}.)"
 
-    def _synthesize(self, query: str, notes: str) -> Synthesis:
-        """The synthesis outcome for `notes`. The model is called only on the last line.
+    #: How much room, in characters of summary, a budgeted block keeps for a summary it
+    #: has not seen yet. The prompt asks for at most three sentences; a longer summary
+    #: that then does not fit is left out and reported as `fallback: budget`.
+    RECALL_SUMMARY_RESERVE = 600
 
-        No notes means no call: there is nothing to summarise, and the outcome is
-        `applied` with no text, the way a ranked read with no turns is `applied` with
-        nothing kept.
-        """
-        if not self.synthesis_enabled:
-            return Synthesis(outcome="disabled")
-        if self.synthesizer is None:
-            return Synthesis(outcome="unconfigured")
-        if not notes:
-            return Synthesis(outcome="applied")
-        return self.synthesizer.synthesize(query, notes, today=utcnow().date())
+    @classmethod
+    def _summary_reserve(cls) -> str:
+        """A stand-in for a summary of the reserved length, measured by `counter`."""
+        filler = ("note " * (cls.RECALL_SUMMARY_RESERVE // 5)).strip()
+        return f"{cls.RECALL_SYNTHESIS_HEADER}\n{filler}"
 
     @classmethod
     def _synthesis_lead(cls, synthesis: Synthesis) -> str:
         """The lines a block with at least one note starts with, for `synthesis`."""
         if synthesis.outcome != "applied":
-            return cls.RECALL_UNSYNTHESIZED.format(outcome=synthesis.outcome)
+            why = (synthesis.outcome if synthesis.reason is None
+                   else f"{synthesis.outcome}: {synthesis.reason}")
+            return cls.RECALL_UNSYNTHESIZED.format(why=why)
         # `applied` with no text happens only when there were no notes, and this is
         # called only when there were.
         assert synthesis.text is not None
@@ -3301,7 +3336,7 @@ class Memvara:
         then = self._believed_at(self._scope(tenant, user, agent, session), at)
         # `profile()` and `ask()` search without the query rewrite: the rewrite belongs to
         # `search()` and `recall()`, and these two keep the answers they gave before it.
-        hits = self.search(query, k=k, query_rewrite=False, **scope_kw) if query else []
+        hits = self.search(query, k=k, **PLAIN_READ, **scope_kw) if query else []
         return self._assemble_profile(live, then, hits, k=k, buckets=buckets)
 
     def _assemble_profile(self, live: Sequence[Claim], then: Collection[str],
@@ -3554,7 +3589,7 @@ class Memvara:
         hits = self.search(question, k=max(k * 4, k), min_score=min_score,
                            anchored=anchored,
                            tenant=tenant, user=user, agent=agent, session=session,
-                           states=["live", "ended", "retired"], query_rewrite=False)
+                           states=["live", "ended", "retired"], **PLAIN_READ)
         slots: list[tuple[str, str]] = []
         for hit in hits:
             slot = (hit.claim.subject, hit.claim.predicate)

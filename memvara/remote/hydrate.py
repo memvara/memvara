@@ -34,11 +34,12 @@ Three asymmetries the renderer introduces and this must undo:
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 
 from ..retrieve.traverse import Edge, Path
 from ..select.base import Rewrite, Selection
+from ..select.stages import parse_day
 from ..types import (
     LAST_OBSERVED, SALIENCE_BASE, Answer, Claim, Delta, Derivation, Episode,
     Explanation, ForgetPreview, ForgetResult, Link, MemoryType, Profile, Provenance,
@@ -344,6 +345,11 @@ def rewrite(body: dict[str, Any] | None) -> Rewrite | None:
     "valid_at"}`, with the two dates as `YYYY-MM-DD` and `valid_at` as an instant; every
     field but `outcome` may be absent or null.
 
+    The date range is all or nothing: both dates or neither, and a `valid_at` only beside
+    both. A body that breaks that raises `ValueError` rather than being decoded into a
+    range with a missing end, because a caller reading `valid_at` would otherwise be told
+    the read was dated by a range nobody can state.
+
     >>> rewrite({"outcome": "applied", "queries": ["Lisbon trip"],
     ...          "date_from": "2024-03-01", "date_to": "2024-03-31"}).date_to
     datetime.date(2024, 3, 31)
@@ -352,18 +358,21 @@ def rewrite(body: dict[str, Any] | None) -> Rewrite | None:
     """
     if not body:
         return None
-
-    def day(value: Any) -> date | None:
-        return None if value is None else date.fromisoformat(value)
-
+    raw_from, raw_to = body.get("date_from"), body.get("date_to")
+    valid_at = _dt(body.get("valid_at"))
+    if (raw_from is None) != (raw_to is None) or (valid_at is not None and raw_to is None):
+        raise ValueError(
+            "a rewrite's date_from, date_to and valid_at come together: both dates or "
+            f"neither, and valid_at only beside them; got {raw_from!r}, {raw_to!r}, "
+            f"{body.get('valid_at')!r}")
     return Rewrite(
         outcome=body["outcome"],
         reason=body.get("reason"),
         status=body.get("status"),
         queries=tuple(body.get("queries") or ()),
-        date_from=day(body.get("date_from")),
-        date_to=day(body.get("date_to")),
-        valid_at=_dt(body.get("valid_at")),
+        date_from=None if raw_from is None else parse_day(raw_from),
+        date_to=None if raw_to is None else parse_day(raw_to),
+        valid_at=valid_at,
     )
 
 

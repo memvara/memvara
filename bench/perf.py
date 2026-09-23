@@ -17,6 +17,7 @@ from io import StringIO
 
 from memvara import Memvara, HashingEmbedder
 from memvara.types import Claim, Scope
+from memvara.select import PLAIN_READ
 
 CITIES = ["Berlin", "Lisbon", "Osaka", "Nairobi", "Lima", "Oslo", "Cairo", "Perth"]
 
@@ -54,13 +55,14 @@ def scaling() -> None:
         # u0..u49, so timing the constructor's default scope times an empty search —
         # which is what this harness previously did, reporting a search that found
         # nothing and never exercised fusion or rescoring.
-        probe = mem.search("Berlin lives", k=10, user="u1")
+        probe = mem.search("Berlin lives", k=10, user="u1", **PLAIN_READ)
         assert probe, "search benchmark must hit a populated scope"
 
         counter = iter(range(1_000_000))
         w = timed("write (single)",
                   lambda: mem.remember("user", f"extra_{next(counter)}", "x", user="u1"), 50)
-        s = timed("search k=10", lambda: mem.search("Berlin lives", k=10, user="u1"), 50)
+        s = timed("search k=10",
+                  lambda: mem.search("Berlin lives", k=10, user="u1", **PLAIN_READ), 50)
         g = timed("get_all", lambda: mem.get_all(user="u1"), 20)
         a = timed("add (fast path, no LLM)",
                   lambda: mem.add(f"I live in City{next(counter)}", user="u1"), 50)
@@ -89,7 +91,7 @@ def profile_hotspots() -> None:
     pr = cProfile.Profile()
     pr.enable()
     for _ in range(30):
-        mem.search("Berlin lives", k=10)
+        mem.search("Berlin lives", k=10, **PLAIN_READ)
     for _ in range(30):
         mem.remember("user", "extra", "x")
     mem.consolidate()

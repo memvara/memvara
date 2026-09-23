@@ -62,6 +62,7 @@ from memvara.retrieve.hybrid import HybridRetriever                 # noqa: E402
 from memvara.schema import (                                        # noqa: E402
     BUILTIN_PREDICATES, PredicateRegistry, load_specs,
 )
+from memvara.select import PLAIN_READ  # noqa: E402
 
 #: The transitive types. A walk can only help where the evidence has a join in it.
 CHAINED = ("compositional", "inference")
@@ -251,10 +252,12 @@ def evaluate(mem: Memvara, samples: Sequence[Sample], *, k: int,
         for bucket in buckets:
             hits["n"][bucket] += 1
         for arm, rows in (
-            ("search", plain.search(sample.question, mem.default_scope, k=k, now=NOW)),
-            ("+graph", graph.search(sample.question, mem.default_scope, k=k, now=NOW)),
+            ("search", plain.search(sample.question, mem.default_scope, k=k, now=NOW,
+                                    **PLAIN_READ)),
+            ("+graph", graph.search(sample.question, mem.default_scope, k=k, now=NOW,
+                                    **PLAIN_READ)),
             ("+graph!",
-             ungated.search(sample.question, mem.default_scope, k=k, now=NOW)),
+             ungated.search(sample.question, mem.default_scope, k=k, now=NOW, **PLAIN_READ)),
         ):
             answer, chain = _found(rows, sample)
             for bucket in buckets:

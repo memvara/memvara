@@ -1,44 +1,54 @@
 """The two model stages beside `ranked`: query rewrite and synthesis.
 
-Both follow the pattern `ModelSelector` set for model-ranked reads. Each makes one plain
-chat call to the caller's own `Chat` backend, gives it 10 seconds, and reports what
-happened as a record on the result (`Rewrite` or `Synthesis`, in `memvara.select.base`)
-instead of raising. Whenever the call fails, the read is served exactly as it would have
-been without the stage.
+Both follow the pattern `ModelSelector` set for model-ranked reads, and share its chat
+call (`memvara.select.chat`). Each makes one plain chat call to the caller's own `Chat`
+backend, gives it 10 seconds, and reports what happened as a record on the result
+(`Rewrite` or `Synthesis`, in `memvara.select.base`) instead of raising. Whenever the
+call fails, the read is served exactly as it would have been without the stage.
 
 * `QueryRewriter` runs before retrieval. It sends the query and today's date, and reads
   back up to three alternative queries and an optional date range. `HybridRetriever`
   searches the original query and every alternative, fuses the lists with
   reciprocal-rank fusion, and turns the range into a `valid_at` for the read.
-* `Synthesizer` runs after `recall()` has rendered its notes. It sends the question and
-  the notes, and reads back a short summary that `recall()` puts above the notes. The
-  notes are still returned in full, so nothing the model leaves out is lost.
+* `Synthesizer` runs after `recall()` has fitted its notes. It sends the question and
+  the notes that will be shown, and reads back a short summary that `recall()` puts above
+  them. The notes are still returned in full, so nothing the model leaves out is lost.
 
-The outcomes are the five `Selection` uses. `applied` means the model answered and the
-answer was used. `fallback` means the call failed or the reply could not be read, with a
-`reason` of `timeout`, `error`, `provider` or `malformed`. `key_rejected` means the
-provider answered 401 or 403; it is kept apart from `fallback` so a revoked key cannot
-hide behind reads that still work. `disabled` and `unconfigured` are decided by the
-caller before either class is reached: the switch is off, or there is no chat backend.
+The outcomes are `OUTCOMES`. `applied` means the model answered and the answer was used.
+`fallback` means the call failed or the reply could not be read, with a `reason` of
+`timeout`, `error`, `provider` or `malformed`. `key_rejected` means the provider answered
+401 or 403. `disabled` and `unconfigured` are decided by `run_stage` before a stage is
+reached: the switch is off, or there is no chat backend.
 
-`timeout` is a deadline on the whole call, measured with `clock` before and after it, as
-in `ModelSelector`. A reply that arrives after the deadline counts as a timeout even
-though it arrived, because the caller waited for it. `clock` is a parameter so a test
-can move time forward without sleeping.
+`run_stage` is the one place either stage is called from, and it emits the same
+telemetry the ranked stage does, tagged `stage=rewrite` or `stage=synthesis`: one
+`retrieval.model_query` per call the model answered, `retrieval.model_fallback` or
+`retrieval.model_refused` otherwise, the tokens the call reported, and the call's own
+duration as `retrieval.rewrite_ms` or `retrieval.synthesis_ms`.
+
+`clock` is a parameter so a test can move time forward without sleeping.
 """
 
 from __future__ import annotations
 
-import time
 from datetime import date
-from typing import Callable
+from time import perf_counter
+from typing import Callable, TypeVar
 
 from ..llm import _shape
-from ..llm.base import Chat, Usage
-from .base import Rewrite, Synthesis
-
-#: The deadline for either call, in seconds. The same 10 seconds `ModelSelector` uses.
-DEFAULT_TIMEOUT = 10.0
+from ..llm.base import Usage
+from ..telemetry import (
+    RETRIEVAL_MODEL_FALLBACK,
+    RETRIEVAL_MODEL_QUERY,
+    RETRIEVAL_MODEL_REFUSED,
+    RETRIEVAL_REWRITE_MS,
+    RETRIEVAL_SYNTHESIS_MS,
+    RETRIEVAL_TOKENS_IN,
+    RETRIEVAL_TOKENS_OUT,
+    Recorder,
+)
+from .base import Rewrite, SelectorBusy, SelectorRefused, StageOutcome, Synthesis
+from .chat import DEFAULT_TIMEOUT, ChatFailed, ChatStage
 
 #: The most alternative queries a rewrite may add. Each one is a full retrieval, so this
 #: caps a rewritten read at four retrievals. Extra queries in a reply are ignored.
@@ -69,54 +79,15 @@ REWRITE_MAX_COMPLETION_TOKENS = 300
 SYNTHESIS_MAX_COMPLETION_TOKENS = 300
 
 
-class _Failed(Exception):
-    """A call that did not produce a usable reply, already sorted into an outcome."""
+def parse_day(value: object) -> date:
+    """A `YYYY-MM-DD` string as a date. `ValueError` for anything else.
 
-    def __init__(self, outcome: str, reason: str | None = None,
-                 status: int | None = None) -> None:
-        super().__init__(outcome)
-        self.outcome = outcome
-        self.reason = reason
-        self.status = status
+    The one date parser for a rewrite's range, used on the model's reply here and on a
+    hosted deployment's response in `memvara.remote.hydrate`.
 
-
-def _require_chat(llm: object, name: str) -> None:
-    if not isinstance(llm, Chat):
-        raise TypeError(
-            f"{name} needs a backend with .chat(), such as OpenAILLM or AnthropicLLM "
-            "(pip install 'memvara[openai]' or 'memvara[anthropic]'), "
-            f"not {type(llm).__name__}. NullLLM has no model to consult.")
-
-
-def _consult(llm: Chat, system: str, prompt: str, *, timeout: float,
-             max_completion_tokens: int, clock: Callable[[], float],
-             usage: Usage | None) -> str:
-    """One chat call, or `_Failed` saying which outcome it ends in.
-
-    The status and timing rules are `ModelSelector.select`'s: 401 and 403 are
-    `key_rejected`, anything that ends after the deadline is a `timeout`, an exception
-    carrying an HTTP status is `provider`, and any other exception is `error`.
+    >>> parse_day("2024-03-31")
+    datetime.date(2024, 3, 31)
     """
-    deadline = clock() + timeout
-    try:
-        text = llm.chat(system, prompt, json_object=True,
-                        max_completion_tokens=max_completion_tokens, timeout=timeout,
-                        usage=usage)
-    except Exception as exc:                                  # noqa: BLE001 - deliberate
-        status = getattr(exc, "status_code", None)
-        if status in (401, 403):
-            raise _Failed("key_rejected", status=status) from exc
-        if isinstance(exc, TimeoutError) or clock() > deadline:
-            raise _Failed("fallback", "timeout", status) from exc
-        raise _Failed("fallback", "provider" if status is not None else "error",
-                      status) from exc
-    if clock() > deadline:
-        raise _Failed("fallback", "timeout")
-    return text
-
-
-def _day(value: object) -> date:
-    """A `YYYY-MM-DD` string as a date. `ValueError` for anything else."""
     if not isinstance(value, str) or len(value) != 10:
         raise ValueError(f"not a YYYY-MM-DD date: {value!r}")
     return date.fromisoformat(value)
@@ -157,7 +128,7 @@ def parse_rewrite(text: str, query: str) -> tuple[tuple[str, ...], date | None, 
         return tuple(queries[:MAX_QUERIES]), None, None
     if not isinstance(span, dict):
         raise ValueError("rewrite reply's 'date_range' is not an object")
-    start, end = _day(span.get("from")), _day(span.get("to"))
+    start, end = parse_day(span.get("from")), parse_day(span.get("to"))
     if start > end:
         raise ValueError("rewrite reply's 'date_range' ends before it starts")
     return tuple(queries[:MAX_QUERIES]), start, end
@@ -175,15 +146,8 @@ def parse_synthesis(text: str) -> str:
     return value.strip()
 
 
-class QueryRewriter:
+class QueryRewriter(ChatStage):
     """Asks a `Chat` backend for other ways to phrase a query. See the module docstring."""
-
-    def __init__(self, llm: Chat, *, timeout: float = DEFAULT_TIMEOUT,
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        _require_chat(llm, "QueryRewriter")
-        self._llm = llm
-        self.timeout = timeout
-        self._clock = clock
 
     def rewrite(self, query: str, *, today: date, usage: Usage | None = None) -> Rewrite:
         """One call. Returns `applied` with the model's answer, or the failure outcome.
@@ -193,11 +157,9 @@ class QueryRewriter:
         """
         prompt = f"Today's date: {today.isoformat()}\nQuery: {query}"
         try:
-            text = _consult(self._llm, REWRITE_SYSTEM, prompt, timeout=self.timeout,
-                            max_completion_tokens=REWRITE_MAX_COMPLETION_TOKENS,
-                            clock=self._clock, usage=usage)
+            text = self._call(REWRITE_SYSTEM, prompt, REWRITE_MAX_COMPLETION_TOKENS, usage)
             queries, start, end = parse_rewrite(text, query)
-        except _Failed as failed:
+        except ChatFailed as failed:
             return Rewrite(outcome=failed.outcome, reason=failed.reason,
                            status=failed.status)
         except ValueError:
@@ -205,28 +167,93 @@ class QueryRewriter:
         return Rewrite(outcome="applied", queries=queries, date_from=start, date_to=end)
 
 
-class Synthesizer:
+class Synthesizer(ChatStage):
     """Asks a `Chat` backend to summarise recalled notes. See the module docstring."""
-
-    def __init__(self, llm: Chat, *, timeout: float = DEFAULT_TIMEOUT,
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        _require_chat(llm, "Synthesizer")
-        self._llm = llm
-        self.timeout = timeout
-        self._clock = clock
 
     def synthesize(self, question: str, notes: str, *, today: date,
                    usage: Usage | None = None) -> Synthesis:
-        """One call over `notes`, the rendered recall block. Never called with no notes."""
+        """One call over `notes`, the block of notes `recall()` is about to show."""
         prompt = f"Today's date: {today.isoformat()}\nQuestion: {question}\n\nNotes:\n{notes}"
         try:
-            text = _consult(self._llm, SYNTHESIS_SYSTEM, prompt, timeout=self.timeout,
-                            max_completion_tokens=SYNTHESIS_MAX_COMPLETION_TOKENS,
-                            clock=self._clock, usage=usage)
+            text = self._call(SYNTHESIS_SYSTEM, prompt, SYNTHESIS_MAX_COMPLETION_TOKENS,
+                              usage)
             summary = parse_synthesis(text)
-        except _Failed as failed:
+        except ChatFailed as failed:
             return Synthesis(outcome=failed.outcome, reason=failed.reason,
                              status=failed.status)
         except ValueError:
             return Synthesis(outcome="fallback", reason="malformed")
         return Synthesis(outcome="applied", text=summary)
+
+
+#: The timing series for each stage's own model call.
+_STAGE_MS = {"rewrite": RETRIEVAL_REWRITE_MS, "synthesis": RETRIEVAL_SYNTHESIS_MS}
+
+S = TypeVar("S", bound=ChatStage)
+O = TypeVar("O", bound=StageOutcome)
+
+
+def gate(enabled: bool, stage: ChatStage | None, record: type[O]) -> O | None:
+    """Why a stage will not run — `disabled`, then `unconfigured` — or `None` if it will.
+
+    The switch is checked first, so a stage switched off reports `disabled` whether or
+    not a backend is configured.
+    """
+    if not enabled:
+        return record(outcome="disabled")
+    if stage is None:
+        return record(outcome="unconfigured")
+    return None
+
+
+def run_stage(name: str, stage: S | None, enabled: bool, record: type[O],
+              call: Callable[[S, Usage], O], rec: Recorder | None,
+              skip: O | None = None) -> O:
+    """Run one stage, or say why it did not run, and count what happened.
+
+    The outcome is `gate()`'s when the stage cannot run, else `skip` when the caller
+    has already decided there is nothing to ask (a recall with no notes to summarise),
+    else whatever `call(stage, usage)` returns inside `stage.admit()`. The model is
+    reached only through `call`. A refused admission is `fallback` with reason `busy`
+    for `SelectorBusy`, or the refusal's own reason for `SelectorRefused`. Every outcome
+    but `skip` is counted; a skipped stage made no call and is not.
+    """
+    outcome = gate(enabled, stage, record)
+    if outcome is None and skip is not None:
+        return skip
+    if outcome is None:
+        assert stage is not None  # `gate` returned None, so there is a stage
+        try:
+            with stage.admit():
+                usage = Usage()
+                t0 = perf_counter()
+                outcome = call(stage, usage)
+                if rec is not None:
+                    rec.timing(_STAGE_MS[name], (perf_counter() - t0) * 1000.0)
+                    if usage.reported > 0:
+                        rec.counter(RETRIEVAL_TOKENS_IN, usage.input_tokens, stage=name)
+                        rec.counter(RETRIEVAL_TOKENS_OUT, usage.output_tokens,
+                                    stage=name)
+        except SelectorBusy:
+            # The deployment's cap on concurrent model calls is full. Unlike a ranked
+            # read, which is refused outright, the read goes on without this stage.
+            outcome = record(outcome="fallback", reason="busy")
+        except SelectorRefused as refused:
+            outcome = record(outcome=refused.reason, status=refused.status)
+    if rec is not None:
+        _count(rec, name, outcome)
+    return outcome
+
+
+def _count(rec: Recorder, name: str, outcome: StageOutcome) -> None:
+    """The outcome counter the ranked stage would emit, tagged with this stage's name."""
+    if outcome.outcome == "applied":
+        rec.counter(RETRIEVAL_MODEL_QUERY, stage=name)
+    elif outcome.outcome == "fallback":
+        if outcome.status is not None:
+            rec.counter(RETRIEVAL_MODEL_FALLBACK, reason=str(outcome.reason),
+                        status=str(outcome.status), stage=name)
+        else:
+            rec.counter(RETRIEVAL_MODEL_FALLBACK, reason=str(outcome.reason), stage=name)
+    else:
+        rec.counter(RETRIEVAL_MODEL_REFUSED, reason=outcome.outcome, stage=name)

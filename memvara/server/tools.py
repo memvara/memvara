@@ -73,8 +73,8 @@ from ..core import PROFILE_WINDOW, Memvara, ScopedMemvara, is_derived, standing_
 from ..schema import _slugify
 from ..select import Rewrite, SelectorBusy
 from ..types import (LINK_RELATIONS, REASON_CHARS, Accumulation, Claim, Closure, Collapse,
-                     Dispute, ForgetPreview, MemoryType, Retype, Row, WriteReceipt,
-                     closure_reason, closure_reasons, utcnow)
+                     Dispute, ForgetPreview, MemoryType, RecallResult, Retype, Row,
+                     SearchResults, WriteReceipt, closure_reason, closure_reasons, utcnow)
 from .memory_api import MemoryAPI
 from .validate import ToolError, validate
 
@@ -630,6 +630,18 @@ def _no_match(query: str, day: str | None = None) -> str:
     )
 
 
+def _rewrite_day(rewrite: Rewrite | None) -> str | None:
+    """The day a rewrite dated this read to, as `YYYY-MM-DD`, or `None` if it did not.
+
+    Only a complete range counts, the rule `_rewrite_line` follows, so a no-match reply
+    and a match reply name the same day for the same read.
+    """
+    if (rewrite is None or rewrite.valid_at is None or rewrite.date_from is None
+            or rewrite.date_to is None):
+        return None
+    return rewrite.date_to.isoformat()
+
+
 def _rewrite_line(rewrite: Rewrite | None) -> str | None:
     """What a query rewrite added to a `memory_search` read, or `None` if it added nothing.
 
@@ -643,7 +655,8 @@ def _rewrite_line(rewrite: Rewrite | None) -> str | None:
     if rewrite.queries:
         parts.append("Also searched as: " +
                      "; ".join(repr(safe_line(q)) for q in rewrite.queries) + ".")
-    if rewrite.valid_at is not None:
+    # All three or no sentence: a range with a missing end is not one a reader can check.
+    if _rewrite_day(rewrite) is not None:
         parts.append(f"The query names {rewrite.date_from} to {rewrite.date_to}, so "
                      f"this is as things were on {rewrite.date_to}.")
     return " ".join(parts) or None
@@ -662,7 +675,7 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
             "at once. Send valid_at alone for what is true of that date as far as we "
             "know today, which is what a question about the past usually means; send "
             "as_of alone for what this system believed on that date.")
-    results = ctx.memory.search(
+    results = cast(SearchResults, ctx.memory.search(
         args["query"],
         k=args["k"],
         min_score=args["min_score"],
@@ -673,12 +686,12 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
                   if valid_at is not None else None),
         # Absent from the schema when the feature is switched off, and then off here.
         query_rewrite=bool(args.get("query_rewrite", False)),
-    )
+    ))
     if not results:
-        return _no_match(args["query"])
+        return _no_match(args["query"], day=_rewrite_day(results.rewrite))
     when = _when(as_of, valid_at)
     lines = [f"{len(results)} match(es){when}. {STORED_HEADER}"]
-    rewritten = _rewrite_line(getattr(results, "rewrite", None))
+    rewritten = _rewrite_line(results.rewrite)
     if rewritten is not None:
         lines.append(rewritten)
     # Metadata first, stored text last: the untrusted span then ends the line and cannot
@@ -698,16 +711,16 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
     # that frames them as data, with no scores and no JSON, which is precisely the shape
     # an MCP text result should have. Reformatting it here would only weaken the framing.
     #
-    # And called *without* `with_ids=True`, which is a decision and not an oversight —
-    # the next reader is asked not to "fix" it. `recall()` will hand back the ids of the
-    # claims it rendered, and this tool's whole pitch, the sentence a model reads before
-    # choosing it, is numbered plain-text notes with nothing to filter out. An id on
-    # every line is precisely the retrieval metadata that pitch promises is absent, so
-    # adding one would degrade the thing the tool is for, and it would buy nothing: an
-    # agent that needs a handle on a memory — to explain it, correct it, retire it — is
-    # sent to `memory_search`, which is the id-bearing tool and says so. `with_ids`
-    # stays a library API, for a programmatic caller that renders its own prompt and
-    # then has to cite it.
+    # And no claim id is ever put in the reply, which is a decision and not an oversight
+    # — the next reader is asked not to "fix" it. `recall(with_ids=True)` hands back the
+    # ids of the claims it rendered, and this tool's whole pitch, the sentence a model
+    # reads before choosing it, is numbered plain-text notes with nothing to filter out.
+    # An id on every line is precisely the retrieval metadata that pitch promises is
+    # absent, so adding one would degrade the thing the tool is for, and it would buy
+    # nothing: an agent that needs a handle on a memory — to explain it, correct it,
+    # retire it — is sent to `memory_search`, which is the id-bearing tool and says so.
+    # A local store is still asked for its `RecallResult` below, for its `rewrite`
+    # only; its `text` is the same string and its ids are dropped.
     # `valid_at` only, never `as_of`. Both are on `memory_search`; here the block goes
     # into a prompt, and `as_of` rewinds belief as well as the world, so a record
     # retired since that day would be rendered as a fact. `valid_at` is what we believe
@@ -723,8 +736,13 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             "were on that day as far as we know now, or call memory_search with as_of "
             "to inspect what was believed then.")
     valid_at = args.get("valid_at")
+    # A local store is asked for its `RecallResult`, whose `text` is byte for byte the
+    # string above, so that a block that came back empty can say which day a query
+    # rewrite dated it to. No id reaches the reply; only `.text` and `.rewrite` are read.
+    # A hosted deployment renders its own block and reports no rewrite on this surface.
+    extra: dict[str, Any] = {"with_ids": True} if isinstance(ctx.memory, ScopedMemvara) else {}
     try:
-        text = ctx.memory.recall(
+        block = ctx.memory.recall(
             args["query"],
             k=args["k"],
             min_score=args["min_score"],
@@ -739,6 +757,7 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             include_episodes=bool(args.get("include_episodes", False)),
             valid_at=(_timestamp(valid_at, "memory_recall.valid_at")
                       if valid_at is not None else None),
+            **extra,
         )
     except SelectorBusy as exc:
         # The one ranked-read outcome that is not served at all (see `memvara.select`):
@@ -748,7 +767,11 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             "memvara's ranked reads are at capacity right now. Retry in a few seconds, "
             "or call memory_recall again without ranked for an ordinary read."
         ) from exc
-    return text or _no_match(args["query"], day=valid_at)
+    if isinstance(block, RecallResult):
+        text, day = block.text, valid_at or _rewrite_day(block.rewrite)
+    else:
+        text, day = block, valid_at
+    return text or _no_match(args["query"], day=day)
 
 
 #: The bracket field saying a machine derived the row: one more metadata token beside

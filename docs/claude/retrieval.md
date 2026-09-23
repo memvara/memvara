@@ -75,8 +75,15 @@ JSON, under a header that names the text as data rather than instruction.
    `RECALL_HEADER_AT` when `valid_at` was given, so a block about the past cannot be read as
    a block about the present. With `synthesize=True`, one model call reads the rendered
    notes and its short summary goes above them under `RECALL_SYNTHESIS_HEADER`. The notes
-   are still all there. Under a `budget`, the notes are fitted first and the summary is left
-   out if it does not fit beside them.
+   are still all there. Under a `budget`, the notes are fitted first with room kept for the
+   summary, the summary is written from exactly the notes that fitted, and it is replaced
+   by a one-line notice if it does not fit or if no note fits beside it.
+- **Reads inside this repository say whether they may call a model.** A preview before a
+  destructive write, a benchmark, a warm-up or a completeness proof passes
+  `**memvara.select.PLAIN_READ`. `tests/test_read_stages.py` fails on a new `search()` or
+  `recall()` call in `memvara/`, `bench/`, `demo/` or the hooks that does not say which
+  kind of read it is, and on a new call site anywhere in the package that can reach a
+  model outside the three named stages.
 
 ## Invariants and assumptions
 

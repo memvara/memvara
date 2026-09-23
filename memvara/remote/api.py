@@ -46,7 +46,7 @@ from ..types import PROJECT_META, PROJECT_META_REFUSAL
 from . import hydrate
 from .client import DEFAULT_TIMEOUT, HttpClient
 from .creds import resolve
-from .errors import Conflict, NotFound
+from .errors import Conflict, InvalidRequest, NotFound
 
 
 #: The header that carries the bound project to the deployment. The deployment reads it
@@ -221,6 +221,24 @@ class RemoteMemvara:
         if project is not None:
             kw["headers"] = {PROJECT_HEADER: project}
         return self._http.request(method, path, **kw)
+
+    def _read(self, path: str, body: dict[str, Any]) -> Any:
+        """POST one read, retrying once without `query_rewrite` for an older deployment.
+
+        `query_rewrite` is sent only as `false`, when the caller opted out. A deployment
+        from before the field refuses it as unknown (422), and such a deployment never
+        rewrites a query, so the opt-out already holds there: the read is sent again
+        without the field. A 422 for any other reason fails the second time as well and
+        is raised. `synthesize` gets no retry, because an older deployment cannot write
+        the summary the caller asked for, and saying so is the honest answer.
+        """
+        try:
+            return self._request("POST", path, params=self._params(), json=body)
+        except InvalidRequest:
+            if body.get("query_rewrite") is not False:
+                raise
+            body = {k: v for k, v in body.items() if k != "query_rewrite"}
+            return self._request("POST", path, params=self._params(), json=body)
 
     def _params(self, **extra: Any) -> dict[str, Any]:
         """Scope on every call, plus whatever this call adds. `None` values are dropped
@@ -422,13 +440,14 @@ class RemoteMemvara:
 
         `query_rewrite` is on by default, and the deployment decides whether it runs,
         with its own per-organisation key. So the field is sent only as `false`, when the
-        caller opts out; a deployment from before the field refuses that request (422)
-        rather than ignoring it. `.rewrite` is read off the response body's `rewrite` and
-        is `None` when the deployment sends none.
+        caller opts out. A deployment from before the field refuses it (422) and never
+        rewrites anyway, so the read is sent again without it (see `_read`). `.rewrite`
+        is read off the response body's `rewrite` and is `None` when the deployment
+        sends none.
         """
-        body = self._request(
-            "POST", "/v1/search", params=self._params(),
-            json=_sent({"query": query, "k": k, "min_score": min_score,
+        body = self._read(
+            "/v1/search",
+            body=_sent({"query": query, "k": k, "min_score": min_score,
                         "anchored": anchored or None, "ranked": ranked or None,
                         "query_rewrite": None if query_rewrite else False,
                         "as_of": _iso(as_of), "valid_at": _iso(valid_at),
@@ -486,9 +505,9 @@ class RemoteMemvara:
                 "recall(valid_at=...) is not available against a hosted deployment: "
                 "POST /v1/recall has no time axis. Use search(valid_at=...) and render "
                 "your own block.")
-        body = self._request(
-            "POST", "/v1/recall", params=self._params(),
-            json=_sent({"query": query, "k": k, "min_score": min_score,
+        body = self._read(
+            "/v1/recall",
+            body=_sent({"query": query, "k": k, "min_score": min_score,
                         "anchored": anchored or None, "ranked": ranked or None,
                         "query_rewrite": None if query_rewrite else False,
                         "synthesize": synthesize or None,

@@ -524,7 +524,7 @@ def test_a_failed_synthesis_says_so_above_the_notes() -> None:
     mem, _ = synthesizing("not json")
     block = mem.recall("where do I live", synthesize=True, with_ids=True)
     assert block.synthesis == Synthesis(outcome="fallback", reason="malformed")
-    assert block.text.splitlines()[0] == "(summary not written — fallback.)"
+    assert block.text.splitlines()[0] == "(summary not written — fallback: malformed.)"
     assert "- user lives in Lisbon" in block.text
 
 
@@ -537,23 +537,75 @@ def test_nothing_recalled_means_no_call_and_an_empty_block() -> None:
     assert chat.calls == []
 
 
-def test_the_summary_is_left_out_when_it_does_not_fit_beside_the_notes() -> None:
-    mem, _ = synthesizing('{"synthesis": "' + "They live in Lisbon. " * 20 + '"}')
+def many_homes(reply: str) -> tuple[Memvara, FakeChat]:
+    chat = FakeChat(reply)
+    mem = memory(synthesizer=Synthesizer(chat), query_rewrite=False)
+    for city in ("Lisbon", "Porto", "Braga", "Faro", "Evora", "Sintra", "Coimbra",
+                 "Aveiro", "Tomar", "Obidos"):
+        mem.remember("user", "visited", city)
+    return mem, chat
+
+
+def test_the_summary_is_written_from_the_notes_that_fit_and_only_those() -> None:
+    mem, chat = many_homes('{"synthesis": "Several towns."}')
+    plain = mem.recall("where have I been", k=10)
+    assert plain.count("\n- ") == 10
+    # Room for the reserved summary and most of the notes, but not all of them.
+    budget = len(plain) + len(Memvara._summary_reserve()) - 60
+    block = mem.recall("where have I been", k=10, synthesize=True, with_ids=True,
+                       budget=budget, counter=len)
+    assert 0 < len(block.claim_ids) < 10, "a partial keep"
+    assert block.synthesis == Synthesis(outcome="applied", text="Several towns.")
+    notes = "\n".join(block.text.splitlines()[2:])
+    [call] = chat.calls
+    assert call["prompt"].endswith("Notes:\n" + notes), "exactly the notes shown"
+    assert "did not fit" in notes
+    assert len(block.text) <= budget
+
+
+def test_no_summary_is_written_when_no_note_fits_beside_one() -> None:
+    mem, chat = many_homes('{"synthesis": "Several towns."}')
+    one = mem.recall("where have I been", k=1)
+    budget = len(one) + len("(summary not written — fallback: budget.)") + 1
+    block = mem.recall("where have I been", k=1, synthesize=True, with_ids=True,
+                       budget=budget, counter=len)
+    assert chat.calls == [], "nothing is summarised"
+    assert block.synthesis == Synthesis(outcome="fallback", reason="budget")
+    assert block.text.splitlines()[0] == "(summary not written — fallback: budget.)"
+    assert block.text.splitlines()[1:] == one.splitlines(), "the note still shows"
+
+
+def test_when_even_the_notice_does_not_fit_the_block_keeps_the_notice() -> None:
+    mem, chat = many_homes('{"synthesis": "Several towns."}')
+    block = mem.recall("where have I been", k=1, synthesize=True, with_ids=True,
+                       budget=5, counter=len)
+    assert chat.calls == []
+    assert block.claim_ids == ()
+    assert block.synthesis == Synthesis(outcome="fallback", reason="budget")
+    assert block.text.splitlines()[0] == "(summary not written — fallback: budget.)"
+
+
+def test_a_long_summary_that_does_not_fit_is_reported_and_the_text_agrees() -> None:
+    mem, chat = synthesizing('{"synthesis": "' + "They live in Lisbon. " * 60 + '"}')
     plain = mem.recall("where do I live")
-    budget = len(plain)
+    budget = len(plain) + len(Memvara._summary_reserve()) + 1
     block = mem.recall("where do I live", synthesize=True, with_ids=True, budget=budget,
                        counter=len)
-    assert block.text == plain, "every note kept, no summary"
+    assert len(chat.calls) == 1
     assert block.synthesis == Synthesis(outcome="fallback", reason="budget")
+    lines = block.text.splitlines()
+    assert lines[0] == "(summary not written — fallback: budget.)"
+    assert "\n".join(lines[1:]) == plain, "every note kept"
 
 
-def test_a_notice_that_does_not_fit_is_left_out_and_the_outcome_kept() -> None:
+def test_a_notice_is_kept_under_a_tight_budget_and_names_the_outcome() -> None:
     mem = memory(query_rewrite=False)
     mem.remember("user", "lives_in", "Lisbon")
     plain = mem.recall("where do I live")
+    notice = "(summary not written — unconfigured.)"
     block = mem.recall("where do I live", synthesize=True, with_ids=True,
-                       budget=len(plain), counter=len)
-    assert block.text == plain
+                       budget=len(plain) + len(notice) + 1, counter=len)
+    assert block.text == f"{notice}\n{plain}"
     assert block.synthesis == Synthesis(outcome="unconfigured")
 
 
@@ -563,6 +615,25 @@ def test_a_summary_that_fits_the_budget_is_kept() -> None:
                        counter=len)
     assert block.synthesis is not None and block.synthesis.outcome == "applied"
     assert block.text.splitlines()[1] == "Lisbon."
+
+
+def test_the_unranked_notice_reaches_the_synthesizer() -> None:
+    chat = FakeChat('{"synthesis": "A trip."}')
+    mem = memory(synthesizer=Synthesizer(chat), query_rewrite=False)
+    mem.add("Loved the trip to Lisbon last spring")
+    block = mem.recall("the trip", include_episodes=True, ranked=True, synthesize=True,
+                       with_ids=True)
+    unranked = Memvara.RECALL_UNRANKED.format(outcome="unconfigured")
+    assert block.text.splitlines()[-1] == unranked
+    [call] = chat.calls
+    assert call["prompt"].endswith(unranked)
+
+
+def test_the_synthesis_switch_wins_over_a_call_that_asks() -> None:
+    mem, chat = synthesizing('{"synthesis": "x"}', synthesis=False)
+    assert mem.recall("where do I live", synthesize=True,
+                      with_ids=True).synthesis == Synthesis(outcome="disabled")
+    assert chat.calls == []
 
 
 # --- the MCP tools -----------------------------------------------------------------------
@@ -747,3 +818,565 @@ def test_the_async_hosted_client_sends_and_reads_the_same_fields() -> None:
     assert hits.rewrite == Rewrite(outcome="fallback", reason="timeout")
     assert json.loads(calls[0].content)["query_rewrite"] is False
     assert json.loads(calls[1].content)["synthesize"] is True
+
+
+# --- telemetry and admission -------------------------------------------------------------
+
+
+def counted(rec: MemoryRecorder, stage: str) -> dict[str, int]:
+    from memvara.telemetry import (
+        RETRIEVAL_MODEL_FALLBACK, RETRIEVAL_MODEL_QUERY, RETRIEVAL_MODEL_REFUSED,
+        RETRIEVAL_TOKENS_IN, RETRIEVAL_TOKENS_OUT)
+    return {"query": rec.total(RETRIEVAL_MODEL_QUERY, stage=stage),
+            "fallback": rec.total(RETRIEVAL_MODEL_FALLBACK, stage=stage),
+            "refused": rec.total(RETRIEVAL_MODEL_REFUSED, stage=stage),
+            "tokens_in": rec.total(RETRIEVAL_TOKENS_IN, stage=stage),
+            "tokens_out": rec.total(RETRIEVAL_TOKENS_OUT, stage=stage)}
+
+
+class UsageChat(FakeChat):
+    """A fake that reports the tokens a real backend would."""
+
+    def chat(self, system: str, prompt: str, **kw: Any) -> str:
+        usage = kw.get("usage")
+        if usage is not None and self.raises is None:
+            usage.add(12, 7)
+        return super().chat(system, prompt, **kw)
+
+
+def rewrite_telemetry(chat: FakeChat, **kw: Any) -> MemoryRecorder:
+    rec = MemoryRecorder()
+    mem = memory(chat, telemetry=rec, **kw)
+    mem.remember("user", "likes", "green tea")
+    mem.search("green tea")
+    return rec
+
+
+def synthesis_telemetry(chat: FakeChat, **kw: Any) -> MemoryRecorder:
+    rec = MemoryRecorder()
+    mem = memory(synthesizer=Synthesizer(chat), telemetry=rec, query_rewrite=False, **kw)
+    mem.remember("user", "likes", "green tea")
+    mem.recall("green tea", synthesize=True)
+    return rec
+
+
+@pytest.mark.parametrize("stage, run, reply", [
+    ("rewrite", rewrite_telemetry, rewrite_reply("tea")),
+    ("synthesis", synthesis_telemetry, '{"synthesis": "Green tea."}'),
+])
+def test_an_answered_call_is_counted_with_its_tokens_and_time(stage: str, run: Any,
+                                                              reply: str) -> None:
+    from memvara.telemetry import RETRIEVAL_REWRITE_MS, RETRIEVAL_SYNTHESIS_MS
+    rec = run(UsageChat(reply))
+    assert counted(rec, stage) == {"query": 1, "fallback": 0, "refused": 0,
+                                   "tokens_in": 12, "tokens_out": 7}
+    timer = RETRIEVAL_REWRITE_MS if stage == "rewrite" else RETRIEVAL_SYNTHESIS_MS
+    assert len(rec.values(timer)) == 1
+
+
+@pytest.mark.parametrize("stage, run", [("rewrite", rewrite_telemetry),
+                                        ("synthesis", synthesis_telemetry)])
+def test_a_failed_call_is_counted_as_a_fallback_with_its_reason(stage: str, run: Any) -> None:
+    from memvara.telemetry import RETRIEVAL_MODEL_FALLBACK
+    rec = run(FakeChat("garbage"))
+    assert counted(rec, stage)["query"] == 0
+    assert rec.total(RETRIEVAL_MODEL_FALLBACK, stage=stage, reason="malformed") == 1
+    clock = Clock()
+    late = run(FakeChat(raises=ConnectionError(), clock=clock, advance=11))
+    assert late.total(RETRIEVAL_MODEL_FALLBACK, stage=stage, reason="error") == 1
+    provider = run(FakeChat(raises=status(503)))
+    assert provider.total(RETRIEVAL_MODEL_FALLBACK, stage=stage, reason="provider",
+                          status="503") == 1
+
+
+@pytest.mark.parametrize("stage", ["rewrite", "synthesis"])
+def test_a_timeout_is_counted_as_a_timeout(stage: str) -> None:
+    from memvara.telemetry import RETRIEVAL_MODEL_FALLBACK
+    clock = Clock()
+    chat = FakeChat(rewrite_reply("a") if stage == "rewrite" else '{"synthesis": "x"}',
+                    clock=clock, advance=11)
+    rec = MemoryRecorder()
+    if stage == "rewrite":
+        mem = memory(read_rewriter=QueryRewriter(chat, clock=clock), telemetry=rec)
+        mem.remember("user", "likes", "green tea")
+        mem.search("green tea")
+    else:
+        mem = memory(synthesizer=Synthesizer(chat, clock=clock), telemetry=rec,
+                     query_rewrite=False)
+        mem.remember("user", "likes", "green tea")
+        mem.recall("green tea", synthesize=True)
+    assert rec.total(RETRIEVAL_MODEL_FALLBACK, stage=stage, reason="timeout") == 1
+
+
+@pytest.mark.parametrize("stage, run", [("rewrite", rewrite_telemetry),
+                                        ("synthesis", synthesis_telemetry)])
+def test_a_rejected_key_is_counted_as_refused(stage: str, run: Any) -> None:
+    from memvara.telemetry import RETRIEVAL_MODEL_REFUSED
+    rec = run(FakeChat(raises=status(401)))
+    assert rec.total(RETRIEVAL_MODEL_REFUSED, stage=stage, reason="key_rejected") == 1
+    assert counted(rec, stage)["query"] == 0
+
+
+def test_a_stage_that_cannot_run_is_counted_as_refused_and_makes_no_call() -> None:
+    from memvara.telemetry import RETRIEVAL_MODEL_REFUSED, RETRIEVAL_REWRITE_MS
+    chat = FakeChat(rewrite_reply("a"))
+    rec = rewrite_telemetry(chat, query_rewrite=False)
+    assert rec.total(RETRIEVAL_MODEL_REFUSED, stage="rewrite", reason="disabled") == 1
+    rec = MemoryRecorder()
+    mem = memory(telemetry=rec)
+    mem.search("anything")
+    assert rec.total(RETRIEVAL_MODEL_REFUSED, stage="rewrite", reason="unconfigured") == 1
+    assert rec.values(RETRIEVAL_REWRITE_MS) == [] and chat.calls == []
+
+
+class Busy(QueryRewriter):
+    """A rewriter whose deployment cap is full."""
+
+    def admit(self) -> Any:
+        from memvara.select import SelectorBusy
+        raise SelectorBusy()
+
+
+class Switched(Synthesizer):
+    """A synthesizer an operator switched off at admission."""
+
+    def admit(self) -> Any:
+        from memvara.select import SelectorRefused
+        raise SelectorRefused("disabled")
+
+
+def test_a_full_admission_cap_is_a_busy_fallback_and_the_read_goes_on() -> None:
+    from memvara.telemetry import RETRIEVAL_MODEL_FALLBACK
+    chat = FakeChat(rewrite_reply("a"))
+    rec = MemoryRecorder()
+    mem = memory(read_rewriter=Busy(chat), telemetry=rec)
+    mem.remember("user", "likes", "green tea")
+    hits = mem.search("green tea")
+    assert hits.rewrite == Rewrite(outcome="fallback", reason="busy")
+    assert [r.claim.object for r in hits] == ["green tea"]
+    assert rec.total(RETRIEVAL_MODEL_FALLBACK, stage="rewrite", reason="busy") == 1
+    assert chat.calls == []
+
+
+def test_a_refused_admission_reports_the_refusal() -> None:
+    chat = FakeChat('{"synthesis": "x"}')
+    mem = memory(synthesizer=Switched(chat), query_rewrite=False)
+    mem.remember("user", "likes", "green tea")
+    block = mem.recall("green tea", synthesize=True, with_ids=True)
+    assert block.synthesis == Synthesis(outcome="disabled")
+    assert chat.calls == []
+
+
+def test_the_read_latency_includes_the_rewrite(monkeypatch: Any) -> None:
+    import memvara.retrieve.hybrid as hybrid
+    import memvara.select.stages as stages
+    from memvara.telemetry import RETRIEVAL_LATENCY_MS, RETRIEVAL_REWRITE_MS
+    clock = Clock()
+    monkeypatch.setattr(hybrid, "perf_counter", clock)
+    monkeypatch.setattr(stages, "perf_counter", clock)
+    rec = MemoryRecorder()
+    chat = FakeChat(rewrite_reply("tea"), clock=clock, advance=4.0)
+    mem = memory(read_rewriter=QueryRewriter(chat, clock=clock), telemetry=rec)
+    mem.remember("user", "likes", "green tea")
+    mem.search("green tea")
+    assert rec.values(RETRIEVAL_REWRITE_MS) == [4000.0]
+    assert rec.values(RETRIEVAL_LATENCY_MS) == [4000.0]
+
+
+def test_the_rewrite_switch_wins_over_a_call_that_asks() -> None:
+    chat = FakeChat(rewrite_reply("a"))
+    mem = memory(chat, query_rewrite=False)
+    mem.remember("user", "likes", "green tea")
+    assert mem.search("green tea", query_rewrite=True).rewrite == Rewrite(outcome="disabled")
+    assert mem.recall("green tea", query_rewrite=True,
+                      with_ids=True).rewrite == Rewrite(outcome="disabled")
+    assert chat.calls == []
+
+
+# --- the work a rewritten read does ------------------------------------------------------
+
+
+class CountingEmbedder(HashingEmbedder):
+    def __init__(self) -> None:
+        super().__init__(dim=64)
+        self.batches: list[list[str]] = []
+
+    def encode(self, texts: Any) -> Any:
+        self.batches.append(list(texts))
+        return super().encode(texts)
+
+
+def test_every_phrasing_is_embedded_once_in_one_call() -> None:
+    emb = CountingEmbedder()
+    mem = Memvara(llm=NullLLM(), embedder=emb, user="alice",
+                  read_rewriter=QueryRewriter(FakeChat(rewrite_reply("tea", "drink"))))
+    mem.add("I drink green tea every morning")
+    emb.batches.clear()
+    mem.search("green tea", include_episodes=True)
+    assert emb.batches == [["green tea", "tea", "drink"]]
+
+
+def test_a_plain_read_embeds_its_query_once_for_both_vector_legs() -> None:
+    emb = CountingEmbedder()
+    mem = Memvara(llm=NullLLM(), embedder=emb, user="alice", query_rewrite=False)
+    mem.add("I drink green tea every morning")
+    emb.batches.clear()
+    mem.search("green tea", include_episodes=True)
+    assert emb.batches == [["green tea"]]
+
+
+class CountingReranker:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def score(self, query: str, texts: Any) -> list[float]:
+        self.calls += 1
+        return [float(len(t)) for t in texts]
+
+
+def test_a_rewritten_read_reranks_once_after_fusion() -> None:
+    rr = CountingReranker()
+    mem = memory(FakeChat(rewrite_reply("tea", "drink", "morning")), read_reranker=rr)
+    mem.remember("user", "likes", "green tea")
+    mem.remember("user", "drinks", "coffee")
+    hits = mem.search("green tea", k=1)
+    assert rr.calls == 1
+    assert len(hits) == 1
+
+
+def test_the_alternative_phrasings_run_on_their_own_threads(monkeypatch: Any) -> None:
+    import threading
+    from memvara.retrieve.hybrid import HybridRetriever
+    seen: list[tuple[str, str]] = []
+    real = HybridRetriever._retrieve
+
+    def spy(self: Any, query: str, **kw: Any) -> Any:
+        seen.append((query, threading.current_thread().name))
+        return real(self, query, **kw)
+
+    monkeypatch.setattr(HybridRetriever, "_retrieve", spy)
+    mem = memory(FakeChat(rewrite_reply("tea", "drink")))
+    mem.remember("user", "likes", "green tea")
+    mem.search("green tea")
+    names = dict(seen)
+    assert not names["green tea"].startswith("memvara-phrasing")
+    assert names["tea"].startswith("memvara-phrasing")
+    assert names["drink"].startswith("memvara-phrasing")
+
+
+def test_the_async_facade_reads_on_its_own_bounded_pool() -> None:
+    import asyncio
+    import threading
+    from memvara.aio import READ_THREADS, AsyncMemvara
+    mem = memory()
+    mem.remember("user", "likes", "green tea")
+    names: list[str] = []
+    real = mem.search
+
+    def spy(*a: Any, **kw: Any) -> Any:
+        names.append(threading.current_thread().name)
+        return real(*a, **kw)
+
+    mem.search = spy  # type: ignore[method-assign]
+
+    async def main() -> Any:
+        return await AsyncMemvara(mem).search("green tea")
+
+    hits = asyncio.run(main())
+    assert [r.claim.object for r in hits] == ["green tea"]
+    assert names[0].startswith("memvara-read") and READ_THREADS == 8
+
+
+# --- reads that must stay plain ------------------------------------------------------------
+
+
+def test_the_mem0_shim_is_deterministic_unless_asked() -> None:
+    from memvara.compat.mem0 import Memory
+    chat = FakeChat(rewrite_reply("tea"))
+    shim = Memory(memory(chat))
+    shim.add("I like green tea", filters={"user_id": "alice"})
+    shim.search("green tea", filters={"user_id": "alice"})
+    assert chat.calls == []
+    shim.search("green tea", filters={"user_id": "alice"}, rewrite=True)
+    assert len(chat.calls) == 1
+
+
+def test_the_benchmark_reads_are_plain_unless_a_run_asks() -> None:
+    import sys
+    sys.path.insert(0, ".")
+    from bench import evalkit as ek
+    chat = FakeChat(rewrite_reply("tea"))
+    mem = memory(chat)
+    mem.remember("user", "likes", "green tea")
+    budget = ek.RetrievalBudget(k=3)
+    ek.retrieve(mem, "green tea", budget, ek.ContextSource.MEMORY, "")
+    ek.retrieval_pass(mem, "green tea", ek.RetrievalPlan(), budget, {})
+    assert chat.calls == []
+    ek.retrieve(mem, "green tea", budget, ek.ContextSource.MEMORY, "", query_rewrite=True)
+    assert len(chat.calls) == 1
+
+
+# --- the hosted client, older deployments, and the constructor ---------------------------
+
+
+def test_an_older_deployment_that_refuses_the_opt_out_is_asked_again_without_it() -> None:
+    import json
+
+    import httpx
+
+    from memvara.remote.api import RemoteMemvara
+    sent: list[dict] = []
+
+    def handler(request: Any) -> Any:
+        sent.append(json.loads(request.content))
+        if "query_rewrite" in sent[-1]:
+            return httpx.Response(422, json={"error": {
+                "code": "invalid_request", "message": "query_rewrite: extra field"}})
+        return httpx.Response(200, json=_SEARCH if request.url.path.endswith("search")
+                              else {"text": "Known:\n- x", "empty": False})
+
+    mem = RemoteMemvara(api_key="k", base_url="https://example.test")
+    mem._http._client._transport = httpx.MockTransport(handler)
+    assert mem.search("q", query_rewrite=False) == []
+    assert [("query_rewrite" in b) for b in sent] == [True, False]
+    assert mem.recall("q", query_rewrite=False) == "Known:\n- x"
+
+
+def test_a_refused_synthesize_is_not_retried() -> None:
+    import httpx
+
+    from memvara.remote.api import RemoteMemvara
+    from memvara.remote.errors import InvalidRequest
+    calls: list[Any] = []
+
+    def handler(request: Any) -> Any:
+        calls.append(request)
+        return httpx.Response(422, json={"error": {"code": "invalid_request",
+                                                   "message": "synthesize: extra field"}})
+
+    mem = RemoteMemvara(api_key="k", base_url="https://example.test")
+    mem._http._client._transport = httpx.MockTransport(handler)
+    with pytest.raises(InvalidRequest):
+        mem.recall("q", synthesize=True)
+    assert len(calls) == 1
+
+
+def test_the_async_client_asks_an_older_deployment_again_too() -> None:
+    import asyncio
+    import json
+
+    import httpx
+
+    from memvara.remote.aio import AsyncRemoteMemvara
+    sent: list[dict] = []
+
+    def handler(request: Any) -> Any:
+        sent.append(json.loads(request.content))
+        if "query_rewrite" in sent[-1]:
+            return httpx.Response(422, json={"error": {"code": "invalid_request",
+                                                       "message": "extra field"}})
+        return httpx.Response(200, json=_SEARCH)
+
+    mem = AsyncRemoteMemvara(api_key="k", base_url="https://example.test")
+    mem._http._client._transport = httpx.MockTransport(handler)
+
+    async def main() -> Any:
+        hits = await mem.search("q", query_rewrite=False)
+        await mem.aclose()
+        return hits
+
+    assert asyncio.run(main()) == []
+    assert [("query_rewrite" in b) for b in sent] == [True, False]
+
+    refused = AsyncRemoteMemvara(api_key="k", base_url="https://example.test")
+    refused._http._client._transport = httpx.MockTransport(
+        lambda request: httpx.Response(422, json={"error": {"code": "invalid_request",
+                                                            "message": "no"}}))
+
+    async def plain() -> Any:
+        try:
+            return await refused.search("q")
+        finally:
+            await refused.aclose()
+
+    from memvara.remote.errors import InvalidRequest
+    with pytest.raises(InvalidRequest):
+        asyncio.run(plain())
+
+
+def test_another_refusal_is_raised_after_the_second_try() -> None:
+    import httpx
+
+    from memvara.remote.api import RemoteMemvara
+    from memvara.remote.errors import InvalidRequest
+    calls: list[Any] = []
+
+    def handler(request: Any) -> Any:
+        calls.append(request)
+        return httpx.Response(422, json={"error": {"code": "invalid_request",
+                                                   "message": "k: out of range"}})
+
+    mem = RemoteMemvara(api_key="k", base_url="https://example.test")
+    mem._http._client._transport = httpx.MockTransport(handler)
+    with pytest.raises(InvalidRequest):
+        mem.search("q", query_rewrite=False)
+    assert len(calls) == 2
+    with pytest.raises(InvalidRequest):
+        mem.search("q")
+    assert len(calls) == 3, "no retry when the opt-out was not sent"
+
+
+@pytest.mark.parametrize("body", [
+    {"outcome": "applied", "date_from": "2024-03-01"},
+    {"outcome": "applied", "date_to": "2024-03-31"},
+    {"outcome": "applied", "valid_at": "2024-03-31T23:59:59Z"},
+    {"outcome": "applied", "date_from": "March", "date_to": "2024-03-31"},
+])
+def test_a_partial_or_malformed_range_from_the_wire_is_refused(body: dict) -> None:
+    from memvara.remote import hydrate
+    with pytest.raises(ValueError):
+        hydrate.rewrite(body)
+
+
+def test_the_search_line_refuses_to_render_a_partial_range() -> None:
+    from memvara.server.tools import _rewrite_line
+    partial = Rewrite(outcome="applied", queries=("a",),
+                      valid_at=datetime(2024, 3, 31, tzinfo=UTC))
+    assert _rewrite_line(partial) == "Also searched as: 'a'."
+
+
+def test_a_hosted_client_accepts_the_default_switches_and_refuses_switching_off() -> None:
+    from memvara.remote.api import RemoteMemvara
+    client = Memvara(api_key="k", base_url="https://example.test", query_rewrite=True,
+                     synthesis=True)
+    assert isinstance(client, RemoteMemvara)
+    for name in ("query_rewrite", "synthesis"):
+        with pytest.raises(TypeError, match=f"{name} cannot be combined"):
+            Memvara(api_key="k", base_url="https://example.test", **{name: False})
+
+
+# --- the MCP no-match reply ------------------------------------------------------------
+
+
+def test_a_dated_miss_names_the_day_the_rewrite_used() -> None:
+    mem = memory(FakeChat(rewrite_reply(start="2019-03-01", end="2019-03-31")))
+    mem.remember("user", "lives_in", "Porto", valid_from=datetime(2025, 1, 1, tzinfo=UTC))
+    srv = mcp(mem)
+    for tool in ("memory_search", "memory_recall"):
+        out = tool_text(srv, tool, {"query": "where did I live in March 2019"})
+        assert "as things were on 2019-03-31" in out, tool
+
+
+# --- invariant 1, enforced -------------------------------------------------------------------
+
+#: Every call in the package that can reach a model, as `module::function: receiver.method`.
+#: The read side is the three named stages and the one chat call they share; the write side
+#: is extraction, predicate acquisition and replacement advice. A new entry here is a new
+#: way to reach a model, and `docs/INTERNALS.md` invariant 1 says where one may live.
+MODEL_CALLS = {
+    # read path: `ranked`, `query_rewrite`, `synthesis`, and their shared chat call
+    "memvara/retrieve/hybrid.py::_run_ranked_stage: selector.select",
+    "memvara/retrieve/hybrid.py::_rewrite: stage.rewrite",
+    "memvara/core.py::recall: stage.synthesize",
+    "memvara/select/chat.py::call_chat: llm.chat",
+    # write path
+    "memvara/core.py::_advise_replacements: judge.judge_replacement",
+    "memvara/compat/mem0_import.py::_extract: llm.extract",
+    "memvara/write/pipeline.py::_tier1: self.fast.extract",
+    "memvara/write/pipeline.py::_tier2: self.llm.extract",
+    "memvara/write/pipeline.py::_acquire: self.llm.classify_predicate",
+}
+_MODEL_METHODS = {"chat", "extract", "resolve_predicate", "classify_predicate",
+                  "judge_replacement", "compose_relations", "select", "rewrite",
+                  "synthesize"}
+
+
+def _model_calls() -> set[str]:
+    import ast
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    found: set[str] = set()
+    for path in sorted((root / "memvara").rglob("*.py")):
+        if "skills" in path.parts:
+            continue
+        stack: list[str] = []
+
+        class Visit(ast.NodeVisitor):
+            def visit_FunctionDef(self, node: Any) -> None:
+                stack.append(node.name)
+                self.generic_visit(node)
+                stack.pop()
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Call(self, node: ast.Call) -> None:
+                func = node.func
+                if (isinstance(func, ast.Attribute) and func.attr in _MODEL_METHODS
+                        and ast.unparse(func.value) != "hydrate"):
+                    found.add(f"{path.relative_to(root).as_posix()}::"
+                              f"{'.'.join(stack)}: {ast.unparse(func.value)}.{func.attr}")
+                self.generic_visit(node)
+
+        Visit().visit(ast.parse(path.read_text()))
+    return found
+
+
+def test_a_model_is_reached_only_from_the_places_invariant_1_names() -> None:
+    assert _model_calls() == MODEL_CALLS
+
+
+#: The `search()` and `recall()` calls in the library, the benchmarks, the demo and the hooks
+#: that pass neither `query_rewrite=` nor `**PLAIN_READ`, each with the reason it may.
+#: Every other call must say which kind of read it is, so that a new one cannot forget.
+DECLARED_ELSEWHERE = {
+    "memvara/integrations/crewai.py: self.memory.search":
+        "an agent framework's retrieval of the user's own query; the store's default holds",
+    "memvara/integrations/langchain.py: self.memory.recall": "forwards the caller's keywords",
+    "memvara/integrations/langchain.py: self.memory.search": "forwards the caller's keywords",
+    "memvara/integrations/langchain.py: memory.search":
+        "a retriever over the user's own query; the store's default holds",
+    "memvara/integrations/langgraph.py: self.memory.search":
+        "search_memory forwards the caller's keywords; _rank passes PLAIN_READ",
+    "memvara/integrations/llamaindex.py: memory.search":
+        "a retriever over the user's own query, or the caller's keywords forwarded",
+    "memvara/integrations/llamaindex.py: self.memory.search":
+        "a retriever over the user's own query; the store's default holds",
+    "memvara/store/sqlite.py: self._vec.search": "the vector index, not a read facade",
+    "bench/compare.py: base.search": "the mem0-style baseline, not memvara",
+    "bench/mem0_real.py: api.search": "mem0 itself",
+    "demo/competitors.py: store.search": "a competitor's client",
+    "plugin/hooks/daemon.py: self.store.recall":
+        "the per-prompt recall, whose rewrite is decided by stream P2-H",
+    "plugin/hooks/lib/fast.py: client.recall": "the per-prompt recall, stream P2-H",
+    "plugin/hooks/lib/fast.py: store.recall": "the per-prompt recall, stream P2-H",
+}
+
+
+def _undeclared_reads() -> set[str]:
+    import ast
+    import pathlib
+    import re
+    root = pathlib.Path(__file__).resolve().parent.parent
+    found: set[str] = set()
+    for tree in ("memvara", "bench", "demo", "plugin/hooks"):
+        for path in sorted((root / tree).rglob("*.py")):
+            if "skills" in path.parts:
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in ("search", "recall")):
+                    continue
+                receiver = ast.unparse(node.func.value)
+                if re.fullmatch(r"_[A-Z_]+|re|.*\.pattern", receiver):
+                    continue  # a regular expression
+                declared = any(k.arg == "query_rewrite" for k in node.keywords) or any(
+                    k.arg is None and ast.unparse(k.value) in ("PLAIN_READ", "plain_read")
+                    for k in node.keywords)
+                if not declared:
+                    found.add(f"{path.relative_to(root).as_posix()}: "
+                              f"{receiver}.{node.func.attr}")
+    return found
+
+
+def test_every_read_in_this_repository_says_whether_it_may_call_a_model() -> None:
+    assert _undeclared_reads() == set(DECLARED_ELSEWHERE)

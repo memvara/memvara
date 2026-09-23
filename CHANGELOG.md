@@ -83,16 +83,26 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   fallback), `status`, `queries`, `date_from`, `date_to` and the `valid_at` the read used.
   Every outcome but `applied` serves the plain read. It is on by default when `llm=`
   implements `Chat`; `search(query_rewrite=False)` skips it for one read, and
-  `Memvara(query_rewrite=False)` switches it off (outcome `disabled`). `read_rewriter=`
-  replaces the built `QueryRewriter`. A rewritten read is counted once in the retrieval
-  telemetry, not once per phrasing. A read with `k=0` makes no call.
+  `Memvara(query_rewrite=False)` switches it off (outcome `disabled`, which a call asking
+  for a rewrite cannot override). `read_rewriter=` replaces the built `QueryRewriter`.
+  The alternative phrasings run on up to three threads beside the original query, all
+  phrasings are embedded in one `encode()` call, each query is embedded once per pass
+  rather than once per vector leg, and a configured reranker runs once, on the fused
+  list. A rewritten read is observed once in the retrieval telemetry, and its
+  `retrieval.latency_ms` includes the model call. A read with `k=0` makes no call.
 - **Synthesis on `recall()`.** `recall(synthesize=True)` sends the rendered notes and the
   question to one chat call and puts a summary of at most three sentences above the
   notes, under `Memvara.RECALL_SYNTHESIS_HEADER`, which names it as a model's reading of
   the notes and as reference data. Every note is still returned. When no summary was
-  written, the block starts with `(summary not written — <outcome>.)` instead. With a
-  `budget`, the notes are fitted first and the summary is added only if it fits beside
-  them; otherwise it is left out and the outcome is `fallback` with reason `budget`. A
+  written, the block starts with `(summary not written — <outcome>.)` instead, with the
+  reason after a fallback's outcome (`fallback: timeout`); the line and
+  `RecallResult.synthesis` always name the same outcome. With a `budget`, the notes are
+  fitted first, keeping room for the summary (`RECALL_SUMMARY_RESERVE`, 600 characters),
+  and the summary is written from exactly the notes that fitted, never from notes the
+  block does not show. If not even one note fits beside a summary, no call is made; if
+  the summary that comes back does not fit, it is left out. Either way the outcome is
+  `fallback` with reason `budget` and the notice line takes its place. The prompt carries
+  the notes as rendered, including a ranked read's `RECALL_UNRANKED` line. A
   recall with no notes makes no call. `RecallResult.synthesis` carries a `Synthesis`
   record with `outcome`, `reason`, `status` and `text`. `Memvara(synthesis=False)`
   switches it off, and `synthesizer=` replaces the built `Synthesizer`.
@@ -100,20 +110,50 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `memvara/select/stages.py`, each wrapping a `Chat` backend with a 10-second deadline and
   the outcome rules `ModelSelector` uses: 401 and 403 are `key_rejected`, a reply after
   the deadline is a `timeout`, an exception with an HTTP status is `provider`, anything
-  else is `error`, and a reply that is not the expected JSON is `malformed`.
+  else is `error`, and a reply that is not the expected JSON is `malformed`. All three
+  stages now share one chat call (`memvara.select.chat.call_chat`), one base class
+  (`ChatStage`, whose `admit()` a deployment overrides to cap concurrent model calls) and
+  one outcome record base (`StageOutcome`, with `OUTCOMES` naming the five outcomes). A
+  rewrite or synthesis refused admission with `SelectorBusy` is a `fallback` with reason
+  `busy` and the read goes on; a ranked read is still refused outright.
+- **Telemetry for the two stages**, emitted as the ranked stage's is and tagged
+  `stage=rewrite` or `stage=synthesis`: `retrieval.model_query` per answered call,
+  `retrieval.model_fallback` and `retrieval.model_refused` otherwise,
+  `retrieval.tokens_in` and `retrieval.tokens_out`, and two new timers,
+  `retrieval.rewrite_ms` and `retrieval.synthesis_ms`.
+- **`memvara.select.PLAIN_READ`**, the keyword arguments for a read that must not call a
+  model: `search(..., **PLAIN_READ)`, `recall(..., **PLAIN_READ)` or
+  `Memvara(..., **PLAIN_READ)`. `forget_matching()`, `profile()` (sync and async),
+  `ask()`, the LangGraph store's ranked search, the benchmark harnesses, the demo, and the
+  plugin's session-start and warm-up reads use it. A test fails when a new `search()` or
+  `recall()` call in the library, `bench/`, `demo/` or the hooks does not say which kind
+  of read it is, and another fails when a new call site that can reach a model appears
+  anywhere in the package.
+- **`Memory.search(rewrite=False)` on the mem0 shim.** The shim stays deterministic by
+  default, as mem0's `search()` is; `rewrite=True` turns the query rewrite on for one
+  search. `bench/evalkit.py`'s `retrieve()` and `retrieval_pass()` take
+  `query_rewrite=False` for the same reason.
 - **Two feature switches, `query_rewrite` and `synthesis`**, in `FEATURES` and read from
   `MEMVARA_FEATURE_QUERY_REWRITE` and `MEMVARA_FEATURE_SYNTHESIS`. Off, the local store is
   built with that stage off, and the MCP tools no longer offer its argument.
 - **MCP arguments.** `memory_search` and `memory_recall` take `query_rewrite` (default
   true), and `memory_recall` takes `synthesize` (default false). `memory_search` adds a
   line under its header naming the extra phrasings it searched and, when the question's
-  dates were used, the day the read describes.
+  dates were used, the day the read describes. When such a dated read finds nothing,
+  both tools' "no stored memory matched" reply names that day.
 - **`RemoteMemvara` and `AsyncRemoteMemvara`** take the same arguments. `query_rewrite` is
-  sent only as `false`, when a caller opts out, and `synthesize` only when it is true, so
-  a deployment from before the fields refuses the request rather than ignoring it.
-  `SearchResults.rewrite` is read off the response's `rewrite` object, whose dates are
-  `YYYY-MM-DD` strings; `hydrate.rewrite()` decodes it. The hosted deployment does not
-  serve these fields yet.
+  sent only as `false`, when a caller opts out, and `synthesize` only when it is true. A
+  deployment from before `query_rewrite` refuses it (422) and never rewrites anyway, so
+  the read is sent again without it; a refused `synthesize` is raised, because the
+  summary cannot be written. `SearchResults.rewrite` is read off the response's `rewrite`
+  object, whose dates are `YYYY-MM-DD` strings; `hydrate.rewrite()` decodes it and
+  refuses a range that is not complete (both dates, and `valid_at` only beside them).
+  `Memvara(api_key=..., query_rewrite=True)` and `synthesis=True` are accepted, since the
+  deployment decides; `False` is refused with a pointer to the per-call switch. The
+  hosted deployment does not serve these fields yet.
+- **`AsyncMemvara.search()` and `.recall()` run on their own pool** of
+  `memvara.aio.READ_THREADS` (8) threads, because a read can now wait on a model for
+  seconds and would otherwise hold a thread of the loop's shared default executor.
 - **Four predicates in the `engineering` pack for what `/memvara:index` records about a
   repository.** `purpose` is single-valued, so a restated purpose ends the old one.
   `convention`, `entry_point` and `runs_with` are many-valued, because a repository

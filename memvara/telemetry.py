@@ -440,6 +440,16 @@ RETRIEVAL_TOKENS_OUT = "retrieval.tokens_out"
 #: carries both, is the reranker's own cost.
 RETRIEVAL_SELECT_MS = "retrieval.select_ms"
 
+#: The query rewrite's model call alone, and the synthesis's, on every call that was
+#: made, by the rule `retrieval.select_ms` follows. The two stages also emit
+#: `retrieval.model_query`, `retrieval.model_fallback`, `retrieval.model_refused` and the
+#: token series, with the same meanings and one more tag, `stage` (`rewrite` or
+#: `synthesis`). The ranked stage's emissions carry no `stage` tag. A quota that sums
+#: `retrieval.model_query` by name therefore counts every answered model call on the read
+#: path, whichever stage made it. See `memvara.select.stages.run_stage`.
+RETRIEVAL_REWRITE_MS = "retrieval.rewrite_ms"
+RETRIEVAL_SYNTHESIS_MS = "retrieval.synthesis_ms"
+
 #: **Live claims in the most crowded slot**, per consolidation pass. If exactly one
 #: series from this module is ever put on a dashboard, make it this one: thirteen
 #: simultaneously-live answers to "where does the user work?" was the worst defect in

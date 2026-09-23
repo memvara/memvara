@@ -125,6 +125,7 @@ import evalkit as ek
 
 from memvara import Memvara, NullLLM
 from memvara.embed import embedder_name
+from memvara.select import PLAIN_READ
 
 CATEGORIES = {
     1: "multi-hop",
@@ -409,7 +410,7 @@ def build_memory(sample: Sample, budget: ek.RetrievalBudget, llm: Any = None,
         read_w_temporal=w_temporal,
         # See `bench/longmemeval.py`'s `build_memory`: the reported numbers were
         # measured without a query rewrite, so an extraction model does not turn one on.
-        query_rewrite=False,
+        **PLAIN_READ,
     )
 
 

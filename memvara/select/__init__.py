@@ -48,13 +48,14 @@ from __future__ import annotations
 from typing import Any
 
 from .base import (
-    Candidate, Rewrite, Selected, Selection, Selector, SelectorBusy, SelectorRefused,
-    Synthesis,
+    OUTCOMES, PLAIN_READ, Candidate, Rewrite, Selected, Selection, Selector, SelectorBusy,
+    SelectorRefused, StageOutcome, Synthesis,
 )
 
 __all__ = [
-    "Candidate", "Rewrite", "Selected", "Selection", "Selector", "SelectorBusy",
-    "SelectorRefused", "Synthesis", "ModelSelector", "QueryRewriter", "Synthesizer",
+    "OUTCOMES", "PLAIN_READ", "Candidate", "Rewrite", "Selected", "Selection", "Selector",
+    "SelectorBusy", "SelectorRefused", "StageOutcome", "Synthesis", "ModelSelector",
+    "QueryRewriter", "Synthesizer",
 ]
 
 

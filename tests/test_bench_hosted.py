@@ -803,10 +803,10 @@ class NamesNothing:
     stopped naming what it rendered.
     """
 
-    def search(self, query, *, k=10, min_score=0.0):
+    def search(self, query, *, k=10, min_score=0.0, query_rewrite=True):
         return [_Row("cl_a", 0.9)]
 
-    def recall(self, query, *, k=8, min_score=0.0, with_ids=False):
+    def recall(self, query, *, k=8, min_score=0.0, with_ids=False, query_rewrite=True):
         return "MEMORY\n- a rendered memory"
 
 

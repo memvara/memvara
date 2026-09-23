@@ -91,8 +91,10 @@ mem.recall(query, *, k=8, min_score=0.0, anchored=False, ranked=False,
 #   query_rewrite= is search()'s. synthesize=True sends the rendered notes to one chat
 #     call and puts a summary of at most three sentences above them, under
 #     RECALL_SYNTHESIS_HEADER; every note is still there. With a budget the notes are
-#     fitted first and the summary is added only if it fits beside them. A block with
-#     no summary starts with a RECALL_UNSYNTHESIZED line naming why.
+#     fitted first, with RECALL_SUMMARY_RESERVE characters kept for the summary, and the
+#     summary is written from exactly the notes that fitted. A block with no summary
+#     starts with a RECALL_UNSYNTHESIZED line naming the outcome, and the reason after a
+#     fallback ("fallback: budget").
 #     Memvara(synthesis=False) switches it off.
 #   with_ids=True returns RecallResult(text, claim_ids, dropped, selection, rewrite,
 #     synthesis) instead of
