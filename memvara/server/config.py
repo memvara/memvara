@@ -18,6 +18,7 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from ..core import Memvara
@@ -87,23 +88,49 @@ _DEFAULT_DIM = 512
 #: read from an environment that sets nothing must open the same store.
 _DEFAULT_EMBEDDER = "hashing"
 
-#: Every feature a user can switch off, by the name `MEMVARA_FEATURE_<NAME>` spells in
-#: upper case. Each one is on unless its variable says `0`. The design has the plugin hooks
-#: and the hosted deployment read the same names, so that one variable switches a feature
-#: off on every surface.
+#: Every feature a user can switch on or off, by the name `MEMVARA_FEATURE_<NAME>` spells
+#: in upper case, and whether it is on when nothing sets it. This table is the one place a
+#: feature and its default are written down; `FEATURES` and `FEATURES_OFF_BY_DEFAULT` are
+#: derived from it. The design has the plugin hooks and the hosted deployment read the same
+#: names, so that one variable switches a feature on or off on every surface.
 #:
-#: Only two of these change what this process does. `project_scope` decides whether the
-#: project is derived from the working directory, and `profile` decides whether the
-#: `memory_profile` tool is listed. The others belong to the plugin or to tools that are not
-#: in this build yet; they are parsed here so that a typo in any of them is refused at
-#: startup rather than ignored.
+#: The design puts every feature on by default. A feature is off by default only while it
+#: has not yet passed the test its design says it must pass before it is switched on for
+#: everyone. `extraction_chunks` is off for that reason: its test asks for 5 of 5 key facts
+#: with 0 duplicates on the longest turn of the extraction spike, and the one measured run
+#: found 4 of 5 (`docs/ROADMAP.md`, the "Reversed" list).
+#:
+#: Only some of these change what this process does. `project_scope` decides whether the
+#: project is derived from the working directory, `profile` decides whether the
+#: `memory_profile` tool is listed, and `extraction_chunks` decides whether a long turn is
+#: extracted in pieces (`WritePipeline.extraction_chunks`). The others belong to the plugin
+#: or to tools that are not in this build yet; they are parsed here so that a typo in any
+#: of them is refused at startup rather than ignored.
 #:
 #: `ingest_urls` and `ingest_media` switch off fetching a URL and reading images, audio and
 #: video when a document is added. `memvara.ingest.extract` takes them as its `allow_urls`
 #: and `allow_media` arguments; no tool in this server adds documents yet.
-FEATURES = ("index_command", "research_agent", "project_scope", "status_line",
-            "recall_mark", "profile", "forget_matching", "end_reason", "links",
-            "ingest_urls", "ingest_media")
+FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
+    "index_command": True,
+    "research_agent": True,
+    "project_scope": True,
+    "status_line": True,
+    "recall_mark": True,
+    "profile": True,
+    "forget_matching": True,
+    "end_reason": True,
+    "links": True,
+    "extraction_chunks": False,
+    "ingest_urls": True,
+    "ingest_media": True,
+})
+
+#: Every feature name, in the order `FEATURE_DEFAULTS` lists them.
+FEATURES = tuple(FEATURE_DEFAULTS)
+
+#: The features that are off unless `MEMVARA_FEATURE_<NAME>=1` turns them on.
+FEATURES_OFF_BY_DEFAULT = frozenset(
+    name for name, on in FEATURE_DEFAULTS.items() if not on)
 
 _FEATURE_PREFIX = "MEMVARA_FEATURE_"
 
@@ -274,9 +301,11 @@ class ServerConfig:
     #: this process in. Under `MEMVARA_MODE=cloud` it travels to the deployment as the
     #: `Memvara-Project` header, which can only narrow inside the credential's tenant.
     project: str | None = None
-    #: Features switched off with `MEMVARA_FEATURE_<NAME>=0`. Empty means every feature in
-    #: `FEATURES` is on, which is the default.
-    features_off: frozenset[str] = frozenset()
+    #: Features that are off: those switched off with `MEMVARA_FEATURE_<NAME>=0`, plus
+    #: those in `FEATURES_OFF_BY_DEFAULT` that were not switched on with `=1`. The default
+    #: is `FEATURES_OFF_BY_DEFAULT`, so a `ServerConfig` built in Python and one read from
+    #: an environment that sets nothing agree.
+    features_off: frozenset[str] = FEATURES_OFF_BY_DEFAULT
     #: The key that signs the confirmation token `memory_end_matching` and
     #: `memory_forget_matching` hand out with a preview. Set the same value on every
     #: process that serves one store, so a preview served by one can be confirmed by
@@ -439,7 +468,7 @@ def unknown_features(names: Iterable[str]) -> str | None:
     exception, so the two cannot disagree about what a feature is.
 
     >>> unknown_features(["profle"])
-    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, ingest_urls and ingest_media."
+    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, extraction_chunks, ingest_urls and ingest_media."
     >>> unknown_features(["profile"]) is None
     True
     """
@@ -453,14 +482,16 @@ def unknown_features(names: Iterable[str]) -> str | None:
 
 
 def _features_off(env: Mapping[str, str]) -> frozenset[str]:
-    """The features the environment switches off, refusing any it does not know.
+    """The features that are off in this environment, refusing any name it does not know.
 
-    An unknown `MEMVARA_FEATURE_*` name is refused rather than ignored. The likely cause is
-    a typo, such as `MEMVARA_FEATURE_PROFLE=0`, and ignoring it would leave the feature on
-    while the operator believes it is off. An empty value means the default, which is on,
-    the same way an empty `MEMVARA_USER` means no user.
+    A feature is off when its variable says `0`, or when it is in
+    `FEATURES_OFF_BY_DEFAULT` and its variable does not say `1`. An unknown
+    `MEMVARA_FEATURE_*` name is refused rather than ignored. The likely cause is a typo,
+    such as `MEMVARA_FEATURE_PROFLE=0`, and ignoring it would leave the feature on while
+    the operator believes it is off. An empty value means the feature's default, the same
+    way an empty `MEMVARA_USER` means no user.
     """
-    off: set[str] = set()
+    off: set[str] = set(FEATURES_OFF_BY_DEFAULT)
     for variable, raw in env.items():
         if not variable.startswith(_FEATURE_PREFIX):
             continue
@@ -469,8 +500,12 @@ def _features_off(env: Mapping[str, str]) -> frozenset[str]:
         if problem is not None:
             raise ConfigError(
                 f"{variable} does not name a feature: {problem} Each variable takes 1 for "
-                "on, which is the default, or 0 for off.")
-        if (raw or "").strip() and not _flag(raw, variable):
+                "on or 0 for off.")
+        if not (raw or "").strip():
+            continue
+        if _flag(raw, variable):
+            off.discard(name)
+        else:
             off.add(name)
     return frozenset(off)
 
@@ -975,6 +1010,7 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         registry=_registry(config),
         advise_replacements=config.advise_replacements,
         write_closed_vocabulary=config.closed_vocabulary,
+        write_extraction_chunks="extraction_chunks" not in config.features_off,
         # Explicit at its own default, like `llm` and `embedder` above and for a related
         # reason: this is the one line that says which retrieval legs this store reads
         # with, and a reader of this function should not have to know that
