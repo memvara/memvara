@@ -83,9 +83,12 @@ Memvara.document_status(id_or_custom_id, **scope) -> DocumentStatus
 
 - Exactly one of `content` and `url` is given.
 - **Re-ingest by `custom_id`.** Adding with an existing `custom_id` is an update. The new text is
-  chunked; chunks whose hash is unchanged keep their episode and vector; new or changed chunks
-  become new episodes; chunks that disappeared are handled like a delete of those chunks (next
-  bullet). Only new episodes go to extraction.
+  chunked, and each new chunk is matched to an old chunk **by content hash, not by position**, so
+  an edit near the top of a document does not invalidate every later chunk. A matched chunk keeps
+  its episode and vector and only has its `position` updated; an unmatched new chunk becomes a new
+  episode; an old chunk with no match is handled like a delete of that chunk (next bullet). Only
+  new episodes go to extraction. The chunker's boundaries depend only on the text around them, so
+  an edit changes the chunks it touches and at most the one after it.
 - **Delete.** The document row, its chunk rows and its chunk episodes are erased, using the
   existing `erase_episode` path extended to documents. Each claim whose every source was one of
   those episodes is **retired** with reason `"source document deleted"` (phase 1 §4.8) before its

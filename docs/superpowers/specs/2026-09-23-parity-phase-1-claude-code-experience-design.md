@@ -91,8 +91,12 @@ agent to:
    read "Derived by user"; :2250-2259), and a predicate from the `engineering` pack
    (`depends_on`, `deploys_to`, `version`, …; core `memvara/packs/engineering.toml:14-103`).
    Phase 1 adds three predicates to that pack: `convention`, `entry_point`, `runs_with`.
-5. When a stored fact is now different, call `memory_end` on the old claim with
-   `reason="superseded by /memvara:index"` (§4.8) before writing the new one.
+5. When a stored fact is now different, write the new value with
+   `memory_remember(…, replaces=<old claim id>)` (§4.8). That calls the existing `supersede()`
+   path (core.py:1651), so the old claim is closed with `invalidated_by` pointing at the new one
+   and the lineage is kept. Ending the old claim first and then writing the new one would lose
+   that link, because the predicates here are many-valued and the reconciler would not
+   supersede on its own.
 
 **Manifest and tests.** Adding a command changes three test guards in the plugin repo:
 `_COMMAND_NAMES` (`test/test_plugin.py:7716`), the manifest-and-tree check (:7840-7880) and
@@ -258,8 +262,11 @@ seen exactly which ones.
    matching claims (id and text) and a `confirm` token. It changes nothing.
 2. The same call plus `confirm=<token>` applies the close to exactly the listed ids.
 
-The token is an HMAC over the sorted claim ids, the close kind and a 10-minute expiry, keyed by
-a per-process secret. A token that does not match, has expired, or whose claims have changed
+The token is an HMAC over the sorted claim ids, the close kind and a 10-minute expiry. The key
+comes from configuration (`MEMVARA_CONFIRM_SECRET`; the cloud sets one shared value in
+`deploy/memvara_deploy/settings.py`), so a preview served by one worker process can be confirmed
+on another. Only when no key is configured does the library generate a per-process key, which is
+correct for a single local process. A token that does not match, has expired, or whose claims have changed
 since the preview is refused with the reason; nothing is applied.
 
 - Core: `Memvara.forget_matching(query, *, close, k, reason, confirm=None) -> ForgetPreview |
@@ -279,7 +286,10 @@ a stale token closes nothing.
 schema migration is needed.
 
 - `memory_end(…, reason=)` and `memory_forget(…, reason=)`; `remember(…, true_until=…,
-  until_reason=…)` for a planned end. The REST `EndRequest` and `ForgetRequest` (cloud
+  until_reason=…)` for a planned end.
+- `memory_remember(…, replaces=<claim id>, reason=…)` supersedes a named claim through the
+  existing `supersede()` path (core.py:1651) and records the reason on the closed claim. This is
+  how a caller replaces one value of a many-valued predicate without losing the lineage. The REST `EndRequest` and `ForgetRequest` (cloud
   `models.py:1404`, :1413) and `FactRequest` gain the same fields.
 - `history()` and `why()` show the reason.
 
