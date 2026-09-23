@@ -185,3 +185,23 @@ def error_from_response(status_code: int, body: Any,
     retryable = (bool(stated) if stated is not None
                  else status_code in _RETRYABLE_WHEN_UNSTATED)
     return cls(status_code, code, message, retryable)
+
+
+def refuse_project_purge(project: str | None) -> None:
+    """Refuse a hosted purge while a project is bound, before anything is sent.
+
+    `POST /v1/erasures` takes a user, an agent and a session but has no project field yet
+    (memvara-cloud #267 adds one). Sent from a client bound to a project, the erasure
+    would reach every project the user holds rather than the one bound, and erasure cannot
+    be undone. `RemoteStore.purge`, `RemoteMemvara.purge` and `AsyncRemoteMemvara.purge`
+    all call this, so the three refuse with one message.
+
+    A `ValueError` rather than `NotImplementedError`: each purge is wired, and it is this
+    one scope that it refuses.
+    """
+    if project is not None:
+        raise ValueError(
+            "purge() cannot erase one project through POST /v1/erasures, which takes a "
+            "user, an agent and a session but no project. Sending it without the project "
+            f"would erase every project, so nothing was sent for {project!r}. Purge from "
+            "a client with no project bound to erase the user's memory in every project.")

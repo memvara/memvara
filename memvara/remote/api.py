@@ -30,7 +30,7 @@ its per-table counts as evidence inside the erasure response itself.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import copy
 from datetime import datetime
 from typing import Any, Collection, Iterator, Literal, Mapping, Sequence, overload
@@ -42,13 +42,13 @@ from ..retrieve import EpisodeResult, Path, Retrieved
 from ..types import (
     Answer, Claim, Delta, Episode, ForgetPreview, ForgetResult, Link, MemoryType,
     Profile, Provenance, Result, Scope, SearchResults, WriteReceipt, closure,
-    closure_reason, link_relation,
+    closure_reason, link_relation, refuse_self_link,
 )
 from ..types import PROJECT_META, PROJECT_META_REFUSAL
 from . import hydrate
 from .client import DEFAULT_TIMEOUT, HttpClient
 from .creds import resolve
-from .errors import Conflict, NotFound
+from .errors import Conflict, NotFound, refuse_project_purge
 
 
 #: The header that carries the bound project to the deployment. The deployment reads it
@@ -68,7 +68,7 @@ def _refuse_project_meta(meta: Mapping[str, Any], method: str) -> None:
 
 
 @contextmanager
-def _as_local_refusal(claim_id: str | None) -> Iterator[None]:
+def _as_local_refusal(claim_id: str) -> Iterator[None]:
     """Raise the local engine's exceptions for the deployment's refusal of a named claim.
 
     `Memvara.remember(replaces=...)` and `Memvara.supersede` raise `KeyError` when the
@@ -76,6 +76,10 @@ def _as_local_refusal(claim_id: str | None) -> Iterator[None]:
     `memory_remember` answers each with its own "Nothing written" message. The facade
     refuses the same two cases as 404 and 409, so they are translated here and a caller
     handles one set of exceptions whatever serves it.
+
+    Only around a call that names a claim. A 404 from a write that names none, such as
+    one citing a source turn that does not exist, is the deployment's own error and
+    reaches the caller unchanged.
     """
     try:
         yield
@@ -83,29 +87,6 @@ def _as_local_refusal(claim_id: str | None) -> Iterator[None]:
         raise KeyError(f"no claim {claim_id!r} is visible here") from None
     except Conflict as exc:
         raise ValueError(exc.message) from None
-
-
-def _refuse_self_link(from_id: str, to_id: str) -> None:
-    """`Memvara.link`'s refusal, raised before a request so the answer is the same."""
-    if from_id == to_id:
-        raise ValueError(f"cannot link claim {from_id} to itself")
-
-
-def _refuse_project_purge(scope: Scope) -> None:
-    """Refuse a purge from a client bound to a project, before anything is sent.
-
-    `POST /v1/erasures` takes a user, an agent and a session but has no project field yet
-    (memvara-cloud #267 adds one). Sent from a client bound to a project, the erasure would
-    reach every project the user holds rather than the one bound, and erasure cannot be
-    undone. `RemoteStore.purge` refuses the same scope for the same reason.
-    """
-    if scope.project is not None:
-        raise ValueError(
-            "purge() cannot erase one project through POST /v1/erasures, which takes a "
-            "user, an agent and a session but no project. Sending it without the project "
-            f"would erase every project, so nothing was sent for {scope.project!r}. "
-            "Purge from a client with no project bound to erase the user's memory in "
-            "every project.")
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -766,7 +747,7 @@ class RemoteMemvara:
             "until_reason": closure_reason(until_reason),
             "replaces": replaces, "reason": closure_reason(reason),
         }
-        with _as_local_refusal(replaces):
+        with _as_local_refusal(replaces) if replaces is not None else nullcontext():
             out = self._request(
                 "POST", "/v1/facts", params=self._params(), json=_sent(body), write=True)
         return hydrate.receipt(out)
@@ -923,7 +904,7 @@ class RemoteMemvara:
         another tenant alike. `ValueError`, without a request, for a claim linked to
         itself, as `Memvara.link` raises.
         """
-        _refuse_self_link(from_id, to_id)
+        refuse_self_link(from_id, to_id)
         try:
             out = self._request(
                 "POST", "/v1/links", params=self._params(),
@@ -1007,7 +988,7 @@ class RemoteMemvara:
         erase the user's memory in every project.
         """
         scope = self.default_scope
-        _refuse_project_purge(scope)
+        refuse_project_purge(scope.project)
         body = self._request(
             "POST", "/v1/erasures", params=self._params(),
             json=_sent({"scope": _sent({"user": scope.user, "agent": scope.agent,

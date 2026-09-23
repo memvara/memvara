@@ -89,6 +89,7 @@ from .types import (
     closure,
     closure_reason,
     link_relation,
+    refuse_self_link,
     owner_key,
     planned_end,
     time_axes,
@@ -1423,8 +1424,11 @@ class Memvara:
         many-valued predicate: an ordinary write beside it would leave both values live,
         because nothing in the slot competes. The closure instant, the checks and the
         errors are `supersede()`'s: `KeyError` if the id names nothing this scope can see,
-        `ValueError` if the claim it names is no longer live, and nothing written either
-        way. `reason` without `replaces` is a `ValueError` too: an automatic displacement
+        and nothing written. A claim that is no longer live raises `ValueError` and writes
+        nothing, except when this call is a replay of the write that closed it: the same
+        closure, by a claim holding the same value, from the same date, in the same
+        project. A replay writes nothing and returns a receipt naming that claim under
+        `reinforced`, so an import run twice completes. See `supersede()`. `reason` without `replaces` is a `ValueError` too: an automatic displacement
         has no caller-named claim to attach a reason to. Both reasons are at most 500
         characters (`types.REASON_CHARS`).
 
@@ -1821,7 +1825,8 @@ class Memvara:
         writes nothing.
 
         Replaying the same supersession is not refused. When the claim was already closed
-        the way `close` asks, by a claim holding the same value as `new_claim`, the call
+        the way `close` asks, by a claim holding the same value as `new_claim`, from the
+        same `valid_from` and in the same project, the call
         writes nothing and returns a receipt naming that successor under `reinforced`, with
         `added` and `closed` empty and no salience changed. That is what lets a mutation
         log be imported twice. Raising rather than quietly asserting the
@@ -1876,26 +1881,38 @@ class Memvara:
                                  reason=why)
 
     def _replayed(self, old: Claim, new_claim: Claim, how: str, **scope: Any) -> Claim | None:
-        """The claim that already closed `old` the way `how` asks, holding `new_claim`'s
-        value, or `None` when this supersession would conflict with the recorded one.
+        """The claim that already closed `old` exactly as this call asks, or `None`.
 
-        The closure has to match: a claim retired cannot be replayed as ended, and a
-        claim ended cannot be replayed as retired (that is a real correction, which
-        `supersede` allows without reaching here). The value is compared on
-        `value_key` — owner, subject, predicate, object and polarity — with the new
-        claim's predicate spelled the way the store spells it and its scope adopted from
-        `old` when it names none, as the write itself would.
+        A replay is the same supersession again, so everything it states has to match
+        what was recorded, and anything else is a correction or a conflict:
+
+        - `old.state` is the closure `how` asks for. A claim retired cannot be replayed as
+          ended, and an ended claim asked to be retired never reaches here, because that
+          is a real correction `supersede` allows.
+        - The successor holds the same value: `value_key`, which is owner, subject,
+          predicate, object and polarity, with the new claim's predicate spelled the way
+          the store spells it and its scope adopted from `old` when it names none, as the
+          write itself would.
+        - The successor is in the same project. `value_key` leaves the project out, so
+          without this a write meant for one project would be reported as already done
+          by another project's successor.
+        - The successor starts at the same instant. The same value from a different date
+          says something new about when it began, and absorbing that would drop it.
         """
-        closed_as = "retired" if old.invalidated_at is not None else "ended"
-        if old.invalidated_by is None or closed_as != how:
+        if old.invalidated_by is None or old.state != how:
             return None
         successor = self.get(old.invalidated_by, **scope)
         if successor is None:
             return None
-        candidate = replace(
-            new_claim, predicate=self.registry.normalize(new_claim.predicate),
-            scope=old.scope if new_claim.scope == Scope() else new_claim.scope)
-        return successor if successor.value_key == candidate.value_key else None
+        predicate = self.registry.normalize(new_claim.predicate)
+        adopted = old.scope if new_claim.scope == Scope() else new_claim.scope
+        candidate = replace(new_claim, predicate=predicate, scope=adopted)
+        project = self.registry.slot_scope(predicate, adopted).project
+        if (successor.value_key != candidate.value_key
+                or successor.scope.project != project
+                or as_utc(successor.valid_from) != as_utc(candidate.valid_from)):
+            return None
+        return successor
 
     def forget(self, subject: str, predicate: str, *, tenant=None, user=None, agent=None,
                session=None, at: datetime | None = None,
@@ -2274,8 +2291,7 @@ class Memvara:
         claim removes the link.
         """
         rel = link_relation(relation)
-        if from_id == to_id:
-            raise ValueError(f"cannot link claim {from_id} to itself")
+        refuse_self_link(from_id, to_id)
         scope = self._scope(tenant, user, agent, session)
         found = self._visible([from_id, to_id], scope)
         for claim_id in (from_id, to_id):

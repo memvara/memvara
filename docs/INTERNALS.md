@@ -360,6 +360,18 @@ claim:
    an inference, and an instruction is not one. `forget()` and `delete()` are outside it
    too, having no candidate to weigh.
 
+   **`Memvara.supersede` refuses to close a claim twice, except for an exact replay.** A
+   named claim that is already retired, or already ended when `close="ended"` asks, is a
+   `ValueError` and nothing is written. The exception, `Memvara._replayed`, is the same
+   supersession again: the claim's `state` is the closure asked for, and the claim that
+   closed it has the same `value_key`, the same project and the same `valid_from` as the
+   new one. Then the call writes nothing and returns a receipt naming that successor under
+   `reinforced`, with no salience change, so importing a mutation log twice completes.
+   `remember(replaces=...)` goes through `supersede`, so it behaves the same way and so
+   does `memory_remember`. The same value from another date, or in another project, is
+   refused: the first is a correction of when the value began, and the second is a write
+   the other project never received.
+
    **A closure clamped to the victim's own start empties its interval**, and the write
    reports a `Collapse`. `close_out` never inverts an interval, so superseding a claim at
    or before the instant it began leaves `valid_from == valid_to`: it survives in

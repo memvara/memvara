@@ -1088,6 +1088,20 @@ LinkRelation = Literal["extends", "derives"]
 LINK_RELATIONS: tuple[LinkRelation, ...] = ("extends", "derives")
 
 
+def refuse_self_link(from_id: str, to_id: str) -> None:
+    """Refuse a link from a claim to itself, with the one message every surface gives.
+
+    `Memvara.link` and both hosted clients call this, so a hosted client refuses before
+    sending anything and `memory_link` answers the same way whatever serves it.
+
+    >>> refuse_self_link("cl_1", "cl_1")
+    Traceback (most recent call last):
+    ValueError: cannot link claim cl_1 to itself
+    """
+    if from_id == to_id:
+        raise ValueError(f"cannot link claim {from_id} to itself")
+
+
 def link_relation(value: str) -> LinkRelation:
     """Validate a caller-supplied relation, or raise naming both legal ones.
 
@@ -1833,7 +1847,13 @@ class WriteReceipt:
     #: will be wrong half the time. `ended` and `retired` below split it, and
     #: `Claim.state` says which axis moved on an individual claim.
     closed: list[Claim] = field(default_factory=list)
-    reinforced: list[Claim] = field(default_factory=list)  # already known, salience bumped
+    #: Claims this write found already stored. Usually the same value observed again,
+    #: whose salience and observation count were raised. The one exception is a replayed
+    #: supersession (`Memvara.supersede` or `remember(replaces=...)` naming a claim that
+    #: an identical earlier write already closed): the successor that earlier write stored
+    #: is named here and nothing about it changes, salience included, so a replay is
+    #: idempotent. Either way, nothing in this list was written by this call.
+    reinforced: list[Claim] = field(default_factory=list)
     skipped: int = 0                                       # turns that carried no durable fact
     #: Turns that got all the way to the extraction tier and yielded nothing. Distinct
     #: from `skipped`, which is the write path working as designed (an acknowledgement

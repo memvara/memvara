@@ -474,3 +474,52 @@ def test_a_profile_asking_for_fewer_than_one_row_is_refused_before_anything_is_s
     with pytest.raises(ValueError, match="at least 1"):
         asyncio.run(aio.scope(agent="a1").profile(k=k))
     assert sent == []
+
+
+
+def test_a_404_on_a_write_that_names_no_replaced_claim_is_not_renamed():
+    """Only a refusal of the claim named by `replaces` is the local engine's `KeyError`.
+    Another 404 on the same route, such as a cited source that does not exist, reaches
+    the caller as the deployment's own error, with its own message."""
+    import asyncio
+    from memvara.remote.errors import NotFound
+    sync, aio = _clients(_refusing(404, "not_found", "no such source turn"))
+    with pytest.raises(NotFound, match="no such source turn"):
+        sync.remember("user", "lives_in", "Lisbon", sources=["ep_missing"])
+    with pytest.raises(NotFound, match="no such source turn"):
+        asyncio.run(aio.remember("user", "lives_in", "Lisbon", sources=["ep_missing"]))
+
+
+def test_a_self_link_is_refused_with_the_local_engines_own_message():
+    from memvara import HashingEmbedder, Memvara, NullLLM
+    local = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM())
+    sync, _ = _clients(lambda request: httpx.Response(200, json={}))
+    with pytest.raises(ValueError) as here:
+        local.link("cl_1", "cl_1", "extends")
+    with pytest.raises(ValueError) as there:
+        sync.link("cl_1", "cl_1", "extends")
+    assert str(here.value) == str(there.value)
+
+
+def test_every_hosted_purge_refuses_a_project_with_one_message():
+    """Three hosted purges and one rule. They share one refusal, so its wording cannot
+    drift between them again."""
+    import asyncio
+    from memvara.remote.aio import AsyncRemoteMemvara
+    from memvara.store.remote import RemoteStore
+    from memvara.types import Scope
+    project = "github.com/acme/app"
+    messages = []
+    for purge in (
+        lambda: RemoteStore(base_url="https://example.test", api_key="k").purge(
+            Scope("acme", "alice", project=project)),
+        lambda: RemoteMemvara(api_key="k", base_url="https://example.test",
+                              user="alice", project=project).purge(),
+        lambda: asyncio.run(AsyncRemoteMemvara(
+            api_key="k", base_url="https://example.test", user="alice",
+            project=project).purge()),
+    ):
+        with pytest.raises(ValueError) as refused:
+            purge()
+        messages.append(str(refused.value))
+    assert len(set(messages)) == 1 and project in messages[0]

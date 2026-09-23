@@ -25,9 +25,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `link()` refuses a claim linked to itself before sending anything, as `Memvara.link`
   does, and `profile()` refuses `k` below 1, as `Memvara.profile` does.
 - **Replaying a supersession is idempotent.** `Memvara.supersede()` on a claim already
-  closed the same way by a claim holding the same value writes nothing and returns a
-  receipt naming that successor under `reinforced`. A supersession that conflicts with
-  the recorded one is still refused with `ValueError`.
+  closed the same way, by a claim holding the same value, from the same `valid_from` and in
+  the same project, writes nothing and returns a receipt naming that successor under
+  `reinforced`, with no salience change. `remember(replaces=...)` and the
+  `memory_remember` tool go through `supersede()`, so they behave the same way: a replayed
+  replacement is reported as already known instead of refused. A supersession that
+  conflicts with the recorded one, including the same value from another date or in
+  another project, is still refused with `ValueError`.
 - **The customer tool reference lists every tool.** It was missing `memory_end_matching`,
   `memory_forget_matching` and `memory_link`, and three customer pages stated an old tool
   count. The pages no longer state a count, and a test holds the reference table to the

@@ -20,6 +20,7 @@ docstring, which this one does not repeat. The only difference method-by-method 
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 from copy import copy
 from datetime import datetime
 from typing import Any, Collection, Literal, Mapping, Sequence, overload
@@ -31,15 +32,15 @@ from ..retrieve import Path, Retrieved
 from ..types import (
     Answer, Claim, Delta, Episode, ForgetPreview, ForgetResult, Link, MemoryType,
     Profile, Provenance, Result, Scope, SearchResults, WriteReceipt, closure,
-    closure_reason, link_relation,
+    closure_reason, link_relation, refuse_self_link,
 )
 from . import hydrate
 from .api import (PROJECT_HEADER, _as_local_refusal, _hit, _iso, _refuse_project_meta,
-                  _refuse_project_purge, _refuse_self_link, _sent, _states,
+                  _sent, _states,
                   _type, _types)
 from .client import DEFAULT_TIMEOUT, AsyncHttpClient
 from .creds import resolve
-from .errors import Conflict, NotFound
+from .errors import Conflict, NotFound, refuse_project_purge
 
 
 class AsyncRemoteMemvara:
@@ -412,7 +413,7 @@ class AsyncRemoteMemvara:
             "until_reason": closure_reason(until_reason),
             "replaces": replaces, "reason": closure_reason(reason),
         }
-        with _as_local_refusal(replaces):
+        with _as_local_refusal(replaces) if replaces is not None else nullcontext():
             out = await self._request(
                 "POST", "/v1/facts", params=self._params(), json=_sent(body), write=True)
         return hydrate.receipt(out)
@@ -489,7 +490,7 @@ class AsyncRemoteMemvara:
 
     async def link(self, from_id: str, to_id: str, relation: str, *,
                    by: str = "api") -> Link:
-        _refuse_self_link(from_id, to_id)
+        refuse_self_link(from_id, to_id)
         try:
             out = await self._request(
                 "POST", "/v1/links", params=self._params(),
@@ -534,7 +535,7 @@ class AsyncRemoteMemvara:
     async def purge(self, *, confirm_tenant: str | None = None) -> dict[str, int]:
         """See `RemoteMemvara.purge`, including its refusal while a project is bound."""
         scope = self.default_scope
-        _refuse_project_purge(scope)
+        refuse_project_purge(scope.project)
         body = await self._request(
             "POST", "/v1/erasures", params=self._params(),
             json=_sent({"scope": _sent({"user": scope.user, "agent": scope.agent,
