@@ -530,7 +530,10 @@ def test_the_wired_list_names_exactly_the_methods_that_do_not_raise():
     `NotImplementedError` is unwired, and everything else on the protocol is wired. That
     is the same rule a reader applies, applied by a machine.
     """
-    protocol = {name for name in dir(Store) if not name.startswith("_")}
+    # Methods only: `holds_documents` is a declared attribute, not a call that could reach
+    # the API or raise.
+    protocol = {name for name in dir(Store)
+                if not name.startswith("_") and callable(getattr(Store, name))}
     wired = set()
     for name in protocol:
         function = getattr(RemoteStore, name, None)

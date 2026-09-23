@@ -426,6 +426,10 @@ class RemoteStore:
 
     # --- documents: the facade serves them, not this class ------------------
 
+    #: Every document method below is a stub that raises, so this store does not hold
+    #: documents, and `Memvara` refuses them with that reason rather than meeting a stub.
+    holds_documents = False
+
     @staticmethod
     def _no_documents(method: str) -> str:
         return _NO_ENDPOINT.format(

@@ -1440,8 +1440,8 @@ The nine store methods (`put_document`, `get_document`, `find_document`,
 `claims_citing_any`, `erase_episodes`) are optional as a group, and a store that has them
 says so with `holds_documents = True`, which is what `Memvara` asks; see `OMITTABLE`.
 `RemoteStore` has each as a stub that raises and names the `RemoteMemvara` method to use,
-because the facade chunks, scope-checks and extracts server-side; it does not set the
-marker, so `Memvara(store=RemoteStore(...)).add_document()` is refused with that advice.
+because the facade chunks, scope-checks and extracts server-side; it sets the marker to
+false, so `Memvara(store=RemoteStore(...)).add_document()` is refused with that advice.
 
 ### Erasure removes the bytes, not just the rows
 

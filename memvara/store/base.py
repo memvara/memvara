@@ -375,6 +375,8 @@ OMITTABLE: dict[str, str] = {
     "document_chunks": "as put_document.",
     "put_document_chunks": "as put_document.",
     "delete_document": "as put_document.",
+    "holds_documents": "read as false: the document methods on Memvara raise "
+                       "NotImplementedError naming the store.",
     "claims_citing_any": "as put_document; deleting a document asks it about every chunk "
                          "at once.",
     "erase_episodes": "as put_document; deleting a document erases its chunks with it.",
@@ -389,6 +391,12 @@ OMITTABLE: dict[str, str] = {
 
 @runtime_checkable
 class Store(Protocol):
+    #: True on a store that implements the document methods below. `Memvara` asks this
+    #: rather than whether the methods exist, because a store can have them as stubs
+    #: that raise, as `RemoteStore` does. Optional, and read as false when absent; see
+    #: `OMITTABLE`.
+    holds_documents: bool = False
+
     # --- episodes ---------------------------------------------------------
     def add_episode(self, ep: Episode) -> None: ...
     def get_episode(self, episode_id: str) -> Episode | None: ...
