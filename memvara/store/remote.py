@@ -460,6 +460,12 @@ class RemoteStore:
     def delete_document(self, tenant: str, document_id: str) -> int:
         raise NotImplementedError(self._no_documents("delete_document"))
 
+    def claims_citing_any(self, tenant: str, episode_ids: Sequence[str]) -> list[Claim]:
+        raise NotImplementedError(self._no_documents("claims_citing_any"))
+
+    def erase_episodes(self, episode_ids: Sequence[str], *, cited: bool = False) -> int:
+        raise NotImplementedError(self._no_documents("erase_episodes"))
+
     def invalidate(self, claim_id: str, at: datetime, by: str | None) -> None:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="invalidate",

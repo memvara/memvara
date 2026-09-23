@@ -26,7 +26,6 @@ import inspect
 import json
 import os
 import warnings
-from contextlib import nullcontext
 from copy import copy
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -50,7 +49,7 @@ from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retr
 from .retrieve.shadow import shadowed
 from .schema import (Cardinality, PredicatePackError, PredicateRegistry, _slugify,
                      load_specs)
-from .store import SQLiteStore, Store, bulk_claims, resolve_states
+from .store import SQLiteStore, Store, bulk_claims, resolve_states, transaction
 from .telemetry import WRITE_LLM_CALLS, WRITE_TOKENS_IN, WRITE_TOKENS_OUT, Recorder
 from dataclasses import replace
 
@@ -1221,8 +1220,7 @@ class Memvara:
         # findable by BM25 and by `why()` — only its *vector* is missing — and because
         # `_index_episodes` skips turns that already have one, so a retry converges.
         receipt = self.writer.add(episodes)
-        batch = getattr(self.store, "batch", None)
-        with (batch() if batch is not None else nullcontext()):
+        with transaction(self.store):
             self._index_episodes(receipt.episode_ids)
         return receipt
 
@@ -1710,8 +1708,7 @@ class Memvara:
             for ep in episodes:
                 redact_episode(self.redactor, ep,
                                telemetry=self.writer.telemetry)
-        batch = getattr(self.store, "batch", None)
-        with (batch() if batch is not None else nullcontext()):
+        with transaction(self.store):
             for ep in episodes:
                 self.store.add_episode(ep)
             if retire is not None:
@@ -1952,8 +1949,7 @@ class Memvara:
         point is that the set stops answering, a partial answer is worse than either
         outcome. Nothing displaced these claims, so no successor is named.
         """
-        batch = getattr(self.store, "batch", None)
-        with (batch() if batch is not None else nullcontext()):
+        with transaction(self.store):
             for c in claims:
                 close_out(c, at, None, how, why)
                 self.store.put_claim(c)
@@ -2018,12 +2014,16 @@ class Memvara:
         values. `filepath` is a `/`-separated path you can list by later, and `meta` is
         your own JSON metadata.
 
-        `extract=True` runs the write pipeline over the new chunks. Chunks are
-        system-role episodes, and the default salience gate reads only user turns, so
-        with the default gate no fact is extracted from a document; it is stored and
-        searchable. The document's `status` records the outcome: `done`, or `failed`
-        with an `error` when extraction raised or was deferred. A failed document is
-        still stored and its chunks are still searchable.
+        `extract=True` runs the write pipeline over the new chunks, and the claims it
+        finds cite the chunk they came from. The salience gate accepts a document chunk
+        whatever its role. The fast path does not run on one, because it reads
+        first-person sentences as the user's own, so facts come from the model tier: a
+        `Memvara` with no `llm=` stores and indexes the document and extracts nothing.
+        The document's `status` records the outcome: `done` when every chunk has been
+        read, `stored` when a chunk was kept unread because you passed `extract=False`,
+        or `failed` with an `error` when extraction raised or was deferred. Adding a
+        failed or `stored` document again with extraction on reads the chunks no claim
+        cites yet. A document in any state is stored and its chunks are searchable.
 
         >>> from memvara import Memvara, HashingEmbedder
         >>> from memvara.llm.base import NullLLM
@@ -2060,8 +2060,8 @@ class Memvara:
         """The documents this scope can see, newest first, one page at a time.
 
         `filepath_prefix` keeps documents whose `filepath` starts with it, compared
-        character for character. `status` keeps one of `queued`, `extracting`, `done`
-        and `failed`. `limit` is between 1 and 1,000. Pass the returned page's
+        character for character. `status` keeps one of `queued`, `extracting`, `done`,
+        `stored` and `failed`. `limit` is between 1 and 1,000. Pass the returned page's
         `next_cursor` as `cursor` for the next page; it is `None` on the last one.
         """
         scope = self._scope(tenant, user, agent, session)
@@ -2070,20 +2070,23 @@ class Memvara:
 
     def update_document(self, id_or_custom_id: str, *, content: str | bytes | None = None,
                         title: str | None = None, meta: Mapping[str, Any] | None = None,
-                        filepath: str | None = None, extract: bool = True, tenant=None,
-                        user=None, agent=None, session=None) -> Document:
+                        filepath: str | None = None, mime: str | None = None,
+                        extract: bool = True, tenant=None, user=None, agent=None,
+                        session=None) -> Document:
         """Change a stored document. Arguments left as `None` keep their stored values.
 
         New `content` is re-ingested the way `add_document` with an existing `custom_id`
         is: chunks whose text is unchanged keep their episodes and the memories that cite
         them, and only new chunks are read for facts. `meta` replaces the stored
-        metadata. Raises `KeyError` for a document this scope cannot see, with the same
-        message whether it is missing or elsewhere.
+        metadata. `mime` is the type of the new content; left out, text keeps a stored
+        text type and bytes are handed to ingestion to detect, never read under the
+        stored type of the content they replace. Raises `KeyError` for a document this
+        scope cannot see, with the same message whether it is missing or elsewhere.
         """
         scope = self._scope(tenant, user, agent, session)
         return self._documents.update(scope, id_or_custom_id, content=content,
                                       title=title, meta=meta, filepath=filepath,
-                                      extract=extract)
+                                      mime=mime, extract=extract)
 
     def delete_document(self, id_or_custom_id: str, *, tenant=None, user=None,
                         agent=None, session=None) -> DeleteResult:
@@ -2112,8 +2115,8 @@ class Memvara:
 
     def document_status(self, id_or_custom_id: str, *, tenant=None, user=None,
                         agent=None, session=None) -> DocumentStatus:
-        """Where a document is in processing: `queued`, `extracting`, `done` or `failed`,
-        with the error when it failed. Raises `KeyError` for a document this scope cannot
+        """Where a document is in processing: `queued`, `extracting`, `done`, `stored`
+        or `failed`, with the error when it failed. See `types.DocumentState`. Raises `KeyError` for a document this scope cannot
         see."""
         scope = self._scope(tenant, user, agent, session)
         return self._documents.status(scope, id_or_custom_id)
@@ -3944,8 +3947,7 @@ class Memvara:
 
         _drop_vectors(self.store)
 
-        batch = getattr(self.store, "batch", None)
-        with (batch() if batch is not None else nullcontext()):
+        with transaction(self.store):
             embedded = self._reencode(
                 self.store.iter_claims(include_invalidated=True),
                 lambda c: c.text, self.store.set_embedding, batch_size)
@@ -4232,10 +4234,11 @@ class ScopedMemvara:
 
     def update_document(self, id_or_custom_id: str, *, content: str | bytes | None = None,
                         title: str | None = None, meta: Mapping[str, Any] | None = None,
-                        filepath: str | None = None, extract: bool = True) -> Document:
+                        filepath: str | None = None, mime: str | None = None,
+                        extract: bool = True) -> Document:
         return self._mem.update_document(id_or_custom_id, content=content, title=title,
-                                         meta=meta, filepath=filepath, extract=extract,
-                                         **self._kw)
+                                         meta=meta, filepath=filepath, mime=mime,
+                                         extract=extract, **self._kw)
 
     def delete_document(self, id_or_custom_id: str) -> DeleteResult:
         return self._mem.delete_document(id_or_custom_id, **self._kw)

@@ -171,15 +171,16 @@ SCHEMA_VERSION = 14
 
 # The two document tables, created by `_migrate_to_v14`.
 #
-# A document row describes the text; the text itself is in `document_chunks`, one row
-# per chunk, each naming the episode it was stored as. The scope is held twice: as its
-# parts, so `_scope_clause` can filter documents exactly the way it filters claims and
-# episodes, and as `scope_key`, so a caller's own id (`custom_id`) can be unique per
-# scope with one index.
+# A document row describes the text; `document_chunks` lists its chunks, one row each,
+# naming the episode the chunk was stored as. The text itself lives only in that episode,
+# and `document_chunks` reads it through `episode_id`, so no second copy of it exists to
+# be missed by an erasure. The scope is held twice: as its parts, so `_scope_clause` can
+# filter documents exactly the way it filters claims and episodes, and as `scope_key`,
+# so a caller's own id (`custom_id`) can be unique per scope with one index.
 #
-# `document_chunks.text` repeats the episode's text. It is kept because the design
-# names it and because re-ingest matches on it; the cost is that every path that erases
-# an episode must erase the chunk row that repeats it, which `_erase_row` and `purge` do.
+# A chunk episode belongs to its document. `_held` reports it, and the episode erasure
+# paths refuse such an episode, so only `delete_document`, a re-ingest and `purge`
+# remove a document's text.
 _DOCUMENTS_DDL = ("""
 CREATE TABLE IF NOT EXISTS documents (
     tenant       TEXT NOT NULL,
@@ -196,7 +197,7 @@ CREATE TABLE IF NOT EXISTS documents (
     mime         TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     status       TEXT NOT NULL
-                 CHECK (status IN ('queued', 'extracting', 'done', 'failed')),
+                 CHECK (status IN ('queued', 'extracting', 'done', 'stored', 'failed')),
     error        TEXT,
     meta         TEXT NOT NULL DEFAULT '{}',
     created_at   REAL NOT NULL,
@@ -214,14 +215,34 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     tenant      TEXT NOT NULL,
     document_id TEXT NOT NULL,
     position    INTEGER NOT NULL,
-    text        TEXT NOT NULL,
     hash        TEXT NOT NULL,
     episode_id  TEXT NOT NULL,
     PRIMARY KEY (tenant, document_id, position)
 ) WITHOUT ROWID""",
-    # Erasing an episode has to find the chunk row that repeats its text.
+    # `_held` asks whether any document still lists an episode.
     "CREATE INDEX IF NOT EXISTS dchunk_episode ON document_chunks(episode_id)",
 )
+
+_DOCUMENT_FIELDS = ("tenant", "id", "custom_id", "scope_key", "usr", "agent", "session",
+                    "project", "title", "filepath", "source_uri", "mime", "content_hash",
+                    "status", "error", "meta", "created_at", "updated_at")
+
+# Keyed on `(tenant, id)`, so rewriting a document's status keeps its rowid and its place
+# in every index, as `_EPISODE_UPSERT` does for an episode.
+_DOCUMENT_UPSERT = (
+    f"INSERT INTO documents ({', '.join(_DOCUMENT_FIELDS)}) "
+    f"VALUES ({', '.join('?' * len(_DOCUMENT_FIELDS))}) "
+    "ON CONFLICT (tenant, id) DO UPDATE SET "
+    + ", ".join(f"{f}=excluded.{f}" for f in _DOCUMENT_FIELDS if f not in ("tenant", "id"))
+)
+
+# Every document column plus how many chunks it has, counted by one aggregate join in the
+# same statement, so the count cannot disagree with the row it is reported beside.
+# `{where}` is filled in by the caller and always names the `d` alias.
+_DOCUMENT_SELECT = (
+    "SELECT d.*, COUNT(c.position) AS n_chunks FROM documents d "
+    "LEFT JOIN document_chunks c ON c.tenant = d.tenant AND c.document_id = d.id "
+    "WHERE {where} GROUP BY d.tenant, d.id")
 
 # The typed-link table, created by `_migrate_to_v13` on a new file and an old one alike.
 #
@@ -1201,6 +1222,10 @@ _SLOT_CHUNK = 900
 
 class SQLiteStore:
     """Reference `Store` implementation. Single file, no server, no Docker."""
+
+    #: This store implements the document methods. `Memvara` asks this marker rather
+    #: than the methods' presence; see `OMITTABLE`.
+    holds_documents = True
 
     def __init__(self, path: str = ":memory:") -> None:
         if sqlite3.sqlite_version_info < _MIN_SQLITE:
@@ -2549,6 +2574,24 @@ class SQLiteStore:
             ).fetchall()
         return [self._row_to_claim(r) for r in rows]
 
+    def claims_citing_any(self, tenant: str, episode_ids: Sequence[str]) -> list[Claim]:
+        """Every claim that cites at least one of these turns, each once, in insertion
+        order. `claims_citing` over a set, in one query per 900 ids rather than one per
+        turn; deleting a document asks it about every chunk at once."""
+        ids = list(dict.fromkeys(episode_ids))
+        rows: dict[str, sqlite3.Row] = {}
+        with self._read() as conn:
+            for i in range(0, len(ids), _MAX_SQL_PARAMS):
+                part = ids[i:i + _MAX_SQL_PARAMS]
+                for r in conn.execute(
+                        "SELECT DISTINCT c.*, c.rowid AS _row FROM claim_sources s "
+                        "JOIN claims c ON c.id = s.claim_id WHERE c.tenant = ? AND "
+                        f"s.episode_id IN ({','.join('?' * len(part))})",
+                        [tenant, *part]):
+                    rows[r["id"]] = r
+        return [self._row_to_claim(r)
+                for r in sorted(rows.values(), key=lambda r: r["_row"])]
+
     def _erase_row(self, table: str, fts: str, t: _VecTable,
                    item_id: str) -> tuple[bool, int]:
         """Erase one row and everything derived from its text. Caller holds the lock.
@@ -2579,12 +2622,6 @@ class SQLiteStore:
         # and a vector left behind is the text left behind.
         self._vec.forget(item_id)
         self._mark(t, item_id)
-        if table == "episodes":
-            # A document chunk repeats its episode's text, so the chunk row goes with the
-            # episode. Left behind, an erased turn would still be readable in
-            # `document_chunks` while every erasure count said it was gone.
-            self._db.execute("DELETE FROM document_chunks WHERE episode_id=?",
-                             (item_id,))
         self._db.execute(f"DELETE FROM {table} WHERE id=?", (item_id,))
         return True, vectors
 
@@ -2605,25 +2642,69 @@ class SQLiteStore:
         The writer's connection, not `_read()`: the caller is mid-erasure inside the
         write lock, and a snapshot predating the claim deleted two statements ago would
         have that claim vote to keep its own source turn.
+
+        A turn a document still lists is not an orphan either. It is that document's
+        text, and erasing it here would leave the document reporting a digest and a chunk
+        count its text no longer has; see `_held`.
         """
-        hit = self._db.execute(
-            "SELECT 1 FROM claim_sources s JOIN claims c ON c.id = s.claim_id "
-            "WHERE s.episode_id = ? LIMIT 1", (episode_id,)).fetchone()
-        return hit is None
+        return not (self._cited([episode_id]) or self._held([episode_id]))
+
+    def _cited(self, episode_ids: Sequence[str]) -> set[str]:
+        """Which of these turns a surviving claim cites. Writer connection, as `_orphan`."""
+        return self._matching(
+            "SELECT DISTINCT s.episode_id FROM claim_sources s "
+            "JOIN claims c ON c.id = s.claim_id WHERE s.episode_id IN ({marks})",
+            episode_ids)
+
+    def _held(self, episode_ids: Sequence[str]) -> set[str]:
+        """Which of these turns a document still lists as one of its chunks.
+
+        A chunk episode belongs to its document, so no episode erasure removes it while
+        the document lists it, whatever `cited` says: `delete_document` and a re-ingest
+        drop the chunk rows first and then erase the episodes, and `purge` takes the
+        document with the scope.
+        """
+        return self._matching(
+            "SELECT DISTINCT episode_id FROM document_chunks "
+            "WHERE episode_id IN ({marks})", episode_ids)
+
+    def _matching(self, sql: str, ids: Sequence[str]) -> set[str]:
+        """The first column of `sql` over `ids`, in chunks below the parameter limit."""
+        found: set[str] = set()
+        for i in range(0, len(ids), _MAX_SQL_PARAMS):
+            part = list(ids[i:i + _MAX_SQL_PARAMS])
+            found |= {r[0] for r in self._db.execute(
+                sql.format(marks=",".join("?" * len(part))), part)}
+        return found
 
     def erase_episode(self, episode_id: str, *, cited: bool = False) -> bool:
         """Erase one turn. See `Store.erase_episode` for why this exists separately.
 
         The citation check is the whole subtlety: refusing by default keeps `why()` from
         resolving to nothing, and `cited=True` is the escape hatch a transcript-retention
-        rule needs. `_orphan` already answers the question, and answers it exactly —
-        it joins back to `claims` rather than matching JSON text.
+        rule needs. `_cited` answers the question exactly — it joins back to `claims`
+        rather than matching JSON text. A turn a document still lists is refused either
+        way; see `_held`.
         """
+        return self.erase_episodes([episode_id], cited=cited) == 1
+
+    def erase_episodes(self, episode_ids: Sequence[str], *, cited: bool = False) -> int:
+        """`erase_episode` over many turns, under one lock and one commit. Returns how
+        many were erased.
+
+        Which turns may go is decided by two set queries rather than two per turn, and
+        the erasure itself runs in one transaction, so erasing a document's hundred
+        chunks is one write rather than a hundred.
+        """
+        ids = list(dict.fromkeys(episode_ids))
         with self._lock:
-            if not cited and not self._orphan(episode_id):
-                return False
-            erased, _ = self._erase_row("episodes", "episodes_fts", _EPISODE_VECS,
-                                        episode_id)
+            keep = self._held(ids) | (set() if cited else self._cited(ids))
+            erased = 0
+            for episode_id in ids:
+                if episode_id not in keep:
+                    gone, _ = self._erase_row("episodes", "episodes_fts",
+                                              _EPISODE_VECS, episode_id)
+                    erased += gone
             self._maybe_commit()
         return erased
 
@@ -2869,16 +2950,6 @@ class SQLiteStore:
 
     # -- documents -----------------------------------------------------------
 
-    _DOC_FIELDS = ("tenant", "id", "custom_id", "scope_key", "usr", "agent", "session",
-                   "project", "title", "filepath", "source_uri", "mime", "content_hash",
-                   "status", "error", "meta", "created_at", "updated_at")
-
-    #: Every document column plus how many chunks it has, counted in the same statement
-    #: so the count cannot disagree with the row it is reported beside.
-    _DOC_SELECT = ("SELECT d.*, (SELECT COUNT(*) FROM document_chunks c "
-                   "WHERE c.tenant = d.tenant AND c.document_id = d.id) AS n_chunks "
-                   "FROM documents d")
-
     @staticmethod
     def _row_to_document(r: sqlite3.Row) -> Document:
         return Document(
@@ -2901,26 +2972,21 @@ class SQLiteStore:
                   doc.content_hash, doc.status, doc.error, json.dumps(doc.meta),
                   _ts(doc.created_at), _ts(doc.updated_at))
         with self._lock:
-            self._db.execute(
-                f"INSERT INTO documents ({', '.join(self._DOC_FIELDS)}) "
-                f"VALUES ({', '.join('?' * len(self._DOC_FIELDS))}) "
-                "ON CONFLICT (tenant, id) DO UPDATE SET "
-                + ", ".join(f"{f}=excluded.{f}" for f in self._DOC_FIELDS
-                            if f not in ("tenant", "id")),
-                values)
+            self._db.execute(_DOCUMENT_UPSERT, values)
             self._maybe_commit()
 
     def get_document(self, tenant: str, document_id: str) -> Document | None:
         with self._read() as conn:
-            r = conn.execute(f"{self._DOC_SELECT} WHERE d.tenant = ? AND d.id = ?",
+            r = conn.execute(_DOCUMENT_SELECT.format(where="d.tenant = ? AND d.id = ?"),
                              (tenant, document_id)).fetchone()
         return self._row_to_document(r) if r else None
 
     def find_document(self, scope: Scope, custom_id: str) -> Document | None:
         with self._read() as conn:
             r = conn.execute(
-                f"{self._DOC_SELECT} WHERE d.tenant = ? AND d.scope_key = ? "
-                "AND d.custom_id = ?", (scope.tenant, scope.key(), custom_id)).fetchone()
+                _DOCUMENT_SELECT.format(
+                    where="d.tenant = ? AND d.scope_key = ? AND d.custom_id = ?"),
+                (scope.tenant, scope.key(), custom_id)).fetchone()
         return self._row_to_document(r) if r else None
 
     def list_documents(self, scopes: Sequence[Scope], *,
@@ -2947,20 +3013,23 @@ class SQLiteStore:
             where.append("(d.created_at < ? OR (d.created_at = ? AND d.id < ?))")
             at = _ts(after[0])
             params += [at, at, after[1]]
-        sql = (f"{self._DOC_SELECT} WHERE {' AND '.join(where)} "
-               "ORDER BY d.created_at DESC, d.id DESC LIMIT ?")
+        sql = (_DOCUMENT_SELECT.format(where=" AND ".join(where))
+               + " ORDER BY d.created_at DESC, d.id DESC LIMIT ?")
         params.append(max(limit, 0))
         with self._read() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [self._row_to_document(r) for r in rows]
 
     def document_chunks(self, tenant: str, document_id: str) -> list[DocumentChunk]:
+        """Every chunk of one document in position order, its text read from its
+        episode."""
         with self._read() as conn:
             rows = conn.execute(
-                "SELECT position, text, hash, episode_id FROM document_chunks "
-                "WHERE tenant = ? AND document_id = ? ORDER BY position",
+                "SELECT c.position, e.content, c.hash, c.episode_id FROM document_chunks c "
+                "JOIN episodes e ON e.id = c.episode_id "
+                "WHERE c.tenant = ? AND c.document_id = ? ORDER BY c.position",
                 (tenant, document_id)).fetchall()
-        return [DocumentChunk(r["position"], r["text"], r["hash"], r["episode_id"])
+        return [DocumentChunk(r["position"], r["content"], r["hash"], r["episode_id"])
                 for r in rows]
 
     def put_document_chunks(self, tenant: str, document_id: str,
@@ -2972,9 +3041,8 @@ class SQLiteStore:
                 (tenant, document_id))
             self._db.executemany(
                 "INSERT INTO document_chunks "
-                "(tenant, document_id, position, text, hash, episode_id) "
-                "VALUES (?,?,?,?,?,?)",
-                [(tenant, document_id, c.position, c.text, c.hash, c.episode_id)
+                "(tenant, document_id, position, hash, episode_id) VALUES (?,?,?,?,?)",
+                [(tenant, document_id, c.position, c.hash, c.episode_id)
                  for c in chunks])
             self._maybe_commit()
 
@@ -2982,8 +3050,8 @@ class SQLiteStore:
         """Delete one document row and its chunk rows. Returns the chunk rows deleted.
 
         The chunk episodes are not touched here. `Memvara.delete_document` erases them
-        with `erase_episode`, after it has decided what happens to the claims that cite
-        them.
+        with `erase_episodes` once this has run, which is what stops `_held` protecting
+        them, after it has decided what happens to the claims that cite them.
         """
         with self._lock:
             chunks = self._db.execute(
@@ -3069,17 +3137,15 @@ class SQLiteStore:
                 f"to_id IN (SELECT id FROM claims WHERE {where}))",
                 [scope.tenant, *params, *params])
             claims = self._db.execute(f"DELETE FROM claims WHERE {where}", params).rowcount
-            # Documents in the scope, and every chunk row that names one of the episodes
-            # about to go. The chunk rows repeat the episodes' text and the document rows
-            # hold titles and file paths, so both are part of what a purge erases. Not
-            # counted separately: the four keys are the erasure contract `erase_claim`
-            # shares, and the text the chunk rows repeat is counted under `episodes`.
-            self._db.execute(
-                "DELETE FROM document_chunks WHERE tenant = ? AND (document_id IN "
-                f"(SELECT id FROM documents WHERE {where}) OR episode_id IN "
-                f"(SELECT id FROM episodes WHERE {where}))",
-                [scope.tenant, *params, *params])
-            self._db.execute(f"DELETE FROM documents WHERE {where}", params)
+            # The scope's documents and their chunk rows. The document rows hold titles,
+            # file paths and digests, so they are part of what a purge erases, and both
+            # are counted as evidence beside the four keys `erase_claim` shares.
+            chunk_rows = self._db.execute(
+                "DELETE FROM document_chunks WHERE tenant = ? AND document_id IN "
+                f"(SELECT id FROM documents WHERE {where})",
+                [scope.tenant, *params]).rowcount
+            documents = self._db.execute(
+                f"DELETE FROM documents WHERE {where}", params).rowcount
             episodes = self._db.execute(
                 f"DELETE FROM episodes WHERE {where}", params
             ).rowcount
@@ -3088,7 +3154,8 @@ class SQLiteStore:
             # enclosing `batch()` early and silently void its rollback guarantee.
             self._maybe_commit()
         return {"claims": claims, "episodes": episodes, "embeddings": gone,
-                "entities": entities}
+                "entities": entities, "documents": documents,
+                "document_chunks": chunk_rows}
 
     def _gc_entities(self, tenant: str) -> int:
         """Drop entity rows in `tenant` that no surviving claim refers to.

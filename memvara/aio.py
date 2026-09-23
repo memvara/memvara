@@ -262,14 +262,14 @@ class AsyncMemvara:
                               content: str | bytes | None = None,
                               title: str | None = None,
                               meta: Mapping[str, Any] | None = None,
-                              filepath: str | None = None, extract: bool = True,
-                              tenant=None, user=None, agent=None,
+                              filepath: str | None = None, mime: str | None = None,
+                              extract: bool = True, tenant=None, user=None, agent=None,
                               session=None) -> Document:
         """See `Memvara.update_document`."""
         return await asyncio.to_thread(
             self.memvara.update_document, id_or_custom_id, content=content, title=title,
-            meta=meta, filepath=filepath, extract=extract, tenant=tenant, user=user,
-            agent=agent, session=session)
+            meta=meta, filepath=filepath, mime=mime, extract=extract, tenant=tenant,
+            user=user, agent=agent, session=session)
 
     async def delete_document(self, id_or_custom_id: str, *, tenant=None, user=None,
                               agent=None, session=None) -> DeleteResult:
@@ -774,11 +774,11 @@ class AsyncScopedMemvara:
                               content: str | bytes | None = None,
                               title: str | None = None,
                               meta: Mapping[str, Any] | None = None,
-                              filepath: str | None = None,
+                              filepath: str | None = None, mime: str | None = None,
                               extract: bool = True) -> Document:
         return await self._amem.update_document(
             id_or_custom_id, content=content, title=title, meta=meta, filepath=filepath,
-            extract=extract, **self._kw)
+            mime=mime, extract=extract, **self._kw)
 
     async def delete_document(self, id_or_custom_id: str) -> DeleteResult:
         return await self._amem.delete_document(id_or_custom_id, **self._kw)

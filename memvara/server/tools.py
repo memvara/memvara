@@ -2064,21 +2064,15 @@ def _document_lines(doc: Document) -> list[str]:
 
 
 def _add_document(ctx: ToolContext, args: dict[str, Any]) -> str:
-    content, url = args.get("content"), args.get("url")
-    if (content is None) == (url is None):
-        raise ToolError(
-            "memory_add_document needs exactly one of content (the text itself) and url "
-            "(a page for the server to fetch).")
     try:
         doc = ctx.memory.add_document(
-            content, url=url, custom_id=args.get("custom_id"), title=args.get("title"),
-            filepath=args.get("filepath"), mime=args.get("mime"),
+            args.get("content"), url=args.get("url"), custom_id=args.get("custom_id"),
+            title=args.get("title"), filepath=args.get("filepath"), mime=args.get("mime"),
             meta=args.get("metadata"))
-    except NotImplementedError as exc:
-        # No ingestion support for a URL or a non-text type. The message says what to
+    except (TypeError, NotImplementedError, ValueError) as exc:
+        # Neither or both of content and url, no ingestion support for a URL or a
+        # non-text type, or an argument the store refuses. Each message says what to
         # send instead, which is the thing a model can act on.
-        raise ToolError(f"Nothing stored: {safe_detail(exc)}") from None
-    except ValueError as exc:
         raise ToolError(f"Nothing stored: {safe_detail(exc)}") from None
     tail = ("Its chunks are searchable now: memory_recall with include_episodes true "
             "returns passages from it.")
@@ -2995,9 +2989,11 @@ TOOLS: tuple[Tool, ...] = (
             "second copy, and every unchanged chunk, with any memory that cites it, "
             "stays as it was. A url, or a mime type other than plain text or Markdown, "
             "needs ingestion support on the server and is refused with the reason when "
-            "there is none. The result gives the document id and its status: 'done', or "
-            "'failed' with the reason, in which case the document is still stored and "
-            "searchable."
+            "there is none. Facts in the document are extracted and cite the passage "
+            "they came from, when this server has an extraction model. The result gives "
+            "the document id and its status: 'done', or 'failed' with the reason, in "
+            "which case the document is still stored and searchable, and sending it "
+            "again retries what was not read."
         ),
         properties={
             "content": {
@@ -3050,7 +3046,8 @@ TOOLS: tuple[Tool, ...] = (
         description=(
             "Show one stored document's record: its title, file path, where it came "
             "from, how many chunks it is stored as, and its processing status, which is "
-            "'queued', 'extracting', 'done', or 'failed' with the reason. Call it when you "
+            "'queued', 'extracting', 'done', 'stored' (kept without reading it for "
+            "facts), or 'failed' with the reason. Call it when you "
             "need to check that a document you added was stored, or to look a document "
             "up by the custom_id you gave it. It does not return the text: memory_recall "
             "with "

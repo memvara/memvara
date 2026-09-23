@@ -14,12 +14,15 @@ chunker that packed sentences until each chunk was full would place every bounda
 counting from the top of the document, so a word added in the first paragraph would move
 every boundary after it, and a re-ingest would find no chunk unchanged. Here a chunk ends
 at a *cut point*: a sentence whose own digest falls below a threshold proportional to its
-length, which on average puts one cut point every `_MEAN_GAP` characters. A chunk ends at
-the first cut point once it holds at least `_MIN_CHARS`, or earlier if the next sentence
-would take it over `CHUNK_CHARS`. After an edit, the old and the new text reach the same
-cut point within a chunk or two and are chunked identically from there on. So an edit
-usually changes the chunks it touches and the one after it. The one after it changes
-because it begins with the overlap described next.
+length, which on average puts one every `_MEAN_GAP` characters, and which comes at least
+`_MIN_CHARS` after the previous cut point. Cut points are chosen from the sentences alone,
+before any chunk is formed. Where a stretch between two cut points is longer than
+`CHUNK_CHARS`, a chunk also ends before the sentence that would overflow it; such a
+forced split moves no cut point, so its effect stays inside its own stretch. After an
+edit, the old and the new text reach the same cut point within a sentence or two and are
+chunked identically from there on. So an edit usually changes the chunks it touches and
+the one after it. The one after it changes because it begins with the overlap described
+next.
 
 **Each chunk repeats the end of the one before it.** Up to `CHUNK_OVERLAP` characters of
 whole sentences from the end of the previous chunk are repeated at the start of the
@@ -137,6 +140,24 @@ def _overlap_start(text: str, spans: list[tuple[int, int]], first: int, last: in
     return cut + 1 if cut != -1 else end - CHUNK_OVERLAP
 
 
+def _cut_points(text: str, spans: list[tuple[int, int]]) -> set[int]:
+    """The sentences a chunk ends after, chosen from the sentences alone.
+
+    A sentence is a cut point when `_is_cut_point` says so and at least `_MIN_CHARS`
+    have passed since the previous cut point. Measured from the previous cut point and
+    not from the start of the current chunk, so a forced split between two cut points
+    changes neither of them; an edit therefore moves a cut point only through the
+    sentences between it and the one before.
+    """
+    cuts: set[int] = set()
+    since = 0
+    for i, (start, end) in enumerate(spans):
+        if end - spans[since][0] >= _MIN_CHARS and _is_cut_point(text[start:end]):
+            cuts.add(i)
+            since = i + 1
+    return cuts
+
+
 def split(text: str) -> list[str]:
     """Split normalised text into retrieval chunks. See the module docstring.
 
@@ -146,13 +167,17 @@ def split(text: str) -> list[str]:
     True
     """
     spans = _sentences(text)
+    cuts = _cut_points(text, spans)
     groups: list[tuple[int, int]] = []
     first = 0
     for i, (start, end) in enumerate(spans):
         if i > first and end - spans[first][0] > CHUNK_CHARS:
+            # A forced split, in a stretch with no cut point for a whole chunk. It
+            # decides where this chunk ends and nothing else: the cut points were chosen
+            # before it, so it cannot move one.
             groups.append((first, i - 1))
             first = i
-        if end - spans[first][0] >= _MIN_CHARS and _is_cut_point(text[start:end]):
+        if i in cuts:
             groups.append((first, i))
             first = i + 1
     if first < len(spans):

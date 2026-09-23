@@ -76,10 +76,21 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     erased. A claim whose every source was one of those episodes is retired with the
     reason "source document deleted"; a claim with another source keeps it.
     `DeleteResult` lists both.
-  - **A failed extraction keeps the document.** Its `status` is `failed` with an
-    `error`, and its chunks stay searchable. Chunks are system-role episodes, so with the
-    default salience gate, which reads user turns only, no fact is extracted from a
-    document.
+  - **New chunks are read for facts**, and the claims found cite the chunk. The salience
+    gate accepts a document chunk whatever its role; the fast path does not run on one,
+    because it reads first-person sentences as the user's own, so facts come from the
+    model tier. `status` is `done` when every chunk has been read, `stored` when a chunk
+    was kept unread with `extract=False` (a later `reextract()` sweep keeps that choice),
+    or `failed` with an `error`. Adding a failed or `stored` document again with
+    extraction on reads the chunks no claim cites yet. A document in any state is stored
+    and searchable.
+  - **A chunk episode belongs to its document.** `erase(sources=True)`, `erase_episode`
+    and `erase_episodes` keep an episode a document still lists, so only
+    `delete_document`, a re-ingest and `purge` remove a document's text. `purge` reports
+    `documents` and `document_chunks` beside its four other counts.
+  - Two concurrent adds of one `custom_id` store one document: the lookup and the write
+    share a transaction. `update_document(mime=)` names the type of new content; left
+    out, bytes are handed to ingestion to detect.
   - A URL, `bytes`, HTML or any non-text type goes through `memvara.ingest.extract()`,
     the ingestion package built separately. Without it installed the call raises
     `NotImplementedError` saying so; plain text and Markdown need nothing.

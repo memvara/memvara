@@ -31,9 +31,10 @@ from ..types import (
     Answer, Claim, DeleteResult, Delta, Document, DocumentStatus, Episode,
     ForgetPreview, ForgetResult, Link, MemoryType, Page, Profile, Provenance, Result,
     Scope, SearchResults, WriteReceipt, closure, closure_reason, link_relation,
+    one_source,
 )
 from . import hydrate
-from .api import (PROJECT_HEADER, _document_fields, _document_path, _hit, _iso,
+from .api import (PROJECT_HEADER, _document_body, _document_path, _hit, _iso,
                   _refuse_project_meta, _sent, _states, _type, _types)
 from .client import DEFAULT_TIMEOUT, AsyncHttpClient
 from .creds import resolve
@@ -523,16 +524,12 @@ class AsyncRemoteMemvara:
                            mime: str | None = None, meta: Mapping[str, Any] | None = None,
                            extract: bool = True) -> Document:
         """See `RemoteMemvara.add_document`."""
-        if (content is None) == (url is None):
-            raise TypeError("add_document() needs exactly one of content and url")
-        body = {**_document_fields(content, self.redactor is not None, self._redact),
-                "url": url, "custom_id": custom_id,
-                "title": self._redact(title, EPISODE), "filepath": filepath,
-                "mime": mime, "metadata": None if meta is None else dict(meta),
-                "extract": extract}
+        one_source(content, url)
+        body = _document_body(self.redactor, self._redact, content, url=url,
+                              custom_id=custom_id, title=title, filepath=filepath,
+                              mime=mime, meta=meta, extract=extract)
         return hydrate.document(await self._request(
-            "POST", "/v1/documents", params=self._params(), json=_sent(body),
-            write=True))
+            "POST", "/v1/documents", params=self._params(), json=body, write=True))
 
     async def get_document(self, id_or_custom_id: str) -> Document | None:
         try:
@@ -553,15 +550,14 @@ class AsyncRemoteMemvara:
                               content: str | bytes | None = None,
                               title: str | None = None,
                               meta: Mapping[str, Any] | None = None,
-                              filepath: str | None = None,
+                              filepath: str | None = None, mime: str | None = None,
                               extract: bool = True) -> Document:
-        body = {**_document_fields(content, self.redactor is not None, self._redact),
-                "title": self._redact(title, EPISODE), "filepath": filepath,
-                "metadata": None if meta is None else dict(meta), "extract": extract}
+        body = _document_body(self.redactor, self._redact, content, title=title,
+                              filepath=filepath, mime=mime, meta=meta, extract=extract)
         try:
             return hydrate.document(await self._request(
                 "PATCH", _document_path(id_or_custom_id), params=self._params(),
-                json=_sent(body), write=True))
+                json=body, write=True))
         except NotFound:
             raise KeyError(f"no document {id_or_custom_id!r} is visible here") from None
 
@@ -861,11 +857,11 @@ class AsyncScopedRemoteMemvara:
                               content: str | bytes | None = None,
                               title: str | None = None,
                               meta: Mapping[str, Any] | None = None,
-                              filepath: str | None = None,
+                              filepath: str | None = None, mime: str | None = None,
                               extract: bool = True) -> Document:
         return await self._mem.update_document(
             id_or_custom_id, content=content, title=title, meta=meta, filepath=filepath,
-            extract=extract)
+            mime=mime, extract=extract)
 
     async def delete_document(self, id_or_custom_id: str) -> DeleteResult:
         return await self._mem.delete_document(id_or_custom_id)

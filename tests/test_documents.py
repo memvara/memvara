@@ -20,7 +20,7 @@ import pytest
 
 from memvara import HashingEmbedder, Memvara, NullLLM, SQLiteStore
 from memvara.documents import CHUNK_CHARS, CHUNK_OVERLAP, normalise, split
-from memvara.documents.chunk import _MIN_CHARS
+from memvara.documents.chunk import _MIN_CHARS, _cut_points, _sentences
 from memvara.store.sqlite import SCHEMA_VERSION
 from memvara.types import (DOCUMENT_DELETED_REASON, DOCUMENT_META, Episode, Scope,
                            closure_reasons, content_hash)
@@ -76,18 +76,42 @@ def test_each_chunk_repeats_whole_sentences_from_the_end_of_the_one_before():
             assert after[0].isupper(), "the overlap begins mid-sentence"
 
 
-def test_an_edit_near_the_top_changes_at_most_two_chunks():
+def test_an_edit_in_any_paragraph_changes_at_most_two_chunks():
     """The property re-ingest by content digest depends on. A packer that filled chunks
     from the top would move every boundary after an edit, and a re-ingest would find no
     chunk unchanged; boundaries chosen by local content resynchronise within a chunk or
     two, and the chunk after an edit changes only because it repeats the edited text."""
     paragraphs = prose(40)
-    before = split(normalise("\n\n".join(paragraphs)))
-    for where in (0, 20, 39):
+    text = normalise("\n\n".join(paragraphs))
+    before = split(text)
+    # The document crosses forced splits, stretches with no cut point for a whole chunk,
+    # so the edits below also land beside them.
+    spans = _sentences(text)
+    cut_ends = {spans[i][1] for i in _cut_points(text, spans)}
+    forced = [c for c in before[:-1] if text.find(c) + len(c) not in cut_ends]
+    assert len(forced) >= 5
+    for where in range(40):
         edited = list(paragraphs)
         edited[where] = "An inserted sentence changes this paragraph. " + edited[where]
         after = split(normalise("\n\n".join(edited)))
         assert len(set(after) - set(before)) <= 2, where
+
+
+def test_edits_across_ten_documents_change_at_most_two_chunks_almost_always():
+    """The measured rate behind the sentence in `chunk.py`, over 400 edits. Cut points
+    are chosen before any forced split, so a forced split cannot move one; with the
+    minimum counted from the start of the chunk instead, as the first version did, 24
+    of the 400 edits changed three or four chunks. This way it is 10, and none more than
+    four."""
+    changed = []
+    for seed in range(7, 17):
+        paragraphs = prose(40, seed=seed)
+        before = set(split(normalise("\n\n".join(paragraphs))))
+        for where in range(40):
+            edited = list(paragraphs)
+            edited[where] = "An inserted sentence changes this paragraph. " + edited[where]
+            changed.append(len(set(split(normalise("\n\n".join(edited)))) - before))
+    assert sum(n > 2 for n in changed) <= 10 and max(changed) <= 4
 
 
 def test_a_sentence_longer_than_a_chunk_is_cut_at_word_boundaries():
@@ -314,6 +338,78 @@ def test_reingesting_identical_text_changes_nothing_and_extracts_nothing():
     assert spy.calls == []
 
 
+def test_an_empty_title_is_a_title_on_add_and_on_update():
+    """`is not None`, not truthiness: an explicit "" replaces the stored title."""
+    m = mem()
+    assert m.add_document("Text.", title="").title == ""
+    m.add_document("Text.", custom_id="c", title="Old")
+    assert m.add_document("Text.", custom_id="c", title="").title == ""
+    assert m.update_document("c", title="").title == ""
+    assert m.get_document("c").title == ""
+
+
+def test_the_custom_id_lookup_and_the_write_share_one_transaction():
+    """Two concurrent adds of one `custom_id` must not both miss the lookup; the second
+    inserting would meet the unique index as a raw IntegrityError. The lookup runs inside
+    the transaction that writes the rows, which holds the store's write lock."""
+    m = mem()
+    depths: list[int] = []
+    real = m.store.find_document
+
+    def find(scope, custom_id):
+        depths.append(m.store._batch_depth)
+        return real(scope, custom_id)
+
+    m.store.find_document = find  # type: ignore[method-assign]
+    m.add_document("Text.", custom_id="c")
+    m.add_document("Text two.", custom_id="c")
+    assert depths and all(d > 0 for d in depths)
+
+
+def test_concurrent_adds_of_one_custom_id_store_one_document(tmp_path):
+    import threading
+    m = mem(path=str(tmp_path / "docs.db"))
+    text = "\n\n".join(prose(6))
+    errors: list[BaseException] = []
+    start = threading.Barrier(8)
+
+    def add():
+        try:
+            start.wait()
+            m.add_document(text, custom_id="shared")
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=add) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    docs = m.list_documents().items
+    assert len(docs) == 1
+    chunks = m.store.document_chunks("default", docs[0].id)
+    episodes = m.store._db.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+    assert episodes == len({c.episode_id for c in chunks})
+    m.close()
+
+
+def test_update_reads_new_content_under_the_mime_it_is_given_or_detects_it(ingest):
+    """New bytes were read under the stored type of the content they replaced."""
+    m = mem()
+    m.add_document(b"%PDF-1.7", custom_id="c", mime="application/pdf")
+    ingest.clear()
+    m.update_document("c", content=b"\x89PNG")
+    assert ingest[-1][2] is None, "no mime given: ingestion detects the type"
+    m.update_document("c", content=b"\x89PNG", mime="image/png")
+    assert ingest[-1][2] == "image/png"
+    doc = m.update_document("c", content="Plain words now.")
+    assert doc.mime == "text/plain" and len(ingest) == 2
+    doc = m.add_document("# Notes", custom_id="md", mime="text/markdown")
+    assert m.update_document("md", content="# More notes").mime == "text/markdown"
+    assert m.update_document("md", mime="text/x-rst").mime == "text/x-rst"
+
+
 def test_reingest_keeps_fields_the_caller_did_not_pass():
     m = mem()
     m.add_document("One.", custom_id="c", title="T", filepath="a/b.md", meta={"k": 1},
@@ -435,14 +531,108 @@ def test_a_deferred_extraction_is_reported_as_failed_with_a_way_to_retry():
     m = mem()
     m.writer.reextract = lambda eps: WriteReceipt(deferred=True)  # type: ignore
     doc = m.add_document("Text.")
-    assert doc.status == "failed" and "reextract()" in (doc.error or "")
+    assert doc.status == "failed" and "adding the document again" in (doc.error or "")
 
 
 def test_extract_false_skips_the_pipeline_and_is_done():
     m = mem()
     spy = Spy(m)
     doc = m.add_document("Text.", extract=False)
-    assert doc.status == "done" and spy.calls == []
+    assert doc.status == "stored" and spy.calls == []
+    # An unchanged re-add without extraction reads nothing and changes nothing.
+    assert m.add_document("Text.", custom_id=None, extract=False).status == "stored"
+
+
+def test_a_readd_after_a_failed_extraction_retries_what_was_not_read():
+    """Re-adding unchanged text after a failure used to report `done` while nothing had
+    been read, because only new chunks went to extraction and there were none."""
+    m = mem()
+    calls: list[list[str]] = []
+
+    def explode(episodes):
+        calls.append([ep.id for ep in episodes])
+        raise RuntimeError("provider unavailable")
+
+    real = m.writer.reextract
+    m.writer.reextract = explode  # type: ignore[method-assign]
+    text = "\n\n".join(prose(6))
+    doc = m.add_document(text, custom_id="c")
+    assert doc.status == "failed"
+    episodes = [c.episode_id for c in m.store.document_chunks("default", doc.id)]
+
+    # An unchanged re-add without extraction keeps the failure and its reason.
+    kept = m.add_document(text, custom_id="c", extract=False)
+    assert (kept.status, kept.error) == ("failed", "RuntimeError: provider unavailable")
+
+    seen: list[list[str]] = []
+    m.writer.reextract = lambda eps: (seen.append([e.id for e in eps]), real(eps))[1]
+    again = m.add_document(text, custom_id="c")
+    assert again.status == "done" and again.error is None
+    assert sorted(seen[0]) == sorted(set(episodes))
+    # Once done, an unchanged re-add reads nothing.
+    seen.clear()
+    assert m.add_document(text, custom_id="c").status == "done" and seen == []
+
+
+def test_a_readd_with_extraction_reads_what_extract_false_left_unread():
+    from test_pipeline import CountingLLM
+    llm = CountingLLM()
+    m = Memvara(llm=llm, embedder=HashingEmbedder(dim=64), user="alice")
+    text = "Refunds are paid within 14 days of the request."
+    doc = m.add_document(text, custom_id="r", extract=False)
+    assert doc.status == "stored" and llm.extract_calls == 0
+    again = m.add_document(text, custom_id="r")
+    assert again.status == "done" and llm.extract_calls == 1
+    episode = m.store.document_chunks("default", doc.id)[0].episode_id
+    assert "extract" not in m.store.get_episode(episode).meta
+
+
+def _extracting(m: Memvara) -> list[str]:
+    """Every status `put_document` writes, in order."""
+    seen: list[str] = []
+    real = m.store.put_document
+
+    def put(doc):
+        seen.append(doc.status)
+        real(doc)
+
+    m.store.put_document = put  # type: ignore[method-assign]
+    return seen
+
+
+def test_a_document_with_a_clear_fact_yields_a_claim_citing_its_chunk():
+    """The design sends new chunks to extraction. A chunk is a system-role episode, and
+    the default gate reads only user turns, so without the document path the gate
+    dropped every chunk and a document produced no memory at all."""
+    from test_pipeline import CountingLLM
+    llm = CountingLLM(responder=lambda eps: [
+        {"subject": "refund_policy", "predicate": "refund_window", "object": "14 days",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": i}
+        for i, ep in enumerate(eps) if "14 days" in ep.content])
+    m = Memvara(llm=llm, embedder=HashingEmbedder(dim=64), user="alice")
+    statuses = _extracting(m)
+    doc = m.add_document("Refunds are paid within 14 days of the request.")
+    episode = m.store.document_chunks("default", doc.id)[0].episode_id
+    claims = m.store.claims_citing("default", episode)
+    assert [(c.subject, c.predicate, c.object) for c in claims] == [
+        ("refund_policy", "refund_window", "14 days")]
+    assert claims[0].sources == [episode]
+    assert llm.extract_calls == 1
+    assert statuses == ["queued", "extracting", "done"] and doc.status == "done"
+
+
+def test_extract_false_is_kept_by_a_later_extraction_sweep():
+    """A chunk stored with `extract=False` is not read now, and not by a scheduled
+    `reextract()` sweep later either: the caller said not to extract this document."""
+    from test_pipeline import CountingLLM
+    llm = CountingLLM()
+    m = Memvara(llm=llm, embedder=HashingEmbedder(dim=64), user="alice")
+    m.add_document("Refunds are paid within 14 days of the request.", extract=False)
+    assert m.pending_extraction() == []
+    m.reextract()
+    assert llm.extract_calls == 0
+    m.add_document("Returns are accepted for 30 days after delivery.")
+    assert llm.extract_calls == 1
 
 
 def test_status_of_a_document_this_scope_cannot_see_is_a_key_error():
@@ -589,6 +779,12 @@ def test_a_url_goes_through_the_ingestion_seam(ingest):
         "https://example.com/refunds", "Extracted title", "text/html")
     assert m.store.document_chunks("default", doc.id)[0].text == \
         "Extracted text from the source."
+    moved = m.add_document(url="https://example.com/refunds-v2", custom_id=None)
+    assert moved.id != doc.id
+    m.add_document("Local copy.", custom_id="r")
+    fetched = m.add_document(url="https://example.com/refunds", custom_id="r")
+    assert fetched.source_uri == "https://example.com/refunds"
+    assert fetched.title == "Extracted title"
 
 
 def test_bytes_and_markup_go_through_the_seam_and_plain_text_does_not(ingest):
@@ -632,38 +828,80 @@ def test_without_the_ingestion_package_a_url_or_bytes_is_refused_with_the_reason
 # --- stores and erasure ----------------------------------------------------------------------
 
 
-def test_a_store_without_the_document_methods_is_refused_by_name():
+def test_a_store_that_does_not_say_it_holds_documents_is_refused_by_name():
+    """Asked through the marker, not the methods: `RemoteStore` has every document method
+    as a stub that raises, so a presence check would pass it and the caller would meet
+    the stub's message about REST routes instead."""
     class NoDocuments(SQLiteStore):
-        put_document = None  # type: ignore[assignment]
+        holds_documents = False
 
     m = Memvara(store=NoDocuments(":memory:"), llm=NullLLM(),
                 embedder=HashingEmbedder(dim=64))
-    with pytest.raises(NotImplementedError, match="NoDocuments does not implement "
-                                                  "put_document"):
+    with pytest.raises(NotImplementedError, match="NoDocuments cannot store documents"):
         m.add_document("Text.")
+    from memvara.store.remote import RemoteStore
+    remote = Memvara(store=RemoteStore(base_url="https://example.invalid", api_key="k"),
+                     llm=NullLLM(), embedder=HashingEmbedder(dim=64))
+    with pytest.raises(NotImplementedError, match="RemoteStore cannot store documents"):
+        remote.add_document("Text.")
 
 
-def test_erasing_a_chunk_episode_erases_the_chunk_row_that_repeats_it():
-    """`document_chunks.text` is a copy of the episode text, so any path that erases the
-    episode must take the copy, or the text survives an erasure that reported success."""
+def test_erasing_a_claim_with_its_sources_leaves_a_document_whole():
+    """A chunk episode belongs to its document. `erase(sources=True)` erases the source
+    turns no surviving claim cites; a chunk is still held by its document, so it is
+    kept, as a still-cited turn is. Erasing it anyway left the document reporting `done`
+    with a digest and a chunk count that no longer matched its text, and the next
+    re-ingest stored the missing chunk again as new and extracted it a second time."""
     m = mem()
-    doc = m.add_document("A paragraph worth a fact.")
+    text = "\n\n".join(prose(12))
+    doc = m.add_document(text, custom_id="handbook")
+    chunks = m.store.document_chunks("default", doc.id)
+    assert len(chunks) > 2
+    claims = [m.remember("policy", f"rule_{i}", f"value {i}",
+                         sources=[c.episode_id]).added[0]
+              for i, c in enumerate(chunks[:3])]
+    for claim in claims:
+        assert m.erase(claim.id, sources=True)
+    assert m.store.document_chunks("default", doc.id) == chunks
+    for chunk in chunks:
+        assert m.store.get_episode(chunk.episode_id) is not None
+    assert m.get_document(doc.id).chunks == len(chunks)
+
+    spy = Spy(m)
+    again = m.add_document(text, custom_id="handbook")
+    assert m.store.document_chunks("default", again.id) == chunks
+    assert spy.calls == [], "an unchanged document was extracted a second time"
+
+
+def test_erasing_a_chunk_episode_directly_is_refused_while_its_document_holds_it():
+    """Only `delete_document` and a re-ingest remove a document's chunks, whatever
+    `cited` says, so no erasure path can leave a document short of its own text."""
+    m = mem()
+    doc = m.add_document("A paragraph worth keeping.")
     episode = m.store.document_chunks("default", doc.id)[0].episode_id
-    claim = m.remember("user", "fact", "x", sources=[episode]).added[0]
-    assert m.erase(claim.id, sources=True)
+    assert m.store.erase_episode(episode, cited=True) is False
+    assert m.store.erase_episodes([episode], cited=True) == 0
+    assert m.store.get_episode(episode) is not None
+    m.delete_document(doc.id)
     assert m.store.get_episode(episode) is None
-    assert m.store.document_chunks("default", doc.id) == []
 
 
-def test_purge_erases_documents_and_their_chunks():
+def test_purge_erases_documents_and_their_chunks_and_counts_them():
     m = mem()
-    m.add_document("Alice's text.", title="secret title")
+    m.add_document("\n\n".join(prose(8)), title="secret title")
+    m.add_document("Alice's second text.")
     kept = m.scope(user="bob").add_document("Bob's text.")
-    m.purge(user="alice")
+    alice_chunks = m.store._db.execute(
+        "SELECT COUNT(*) FROM document_chunks WHERE document_id != ?",
+        (kept.id,)).fetchone()[0]
+    counts = m.purge(user="alice")
+    assert counts["documents"] == 2
+    assert counts["document_chunks"] == alice_chunks > 2
     rows = m.store._db.execute("SELECT title FROM documents").fetchall()
     assert [r[0] for r in rows] == [None]
     chunks = m.store._db.execute("SELECT document_id FROM document_chunks").fetchall()
     assert [r[0] for r in chunks] == [kept.id]
+    assert m.purge(user="alice")["documents"] == 0
 
 
 def test_a_version_13_file_gains_the_document_tables_and_keeps_its_rows(tmp_path):
@@ -727,7 +965,7 @@ def test_every_view_reaches_every_document_method():
     assert view.get_document("s").id == doc.id
     assert view.list_documents().items[0].id == doc.id
     assert view.update_document("s", title="T").title == "T"
-    assert view.document_status("s").status == "done"
+    assert view.document_status("s").status == "stored"
     assert [r.deleted for r in view.delete_documents(["s"])] == [True]
     assert view.delete_document("s").deleted is False
 
@@ -736,7 +974,7 @@ def test_every_view_reaches_every_document_method():
         assert (await target.get_document("a")).id == doc.id
         assert (await target.list_documents()).items[0].id == doc.id
         assert (await target.update_document("a", title="T")).title == "T"
-        assert (await target.document_status("a")).status == "done"
+        assert (await target.document_status("a")).status == "stored"
         assert [r.deleted for r in await target.delete_documents(["a"])] == [True]
         assert (await target.delete_document("a")).deleted is False
 
@@ -888,7 +1126,9 @@ def test_the_remote_store_names_the_route_to_use_instead():
              lambda: store.list_documents([Scope()]),
              lambda: store.document_chunks("t", "doc_1"),
              lambda: store.put_document_chunks("t", "doc_1", []),
-             lambda: store.delete_document("t", "doc_1")]
+             lambda: store.delete_document("t", "doc_1"),
+             lambda: store.claims_citing_any("t", ["ep_1"]),
+             lambda: store.erase_episodes(["ep_1"])]
     for c in calls:
         with pytest.raises(NotImplementedError, match="RemoteMemvara.add_document"):
             c()

@@ -17,7 +17,7 @@ import re
 
 from typing import Iterable
 
-from ..types import Episode
+from ..types import DOCUMENT_EXTRACT, DOCUMENT_META, Episode
 
 # `[^\W_]` is "word character but not underscore", which keeps accented and non-Latin
 # scripts counting as content instead of being silently dropped as punctuation.
@@ -121,8 +121,19 @@ class SalienceGate:
         if not content:
             return False, "no_content"
 
+        document = bool(ep.meta.get(DOCUMENT_META))
+        if document and ep.meta.get(DOCUMENT_EXTRACT) is False:
+            # Stored with `add_document(extract=False)`. Refused here, where every
+            # extraction path asks, so a later `reextract()` sweep keeps that choice.
+            return False, "document_not_extracted"
         role = (ep.role or "user").strip().lower()
-        if self.evidence_roles is not None and role not in self.evidence_roles:
+        # A document chunk is evidence whatever its role. It is stored as a system turn
+        # so that `FastExtractor`, which reads first-person sentences as the user's own,
+        # never runs on it; the caller asked for the document to be read, and without
+        # this exception the default gate would drop every chunk and a document would
+        # produce no memory at all.
+        if (self.evidence_roles is not None and role not in self.evidence_roles
+                and not document):
             # Assistant text restates or speculates; treating it as evidence is how a
             # memory store ends up believing its own hallucinations. Widen with
             # `evidence_roles=` for a transcript whose speakers are all people.

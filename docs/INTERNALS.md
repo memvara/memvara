@@ -1329,68 +1329,94 @@ the caller cannot see, because the link would otherwise disclose that id.
 Schema 14 adds two tables. `documents` holds one row per document, keyed on `(tenant,
 id)`: `custom_id`, the scope both as its five parts and as `scope_key`, `title`,
 `filepath`, `source_uri`, `mime`, `content_hash` (blake2b-16 of the normalised text),
-`status` (`queued`, `extracting`, `done` or `failed`, enforced by a `CHECK`), `error`,
-`meta`, `created_at` and `updated_at`. A unique index on `(tenant, scope_key, custom_id)`
-makes a caller's own id unique per scope. `document_chunks` holds one row per chunk,
-keyed on `(tenant, document_id, position)`, with the chunk's `text`, its `hash` and the
-`episode_id` it was stored as.
+`status` (`queued`, `extracting`, `done`, `stored` or `failed`, enforced by a `CHECK`),
+`error`, `meta`, `created_at` and `updated_at`. A unique index on `(tenant, scope_key,
+custom_id)` makes a caller's own id unique per scope. `document_chunks` holds one row per
+chunk, keyed on `(tenant, document_id, position)`, with the chunk's `hash` and the
+`episode_id` it was stored as. It holds no text: the text lives only in the episode, and
+`document_chunks()` reads it through `episode_id`, so there is no second copy for an
+erasure to miss. A read counts a document's chunks with one aggregate join.
 
 **A chunk is an episode.** Each one is written as a `role="system"` episode with
 `meta["document_id"]` set, so the episode text index, the episode vectors and
 `search(include_episodes=True)` serve documents with no second index, and `why()` on a
-claim extracted from a document quotes the chunk. `Episode.hash` mixes the document id
-in, so the same paragraph in two documents is two episodes and deleting one document
-cannot erase the other's text. Episodes without the key hash exactly as before.
+claim extracted from a document quotes the chunk.
+
+**What `episodes.hash` holds.** For an ordinary turn, as before: blake2b-16 of the scope
+key, the role and the text. For a document chunk, the episode whose `meta` has a
+`document_id`, the document id is mixed in as a fourth part. Without it, the same
+paragraph in two documents would hash alike, exact-repeat detection would store it once,
+and deleting either document would erase text the other still holds. No stored hash
+changes on upgrade, because no episode before schema 14 carries the key. The column is a
+dedupe key, not a digest of the text alone: two rows with the same text can differ in it.
 
 **Chunking** (`memvara/documents/chunk.py`) splits the normalised text into runs of whole
 sentences of at most 1,000 characters, each preceded by up to 150 characters repeated
 from the end of the chunk before. A sentence is cut only when it is longer than a chunk
-on its own. A chunk ends at a *cut point*, a sentence whose own digest falls below a
-threshold proportional to its length (one every 600 characters on average), once the
-chunk holds 300 characters, or earlier when the next sentence would overflow it. Because
-a boundary depends on the sentences around it and not on the distance from the top, an
-edit usually changes the chunks it touches and the one after it. On a 27,000-character
-document of generated prose, an edit at the top, the middle or the end left 37 or 38 of
-39 chunks unchanged. `Memvara(retrieval_chunks=False)` stores a document as one chunk.
+on its own. Cut points are chosen first, from the sentences alone: a sentence whose own
+digest falls below a threshold proportional to its length (one every 600 characters on
+average), at least 300 characters after the previous cut point. A chunk ends at each cut
+point, and also before a sentence that would take it over 1,000 characters; such a forced
+split moves no cut point. So an edit usually changes the chunks it touches and the one
+after it. Measured over 400 single-sentence insertions, one per paragraph of ten
+27,000-character documents of generated prose: 390 changed at most two chunks, 9 changed
+three and 1 changed four. With the 300-character minimum counted from the start of the
+chunk instead, 24 changed three or four. `Memvara(retrieval_chunks=False)` stores a
+document as one chunk.
 
 **Re-ingest matches chunks by content, not position.** `add_document` with a `custom_id`
 that already exists at the same scope, and `update_document` with new content, chunk the
 new text and match each chunk to an unused old chunk with the same `hash`. A match keeps
 its episode, vector and citations, and only its position changes. An unmatched chunk
-becomes a new episode, and only new episodes go to `WritePipeline.reextract`. An old
-chunk with no match is released the way a delete releases every chunk (next paragraph).
+becomes a new episode. An old chunk with no match is released the way a delete releases
+every chunk (next paragraph). The lookup of the `custom_id` and the rows it decides
+between are written in one `batch()`, so two concurrent adds of one id cannot both miss
+the lookup; indexing and extraction run after that transaction, so no model call holds
+the write lock.
 
-**Delete erases text and retires memory.** `delete_document` detaches every claim that
-cites one of the document's episodes. A claim whose every source is among them is
-retired first, with the closure reason `"source document deleted"`; a claim with another
-source keeps it. Both lose the erased episodes from `sources`. Then the document row, its
-chunk rows and its episodes are erased, the episodes through `erase_episode`, all in one
-`batch()`. `erase_episode`, `erase_claim(sources=True)` and `purge` delete the chunk row
-that repeats an erased episode's text, and `purge` deletes the scope's document rows,
-because both hold text the caller was told is gone.
+**Delete erases text and retires memory.** `delete_document` finds every claim citing
+one of the document's episodes with one `claims_citing_any` query. A claim whose every
+source is among them is retired first, with the closure reason `"source document
+deleted"`; a claim with another source keeps it. Both lose the erased episodes from
+`sources`. Then the document row and its chunk rows are deleted and the episodes erased
+with one `erase_episodes` call, all in one `batch()`. **A chunk episode belongs to its
+document**: while a document lists it, `erase_episode`, `erase_episodes` and
+`erase_claim(sources=True)` keep it, whatever `cited` says, so no erasure path leaves a
+document reporting a digest and a chunk count its text no longer has. `purge` deletes the
+scope's documents and their chunk rows and counts both, as `documents` and
+`document_chunks`, beside its four other keys.
 
-**Status and failure.** A document is written `queued`, becomes `extracting` while
-`reextract` runs over its new chunks, and ends `done` or `failed`. The chunks are stored
-and indexed before extraction runs, so a failure, or a deferred extraction, is recorded
-on the document and does not remove it. Chunks are system-role episodes, and the default
-salience gate reads user turns only, so with the default gate nothing is extracted from a
-document; it is stored and searchable.
+**Extraction and status.** A document is written `queued` and becomes `extracting` while
+`WritePipeline.reextract` reads its new chunks. The salience gate accepts a chunk
+whatever its role; the fast path does not run on one, because it reads first-person
+sentences as the user's own and runs only on user turns, so facts come from the model
+tier. The outcome is `done` when every chunk has been read, `failed` with an `error`
+when extraction raised or was deferred, or `stored` when a chunk was kept unread because
+the call passed `extract=False`. Such a chunk carries `meta["extract"] = False`, which
+the gate refuses, so a later `reextract()` sweep keeps the choice. Adding a `failed` or
+`stored` document again with extraction on reads the kept chunks no claim cites yet, and
+clears their mark. The chunks are stored and indexed before extraction runs, so a
+document in any state is stored and searchable.
 
 **Content that is not plain text** — a URL, `bytes`, HTML or any non-text mime — is handed
 to `memvara.ingest.extract(content, url=, mime=)`, looked up by name at call time, which
 returns an object with `text`, `title` and `mime`. Without that package the call raises
-`NotImplementedError`. A configured redactor runs over the whole text and the title
-before chunking, so every stored digest is of redacted text.
+`NotImplementedError`. `update_document` reads new content under the `mime` it is given,
+otherwise under the stored type for text, otherwise with none so ingestion detects it. A
+configured redactor runs over the whole text and the title before chunking, so every
+stored digest is of redacted text.
 
 `list_documents` filters by scope, `filepath_prefix` (compared with `substr`, so `%` and
 `_` match only themselves) and `status` in the same statement as its `LIMIT`, per
 invariant 7, and pages on `(created_at, id)` newest first.
 
-The seven store methods (`put_document`, `get_document`, `find_document`,
-`list_documents`, `document_chunks`, `put_document_chunks`, `delete_document`) are
-optional as a group; see `OMITTABLE`. `RemoteStore` raises on each and names the
-`RemoteMemvara` method to use, because the facade chunks, scope-checks and extracts
-server-side.
+The nine store methods (`put_document`, `get_document`, `find_document`,
+`list_documents`, `document_chunks`, `put_document_chunks`, `delete_document`,
+`claims_citing_any`, `erase_episodes`) are optional as a group, and a store that has them
+says so with `holds_documents = True`, which is what `Memvara` asks; see `OMITTABLE`.
+`RemoteStore` has each as a stub that raises and names the `RemoteMemvara` method to use,
+because the facade chunks, scope-checks and extracts server-side; it does not set the
+marker, so `Memvara(store=RemoteStore(...)).add_document()` is refused with that advice.
 
 ### Erasure removes the bytes, not just the rows
 

@@ -29,13 +29,21 @@ memory, and a memory whose only source was the document is retired with the reas
 
 ### Who this changes, and in which direction
 
-**If you implement `Store` yourself**, seven document methods are new: `put_document`,
+**If you implement `Store` yourself**, nine document methods are new: `put_document`,
 `get_document`, `find_document`, `list_documents`, `document_chunks`,
-`put_document_chunks` and `delete_document`. They are optional as a group: without them
-`add_document()` and the methods beside it raise `NotImplementedError` naming your
-store, and nothing else changes. If your store keeps a copy of a chunk's text outside the
-episode, erase it wherever you erase the episode, including in `purge()`, or an erasure
-leaves the text behind.
+`put_document_chunks`, `delete_document`, `claims_citing_any` and `erase_episodes`. They
+are optional as a group, and a store that implements them sets the class attribute
+`holds_documents = True`; without it `add_document()` and the methods beside it raise
+`NotImplementedError` naming your store, and nothing else changes. An episode a document
+still lists must survive `erase_episode` and `erase_claim(sources=True)`, or a document
+can lose part of its text behind its own back.
+
+**If you compare `purge()` output against a fixed set of keys**, add `documents` and
+`document_chunks`. `erase_claim()` keeps its four keys.
+
+**If you use `SalienceGate` directly**, an episode with `meta["document_id"]` now passes
+the role check whatever its role, and one that also has `meta["extract"] = False` is
+refused with the reason `document_not_extracted`.
 
 **If you serve MCP to a model with a fixed tool budget**, set
 `MEMVARA_FEATURE_DOCUMENTS=0` to keep the list at eighteen.

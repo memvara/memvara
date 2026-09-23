@@ -218,6 +218,31 @@ def test_no_tool_can_erase_a_memory():
         assert not any(word in tool.name for word in forbidden)
 
 
+def test_the_document_delete_tool_retires_memories_and_touches_only_its_own_document():
+    """The effect behind the one exception above. Every claim row survives the call, the
+    ones whose only source was the document are retired, and another document's chunks
+    and episodes are untouched."""
+    srv = MemvaraMCPServer(make_memory(user="alice"), user="alice")
+    memory = srv._ctx.memory
+    store = memory.memvara.store
+    doomed = memory.add_document("Refunds are paid within 14 days.", custom_id="refunds")
+    other = memory.add_document("Returns are accepted for 30 days.", custom_id="returns")
+    doomed_ep = store.document_chunks("default", doomed.id)[0].episode_id
+    other_chunks = store.document_chunks("default", other.id)
+    claim = memory.remember("policy", "refund_window", "14 days",
+                            sources=[doomed_ep]).added[0]
+    rows = store._db.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+
+    text(srv, "memory_delete_document", {"id": "refunds"})
+
+    assert store._db.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == rows
+    assert store.get_claim(claim.id).state == "retired"
+    assert store.get_episode(doomed_ep) is None
+    assert store.document_chunks("default", other.id) == other_chunks
+    assert all(store.get_episode(c.episode_id) for c in other_chunks)
+    srv.close()
+
+
 def test_no_tool_accepts_a_scope_argument():
     """The security property, asserted structurally.
 

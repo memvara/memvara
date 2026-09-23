@@ -2043,14 +2043,36 @@ class WriteReceipt:
 #: cannot take the other's text with it.
 DOCUMENT_META = "document_id"
 
+#: The `Episode.meta` key set to `False` on a document chunk stored with
+#: `add_document(extract=False)`. The salience gate refuses such a chunk, so a later
+#: `reextract()` sweep does not read a document its caller said not to extract.
+DOCUMENT_EXTRACT = "extract"
+
+
+def one_source(content: object, url: object) -> None:
+    """Refuse a document request that does not name exactly one of `content` and `url`.
+
+    One check for the library, both hosted clients and the MCP tool, so the four cannot
+    disagree about what a valid request is.
+
+    >>> one_source("text", None)
+    >>> one_source(None, None)
+    Traceback (most recent call last):
+    TypeError: add_document() needs exactly one of content and url
+    """
+    if (content is None) == (url is None):
+        raise TypeError("add_document() needs exactly one of content and url")
+
 #: A document's processing state. `queued` when the row is first written, `extracting`
-#: while the write pipeline reads its new chunks, then `done` or `failed`. A failed
-#: document is still stored and its chunks are still searchable; `Document.error` says
-#: what failed.
-DocumentState = Literal["queued", "extracting", "done", "failed"]
+#: while the write pipeline reads its new chunks, then one of three outcomes: `done`, every
+#: chunk has been read for facts; `stored`, some chunk was kept unread because a call
+#: passed `extract=False`; `failed`, extraction raised or was deferred, and
+#: `Document.error` says why. A document in any state is stored and searchable.
+DocumentState = Literal["queued", "extracting", "done", "stored", "failed"]
 
 #: Every legal `DocumentState`, in the order a document moves through them.
-DOCUMENT_STATES: tuple[DocumentState, ...] = ("queued", "extracting", "done", "failed")
+DOCUMENT_STATES: tuple[DocumentState, ...] = ("queued", "extracting", "done", "stored",
+                                              "failed")
 
 #: The closure reason recorded on a claim that is retired because the only document it
 #: came from was deleted. `history()` and `why()` show it.
@@ -2113,13 +2135,22 @@ class Document:
 
 @dataclass(frozen=True, slots=True)
 class DocumentStatus:
-    """Where one document is in processing. See `DocumentState` for the four values."""
+    """Where one document is in processing. See `DocumentState` for the four values.
+
+    The five processing fields of a `Document`, and nothing else, so a status check
+    carries no title, path or metadata. Built from a document by `of()` locally; the
+    hosted client reads it from the status route.
+    """
 
     id: str
     status: DocumentState
     error: str | None
     chunks: int
     updated_at: datetime
+
+    @classmethod
+    def of(cls, doc: "Document") -> "DocumentStatus":
+        return cls(doc.id, doc.status, doc.error, doc.chunks, doc.updated_at)
 
 
 @dataclass(frozen=True, slots=True)

@@ -43,6 +43,7 @@ from ..types import (
     Answer, Claim, DeleteResult, Delta, Document, DocumentStatus, Episode,
     ForgetPreview, ForgetResult, Link, MemoryType, Page, Profile, Provenance, Result,
     Scope, SearchResults, WriteReceipt, closure, closure_reason, link_relation,
+    one_source,
 )
 from ..types import PROJECT_META, PROJECT_META_REFUSAL
 from . import hydrate
@@ -126,24 +127,34 @@ def _document_path(ref: str, tail: str = "") -> str:
     return f"/v1/documents/{quote(ref, safe='')}{tail}"
 
 
-def _document_fields(content: str | bytes | None, redacting: bool,
-                     redact: Callable[[str | None, str], str | None]) -> dict[str, Any]:
-    """The request fields that carry a document's content.
+def _document_body(redactor: Redactor | None,
+                   redact: Callable[[str | None, str], str | None],
+                   content: str | bytes | None, *, title: str | None,
+                   filepath: str | None, mime: str | None,
+                   meta: Mapping[str, Any] | None, extract: bool,
+                   url: str | None = None, custom_id: str | None = None) -> dict[str, Any]:
+    """The JSON body of `POST /v1/documents` and `PATCH /v1/documents/{id}`, for both
+    clients, with unset fields left out.
 
-    Text travels as `content`, redacted here, before it leaves the process. Bytes travel
-    as `content_base64`, and are refused when a redactor is configured: nothing here can
-    read a PDF or an image to redact it, and sending it unredacted would be the one
-    thing a redactor is configured to prevent. Extract the text first and pass a `str`.
+    Text travels as `content` and the title as `title`, both redacted here, before they
+    leave the process. Bytes travel as `content_base64`, and are refused when a redactor
+    is configured: nothing here can read a PDF or an image to redact it, and sending it
+    unredacted would be the one thing a redactor is configured to prevent. Extract the
+    text first and pass a `str`.
     """
-    if content is None:
-        return {}
+    body: dict[str, Any] = {
+        "url": url, "custom_id": custom_id, "title": redact(title, EPISODE),
+        "filepath": filepath, "mime": mime,
+        "metadata": None if meta is None else dict(meta), "extract": extract}
     if isinstance(content, str):
-        return {"content": redact(content, EPISODE)}
-    if redacting:
-        raise ValueError(
-            "a redactor is configured, and bytes cannot be redacted before they leave "
-            "this process. Extract the text yourself and pass it as a str.")
-    return {"content_base64": base64.b64encode(content).decode("ascii")}
+        body["content"] = redact(content, EPISODE)
+    elif content is not None:
+        if redactor is not None:
+            raise ValueError(
+                "a redactor is configured, and bytes cannot be redacted before they "
+                "leave this process. Extract the text yourself and pass it as a str.")
+        body["content_base64"] = base64.b64encode(content).decode("ascii")
+    return _sent(body)
 
 
 def tenant_of(answer: object) -> str | None:
@@ -962,15 +973,12 @@ class RemoteMemvara:
         base64-encoded, and refused when a redactor is configured. A `url` is fetched by
         the deployment, so its content never passes through this process.
         """
-        if (content is None) == (url is None):
-            raise TypeError("add_document() needs exactly one of content and url")
-        body = {**_document_fields(content, self.redactor is not None, self._redact),
-                "url": url, "custom_id": custom_id,
-                "title": self._redact(title, EPISODE), "filepath": filepath,
-                "mime": mime, "metadata": None if meta is None else dict(meta),
-                "extract": extract}
+        one_source(content, url)
+        body = _document_body(self.redactor, self._redact, content, url=url,
+                              custom_id=custom_id, title=title, filepath=filepath,
+                              mime=mime, meta=meta, extract=extract)
         return hydrate.document(self._request("POST", "/v1/documents",
-                                              params=self._params(), json=_sent(body),
+                                              params=self._params(), json=body,
                                               write=True))
 
     def get_document(self, id_or_custom_id: str) -> Document | None:
@@ -994,16 +1002,16 @@ class RemoteMemvara:
 
     def update_document(self, id_or_custom_id: str, *, content: str | bytes | None = None,
                         title: str | None = None, meta: Mapping[str, Any] | None = None,
-                        filepath: str | None = None, extract: bool = True) -> Document:
+                        filepath: str | None = None, mime: str | None = None,
+                        extract: bool = True) -> Document:
         """`PATCH /v1/documents/{id}`: change what is given, keep the rest. `KeyError`
         for a document that is missing or not visible, as `Memvara.update_document`."""
-        body = {**_document_fields(content, self.redactor is not None, self._redact),
-                "title": self._redact(title, EPISODE), "filepath": filepath,
-                "metadata": None if meta is None else dict(meta), "extract": extract}
+        body = _document_body(self.redactor, self._redact, content, title=title,
+                              filepath=filepath, mime=mime, meta=meta, extract=extract)
         try:
             return hydrate.document(self._request(
                 "PATCH", _document_path(id_or_custom_id), params=self._params(),
-                json=_sent(body), write=True))
+                json=body, write=True))
         except NotFound:
             raise KeyError(f"no document {id_or_custom_id!r} is visible here") from None
 
@@ -1355,9 +1363,11 @@ class ScopedRemoteMemvara:
 
     def update_document(self, id_or_custom_id: str, *, content: str | bytes | None = None,
                         title: str | None = None, meta: Mapping[str, Any] | None = None,
-                        filepath: str | None = None, extract: bool = True) -> Document:
+                        filepath: str | None = None, mime: str | None = None,
+                        extract: bool = True) -> Document:
         return self._mem.update_document(id_or_custom_id, content=content, title=title,
-                                         meta=meta, filepath=filepath, extract=extract)
+                                         meta=meta, filepath=filepath, mime=mime,
+                                         extract=extract)
 
     def delete_document(self, id_or_custom_id: str) -> DeleteResult:
         return self._mem.delete_document(id_or_custom_id)

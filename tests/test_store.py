@@ -780,7 +780,7 @@ def test_purge_reports_what_it_actually_erased(store, emb):
     # holds a subject's and object's first-seen spelling verbatim. These claims were
     # written through the store directly, so no entity was ever resolved for them.
     assert store.purge(SCOPE) == {"claims": 2, "episodes": 1, "embeddings": 1,
-                                  "entities": 0}
+                                  "entities": 0, "documents": 0, "document_chunks": 0}
 
 
 def test_purge_erases_a_large_scope_in_one_pass(store, emb):
@@ -804,7 +804,8 @@ def test_purge_erases_the_episode_indexes_not_only_the_rows(store, emb):
     ep = turn(store, emb, content="the kafka pipeline is being sunset")
     counts = store.purge(SCOPE)
 
-    assert counts == {"claims": 0, "episodes": 1, "embeddings": 1, "entities": 0}
+    assert counts == {"claims": 0, "episodes": 1, "embeddings": 1, "entities": 0,
+                      "documents": 0, "document_chunks": 0}
     assert store.lexical_search_episodes("kafka", [SCOPE], limit=10) == []
     assert store.get_episode_embedding(ep.id) is None
     assert store._db.execute("SELECT COUNT(*) FROM episodes_fts").fetchone()[0] == 0
@@ -1277,8 +1278,11 @@ def test_erase_claim_reports_what_it_erased_in_the_same_shape_purge_does(store):
                                        "entities": 0}
     assert store.erase_claim(c.id) == nothing, "erasing twice is not two erasures"
     assert store.erase_claim("cl_never_existed") == nothing
-    assert set(nothing) == set(store.purge(Scope("acme", "nobody"))), \
+    purged = set(store.purge(Scope("acme", "nobody")))
+    assert set(nothing) <= purged, \
         "the same four keys as purge, or the two paths evidence themselves differently"
+    # The two purge adds count documents, which erasing a claim never removes.
+    assert purged - set(nothing) == {"documents", "document_chunks"}
 
 
 def test_erase_claim_takes_the_row_the_index_and_the_vector(store, emb):
