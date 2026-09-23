@@ -24,6 +24,13 @@ import os.path
 #: state, not inside the plugin, which is replaced wholesale on every update.
 SETTINGS = os.path.join(os.path.expanduser("~"), ".memvara", "settings.json")
 
+#: Every feature switch, in the order `/memvara:setup` lists them. The library's MCP server
+#: has the same tuple as `memvara.server.config.FEATURES` and refuses a
+#: `MEMVARA_FEATURE_<NAME>` that is not in it. The hooks cannot import the library, so this
+#: is a copy, and `tests/test_hook_project.py` fails when the two differ.
+FEATURES = ("index_command", "research_agent", "project_scope", "status_line",
+            "recall_mark", "profile", "forget_matching", "end_reason", "links")
+
 #: What an override may say. Anything else is ignored and the file decides, because a typo
 #: in an environment variable should not silently flip a feature the file set.
 _ON = frozenset({"1", "true", "on", "yes"})
@@ -52,7 +59,12 @@ def enabled(name: str) -> bool:
 
     On is the safe direction for every feature this reads: each one is additive, and the
     failure to avoid is a feature that stopped working because a file could not be parsed.
+
+    A name outside `FEATURES` raises `ValueError`. Every caller passes a fixed name, so this
+    can only be a typo in the hooks' own code, and the tests exercise every caller.
     """
+    if name not in FEATURES:
+        raise ValueError(f"{name!r} is not a feature; the features are {', '.join(FEATURES)}")
     raw = os.environ.get(f"MEMVARA_FEATURE_{name.upper()}")
     if raw is not None:
         value = raw.strip().lower()

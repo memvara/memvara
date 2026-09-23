@@ -430,3 +430,75 @@ def test_the_settings_file_is_read_once_per_process(monkeypatch):
 def test_an_unreadable_settings_file_means_the_default(body):
     pathlib.Path(settings.SETTINGS).write_text(body, encoding="utf-8")
     assert settings.enabled("recall_mark") is True
+
+
+# -- parity with the library's copy ----------------------------------------------------
+
+import memvara.project as library  # noqa: E402
+from memvara.server.config import FEATURES as LIBRARY_FEATURES  # noqa: E402
+
+FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "project_vectors.json"
+
+
+def test_the_two_vectors_files_are_the_same_bytes():
+    """The library's tests read `tests/fixtures/`, the hooks' tests read `plugin/hooks/lib/`.
+
+    A row added to one and not the other would let the two copies drift while each still
+    passed its own suite.
+    """
+    assert FIXTURE.read_bytes() == (HOOKS / "lib" / "project_vectors.json").read_bytes()
+
+
+@pytest.mark.parametrize("row", VECTORS["normalise"], ids=lambda r: r["rule"])
+def test_both_copies_normalise_every_shared_remote_the_same_way(row):
+    assert project.normalise_remote(row["remote"]) == library.normalize_remote(row["remote"])
+
+
+def _library_accepts(value: str) -> bool:
+    try:
+        library.check_project(value)
+    except ValueError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize("row", VECTORS["check_project"]["rows"], ids=lambda r: r["rule"])
+def test_both_copies_accept_the_same_project_names(row):
+    assert project.is_canonical(row["value"]) is _library_accepts(row["value"])
+
+
+@pytest.mark.parametrize("length", [511, 512, 513])
+def test_both_copies_share_the_length_limit(length):
+    value = "example.com/" + "a" * (length - len("example.com/"))
+    assert project.is_canonical(value) is _library_accepts(value)
+
+
+def test_both_copies_fold_case_on_the_same_hosts():
+    assert project.CASE_INSENSITIVE_HOSTS == library._CASE_INSENSITIVE_HOSTS
+
+
+@needs_git
+@pytest.mark.parametrize("remote", [
+    "git@github.com:Memvara/Memvara.git",
+    "https://example.com/team/../repo",
+    "/srv/git/memvara.git",
+    None,
+])
+def test_both_copies_name_a_real_worktree_the_same(tmp_path, remote):
+    """The end-to-end answer, not only the parts: one repository, one project, both copies."""
+    main = _repo(tmp_path / "main", remote)
+    _git("worktree", "add", "-q", str(tmp_path / "linked"), cwd=main)
+    for checkout in (main, tmp_path / "linked"):
+        assert project.canonical_project(str(checkout)) == \
+            library.canonical_project(str(checkout))
+
+
+def test_the_hooks_know_the_same_features_as_the_library():
+    """`ServerConfig` refuses an unknown `MEMVARA_FEATURE_<NAME>`; the hooks must accept
+    exactly the names it accepts, or one side ignores a switch the other honours."""
+    assert settings.FEATURES == LIBRARY_FEATURES
+
+
+def test_asking_for_a_feature_that_does_not_exist_is_a_bug_the_tests_catch():
+    with pytest.raises(ValueError, match="not a feature"):
+        settings.enabled("recall_marks")

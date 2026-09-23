@@ -240,7 +240,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   stored again.
 - **The optional hook features can be switched off.** `~/.memvara/settings.json` holds
   `project_scope`, `status_line` and `recall_mark` as `true` or `false`; a missing key
-  means on. `MEMVARA_FEATURE_<NAME>=0` or `=1` overrides the file for one process.
+  means on. `MEMVARA_FEATURE_<NAME>=0` or `=1` overrides the file for one process. The
+  hooks use the same feature names as the MCP server's `MEMVARA_FEATURE_*` switches.
 
 ### Changed
 

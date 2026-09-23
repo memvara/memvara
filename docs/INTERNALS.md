@@ -1681,7 +1681,9 @@ rather than `OSError`.
 **Each of those three features has a switch.** `lib/settings.py` reads
 `~/.memvara/settings.json`, a flat object of `feature_name: true|false`, where a missing key
 means on. `MEMVARA_FEATURE_<NAME>=0|1` overrides the file. The names are `project_scope`,
-`status_line` and `recall_mark`. The file is read at most once per process. Capture drops
+`status_line` and `recall_mark`. The hooks know the same list of feature names as
+`ServerConfig`, kept as a copy in `lib/settings.FEATURES` that a test compares with the
+library's. The file is read at most once per process. Capture drops
 marked lines whatever `recall_mark` says, because a transcript can hold lines injected before
 the switch changed.
 
