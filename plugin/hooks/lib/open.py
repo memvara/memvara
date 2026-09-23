@@ -21,8 +21,8 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
-from .ipc import emit, server_env  # noqa: F401  (re-exported; they live
-# in ipc so the fast path can use them without importing pathlib)
+from .ipc import client_env, emit, server_env  # noqa: F401  (re-exported; they
+# live in ipc so the fast path can use them without importing pathlib)
 
 #: Written by `memvara-mcp login`, read when there is no local store to open.
 _CREDENTIALS = Path.home() / ".memvara" / "credentials.json"
@@ -57,11 +57,9 @@ def open_store() -> Any | None:
     for a second client to be better at. It briefly took a `recalls` flag, when the MCP
     surface could not carry `sources=` and the library's client could.
     """
-    env = dict(os.environ)
-    # The client's block loses to a real environment variable. Someone who exports
-    # MEMVARA_DB to point a session at a scratch store means it.
-    for key, value in server_env().items():
-        env.setdefault(key, value)
+    # The client's block loses to a real environment variable; `client_env` is where that
+    # rule is written, for this function, the daemon's address and the rewrite decision.
+    env = client_env()
 
     if not env.get("MEMVARA_DB") and env.get("MEMVARA_MODE") != "cloud":
         # No local store named. Cloud mode is still possible if a key was written by

@@ -825,9 +825,10 @@ def main() -> int:
 
     # A rewrite is started only when the hook can afford to wait for it: the model call may
     # take `REWRITE_WAIT_SEC` before the plain read is served, and the harness kills the
-    # hook at 10 seconds with nothing printed.
-    rewrite = (rewrite_allowed()
-               and time.monotonic() - start + REWRITE_WAIT_SEC < OVERALL_BUDGET_SEC)
+    # hook at 10 seconds with nothing printed. The clock is compared first: it is free,
+    # and the decision reads files.
+    rewrite = (time.monotonic() - start + REWRITE_WAIT_SEC < OVERALL_BUDGET_SEC
+               and rewrite_allowed())
     try:
         block, ok, why = fast_recall(query, k=K, budget=BUDGET, header=HEADER,
                                      min_score=_min_score(), query_rewrite=rewrite,

@@ -40,7 +40,7 @@ from lib.ipc import (  # noqa: E402
     due_capture_alert, payload, plural, status, under_extraction, with_alert,
 )
 from lib import counts, project  # noqa: E402
-from lib.fast import rewrite_kwargs  # noqa: E402
+from lib.fast import read_kinds  # noqa: E402
 from lib.mark import count as count_memories  # noqa: E402
 from lib.mark import mark_block  # noqa: E402
 from lib.mark import on as mark_on  # noqa: E402
@@ -214,7 +214,7 @@ def main() -> int:
     # return a different block from one session to the next. The library's store takes
     # `query_rewrite` unless it was released before query rewrite, which never rewrites.
     # The stdlib hosted client takes no such argument and always asks for a plain read.
-    plain_read: dict = {} if hosted else rewrite_kwargs(store.recall, False)
+    plain_read: dict = {} if hosted else read_kinds(store)[0]
     #: What a section could not be fetched for, in words. Set before the `try` so that
     #: every path to the banner below has it, including the ones that leave early.
     missing = ""

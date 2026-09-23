@@ -1371,9 +1371,9 @@ DECLARED_ELSEWHERE = {
 }
 
 #: The names a `**` argument may have and still declare which kind of read a call is.
-#: `read_kind` is what `lib.fast.rewrite_kwargs` returns in the hooks: `query_rewrite`
-#: for a backend that takes it, and nothing for a library too old to have it, which
-#: never rewrites.
+#: `plain_read` and `read_kind` are what `lib.fast.read_kinds` returns in the hooks:
+#: `query_rewrite` for a backend that takes it, and nothing for a library too old to have
+#: it, which never rewrites.
 READ_KIND_NAMES = ("PLAIN_READ", "plain_read", "read_kind")
 
 

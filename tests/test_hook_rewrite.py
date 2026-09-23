@@ -36,6 +36,9 @@ from lib import fast, ipc, read_model, settings  # noqa: E402
 from lib import open as opener  # noqa: E402
 from lib.hosted import HostedRecall  # noqa: E402
 
+#: Taken before any fixture replaces it, for the one test that reads a real config file.
+REAL_SERVER_ENV = ipc.server_env
+
 REWRITE_REPLY = json.dumps({"queries": ["release decision"], "date_range": None})
 
 
@@ -44,8 +47,10 @@ def _isolated(monkeypatch, tmp_path):
     """Keep every test away from the real `~/.memvara`, the client's config and switches."""
     monkeypatch.setattr(settings, "SETTINGS", str(tmp_path / "settings.json"))
     monkeypatch.setattr(settings, "_LOADED", None)
-    monkeypatch.setattr(read_model, "server_env", lambda: {})
+    monkeypatch.setattr(read_model, "STATE", str(tmp_path / "hooks" / "read_model.json"))
+    monkeypatch.setattr(ipc, "server_env", lambda: {})
     monkeypatch.setattr(fast, "log_line", lambda *a, **k: None)
+    monkeypatch.setattr(fast, "_OPENED", None)
     for name in list(os.environ):
         if name.startswith("MEMVARA_FEATURE_") or name in ("MEMVARA_LLM", "MEMVARA_LLM_MODEL"):
             monkeypatch.delenv(name)
@@ -54,6 +59,17 @@ def _isolated(monkeypatch, tmp_path):
 def write_settings(data: dict) -> None:
     pathlib.Path(settings.SETTINGS).write_text(json.dumps(data), encoding="utf-8")
     settings._LOADED = None
+
+
+def write_record(record: object) -> None:
+    """Put a verification record where `/memvara:setup verify-key --yes` puts it."""
+    path = pathlib.Path(read_model.STATE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+
+def stored_record() -> dict:
+    return json.loads(pathlib.Path(read_model.STATE).read_text(encoding="utf-8"))
 
 
 def verified(**overrides: Any) -> dict:
@@ -105,6 +121,28 @@ def test_extraction_chunks_reads_as_off_when_nothing_sets_it():
     assert settings.enabled("query_rewrite") is True
 
 
+def test_reload_reads_a_settings_file_changed_in_this_process():
+    """`/memvara:setup` writes the file and then reports what the hooks will read."""
+    write_settings({"query_rewrite": True})
+    assert settings.enabled("query_rewrite") is True
+    pathlib.Path(settings.SETTINGS).write_text('{"query_rewrite": false}', encoding="utf-8")
+    assert settings.enabled("query_rewrite") is True, "read once per process"
+    settings.reload()
+    assert settings.enabled("query_rewrite") is False
+
+
+def test_verified_for_the_current_config_ignores_the_switch(monkeypatch):
+    """Setup asks it to learn whether turning the switch on would start rewrites."""
+    monkeypatch.setenv("MEMVARA_LLM", "anthropic")
+    assert read_model.verified_for_current_config() is False
+    write_record(verified())
+    write_settings({"query_rewrite": False})
+    assert read_model.verified_for_current_config() is True
+    assert read_model.allowed() is False
+    monkeypatch.setenv("MEMVARA_LLM_MODEL", "another-model")
+    assert read_model.verified_for_current_config() is False
+
+
 def test_a_setting_that_is_not_a_switch_is_handed_over_as_stored():
     write_settings({"read_model": {"outcome": "applied"}, "recall_mark": False})
     assert settings.stored("read_model") == {"outcome": "applied"}
@@ -121,15 +159,15 @@ def test_nothing_recorded_means_a_plain_read(monkeypatch):
 
 def test_a_verified_key_for_the_configured_model_allows_a_rewrite(monkeypatch):
     monkeypatch.setenv("MEMVARA_LLM", "anthropic")
-    write_settings({"read_model": verified()})
+    write_record(verified())
     assert read_model.allowed() is True
 
 
 def test_the_client_config_names_the_model_when_the_environment_does_not(monkeypatch):
     """The hook finds the model where the MCP server does: the client's server block."""
-    monkeypatch.setattr(read_model, "server_env",
+    monkeypatch.setattr(ipc, "server_env",
                         lambda: {"MEMVARA_LLM": "openai", "MEMVARA_LLM_MODEL": "m-2"})
-    write_settings({"read_model": verified(backend="openai", model_setting="m-2")})
+    write_record(verified(backend="openai", model_setting="m-2"))
     assert read_model.configured() == ("openai", "m-2")
     assert read_model.allowed() is True
     monkeypatch.setenv("MEMVARA_LLM_MODEL", "m-3")
@@ -141,7 +179,8 @@ def test_the_client_config_names_the_model_when_the_environment_does_not(monkeyp
 @pytest.mark.parametrize("switch", [{"query_rewrite": False}, {}])
 def test_the_switch_off_means_a_plain_read_whatever_was_verified(monkeypatch, switch):
     monkeypatch.setenv("MEMVARA_LLM", "anthropic")
-    write_settings({"read_model": verified(), **switch})
+    write_record(verified())
+    write_settings(switch)
     if not switch:
         monkeypatch.setenv("MEMVARA_FEATURE_QUERY_REWRITE", "0")
     assert read_model.allowed() is False
@@ -157,7 +196,7 @@ def test_the_switch_off_means_a_plain_read_whatever_was_verified(monkeypatch, sw
 ])
 def test_a_check_the_model_did_not_answer_means_a_plain_read(monkeypatch, record):
     monkeypatch.setenv("MEMVARA_LLM", "anthropic")
-    write_settings({"read_model": record})
+    write_record(record)
     assert read_model.allowed() is False
 
 
@@ -168,8 +207,139 @@ def test_a_different_model_from_the_one_checked_means_a_plain_read(monkeypatch, 
     monkeypatch.setenv("MEMVARA_LLM", backend)
     if model:
         monkeypatch.setenv("MEMVARA_LLM_MODEL", model)
-    write_settings({"read_model": verified()})
+    write_record(verified())
     assert read_model.allowed() is False
+
+
+# --- where the verification lives -------------------------------------------------------
+
+
+def test_a_saved_verification_is_a_state_file_of_its_own(monkeypatch):
+    """Not a key in the switch file, which is a flat map of switches written unlocked."""
+    monkeypatch.setenv("MEMVARA_LLM", "anthropic")
+    assert read_model.save(verified()) is True
+    assert stored_record() == verified()
+    assert not pathlib.Path(settings.SETTINGS).exists()
+    assert read_model.allowed() is True
+
+
+def test_a_verification_in_the_old_place_is_read_once_and_moved(monkeypatch):
+    """An earlier build of this branch kept it under `read_model` in settings.json."""
+    monkeypatch.setenv("MEMVARA_LLM", "anthropic")
+    write_settings({"read_model": verified()})
+    assert read_model.allowed() is True
+    assert stored_record() == verified(), "moved to the state file on first read"
+    write_settings({"read_model": verified(outcome="fallback")})
+    assert read_model.allowed() is True, "the old place is not read again"
+
+
+def test_a_state_file_that_cannot_be_written_is_reported(tmp_path, monkeypatch):
+    blocker = tmp_path / "a-file"
+    blocker.write_text("", encoding="utf-8")
+    monkeypatch.setattr(read_model, "STATE", str(blocker / "read_model.json"))
+    assert read_model.save(verified()) is False
+
+
+# --- a key that stops working ---------------------------------------------------------
+
+
+def _rejected_key() -> Exception:
+    rejected = RuntimeError("401")
+    rejected.status_code = 401  # type: ignore[attr-defined]
+    return rejected
+
+
+def test_a_key_the_provider_rejects_during_a_recall_stops_the_rewrites(monkeypatch,
+                                                                       tmp_path):
+    """A rotated or revoked key would otherwise cost every prompt a refused call."""
+    _no_daemon(monkeypatch, tmp_path)
+    monkeypatch.setenv("MEMVARA_LLM", "anthropic")
+    write_record(verified())
+    monkeypatch.setattr(opener, "open_store",
+                        lambda: store(FakeChat(raises=_rejected_key())))
+    text, ok, _ = fast.recall("what did we decide", query_rewrite=True, spawn=False)
+    assert ok is True and "Friday" in text
+    assert stored_record()["outcome"] == "key_rejected"
+    assert stored_record()["backend"] == "anthropic", "the rest of the record is kept"
+    assert read_model.allowed() is False
+
+
+def test_the_daemon_stops_the_rewrites_on_a_rejected_key_too(monkeypatch):
+    import daemon as daemon_hook
+
+    monkeypatch.setenv("MEMVARA_LLM", "anthropic")
+    write_record(verified())
+    served = daemon_hook.Daemon("/tmp/unused-reject.sock",
+                                store(FakeChat(raises=_rejected_key())))
+    reply = served._answer({"q": "what did we decide", "k": 2, "budget": 300,
+                            "query_rewrite": True})
+    assert reply["ok"] is True and "Friday" in reply["text"]
+    assert read_model.allowed() is False
+
+
+def test_a_rejection_with_nothing_verified_writes_nothing():
+    read_model.rejected()
+    assert not pathlib.Path(read_model.STATE).exists()
+
+
+def test_a_rewrite_that_answered_leaves_the_verification_alone(monkeypatch, tmp_path):
+    _no_daemon(monkeypatch, tmp_path)
+    monkeypatch.setenv("MEMVARA_LLM", "anthropic")
+    write_record(verified())
+    monkeypatch.setattr(opener, "open_store", lambda: store(FakeChat()))
+    text, ok, _ = fast.recall("what did we decide", query_rewrite=True, spawn=False)
+    assert ok is True and "Friday" in text
+    assert stored_record() == verified()
+
+
+# --- one rule for the environment -------------------------------------------------------
+
+
+def test_the_process_environment_wins_over_the_clients_server_block(monkeypatch):
+    monkeypatch.setattr(ipc, "server_env",
+                        lambda: {"MEMVARA_DB": "/from/block.db", "MEMVARA_LLM": "openai"})
+    monkeypatch.setenv("MEMVARA_LLM", "anthropic")
+    env = ipc.client_env()
+    assert (env["MEMVARA_DB"], env["MEMVARA_LLM"]) == ("/from/block.db", "anthropic")
+    assert read_model.configured() == ("anthropic", "")
+
+
+def test_only_the_shared_helper_merges_the_server_block():
+    """`store_key`, `open_store` and the rewrite decision must agree on one rule."""
+    sources = {name: (HOOKS / name).read_text(encoding="utf-8")
+               for name in ("lib/ipc.py", "lib/open.py", "lib/read_model.py")}
+    import re
+
+    for name, source in sources.items():
+        calls = re.findall(r"(?<!def )\bserver_env\(\)", source)
+        assert len(calls) == (1 if name == "lib/ipc.py" else 0), name
+    for name in ("lib/open.py", "lib/read_model.py"):
+        assert "client_env()" in sources[name], name
+    assert "client_env()" in sources["lib/ipc.py"].split("def store_key")[1]
+
+
+def test_the_client_config_is_read_once_per_process(monkeypatch, tmp_path):
+    monkeypatch.setattr(ipc, "server_env", REAL_SERVER_ENV)  # not the fixture's stand-in
+    config = tmp_path / "client.json"
+    config.write_text(json.dumps({"mcpServers": {"memvara": {"env": {"MEMVARA_DB": "x"}}}}),
+                      encoding="utf-8")
+    monkeypatch.setattr(ipc, "_CLIENT_CONFIGS", (str(config),))
+    monkeypatch.setattr(ipc, "_SERVER_ENV", None)
+    opened: list[str] = []
+    real_open = open
+
+    def counting_open(path, *args, **kwargs):
+        if str(path) == str(config):
+            opened.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", counting_open)
+    assert ipc.server_env() == {"MEMVARA_DB": "x"}
+    ipc.store_key()
+    ipc.client_env()
+    assert len(opened) == 1
+    monkeypatch.setattr(ipc, "_CLIENT_CONFIGS", ())
+    assert ipc.server_env() == {}, "a different set of config files is read afresh"
 
 
 # --- the check setup makes ---------------------------------------------------------------
@@ -183,6 +353,7 @@ def test_the_check_makes_one_rewrite_call_and_records_that_it_answered(monkeypat
     monkeypatch.setattr(made, "close", lambda: closed.append(True))
     monkeypatch.setattr(opener, "open_store", lambda: made)
     record = read_model.check()
+    assert not pathlib.Path(read_model.STATE).exists(), "setup decides whether to save it"
     assert len(model.calls) == 1
     assert read_model.PROBE in model.calls[0]
     assert record["outcome"] == "applied"
@@ -245,21 +416,26 @@ def test_a_check_that_raises_is_recorded_not_raised(monkeypatch):
     assert (record["outcome"], record["reason"]) == ("error", "OSError")
 
 
-# --- which keyword a backend is handed ---------------------------------------------------
+# --- which keywords a backend is handed ------------------------------------------------
 
 
-def test_a_backend_that_takes_query_rewrite_is_told_which_kind_of_read():
+def test_a_backend_that_takes_query_rewrite_gets_both_kinds_of_read():
     class Takes:
         def recall(self, query, *, k=6, query_rewrite=True):
             return ""
 
+    assert fast.read_kinds(Takes()) == ({"query_rewrite": False}, {"query_rewrite": True})
+
+
+def test_a_library_store_is_asked_for_the_rewrite_outcome_too():
+    """`with_ids=True` returns a `RecallResult`, whose `rewrite` says a key was rejected."""
     class Forwards:
         def recall(self, query, **kwargs):
             return ""
 
-    for backend in (Takes(), Forwards()):
-        assert fast.rewrite_kwargs(backend.recall, True) == {"query_rewrite": True}
-        assert fast.rewrite_kwargs(backend.recall, False) == {"query_rewrite": False}
+    both = ({"query_rewrite": False}, {"query_rewrite": True, "with_ids": True})
+    assert fast.read_kinds(Forwards()) == both
+    assert fast.read_kinds(store()) == both
 
 
 def test_a_backend_that_predates_query_rewrite_is_asked_as_before():
@@ -268,9 +444,62 @@ def test_a_backend_that_predates_query_rewrite_is_asked_as_before():
         def recall(self, query, k=6, budget=700):
             return ""
 
-    assert fast.rewrite_kwargs(Older().recall, True) == {}
-    assert fast.rewrite_kwargs(HostedRecall("key").recall, False) == {}
-    assert fast.rewrite_kwargs(len, False) == {}, "a builtin with no signature"
+    class NoSignature:
+        recall = len
+
+    assert fast.read_kinds(Older()) == ({}, {})
+    assert fast.read_kinds(HostedRecall("key")) == ({}, {})
+    assert fast.read_kinds(NoSignature()) == ({}, {}), "a builtin with no signature"
+
+
+def test_the_daemon_decides_once_at_startup(monkeypatch):
+    import daemon as daemon_hook
+
+    decided: list[object] = []
+    real = daemon_hook.read_kinds
+
+    def counting(backend):
+        decided.append(backend)
+        return real(backend)
+
+    monkeypatch.setattr(daemon_hook, "read_kinds", counting)
+    served = daemon_hook.Daemon("/tmp/unused-once.sock", Recorder())
+    for rewrite in (False, True, False):
+        served._answer({"q": "a", "k": 1, "budget": 50, "query_rewrite": rewrite})
+    assert len(decided) == 1
+
+
+def test_the_widening_retry_reuses_the_store_the_first_read_opened(monkeypatch, tmp_path):
+    """One process, one handle: a second `open_store()` is a second store to open."""
+    _no_daemon(monkeypatch, tmp_path)
+    opened: list[Recorder] = []
+    decided: list[object] = []
+    real = fast.read_kinds
+
+    def open_store():
+        opened.append(Recorder())
+        return opened[-1]
+
+    def counting(backend):
+        decided.append(backend)
+        return real(backend)
+
+    monkeypatch.setattr(opener, "open_store", open_store)
+    monkeypatch.setattr(fast, "read_kinds", counting)
+    fast.recall("q", query_rewrite=True, spawn=False)
+    fast.recall("q", include_episodes=True, spawn=False)
+    assert len(opened) == 1 and len(opened[0].calls) == 2
+    assert len(decided) == 1
+
+
+def test_a_different_opener_is_a_different_store(monkeypatch, tmp_path):
+    _no_daemon(monkeypatch, tmp_path)
+    first, second = Recorder(), Recorder()
+    monkeypatch.setattr(opener, "open_store", lambda: first)
+    fast.recall("q", spawn=False)
+    monkeypatch.setattr(opener, "open_store", lambda: second)
+    fast.recall("q", spawn=False)
+    assert (len(first.calls), len(second.calls)) == (1, 1)
 
 
 # --- the in-process route ----------------------------------------------------------------
@@ -431,6 +660,38 @@ def test_no_daemon_at_all_leaves_the_rewrite_to_the_in_process_route(monkeypatch
     assert backend.calls[0]["query_rewrite"] is True
 
 
+def test_a_slow_rewrite_does_not_hold_up_another_clients_plain_read():
+    """The model call runs outside the daemon's lock, so a second session is not kept
+    waiting past its client timeout and sent to the slow route."""
+    import time
+
+    import daemon as daemon_hook
+
+    started, release = threading.Event(), threading.Event()
+
+    class Slow(Recorder):
+        def recall(self, query, **kwargs):
+            if kwargs.get("query_rewrite"):
+                started.set()
+                release.wait(timeout=5)
+            return super().recall(query, **kwargs)
+
+    served = daemon_hook.Daemon("/tmp/unused-lock.sock", Slow())
+    rewrite = threading.Thread(target=served._answer, args=(
+        {"q": "slow", "k": 1, "budget": 50, "query_rewrite": True},))
+    rewrite.start()
+    try:
+        assert started.wait(timeout=5), "the rewrite never reached the store"
+        began = time.monotonic()
+        reply = served._answer({"q": "plain", "k": 1, "budget": 50})
+        waited = time.monotonic() - began
+    finally:
+        release.set()
+        rewrite.join(timeout=5)
+    assert reply == {"ok": True, "text": "- plain"}
+    assert waited < ipc.CLIENT_TIMEOUT_SEC, f"the plain read waited {waited:.1f}s"
+
+
 @pytest.mark.parametrize("asked", [False, True])
 def test_both_routes_ask_the_backend_the_same_thing(monkeypatch, tmp_path, asked):
     import daemon as daemon_hook
@@ -450,7 +711,8 @@ def test_both_routes_ask_the_backend_the_same_thing(monkeypatch, tmp_path, asked
 # --- the hosted route --------------------------------------------------------------------
 
 
-def hosted(monkeypatch, offers: bool) -> "tuple[HostedRecall, list[dict]]":
+def hosted(monkeypatch, offers: "bool | None") -> "tuple[HostedRecall, list[dict]]":
+    """A client whose probe answers `offers`: yes, no, or `None` for a probe that failed."""
     sent: list[dict] = []
     client = HostedRecall("key")
 
@@ -460,9 +722,9 @@ def hosted(monkeypatch, offers: bool) -> "tuple[HostedRecall, list[dict]]":
 
     monkeypatch.setattr(client, "_call", call)
     monkeypatch.setattr(client, "_ensure_session", lambda: True)
-    monkeypatch.setattr(client, "accepts",
-                        lambda tool, argument: offers and (tool, argument) == (
-                            "memory_recall", "query_rewrite"))
+    monkeypatch.setattr(client, "offers",
+                        lambda tool, argument: offers if (tool, argument) == (
+                            "memory_recall", "query_rewrite") else False)
     return client, sent
 
 
@@ -492,10 +754,87 @@ def test_a_hosted_endpoint_with_no_session_is_asked_nothing_more(monkeypatch):
     assert (handshakes, sent) == ([True], [])
 
 
+def test_a_failed_probe_still_asks_for_a_plain_read(monkeypatch):
+    """A probe that fails says nothing about the server, so the opt-out is still sent."""
+    client, sent = hosted(monkeypatch, offers=None)
+    client.recall("q")
+    assert sent[0]["query_rewrite"] is False
+
+
+def test_a_server_that_refuses_the_opt_out_is_asked_again_without_it(monkeypatch):
+    """Safe to drop: a server that does not know the argument cannot rewrite."""
+    from lib.hosted import HostedError
+
+    client, sent = hosted(monkeypatch, offers=None)
+
+    def call(tool, args):
+        sent.append(dict(args))
+        if "query_rewrite" in args:
+            raise HostedError("memory_recall: unknown argument(s) query_rewrite.")
+        return "- a memory"
+
+    monkeypatch.setattr(client, "_call", call)
+    assert client.recall("q").strip() == "- a memory"
+    assert ["query_rewrite" in a for a in sent] == [True, False]
+
+
+def test_a_failure_that_is_not_about_the_opt_out_keeps_it(monkeypatch):
+    """A transient failure must not buy a retry that lets the server rewrite."""
+    from lib.hosted import HostedError
+
+    client, sent = hosted(monkeypatch, offers=None)
+
+    def call(tool, args):
+        sent.append(dict(args))
+        raise HostedError("upstream timed out")
+
+    monkeypatch.setattr(client, "_call", call)
+    with pytest.raises(HostedError, match="timed out"):
+        client.recall("q", min_score=0.29)
+    assert sent and all(a.get("query_rewrite") is False for a in sent)
+
+
+def test_a_probe_that_fails_is_asked_again_on_the_next_call(monkeypatch):
+    """A resident daemon lives for half an hour; one bad moment must not last that long."""
+    client = HostedRecall("key")
+    monkeypatch.setattr(client, "_ensure_session", lambda: True)
+    tools = {"result": {"tools": [{"name": "memory_recall", "inputSchema": {
+        "properties": {"query": {}, "query_rewrite": {}}}}]}}
+    replies = iter([None, tools])
+    probes: list[str] = []
+
+    def rpc(method, params=None, retry=True):
+        probes.append(method)
+        return next(replies)
+
+    monkeypatch.setattr(client, "_rpc", rpc)
+    assert client.offers("memory_recall", "query_rewrite") is None
+    assert client.accepts("memory_recall", "query_rewrite") is True
+    assert client.offers("memory_recall", "query_rewrite") is True
+    assert client.offers("memory_recall", "nothing") is False
+    assert probes == ["tools/list", "tools/list"], "a probe that answered is kept"
+
+
+def test_a_refused_probe_is_not_kept_either(monkeypatch):
+    from lib.hosted import HostedError
+
+    client = HostedRecall("key")
+    monkeypatch.setattr(client, "_ensure_session", lambda: True)
+
+    def rpc(method, params=None, retry=True):
+        raise HostedError("503")
+
+    monkeypatch.setattr(client, "_rpc", rpc)
+    assert client.offers("memory_recall", "query_rewrite") is None
+    assert client.accepts("memory_recall", "query_rewrite") is False
+    assert client._schemas is None
+
+
 # --- the hook itself ---------------------------------------------------------------------
 
 
-def run_hook(monkeypatch, tmp_path, *, allowed: bool, block: str = "- a memory") -> list[dict]:
+def run_hook(monkeypatch, tmp_path, *, allowed: bool, block: str = "- a memory",
+             decide=None) -> list[dict]:
     import recall as recall_hook
 
     asked: list[dict] = []
@@ -513,7 +852,7 @@ def run_hook(monkeypatch, tmp_path, *, allowed: bool, block: str = "- a memory")
     monkeypatch.setattr(recall_hook, "due_alert_for_model", lambda: "")
     monkeypatch.setattr(recall_hook, "bind_project", lambda cwd: None)
     monkeypatch.setattr(recall_hook, "fast_recall", fake_recall)
-    monkeypatch.setattr(recall_hook, "rewrite_allowed", lambda: allowed)
+    monkeypatch.setattr(recall_hook, "rewrite_allowed", decide or (lambda: allowed))
     monkeypatch.setattr(recall_hook, "_standing_refresh", lambda *a, **k: ("", None))
     assert recall_hook.main() == 0
     return asked
@@ -552,6 +891,26 @@ def test_no_rewrite_is_started_that_the_hooks_budget_cannot_wait_for(monkeypatch
 
     monkeypatch.setattr(recall_hook.time, "monotonic", monotonic_after_start)
     asked = run_hook(monkeypatch, tmp_path, allowed=True)
+    assert [kw["query_rewrite"] for kw in asked] == [False]
+
+
+def test_the_budget_is_checked_before_the_verification_is_read(monkeypatch, tmp_path):
+    """The comparison is free; the decision reads files."""
+    import recall as recall_hook
+
+    def never():
+        raise AssertionError("read the verification with no budget left to use it")
+
+    late = recall_hook.OVERALL_BUDGET_SEC
+    clock = [0.0]
+
+    def monotonic_after_start():
+        value = clock[0]
+        clock[0] = late
+        return value
+
+    monkeypatch.setattr(recall_hook.time, "monotonic", monotonic_after_start)
+    asked = run_hook(monkeypatch, tmp_path, allowed=True, decide=never)
     assert [kw["query_rewrite"] for kw in asked] == [False]
 
 

@@ -33,7 +33,8 @@ can chat rewrites by default, so a plain read has to ask for one: `query_rewrite
 `recall(query_rewrite=True)` is how the recall hook asks for a rewrite, and it does that
 only when `lib.read_model.allowed()` says setup verified a key. A library released before
 query rewrite has no such argument and never rewrites, so it is asked exactly as before
-(`rewrite_kwargs`). The hosted route never asks for a rewrite; see `lib.hosted`.
+(`read_kinds`, decided once per store). The hosted route never asks for a rewrite; see
+`lib.hosted`.
 
 A rewrite is one model call with a 10-second deadline, and the hook's own allowance is 10
 seconds in all. So a rewritten read gets `rewrite_wait` seconds, `REWRITE_WAIT_SEC` unless
@@ -67,28 +68,57 @@ REWRITE_WAIT_SEC = 5.0
 _clock = time.monotonic
 
 
-def rewrite_kwargs(method: object, query_rewrite: bool) -> dict:
-    """`{"query_rewrite": query_rewrite}` when `method` takes that argument, else `{}`.
+def read_kinds(store: object, method: str = "recall") -> "tuple[dict, dict]":
+    """`(plain, rewrite)`: the keyword arguments for each kind of read of `store`.
+
+    `method` is `recall` for every read a hook makes, and `search` for the one test call
+    `lib.read_model.check()` makes.
+
+    Decided once per store, from the signature of its `recall`, by whoever holds the store:
+    the daemon when it starts, the in-process route when it opens its handle, the
+    session-start hook once. Every read then spreads one of the two dicts, spelled
+    `**plain_read` or `**read_kind`, which is how `tests/test_read_stages.py` knows the read
+    says which kind it is.
 
     A library store has taken `query_rewrite` since query rewrite was added, and rewrites
-    unless it is told `False`. Every library released before that has no such argument and
-    raises `TypeError` when handed one, which the hook would report as a store it could not
-    ask; those never rewrite, so leaving the argument out is the plain read. The hooks' own
-    hosted client has no such argument either. A method that forwards `**kwargs` is taken to
-    accept it, since the library's wrappers do exactly that.
-
-    The call site spells the result `**read_kind`, which is how
-    `tests/test_read_stages.py` knows that the read says which kind it is.
+    unless it is told `False`, so its plain read is `{"query_rewrite": False}`. Its
+    rewritten read also asks for `with_ids=True`, which returns a `RecallResult` whose
+    `rewrite` says how the model call went; `text_of` reads it. Every library released
+    before query rewrite has no such argument and raises `TypeError` when handed one, which
+    the hook would report as a store it could not ask. Those never rewrite, so both of
+    their dicts are empty, and so are the hooks' own hosted client's. A method that
+    forwards `**kwargs` is taken to accept both arguments, since the library's wrappers do
+    exactly that. An empty `rewrite` means this store cannot rewrite.
     """
     import inspect  # noqa: PLC0415 - only the in-process route and the daemon need it
 
     try:
-        parameters = inspect.signature(method).parameters.values()  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return {}
-    if any(p.name == "query_rewrite" or p.kind is p.VAR_KEYWORD for p in parameters):
-        return {"query_rewrite": bool(query_rewrite)}
-    return {}
+        parameters = inspect.signature(getattr(store, method)).parameters
+    except (AttributeError, TypeError, ValueError):
+        return {}, {}
+    forwards = any(p.kind is p.VAR_KEYWORD for p in parameters.values())
+    if not forwards and "query_rewrite" not in parameters:
+        return {}, {}
+    rewrite: dict = {"query_rewrite": True}
+    if method == "recall" and (forwards or "with_ids" in parameters):
+        rewrite["with_ids"] = True
+    return {"query_rewrite": False}, rewrite
+
+
+def text_of(result: object) -> str:
+    """The text of one read, noting a rejected key on the way.
+
+    A rewritten read returns a `RecallResult`; every other read returns text. When the
+    provider refused the key (`key_rejected`), the plain read was still served, and the
+    verification is marked failed (`lib.read_model.rejected`) so that the next prompt does
+    not spend another refused call on a key nobody has checked since.
+    """
+    rewrite = getattr(result, "rewrite", None)
+    if getattr(rewrite, "outcome", None) == "key_rejected":
+        from .read_model import rejected  # noqa: PLC0415 - only a rejected key needs it
+
+        rejected()
+    return str(getattr(result, "text", result) or "")
 
 
 def _within(wait: float, call, fallback):
@@ -98,6 +128,10 @@ def _within(wait: float, call, fallback):
     not hold the hook's process open: the process exits when the hook is done, and the
     call's reply is never read. An exception from `call` is raised here, as it would have
     been without the thread.
+
+    The fallback reads the same store while the abandoned thread may still be inside it.
+    That is not a race: `SQLiteStore` gives every thread its own reader connection, and the
+    library runs a rewrite's phrasings on threads of their own for the same reason.
     """
     import threading  # noqa: PLC0415 - only a rewritten read needs it
 
@@ -250,9 +284,7 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
                                "reading without a rewrite")
             query_rewrite = False
 
-    from .open import open_store
-
-    store = open_store()
+    store, plain_read, rewrite_read = _local_store()
     if store is None:
         # No local library or no local store. Hosted is the remaining route, and on a
         # paste-the-URL install it is the only one there ever was.
@@ -291,14 +323,13 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
             kwargs["include_episodes"] = True
         if memory_types:
             kwargs["memory_types"] = list(memory_types)
-        plain_read = rewrite_kwargs(store.recall, False)
-        read_kind = rewrite_kwargs(store.recall, True) if query_rewrite else plain_read
-        if read_kind.get("query_rewrite"):
-            text = str(_within(rewrite_wait,
-                               lambda: store.recall(query, **kwargs, **read_kind),
-                               lambda: store.recall(query, **kwargs, **plain_read)) or "")
+        read_kind = rewrite_read if query_rewrite else {}
+        if read_kind:
+            text = text_of(_within(rewrite_wait,
+                                   lambda: store.recall(query, **kwargs, **read_kind),
+                                   lambda: store.recall(query, **kwargs, **plain_read)))
         else:
-            text = str(store.recall(query, **kwargs, **plain_read) or "")
+            text = text_of(store.recall(query, **kwargs, **plain_read))
     except Exception as exc:
         if spawn and path is not None:
             _spawn(root)
@@ -307,6 +338,33 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
     if spawn and path is not None:
         _spawn(root)
     return text, True, ""
+
+
+#: The store this process opened for in-process reads: `(opener, store, plain, rewrite)`.
+#: The recall hook can read twice on one prompt -- the episode-widening retry follows the
+#: first read -- and a second `open_store()` would open a second, independent handle on
+#: the same store. The opener is part of the key so that a caller that replaces
+#: `lib.open.open_store`, as the tests do, gets the store it asked for.
+_OPENED: "tuple[object, object, dict, dict] | None" = None
+
+
+def _local_store() -> "tuple[object, dict, dict]":
+    """`(store, plain, rewrite)` for in-process reads, or `(None, {}, {})` for none.
+
+    Opened once per process, and its kinds of read decided once (`read_kinds`). "No store"
+    is not kept: on a hosted install it is the normal answer, and asking again is cheap.
+    """
+    global _OPENED
+    from . import open as opener  # noqa: PLC0415 - imports pathlib; not on the daemon route
+
+    if _OPENED is not None and _OPENED[0] is opener.open_store:
+        return _OPENED[1], _OPENED[2], _OPENED[3]
+    store = opener.open_store()
+    if store is None:
+        return None, {}, {}
+    plain, rewrite = read_kinds(store)
+    _OPENED = (opener.open_store, store, plain, rewrite)
+    return store, plain, rewrite
 
 
 def _served(answer: "str | None") -> "str | None":

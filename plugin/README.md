@@ -105,6 +105,10 @@ feature's default. Each of these four is on by default.
   plain result, so a slow or failing model never costs you your memories.
   A hosted install is always asked for a plain read, because the hosted
   service would use your organisation's key, which setup cannot check.
+  The result of the check is kept in `~/.memvara/.hooks/read_model.json`.
+  If the provider rejects the key during a later prompt, that prompt gets
+  the plain result and the hook stops rewriting until the key is checked
+  again.
 
 The file lists the library's other switches too, with the same defaults as
 the MCP server. `extraction_chunks` is the one that is off by default. No

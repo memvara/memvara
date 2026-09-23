@@ -81,6 +81,16 @@ def _file() -> dict:
     return _LOADED[1]
 
 
+def reload() -> None:
+    """Forget the file read earlier in this process, so the next read sees it as it is now.
+
+    A hook reads the file once and never needs this. `/memvara:setup` does: it writes the
+    file and then reports what the hooks will read, in the same process.
+    """
+    global _LOADED
+    _LOADED = None
+
+
 def stored(key: str) -> object:
     """The value the settings file holds under `key`, or `None`. Never raises."""
     return _file().get(key)

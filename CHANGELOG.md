@@ -96,13 +96,26 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   key, which setup cannot check from the user's machine. The client now sends
   `query_rewrite: false` to such a server, and nothing to a server that does not offer the
   argument. Finding out costs one `tools/list` call per client, which a resident daemon
-  pays once. The client also asks for its session once before the call rather than inside
-  each retry, so an endpoint that cannot be reached is reported after one handshake
-  instead of one per optional argument the retries drop.
+  pays once. A probe that fails is not kept, and the next call asks again; until one
+  answers, the client sends `query_rewrite: false` anyway, and drops it only when the
+  server's refusal names that argument, because a server that does not know it cannot
+  rewrite. `HostedRecall.offers()` returns `True`, `False`, or `None` when the probe could
+  not answer, and `accepts()` is `offers() is True`. The client also asks for its session
+  once before the call rather than inside each retry, so an endpoint that cannot be
+  reached is reported after one handshake instead of one per optional argument the
+  retries drop.
 - **The session-start hook and the daemon's warm-up read no longer pass `query_rewrite`
   to a library released before query rewrite.** Such a library raises `TypeError` on the
   unknown argument, which the session-start hook reported as a store it could not ask.
-  The argument is now passed only to a `recall()` that takes it (`lib.fast.rewrite_kwargs`).
+  The argument is now passed only to a `recall()` that takes it. `lib.fast.read_kinds`
+  decides that once per store: the daemon when it starts, the in-process route when it
+  opens its handle, and the session-start hook once.
+- **The hooks read the client's MCP configuration once per process, through one rule.**
+  `lib.ipc.client_env()` is the client's server block with this process's own variables
+  winning, and the daemon's address, the store the hooks open and the rewrite decision all
+  read it. `server_env()` keeps what it read for the rest of the process.
+- **The recall hook opens the store once per prompt.** The episode-widening retry reuses
+  the handle the first read opened, instead of opening a second one.
 
 ### Added
 
@@ -509,22 +522,33 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   made one test rewrite through the library and the model answered it; and the model
   configured now (`MEMVARA_LLM` and `MEMVARA_LLM_MODEL`, read from the environment and
   then from the client's MCP server block) is the one that was checked. The check is
-  recorded in `~/.memvara/settings.json` under `read_model`, with the outcome, the backend,
-  the model and the time. `plugin/hooks/lib/read_model.py` has `check()`, which setup
-  calls, and `allowed()`, which the hook calls. A rewritten read gets at most
+  recorded in its own state file, `~/.memvara/.hooks/read_model.json`, with the outcome,
+  the backend, the model and the time, written atomically under a lock. A record under
+  `read_model` in `~/.memvara/settings.json`, where an earlier build of this change kept
+  it, is read once and moved. `plugin/hooks/lib/read_model.py` has `check()` and `save()`,
+  which setup calls, `allowed()`, which the hook calls, and
+  `verified_for_current_config()`, which is `allowed()` without the switch. When a rewrite
+  during a recall reports `key_rejected`, the plain read is served and the record is
+  marked `key_rejected`, so a rotated or revoked key stops the rewrites after one prompt.
+  The rewritten read asks the library for `with_ids=True` to see that outcome. A
+  rewritten read gets at most
   `REWRITE_WAIT_SEC` (5 seconds) before the hook serves the plain read instead, because
   the model call's own deadline is 10 seconds and so is the hook's whole allowance; the
   hook starts a rewrite only when that much of its budget is left. A rewrite that fails or
   is refused serves the plain read, as the library already does. When a daemon was handed
   a rewrite and did not serve it in time, the fallback read is plain, so one prompt is
-  never billed for two model calls. The episode-widening retry is always plain, and the
-  hook never asks for a summary.
+  never billed for two model calls. The daemon runs a rewritten read outside its lock, so
+  a model call of up to 10 seconds does not keep another session's plain read waiting
+  past its 2-second client timeout; plain reads stay serialised, because the hosted
+  client holds one connection. The episode-widening retry is always plain, and the hook
+  never asks for a summary.
 - **The hooks' copy of the feature switches carries the library's defaults.**
   `plugin/hooks/lib/settings.FEATURE_DEFAULTS` is a copy of
   `memvara.server.config.FEATURE_DEFAULTS`, and a test compares the names, the order and
   the defaults. A missing switch now reads as its default, so `extraction_chunks` reads as
   off, as it does in the library. `settings.stored(key)` hands over an entry of the file
-  that is not a switch.
+  that is not a switch, and `settings.reload()` makes the next read see the file as it is
+  now, for `/memvara:setup`, which writes it and reports on it in one process.
 
 ### Changed
 

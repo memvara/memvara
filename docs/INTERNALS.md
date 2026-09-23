@@ -1956,17 +1956,24 @@ the switch changed.
 store whose model can chat rewrites every read by default (invariant 1 names `query_rewrite`
 as one of the read path's model stages), and on the recall hook that is one model call per
 prompt. `lib/read_model.allowed()` says yes only when the `query_rewrite` switch is on, the
-settings file records under `read_model` that `/memvara:setup verify-key` made one test
-rewrite through the library and the model answered it (outcome `applied`), and the
-configured `MEMVARA_LLM` and `MEMVARA_LLM_MODEL` are the ones that were checked. Every other
-read from the hooks is plain: `lib/fast.rewrite_kwargs` passes `query_rewrite=False` to a
-`recall()` that takes it, and nothing to a library released before query rewrite, which
-never rewrites. A rewritten read gets `lib/fast.REWRITE_WAIT_SEC` (5 seconds), then the
-plain read is served, because the model call's own deadline is 10 seconds and so is the
-hook's allowance. When a daemon took a rewrite and did not serve it in time, the fallback
-read is plain, so one prompt is never billed twice. The hooks' hosted client always asks for
-a plain read: a hosted server would rewrite with the organisation's key, which the user's
-machine cannot check.
+state file `~/.memvara/.hooks/read_model.json` records that `/memvara:setup verify-key`
+made one test rewrite through the library and the model answered it (outcome `applied`),
+and the configured `MEMVARA_LLM` and `MEMVARA_LLM_MODEL` are the ones that were checked. A
+rewrite that reports `key_rejected` during a recall marks that record failed. Every other
+read from the hooks is plain: `lib/fast.read_kinds` decides once per store whether its
+`recall()` takes `query_rewrite`, and a library released before query rewrite, which never
+rewrites, is asked without it. A rewritten read gets `lib/fast.REWRITE_WAIT_SEC` (5
+seconds), because the model call's own deadline is 10 seconds and so is the hook's
+allowance. After that the plain read is served from the same handle while the abandoned
+thread may still be reading it, which is safe because `SQLiteStore` gives each thread its
+own reader connection. When a daemon took a rewrite and did
+not serve it in time, the fallback read is plain, so one prompt is never billed twice. The
+daemon runs a rewritten read outside its lock and keeps plain reads under it, for the
+hosted client's one connection. The hooks' hosted client always asks for a plain read: a
+hosted server would rewrite with the organisation's key, which the user's machine cannot
+check. The daemon's address, the store the hooks open and the rewrite decision all read
+the client's configuration through `lib/ipc.client_env`, which reads the file once per
+process.
 
 **A hook may never fail a turn.** Every path out of `run.py` returns 0, including the ones
 it does not know about — the `__main__` block catches `BaseException`. That is the rule

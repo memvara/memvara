@@ -47,7 +47,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from lib.fast import rewrite_kwargs  # noqa: E402
+from lib.fast import read_kinds, text_of  # noqa: E402
 from lib.ipc import IDLE_TIMEOUT_SEC, socket_path, store_key  # noqa: E402
 from lib.open import open_store  # noqa: E402
 
@@ -90,6 +90,11 @@ class Daemon:
         self.last_seen = time.monotonic()
         self._lock = threading.Lock()
         self.failures = 0
+        #: The keyword arguments for a plain read and for a rewritten read of this store,
+        #: decided once here rather than on every request (`lib.fast.read_kinds`). An
+        #: empty `rewrite_read` means this store cannot rewrite, which is true of the
+        #: hosted client and of every library released before query rewrite.
+        self.plain_read, self.rewrite_read = read_kinds(store)
 
     # -- serving ---------------------------------------------------------------
 
@@ -135,25 +140,35 @@ class Daemon:
         types = request.get("memory_types")
         if isinstance(types, list) and types:
             kwargs["memory_types"] = [str(t) for t in types]
-        # A plain read unless the client asked for a rewrite, and the argument only for a
-        # backend that takes it -- the same rule `lib.fast.recall` applies on the direct
-        # route, so the two routes hand one backend the same call.
-        read_kind = rewrite_kwargs(self.store.recall, bool(request.get("query_rewrite")))
+        # A plain read unless the client asked for a rewrite and this store can do one --
+        # the same rule `lib.fast.recall` applies on the direct route, so the two routes
+        # hand one backend the same call.
+        rewrite = bool(request.get("query_rewrite")) and bool(self.rewrite_read)
+        read_kind = self.rewrite_read if rewrite else self.plain_read
         try:
-            # Serialised deliberately. The store is a read handle over SQLite and is not
-            # documented as thread-safe; a per-prompt hook has no concurrency worth the
-            # risk of finding out otherwise.
+            # Both backends answer the same call. The local one is a `Memvara`; the hosted
+            # one is a `HostedRecall` holding a kept-alive TLS connection, which is the
+            # whole reason a hosted install wants a daemon: the same request costs 609ms on
+            # a fresh connection and 177ms on a warm one. Both raise on failure and return
+            # a result on success, which is what lets one `except` cover both backends
+            # without knowing which one it holds. `text_of` notes a rejected key.
+            if rewrite:
+                # Outside the lock, because this read waits on a model call for up to its
+                # 10-second deadline, and every other client of this daemon -- a second
+                # session on the same project -- would wait behind it past its 2-second
+                # timeout and fall back to the slow route even for a plain read. Only a
+                # library store is ever handed a rewrite, and `SQLiteStore` gives each
+                # thread its own reader connection, so this read can run beside another.
+                text = text_of(self.store.recall(query, **kwargs, **read_kind))
+            else:
+                # Serialised deliberately, and still needed: the hosted client holds one
+                # kept-alive connection, which two threads must not use at once. Nothing
+                # under this lock waits on a model.
+                with self._lock:
+                    text = text_of(self.store.recall(query, **kwargs, **read_kind))
             with self._lock:
-                # Both backends answer the same call. The local one is a `Memvara`; the
-                # hosted one is a `HostedRecall` holding a kept-alive TLS connection,
-                # which is the whole reason a hosted install wants a daemon: the same
-                # request costs 609ms on a fresh connection and 177ms on a warm one.
-                #
-                # Both raise on failure and return text on success, which is what lets one
-                # `except` cover both backends without knowing which one it holds.
-                text = str(self.store.recall(query, **kwargs, **read_kind) or "")
                 self.failures = 0
-                return {"ok": True, "text": text}
+            return {"ok": True, "text": text}
         except Exception:
             # Still never a raised exception out of here -- but no longer an empty string
             # either, because the client cannot act on what it cannot see.
@@ -273,24 +288,25 @@ class Daemon:
 
 def main() -> int:
     store = open_store()
-    # The warm-up is a plain read: it exists to pay connection costs, not a model call.
-    # `open_store()` returns the library's own `Memvara`, which takes `query_rewrite`
-    # unless it was released before query rewrite; the stdlib hosted client below takes no
-    # such argument and always asks its server for a plain read.
-    plain_read: dict = rewrite_kwargs(store.recall, False) if store is not None else {}
-    if store is None:
+    hosted = store is None
+    if hosted:
         # No library, or no local store. On a paste-the-URL hosted install that is the
         # normal state, not a broken one, so fall through to the stdlib HTTP client
         # rather than exiting.
         from lib.hosted import open_hosted
 
         store = open_hosted()
-        plain_read = {}
     if store is None:
         # Nothing to serve at all. Exiting is correct: a daemon with no backend would
         # accept connections and answer every one with silence, which is indistinguishable
         # from a working daemon over a store that happens to be empty.
         return 0
+    served = Daemon(socket_path(store_key()), store)
+    # The warm-up is a plain read: it exists to pay connection costs, not a model call.
+    # The library's store is told so with the plain read the daemon decided on at
+    # startup; the stdlib hosted client takes no such argument and always asks its server
+    # for a plain read.
+    plain_read = {} if hosted else served.plain_read
     try:
         # Pay the first-query costs -- imports, page cache, TLS handshake -- before any
         # prompt is waiting on them. For hosted this is the handshake that turns a 609ms
@@ -298,7 +314,7 @@ def main() -> int:
         store.recall("warm", k=1, **plain_read)
     except Exception:
         pass
-    return Daemon(socket_path(store_key()), store).run()
+    return served.run()
 
 
 if __name__ == "__main__":

@@ -316,29 +316,40 @@ class HostedRecall:
         A client that guesses wrong therefore loses the whole write rather than losing one
         field, which is the wrong way round for a field that only adds provenance.
 
-        One `tools/list` per process answers it for every call afterwards, and a probe that
-        fails answers False -- so an older server, or no answer at all, costs the provenance
-        and keeps the fact.
+        A probe that fails answers False -- so an older server, or no answer at all, costs
+        the provenance and keeps the fact. See `offers` for how the answer is kept.
+        """
+        return self.offers(tool, argument) is True
+
+    def offers(self, tool: str, argument: str) -> "bool | None":
+        """Whether the server's schema for `tool` has `argument`; `None` when unknown.
+
+        One `tools/list` that answers is kept for every call afterwards. A probe that
+        fails is not kept, and the next call asks again: a resident daemon lives for up to
+        half an hour, and one bad moment at its start used to settle every answer for all
+        of it. `None` lets a caller treat "could not ask" differently from "no".
         """
         if self._schemas is None:
-            self._schemas = {}
             try:
                 reply = self._rpc("tools/list", {}) if self._ensure_session() else None
             except HostedError:
-                # Stated above: a probe that fails answers False. A refusal here costs the
-                # provenance field and keeps the fact, which is the right way round -- and
-                # is why this catch cannot be narrowed to the transport case.
+                # A refusal is a probe that failed, not an answer. This catch cannot be
+                # narrowed to the transport case for that reason.
                 reply = None
             result = reply.get("result") if isinstance(reply, dict) else None
             listed = result.get("tools") if isinstance(result, dict) else None
-            for entry in listed if isinstance(listed, list) else []:
+            if not isinstance(listed, list):
+                return None
+            schemas: "dict[str, set[str]]" = {}
+            for entry in listed:
                 if not isinstance(entry, dict):
                     continue
                 schema = entry.get("inputSchema")
                 props = schema.get("properties") if isinstance(schema, dict) else None
                 name = entry.get("name")
                 if isinstance(name, str) and isinstance(props, dict):
-                    self._schemas[name] = set(props)
+                    schemas[name] = set(props)
+            self._schemas = schemas
         return argument in self._schemas.get(tool, set())
 
     def _call(self, tool: str, arguments: dict) -> str:
@@ -382,12 +393,15 @@ class HostedRecall:
         # argument they drop.
         if not self._ensure_session():
             raise HostedError("no session on the hosted endpoint for memory_recall")
-        if self.accepts("memory_recall", "query_rewrite"):
+        offered = self.offers("memory_recall", "query_rewrite")
+        if offered is not False:
             # Always a plain read. A server that offers query rewrite runs it by default,
             # with the organisation's own model key, and setup cannot check that key from
             # this machine or show what it costs. The per-prompt rewrite the recall hook
-            # can turn on is the local store's (`lib.read_model`). Only sent to a server
-            # that offers the argument, because an unknown argument is refused outright.
+            # can turn on is the local store's (`lib.read_model`). Not sent to a server
+            # whose tool list lacks the argument, because an unknown argument is refused
+            # outright. When the probe failed (`None`) it is sent anyway: the opt-out is
+            # what must not be lost, and a server that refuses it is handled below.
             args["query_rewrite"] = False
         if min_score:
             args["min_score"] = min_score
@@ -401,47 +415,65 @@ class HostedRecall:
             args["memory_types"] = list(memory_types)
         try:
             text = self._call("memory_recall", args)
-        except HostedError:
-            # Optional arguments are dropped one at a time, cumulatively, in the order
-            # that loses least -- the floor before the episodes, because unfiltered
-            # memories beat none and a widened brief beats a narrow one.
-            #
-            # Written as a loop rather than as a chain of branches because the chain is
-            # what broke: `min_score` was added as the first branch and returned from
-            # inside it, so a call carrying BOTH arguments and rejected because of
-            # `include_episodes` retried with the episodes still attached, failed again,
-            # and propagated -- leaving the older `include_episodes` fallback below
-            # unreachable for the one call site that uses it. Dropping in sequence has no
-            # such ordering hazard: whatever the server objected to is gone by the end.
-            #
-            # `include_episodes` is the only boolean argument anywhere in the tool surface,
-            # and the server's own validator has no branch for that type: a boolean falls
-            # through to the string check and dies on a `KeyError: 'boolean'` looking up the
-            # article for the error message it was about to raise. So that argument has
-            # never worked on any deployment, for either value. Both drops self-heal the
-            # day the server grows the branch, with no release here.
-            optional = [key for key in ("min_score", "include_episodes") if key in args]
-            if not optional:
-                raise
-            for index, key in enumerate(optional):
-                del args[key]
-                if key == "min_score":
-                    # Recorded where a person actually looks. The flag alone was not
-                    # enough: nothing read it, so a hosted store that cannot filter
-                    # returned unfiltered memories while every visible signal said the
-                    # recall had succeeded normally.
-                    self.unfiltered = True
-                    log_line("recall", "hosted rejected min_score; this recall is "
-                                       "UNFILTERED -- the floor was not applied")
+        except HostedError as exc:
+            if offered is None and "query_rewrite" in str(exc):
+                # The probe could not say, and the server named the argument: it does not
+                # know it, so it cannot rewrite either, and dropping the opt-out is safe.
+                # Any other failure keeps the opt-out, because a retry without it could
+                # reach a server that does rewrite. Checked before the drops below, which
+                # would otherwise strip the floor for a refusal that was not about it.
+                del args["query_rewrite"]
                 try:
                     text = self._call("memory_recall", args)
-                    break
-                except HostedError:
-                    if index == len(optional) - 1:
-                        raise
+                except HostedError as again:
+                    text = self._without_optional(args, again)
+            else:
+                text = self._without_optional(args, exc)
         if not text:
             return ""
         return _reheader(text, header)
+
+    def _without_optional(self, args: dict, refusal: HostedError) -> str:
+        """`memory_recall` again after `refusal`, dropping the optional arguments.
+
+        Optional arguments are dropped one at a time, cumulatively, in the order that loses
+        least -- the floor before the episodes, because unfiltered memories beat none and a
+        widened brief beats a narrow one. With nothing to drop, `refusal` is raised.
+
+        Written as a loop rather than as a chain of branches because the chain is what
+        broke: `min_score` was added as the first branch and returned from inside it, so a
+        call carrying BOTH arguments and rejected because of `include_episodes` retried with
+        the episodes still attached, failed again, and propagated -- leaving the older
+        `include_episodes` fallback unreachable for the one call site that uses it. Dropping
+        in sequence has no such ordering hazard: whatever the server objected to is gone by
+        the end.
+
+        `include_episodes` is the only boolean argument anywhere in the tool surface, and
+        the server's own validator has no branch for that type: a boolean falls through to
+        the string check and dies on a `KeyError: 'boolean'` looking up the article for the
+        error message it was about to raise. So that argument has never worked on any
+        deployment, for either value. Both drops self-heal the day the server grows the
+        branch, with no release here.
+        """
+        optional = [key for key in ("min_score", "include_episodes") if key in args]
+        if not optional:
+            raise refusal
+        for index, key in enumerate(optional):
+            del args[key]
+            if key == "min_score":
+                # Recorded where a person actually looks. The flag alone was not enough:
+                # nothing read it, so a hosted store that cannot filter returned unfiltered
+                # memories while every visible signal said the recall had succeeded
+                # normally.
+                self.unfiltered = True
+                log_line("recall", "hosted rejected min_score; this recall is "
+                                   "UNFILTERED -- the floor was not applied")
+            try:
+                return self._call("memory_recall", args)
+            except HostedError:
+                if index == len(optional) - 1:
+                    raise
+        return ""  # not reached: the last drop returns or raises
 
     def stats(self) -> str:
         """The server's own scope/writes/count report, or raise.
