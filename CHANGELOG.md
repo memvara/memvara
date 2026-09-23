@@ -64,7 +64,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   audio and video need a model backend that implements the new `memvara.llm.Multimodal`
   protocol. A URL is fetched only over `http` or `https`, and is refused if its host
   resolves to any address that is not public, including after a redirect; at most 5
-  redirects, 20 seconds and 10 MB. Every failure raises `IngestError` with a `code`, such as
+  redirects, 20 seconds and 10 MB. An IPv4 address behind the NAT64 prefixes
+  `64:ff9b::/96` and `64:ff9b:1::/48` is unwrapped and checked, and an operator adds their
+  own prefixes with `SafeFetcher(nat64_prefixes=...)` or the new `MEMVARA_NAT64_PREFIXES`
+  setting. Every failure raises `IngestError` with a `code`, such as
   `media_unsupported`, `url_refused` or `no_text`. The document store will call this; on
   its own it stores nothing.
 - **`Multimodal`, a protocol for backends that turn media into text**, with

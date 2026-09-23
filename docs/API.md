@@ -270,7 +270,10 @@ fetcher=None, allow_urls=True, allow_media=True)`. Give exactly one of `content`
   if the host resolves to any address that is not public (private, loopback, link-local,
   multicast, reserved, unspecified, including IPv4 written inside IPv6). The connection
   goes to the address that was checked, every redirect is checked again, at most 5 are
-  followed, and the whole fetch has 20 seconds and 10 MB. `fetcher=` replaces it, which
+  followed, and the whole fetch has 20 seconds and 10 MB. IPv4 behind the NAT64 prefixes
+  `64:ff9b::/96` and `64:ff9b:1::/48` is unwrapped and checked; on a network with its own
+  NAT64 prefix, pass `fetcher=SafeFetcher(nat64_prefixes=["<prefix>/96"])` so that one is
+  unwrapped too. `fetcher=` replaces the default fetcher, which
   is how a test avoids the network.
 - **Switches.** `allow_urls` and `allow_media` are the `ingest_urls` and `ingest_media`
   features. When one is `False`, a URL or a piece of media is refused with `feature_off`.

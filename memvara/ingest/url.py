@@ -9,8 +9,11 @@ forgery. `SafeFetcher` prevents it with these rules:
 2. The host name is resolved first, and the fetch is refused if **any** address it
    resolves to is not a public one: private, loopback, link-local, multicast, reserved,
    unspecified, or otherwise not globally routable. IPv4 addresses written inside IPv6
-   forms (IPv4-mapped `::ffff:a.b.c.d`, NAT64 `64:ff9b::/96`, 6to4 and Teredo) are unwrapped
-   and checked as IPv4.
+   forms (IPv4-mapped `::ffff:a.b.c.d`, 6to4, Teredo, and NAT64) are unwrapped and checked
+   as IPv4. The NAT64 prefixes recognised are the well-known `64:ff9b::/96`, the local-use
+   `64:ff9b:1::/48`, and any the operator configures (`nat64_prefixes`, or
+   `MEMVARA_NAT64_PREFIXES` for the MCP server). A NAT64 gateway on a prefix nobody
+   configured cannot be recognised, because its addresses look like any other IPv6 address.
 3. The connection is made to the address that was checked, not to the host name. A DNS
    server that answers with a public address for the check and a private one for the
    connection (DNS rebinding) therefore cannot move the request. TLS still verifies the
@@ -32,13 +35,13 @@ import socket
 import ssl
 import time
 from dataclasses import dataclass
-from typing import Callable, Protocol, Sequence
+from typing import Callable, Iterable, Protocol, Sequence
 from urllib.parse import urljoin, urlsplit
 
 from .errors import IngestError
 
-__all__ = ["Fetched", "Fetcher", "SafeFetcher", "refusal", "MAX_BYTES", "MAX_REDIRECTS",
-           "TIMEOUT_SEC", "USER_AGENT"]
+__all__ = ["Fetched", "Fetcher", "SafeFetcher", "nat64_networks", "refusal", "MAX_BYTES",
+           "MAX_REDIRECTS", "NAT64_PREFIXES", "TIMEOUT_SEC", "USER_AGENT"]
 
 #: The largest response body that is read. A longer body is refused with `too_large`.
 MAX_BYTES = 10 * 1024 * 1024
@@ -51,6 +54,14 @@ MAX_REDIRECTS = 5
 
 #: Sent on every request. A fixed value, so a site owner can recognise and block it.
 USER_AGENT = "memvara-ingest/1.0 (+https://memvara.dev)"
+
+#: The NAT64 prefixes every fetcher recognises: the well-known prefix from RFC 6052 and the
+#: local-use prefix from RFC 8215. An operator's own prefix is added with `nat64_prefixes`.
+NAT64_PREFIXES = ("64:ff9b::/96", "64:ff9b:1::/48")
+
+#: The prefix lengths RFC 6052 defines a layout for. No other length can carry an IPv4
+#: address in a way a gateway and this module agree on.
+_NAT64_LENGTHS = (32, 40, 48, 56, 64, 96)
 
 _REDIRECTS = frozenset({301, 302, 303, 307, 308})
 _CHUNK = 64 * 1024
@@ -95,24 +106,75 @@ Transport = Callable[[str, str, float], Response]
 Resolver = Callable[[str, int], Sequence[str]]
 
 
-def _embedded_ipv4(address: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+def nat64_networks(prefixes: Iterable[str]) -> tuple[ipaddress.IPv6Network, ...]:
+    """`prefixes` as networks, refusing one that cannot carry an IPv4 address.
+
+    Raises `ValueError` naming the prefix and what is wrong with it.
+
+    >>> nat64_networks(["64:ff9b:1::/48"])
+    (IPv6Network('64:ff9b:1::/48'),)
+    >>> nat64_networks(["2001:db8::/33"])
+    Traceback (most recent call last):
+    ...
+    ValueError: NAT64 prefix '2001:db8::/33' is 33 bits long; RFC 6052 defines only 32, 40, 48, 56, 64 or 96
+    """
+    networks = []
+    for prefix in prefixes:
+        try:
+            network = ipaddress.IPv6Network(prefix.strip())
+        except ValueError:
+            raise ValueError(
+                f"NAT64 prefix {prefix!r} is not an IPv6 prefix with its host bits clear, "
+                "such as 64:ff9b:1::/48") from None
+        if network.prefixlen not in _NAT64_LENGTHS:
+            lengths = ", ".join(map(str, _NAT64_LENGTHS[:-1]))
+            raise ValueError(
+                f"NAT64 prefix {prefix!r} is {network.prefixlen} bits long; RFC 6052 "
+                f"defines only {lengths} or {_NAT64_LENGTHS[-1]}")
+        networks.append(network)
+    return tuple(networks)
+
+
+_DEFAULT_NAT64 = nat64_networks(NAT64_PREFIXES)
+
+
+def _nat64_ipv4(address: ipaddress.IPv6Address,
+                network: ipaddress.IPv6Network) -> ipaddress.IPv4Address:
+    """The IPv4 address inside `address`, laid out as RFC 6052 says for this prefix length.
+
+    After a /96 prefix the IPv4 address is the last four bytes. After a shorter prefix it
+    starts right after the prefix, and byte 8 (bits 64 to 71, which must be zero) is
+    skipped wherever the four bytes would cross it.
+    """
+    raw = address.packed
+    if network.prefixlen == 96:
+        return ipaddress.IPv4Address(raw[12:16])
+    start = network.prefixlen // 8
+    without_reserved = raw[:8] + raw[9:]
+    return ipaddress.IPv4Address(without_reserved[start:start + 4])
+
+
+def _embedded_ipv4(address: ipaddress.IPv6Address,
+                   nat64: Sequence[ipaddress.IPv6Network]) -> ipaddress.IPv4Address | None:
     """The IPv4 address carried inside an IPv6 one, for the forms that route to it."""
     if address.ipv4_mapped is not None:
         return address.ipv4_mapped
+    for network in nat64:
+        if address in network:
+            return _nat64_ipv4(address, network)
     if address.sixtofour is not None:
         return address.sixtofour
     if address.teredo is not None:
         return address.teredo[1]
-    if address in _NAT64:
-        return ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
     return None
 
 
-_NAT64 = ipaddress.IPv6Network("64:ff9b::/96")
-
-
-def refusal(address: str) -> str | None:
+def refusal(address: str,
+            nat64: Sequence[ipaddress.IPv6Network] = _DEFAULT_NAT64) -> str | None:
     """Why `address` must not be fetched from, or `None` when it is a public address.
+
+    `nat64` is the NAT64 prefixes to unwrap. The default is `NAT64_PREFIXES`;
+    `SafeFetcher.refusal` adds the operator's own.
 
     >>> refusal("93.184.216.34") is None
     True
@@ -128,7 +190,7 @@ def refusal(address: str) -> str | None:
     except ValueError:
         return "not an IP address"
     if isinstance(parsed, ipaddress.IPv6Address):
-        inner = _embedded_ipv4(parsed)
+        inner = _embedded_ipv4(parsed, nat64)
         if inner is not None:
             return refusal(str(inner))
     checks = (("is_unspecified", "an unspecified address"),
@@ -225,6 +287,10 @@ def _pinned_transport(url: str, address: str, timeout: float) -> Response:
 class SafeFetcher:
     """Fetches `http` and `https` URLs under the rules in this module's docstring.
 
+    `nat64_prefixes` adds the operator's own NAT64 prefixes to `NAT64_PREFIXES`, so an
+    address translated through one is checked as the IPv4 address inside it. Each must be
+    an IPv6 prefix of 32, 40, 48, 56, 64 or 96 bits, or `ValueError` is raised here.
+
     `transport`, `resolve` and `clock` exist for tests. Leave them unset in real use.
     """
 
@@ -232,7 +298,9 @@ class SafeFetcher:
                  resolve: Resolver | None = None,
                  clock: Callable[[], float] | None = None,
                  max_bytes: int = MAX_BYTES, timeout: float = TIMEOUT_SEC,
-                 max_redirects: int = MAX_REDIRECTS) -> None:
+                 max_redirects: int = MAX_REDIRECTS,
+                 nat64_prefixes: Iterable[str] = ()) -> None:
+        self._nat64 = _DEFAULT_NAT64 + nat64_networks(nat64_prefixes)
         self._transport = transport or _pinned_transport
         self._resolve = resolve or _resolve
         self._clock = clock or time.monotonic
@@ -270,6 +338,10 @@ class SafeFetcher:
             finally:
                 response.close()
 
+    def refusal(self, address: str) -> str | None:
+        """Why this fetcher would refuse `address`, or `None` when it would connect."""
+        return refusal(address, self._nat64)
+
     def _check(self, url: str) -> str:
         """The address to connect to for `url`, after every rule that can refuse it."""
         parts = urlsplit(url)
@@ -291,7 +363,7 @@ class SafeFetcher:
         if not addresses:
             raise IngestError("fetch_failed", f"{host} resolved to no address")
         for address in addresses:
-            reason = refusal(address)
+            reason = self.refusal(address)
             if reason is not None:
                 raise IngestError(
                     "url_refused",

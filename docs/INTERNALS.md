@@ -1627,6 +1627,15 @@ pages)`, and one module per source type: `plain`, `html_text`, `pdf`, `media` an
   set to the time left; the body stops at `MAX_BYTES` (10 MB). The transport, resolver
   and clock are constructor arguments so `tests/test_ingest_url.py` needs no network and
   no sleep.
+- **NAT64 prefixes.** A NAT64 address carries its IPv4 address in bytes that depend on the
+  prefix length (RFC 6052): after a /96 it is the last four bytes, and after a /32 to /64
+  it starts right after the prefix, skipping byte 8. `_nat64_ipv4` reads it that way.
+  `NAT64_PREFIXES` holds the well-known `64:ff9b::/96` and the RFC 8215 local-use
+  `64:ff9b:1::/48`; `SafeFetcher(nat64_prefixes=...)` adds an operator's own, and the MCP
+  server reads those from `MEMVARA_NAT64_PREFIXES` in `ServerConfig` and hands them over
+  through `ServerConfig.url_fetcher()`. A prefix of any other length is refused, because no
+  layout is defined for it. An address behind a prefix nobody listed looks like an ordinary
+  global IPv6 address, so it cannot be caught; `docs/LIMITATIONS.md` says so.
 - **The switches.** `allow_urls` and `allow_media` are the `ingest_urls` and
   `ingest_media` features in `memvara/server/config.py`'s `FEATURES`. `extract` does not
   read the environment itself; the caller passes them.

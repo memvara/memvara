@@ -460,3 +460,103 @@ def test_https_is_spoken_as_tls_to_the_pinned_address(local_server):
     # is the evidence that https:// URLs are sent over TLS.
     with pytest.raises(OSError):
         _pinned_transport(f"https://example.test:{local_server}/", "127.0.0.1", 5.0)
+
+
+# -- NAT64 prefixes -----------------------------------------------------------------------
+#
+# A NAT64 gateway reaches an IPv4 host through an IPv6 address that carries the IPv4
+# address inside it, laid out as RFC 6052 describes for the prefix length. Unless the
+# prefix is known, the IPv6 address can look public while the IPv4 one behind it is
+# private. The well-known prefix and the RFC 8215 local-use prefix are always known; an
+# operator's own prefix must be configured.
+
+#: Prefixes that look like ordinary global address space, as an operator's own would.
+OPERATOR_96 = "2a01:4f8:c0c:64::/96"
+OPERATOR_64 = "2a01:4f8:c0c:64::/64"
+
+#: 10.0.0.1 behind `OPERATOR_96`. Without the prefix configured it looks public.
+HIDDEN_PRIVATE = "2a01:4f8:c0c:64::a00:1"
+
+
+@pytest.mark.parametrize("address, reason", [
+    ("64:ff9b:1:a00:0:100::", "private"),          # 10.0.0.1 in the /48 layout
+    ("64:ff9b:1:a9fe:a9:fe00::", "link-local"),    # 169.254.169.254 in the /48 layout
+])
+def test_the_local_use_nat64_prefix_is_unwrapped_by_its_48_bit_layout(address, reason):
+    transport = FakeTransport()
+    resolver = FakeResolver({"nat.example": [address]})
+    message = refused("url_refused", fetcher(transport, resolver), "https://nat.example/")
+    assert reason in message and transport.calls == []
+
+
+def test_a_public_address_behind_the_local_use_prefix_is_allowed():
+    # 8.8.8.8 in the /48 layout. Allowed only because the IPv4 address was read from the
+    # right bytes: recent Pythons file the whole /48 as private.
+    assert refusal("64:ff9b:1:808:8:800::") is None
+
+
+def test_an_operator_prefix_is_not_recognised_until_it_is_configured():
+    assert refusal(HIDDEN_PRIVATE) is None
+    transport = FakeTransport()
+    resolver = FakeResolver({"nat.example": [HIDDEN_PRIVATE]})
+    fetch = SafeFetcher(transport=transport, resolve=resolver, clock=Clock(0.0),
+                        nat64_prefixes=[OPERATOR_96])
+    reason = refused("url_refused", fetch, "https://nat.example/")
+    assert "a private address" in reason and transport.calls == []
+
+
+def test_an_operator_prefix_of_64_bits_skips_the_reserved_octet():
+    transport = FakeTransport()
+    resolver = FakeResolver({"nat.example": ["2a01:4f8:c0c:64:7f:0:100:0"]})  # 127.0.0.1
+    fetch = SafeFetcher(transport=transport, resolve=resolver, clock=Clock(0.0),
+                        nat64_prefixes=(OPERATOR_64,))
+    assert "loopback" in refused("url_refused", fetch, "https://nat.example/")
+    assert transport.calls == []
+
+
+def test_a_public_address_behind_an_operator_prefix_is_still_fetched():
+    transport = FakeTransport({"https://nat.example/": FakeResponse()})
+    resolver = FakeResolver({"nat.example": ["2a01:4f8:c0c:64::808:808"]})    # 8.8.8.8
+    fetch = SafeFetcher(transport=transport, resolve=resolver, clock=Clock(0.0),
+                        nat64_prefixes=[OPERATOR_96])
+    assert fetch.fetch("https://nat.example/").body == b"body"
+
+
+@pytest.mark.parametrize("prefix, problem", [
+    ("2a01:4f8::/33", "32, 40, 48, 56, 64 or 96"),
+    ("10.0.0.0/8", "not an IPv6 prefix"),
+    ("nonsense", "not an IPv6 prefix"),
+    ("2a01:4f8:c0c:64::1/96", "not an IPv6 prefix"),
+])
+def test_a_prefix_that_cannot_carry_an_ipv4_address_is_refused(prefix, problem):
+    with pytest.raises(ValueError, match=problem):
+        SafeFetcher(nat64_prefixes=[prefix])
+
+
+_ENV = {"MEMVARA_DB": ":memory:", "MEMVARA_FEATURE_PROJECT_SCOPE": "0"}
+
+
+def test_the_server_reads_operator_prefixes_from_the_environment():
+    from memvara.server.config import ServerConfig
+
+    config = ServerConfig.from_env(
+        {**_ENV, "MEMVARA_NAT64_PREFIXES": f" {OPERATOR_96} , {OPERATOR_64},"})
+    assert config.nat64_prefixes == (OPERATOR_96, OPERATOR_64)
+    fetch = config.url_fetcher()
+    assert isinstance(fetch, SafeFetcher)
+    assert fetch.refusal(HIDDEN_PRIVATE) == "a private address"
+
+
+def test_the_server_has_no_operator_prefixes_by_default():
+    from memvara.server.config import ServerConfig
+
+    config = ServerConfig.from_env(dict(_ENV))
+    assert config.nat64_prefixes == ()
+    assert config.url_fetcher().refusal(HIDDEN_PRIVATE) is None
+
+
+def test_a_bad_prefix_in_the_environment_is_refused_at_startup():
+    from memvara.server.config import ConfigError, ServerConfig
+
+    with pytest.raises(ConfigError, match="MEMVARA_NAT64_PREFIXES"):
+        ServerConfig.from_env({**_ENV, "MEMVARA_NAT64_PREFIXES": "2a01:4f8::/33"})

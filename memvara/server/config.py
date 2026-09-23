@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from ..core import Memvara
 from ..embed import CachedEmbedder, HashingEmbedder
+from ..ingest.url import SafeFetcher, nat64_networks
 from ..llm import NullLLM
 from ..project import canonical_project, check_project
 from .validate import _suggest
@@ -282,6 +283,12 @@ class ServerConfig:
     #: another. Unset, each process generates its own, which is right for a single stdio
     #: server. Kept out of `repr` because it is a secret.
     confirm_secret: str | None = field(default=None, repr=False)
+    #: The operator's own NAT64 prefixes, from `MEMVARA_NAT64_PREFIXES` (comma-separated).
+    #: A URL whose host resolves into one is checked as the IPv4 address inside it, so a
+    #: private IPv4 host reached through the gateway is refused. The well-known and
+    #: local-use prefixes are always checked and need not be listed. Used by
+    #: `url_fetcher()`.
+    nat64_prefixes: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None, *,
@@ -364,6 +371,14 @@ class ServerConfig:
             except PredicatePackError as exc:
                 raise ConfigError(f"MEMVARA_PREDICATES: {exc}") from None
 
+        nat64_prefixes = tuple(
+            part.strip() for part in (env.get("MEMVARA_NAT64_PREFIXES") or "").split(",")
+            if part.strip())
+        try:
+            nat64_networks(nat64_prefixes)
+        except ValueError as exc:
+            raise ConfigError(f"MEMVARA_NAT64_PREFIXES: {exc}") from None
+
         features_off = _features_off(env)
         project = _project(env.get("MEMVARA_PROJECT"),
                            derive="project_scope" not in features_off, cwd=cwd)
@@ -402,7 +417,13 @@ class ServerConfig:
             # `_optional` strips it and reads blank as unset. A blank key would otherwise
             # reach `Confirmer`, which refuses an empty key; unset is the intended reading.
             confirm_secret=_optional(env.get("MEMVARA_CONFIRM_SECRET")),
+            nat64_prefixes=nat64_prefixes,
         )
+
+    def url_fetcher(self) -> SafeFetcher:
+        """The fetcher a document tool passes to `memvara.ingest.extract` as `fetcher=`,
+        with this deployment's NAT64 prefixes."""
+        return SafeFetcher(nat64_prefixes=self.nat64_prefixes)
 
     @property
     def scope_kwargs(self) -> dict[str, Any]:
