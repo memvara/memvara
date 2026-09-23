@@ -180,7 +180,7 @@ def whoami(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
     # install, so that `memvara --help` works there. The same boundary `server/cli.py`
     # keeps around `login`. These three modules import no httpx themselves — the
     # transport does, at construction, which is where the missing extra is caught below.
-    from .remote.api import RemoteMemvara
+    from .remote.api import RemoteMemvara, tenant_of
     from .remote.creds import read_credentials_file
     from .remote.errors import RemoteError
 
@@ -212,7 +212,7 @@ def whoami(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
         # The ordinary reason to run this command is a credential that has stopped
         # working, so its own failure is a sentence rather than a traceback — which
         # would carry the request, and with it the bearer token, into the terminal.
-        print(f"memvara whoami: {exc.message} ({exc.status_code} {exc.code}). The "
+        print(f"memvara whoami: {exc.describe()}. The "
               f"credential in {source} was not accepted by {base_url}.", file=err)
         return 1
     finally:
@@ -228,7 +228,7 @@ def whoami(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
           + (f" (granted {answer.get('granted_privilege')})"
              if answer.get("granted_privilege") != answer.get("effective_privilege")
              else ""), file=out)
-    print(f"tenant      {scope.get('tenant')}", file=out)
+    print(f"tenant      {tenant_of(answer)}", file=out)
     narrowed = " ".join(f"{name}={scope[name]}" for name in ("user", "agent", "session")
                         if scope.get(name))
     print(f"scope       {narrowed or 'the whole tenant'}", file=out)
