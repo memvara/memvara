@@ -535,14 +535,27 @@ flowchart TD
     B -.-> O
 ```
 
-The write path and the read path meet only at the store, and **nothing on the read path
-calls a model by default** — not even the optional reranker, which is a cross-encoder
-rather than a generative model. The one opt-in exception is `search(ranked=True)` against
-a retriever configured with a `read_selector`: one chat call per read, on the customer's
-own key, naming which of the reranked turns actually bear on the question. See
-`memvara.select`. That call sees the user's turns unless the question asks what the
-assistant said; a store whose two roles are two people sets `read_route_roles=False` so
-neither person's turns are cut before the model sees them. History and provenance are
+The write path and the read path meet only at the store. **With the default `NullLLM`,
+nothing on the read path calls a model** — not even the optional reranker, which is a
+cross-encoder rather than a generative model. Scoring, contradiction handling, decay and
+time travel never call one in any configuration. A model is called on a read only through
+three named stages, each on your own chat backend, each with a 10-second deadline, and each
+reporting on the result whether it ran, so a failure serves the ordinary read instead:
+
+- **Query rewrite**, on by default when `llm=` is a backend that can chat
+  (`OpenAILLM`, `AnthropicLLM`). One call before retrieval asks for up to three other
+  phrasings of the query and the dates it names. Every phrasing is searched and the lists
+  are fused, and the dates become `valid_at` unless you passed `valid_at` yourself. Pass
+  `query_rewrite=False` to a read, or to the constructor, to turn it off.
+- **Synthesis**, when you call `recall(synthesize=True)`. One call writes a short summary
+  of the recalled notes and puts it above them; every note is still returned.
+- **Model ranking**, when you call `search(ranked=True)` against a retriever configured
+  with a `read_selector`. One call names which of the reranked turns actually bear on the
+  question. That call sees the user's turns unless the question asks what the assistant
+  said; a store whose two roles are two people sets `read_route_roles=False` so neither
+  person's turns are cut before the model sees them.
+
+See `memvara.select`. History and provenance are
 not a separate subsystem: they fall out of the store keeping intervals and supersession
 pointers instead of overwriting rows.
 

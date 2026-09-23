@@ -96,8 +96,14 @@ _DEFAULT_EMBEDDER = "hashing"
 #: `memory_profile` tool is listed. The others belong to the plugin or to tools that are not
 #: in this build yet; they are parsed here so that a typo in any of them is refused at
 #: startup rather than ignored.
+#:
+#: `query_rewrite` and `synthesis` switch off the read path's two model stages
+#: (`memvara.select.stages`). A local store is then built with that stage off, and
+#: `memory_search` and `memory_recall` no longer offer the `query_rewrite` or
+#: `synthesize` argument.
 FEATURES = ("index_command", "research_agent", "project_scope", "status_line",
-            "recall_mark", "profile", "forget_matching", "end_reason", "links")
+            "recall_mark", "profile", "forget_matching", "end_reason", "links",
+            "query_rewrite", "synthesis")
 
 _FEATURE_PREFIX = "MEMVARA_FEATURE_"
 
@@ -413,7 +419,7 @@ def unknown_features(names: Iterable[str]) -> str | None:
     exception, so the two cannot disagree about what a feature is.
 
     >>> unknown_features(["profle"])
-    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason and links."
+    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, query_rewrite and synthesis."
     >>> unknown_features(["profile"]) is None
     True
     """
@@ -955,5 +961,10 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         # `HybridRetriever`'s own default happens to agree.
         read_w_graph=config.read_w_graph,
         confirm_secret=config.confirm_secret,
+        # The read path's model stages use the `llm` above when it can chat, and these
+        # are their switches, `MEMVARA_FEATURE_QUERY_REWRITE` and
+        # `MEMVARA_FEATURE_SYNTHESIS`.
+        query_rewrite="query_rewrite" not in config.features_off,
+        synthesis="synthesis" not in config.features_off,
         **config.scope_kwargs,
     )

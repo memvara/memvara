@@ -31,26 +31,55 @@ for.
 holds somewhere and not everywhere, and the eighth invariant exists because one of them
 was being read as holding further than it does.
 
-1. **Deterministic paths never call an LLM.**
+1. **Deterministic stages never call a model, and the read path calls one only through
+   three named stages.**
 
-   > **Claim.** Deduplication, contradiction resolution, ranking, decay and time travel
-   > are pure functions of stored state.
-   > **Scope.** The library, by default. Only `extract()` and `resolve_predicate()` may
-   > touch a model, and both are on the write path. Nothing on the read path calls one
-   > unless the caller opts in — a reranker is a cross-encoder rather than a generative
-   > model, and it is off by default; `search(ranked=True)` against a retriever
-   > configured with a `read_selector` (`memvara.select`) is the one opt-in exception, one
-   > chat call per read, on the caller's own key, over the turns of the role the question
-   > asks about (`retrieve.intent.routed_role`, model-free; `read_route_roles=False` hands
-   > it both roles), and it changes nothing about a plain read.
-   > **Sketch.** `NullLLM` is the default `llm=`, so the shipped configuration has no
-   > model to call; `Reconciler` and `Consolidator` take no `llm` parameter at all, and
-   > `HybridRetriever` takes one only as `selector=`, which is `None` by default and
-   > consulted only on a call that passes `ranked=True`.
+   > **Claim.** Deterministic stages (deduplication, contradiction resolution, ranking,
+   > decay, time travel) never call a model. The read path may call one only through the
+   > named stages `ranked`, `query_rewrite` and `synthesis`, each with a recorded outcome
+   > and a model-free fallback.
+   > **Scope.** The library. On the write path, only `extract()` and
+   > `resolve_predicate()` may touch a model. On the read path, a reranker is a
+   > cross-encoder rather than a generative model, and it is off by default. The three
+   > model stages are: `search(ranked=True)` against a retriever configured with a
+   > `read_selector` (`memvara.select`), one chat call per read over the turns of the
+   > role the question asks about (`retrieve.intent.routed_role`, model-free;
+   > `read_route_roles=False` hands it both roles); `query_rewrite`, one chat call before
+   > retrieval that returns up to three other phrasings and an optional date range; and
+   > `synthesis`, one chat call after `recall(synthesize=True)` has rendered its notes.
+   > Each runs on the caller's own chat backend with a 10-second deadline, records its
+   > outcome (`applied`, `fallback`, `key_rejected`, `disabled`, `unconfigured`) on the
+   > result, and serves the plain read on every outcome but `applied`. The model's
+   > answer never changes what is stored and never reaches a deterministic stage: a
+   > rewrite chooses which queries and which `valid_at` the ordinary pipeline runs with,
+   > and a synthesis is text placed above notes that are still returned in full.
+   > **Sketch.** `NullLLM` is the default `llm=` and cannot chat, so the shipped
+   > configuration has no model to call on either path. `Reconciler` and `Consolidator`
+   > take no `llm` parameter at all. `HybridRetriever` takes a model only as `selector=`
+   > and `rewriter=`, both `None` by default; `Memvara` builds a `QueryRewriter` and a
+   > `Synthesizer` (`memvara.select.stages`) only when its `llm=` implements `Chat`.
+   > `query_rewrite=False` and `synthesis=False` on the constructor are the switches,
+   > and `search(query_rewrite=False)` is the per-call opt-out.
    > **Measured.** `bench/mem0_real.py`: 2 write-path LLM calls against mem0's 105 on the
    > same 105-turn transcript, and **identical final state on every run** where mem0's
    > differs. `tests/test_packaging.py::test_nothing_but_numpy_is_imported_while_the_
    > package_is_being_imported` holds the import side.
+   > `tests/test_read_stages.py::test_the_default_read_path_makes_no_model_call_without_a_chat_backend`
+   > holds the read side: with a backend that cannot chat, `search()` and
+   > `recall(synthesize=True)` make zero model calls. No measurement of answer quality
+   > with the two new stages exists yet.
+
+   **What changed on 2026-09-23.** Until then this invariant said that nothing on the read
+   path calls a model unless the caller opts in, and `ranked=True` was the one opt-in.
+   The phase 2 parity design
+   (`docs/superpowers/specs/2026-09-23-parity-phase-2-documents-and-retrieval-design.md`,
+   §4.5) added query rewrite and synthesis, and made query rewrite **on by default**
+   whenever the configured `llm=` can chat. So a caller who configured an extraction
+   model now pays one read-path model call per `search()` and `recall()` unless they
+   pass `query_rewrite=False`. What did not change is the part the measurement above
+   stands on: the stages that decide what is stored, what contradicts what, and how
+   results are ordered are still pure functions of stored state, and a store opened
+   with the default `NullLLM` still makes no model call anywhere.
 
 2. **Unknown predicates default to `Cardinality.MANY`.** Wrongly retiring a true fact is
    worse than keeping two competing ones. The default is deliberate and stays; what
@@ -693,6 +722,15 @@ the `limit` turns closest to the anchor, nearest first, and `retrieve/temporal.p
 their timestamps into an absolute [0, 1] closeness. The anchor is `valid_at`, else
 `known_at`, else now — **given, never parsed**, because a date parser on the read path is
 a second extractor answering a question the caller who wrote `valid_at=` already answered.
+
+That rule still holds for this leg: `temporal.py` reads only the instant it is handed and
+never looks at the words of the question. Since 2026-09-23 there is a model-backed way to
+get an instant out of the words, and it sits in front of this leg rather than inside it.
+`query_rewrite` (invariant 1, `memvara.select.stages`) asks a model for the date range a
+question refers to, and `HybridRetriever.search` turns the range's last second into the
+read's `valid_at`, which then anchors this leg like any caller's `valid_at`. A `valid_at`
+or `as_of` the caller passed always wins over the model's range, and without a chat
+backend nothing is parsed at all.
 
 Episodes and not claims: a claim carries a predicate-keyed half-life, which knows what raw
 proximity cannot — whether a fact from 2019 is stale. A `born_in` from 2019 is as current

@@ -372,6 +372,7 @@ class RemoteMemvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                anchored: bool = ..., ranked: bool = ...,
+               query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -381,6 +382,7 @@ class RemoteMemvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                anchored: bool = ..., ranked: bool = ...,
+               query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -390,6 +392,7 @@ class RemoteMemvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                anchored: bool = ..., ranked: bool = ...,
+               query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -398,6 +401,7 @@ class RemoteMemvara:
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                anchored: bool = False, ranked: bool = False,
+               query_rewrite: bool = True,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -415,21 +419,30 @@ class RemoteMemvara:
         one refusal `ranked` inherits from `anchored`, its precedent. The return value is
         always a `SearchResults`, whose `.selection` is read off the response body's
         `selection` and is `None` against a plain read or a server that sends none.
+
+        `query_rewrite` is on by default, and the deployment decides whether it runs,
+        with its own per-organisation key. So the field is sent only as `false`, when the
+        caller opts out; a deployment from before the field refuses that request (422)
+        rather than ignoring it. `.rewrite` is read off the response body's `rewrite` and
+        is `None` when the deployment sends none.
         """
         body = self._request(
             "POST", "/v1/search", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,
                         "anchored": anchored or None, "ranked": ranked or None,
+                        "query_rewrite": None if query_rewrite else False,
                         "as_of": _iso(as_of), "valid_at": _iso(valid_at),
                         "known_at": _iso(known_at), "states": _states(states),
                         "include_invalidated": include_invalidated,
                         "memory_types": _types(memory_types),
                         "include_episodes": include_episodes}))
         return SearchResults([_hit(h) for h in body["results"]],
-                             selection=hydrate.selection(body.get("selection")))
+                             selection=hydrate.selection(body.get("selection")),
+                             rewrite=hydrate.rewrite(body.get("rewrite")))
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                anchored: bool = False, ranked: bool = False,
+               query_rewrite: bool = True, synthesize: bool = False,
                memory_types: Sequence[MemoryType | str] | None = None,
                include_episodes: bool = False, budget: int | None = None,
                valid_at: datetime | None = None) -> str:
@@ -456,6 +469,12 @@ class RemoteMemvara:
         renders into `text` when the model did not actually rank the read is the only
         signal this surface carries — a caller who needs `RecallResult.selection`
         structurally reads `RecallResponse.selection` off `/v1/recall` directly.
+
+        `query_rewrite` is sent only as `false`, as on `search`. `synthesize` is sent only
+        when set, so a deployment from before the field refuses it rather than returning
+        a block with no summary and nothing to say why. The summary, or the line saying
+        why there is none, arrives inside `text`; `RecallResponse.synthesis` carries the
+        outcome for a caller reading `/v1/recall` directly.
         """
         if budget is not None:
             raise ValueError(
@@ -471,6 +490,8 @@ class RemoteMemvara:
             "POST", "/v1/recall", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,
                         "anchored": anchored or None, "ranked": ranked or None,
+                        "query_rewrite": None if query_rewrite else False,
+                        "synthesize": synthesize or None,
                         "memory_types": _types(memory_types),
                         "include_episodes": include_episodes}))
         return str(body["text"])
@@ -1052,6 +1073,7 @@ class ScopedRemoteMemvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                anchored: bool = ..., ranked: bool = ...,
+               query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -1061,6 +1083,7 @@ class ScopedRemoteMemvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                anchored: bool = ..., ranked: bool = ...,
+               query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -1070,6 +1093,7 @@ class ScopedRemoteMemvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                anchored: bool = ..., ranked: bool = ...,
+               query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -1078,6 +1102,7 @@ class ScopedRemoteMemvara:
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                anchored: bool = False, ranked: bool = False,
+               query_rewrite: bool = True,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -1086,6 +1111,7 @@ class ScopedRemoteMemvara:
                include_episodes: bool = False) -> list[Any]:
         return self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
                                 anchored=anchored, ranked=ranked,
+                                query_rewrite=query_rewrite,
                                 valid_at=valid_at, known_at=known_at, states=states,
                                 include_invalidated=include_invalidated,
                                 memory_types=memory_types,
@@ -1093,11 +1119,13 @@ class ScopedRemoteMemvara:
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                anchored: bool = False, ranked: bool = False,
+               query_rewrite: bool = True, synthesize: bool = False,
                memory_types: Sequence[MemoryType | str] | None = None,
                include_episodes: bool = False, budget: int | None = None,
                valid_at: datetime | None = None) -> str:
         return self._mem.recall(query, k=k, min_score=min_score, anchored=anchored,
                                 ranked=ranked,
+                                query_rewrite=query_rewrite, synthesize=synthesize,
                                 memory_types=memory_types,
                                 include_episodes=include_episodes, budget=budget,
                                 valid_at=valid_at)

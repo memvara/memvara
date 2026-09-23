@@ -34,11 +34,11 @@ Three asymmetries the renderer introduces and this must undo:
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from ..retrieve.traverse import Edge, Path
-from ..select.base import Selection
+from ..select.base import Rewrite, Selection
 from ..types import (
     LAST_OBSERVED, SALIENCE_BASE, Answer, Claim, Delta, Derivation, Episode,
     Explanation, ForgetPreview, ForgetResult, Link, MemoryType, Profile, Provenance,
@@ -47,7 +47,7 @@ from ..types import (
 
 __all__ = ["claim", "episode", "result", "explanation", "receipt", "provenance",
            "reading", "answer", "delta", "profile", "edge", "path", "scope",
-           "selection", "link", "forget_preview", "forget_result"]
+           "selection", "rewrite", "link", "forget_preview", "forget_result"]
 
 
 def _dt(value: Any) -> datetime | None:
@@ -333,6 +333,38 @@ def path(body: dict[str, Any]) -> Path:
     return Path(nodes=tuple(body["nodes"]),
                 edges=tuple(edge(e) for e in body["edges"]),
                 score=body["score"])
+
+
+def rewrite(body: dict[str, Any] | None) -> Rewrite | None:
+    """The `Rewrite` a read's query rewrite produced, or `None`.
+
+    `None` when the response carries no `rewrite`, which is what a deployment from
+    before the field sends, and what a read that passed `query_rewrite=False` gets. The
+    wire shape is `{"outcome", "reason", "status", "queries", "date_from", "date_to",
+    "valid_at"}`, with the two dates as `YYYY-MM-DD` and `valid_at` as an instant; every
+    field but `outcome` may be absent or null.
+
+    >>> rewrite({"outcome": "applied", "queries": ["Lisbon trip"],
+    ...          "date_from": "2024-03-01", "date_to": "2024-03-31"}).date_to
+    datetime.date(2024, 3, 31)
+    >>> rewrite(None) is None
+    True
+    """
+    if not body:
+        return None
+
+    def day(value: Any) -> date | None:
+        return None if value is None else date.fromisoformat(value)
+
+    return Rewrite(
+        outcome=body["outcome"],
+        reason=body.get("reason"),
+        status=body.get("status"),
+        queries=tuple(body.get("queries") or ()),
+        date_from=day(body.get("date_from")),
+        date_to=day(body.get("date_to")),
+        valid_at=_dt(body.get("valid_at")),
+    )
 
 
 def selection(body: dict[str, Any] | None) -> Selection | None:

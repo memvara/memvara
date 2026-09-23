@@ -24,6 +24,11 @@ belief as well, so every later correction disappears — including one that
 was made about exactly the period being asked about. `as_of` earns its
 place only when they want what you *used to think*.
 
+A server that has a model set up also reads dates out of the question itself,
+so "where did I live in 2019" can come back dated without you passing
+anything. That reading is a model's guess. When the person names a day, pass
+`valid_at` yourself: yours always wins, and it needs no model at all.
+
 A fact backfilled so that both its ends are already past is reachable
 through `valid_at` alone. Its write receipt says so at the time, and the
 tool description says why.

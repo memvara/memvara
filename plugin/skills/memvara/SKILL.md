@@ -176,6 +176,12 @@ user the steps and let them see where you got it; a conclusion with the middle
 removed is something they have to take on trust, and the middle is the part
 they can correct.
 
+A summary at the top of a recall block is there because you asked for one. It
+is a model's reading of the notes under it, not a note. When the two differ,
+answer from the notes. Never store the summary with `memory_remember`: that
+files a paraphrase as though somebody had said it, and the next session cannot
+tell the difference.
+
 ## Other jobs
 
 | They asked | Open |

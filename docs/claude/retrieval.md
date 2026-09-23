@@ -4,7 +4,11 @@ Reading is hybrid. A query runs a lexical leg and a vector leg over the claim st
 their two ranked lists, and then re-scores what comes back using properties of the claims
 themselves — recency for the predicate, confidence, salience. Two further legs are optional
 and off by default: a graph leg that walks entity relationships, and a temporal leg over raw
-turns. Nothing on this path calls a generative model unless the caller asks for it.
+turns. The deterministic stages on this path never call a generative model. A model is
+called only through three named stages, each with a recorded outcome and a fallback that
+serves the plain read: `ranked`, `query_rewrite` and `synthesis`. Query rewrite is on by
+default whenever the configured `llm=` can chat, and with the default `NullLLM` no stage has
+a model to call.
 
 There are two public shapes for a read. `Memvara.search()` returns `Result` objects with
 scores and an `Explanation` each, for a program to inspect. `Memvara.recall()` returns a
@@ -35,17 +39,26 @@ JSON, under a header that names the text as data rather than instruction.
   `memvara/embed/fingerprint.py` — `fingerprint_of()` and `EmbedderFingerprint`.
 - Optional model-ranked reads: `memvara/select/base.py` — the `Selector` protocol,
   `Candidate`, `Selection`, `SelectorRefused`; `memvara/select/model.py` — `ModelSelector`.
+- Query rewrite and synthesis: `memvara/select/stages.py` — `QueryRewriter` and
+  `Synthesizer`; `memvara/select/base.py` — the `Rewrite` and `Synthesis` records;
+  `HybridRetriever.search(query_rewrite=)` and `Memvara.recall(synthesize=)`.
 - Prompt rendering: `memvara/core.py` — `Memvara.recall()` and the header constants
   `RECALL_HEADER`, `RECALL_HEADER_AT` and `RECALL_HISTORY_HEADER`.
 - Tests: `tests/test_hybrid.py`, `tests/test_fusion.py`, `tests/test_scoring.py`,
   `tests/test_intent.py`, `tests/test_anchor.py`, `tests/test_traverse.py`,
-  `tests/test_temporal.py`, `tests/test_rerank.py`, `tests/test_select.py`.
+  `tests/test_temporal.py`, `tests/test_rerank.py`, `tests/test_select.py`,
+  `tests/test_read_stages.py`.
 - Documentation: [INTERNALS.md](../INTERNALS.md), section *`memvara/retrieve/`* (including
   *The third leg* and *The fourth leg*) and *`memvara/core.py` — the prompt rendering
   boundary*. Measurements are in [BENCHMARKS.md](../BENCHMARKS.md).
 
 ## How the pieces fit
 
+0. With `query_rewrite` on and a chat backend configured, one model call first asks for up
+   to three other phrasings of the query and the date range it names. Steps 1 to 5 then run
+   once per phrasing, the lists are fused by `reciprocal_rank_fusion()`, and the range's
+   last second becomes `valid_at` unless the caller passed `valid_at` or `as_of`. If the
+   call fails, only the original query runs, and `SearchResults.rewrite` says why.
 1. `analyze()` turns the raw query into terms. `intent.classify()` labels it as a lookup, a
    temporal question, a relational question, or open, and `intent.weights()` shifts the leg
    weights accordingly.
@@ -60,7 +73,10 @@ JSON, under a header that names the text as data rather than instruction.
    `CrossEncoderReranker` is a cross-encoder, not a generative model. It is off by default.
 6. `recall()` renders the survivors into text under `RECALL_HEADER`, or under
    `RECALL_HEADER_AT` when `valid_at` was given, so a block about the past cannot be read as
-   a block about the present.
+   a block about the present. With `synthesize=True`, one model call reads the rendered
+   notes and its short summary goes above them under `RECALL_SYNTHESIS_HEADER`. The notes
+   are still all there. Under a `budget`, the notes are fitted first and the summary is left
+   out if it does not fit beside them.
 
 ## Invariants and assumptions
 
@@ -82,8 +98,11 @@ JSON, under a header that names the text as data rather than instruction.
   legs have had the same guard from the start. On an archived transcript read with no
   instant, the guard fires on every question, which is why `bench/longmemeval.py` passes
   the last second of each question's day as `valid_at` and why [BENCHMARKS.md](../BENCHMARKS.md)
-  reports the leg with and without that anchor. The anchor is still given by the caller,
-  never parsed from the question.
+  reports the leg with and without that anchor. The temporal leg itself never parses the
+  question: its anchor is the instant it is handed. Since 2026-09-23 that instant can come
+  from `query_rewrite`, which asks a model for the date range a question names and passes
+  the range's last second as `valid_at`. A `valid_at` or `as_of` the caller passed always
+  wins over the model's range.
 - **The graph leg seeds on content, never on ids.** `spread.seed_keys()` re-sorts on
   `value_key`, because a claim id is a `uuid4` and seeding off it would make the walk a
   property of which ingest ran.

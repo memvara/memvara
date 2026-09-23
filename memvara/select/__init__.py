@@ -29,10 +29,16 @@ a fake `Selector` so the doctest touches no network and needs no API key.
     >>> "Loved the trip to Lisbon last spring" in result.text
     True
 
-A default install imports none of this: `Memvara(read_selector=None)` is the default,
-and no `read_*` option calls a model unless it is explicitly configured — see
-`docs/INTERNALS.md`, invariant 1. `ModelSelector`, the one real implementation here,
-needs the `openai` or `anthropic` extra; naming it must not import either SDK, the same
+The same package holds the two other model stages a read may run, `QueryRewriter` and
+`Synthesizer` (`memvara.select.stages`). They need no configuration of their own: a
+`Memvara` whose `llm=` backend can chat builds both, and `query_rewrite=False` or
+`synthesis=False` on the constructor switches them off.
+
+A default install makes no model call on the read path. `Memvara(read_selector=None)` is
+the default, and the default `llm=` is `NullLLM`, which cannot chat, so neither rewrite
+nor synthesis has a backend to call — see `docs/INTERNALS.md`, invariant 1.
+`ModelSelector`, the one real selector here, needs the `openai` or `anthropic` extra, and
+so do the two stages; naming any of them must not import either SDK, the same
 promise `memvara.rerank.CrossEncoderReranker` makes about `sentence-transformers`, and
 `tests/test_rerank.py`'s subprocess assertion covers this package too.
 """
@@ -41,11 +47,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import Candidate, Selected, Selection, Selector, SelectorBusy, SelectorRefused
+from .base import (
+    Candidate, Rewrite, Selected, Selection, Selector, SelectorBusy, SelectorRefused,
+    Synthesis,
+)
 
 __all__ = [
-    "Candidate", "Selected", "Selection", "Selector", "SelectorBusy", "SelectorRefused",
-    "ModelSelector",
+    "Candidate", "Rewrite", "Selected", "Selection", "Selector", "SelectorBusy",
+    "SelectorRefused", "Synthesis", "ModelSelector", "QueryRewriter", "Synthesizer",
 ]
 
 
@@ -57,4 +66,8 @@ def __getattr__(name: str) -> Any:
         from .model import ModelSelector
 
         return ModelSelector
+    if name in ("QueryRewriter", "Synthesizer"):
+        from . import stages
+
+        return getattr(stages, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

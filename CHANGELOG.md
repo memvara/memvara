@@ -52,8 +52,68 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `tenant/user/project/agent/session`. It said four while printing five.
 - **The local MCP server now has fifteen tools**, with `memory_profile` after
   `memory_standing`.
+- **A `Memvara` whose `llm=` can chat now makes one model call on every `search()` and
+  `recall()`**, to rewrite the query (see *Added*). Before this, a read called a model
+  only with `ranked=True`. With the default `NullLLM` nothing changes: it cannot chat, so
+  no read calls a model. To keep the old behaviour with an extraction model configured,
+  pass `query_rewrite=False` to `Memvara(...)`, or set `MEMVARA_FEATURE_QUERY_REWRITE=0`
+  on a server. `docs/INTERNALS.md` invariant 1 is rewritten to say this: deterministic
+  stages (deduplication, contradiction resolution, ranking, decay, time travel) never call
+  a model, and the read path calls one only through the named stages `ranked`,
+  `query_rewrite` and `synthesis`, each with a recorded outcome and a model-free fallback.
+  `forget_matching()`, `profile()` and `ask()` do not rewrite, so their results are
+  unchanged.
+- **The `memory_recall` tool description and the MCP server's instructions** no longer
+  say that recall involves no model; they say it calls one only on a server that has one
+  configured.
 
 ### Added
+
+- **Query rewrite on `search()` and `recall()`.** Before retrieval, one call to the
+  configured chat backend sends the query and today's date, and reads back JSON with up
+  to three alternative queries and an optional date range. The original query and each
+  alternative are retrieved with every other argument unchanged, and the lists are fused
+  with reciprocal-rank fusion. The date range becomes the read's `valid_at`, set to
+  23:59:59 UTC on the range's last day, unless the caller passed `valid_at` or `as_of`
+  (the caller always wins) or the range ends today or later. On a ranked read, only the
+  original query goes to the selector and the turns it kept stay first. The call has a
+  10-second deadline. `SearchResults.rewrite` and `RecallResult.rewrite` carry a
+  `Rewrite` record with `outcome` (`applied`, `fallback`, `key_rejected`, `disabled`,
+  `unconfigured`), `reason` (`timeout`, `error`, `provider` or `malformed`, for a
+  fallback), `status`, `queries`, `date_from`, `date_to` and the `valid_at` the read used.
+  Every outcome but `applied` serves the plain read. It is on by default when `llm=`
+  implements `Chat`; `search(query_rewrite=False)` skips it for one read, and
+  `Memvara(query_rewrite=False)` switches it off (outcome `disabled`). `read_rewriter=`
+  replaces the built `QueryRewriter`. A rewritten read is counted once in the retrieval
+  telemetry, not once per phrasing. A read with `k=0` makes no call.
+- **Synthesis on `recall()`.** `recall(synthesize=True)` sends the rendered notes and the
+  question to one chat call and puts a summary of at most three sentences above the
+  notes, under `Memvara.RECALL_SYNTHESIS_HEADER`, which names it as a model's reading of
+  the notes and as reference data. Every note is still returned. When no summary was
+  written, the block starts with `(summary not written — <outcome>.)` instead. With a
+  `budget`, the notes are fitted first and the summary is added only if it fits beside
+  them; otherwise it is left out and the outcome is `fallback` with reason `budget`. A
+  recall with no notes makes no call. `RecallResult.synthesis` carries a `Synthesis`
+  record with `outcome`, `reason`, `status` and `text`. `Memvara(synthesis=False)`
+  switches it off, and `synthesizer=` replaces the built `Synthesizer`.
+- **`memvara.select.QueryRewriter` and `memvara.select.Synthesizer`**, in
+  `memvara/select/stages.py`, each wrapping a `Chat` backend with a 10-second deadline and
+  the outcome rules `ModelSelector` uses: 401 and 403 are `key_rejected`, a reply after
+  the deadline is a `timeout`, an exception with an HTTP status is `provider`, anything
+  else is `error`, and a reply that is not the expected JSON is `malformed`.
+- **Two feature switches, `query_rewrite` and `synthesis`**, in `FEATURES` and read from
+  `MEMVARA_FEATURE_QUERY_REWRITE` and `MEMVARA_FEATURE_SYNTHESIS`. Off, the local store is
+  built with that stage off, and the MCP tools no longer offer its argument.
+- **MCP arguments.** `memory_search` and `memory_recall` take `query_rewrite` (default
+  true), and `memory_recall` takes `synthesize` (default false). `memory_search` adds a
+  line under its header naming the extra phrasings it searched and, when the question's
+  dates were used, the day the read describes.
+- **`RemoteMemvara` and `AsyncRemoteMemvara`** take the same arguments. `query_rewrite` is
+  sent only as `false`, when a caller opts out, and `synthesize` only when it is true, so
+  a deployment from before the fields refuses the request rather than ignoring it.
+  `SearchResults.rewrite` is read off the response's `rewrite` object, whose dates are
+  `YYYY-MM-DD` strings; `hydrate.rewrite()` decodes it. The hosted deployment does not
+  serve these fields yet.
 
 - **End or retire every memory that matches a query, after seeing exactly which.**
   `Memvara.forget_matching(query, close=, k=20, reason=None, confirm=None)` without

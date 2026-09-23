@@ -1,10 +1,13 @@
 """Selector protocol: the model call a ranked read makes, and nothing about how.
 
-A read stays "no model on the read path" by default (`docs/INTERNALS.md`, invariant 1);
-`ranked=True` is the one opt-in that breaks it, and only when the caller configured a
-`read_selector`. `HybridRetriever` calls this protocol at one point in its read order —
-after the reranker has ordered a tenant's turns, before the first few of them are
-returned — and asks it to say which of those turns actually bear on the question.
+The read path may call a model only through three named stages (`docs/INTERNALS.md`,
+invariant 1): `ranked`, `query_rewrite` and `synthesis`. This module holds the protocol
+for the first, and the records all three leave on a result: `Selection`, `Rewrite` and
+`Synthesis`. The other two stages live in `memvara.select.stages`. `ranked=True` calls a
+model only when the caller configured a `read_selector`. `HybridRetriever` calls this
+protocol at one point in its read order — after the reranker has ordered a tenant's
+turns, before the first few of them are returned — and asks it to say which of those
+turns actually bear on the question.
 
 Two members, deliberately no more: `admit()` bounds concurrent model calls before the
 expensive stage runs, `select()` names the kept turns after it has. `Reranker` cannot
@@ -21,7 +24,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Protocol, Sequence, runtime_checkable
 
 from ..llm.base import Usage
@@ -75,6 +78,54 @@ class Selection:
     status: int | None = None
     candidates: int = 0
     kept: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class Rewrite:
+    """How a read's query rewrite went. Carried on the result, not raised.
+
+    `outcome` uses the five words `Selection.outcome` uses, with the same meanings:
+    `applied` (the model answered and its answer was used), `fallback` (the call failed
+    or its reply could not be read, so the plain read was served), `key_rejected` (the
+    provider answered 401 or 403), `disabled` (the `query_rewrite` switch is off) and
+    `unconfigured` (no chat backend is configured, so no call was made). `reason` only
+    accompanies `fallback` (`timeout`, `error`, `provider`, `malformed`), and `status` is
+    the provider's HTTP status when there was one.
+
+    `queries` holds the alternative queries the model wrote, without the caller's own
+    query, which is always searched as well. `date_from` and `date_to` are the date
+    range the model read out of the question, or `None` when it found none. `valid_at`
+    is the instant the read actually used because of that range: the last second of
+    `date_to`, in UTC. It is `None` when the range was not used, which happens when
+    there was no range, when the caller passed `valid_at` or `as_of` (the caller's
+    instant always wins), or when the range ends today or later, which is a present-tense
+    read anyway.
+    """
+
+    outcome: str
+    reason: str | None = None
+    status: int | None = None
+    queries: tuple[str, ...] = ()
+    date_from: date | None = None
+    date_to: date | None = None
+    valid_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class Synthesis:
+    """How `recall(synthesize=True)`'s summary went. Carried on the result, not raised.
+
+    `outcome` and `reason` mean what they mean on `Rewrite`, with one more `reason`:
+    `budget`, when the summary was written but did not fit inside the caller's `budget`
+    and was left out so the notes could stay. `text` is the summary the block starts
+    with, and is `None` for every outcome except `applied`. It is also `None` for an
+    `applied` call that had no notes to summarise, because no call is made then.
+    """
+
+    outcome: str
+    reason: str | None = None
+    status: int | None = None
+    text: str | None = None
 
 
 @runtime_checkable

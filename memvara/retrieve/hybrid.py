@@ -33,13 +33,20 @@ out of that, and both are routine rather than exotic.
    `retrieve/intent.py` for what keeps every other query from paying for it. It ships at
    `w_graph=0.0`; the measurement behind that default is in `docs/BENCHMARKS.md`.
 
-Everything here is deterministic by default. No LLM sits on the read path, and identical
-inputs produce an identical ordering, ties included - unstable ranking makes retrieval
+Everything here is deterministic by default. No LLM sits on the read path unless one of
+the two model stages below is configured, and identical inputs produce an identical
+ordering, ties included - unstable ranking makes retrieval
 regressions impossible to bisect. "Identical inputs" means the *content*: ties break on
 a content hash rather than on a row id, because ids are minted per ingest and an
 ordering that only holds within one store is not reproducibility, it is luck.
 
-The one opt-in exception is `search(ranked=True)` against a retriever configured with a
+There are two exceptions, and both record what happened on the result. The first is
+`search(query_rewrite=True)` against a retriever configured with a `rewriter`: one model
+call before anything is retrieved, asking for other phrasings of the query and the date
+range it names. The phrasings are each retrieved by the deterministic pipeline and fused,
+so the model chooses what is searched for and never how anything is scored. `Memvara`
+turns it on by default whenever its `llm=` can chat, and `SearchResults.rewrite` says
+what happened. The second is `search(ranked=True)` against a retriever configured with a
 `read_selector`: one model call per read, on the customer's own key, naming which of the
 reranked turns actually bear on the question — by default the turns of the role the
 question asks about (`intent.routed_role`), or the whole reranked window with
@@ -53,8 +60,9 @@ order a ranked call takes.
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from functools import partial
 from time import perf_counter
 from typing import (
     TYPE_CHECKING, Any, Callable, ClassVar, Collection, Iterable, Literal, NamedTuple,
@@ -67,7 +75,9 @@ from ..embed.base import Embedder
 from ..llm.base import Usage
 from ..rerank import Reranker, rerank
 from ..schema import PredicateRegistry
-from ..select.base import Candidate, Selection, Selector, SelectorBusy, SelectorRefused
+from ..select.base import (
+    Candidate, Rewrite, Selection, Selector, SelectorBusy, SelectorRefused,
+)
 from ..store.base import Store, bulk_claims, resolve_states
 from ..telemetry import (
     RETRIEVAL_LATENCY_MS,
@@ -122,6 +132,7 @@ from .traverse import GraphTraverser
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only
     from ..entities import EntityRegistry
+    from ..select.stages import QueryRewriter
 
 # Retriever names. Shared between the fusion weights and the `Explanation` fields so
 # the two cannot drift apart under a rename.
@@ -329,6 +340,8 @@ class HybridRetriever:
         rerank_ranked_only: bool = False,
         selector: "Selector | None" = None,
         route_roles: bool = True,
+        rewriter: "QueryRewriter | None" = None,
+        rewrite_enabled: bool = True,
         telemetry: Recorder | None = None,
         entities: "EntityRegistry | None" = None,
     ) -> None:
@@ -497,6 +510,14 @@ class HybridRetriever:
         #: `read_route_roles=False` there. The changelog entry that added the option
         #: carries the measurement that found this.
         self.route_roles = route_roles
+        #: Asks a model for other phrasings of the query and the date range it means, or
+        #: `None`. `Memvara` builds one from its `llm=` backend when that backend can
+        #: chat. With none, a `search(query_rewrite=True)` reports `unconfigured` and
+        #: makes no call. See `memvara.select.stages` and `search`'s `query_rewrite`.
+        self.rewriter = rewriter
+        #: The `query_rewrite` switch. Off, a read that asks for a rewrite reports
+        #: `disabled` and makes no call, whatever `rewriter` holds.
+        self.rewrite_enabled = rewrite_enabled
         #: The owner's learned entity aliases, or `None`. Read by the anchoring pass so
         #: a question saying "Big Blue" names a claim filed under `ibm`; without one a
         #: key is its own only spelling, which is what an unmerged store has anyway.
@@ -519,6 +540,7 @@ class HybridRetriever:
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         anchored: bool = ..., include_episodes: Literal[False] = ...,
         now: datetime | None = ..., ranked: bool = ...,
+        query_rewrite: bool = ...,
     ) -> list[Result]: ...
 
     @overload
@@ -530,6 +552,7 @@ class HybridRetriever:
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         anchored: bool = ..., include_episodes: Literal[True],
         now: datetime | None = ..., ranked: bool = ...,
+        query_rewrite: bool = ...,
     ) -> list[Retrieved]: ...
 
     @overload
@@ -540,7 +563,7 @@ class HybridRetriever:
         include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         anchored: bool = ..., include_episodes: bool, now: datetime | None = ...,
-        ranked: bool = ...,
+        ranked: bool = ..., query_rewrite: bool = ...,
     ) -> list[Retrieved]: ...
 
     def search(
@@ -560,6 +583,7 @@ class HybridRetriever:
         include_episodes: bool = False,
         now: datetime | None = None,
         ranked: bool = False,
+        query_rewrite: bool = False,
     ) -> list[Any]:
         """Return the top `k` results for `query`, each with a populated `Explanation`.
 
@@ -630,6 +654,22 @@ class HybridRetriever:
         `unconfigured` (no `read_selector` configured), `disabled` (the operator's
         switch), or `key_rejected` (the provider rejected the key) — every case but
         `applied` still returns the plain order, unranked.
+
+        `query_rewrite=True` asks the configured `rewriter` (`memvara.select.stages`) for
+        up to three other phrasings of `query` and the date range it refers to, in one
+        model call, before anything is retrieved. The original query and each
+        alternative are searched with every other argument unchanged, and the lists are
+        fused with reciprocal-rank fusion, in which a row found by several phrasings
+        rises. A row's own `score` and `Explanation` are those from the first list that
+        found it, the original query's list first. On a ranked read only the original
+        query goes to the selector, and the turns it kept stay at the front, ahead of
+        the fused rows. The date range becomes this read's `valid_at`, set to the last
+        second of the range's final day, unless the caller passed `valid_at` or
+        `as_of`, which always win, or the range ends today or later. `.rewrite` on the
+        result records what happened, with the five outcomes `ranked` uses; every
+        outcome but `applied` serves the plain read. It is `False` here, on the engine,
+        and `True` on `Memvara.search`. A plain read with `k <= 0` returns nothing,
+        makes no call and reports no rewrite.
         """
         if ranked and (not include_episodes or memory_types is not None):
             raise ValueError(
@@ -637,6 +677,101 @@ class HybridRetriever:
                 "no memory_types (a type filter skips the episode leg entirely, so a "
                 "ranked call would hand the selector nothing)."
             )
+        # Checked before the model is asked anything, so a call that is going to raise
+        # for its time arguments does not pay for a rewrite first.
+        time_axes(as_of, valid_at, known_at)
+        once = partial(self._search_once, scope=scope, k=k, as_of=as_of,
+                       known_at=known_at, states=states,
+                       include_invalidated=include_invalidated,
+                       memory_types=memory_types, min_score=min_score,
+                       anchored=anchored, include_episodes=include_episodes)
+        # A read that returns nothing by construction is not worth a model call.
+        if not query_rewrite or (k <= 0 and not ranked):
+            return once(query, valid_at=valid_at, now=now, ranked=ranked)
+        # One instant for the whole read: the date the model is told is today, the
+        # clock every retrieval below decays from, and the line a date range must end
+        # before to be worth using.
+        asked = _as_utc(now) if now is not None else utcnow()
+        rewrite = self._rewrite(query, asked)
+        alternatives: tuple[str, ...] = ()
+        if rewrite.outcome == "applied":
+            alternatives = rewrite.queries
+            if rewrite.date_to is not None and valid_at is None and as_of is None:
+                end = datetime(rewrite.date_to.year, rewrite.date_to.month,
+                               rewrite.date_to.day, 23, 59, 59, tzinfo=timezone.utc)
+                if end < asked:
+                    valid_at = end
+                    rewrite = replace(rewrite, valid_at=end)
+        rec = self.telemetry
+        t0 = perf_counter() if rec is not None else 0.0
+        main = once(query, valid_at=valid_at, now=asked, ranked=ranked,
+                    observe=not alternatives)
+        if not alternatives:
+            main.rewrite = rewrite
+            return main
+        others = [once(q, valid_at=valid_at, now=asked, ranked=False, observe=False)
+                  for q in alternatives]
+        hits = self._fuse(main, others, k)
+        if rec is not None:
+            self._observe(rec, query, hits, (perf_counter() - t0) * 1000.0)
+        return SearchResults(hits, selection=main.selection, rewrite=rewrite)
+
+    def _rewrite(self, query: str, asked: datetime) -> Rewrite:
+        """The rewrite outcome for `query`. The model is called only on the last line."""
+        if not self.rewrite_enabled:
+            return Rewrite(outcome="disabled")
+        if self.rewriter is None:
+            return Rewrite(outcome="unconfigured")
+        return self.rewriter.rewrite(query, today=asked.date())
+
+    @staticmethod
+    def _fuse(main: SearchResults, others: Sequence[SearchResults],
+              k: int) -> list[Retrieved]:
+        """The original query's rows and each alternative's, fused by rank.
+
+        Turns a ranked read kept stay first and are not fused: they arrived outside `k`
+        (see `ranked`), and fusing them would let an alternative phrasing push a turn
+        the model chose below one it never saw. Everything else is ranked by
+        reciprocal-rank fusion over the lists, and ties go to the row seen first, in the
+        order main list, then each alternative in turn. That order is deterministic, which
+        the id tiebreak inside `reciprocal_rank_fusion` is not across two stores.
+        """
+        def key(r: Retrieved) -> str:
+            if isinstance(r, EpisodeResult):
+                return f"{EPISODE}:{r.episode.id}"
+            return f"{CLAIM}:{r.claim.id}"
+
+        kept = [r for r in main
+                if isinstance(r, EpisodeResult) and r.explain.selected is True]
+        taken = {key(r) for r in kept}
+        first: dict[str, tuple[int, Retrieved]] = {}
+        rankings: dict[str, list[tuple[str, float]]] = {}
+        for i, rows in enumerate([main, *others]):
+            ranking = []
+            for r in rows:
+                name = key(r)
+                if name in taken:
+                    continue
+                ranking.append((name, r.score))
+                first.setdefault(name, (len(first), r))
+            rankings[str(i)] = ranking
+        fused = reciprocal_rank_fusion(rankings)
+        order = sorted(fused, key=lambda name: (-fused[name], first[name][0]))
+        return [*kept, *(first[name][1] for name in order[:k])]
+
+    def _search_once(
+        self, query: str, *, scope: Scope, k: int, as_of: datetime | None,
+        valid_at: datetime | None, known_at: datetime | None,
+        states: Collection[str] | None, include_invalidated: bool | None,
+        memory_types: Sequence[MemoryType] | None, min_score: float, anchored: bool,
+        include_episodes: bool, now: datetime | None, ranked: bool,
+        observe: bool = True,
+    ) -> SearchResults:
+        """One retrieval of one query: everything `search` does except the rewrite.
+
+        `observe=False` skips the retrieval telemetry, for a rewritten read, which is
+        observed once as a whole rather than once per phrasing.
+        """
         valid_at, known_at = time_axes(as_of, valid_at, known_at)
         # Resolved once, here, and carried as a tuple from this line down. The alias is
         # a facade spelling; below it there is one parameter, so no inner call can pass
@@ -773,7 +908,7 @@ class HybridRetriever:
             # list would spend a second cross-encoder pass — one `disabled` is specifically
             # measured never to spend (see the design spec's outcomes).
             hits = rerank(reranker_active, query, hits, top_n=self.rerank_top_n)[:k]
-        if rec is not None:
+        if rec is not None and observe:
             self._observe(rec, query, hits, (perf_counter() - t0) * 1000.0)
         return SearchResults(hits, selection=selection)
 

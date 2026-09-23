@@ -7,6 +7,43 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A `Memvara` with a chat-capable `llm=` now calls it on every read, and `MemoryAPI` gained `query_rewrite` and `synthesize`
+
+### What changed
+
+`search()` and `recall()` gained `query_rewrite: bool = True`, and `recall()` gained
+`synthesize: bool = False`. When `llm=` is a backend that implements `Chat`, which
+`OpenAILLM` and `AnthropicLLM` both do, every `search()` and `recall()` now makes one model
+call before retrieval to rewrite the query, waits up to 10 seconds for it, and may search
+at a `valid_at` read from the question's dates. Before this, such a store called its model
+only on writes and on `ranked=True` reads.
+
+Nothing changes for a store opened with the default `NullLLM`, or with any backend that
+cannot chat: no read calls a model, and `.rewrite.outcome` reports `unconfigured`.
+
+`MemoryAPI`, the protocol the MCP tools are written against, declares `query_rewrite` on
+`search` and `recall`, and `synthesize` on `recall`. The tools pass both on every call.
+
+### How you find your instances
+
+**A store opened with a model.** Search your code for `Memvara(` with `llm=OpenAILLM`,
+`llm=AnthropicLLM`, or a backend of your own that has a `chat` method. If you need reads
+to stay model-free, for cost, latency, or a benchmark whose numbers were measured without
+a rewrite, pass `query_rewrite=False` to the constructor. On a server, set
+`MEMVARA_FEATURE_QUERY_REWRITE=0`.
+
+**A benchmark or test that counts model calls.** A fake backend with a `chat` method now
+receives rewrite calls on reads, with the system prompt
+`memvara.select.stages.REWRITE_SYSTEM`. Pass `query_rewrite=False` where the count should
+stay as it was.
+
+**A class of your own used as `ToolContext.memory`.** Search your code for `ToolContext(`
+or `MemoryAPI`. Its `search` needs `query_rewrite`, and its `recall` needs `query_rewrite`
+and `synthesize`, or the tools raise `TypeError: unexpected keyword argument`.
+`ScopedMemvara` and `ScopedRemoteMemvara` already take them.
+
+---
+
 ## The schema is version 13, three MCP tools are new, erasure proofs count a fifth table, and `supersede()` ends where the new value begins
 
 ### What changed
