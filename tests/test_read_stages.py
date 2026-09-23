@@ -1317,7 +1317,7 @@ def _model_calls() -> set[str]:
                               f"{'.'.join(stack)}: {ast.unparse(func.value)}.{func.attr}")
                 self.generic_visit(node)
 
-        Visit().visit(ast.parse(path.read_text()))
+        Visit().visit(ast.parse(path.read_text(encoding="utf-8")))
     return found
 
 
@@ -1362,7 +1362,7 @@ def _undeclared_reads() -> set[str]:
         for path in sorted((root / tree).rglob("*.py")):
             if "skills" in path.parts:
                 continue
-            for node in ast.walk(ast.parse(path.read_text())):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                         and node.func.attr in ("search", "recall")):
                     continue
