@@ -11,6 +11,28 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A hosted client bound to a project refuses to purge.** `RemoteMemvara.purge()` and
+  `AsyncRemoteMemvara.purge()`, and their scoped views, sent `POST /v1/erasures` with the
+  user, agent and session only. From a client bound to one project that would have erased
+  the user's memory in every project. They now raise `ValueError` and send nothing, for the
+  reason `RemoteStore.purge()` already gave: the erasure route has no project field yet.
+  A client with no project bound purges as before.
+- **The hosted clients raise what the local engine raises for a refused replacement.**
+  `remember(replaces=...)` and `supersede()` on `RemoteMemvara` and `AsyncRemoteMemvara`
+  now raise `KeyError` when the deployment answers 404 for the named claim and
+  `ValueError` when it answers 409, as `Memvara` does, so `memory_remember` gives its own
+  "Nothing written" message against a hosted deployment instead of a transport error.
+  `link()` refuses a claim linked to itself before sending anything, as `Memvara.link`
+  does, and `profile()` refuses `k` below 1, as `Memvara.profile` does.
+- **Replaying a supersession is idempotent.** `Memvara.supersede()` on a claim already
+  closed the same way by a claim holding the same value writes nothing and returns a
+  receipt naming that successor under `reinforced`. A supersession that conflicts with
+  the recorded one is still refused with `ValueError`.
+- **The customer tool reference lists every tool.** It was missing `memory_end_matching`,
+  `memory_forget_matching` and `memory_link`, and three customer pages stated an old tool
+  count. The pages no longer state a count, and a test holds the reference table to the
+  server's tool list.
+
 - **`profile()` on Python 3.10 reports its default buckets as unavailable.** They are
   read from the shipped predicate packs, which need `tomllib`, and 3.10 has none. A line
   reader that supplied the names there was added and is now withdrawn, because it
@@ -50,8 +72,7 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 - **`memory_stats` labels the scope line with its five parts**,
   `tenant/user/project/agent/session`. It said four while printing five.
-- **The local MCP server now has fifteen tools**, with `memory_profile` after
-  `memory_standing`.
+- **The local MCP server lists `memory_profile`**, after `memory_standing`.
 
 ### Added
 

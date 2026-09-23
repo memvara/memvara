@@ -851,3 +851,39 @@ def test_both_classes_say_which_scope_they_are_bound_to_when_printed():
     assert "alice" in repr(mem.scope(agent="a1"))
     assert "a1" in repr(mem.scope(agent="a1"))
     run(mem.aclose())
+
+
+
+# -- a purge never widens past a bound project ------------------------------------------
+
+def test_the_async_client_refuses_a_purge_with_a_project_bound_and_sends_nothing():
+    """The async twin of the sync client's refusal, with the same reason: the hosted
+    erasure route has no project field, so the purge would erase every project."""
+    import asyncio
+
+    import httpx
+
+    from memvara.remote.aio import AsyncRemoteMemvara
+
+    sent = []
+
+    def handler(request):
+        sent.append(request)
+        return httpx.Response(200, json={"counts": {}})
+
+    mem = AsyncRemoteMemvara(api_key="k", base_url="https://example.test", user="alice",
+                             project="github.com/acme/app")
+    mem._http._client = httpx.AsyncClient(base_url="https://example.test",
+                                          transport=httpx.MockTransport(handler))
+    unbound = AsyncRemoteMemvara(api_key="k", base_url="https://example.test",
+                                 user="alice")
+    unbound._http._client = mem._http._client
+
+    async def run():
+        for purge in (lambda: mem.purge(), lambda: mem.scope(agent="a1").purge(),
+                      lambda: unbound.scope(project="github.com/acme/web").purge()):
+            with pytest.raises(ValueError, match="every project"):
+                await purge()
+
+    asyncio.run(run())
+    assert sent == []

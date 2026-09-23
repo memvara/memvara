@@ -1,7 +1,7 @@
 # MCP tools reference
 
-When Memvara is connected to an AI assistant over MCP, it exposes fifteen tools. This
-page lists each one. See
+When Memvara is connected to an AI assistant over MCP, it gives the assistant a set of
+memory tools. This page lists every one of them, one row per tool. See
 [Use Memvara in an AI coding assistant](../how-to-guides/use-memvara-in-an-ai-coding-assistant.md)
 for how to connect.
 
@@ -29,6 +29,9 @@ for how to connect.
 | `memory_remember` | Record one exact fact directly, as a subject/predicate/object triple, skipping extraction entirely. |
 | `memory_forget` | Retire a fact **because the record was wrong** — it was never true. |
 | `memory_end` | Close out a fact **because it has stopped being true** — the world changed. |
+| `memory_end_matching` | Close out a whole group of facts that have all stopped being true, such as everything about a project that has shipped. It works in two steps so nothing changes by surprise. The first call takes a search `query` and changes nothing: it lists the matching facts and returns a confirmation token. Calling again with that token as `confirm` ends exactly the facts that were listed, and none that started matching since. `k` caps how many matches are considered, and `reason` records why they ended. An expired or mismatched token is refused and nothing is changed. |
+| `memory_forget_matching` | Retire a whole group of facts that were all wrong, or that the user asked to forget, such as everything stored about one topic. It works in the same two steps as `memory_end_matching`: a first call with a `query` lists the matches and returns a token, and a second call with that token as `confirm` retires exactly those facts. `k` and `reason` work the same way. Retired facts stay visible in their history; nothing is erased. |
+| `memory_link` | Record that one stored fact adds detail to another (`extends`), or was worked out from another (`derives`), so that asking why either one is believed shows the connection. It takes the two facts' ids, `from_id` and `to_id`, and the `relation`. Both facts must be visible to the assistant, a fact cannot be linked to itself, and recording the same link twice changes nothing. |
 
 ## The two that are easy to confuse
 

@@ -1818,7 +1818,13 @@ class Memvara:
         have nothing left to close that way, and a second closure would restate what the
         first already said. Retiring an *ended* claim is allowed, because learning later
         that a finished value was never true is a real correction. Either way a refusal
-        writes nothing. Raising rather than quietly asserting the
+        writes nothing.
+
+        Replaying the same supersession is not refused. When the claim was already closed
+        the way `close` asks, by a claim holding the same value as `new_claim`, the call
+        writes nothing and returns a receipt naming that successor under `reinforced`, with
+        `added` and `closed` empty and no salience changed. That is what lets a mutation
+        log be imported twice. Raising rather than quietly asserting the
         new value keeps the call all-or-nothing: a supersession that lost its predecessor
         is not a partial success, it is two live answers to one question.
         """
@@ -1836,6 +1842,14 @@ class Memvara:
         # a mutation log this method exists for contains, and the closure witness is a
         # list for exactly that sequence. What an ended claim cannot be is ended again.
         if old.invalidated_at is not None or (how == "ended" and not old.is_live()):
+            # A replay of the same supersession is not a conflict. Importing a mutation
+            # log twice replays each update twice, and the second time the old claim is
+            # already closed, the same way, by a claim holding the same value. That
+            # writes nothing and names the successor, so a re-run import completes.
+            successor = self._replayed(old, new_claim, how, tenant=tenant, user=user,
+                                       agent=agent, session=session)
+            if successor is not None:
+                return WriteReceipt(reinforced=[successor])
             raise ValueError(
                 f"claim {old_claim_id!r} is already {old.state}, so there is nothing "
                 f"left to {'end' if how == 'ended' else 'retire'}. Nothing was written. "
@@ -1860,6 +1874,28 @@ class Memvara:
             at = new_claim.valid_from if how == "ended" else new_claim.recorded_at
         return self._write_claim(new_claim, sources, retire=old, at=at, close=how,
                                  reason=why)
+
+    def _replayed(self, old: Claim, new_claim: Claim, how: str, **scope: Any) -> Claim | None:
+        """The claim that already closed `old` the way `how` asks, holding `new_claim`'s
+        value, or `None` when this supersession would conflict with the recorded one.
+
+        The closure has to match: a claim retired cannot be replayed as ended, and a
+        claim ended cannot be replayed as retired (that is a real correction, which
+        `supersede` allows without reaching here). The value is compared on
+        `value_key` — owner, subject, predicate, object and polarity — with the new
+        claim's predicate spelled the way the store spells it and its scope adopted from
+        `old` when it names none, as the write itself would.
+        """
+        closed_as = "retired" if old.invalidated_at is not None else "ended"
+        if old.invalidated_by is None or closed_as != how:
+            return None
+        successor = self.get(old.invalidated_by, **scope)
+        if successor is None:
+            return None
+        candidate = replace(
+            new_claim, predicate=self.registry.normalize(new_claim.predicate),
+            scope=old.scope if new_claim.scope == Scope() else new_claim.scope)
+        return successor if successor.value_key == candidate.value_key else None
 
     def forget(self, subject: str, predicate: str, *, tenant=None, user=None, agent=None,
                session=None, at: datetime | None = None,

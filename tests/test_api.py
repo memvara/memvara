@@ -3289,3 +3289,58 @@ def test_binding_a_narrower_view_keeps_the_project():
         assert view.scope.agent == "worker"
     finally:
         mem.close()
+
+
+
+# -- replaying a supersession ------------------------------------------------------------
+
+def _replay_store():
+    from memvara import Claim, HashingEmbedder, Memvara, NullLLM
+    mem = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+    old = mem.remember("user", "lives_in", "Berlin").added[0]
+    return mem, old, Claim
+
+
+@pytest.mark.parametrize("close", ["ended", "retired"])
+def test_replaying_the_same_supersession_changes_nothing_and_names_the_successor(close):
+    """Importing a mutation log twice replays each update twice. The second replay names
+    a claim the first already closed with the same new value, so it writes nothing and
+    reports the value that already replaced it, instead of failing the import."""
+    mem, old, Claim = _replay_store()
+    first = mem.supersede(old.id, Claim(subject="user", predicate="lives_in",
+                                        object="Lisbon"), close=close)
+    successor = first.added[0]
+    before = mem.stats()
+    again = mem.supersede(old.id, Claim(subject="user", predicate="lives_in",
+                                        object="Lisbon"), close=close)
+    assert again.added == [] and again.closed == []
+    assert [c.id for c in again.reinforced] == [successor.id]
+    assert mem.stats() == before
+    assert [c.object for c in mem.get_all()] == ["Lisbon"]
+
+
+def test_a_supersession_that_conflicts_with_the_recorded_one_is_still_refused():
+    """A different new value, or the other closure, is not a replay: the old claim was
+    closed by something else, and closing it again would restate history."""
+    mem, old, Claim = _replay_store()
+    mem.supersede(old.id, Claim(subject="user", predicate="lives_in", object="Lisbon"))
+    with pytest.raises(ValueError, match="already ended"):
+        mem.supersede(old.id, Claim(subject="user", predicate="lives_in", object="Oslo"))
+    mem2, old2, _ = _replay_store()
+    mem2.supersede(old2.id, Claim(subject="user", predicate="lives_in", object="Lisbon"),
+                   close="retired")
+    with pytest.raises(ValueError, match="already retired"):
+        mem2.supersede(old2.id, Claim(subject="user", predicate="lives_in",
+                                      object="Lisbon"), close="ended")
+
+
+
+def test_a_replay_whose_successor_was_erased_is_refused_as_a_conflict():
+    """Without the successor there is nothing to compare the replayed value with, so the
+    call cannot show it is a replay and is refused like any other second closure."""
+    mem, old, Claim = _replay_store()
+    successor = mem.supersede(old.id, Claim(subject="user", predicate="lives_in",
+                                            object="Lisbon")).added[0]
+    mem.erase(successor.id)
+    with pytest.raises(ValueError, match="already ended"):
+        mem.supersede(old.id, Claim(subject="user", predicate="lives_in", object="Lisbon"))

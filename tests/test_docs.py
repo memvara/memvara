@@ -436,3 +436,36 @@ def test_no_document_brings_back_a_wording_this_project_has_corrected(
                  f"{' '.join(m.group(0).split())!r}" for m in pattern.finditer(text)]
 
     assert not hits, "\n".join([f"{why}\n\nSo {instead}. Found in:", *hits])
+
+
+
+# -- the customer pages name every tool and state no count ---------------------------------
+
+PUBLIC_TOOL_PAGES = (
+    "public-docs/reference/mcp-tools.md",
+    "public-docs/README.md",
+    "public-docs/how-to-guides/use-memvara-in-an-ai-coding-assistant.md",
+)
+
+
+def test_the_public_tool_reference_lists_exactly_the_tools_the_server_serves() -> None:
+    """Each tool has one row, and no row names a tool that is not served. The page
+    fell behind twice while every internal page was kept in step by count tests, because
+    nothing read it."""
+    page = (ROOT / "public-docs" / "reference" / "mcp-tools.md").read_text(encoding="utf-8")
+    rows = re.findall(r"^\| `(memory_[a-z_]+)` \|", page, flags=re.MULTILINE)
+    assert sorted(rows) == sorted(t.name for t in TOOLS), (
+        f"missing {sorted({t.name for t in TOOLS} - set(rows))}, "
+        f"extra {sorted(set(rows) - {t.name for t in TOOLS})}")
+    assert len(rows) == len(set(rows)), "a tool has two rows"
+
+
+@pytest.mark.parametrize("relative", PUBLIC_TOOL_PAGES)
+def test_the_public_pages_state_no_tool_count_that_could_go_stale(relative: str) -> None:
+    """A number of tools written into a customer page is wrong the day a tool ships.
+    These pages say "the tools" and let the reference table be the count."""
+    text = (ROOT / relative).read_text(encoding="utf-8")
+    numbers = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|" \
+              r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)"
+    stated = re.findall(rf"\b{numbers}\s+(?:MCP\s+)?tools\b", text, flags=re.IGNORECASE)
+    assert not stated, f"{relative} states a tool count: {stated}"
