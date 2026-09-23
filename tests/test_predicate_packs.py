@@ -935,3 +935,53 @@ def test_loading_the_engineering_pack_gives_a_store_a_graph():
     assert bare.connectivity()["joinable_claims"] == 0, (
         "the builtins declare no relation, so a store without a pack is a star")
     assert bare.paths_between("memvara_cloud", "db.internal") == []
+
+
+#: The four predicates `/memvara:index` writes about a repository, with the shape each is
+#: declared with: (cardinality, volatility, object_type).
+INDEX_PREDICATES = {
+    "purpose": (Cardinality.ONE, Volatility.SLOW, ("value",)),
+    "convention": (Cardinality.MANY, Volatility.SLOW, ("value",)),
+    "entry_point": (Cardinality.MANY, Volatility.SLOW, ("value",)),
+    "runs_with": (Cardinality.MANY, Volatility.SLOW, ("value",)),
+}
+
+
+@needs_toml
+def test_the_engineering_pack_declares_what_the_index_command_writes():
+    """`/memvara:index` records a repository's purpose, conventions, entry points and how
+    it is run. Undeclared, each would fall to the default: many-valued, so a changed
+    purpose would sit beside the old one instead of ending it."""
+    specs = {s.name: s for s in load_specs("engineering")}
+    for name, (cardinality, volatility, object_type) in INDEX_PREDICATES.items():
+        spec = specs[name]
+        assert (spec.cardinality, spec.volatility) == (cardinality, volatility), name
+        assert tuple(spec.object_type) == object_type, name
+        assert tuple(spec.subject_type) == ("component",), name
+        assert not spec.graph, f"{name} objects are values, so there is no edge to walk"
+
+
+@needs_toml
+def test_a_new_purpose_ends_the_old_one_and_conventions_accumulate():
+    """The cardinality decision, asserted through the write path rather than on the spec.
+
+    A repository has one purpose at a time, so a restated purpose is a change and ends
+    the previous value. It has many conventions, entry points and ways to run, so a
+    second one is another fact and ends nothing."""
+    from memvara import Memvara
+    from memvara.embed import HashingEmbedder
+    from memvara.llm import NullLLM
+
+    mem = Memvara(":memory:", embedder=HashingEmbedder(dim=32), user="alice",
+                  llm=NullLLM(),
+                  registry=PredicateRegistry(BUILTIN_PREDICATES + load_specs("engineering")))
+    repo = "project:github.com/acme/app"
+    mem.remember(repo, "purpose", "a memory layer")
+    assert mem.remember(repo, "purpose", "a bitemporal memory layer").ended
+    for predicate in ("convention", "entry_point", "runs_with"):
+        mem.remember(repo, predicate, "first")
+        assert not mem.remember(repo, predicate, "second").closed, predicate
+    live = {(c.predicate, c.object) for c in mem.get_all()}
+    assert ("purpose", "a memory layer") not in live
+    assert ("purpose", "a bitemporal memory layer") in live
+    assert {("runs_with", "first"), ("runs_with", "second")} <= live
