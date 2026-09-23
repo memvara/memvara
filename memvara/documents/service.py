@@ -36,19 +36,19 @@ runs, then `done` when every chunk has been read, `stored` when some chunk was k
 unread because the caller passed `extract=False`, or `failed` with an `error`. A failed
 document is still stored and its chunks are still searchable.
 
-**Content that is not plain text goes through one seam.** A URL, `bytes`, or a mime type
-that is not plain text is handed to `memvara.ingest.extract(content, url=..., mime=...)`,
-which returns an object with `text`, `title` and `mime`. That package is built
-separately; until it is installed, such a call raises `NotImplementedError` saying so.
+**Content that is not plain text goes through ingestion.** A URL, `bytes`, or a mime
+type that is not plain text is handed to `memvara.ingest.extract`, with the instance's
+URL fetcher, its model backend for media, and its `ingest_urls` and `ingest_media`
+switches. This module fetches nothing itself.
 """
 
 from __future__ import annotations
 
-import importlib
 import json
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Mapping, NamedTuple, Sequence
 
+from .. import ingest
 from ..redact import EPISODE
 from ..store import transaction
 from ..types import (CUSTOM_ID_CHARS, DOCUMENT_DELETED_REASON, DOCUMENT_EXTRACT,
@@ -82,29 +82,6 @@ def is_plain_text(mime: str) -> bool:
     """
     base = mime.split(";", 1)[0].strip().lower()
     return base.startswith("text/") and base not in _MARKUP
-
-
-def _ingest(content: str | bytes | None, url: str | None,
-            mime: str | None) -> tuple[str, str | None, str]:
-    """Text, title and mime for content that is not plain text, through the seam.
-
-    Looked up by name at call time rather than imported, because the ingestion package is
-    built separately and is not in every build. Missing, it is a refusal that says what
-    to pass instead, rather than an `ImportError` from inside this module.
-    """
-    try:
-        module = importlib.import_module("memvara.ingest")
-    except ImportError:
-        what = (f"the URL {url!r}" if url is not None
-                else "bytes" if not isinstance(content, str)
-                else f"mime type {mime!r}")
-        raise NotImplementedError(
-            f"adding a document from {what} needs the ingestion package "
-            "(memvara.ingest), which is not installed in this build. Pass the text as a "
-            f"str with mime {PLAIN_TEXT!r} or 'text/markdown' instead.") from None
-    got = module.extract(content, url=url, mime=mime)
-    return (str(got.text), getattr(got, "title", None),
-            str(getattr(got, "mime", None) or mime or PLAIN_TEXT))
 
 
 def _check_custom_id(custom_id: str | None) -> None:
@@ -248,7 +225,14 @@ class DocumentService:
         """
         if url is not None or not isinstance(content, str) or (
                 mime is not None and not is_plain_text(mime)):
-            text, title, mime = _ingest(content, url, mime)
+            # Called through the module, so a test can stand a fake in for it. Every
+            # failure is an `IngestError`, a `ValueError`, raised before anything is
+            # written.
+            got = ingest.extract(content, url=url, mime=mime, llm=self.mem.llm,
+                                 fetcher=self.mem.url_fetcher,
+                                 allow_urls=self.mem.ingest_urls,
+                                 allow_media=self.mem.ingest_media)
+            text, title, mime = got.text, got.title, got.mime
         else:
             text, title, mime = content, None, mime or PLAIN_TEXT
         text = normalise(self._redact(text, scope) or "")

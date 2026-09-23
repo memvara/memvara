@@ -1424,9 +1424,11 @@ clears their mark. The chunks are stored and indexed before extraction runs, so 
 document in any state is stored and searchable.
 
 **Content that is not plain text** — a URL, `bytes`, HTML or any non-text mime — is handed
-to `memvara.ingest.extract(content, url=, mime=)`, looked up by name at call time, which
-returns an object with `text`, `title` and `mime`. Without that package the call raises
-`NotImplementedError`. `update_document` reads new content under the `mime` it is given,
+to `memvara.ingest.extract`, with the instance's `url_fetcher` (the MCP server passes
+`ServerConfig.url_fetcher()`, which carries `MEMVARA_NAT64_PREFIXES`; unset, ingestion uses
+its own `SafeFetcher`), its `llm` for images, audio and video, and its `ingest_urls` and
+`ingest_media` switches as `allow_urls` and `allow_media`. The document store fetches
+nothing itself. An `IngestError` is raised before anything is written. `update_document` reads new content under the `mime` it is given,
 otherwise under the stored type for text, otherwise with none so ingestion detects it. A
 configured redactor runs over the whole text and the title before chunking, so every
 stored digest is of redacted text.

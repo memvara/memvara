@@ -98,6 +98,7 @@ from .types import (
     utcnow,
 )
 from .documents import DocumentService
+from .ingest import Fetcher
 from .write import WritePipeline
 from .write.reconcile import MergeReport, backfill_predicates
 
@@ -722,7 +723,7 @@ class Memvara:
     #: out, before anything leaves this process, which is the one privacy control that
     #: matters *more* against a hosted deployment than against a local file.
     _LOCAL_ONLY = ("path", "store", "embedder", "llm", "registry", "telemetry",
-                   "advise_replacements")
+                   "advise_replacements", "url_fetcher")
 
     #: The prefixes `_split_tuning` routes to the write, read and graph subsystems. Every
     #: one of those subsystems runs server-side against a hosted deployment, so the
@@ -754,10 +755,12 @@ class Memvara:
         # `Memvara(api_key=..., reembed=False)` an error that asked for nothing.
         if kwargs.pop("reembed", False):
             named.append("reembed")
-        # The same reading for the one local option whose default is true: chunking runs
-        # inside the deployment, so turning it off here would be accepted and never used.
-        if kwargs.pop("retrieval_chunks", True) is not True:
-            named.append("retrieval_chunks")
+        # The same reading for the local options whose default is true: chunking and
+        # ingestion run inside the deployment, so turning one off here would be accepted
+        # and never used.
+        for switch in ("retrieval_chunks", "ingest_urls", "ingest_media"):
+            if kwargs.pop(switch, True) is not True:
+                named.append(switch)
         # Prefix rather than name, and sorted so two of them read the same way twice.
         # Without this the caller still gets a `TypeError`, but from
         # `RemoteMemvara.__init__` naming a class they never mentioned — which says the
@@ -812,6 +815,9 @@ class Memvara:
         advise_replacements: bool = False,
         confirm_secret: str | bytes | None = None,
         retrieval_chunks: bool = True,
+        url_fetcher: "Fetcher | None" = None,
+        ingest_urls: bool = True,
+        ingest_media: bool = True,
         **tuning: Any,
     ) -> None:
         # Present so that a local construction that named them still binds. `__new__`
@@ -948,6 +954,15 @@ class Memvara:
         #: against the whole text. The MCP server turns it off with
         #: `MEMVARA_FEATURE_RETRIEVAL_CHUNKS=0`.
         self.retrieval_chunks = retrieval_chunks
+        #: What `add_document(url=...)` fetches with, or `None` for ingestion's own
+        #: `SafeFetcher`. The MCP server passes `ServerConfig.url_fetcher()`, which adds
+        #: the operator's NAT64 prefixes.
+        self.url_fetcher = url_fetcher
+        #: The `ingest_urls` and `ingest_media` switches: whether `add_document` may fetch
+        #: a URL, and whether it may read images, audio and video. Refused with the code
+        #: `feature_off` when off.
+        self.ingest_urls = ingest_urls
+        self.ingest_media = ingest_media
         self._documents = DocumentService(self)
 
         # Last, because both need the fully wired object: the migration path calls
@@ -1996,9 +2011,12 @@ class Memvara:
 
         Pass exactly one of `content` and `url`. A `str` with no `mime`, or a plain-text
         `mime` such as `text/plain` or `text/markdown`, is stored as it is. A URL,
-        `bytes`, HTML or any other type goes through the ingestion package
-        (`memvara.ingest`), which extracts the text; without that package installed the
-        call raises `NotImplementedError` saying so.
+        `bytes`, HTML or any other type goes through `memvara.ingest.extract`, which
+        fetches the URL with `url_fetcher` (by default a `SafeFetcher` that refuses
+        private addresses), reads HTML and PDF, and hands images, audio and video to this
+        instance's `llm` when it implements `Multimodal`. A failure raises
+        `memvara.ingest.IngestError`, a `ValueError` whose `code` names it, and nothing is
+        stored.
 
         The text is split into chunks of about 1,000 characters at sentence boundaries,
         each repeating up to 150 characters from the end of the one before, and each

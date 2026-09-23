@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import random
 import sqlite3
-import sys
-import types as pytypes
 from dataclasses import dataclass
 
 import pytest
@@ -757,17 +755,16 @@ class Extracted:
 
 @pytest.fixture()
 def ingest(monkeypatch):
-    """A fake `memvara.ingest` that records what it was asked to extract."""
+    """A fake `memvara.ingest.extract` that records what it was asked to extract."""
+    import memvara.ingest
     calls: list[tuple] = []
-    module = pytypes.ModuleType("memvara.ingest")
 
-    def extract(content, *, url=None, mime=None):
+    def extract(content, *, url=None, mime=None, **kw):
         calls.append((content, url, mime))
         return Extracted("Extracted text from the source.", "Extracted title",
                          "application/pdf" if isinstance(content, bytes) else "text/html")
 
-    module.extract = extract  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "memvara.ingest", module)
+    monkeypatch.setattr(memvara.ingest, "extract", extract)
     return calls
 
 
@@ -801,28 +798,60 @@ def test_bytes_and_markup_go_through_the_seam_and_plain_text_does_not(ingest):
 
 
 def test_a_title_found_by_ingestion_is_redacted_too(ingest, monkeypatch):
-    import memvara.ingest as fake  # the fixture's module
+    import memvara.ingest
 
-    monkeypatch.setattr(fake, "extract", lambda content, *, url=None, mime=None: Extracted(
+    monkeypatch.setattr(memvara.ingest, "extract", lambda content, **kw: Extracted(
         "Body text.", "Notes for alice@example.com", "text/html"))
     from memvara import PatternRedactor
     doc = mem(redactor=PatternRedactor()).add_document(url="https://example.com")
     assert doc.title and "alice@example.com" not in doc.title
 
 
-def test_without_the_ingestion_package_a_url_or_bytes_is_refused_with_the_reason(
-        monkeypatch):
-    # `None` in `sys.modules` makes the import fail, whether or not the package exists
-    # in this build.
-    monkeypatch.setitem(sys.modules, "memvara.ingest", None)
-    m = mem()
-    with pytest.raises(NotImplementedError, match="the URL 'https://x.test'"):
-        m.add_document(url="https://x.test")
-    with pytest.raises(NotImplementedError, match="from bytes needs"):
-        m.add_document(b"data")
-    with pytest.raises(NotImplementedError, match="mime type 'application/pdf'"):
-        m.add_document("text", mime="application/pdf")
+class FakeFetcher:
+    """Stands in for `SafeFetcher`: answers every URL with one page, and records it."""
+
+    def __init__(self, body: bytes = b"<html><title>Refunds</title>"
+                                      b"<p>Refunds are paid within 14 days.</p></html>",
+                 content_type: str = "text/html; charset=utf-8") -> None:
+        self.body, self.content_type = body, content_type
+        self.urls: list[str] = []
+
+    def fetch(self, url: str):
+        from memvara.ingest import Fetched
+        self.urls.append(url)
+        return Fetched(url, self.content_type, self.body)
+
+
+def test_a_url_is_fetched_with_the_instances_fetcher_and_read_by_ingestion():
+    """The document store fetches nothing itself: the URL goes to `memvara.ingest`
+    with the fetcher this `Memvara` was given."""
+    fetcher = FakeFetcher()
+    m = mem(url_fetcher=fetcher)
+    doc = m.add_document(url="https://example.com/refunds", custom_id="refunds")
+    assert fetcher.urls == ["https://example.com/refunds"]
+    assert (doc.title, doc.mime, doc.source_uri) == (
+        "Refunds", "text/html", "https://example.com/refunds")
+    assert m.store.document_chunks("default", doc.id)[0].text == \
+        "Refunds are paid within 14 days."
+
+
+def test_the_ingestion_switches_and_failures_refuse_before_anything_is_stored():
+    from memvara.ingest import IngestError
+    m = mem(url_fetcher=FakeFetcher(), ingest_urls=False, ingest_media=False)
+    with pytest.raises(IngestError, match="feature_off: fetching a URL"):
+        m.add_document(url="https://example.com")
+    with pytest.raises(IngestError, match="feature_off: reading image/png"):
+        m.add_document(b"\x89PNG\r\n\x1a\n" + b"0" * 16)
+    with pytest.raises(IngestError, match="media_unsupported"):
+        mem().add_document(b"\x89PNG\r\n\x1a\n" + b"0" * 16)
     assert m.list_documents().items == []
+
+
+def test_a_hosted_client_refuses_local_ingestion_options():
+    for kw in ({"url_fetcher": FakeFetcher()}, {"ingest_urls": False},
+               {"ingest_media": False}):
+        with pytest.raises(TypeError, match=f"{next(iter(kw))} cannot be combined"):
+            Memvara(api_key="k", base_url="https://example.test", **kw)
 
 
 # --- stores and erasure ----------------------------------------------------------------------
@@ -1043,14 +1072,14 @@ def test_deleting_a_document_through_the_tool_retires_and_never_erases_a_memory(
     srv.close()
 
 
-def test_the_add_tool_refuses_what_it_cannot_store_with_the_reason(monkeypatch):
+def test_the_add_tool_refuses_what_it_cannot_store_with_the_reason():
     from test_server import call
-    monkeypatch.setitem(sys.modules, "memvara.ingest", None)
     srv = _server()
     body, is_error = call(srv, "memory_add_document", {})
     assert is_error and "exactly one of content" in body
+    srv._ctx.memory.memvara.ingest_urls = False
     body, is_error = call(srv, "memory_add_document", {"url": "https://x.test"})
-    assert is_error and body.startswith("Nothing stored: adding a document from the URL")
+    assert is_error and body.startswith("Nothing stored: feature_off: fetching a URL")
     body, is_error = call(srv, "memory_add_document", {"content": "  "})
     assert is_error and "no text" in body
     body, is_error = call(srv, "memory_list_documents", {"cursor": "junk"})
@@ -1093,6 +1122,20 @@ def test_switching_documents_off_hides_the_four_tools():
     assert not {"memory_add_document", "memory_get_document", "memory_list_documents",
                 "memory_delete_document"} & names
     assert "memory_recall" in names
+
+
+def test_the_server_fetches_through_the_operators_nat64_prefixes_and_switches():
+    from memvara.ingest import SafeFetcher
+    from memvara.server.config import ServerConfig, build_memvara
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": ":memory:", "MEMVARA_EMBEDDER": "hashing",
+        "MEMVARA_NAT64_PREFIXES": "2001:db8:64::/96",
+        "MEMVARA_FEATURE_INGEST_MEDIA": "0"}))
+    assert isinstance(memory.url_fetcher, SafeFetcher)
+    import ipaddress
+    assert ipaddress.ip_network("2001:db8:64::/96") in memory.url_fetcher._nat64
+    assert (memory.ingest_urls, memory.ingest_media) == (True, False)
+    memory.close()
 
 
 def test_switching_retrieval_chunks_off_stores_a_document_whole():
