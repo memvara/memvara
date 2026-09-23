@@ -54,6 +54,47 @@ matrix was shared between them.
 
 ---
 
+## Seven store methods take a filter, and the two read tools take two new arguments
+
+### What changed
+
+`search()` and `recall()` take `filters` and `filepath_prefix`, which narrow a read by
+metadata and by the file path of the document a memory came from. The filter runs inside
+the store, so seven `Store` methods take a new keyword argument, `where`, a
+`memvara.filters.SearchFilter` or `None`: `candidate_ids`, `lexical_search`,
+`vector_search`, `episode_candidate_ids`, `lexical_search_episodes`,
+`vector_search_episodes` and `episodes_near`. `memory_search` and `memory_recall` take
+the same two arguments, and a new feature switch, `metadata_filters`, is on by default.
+
+### Who this changes, and in which direction
+
+**If you implement `Store` yourself**, nothing breaks for a read that does not filter:
+the retriever passes `where` only when the caller filtered. A filtered read against your
+store raises `TypeError` naming `where` until you add it. Add it to all seven methods and
+apply it in the same query as your limit, or a filtered search returns fewer than `k`
+matches while more exist. `SQLiteStore` in `memvara/store/sqlite.py` is the reference:
+`_where_clause` builds the condition. Find your implementations with
+`grep -rn "def lexical_search" your_package/`.
+
+**If you call a hosted deployment with `RemoteMemvara`**, a call that passes either
+argument fails with `InvalidRequest` (HTTP 422) until the deployment is updated, because
+its request models refuse a field they do not know. It is never answered unfiltered. A
+call without them is unchanged.
+
+**If you compare a tool's accepted arguments**, `memory_search` and `memory_recall` list
+`filepath_prefix` and `filters`. With `MEMVARA_FEATURE_METADATA_FILTERS=0` both stay in
+the schema with a description saying they are refused, and a call carrying one is
+refused with a message naming the switch.
+
+**If you list feature names** (the plugin hooks' `FEATURES`, or a check of
+`MEMVARA_FEATURE_*` variables), add `metadata_filters`.
+
+**If you pass a class of your own as `ToolContext.memory`**, its `search` and `recall`
+need `filters` and `filepath_prefix`: `MemoryAPI` declares both and the tools pass both
+on every call, as `None` unless the model asked for a filter.
+
+---
+
 ## A hosted purge with a project bound is refused instead of erasing every project
 
 ### What changed

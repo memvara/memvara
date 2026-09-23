@@ -69,6 +69,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Collection, Iterable, Iterator
 
 import numpy as np
 
+from ..filters import SearchFilter, meta_matches
 from ..types import (
     ObjectKind,
     OBJECT_ENTITY,
@@ -1316,6 +1317,117 @@ class _VecIndex:
 #: worst possible place to discover it. Checked once at construction instead.
 _MIN_SQLITE = (3, 35, 0)
 
+# The joins a filter follows from a row to the documents it came from. A chunk episode is
+# listed in `document_chunks`; a claim reaches the same rows through `claim_sources`. The
+# tenant is compared on the way, so a document in another tenant can never make a row
+# match, even though episode ids are unique across tenants.
+_EPISODE_DOCUMENTS = (
+    "SELECT 1 FROM document_chunks dc "
+    "JOIN documents d ON d.tenant = dc.tenant AND d.id = dc.document_id "
+    "WHERE dc.episode_id = {row}.id AND dc.tenant = {row}.tenant AND {test}")
+_CLAIM_DOCUMENTS = (
+    "SELECT 1 FROM claim_sources cs "
+    "JOIN document_chunks dc ON dc.episode_id = cs.episode_id AND dc.tenant = {row}.tenant "
+    "JOIN documents d ON d.tenant = dc.tenant AND d.id = dc.document_id "
+    "WHERE cs.claim_id = {row}.id AND {test}")
+
+
+def _register_functions(conn: sqlite3.Connection) -> None:
+    """The SQL functions a read needs, on every connection that runs reads.
+
+    `mv_meta_match` is `memvara.filters.meta_matches`. A store whose SQLite has no JSON
+    functions tests metadata filters with it, inside the statement that applies the limit.
+    A function belongs to one connection, which is why the snapshot connections `_reader`
+    opens need it as well as the writer's.
+    """
+    conn.create_function("mv_meta_match", 2, meta_matches, deterministic=True)
+
+
+def _has_json_functions(conn: sqlite3.Connection,
+                        error: type[Exception] = sqlite3.OperationalError) -> bool:
+    """Whether this SQLite was built with its JSON functions.
+
+    They are built in from SQLite 3.38 and optional before it, and this library supports
+    3.35, so the answer is asked of the library rather than assumed. `error` is the
+    driver's `OperationalError`: SQLCipher's module has its own, which `sqlite3`'s does
+    not catch.
+    """
+    try:
+        conn.execute("SELECT json_type('{}')")
+    except error:
+        return False
+    return True
+
+
+def _starts_with(column: str, prefix: str) -> tuple[str, list]:
+    """SQL and binds for "`column` starts with `prefix`", compared character for character.
+
+    `substr` rather than `LIKE`, so `%` and `_` match only themselves and case matters;
+    `LIKE` treats both as wildcards and ignores ASCII case. `list_documents` and the search
+    filter both use this, so a folder lists and searches by the same rule.
+    """
+    return f"substr({column}, 1, ?) = ?", [len(prefix), prefix]
+
+
+def _key_test(column: str, key: str, values: Sequence[Any], key_spec: str,
+              json_functions: bool) -> tuple[str, list]:
+    """SQL and binds for "the JSON object in `column` holds one of `values` under `key`".
+
+    With SQLite's JSON functions, `json_type` keeps the JSON types apart the way
+    `memvara.filters` does (a boolean is never the number 1, a string never a number), and
+    `json_extract` compares the value. The path is bound as a parameter like the values;
+    a key is restricted to characters that need no quoting inside the double quotes the
+    path puts round it. Without the JSON functions, the registered `mv_meta_match` does
+    the same test in Python, about four times slower on a scan (see `docs/INTERNALS.md`).
+    """
+    if not json_functions:
+        return f"mv_meta_match({column}, ?)", [key_spec]
+    path = f'$."{key}"'
+    texts = [v for v in values if isinstance(v, str)]
+    numbers = [v for v in values
+               if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    flags = sorted({v for v in values if isinstance(v, bool)})
+    parts: list[str] = []
+    params: list[Any] = []
+    for kinds, group in (("'text'", texts), ("'integer', 'real'", numbers)):
+        if group:
+            marks = ", ".join("?" * len(group))
+            parts.append(f"(json_type({column}, ?) IN ({kinds}) "
+                         f"AND json_extract({column}, ?) IN ({marks}))")
+            params += [path, path, *group]
+    for flag in flags:
+        parts.append(f"json_type({column}, ?) = ?")
+        params += [path, "true" if flag else "false"]
+    return "(" + " OR ".join(parts) + ")", params
+
+
+def _where_clause(where: SearchFilter | None, row: str, documents: str,
+                  json_functions: bool) -> tuple[str, list]:
+    """SQL and binds for the caller's metadata and file-path filter, or `1=1`.
+
+    `row` names the table or alias whose `id`, `tenant` and `meta` are tested, and
+    `documents` is `_EPISODE_DOCUMENTS` or `_CLAIM_DOCUMENTS`. Nothing the caller wrote is
+    placed in the SQL text: keys, values and the prefix are bound as parameters.
+
+    **Each key is tested on its own**, against the row's own `meta` or the `meta` of any
+    document the row came from, which is the rule `memvara.filters` states: a claim whose
+    own `meta` holds one key and whose source document holds the other matches both.
+    """
+    if where is None:
+        return "1=1", []
+    parts: list[str] = []
+    params: list[Any] = []
+    for (key, values), (_, key_spec) in zip(where.meta, where.key_specs):
+        own, own_params = _key_test(f"{row}.meta", key, values, key_spec, json_functions)
+        doc, doc_params = _key_test("d.meta", key, values, key_spec, json_functions)
+        parts.append(f"({own} OR EXISTS ({documents.format(row=row, test=doc)}))")
+        params += own_params + doc_params
+    if where.filepath_prefix is not None:
+        test, test_params = _starts_with("d.filepath", where.filepath_prefix)
+        parts.append(f"EXISTS ({documents.format(row=row, test=test)})")
+        params += test_params
+    return "(" + " AND ".join(parts) + ")", params
+
 
 #: Fact keys per `occupied_slots` statement, under SQLite's oldest bound-parameter limit
 #: of 999 with room for the tenant and the liveness clause's own parameters.
@@ -1389,6 +1501,8 @@ class SQLiteStore:
         self._db = self._connect()
         if kind == "other":
             self._check_key()
+        #: Whether metadata filters use SQLite's JSON functions or `mv_meta_match`.
+        self._json_functions = _has_json_functions(self._db, self._sql.OperationalError)
         self._lock = threading.RLock()
         # Per-thread: the snapshot connection this thread reads through, how deep it is
         # inside `batch()`, and the last `data_version` it saw. Each of those three is a
@@ -1448,6 +1562,9 @@ class SQLiteStore:
             # already; saying it here keeps that true for a build that is not.
             conn.execute("PRAGMA temp_store = MEMORY")
         conn.row_factory = self._sql.Row
+        # Here rather than at each caller, so the writer and every reading thread's
+        # connection get the SQL functions a filtered read needs, encrypted or not.
+        _register_functions(conn)
         return cast(sqlite3.Connection, conn)
 
     def _check_key(self) -> None:
@@ -3264,14 +3381,15 @@ class SQLiteStore:
 
         `after` is the `(created_at, id)` of the last document on the previous page; the
         id breaks ties between documents created in the same instant, so no document is
-        skipped or repeated across pages. The prefix is compared with `substr` rather
-        than `LIKE`, so a `%` or `_` in a path matches only itself.
+        skipped or repeated across pages. The prefix is compared by `_starts_with`, so a
+        `%` or `_` in a path matches only itself.
         """
         sc, params = self._scope_clause(scopes, "d")
         where = [sc]
         if filepath_prefix is not None:
-            where.append("substr(d.filepath, 1, ?) = ?")
-            params += [len(filepath_prefix), filepath_prefix]
+            test, test_params = _starts_with("d.filepath", filepath_prefix)
+            where.append(test)
+            params += test_params
         if status is not None:
             where.append("d.status = ?")
             params.append(status)
@@ -3835,7 +3953,8 @@ class SQLiteStore:
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
                       states: Collection[str] | None = None,
-                      include_invalidated: bool | None = None) -> list[str]:
+                      include_invalidated: bool | None = None,
+                      where: SearchFilter | None = None) -> list[str]:
         """Every claim id visible at these scopes, in the states asked for.
 
         The state filter is in the SQL and not applied to the result, which is the whole
@@ -3846,17 +3965,20 @@ class SQLiteStore:
         sc, sp = self._scope_clause(scopes)
         lv, lp = self._state_clause(
             valid_at, known_at, resolve_states(states, include_invalidated))
+        wc, wp = _where_clause(where, "claims", _CLAIM_DOCUMENTS, self._json_functions)
         with self._read() as conn:
             cur = conn.cursor()
             # A whole-tenant scope returns every claim id; building a `Row` object for
             # each of them costs more than the query.
             cur.row_factory = None
-            cur.execute(f"SELECT id FROM claims WHERE {sc} AND {lv}", sp + lp)
+            cur.execute(f"SELECT id FROM claims WHERE {sc} AND {lv} AND {wc}",
+                        sp + lp + wp)
             return [r[0] for r in cur.fetchall()]
 
     def episode_candidate_ids(self, scopes: Sequence[Scope], *,
                               valid_at: datetime | None = None,
-                              known_at: datetime | None = None) -> list[str]:
+                              known_at: datetime | None = None,
+                              where: SearchFilter | None = None) -> list[str]:
         """Every turn visible at these scopes. The episode half of `candidate_ids`.
 
         No `include_invalidated`: episodes have no end-of-life to lift. Scope, though,
@@ -3867,15 +3989,18 @@ class SQLiteStore:
         """
         sc, sp = self._scope_clause(scopes)
         hp, hpp = self._happened_clause(valid_at, known_at)
+        wc, wp = _where_clause(where, "episodes", _EPISODE_DOCUMENTS, self._json_functions)
         with self._read() as conn:
             cur = conn.cursor()
             cur.row_factory = None
-            cur.execute(f"SELECT id FROM episodes WHERE {sc} AND {hp}", sp + hpp)
+            cur.execute(f"SELECT id FROM episodes WHERE {sc} AND {hp} AND {wc}",
+                        sp + hpp + wp)
             return [r[0] for r in cur.fetchall()]
 
     def episodes_near(self, anchor: datetime, scopes: Sequence[Scope], limit: int, *,
                       valid_at: datetime | None = None,
-                      known_at: datetime | None = None) -> list[tuple[str, float]]:
+                      known_at: datetime | None = None,
+                      where: SearchFilter | None = None) -> list[tuple[str, float]]:
         """The `limit` turns closest in time to `anchor`, nearest first, with their `ts`.
 
         The third episode search, beside lexical and vector, and the only one that ranks
@@ -3904,21 +4029,23 @@ class SQLiteStore:
         """
         sc, sp = self._scope_clause(scopes)
         hp, hpp = self._happened_clause(valid_at, known_at)
+        wc, wp = _where_clause(where, "episodes", _EPISODE_DOCUMENTS, self._json_functions)
         at = as_utc(anchor).timestamp()
         with self._read() as conn:
             cur = conn.cursor()
             cur.row_factory = None
             cur.execute(
-                f"SELECT id, ts FROM episodes WHERE {sc} AND {hp} "
+                f"SELECT id, ts FROM episodes WHERE {sc} AND {hp} AND {wc} "
                 "ORDER BY ABS(ts - ?), hash, id LIMIT ?",
-                sp + hpp + [at, limit])
+                sp + hpp + wp + [at, limit])
             return [(row[0], float(row[1])) for row in cur.fetchall()]
 
     def lexical_search(self, query: str, scopes: Sequence[Scope], limit: int, *,
                        valid_at: datetime | None = None,
                        known_at: datetime | None = None,
                        states: Collection[str] | None = None,
-                       include_invalidated: bool | None = None
+                       include_invalidated: bool | None = None,
+                       where: SearchFilter | None = None
                        ) -> list[tuple[str, float]]:
         m = _fts_query(query)
         if not m:
@@ -3928,10 +4055,12 @@ class SQLiteStore:
         # state filter applied to the returned page cannot see what the page cut off.
         lv, lp = self._state_clause(
             valid_at, known_at, resolve_states(states, include_invalidated), alias="c")
+        # The caller's filter goes inside the `LIMIT` too, for the same reason.
+        wc, wp = _where_clause(where, "c", _CLAIM_DOCUMENTS, self._json_functions)
         sql = (
             "SELECT f.claim_id AS cid, bm25(claims_fts) AS s "
             "FROM claims_fts f JOIN claims c ON c.id = f.claim_id "
-            f"WHERE claims_fts MATCH ? AND {sc} AND {lv} "
+            f"WHERE claims_fts MATCH ? AND {sc} AND {lv} AND {wc} "
             # `value_key` before `id`, and neither is decoration: BM25 ties are common —
             # eight claims differing only in subject score identically for a query on
             # the object — and with no tiebreak the winners were whatever rowid order
@@ -3943,13 +4072,14 @@ class SQLiteStore:
             "ORDER BY s ASC, c.value_key ASC, c.id ASC LIMIT ?"
         )
         with self._read() as conn:
-            rows = conn.execute(sql, [m] + sp + lp + [limit]).fetchall()
+            rows = conn.execute(sql, [m] + sp + lp + wp + [limit]).fetchall()
         # bm25() is negative-is-better; flip it so callers see a normal ascending score.
         return [(r["cid"], -float(r["s"])) for r in rows]
 
     def lexical_search_episodes(self, query: str, scopes: Sequence[Scope], limit: int, *,
                                 valid_at: datetime | None = None,
-                                known_at: datetime | None = None
+                                known_at: datetime | None = None,
+                                where: SearchFilter | None = None
                                 ) -> list[tuple[str, float]]:
         """BM25 over raw turn text, scope-filtered inside the query.
 
@@ -3962,27 +4092,31 @@ class SQLiteStore:
             return []
         sc, sp = self._scope_clause(scopes, alias="e")
         hp, hpp = self._happened_clause(valid_at, known_at, alias="e")
+        wc, wp = _where_clause(where, "e", _EPISODE_DOCUMENTS, self._json_functions)
         sql = (
             "SELECT f.episode_id AS eid, bm25(episodes_fts) AS s "
             "FROM episodes_fts f JOIN episodes e ON e.id = f.episode_id "
-            f"WHERE episodes_fts MATCH ? AND {sc} AND {hp} "
+            f"WHERE episodes_fts MATCH ? AND {sc} AND {hp} AND {wc} "
             # Same tie, same fix. A turn has no `value_key`; `hash` is the content hash
             # `find_episode_by_hash` dedupes on, so it plays the same role.
             "ORDER BY s ASC, e.hash ASC, e.id ASC LIMIT ?"
         )
         with self._read() as conn:
-            rows = conn.execute(sql, [m] + sp + hpp + [limit]).fetchall()
+            rows = conn.execute(sql, [m] + sp + hpp + wp + [limit]).fetchall()
         return [(r["eid"], -float(r["s"])) for r in rows]
 
     def vector_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int, *,
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
                       states: Collection[str] | None = None,
-                      include_invalidated: bool | None = None
+                      include_invalidated: bool | None = None,
+                      where: SearchFilter | None = None
                       ) -> list[tuple[str, float]]:
+        # The filter narrows the candidate set the index ranks inside, so the cap counts
+        # only rows that match it.
         allowed = self.candidate_ids(
             scopes, valid_at=valid_at, known_at=known_at,
-            states=resolve_states(states, include_invalidated))
+            states=resolve_states(states, include_invalidated), where=where)
         if not allowed:
             return []
         self._ensure_index()
@@ -3990,7 +4124,8 @@ class SQLiteStore:
 
     def vector_search_episodes(self, qvec: np.ndarray, scopes: Sequence[Scope],
                                limit: int, *, valid_at: datetime | None = None,
-                               known_at: datetime | None = None
+                               known_at: datetime | None = None,
+                               where: SearchFilter | None = None
                                ) -> list[tuple[str, float]]:
         """Cosine over turn vectors, restricted to the ids this scope may see.
 
@@ -3999,7 +4134,7 @@ class SQLiteStore:
         not return is not passed to the index at all.
         """
         allowed = self.episode_candidate_ids(scopes, valid_at=valid_at,
-                                             known_at=known_at)
+                                             known_at=known_at, where=where)
         if not allowed:
             return []
         self._ensure_index()

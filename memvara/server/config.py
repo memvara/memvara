@@ -119,6 +119,10 @@ _DEFAULT_EMBEDDER = "hashing"
 #: `memory_search` and `memory_recall` no longer offer the `query_rewrite` or
 #: `synthesize` argument.
 #:
+#: `metadata_filters` decides whether `memory_search` and `memory_recall` accept `filters`
+#: and `filepath_prefix`. Switched off, a call carrying either is refused with a message
+#: naming the switch, and the argument descriptions say so; it is never run unfiltered.
+#:
 #: `encryption` decides whether a new local store file is created encrypted
 #: (`SQLiteStore(encryption=True)`). An existing store opens as whatever it already is.
 #: With the switch on and the `encrypt` extra missing, a new store is refused rather than
@@ -140,6 +144,7 @@ FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
     "ingest_media": True,
     "query_rewrite": True,
     "synthesis": True,
+    "metadata_filters": True,
     "encryption": True,
 })
 
@@ -493,7 +498,7 @@ def unknown_features(names: Iterable[str]) -> str | None:
     exception, so the two cannot disagree about what a feature is.
 
     >>> unknown_features(["profle"])
-    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite, synthesis and encryption."
+    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite, synthesis, metadata_filters and encryption."
     >>> unknown_features(["profile"]) is None
     True
     """
@@ -1025,6 +1030,7 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         return RemoteMemvara(
             api_key=config.api_key,
             base_url=config.server_url,
+            metadata_filters="metadata_filters" not in config.features_off,
             **config.scope_kwargs,
         )
     encryption = "encryption" not in config.features_off
@@ -1103,5 +1109,9 @@ def _local_memvara(config: ServerConfig, encryption: bool) -> Memvara:
         # `MEMVARA_FEATURE_SYNTHESIS`.
         query_rewrite="query_rewrite" not in config.features_off,
         synthesis="synthesis" not in config.features_off,
+        # `MEMVARA_FEATURE_METADATA_FILTERS=0` makes the engine refuse `filters` and
+        # `filepath_prefix` too, so a caller of this `Memvara` other than the tools is
+        # refused the same way.
+        metadata_filters="metadata_filters" not in config.features_off,
         **config.scope_kwargs,
     )

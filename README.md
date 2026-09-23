@@ -671,8 +671,20 @@ for a large corpus: the vector index is exact and in-process.
 
 ```python
 mem.add_document(open("policies/refunds.md").read(), custom_id="policies/refunds.md",
-                 filepath="policies/refunds.md", mime="text/markdown")
+                 filepath="policies/refunds.md", mime="text/markdown",
+                 meta={"team": "support"})
 print(mem.recall("how long do refunds take?", include_episodes=True))
+```
+
+A read can be narrowed to part of memory. `filters={"team": "support"}` keeps only
+memories whose metadata, or whose source document's metadata, has that value, and
+`filepath_prefix="policies/"` keeps only memories that came from a document in that
+folder. Both work on `search()` and `recall()`, and both are applied before the result is
+cut to `k`, so asking for five matches returns five when five exist.
+
+```python
+print(mem.recall("how long do refunds take?", include_episodes=True,
+                 filepath_prefix="policies/"))
 ```
 
 Memvara ships retriever adapters for LangChain and LlamaIndex, so in an existing pipeline

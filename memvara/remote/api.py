@@ -39,6 +39,7 @@ from urllib.parse import quote
 
 from ..confirm import ConfirmationRefused
 from ..core import _check_k
+from ..filters import FilterValue, checked_filter
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import EpisodeResult, Path, Retrieved
 from ..types import (
@@ -142,6 +143,24 @@ def _sent(body: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in body.items() if v is not None}
 
 
+def _filter_fields(filters: Mapping[str, FilterValue] | None,
+                   filepath_prefix: str | None, enabled: bool) -> dict[str, Any]:
+    """The `filters` and `filepath_prefix` request fields, checked before anything is sent.
+
+    Checked by `checked_filter`, the function the local engine uses, so a key the
+    deployment would refuse, or a filter while `metadata_filters` is off, is refused
+    without a round trip and with the same message. Both fields are left out of the body
+    when unset, so a request without a filter is byte for byte what it was before filters
+    existed. **A deployment that does not know the fields refuses a request carrying
+    them** with 422, because its request models forbid unknown fields; a filtered read is
+    never answered unfiltered.
+    """
+    where = checked_filter(filters, filepath_prefix, enabled=enabled)
+    if where is None:
+        return {}
+    return {"filters": where.wire() or None, "filepath_prefix": where.filepath_prefix}
+
+
 def _document_path(ref: str, tail: str = "") -> str:
     """`/v1/documents/{ref}`, with the reference escaped whole.
 
@@ -215,8 +234,12 @@ class RemoteMemvara:
                  agent: str | None = None, session: str | None = None,
                  project: str | None = None,
                  timeout: float = DEFAULT_TIMEOUT,
-                 redactor: Redactor | None = None) -> None:
+                 redactor: Redactor | None = None,
+                 metadata_filters: bool = True) -> None:
         key, url = resolve(api_key, base_url)
+        #: The `metadata_filters` switch, as on `Memvara`: off, a read that passes
+        #: `filters` or `filepath_prefix` is refused before anything is sent.
+        self.metadata_filters = metadata_filters
         self._http = HttpClient(key, url, timeout=timeout)
         #: The scope this client narrows to. `tenant` is held for `default_scope`'s sake
         #: and never sent: the facade resolves it from the bearer token, and a `tenant`
@@ -461,6 +484,8 @@ class RemoteMemvara:
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType | str] | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                include_episodes: Literal[False] = ...) -> list[Result]: ...
 
     @overload
@@ -471,6 +496,8 @@ class RemoteMemvara:
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType | str] | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
@@ -481,6 +508,8 @@ class RemoteMemvara:
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType | str] | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
@@ -491,6 +520,8 @@ class RemoteMemvara:
                states: Collection[str] | None = None,
                include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType | str] | None = None,
+               filters: Mapping[str, FilterValue] | None = None,
+               filepath_prefix: str | None = None,
                include_episodes: bool = False) -> list[Any]:
         """Hybrid retrieval, with the ranking explanation attached.
 
@@ -520,6 +551,7 @@ class RemoteMemvara:
                         "known_at": _iso(known_at), "states": _states(states),
                         "include_invalidated": include_invalidated,
                         "memory_types": _types(memory_types),
+                        **_filter_fields(filters, filepath_prefix, self.metadata_filters),
                         "include_episodes": include_episodes}))
         return SearchResults([_hit(h) for h in body["results"]],
                              selection=hydrate.selection(body.get("selection")),
@@ -530,7 +562,9 @@ class RemoteMemvara:
                query_rewrite: bool = True, synthesize: bool = False,
                memory_types: Sequence[MemoryType | str] | None = None,
                include_episodes: bool = False, budget: int | None = None,
-               valid_at: datetime | None = None) -> str:
+               valid_at: datetime | None = None,
+               filters: Mapping[str, FilterValue] | None = None,
+               filepath_prefix: str | None = None) -> str:
         """Retrieval already formatted for a system prompt: prose, not rows.
 
         Narrower than `search` in the two ways the facade is narrow, and neither is an
@@ -578,6 +612,7 @@ class RemoteMemvara:
                         "query_rewrite": None if query_rewrite else False,
                         "synthesize": synthesize or None,
                         "memory_types": _types(memory_types),
+                        **_filter_fields(filters, filepath_prefix, self.metadata_filters),
                         "include_episodes": include_episodes}))
         return str(body["text"])
 
@@ -1259,6 +1294,8 @@ class ScopedRemoteMemvara:
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType | str] | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                include_episodes: Literal[False] = ...) -> list[Result]: ...
 
     @overload
@@ -1269,6 +1306,8 @@ class ScopedRemoteMemvara:
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType | str] | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
@@ -1279,6 +1318,8 @@ class ScopedRemoteMemvara:
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType | str] | None = ...,
+               filters: Mapping[str, FilterValue] | None = ...,
+               filepath_prefix: str | None = ...,
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
@@ -1289,13 +1330,16 @@ class ScopedRemoteMemvara:
                states: Collection[str] | None = None,
                include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType | str] | None = None,
+               filters: Mapping[str, FilterValue] | None = None,
+               filepath_prefix: str | None = None,
                include_episodes: bool = False) -> list[Any]:
         return self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
                                 anchored=anchored, ranked=ranked,
                                 query_rewrite=query_rewrite,
                                 valid_at=valid_at, known_at=known_at, states=states,
                                 include_invalidated=include_invalidated,
-                                memory_types=memory_types,
+                                memory_types=memory_types, filters=filters,
+                                filepath_prefix=filepath_prefix,
                                 include_episodes=include_episodes)
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
@@ -1303,13 +1347,16 @@ class ScopedRemoteMemvara:
                query_rewrite: bool = True, synthesize: bool = False,
                memory_types: Sequence[MemoryType | str] | None = None,
                include_episodes: bool = False, budget: int | None = None,
-               valid_at: datetime | None = None) -> str:
+               valid_at: datetime | None = None,
+               filters: Mapping[str, FilterValue] | None = None,
+               filepath_prefix: str | None = None) -> str:
         return self._mem.recall(query, k=k, min_score=min_score, anchored=anchored,
                                 ranked=ranked,
                                 query_rewrite=query_rewrite, synthesize=synthesize,
                                 memory_types=memory_types,
                                 include_episodes=include_episodes, budget=budget,
-                                valid_at=valid_at)
+                                valid_at=valid_at, filters=filters,
+                                filepath_prefix=filepath_prefix)
 
     def get(self, claim_id: str) -> Claim | None:
         return self._mem.get(claim_id)

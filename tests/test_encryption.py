@@ -40,6 +40,7 @@ import pytest
 import memvara.store.encryption as enc
 from memvara import HashingEmbedder, Memvara, NullLLM
 from memvara.cli import main as cli_main
+from memvara.retrieve import EpisodeResult
 from memvara.server.config import ConfigError, ServerConfig, build_memvara
 from memvara.server.mcp import MemvaraMCPServer, _storage_fact
 from memvara.store import SQLiteStore
@@ -394,6 +395,35 @@ def test_memvara_end_to_end_with_encryption(tmp_path, keyed):
     with Memvara(path, embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="u") as mem:
         assert mem.store.encrypted
         assert SECRET in mem.search(SECRET, k=1)[0].claim.object
+
+
+@needs_extra
+@pytest.mark.parametrize("json_functions", [True, False])
+def test_a_filtered_search_runs_against_an_encrypted_store(tmp_path, keyed,
+                                                           json_functions):
+    """Metadata and file-path filters run inside SQL, through SQLite's JSON functions or,
+    where SQLite has none, through `mv_meta_match`, a function registered on each
+    connection. An encrypted store's connections, the writer's and each reading thread's,
+    come from SQLCipher, and a function missing from one of them would fail every
+    filtered read with "no such function"."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="u",
+                 encryption=True) as mem:
+        mem.remember("user", "prefers", "tabs", team="web")
+        mem.remember("user", "prefers", "spaces", team="infra")
+        mem.add_document("The refund window is thirty days.", filepath="policies/r.md")
+        mem.add_document("The refund window is ninety days.", filepath="drafts/r.md")
+    with Memvara(path, embedder=HashingEmbedder(dim=64), llm=NullLLM(),
+                 user="u") as mem:
+        assert mem.store.encrypted
+        mem.store._json_functions = json_functions
+        assert mem.store._reader() is not None
+        found = mem.search("prefers", filters={"team": "web"})
+        assert [r.claim.object for r in found] == ["tabs"]
+        turns = mem.search("refund window", include_episodes=True,
+                           filepath_prefix="policies/")
+        texts = [r.episode.content for r in turns if isinstance(r, EpisodeResult)]
+        assert texts and all("thirty" in t for t in texts)
 
 
 @needs_extra

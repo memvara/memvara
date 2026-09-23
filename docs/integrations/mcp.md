@@ -84,6 +84,11 @@ hides the four document tools, and `MEMVARA_FEATURE_END_REASON=0` removes the `r
 and `until_reason` arguments from every tool that has them.
 `MEMVARA_FEATURE_RETRIEVAL_CHUNKS=0` makes a local server store each document as one
 chunk instead of passages of about 1,000 characters.
+`MEMVARA_FEATURE_METADATA_FILTERS=0` makes `memory_recall` and `memory_search` refuse a
+call that passes `filters` or `filepath_prefix`, with a message naming the switch; the
+two arguments stay listed, with a description saying they are refused. A hosted
+deployment does not accept the two arguments yet, so in cloud mode a filtered call fails
+with the deployment's refusal rather than being answered unfiltered.
 `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` (off by default) makes the extraction model read a
 turn over 6,000 characters in pieces, one call per piece. `MEMVARA_FEATURE_ENCRYPTION=0`
 creates a new store unencrypted. A feature marked (off by default)
@@ -108,8 +113,8 @@ measurements and the case for each.
 
 | Tool | What it does |
 |---|---|
-| `memory_recall` | Look up what is already known about this user, rendered to read before answering |
-| `memory_search` | Search and get back claim ids, scores and record types — and the tool for time travel on either clock |
+| `memory_recall` | Look up what is already known about this user, rendered to read before answering. `filters` and `filepath_prefix` narrow it to matching metadata or to documents under a path |
+| `memory_search` | Search and get back claim ids, scores and record types — and the tool for time travel on either clock. Takes the same two filters |
 | `memory_neighborhood` | What is connected to one entity, walked through stored facts rather than searched for |
 | `memory_paths` | How two things are connected, if anything stored connects them |
 | `memory_ask` | Answer about a *past* instant, and say whether the record has changed since |

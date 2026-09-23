@@ -23,6 +23,9 @@ JSON, under a header that names the text as data rather than instruction.
 - Scoring: `memvara/retrieve/scoring.py` — `final_score()`, `relevance()`,
   `lexical_relevance()`, `vector_relevance()`, `recency_factor()`, `quality_boost()`,
   `normalized_score()`.
+- Filters: `memvara/filters.py` — `search_filter()`, `SearchFilter` and `meta_matches()`,
+  the SQL function `SQLiteStore` evaluates metadata filters with. Tests:
+  `tests/test_metadata_filters.py`.
 - Query handling: `memvara/retrieve/analyze.py` — `analyze()`, `tokenize()`;
   `memvara/retrieve/intent.py` — `classify()` and `weights()`, which shift the leg weights
   by what the query is asking for.
@@ -117,7 +120,9 @@ JSON, under a header that names the text as data rather than instruction.
   `docs/INTERNALS.md`, which carries the measurements). Scope and state filtering happen
   in the store, not in a comprehension afterwards, or the top of the list is silently wrong.
   `HybridRetriever` filters `memory_types` after fusion on purpose and pays for it with a
-  bounded retry when the pool came back full.
+  bounded retry when the pool came back full. The caller's metadata and file-path filter
+  (`filters`, `filepath_prefix`, checked in `memvara/filters.py`) is a store parameter,
+  `where`, on every capped store method, and the graph leg does not run when it is set.
 - **A document's passages are episodes.** `add_document()` stores each chunk as a
   `role="system"` episode with `meta["document_id"]`, so the episode legs find passages
   from documents with no index of their own, and only when `include_episodes=True` is

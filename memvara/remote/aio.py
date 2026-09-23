@@ -27,6 +27,7 @@ from typing import Any, Collection, Literal, Mapping, Sequence, overload
 
 from ..confirm import ConfirmationRefused
 from ..core import _check_k
+from ..filters import FilterValue
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import Path, Retrieved
 from ..types import (
@@ -36,7 +37,8 @@ from ..types import (
     one_source, refuse_self_link,
 )
 from . import hydrate
-from .api import (PROJECT_HEADER, _as_local_refusal, _document_body, _document_path, _hit,
+from .api import (PROJECT_HEADER, _as_local_refusal, _document_body,
+                  _document_path, _filter_fields, _hit,
                   _iso, _refuse_project_meta, _sent, _states, _type, _types)
 from .client import DEFAULT_TIMEOUT, AsyncHttpClient
 from .creds import resolve
@@ -57,8 +59,12 @@ class AsyncRemoteMemvara:
                  agent: str | None = None, session: str | None = None,
                  project: str | None = None,
                  timeout: float = DEFAULT_TIMEOUT,
-                 redactor: Redactor | None = None) -> None:
+                 redactor: Redactor | None = None,
+                 metadata_filters: bool = True) -> None:
         key, url = resolve(api_key, base_url)
+        #: The `metadata_filters` switch, as on `Memvara`: off, a read that passes
+        #: `filters` or `filepath_prefix` is refused before anything is sent.
+        self.metadata_filters = metadata_filters
         self._http = AsyncHttpClient(key, url, timeout=timeout)
         #: See `RemoteMemvara.default_scope`. The tenant is held, never sent; the project
         #: is sent as the `Memvara-Project` header.
@@ -201,6 +207,8 @@ class AsyncRemoteMemvara:
                      states: Collection[str] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType | str] | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      include_episodes: Literal[False] = ...) -> list[Result]: ...
 
     @overload
@@ -212,6 +220,8 @@ class AsyncRemoteMemvara:
                      states: Collection[str] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType | str] | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
@@ -223,6 +233,8 @@ class AsyncRemoteMemvara:
                      states: Collection[str] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType | str] | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      include_episodes: bool) -> list[Retrieved]: ...
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
@@ -233,6 +245,8 @@ class AsyncRemoteMemvara:
                      states: Collection[str] | None = None,
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType | str] | None = None,
+                     filters: Mapping[str, FilterValue] | None = None,
+                     filepath_prefix: str | None = None,
                      include_episodes: bool = False) -> list[Any]:
         body = await self._read(
             "/v1/search",
@@ -243,6 +257,7 @@ class AsyncRemoteMemvara:
                         "known_at": _iso(known_at), "states": _states(states),
                         "include_invalidated": include_invalidated,
                         "memory_types": _types(memory_types),
+                        **_filter_fields(filters, filepath_prefix, self.metadata_filters),
                         "include_episodes": include_episodes}))
         return SearchResults([_hit(h) for h in body["results"]],
                              selection=hydrate.selection(body.get("selection")),
@@ -254,7 +269,9 @@ class AsyncRemoteMemvara:
                      memory_types: Sequence[MemoryType | str] | None = None,
                      include_episodes: bool = False,
                      budget: int | None = None,
-                     valid_at: datetime | None = None) -> str:
+                     valid_at: datetime | None = None,
+                     filters: Mapping[str, FilterValue] | None = None,
+                     filepath_prefix: str | None = None) -> str:
         if budget is not None:
             raise ValueError(
                 "recall(budget=...) is not available against a hosted deployment: "
@@ -272,6 +289,7 @@ class AsyncRemoteMemvara:
                         "query_rewrite": None if query_rewrite else False,
                         "synthesize": synthesize or None,
                         "memory_types": _types(memory_types),
+                        **_filter_fields(filters, filepath_prefix, self.metadata_filters),
                         "include_episodes": include_episodes}))
         return str(body["text"])
 
@@ -701,6 +719,8 @@ class AsyncScopedRemoteMemvara:
                      states: Collection[str] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType | str] | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      include_episodes: Literal[False] = ...) -> list[Result]: ...
 
     @overload
@@ -712,6 +732,8 @@ class AsyncScopedRemoteMemvara:
                      states: Collection[str] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType | str] | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
@@ -723,6 +745,8 @@ class AsyncScopedRemoteMemvara:
                      states: Collection[str] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType | str] | None = ...,
+                     filters: Mapping[str, FilterValue] | None = ...,
+                     filepath_prefix: str | None = ...,
                      include_episodes: bool) -> list[Retrieved]: ...
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
@@ -733,6 +757,8 @@ class AsyncScopedRemoteMemvara:
                      states: Collection[str] | None = None,
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType | str] | None = None,
+                     filters: Mapping[str, FilterValue] | None = None,
+                     filepath_prefix: str | None = None,
                      include_episodes: bool = False) -> list[Any]:
         return await self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
                                       anchored=anchored, ranked=ranked,
@@ -740,7 +766,8 @@ class AsyncScopedRemoteMemvara:
                                       valid_at=valid_at, known_at=known_at,
                                       states=states,
                                       include_invalidated=include_invalidated,
-                                      memory_types=memory_types,
+                                      memory_types=memory_types, filters=filters,
+                                      filepath_prefix=filepath_prefix,
                                       include_episodes=include_episodes)
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
@@ -749,13 +776,16 @@ class AsyncScopedRemoteMemvara:
                      memory_types: Sequence[MemoryType | str] | None = None,
                      include_episodes: bool = False,
                      budget: int | None = None,
-                     valid_at: datetime | None = None) -> str:
+                     valid_at: datetime | None = None,
+                     filters: Mapping[str, FilterValue] | None = None,
+                     filepath_prefix: str | None = None) -> str:
         return await self._mem.recall(query, k=k, min_score=min_score, anchored=anchored,
                                       ranked=ranked,
                                       query_rewrite=query_rewrite, synthesize=synthesize,
                                       memory_types=memory_types,
                                       include_episodes=include_episodes,
-                                      budget=budget, valid_at=valid_at)
+                                      budget=budget, valid_at=valid_at,
+                                      filters=filters, filepath_prefix=filepath_prefix)
 
     async def get(self, claim_id: str) -> Claim | None:
         return await self._mem.get(claim_id)

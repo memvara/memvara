@@ -185,6 +185,17 @@ write that fact as well. Give the document a stable name of your own, such as it
 path, so a newer version sent later replaces the old one instead of sitting
 beside it.
 
+Label documents for the questions you expect. A file path and a label such as the
+team or product it belongs to let a later question be answered from that part of
+memory alone, instead of from everything else that happens to share its words.
+Store the label in `metadata` when you add the document, then read with the same
+name: `memory_recall` and `memory_search` both take `filters`, as in
+`filters: {"team": "support"}`, and `filepath_prefix`, as in
+`filepath_prefix: "policies/"`. A list of values, `{"team": ["support", "billing"]}`,
+reads from either label. A label narrows the answer and does not rank it, so read
+without one when the answer could be anywhere, and when a narrowed read comes back
+empty, say that nothing under that label matched rather than that nothing is stored.
+
 Deleting a document is different from every other removal here. Its text is
 erased and cannot be brought back. The notes that came only from it are retired,
 not erased, so the record of what was believed stays. Before you delete, say which

@@ -329,6 +329,46 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 - **Two feature switches, `ingest_urls` and `ingest_media`.** `MEMVARA_FEATURE_INGEST_URLS=0`
   and `MEMVARA_FEATURE_INGEST_MEDIA=0` are now accepted by the MCP server and the plugin
   hooks. `extract` takes them as `allow_urls` and `allow_media`.
+- **Metadata filters and a file-path filter on `search()` and `recall()`.** Both methods
+  take `filters`, a mapping from a top-level key of a memory's `meta` to the value it
+  must equal, where a list means any one of those values, and `filepath_prefix`, which
+  keeps only memories that came from a document whose `filepath` starts with that text.
+  They are on `Memvara`, `ScopedMemvara`, `AsyncMemvara`, `AsyncScopedMemvara`,
+  `RemoteMemvara` and the hosted clients' scoped and async views.
+  - **The filter runs in the store, before `k` is applied**, so a filtered search with
+    `k=5` returns five matches whenever five exist, however many other rows would have
+    ranked above them. `candidate_ids`, `lexical_search`, `vector_search`,
+    `episode_candidate_ids`, `lexical_search_episodes`, `vector_search_episodes` and
+    `episodes_near` on the `Store` protocol take a new keyword argument, `where`, a
+    `memvara.filters.SearchFilter`. The graph leg does not run on a filtered search,
+    because `Store.adjacent` takes no filter.
+  - **What matches.** Every key must match. A string matches only the same string, case
+    included; a number matches an equal number; `True` and `False` match only a boolean,
+    never `1` or `0`; a stored list or object never matches. Each key is tested on its
+    own, against the row's own `meta` and the `meta` of every document it came from, so
+    different keys may be held by different sources: a document's chunks are its own
+    text, and a claim came from a document when one of its sources is a chunk of it.
+    SQLite tests a key with `json_type` and `json_extract`, or with a registered Python
+    function on a build without its JSON functions; `bench/filters.py` measures both.
+    `filepath_prefix` compares characters exactly, so `%` and `_` are ordinary characters
+    and case matters; a row that came from no document never matches it.
+  - **Refusals.** A key outside `[A-Za-z0-9_.-]{1,64}`, a value that is not a string,
+    number or boolean or a non-empty list of them, or a `filepath_prefix` that is not a
+    string raises `memvara.filters.FilterError`, a `ValueError`, before anything is
+    read. Values are bound as parameters and
+    never placed in SQL text.
+  - **MCP.** `memory_search` and `memory_recall` take `filters` and `filepath_prefix`,
+    checked by the tool schema. `memvara.server.validate` now understands a list of types,
+    `pattern` and `propertyNames`.
+  - **A switch, `metadata_filters`, on by default.** `MEMVARA_FEATURE_METADATA_FILTERS=0`,
+    `Memvara(metadata_filters=False)` or `RemoteMemvara(metadata_filters=False)` refuses a
+    call that passes either argument, with a message naming the switch; it is never
+    answered unfiltered. An empty `filters` mapping is not refused. The plugin hooks
+    accept the name.
+  - **The hosted deployment does not accept the two fields yet.** `RemoteMemvara` sends
+    them only when set, and a deployment that does not know them answers 422, which the
+    client raises as `InvalidRequest`. Server-side support is tracked as stream P2-G of
+    the phase 2 parity design.
 - **A long turn can be extracted in pieces, switched off by default.**
   `WritePipeline(extraction_chunks=True)`, `Memvara(write_extraction_chunks=True)`, or
   `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` on the MCP server. A turn over 6,000 characters
