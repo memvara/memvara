@@ -8,9 +8,11 @@ response made of typed content blocks.
 
 from __future__ import annotations
 
+import base64
 import os
 from typing import Any, Sequence
 
+from ..ingest.errors import MediaUnsupported
 from ..types import Episode
 from . import _shape
 from .base import (
@@ -22,10 +24,19 @@ from .base import (
     PREDICATE_SYSTEM,
     COMPOSE_SCHEMA,
     COMPOSE_SYSTEM,
+    DESCRIBE_IMAGE_MAX_TOKENS,
+    DESCRIBE_IMAGE_PROMPT,
+    DESCRIBE_IMAGE_SYSTEM,
     RESOLVE_SCHEMA,
     RESOLVE_SYSTEM,
     Usage,
 )
+
+#: The image types the Messages API accepts.
+IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
+
+#: The Messages API refuses an image larger than this.
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 
 def _stop_reason(response: Any) -> Any:
@@ -158,6 +169,40 @@ class AnthropicLLM:
         )
         _shape.record_usage(response, usage, "input_tokens", "output_tokens")
         return _first_text(response)
+
+    # -- Multimodal protocol ------------------------------------------------
+
+    def describe_image(self, data: bytes, mime: str) -> str:
+        """A text description of an image, through one Messages request.
+
+        Refuses, without a request, an image type the API does not accept and an image
+        over its 5 MB limit, so the caller gets the reason rather than a 400.
+        """
+        if mime not in IMAGE_TYPES:
+            raise MediaUnsupported(
+                f"AnthropicLLM reads JPEG, PNG, GIF and WebP images, not {mime}")
+        if len(data) > MAX_IMAGE_BYTES:
+            raise MediaUnsupported(
+                f"the image is {len(data)} bytes, and the Anthropic API accepts at most "
+                f"{MAX_IMAGE_BYTES} bytes per image")
+        response = self._client.messages.create(
+            model=self.model,
+            max_tokens=DESCRIBE_IMAGE_MAX_TOKENS,
+            system=DESCRIBE_IMAGE_SYSTEM,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": mime,
+                    "data": base64.b64encode(data).decode("ascii")}},
+                {"type": "text", "text": DESCRIBE_IMAGE_PROMPT},
+            ]}],
+        )
+        return _first_text(response).strip()
+
+    def transcribe(self, data: bytes, mime: str) -> str:
+        """Always refuses: the Anthropic API does not accept audio or video input."""
+        raise MediaUnsupported(
+            f"AnthropicLLM cannot transcribe {mime}, because the Anthropic API does not "
+            "accept audio or video; configure OpenAILLM to transcribe it")
 
     # -- LLM protocol -------------------------------------------------------
 

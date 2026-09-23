@@ -124,7 +124,7 @@ EXTRAS = {name: value for name, value in _toml_table("project.optional-dependenc
 # because the person reading that traceback has no other way to learn that the fix is one
 # `pip install` away. `ModuleNotFoundError: No module named 'x'` is not that error.
 ADAPTER_EXTRAS = {"anthropic", "openai", "local-embed", "rerank",
-                  "langchain", "llama-index", "crewai", "langgraph", "cloud"}
+                  "langchain", "llama-index", "crewai", "langgraph", "cloud", "ingest"}
 # A **reserved** extra buys nothing yet and says so. `http` names the REST layer's
 # dependencies before the REST layer exists. That is defensible — it fixes the dependency
 # set publicly before anything depends on it — and it is one letter away from the
@@ -158,6 +158,12 @@ def _construct_cross_encoder_reranker() -> None:
     from memvara.rerank.cross import CrossEncoderReranker
 
     CrossEncoderReranker()
+
+
+def _read_a_pdf() -> None:
+    from memvara.ingest import extract
+
+    extract(b"%PDF-1.4", mime="application/pdf")
 
 
 def _construct_remote_store() -> None:
@@ -212,6 +218,7 @@ ADAPTERS = {
     # mapping exists for.
     "langgraph": ("langgraph", _resolve_langgraph_store),
     "cloud": ("httpx", _construct_remote_store),
+    "ingest": ("pypdf", _read_a_pdf),
 }
 
 #: The subset of `ADAPTERS` whose SDK name never appears in an `import` statement,
@@ -545,7 +552,7 @@ def test_every_module_imports_cleanly_in_a_process_that_has_only_numpy() -> None
         "    except ImportError as exc:\n"
         "        bad.append((m.name, str(exc)))\n"
         "leaked = sorted({'anthropic', 'openai', 'sentence_transformers', 'fastapi',\n"
-        "                 'uvicorn', 'pydantic'} & set(sys.modules))\n"
+        "                 'uvicorn', 'pydantic', 'pypdf'} & set(sys.modules))\n"
         "print(bad or '', leaked or '', sep='|')\n"
     )
     done = subprocess.run([sys.executable, "-c", probe], cwd=REPO, check=False,
@@ -603,6 +610,24 @@ def test_an_adapter_whose_sdk_is_absent_raises_an_error_naming_the_extra(
     with pytest.raises(ImportError) as caught:
         construct()
     assert f"memvara[{extra}]" in str(caught.value)
+
+
+def test_a_pdf_without_the_ingest_extra_is_refused_naming_the_extra(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The `ingest` extra's version of the test above, with a different exception.
+
+    A missing `pypdf` is not an `ImportError` here. `extract` is called by a server with a
+    user's upload, and it is the upload that cannot be read, so it is refused with
+    `media_unsupported` like any other content nothing configured can read. The reason
+    still names the extra, which is the part the test above exists for.
+    """
+    from memvara.ingest import MediaUnsupported
+
+    module, read = ADAPTERS["ingest"]
+    monkeypatch.setitem(sys.modules, module, None)
+    with pytest.raises(MediaUnsupported) as caught:
+        read()
+    assert "memvara[ingest]" in str(caught.value)
 
 
 def test_the_version_is_the_same_string_in_both_places_that_state_it() -> None:
