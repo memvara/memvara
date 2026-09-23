@@ -23,10 +23,12 @@ includes every built-in person fact such as `prefers` or `lives_in`, is written 
 project, exactly as before, and is recalled everywhere.
 
 Memories written before this release have no project, so they stay visible from every
-repository. One consequence is worth knowing. A new value for a project-relative predicate
-that holds one value at a time now occupies the repository's own slot, so it does not end
-the older value that was written without a project. Both are recalled inside that
-repository until the older one is closed with `memory_end` or `memory_forget`.
+repository. A new value for a project-relative predicate that holds one value at a time is
+filed in the repository's own slot and does not end the older value written without a
+project, because that value is still the answer everywhere else. Inside the repository,
+reads return the repository's value and leave the older one out; in every other repository
+the older value still answers. If the repository's value is later ended, the older one
+answers there again.
 
 The hosted clients are unaffected unless a project is given. `memvara-mcp` in cloud mode
 derives the project the same way and sends it as the `Memvara-Project` header; a deployment
@@ -43,6 +45,12 @@ value that is not in that form stops the server at startup.
 
 **Any `MEMVARA_FEATURE_*` variable already in your environment.** The server now reads
 these and refuses to start on a name it does not know or a value that is not a boolean.
+
+**A call that passes `project=` as metadata.** `remember(..., project="x")` used to store
+`project` as an annotation on a claim filed without a project. It now raises `TypeError`,
+on the local engine and the hosted clients alike, and the fix is to bind the project with
+`Memvara(project=...)` or `mem.scope(project=...)`. Search your code for `project=` on a
+`remember(` or `supersede(` call.
 
 ---
 

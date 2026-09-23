@@ -31,7 +31,8 @@ from ..types import (
     SearchResults, WriteReceipt, closure,
 )
 from . import hydrate
-from .api import PROJECT_HEADER, _hit, _iso, _sent, _states, _type, _types
+from .api import (PROJECT_HEADER, _hit, _iso, _refuse_project_meta, _sent, _states,
+                  _type, _types)
 from .client import DEFAULT_TIMEOUT, AsyncHttpClient
 from .creds import resolve
 from .errors import NotFound
@@ -389,6 +390,7 @@ class AsyncRemoteMemvara:
                        sources: Sequence[Episode | Mapping[str, Any] | str] | None = None,
                        text: str | None = None, extractor: str = "api",
                        **meta: Any) -> WriteReceipt:
+        _refuse_project_meta(meta, "remember()")
         ids, turns = self._cite(sources)
         body = {
             "subject": self._redact(subject, CLAIM_SUBJECT),
@@ -414,6 +416,7 @@ class AsyncRemoteMemvara:
                         sources: Sequence[Episode | Mapping[str, Any] | str] | None = None,
                         text: str | None = None, extractor: str = "api",
                         **meta: Any) -> WriteReceipt:
+        _refuse_project_meta(meta, "supersede()")
         ids, turns = self._cite(sources)
         body = {
             "subject": self._redact(subject, CLAIM_SUBJECT),

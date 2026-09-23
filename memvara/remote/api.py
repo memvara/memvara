@@ -40,6 +40,7 @@ from ..types import (
     Answer, Claim, Delta, Episode, MemoryType, Profile, Provenance, Result, Scope,
     SearchResults, WriteReceipt, closure,
 )
+from ..types import PROJECT_META, PROJECT_META_REFUSAL
 from . import hydrate
 from .client import DEFAULT_TIMEOUT, HttpClient
 from .creds import resolve
@@ -50,6 +51,16 @@ from .errors import NotFound
 #: as a narrowing inside the tenant the credential binds, and refuses a value that is not
 #: a canonical project name (`memvara.project.check_project`) with a 400.
 PROJECT_HEADER = "Memvara-Project"
+
+
+def _refuse_project_meta(meta: Mapping[str, Any], method: str) -> None:
+    """Refuse `project=` arriving as metadata, for the reason `Memvara.remember` gives.
+
+    Here the project also travels as a header, so a `project` key in the body would be a
+    second, contradicting statement of it that the deployment would store as metadata.
+    """
+    if PROJECT_META in meta:
+        raise TypeError(PROJECT_META_REFUSAL.format(method=method))
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -684,6 +695,7 @@ class RemoteMemvara:
         already knows — contradiction handling is an exact match on the slot, so a
         synonym opens a second one instead of correcting the first.
         """
+        _refuse_project_meta(meta, "remember()")
         ids, turns = self._cite(sources)
         body = {
             "subject": self._redact(subject, CLAIM_SUBJECT),
@@ -727,6 +739,7 @@ class RemoteMemvara:
         `Claim` here to take it apart again would put this layer in the business of
         inventing ids and timestamps the server is about to overwrite.
         """
+        _refuse_project_meta(meta, "supersede()")
         ids, turns = self._cite(sources)
         body = {
             "subject": self._redact(subject, CLAIM_SUBJECT),

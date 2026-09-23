@@ -234,9 +234,17 @@ def _run_git(args: Sequence[str], cwd: str) -> str | None:
     repository, there is no `origin` remote, or git took longer than `_GIT_TIMEOUT`.
     """
     try:
-        done = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+        done = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
                               timeout=_GIT_TIMEOUT, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
-    out = done.stdout.strip()
-    return out if done.returncode == 0 and out else None
+    if done.returncode != 0:
+        return None
+    # Decoded here rather than with `text=True`, because git stores a remote as bytes and
+    # one that is not UTF-8 would raise `UnicodeDecodeError` out of server startup. Output
+    # that cannot be decoded is read as no answer, which the plugin hooks do as well.
+    try:
+        out = done.stdout.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return None
+    return out or None

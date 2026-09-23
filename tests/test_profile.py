@@ -178,7 +178,11 @@ def test_a_pack_that_cannot_be_read_costs_its_bucket_and_says_so(monkeypatch):
     assert profile.warnings == [f"the {p!r} bucket is unavailable: needs Python 3.11"
                                 for p in core_module.PROFILE_PACKS]
     custom = mem.profile(buckets={"stack": ["depends_on"]})
+    # The pack failure is reported first, so the warning after it is not read as a
+    # verdict on the predicate: nothing could declare it because no pack could be read.
     assert custom.warnings == [
+        *(f"the {p!r} pack could not be read, so its predicates count as undeclared: "
+          "needs Python 3.11" for p in core_module.PROFILE_PACKS),
         "bucket 'stack' names 'depends_on', which nothing declares or uses, so it "
         "was ignored."]
 
@@ -204,13 +208,23 @@ def test_a_profile_and_standing_for_another_project_read_that_project():
     app = mem.scope(project="github.com/acme/app")
     app.remember("api", "depends_on", "postgres")
     app.remember("user", "prefers", "pytest", memory_type=MemoryType.PROCEDURAL)
-    assert [r.text for r in mem.profile(project="github.com/acme/app")
-            .buckets["engineering"]] == ["api depends on postgres"]
+    assert [r.text for r in app.profile().buckets["engineering"]] == \
+        ["api depends on postgres"]
     assert mem.profile().buckets["engineering"] == []
     # `prefers` is declared global, so the rule is written without a project and is
     # seen from the unscoped instance as well as from the project.
-    assert [c.object for c in mem.standing(project="github.com/acme/app")] == ["pytest"]
+    assert [c.object for c in app.standing()] == ["pytest"]
     assert [c.object for c in mem.standing()] == ["pytest"]
+
+
+def test_the_project_is_bound_once_and_never_chosen_per_call():
+    """Every other read binds the project with `scope(project=...)`. A per-call argument
+    on two of them would be a second, inconsistent way to choose it."""
+    mem = make()
+    with pytest.raises(TypeError):
+        mem.profile(project="github.com/acme/app")
+    with pytest.raises(TypeError):
+        mem.standing(project="github.com/acme/app")
 
 
 def test_the_scoped_views_forward_standing_and_profile():
@@ -320,9 +334,9 @@ def test_a_read_only_server_still_explains_a_hidden_write_tool_as_read_only():
 
 
 def test_the_server_refuses_a_feature_it_does_not_know():
-    with pytest.raises(ValueError, match="'profle', which is not a feature"):
+    with pytest.raises(ValueError, match="'profle' .* is not a feature"):
         server(features_off={"profle"})
-    with pytest.raises(ValueError, match="which are not features"):
+    with pytest.raises(ValueError, match="are not features"):
         server(features_off={"a", "b"})
 
 
@@ -400,3 +414,41 @@ def test_a_reply_missing_a_section_raises_rather_than_reading_as_empty():
     recorder(mem, {k: v for k, v in _REPLY.items() if k != "recent"})
     with pytest.raises(KeyError):
         mem.profile()
+
+
+def test_the_async_profile_reads_concurrently_and_answers_like_the_sync_one(monkeypatch):
+    """The three reads a profile needs are independent, so the async facade dispatches
+    them separately rather than as one opaque call on one thread."""
+    mem = make()
+    rule(mem, "pytest")
+    mem.remember("api", "depends_on", "postgres")
+    dispatched = []
+    real = asyncio.to_thread
+
+    async def counting(fn, *args, **kwargs):
+        dispatched.append(getattr(fn, "__name__", fn))
+        return await real(fn, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", counting)
+    got = asyncio.run(AsyncMemvara(mem).profile("postgres", since=T0,
+                                               buckets={"stack": ["depends_on"]}))
+    assert len(dispatched) == 3
+    assert got == mem.profile("postgres", since=T0, buckets={"stack": ["depends_on"]})
+
+
+def test_a_profile_reads_the_scope_once_and_asks_the_store_once_more_for_recent(
+        monkeypatch):
+    """`recent` is the live set minus what was believed at `since`, so it needs one scan
+    at that instant on top of the live read, not the two scans `since()` makes."""
+    mem = make()
+    rule(mem, "pytest")
+    calls = []
+    real = mem.store.candidate_ids
+
+    def counting(*args, **kwargs):
+        calls.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mem.store, "candidate_ids", counting)
+    mem.profile(since=T0, buckets={})
+    assert len(calls) == 2

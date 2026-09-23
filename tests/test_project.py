@@ -105,6 +105,21 @@ def test_the_library_and_the_hooks_agree_on_every_shared_row():
         assert got == example["project"]
 
 
+def test_the_library_and_the_hooks_agree_on_which_names_the_server_accepts():
+    """The hooks fall back to the path form when a normalised remote fails this check,
+    so the two copies must agree on it row for row, or one of them sends a header the
+    server refuses."""
+    rows = json.loads(VECTORS.read_text(encoding="utf-8"))["check_project"]["rows"]
+    assert rows
+    for row in rows:
+        try:
+            check_project(row["value"])
+            valid = True
+        except ValueError:
+            valid = False
+        assert valid is row["valid"], row["rule"]
+
+
 def test_the_shared_vectors_are_the_hooks_own_file_when_both_are_here():
     """The fixture is a copy so that this suite does not depend on the hooks tree. Once
     both are in one checkout, the copy has to be the same bytes as the original."""
@@ -271,7 +286,7 @@ def test_the_runner_gives_up_on_a_git_that_hangs(monkeypatch, tmp_path):
 def test_the_runner_reports_a_failed_git_as_no_answer(monkeypatch, tmp_path):
     monkeypatch.setattr(
         project_module.subprocess, "run",
-        lambda *a, **k: subprocess.CompletedProcess(a, 128, stdout="noise\n", stderr=""))
+        lambda *a, **k: subprocess.CompletedProcess(a, 128, stdout=b"noise\n", stderr=b""))
     assert project_module._run_git(["--version"], str(tmp_path)) is None
 
 
@@ -329,6 +344,7 @@ class Derive:
 
 @pytest.fixture()
 def derive(monkeypatch):
+    # Replaces the stub `tests/conftest.py` installs, with one that records its calls.
     fake = Derive("github.com/acme/app")
     monkeypatch.setattr(config_module, "canonical_project", fake)
     return fake
@@ -337,34 +353,53 @@ def derive(monkeypatch):
 LOCAL = {"MEMVARA_DB": ":memory:"}
 
 
+@pytest.mark.derives_project
 def test_every_feature_is_on_unless_switched_off(derive):
-    config = ServerConfig.from_env(LOCAL)
-    assert config.features_off == frozenset()
-    assert all(config.feature(name) for name in FEATURES)
+    assert ServerConfig.from_env(LOCAL).features_off == frozenset()
 
 
-@pytest.mark.parametrize("value, on", [("0", False), ("off", False), ("1", True),
-                                       ("", True), ("  ", True)])
-def test_a_feature_variable_switches_its_feature(derive, value, on):
+@pytest.mark.parametrize("value, off", [("0", True), ("off", True), ("1", False),
+                                        ("", False), ("  ", False)])
+@pytest.mark.derives_project
+def test_a_feature_variable_switches_its_feature(derive, value, off):
     config = ServerConfig.from_env({**LOCAL, "MEMVARA_FEATURE_PROFILE": value})
-    assert config.feature("profile") is on
-    assert config.feature("links") is True
+    assert config.features_off == (frozenset({"profile"}) if off else frozenset())
 
 
-def test_a_misspelt_feature_is_refused_rather_than_ignored(derive):
+@pytest.mark.derives_project
+def test_a_misspelt_feature_is_refused_with_the_name_it_probably_meant(derive):
     """Ignoring `MEMVARA_FEATURE_PROFLE=0` would leave the feature on while the operator
     believes it is off, which is the failure a refusal at startup prevents."""
-    with pytest.raises(ConfigError, match="MEMVARA_FEATURE_PROFLE does not name a feature"):
+    with pytest.raises(ConfigError, match=r"MEMVARA_FEATURE_PROFLE does not name a "
+                                          r"feature: 'profle' \(did you mean 'profile'\?\)"):
         ServerConfig.from_env({**LOCAL, "MEMVARA_FEATURE_PROFLE": "0"})
     with pytest.raises(ConfigError, match="MEMVARA_FEATURE_LINKS='maybe' is not a boolean"):
         ServerConfig.from_env({**LOCAL, "MEMVARA_FEATURE_LINKS": "maybe"})
 
 
-def test_asking_about_an_unknown_feature_is_a_bug_in_the_caller():
-    with pytest.raises(ValueError, match="'profle' is not a feature"):
-        ServerConfig().feature("profle")
+def test_the_server_and_the_environment_refuse_an_unknown_feature_the_same_way():
+    """One check, so the two doors cannot come to disagree about what a feature is."""
+    with pytest.raises(ValueError, match=r"'profle' \(did you mean 'profile'\?\)"):
+        MemvaraMCPServer(Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM()),
+                         features_off={"profle"})
+    assert set(FEATURES) >= {"profile", "project_scope"}
 
 
+def test_without_opting_in_a_test_never_derives_a_project():
+    """`tests/conftest.py` switches the derivation off for every test that does not ask
+    for it, so no test depends on which checkout it happens to run in."""
+    assert ServerConfig.from_env(LOCAL).project is None
+
+
+@needs_git
+@pytest.mark.derives_project
+def test_an_opted_in_test_derives_the_project_from_a_real_repository(tmp_path):
+    _git("init", "-q", cwd=tmp_path)
+    _git("remote", "add", "origin", "git@github.com:Acme/App.git", cwd=tmp_path)
+    assert ServerConfig.from_env(LOCAL, cwd=str(tmp_path)).project == "github.com/acme/app"
+
+
+@pytest.mark.derives_project
 def test_the_project_is_derived_from_the_working_directory_by_default(derive, tmp_path):
     assert ServerConfig.from_env(LOCAL, cwd=str(tmp_path)).project == "github.com/acme/app"
     assert derive.asked == [str(tmp_path)]
@@ -372,11 +407,13 @@ def test_the_project_is_derived_from_the_working_directory_by_default(derive, tm
     assert derive.asked[-1] == os.getcwd()
 
 
+@pytest.mark.derives_project
 def test_outside_a_repository_there_is_no_project(monkeypatch):
     monkeypatch.setattr(config_module, "canonical_project", Derive(None))
     assert ServerConfig.from_env(LOCAL).project is None
 
 
+@pytest.mark.derives_project
 def test_switching_project_scope_off_stops_the_derivation_only(derive):
     """The switch turns off working the project out. An operator who also wrote a
     project name asked for that project, so it still applies."""
@@ -387,6 +424,7 @@ def test_switching_project_scope_off_stops_the_derivation_only(derive):
     assert named.project == "gitlab.com/team/svc"
 
 
+@pytest.mark.derives_project
 def test_an_explicit_project_wins_and_must_be_canonical(derive):
     config = ServerConfig.from_env({**LOCAL, "MEMVARA_PROJECT": " path:0123456789abcdef "})
     assert config.project == "path:0123456789abcdef" and derive.asked == []
@@ -395,6 +433,7 @@ def test_an_explicit_project_wins_and_must_be_canonical(derive):
         ServerConfig.from_env({**LOCAL, "MEMVARA_PROJECT": "my-app"})
 
 
+@pytest.mark.derives_project
 def test_a_local_server_opens_its_store_at_the_project(derive):
     memory = build_memvara(ServerConfig.from_env({**LOCAL, "MEMVARA_USER": "alice"}))
     try:
@@ -403,6 +442,7 @@ def test_a_local_server_opens_its_store_at_the_project(derive):
         memory.close()
 
 
+@pytest.mark.derives_project
 def test_a_cloud_server_sends_the_project_as_a_header(derive):
     """The hosted deployment reads the project from `Memvara-Project` and never from a
     tool argument, so the header is the only channel and it must be on every request."""
@@ -543,3 +583,63 @@ def test_the_async_facade_binds_a_project_the_same_way():
 
     in_app, unscoped, in_web = asyncio.run(run())
     assert len(in_app) == 1 and unscoped == [] and in_web == []
+
+
+
+# -- the project is never metadata ------------------------------------------------------
+
+def test_a_project_passed_to_remember_is_refused_rather_than_stored_as_metadata():
+    """`project` is bound once. Accepted through `**meta` it would be stored as an
+    annotation and the claim filed without a project, while the caller believed it had
+    been filed under one."""
+    mem = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM())
+    with pytest.raises(TypeError, match=r"scope\(project=\.\.\.\)"):
+        mem.remember("api", "depends_on", "postgres", project="github.com/acme/app")
+    assert mem.get_all() == []
+    remote = RemoteMemvara(api_key="k", base_url="https://example.test")
+    with pytest.raises(TypeError, match=r"scope\(project=\.\.\.\)"):
+        remote.remember("api", "depends_on", "postgres", project="github.com/acme/app")
+    with pytest.raises(TypeError, match=r"scope\(project=\.\.\.\)"):
+        remote.supersede("cl_1", "api", "depends_on", "mysql", project="x")
+    aremote = AsyncRemoteMemvara(api_key="k", base_url="https://example.test")
+    with pytest.raises(TypeError, match=r"scope\(project=\.\.\.\)"):
+        asyncio.run(aremote.remember("api", "depends_on", "pg", project="x"))
+    with pytest.raises(TypeError, match=r"scope\(project=\.\.\.\)"):
+        asyncio.run(aremote.supersede("cl_1", "api", "depends_on", "pg", project="x"))
+
+
+def test_project_is_one_of_the_keys_the_engine_owns():
+    from memvara.types import RESERVED_META
+    assert "project" in RESERVED_META
+
+
+# -- the boundary predicate ---------------------------------------------------------------
+
+def test_a_project_scope_contains_only_its_own_project():
+    """`contains` is the downward predicate `forget` and `history` use. It must not rely
+    on fact keys carrying the project to keep one repository out of another."""
+    from memvara.types import Scope
+    app = Scope("t", "alice", project="github.com/acme/app")
+    assert app.contains(Scope("t", "alice", project="github.com/acme/app", session="s"))
+    assert not app.contains(Scope("t", "alice", project="github.com/acme/web"))
+    assert not app.contains(Scope("t", "alice"))
+    assert Scope("t", "alice").contains(app), "an unset project is a wildcard"
+
+
+
+@needs_git
+def test_a_remote_that_is_not_utf8_falls_back_to_the_path_form(tmp_path):
+    """Git stores a remote as bytes. One that is not UTF-8 must not raise out of server
+    startup; it is treated as no usable remote, exactly as the hooks treat it."""
+    _git("init", "-q", cwd=tmp_path)
+    subprocess.run([b"git", b"config", b"remote.origin.url",
+                    b"https://example.com/\xff/repo.git"], cwd=tmp_path, check=True)
+    name = canonical_project(str(tmp_path))
+    assert name is not None and name.startswith("path:")
+
+
+def test_the_runner_reads_output_that_is_not_utf8_as_no_answer(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        project_module.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=b"\xff\xfe", stderr=b""))
+    assert project_module._run_git(["--version"], str(tmp_path)) is None

@@ -106,6 +106,7 @@ from .intent import Intent, classify, routed_role
 from .compose import names_derived
 from .intent import is_comparison, is_relational, observed_refs
 from .intent import weights as intent_weights
+from .shadow import shadowed
 from .scoring import (
     final_score,
     lexical_relevance,
@@ -1048,11 +1049,19 @@ class HybridRetriever:
             lexical_terms=lexical_terms,
         )
 
+        # A present-tense read bound to a project leaves out a user-wide value its own
+        # value shadows (`retrieve/shadow.py`). Applied after the walk, so a shadowed claim
+        # the graph leg reached is left out as surely as one the lookup legs found.
+        hidden = (shadowed(self.store, self.registry, claims.values(), scope)
+                  if valid_at is None and known_at is None else frozenset())
+
         results: list[Result] = []
         for claim_id, fusion in fused.items():
             claim = claims.get(claim_id)
             if claim is None:
                 continue  # raced with a delete; a missing row is not a ranking error
+            if claim_id in hidden:
+                continue
             if wanted is not None and claim.memory_type not in wanted:
                 continue
             if not self._believed_by(claim, known_at):

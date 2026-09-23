@@ -27,7 +27,7 @@ from .protocol import (
     serve_stdio,
     success,
 )
-from .config import FEATURES
+from .config import unknown_features
 from .memory_api import MemoryAPI
 from .tools import (TOOLS, Tool, ToolContext, ToolError, anchoring_by_default,
                     safe_detail)
@@ -156,12 +156,9 @@ class MemvaraMCPServer:
                  session: str | None = None, read_only: bool = False,
                  anchored: bool = False, project: str | None = None,
                  features_off: Collection[str] = ()) -> None:
-        unknown = sorted(set(features_off) - set(FEATURES))
-        if unknown:
-            raise ValueError(
-                f"features_off names {', '.join(map(repr, unknown))}, which "
-                f"{'is not a feature' if len(unknown) == 1 else 'are not features'}. "
-                f"Known features: {', '.join(FEATURES)}.")
+        problem = unknown_features(features_off)
+        if problem is not None:
+            raise ValueError(f"features_off: {problem}")
         self._memory = memory
         #: Features this server was told to leave off. A tool that belongs to one of them
         #: is not listed, for the reason a read-only server hides its write tools.

@@ -68,12 +68,18 @@ import inspect
 from datetime import datetime
 from typing import Any, Callable, Collection, Literal, Mapping, Sequence, overload
 
-from .core import Memvara, Messages, ScopedMemvara, _approx_tokens
+from .core import (Memvara, Messages, ScopedMemvara, _approx_tokens, _check_k,
+                   _profile_since)
 from .embed import Embedder
 from .retrieve import Path, Retrieved
 from .write.reconcile import MergeReport
 from .types import (Answer, Claim, Delta, Episode, ErasureProof, MemoryType,
                     Profile, Provenance, RecallResult, Result, Scope, WriteReceipt)
+
+
+async def _nothing() -> list[Result]:
+    """The search a profile with no query does not run, as an awaitable."""
+    return []
 
 
 class AsyncMemvara:
@@ -346,21 +352,36 @@ class AsyncMemvara:
             session=session)
 
     async def standing(self, *, k: int | None = None, tenant=None, user=None, agent=None,
-                       session=None, project=None) -> list[Claim]:
+                       session=None) -> list[Claim]:
         """See `Memvara.standing`. It scans the whole scope, so it belongs off the loop."""
         return await asyncio.to_thread(
             self.memvara.standing, k=k, tenant=tenant, user=user, agent=agent,
-            session=session, project=project)
+            session=session)
 
     async def profile(self, query: str | None = None, *, k: int = 8,
                       since: datetime | None = None,
                       buckets: Mapping[str, Sequence[str]] | None = None,
-                      tenant=None, user=None, agent=None, session=None,
-                      project=None) -> Profile:
-        """See `Memvara.profile`. A scope scan, a delta and a search in one call."""
-        return await asyncio.to_thread(
-            self.memvara.profile, query, k=k, since=since, buckets=buckets,
-            tenant=tenant, user=user, agent=agent, session=session, project=project)
+                      tenant=None, user=None, agent=None, session=None) -> Profile:
+        """See `Memvara.profile`.
+
+        The three reads a profile needs — the live scope, what was believed at `since`,
+        and the search — do not depend on each other, so they run as three threads at
+        once rather than one after another. Assembling the sections touches no store.
+        """
+        _check_k(k)
+        mem = self.memvara
+        scope_kw = {"tenant": tenant, "user": user, "agent": agent, "session": session}
+        at = _profile_since(since)
+
+        def search() -> list[Result]:
+            return mem.search(query or "", k=k, **scope_kw)
+
+        live, then, hits = await asyncio.gather(
+            asyncio.to_thread(mem.get_all, states=["live"], **scope_kw),
+            asyncio.to_thread(mem._believed_at, mem._scope(tenant, user, agent, session),
+                              at),
+            asyncio.to_thread(search) if query else _nothing())
+        return mem._assemble_profile(live, then, hits, k=k, buckets=buckets)
 
     async def get(self, claim_id: str, *, tenant=None, user=None, agent=None,
                   session=None) -> Claim | None:

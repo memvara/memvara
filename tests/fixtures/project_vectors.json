@@ -37,5 +37,32 @@
     {"remote": "https://github.com/.git", "project": null, "rule": "a path that is only .git"},
     {"remote": "", "project": null, "rule": "empty"},
     {"remote": "https://github.com:notaport/memvara/memvara", "project": null, "rule": "an unparseable port"}
-  ]
+  ],
+  "check_project": {
+    "about": "Whether a value is a project name the server accepts; both copies' check (check_project in the library, is_canonical in the hooks) must agree on every row. canonical_project returns the path form, not the normalised remote, when the normalised remote fails this check, so the hooks never send a header the server refuses with a 400.",
+    "rows": [
+      {"value": "github.com/memvara/memvara", "valid": true, "rule": "host and two segments"},
+      {"value": "git.example.com:2222/team/repo", "valid": true, "rule": "a port of up to five digits"},
+      {"value": "gitlab.com/group/subgroup/repo", "valid": true, "rule": "any number of segments"},
+      {"value": "github-work/memvara/memvara", "valid": true, "rule": "an ssh alias is a valid host name"},
+      {"value": "github.com/\u00f6/r", "valid": true, "rule": "a non-ASCII segment is valid; the hooks still do not send it as a header"},
+      {"value": "path:0123456789abcdef", "valid": true, "rule": "the path form"},
+      {"value": "path:0123456789ABCDEF", "valid": false, "rule": "the path form is lower-case hex"},
+      {"value": "path:0123456789abcde", "valid": false, "rule": "the path form has exactly 16 hex characters"},
+      {"value": "", "valid": false, "rule": "empty"},
+      {"value": "my-project", "valid": false, "rule": "no path segment"},
+      {"value": "github.com/", "valid": false, "rule": "an empty path"},
+      {"value": "example.com/team/../repo", "valid": false, "rule": "a .. segment"},
+      {"value": "example.com/./repo", "valid": false, "rule": "a . segment"},
+      {"value": "example.com//repo", "valid": false, "rule": "an empty segment"},
+      {"value": "Example.com/o/r", "valid": false, "rule": "an upper-case host"},
+      {"value": "host_name/o/r", "valid": false, "rule": "an underscore in the host"},
+      {"value": "-host.com/o/r", "valid": false, "rule": "a host that starts with a hyphen"},
+      {"value": "host.com./o/r", "valid": false, "rule": "a host that ends with a dot"},
+      {"value": "host.com:123456/o/r", "valid": false, "rule": "a port longer than five digits"},
+      {"value": "host.com:/o/r", "valid": false, "rule": "a colon with no port"},
+      {"value": "github.com/o/r x", "valid": false, "rule": "whitespace"},
+      {"value": "github.com/o/r\u0007", "valid": false, "rule": "a control character"}
+    ]
+  }
 }

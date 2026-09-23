@@ -178,6 +178,20 @@ PREDICATE_REKEY = "predicate_rekey"
 #: `ENTITY_REKEY` for the same reason.
 CLOSURE = "closure"
 
+#: Not a meta key the engine writes, but one it refuses. The project is part of a claim's
+#: scope, bound once where the store or view is opened, so a `project=` reaching `**meta`
+#: is a caller who believes they chose the project for this one claim. Storing it would
+#: record an annotation while the claim was filed without a project.
+PROJECT_META = "project"
+
+#: Why a `project=` passed as metadata is refused. Shared by `Memvara.remember` and the
+#: hosted clients, whose `remember()` and `supersede()` take `**meta` as well.
+PROJECT_META_REFUSAL = (
+    "{method} does not take project=. The project is bound once, with "
+    "Memvara(project=...) or mem.scope(project=...), and every call on that object is "
+    "filed under it. Passed through **meta it would have been stored as an annotation "
+    "while the claim was filed without a project.")
+
 #: The `meta` keys above, as one set: everything in `Claim.meta` that the engine owns
 #: rather than the caller. Two surfaces need it and they need it for opposite reasons —
 #: `Memvara.remember` **rejects** them on the way in, because `salience_base` reaching
@@ -187,7 +201,7 @@ CLOSURE = "closure"
 #: adding a sixth cannot leave one of those two surfaces behind.
 RESERVED_META = frozenset({
     SALIENCE_BASE, LAST_OBSERVED, SUBJECT_ENTITY, OBJECT_ENTITY, ENTITY_REKEY,
-    PREDICATE_REKEY, CLOSURE,
+    PREDICATE_REKEY, CLOSURE, PROJECT_META,
 })
 
 #: Decimal places kept on a stored salience. Salience is a ranking weight, not an
@@ -552,11 +566,16 @@ class Scope:
 
         The downward-reaching predicate: an unset field is a wildcard. Use `sees` for
         read authorization — see there for why the two must not be confused.
+
+        The project is compared like every other field. Fact keys also include it, so a
+        slot operation could not reach another project's claims today, but this boundary
+        should not depend on how a key happens to be built.
         """
         if self.tenant != other.tenant:
             return False
         for mine, theirs in (
             (self.user, other.user),
+            (self.project, other.project),
             (self.agent, other.agent),
             (self.session, other.session),
         ):

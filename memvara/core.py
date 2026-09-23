@@ -46,6 +46,7 @@ from .embed.fingerprint import (
 from .llm import LLM, NullLLM, ReplacementJudge, Usage
 from .redact import Redactor, redact_episode
 from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retrieved
+from .retrieve.shadow import shadowed
 from .schema import (Cardinality, PredicatePackError, PredicateRegistry, _slugify,
                      load_specs)
 from .store import SQLiteStore, Store, bulk_claims, resolve_states
@@ -53,6 +54,8 @@ from .telemetry import WRITE_LLM_CALLS, WRITE_TOKENS_IN, WRITE_TOKENS_OUT, Recor
 from dataclasses import replace
 
 from .types import (
+    PROJECT_META,
+    PROJECT_META_REFUSAL,
     RESERVED_META,
     ENTITY_REKEY,
     LAST_OBSERVED,
@@ -634,6 +637,19 @@ def _row(claim: Claim) -> Row:
 #: The shipped predicate packs `profile()` groups memories by when the caller names no
 #: buckets. Each bucket is named after its pack and holds that pack's predicates.
 PROFILE_PACKS = ("decisions", "engineering", "events")
+
+
+#: How far back `profile()` looks for recent changes when no `since` is given.
+PROFILE_WINDOW = timedelta(days=7)
+
+
+def _check_k(k: int) -> None:
+    if k < 1:
+        raise ValueError(f"k must be at least 1, got {k}.")
+
+
+def _profile_since(since: datetime | None) -> datetime:
+    return utcnow() - PROFILE_WINDOW if since is None else as_utc(since)
 
 
 @lru_cache(maxsize=None)
@@ -1388,6 +1404,8 @@ class Memvara:
           key nowhere in the message and the traceback pointing at the storage layer
           rather than at this call.
         """
+        if PROJECT_META in meta:
+            raise TypeError(PROJECT_META_REFUSAL.format(method="remember()"))
         if reserved := RESERVED_META & set(meta):
             raise TypeError(
                 "these meta keys belong to the engine and cannot be set through "
@@ -1801,15 +1819,19 @@ class Memvara:
         # globally-declared predicate is written with the project cleared. Skipping this
         # made `forget()` match nothing and return an empty list, which reads as "there
         # was nothing to forget" rather than as a failure, while the fact stayed live.
-        probe = Claim(subject=subject, predicate=pred, object="",
-                      scope=self.registry.slot_scope(pred, scope))
+        slot = self.registry.slot_scope(pred, scope)
+        probe = Claim(subject=subject, predicate=pred, object="", scope=slot)
         # `fact_key` intentionally ignores agent and session so a fact learned in a new
         # session still retires the old value. That is right for a user-level caller and
         # wrong for a narrow one: without this filter a session could retire a sibling
         # session's private slot. `contains` gives exactly the intended asymmetry —
         # broad callers reach downward, narrow callers never reach sideways.
+        #
+        # Checked against `slot`, not `scope`, because `contains` compares the project:
+        # a globally-declared predicate is stored with no project, and a caller inside a
+        # repository still has to reach it.
         retired = [c for c in self.store.competing_claims(scope.tenant, probe.fact_key)
-                   if scope.contains(c.scope)]
+                   if slot.contains(c.scope)]
         # One transaction over the whole slot. Committed row by row, a concurrent reader
         # can see half a slot forgotten — and for the slot operation whose entire point is
         # that the slot stops answering, a partial answer is worse than either outcome.
@@ -2728,6 +2750,9 @@ class Memvara:
         the correction audit: every record we stopped believing, and nothing that merely
         stopped being true. `include_invalidated` stays the two-valued alias of the same
         parameter and is not deprecated; see `search()`.
+
+        A present-tense read bound to a project leaves out a user-wide value that the
+        project's own value shadows; see `memvara.retrieve.shadow`.
         """
         scope = self._scope(tenant, user, agent, session)
         valid_at, known_at = time_axes(as_of, valid_at, known_at)
@@ -2735,6 +2760,9 @@ class Memvara:
             scope.ancestors(), valid_at=valid_at, known_at=known_at,
             states=resolve_states(states, include_invalidated))
         claims = list(bulk_claims(self.store, ids).values())
+        if valid_at is None and known_at is None:
+            hidden = shadowed(self.store, self.registry, claims, scope)
+            claims = [c for c in claims if c.id not in hidden]
         # Content first, id only to make the order total; the stable sort below then
         # breaks timestamp ties on that instead of on whatever order SQLite returned.
         #
@@ -2802,14 +2830,22 @@ class Memvara:
         >>> delta = mem.since(feb)
         >>> [c.object for c in delta.added], [c.object for c in delta.gone]
         (['Lisbon'], ['Berlin'])
+
+        Bound to a project, a user-wide value that the project's own value shadows is
+        left out of `added`, as it is left out of `get_all()`.
         """
         scope = self._scope(tenant, user, agent, session)
         at = as_utc(when)
-        scopes = scope.ancestors()
-        then = set(self.store.candidate_ids(scopes, valid_at=at, known_at=at))
-        now = set(self.store.candidate_ids(scopes))
-        return Delta(since=at, added=self._ordered_claims(now - then),
+        then = self._believed_at(scope, at)
+        now = set(self.store.candidate_ids(scope.ancestors()))
+        added = self._ordered_claims(now - then)
+        hidden = shadowed(self.store, self.registry, added, scope)
+        return Delta(since=at, added=tuple(c for c in added if c.id not in hidden),
                      gone=self._ordered_claims(then - now))
+
+    def _believed_at(self, scope: Scope, at: datetime) -> set[str]:
+        """The ids this scope held at `at`, on both clocks: `since()`'s "then" set."""
+        return set(self.store.candidate_ids(scope.ancestors(), valid_at=at, known_at=at))
 
     def _ordered_claims(self, ids: Collection[str]) -> tuple[Claim, ...]:
         """Claims by id, in `get_all()`'s order.
@@ -2826,7 +2862,7 @@ class Memvara:
         return tuple(claims)
 
     def standing(self, *, k: int | None = None, tenant=None, user=None, agent=None,
-                 session=None, project=None) -> list[Claim]:
+                 session=None) -> list[Claim]:
         """Every standing preference in this scope, with no query and no ranking.
 
         A standing preference is a live `procedural` memory: how the user wants work done.
@@ -2845,10 +2881,10 @@ class Memvara:
         >>> _ = mem.remember("user", "lives_in", "Berlin")
         >>> [c.object for c in mem.standing()]
         ['pytest']
+
+        To read another project's standing preferences, bind it first:
+        `mem.scope(project=...).standing()`.
         """
-        if project is not None and project != self.default_scope.project:
-            return self._with_project(project).standing(
-                k=k, tenant=tenant, user=user, agent=agent, session=session)
         live = self.get_all(states=["live"], tenant=tenant, user=user, agent=agent,
                             session=session)
         return self._standing_from(live, k)
@@ -2862,8 +2898,7 @@ class Memvara:
     def profile(self, query: str | None = None, *, k: int = 8,
                 since: datetime | None = None,
                 buckets: Mapping[str, Sequence[str]] | None = None,
-                tenant=None, user=None, agent=None, session=None,
-                project=None) -> Profile:
+                tenant=None, user=None, agent=None, session=None) -> Profile:
         """One call's worth of context about a user: standing preferences, recent changes,
         search hits for `query`, and memories grouped into named buckets.
 
@@ -2872,7 +2907,8 @@ class Memvara:
         `since` defaults to seven days before now; memories that stopped being believed
         are left out, because a profile is read as current context. `relevant` is
         `search(query, k=k)` and is empty without a query. Each section holds at most `k`
-        rows.
+        rows. To read another project's profile, bind it first:
+        `mem.scope(project=...).profile()`.
 
         `buckets` maps a bucket name to the predicates it collects, and each bucket holds
         the newest `k` live memories with one of those predicates. With no `buckets`, the
@@ -2881,6 +2917,11 @@ class Memvara:
         replaces those defaults rather than adding to them. A predicate that this store's
         vocabulary does not know, no shipped pack declares and no live memory in the scope
         uses is ignored, and `Profile.warnings` says so.
+
+        It reads the scope's live memories once, and serves `standing`, `recent` and every
+        bucket from that one read. `recent` needs one more scan, of what was believed at
+        `since`; `since()` makes a second scan for what left, which a profile does not
+        report.
 
         >>> mem = Memvara(llm=NullLLM(), user="alice")
         >>> _ = mem.remember("user", "prefers", "pytest", memory_type=MemoryType.PROCEDURAL)
@@ -2891,25 +2932,31 @@ class Memvara:
         >>> p.warnings
         ["bucket 'stack' names 'no_such_verb', which nothing declares or uses, so it was ignored."]
         """
-        if project is not None and project != self.default_scope.project:
-            return self._with_project(project).profile(
-                query, k=k, since=since, buckets=buckets, tenant=tenant, user=user,
-                agent=agent, session=session)
-        if k < 1:
-            raise ValueError(f"k must be at least 1, got {k}.")
-        scope = {"tenant": tenant, "user": user, "agent": agent, "session": session}
-        live = self.get_all(states=["live"], **scope)
-        when = utcnow() - timedelta(days=7) if since is None else since
+        _check_k(k)
+        scope_kw = {"tenant": tenant, "user": user, "agent": agent, "session": session}
+        at = _profile_since(since)
+        live = self.get_all(states=["live"], **scope_kw)
+        then = self._believed_at(self._scope(tenant, user, agent, session), at)
+        hits = self.search(query, k=k, **scope_kw) if query else []
+        return self._assemble_profile(live, then, hits, k=k, buckets=buckets)
+
+    def _assemble_profile(self, live: Sequence[Claim], then: Collection[str],
+                          hits: Sequence[Result], *, k: int,
+                          buckets: Mapping[str, Sequence[str]] | None) -> Profile:
+        """Build a `Profile` from the three reads it needs, which touch no store here.
+
+        `live` arrives in `get_all()`'s newest-first order, so `recent` and the buckets
+        are filters over it and need no sort of their own. `recent` is the live memories
+        that were not believed at `since`, which is exactly `since().added`.
+        """
         warnings: list[str] = []
         wanted = self._bucket_predicates(buckets, warnings,
                                          stored={c.predicate for c in live})
-        newest = sorted(live, key=lambda c: (-c.recorded_at.timestamp(), c.id))
         return Profile(
             standing=[_row(c) for c in self._standing_from(live, k)],
-            recent=[_row(c) for c in self.since(when, **scope).added[:k]],
-            relevant=([_row(r.claim) for r in self.search(query, k=k, **scope)]
-                      if query else []),
-            buckets={name: [_row(c) for c in newest if c.predicate in predicates][:k]
+            recent=[_row(c) for c in live if c.id not in then][:k],
+            relevant=[_row(r.claim) for r in hits],
+            buckets={name: [_row(c) for c in live if c.predicate in predicates][:k]
                      for name, predicates in wanted.items()},
             warnings=warnings,
         )
@@ -2941,8 +2988,11 @@ class Memvara:
         for pack in PROFILE_PACKS:
             try:
                 declared.update(_pack_predicates(pack))
-            except PredicatePackError:
-                pass
+            except PredicatePackError as exc:
+                # Said before any "nothing declares" warning below, so that one is not
+                # read as a verdict on the predicate: no pack could be asked.
+                warnings.append(f"the {pack!r} pack could not be read, so its predicates "
+                                f"count as undeclared: {exc}")
         out: dict[str, frozenset[str]] = {}
         for name, predicates in buckets.items():
             kept: set[str] = set()
@@ -3030,7 +3080,7 @@ class Memvara:
         # the protocol method alone keeps every backend's audit trail one query with one
         # meaning.
         return [c for c in rows
-                if scope.contains(c.scope) and _in_timeline(c, valid_at, known_at)]
+                if slot.contains(c.scope) and _in_timeline(c, valid_at, known_at)]
 
     def _probe_entities(self, surface: str, scope: Scope) -> tuple[str, ...]:
         """Every stored identity a read's surface form is asking about.

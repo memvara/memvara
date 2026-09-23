@@ -18,12 +18,13 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from ..core import Memvara
 from ..embed import CachedEmbedder, HashingEmbedder
 from ..llm import NullLLM
 from ..project import canonical_project, check_project
+from .validate import _suggest
 from ..schema import (BUILTIN_PREDICATES, PredicatePackError,
                       PredicateRegistry, load_all_specs)
 
@@ -271,17 +272,6 @@ class ServerConfig:
     #: `FEATURES` is on, which is the default.
     features_off: frozenset[str] = frozenset()
 
-    def feature(self, name: str) -> bool:
-        """True unless the feature `name` was switched off.
-
-        A name not in `FEATURES` raises `ValueError`, so a misspelt check in this codebase
-        fails in a test instead of reading as on.
-        """
-        if name not in FEATURES:
-            raise ValueError(
-                f"{name!r} is not a feature. Known features: {', '.join(FEATURES)}.")
-        return name not in self.features_off
-
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None, *,
                  cwd: str | None = None) -> "ServerConfig":
@@ -400,6 +390,27 @@ class ServerConfig:
                 "session": self.session, "project": self.project}
 
 
+def unknown_features(names: Iterable[str]) -> str | None:
+    """Why `names` are not all features, naming the likely intended one, or `None`.
+
+    The one check both doors use: `MEMVARA_FEATURE_<NAME>` in the environment and
+    `MemvaraMCPServer(features_off=...)` in Python. Each wraps the sentence in its own
+    exception, so the two cannot disagree about what a feature is.
+
+    >>> unknown_features(["profle"])
+    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason and links."
+    >>> unknown_features(["profile"]) is None
+    True
+    """
+    unknown = sorted(set(names) - set(FEATURES))
+    if not unknown:
+        return None
+    named = ", ".join(_suggest(name, FEATURES) for name in unknown)
+    verb = "is not a feature" if len(unknown) == 1 else "are not features"
+    listed = f"{', '.join(FEATURES[:-1])} and {FEATURES[-1]}"
+    return f"{named} {verb}. The features are {listed}."
+
+
 def _features_off(env: Mapping[str, str]) -> frozenset[str]:
     """The features the environment switches off, refusing any it does not know.
 
@@ -413,11 +424,11 @@ def _features_off(env: Mapping[str, str]) -> frozenset[str]:
         if not variable.startswith(_FEATURE_PREFIX):
             continue
         name = variable[len(_FEATURE_PREFIX):].lower()
-        if name not in FEATURES:
+        problem = unknown_features([name])
+        if problem is not None:
             raise ConfigError(
-                f"{variable} does not name a feature. The features are "
-                f"{', '.join(f'{_FEATURE_PREFIX}{f.upper()}' for f in FEATURES)}; each "
-                "takes 1 for on, which is the default, or 0 for off.")
+                f"{variable} does not name a feature: {problem} Each variable takes 1 for "
+                "on, which is the default, or 0 for off.")
         if (raw or "").strip() and not _flag(raw, variable):
             off.add(name)
     return frozenset(off)
