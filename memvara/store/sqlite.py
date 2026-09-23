@@ -71,6 +71,7 @@ from ..types import (
     Claim,
     Derivation,
     Episode,
+    Link,
     MemoryType,
     Scope,
     as_utc,
@@ -154,7 +155,38 @@ if TYPE_CHECKING:  # pragma: no cover
 #    them the graph declaration would be dropped on that write and the next start would
 #    rehydrate the predicate as non-traversable — a store that quietly stops walking
 #    edges it walked yesterday, with no error and nothing in the file saying why.
-SCHEMA_VERSION = 12
+# 13: memories gained typed links (`claim_links`): one memory adds detail to another
+#    (`extends`) or was inferred from others (`derives`). A new table and nothing else,
+#    and nothing is backfilled into it; `_migrate_to_v13` says why a backfill would be a
+#    guess. Erasing a claim removes its links in the same transaction, so the table
+#    joins the list `residue` counts.
+SCHEMA_VERSION = 13
+
+# The typed-link table, created by `_migrate_to_v13` on a new file and an old one alike.
+#
+# `WITHOUT ROWID` for the reason `claim_sources` gives: the primary key is the whole
+# identity of a row, so the key btree is the table. `created_at` and `by` ride along.
+#
+# Both ids name claims, and there is no `REFERENCES` clause saying so, because this
+# connection does not turn on `PRAGMA foreign_keys` and a clause SQLite does not enforce
+# would read as a guarantee it is not. The guarantee is kept in code instead, at both
+# ends: `Memvara.link` refuses an id the caller cannot see, and `erase_claim` and `purge`
+# delete every link touching an erased claim in the same transaction as the claim.
+_LINKS_DDL = """
+CREATE TABLE IF NOT EXISTS claim_links (
+    tenant     TEXT NOT NULL,
+    from_id    TEXT NOT NULL,
+    to_id      TEXT NOT NULL,
+    relation   TEXT NOT NULL CHECK (relation IN ('extends', 'derives')),
+    created_at REAL NOT NULL,
+    by         TEXT NOT NULL DEFAULT 'api',
+    PRIMARY KEY (tenant, from_id, to_id, relation)
+) WITHOUT ROWID
+"""
+# The other direction. The primary key answers "what does this claim link to"; reading
+# the links *into* a claim, which `claim_links` and every erasure do, would otherwise
+# scan the tenant.
+_LINKS_INDEX = "CREATE INDEX IF NOT EXISTS cl_link_to ON claim_links(tenant, to_id)"
 
 # Kept separate because the v1 -> v2 migration has to recreate this table: SQLite
 # cannot add a column to an existing primary key, and (tenant, name) is now the key.
@@ -1266,6 +1298,7 @@ class SQLiteStore:
             self._migrate_to_v10()
             self._migrate_to_v11()
             self._migrate_to_v12()
+            self._migrate_to_v13()
             # No `_migrate_to_v8`: version 8 added a table nothing had ever written to
             # and that holds no derived data, so its `CREATE TABLE IF NOT EXISTS` above
             # genuinely is the whole migration — the same shape as version 4. What it
@@ -1273,6 +1306,26 @@ class SQLiteStore:
             # table, and an empty one means "nothing has been erased *since this file was
             # upgraded*", never "nothing has ever been erased here".
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _migrate_to_v13(self) -> None:
+        """Create the typed-link table, and deliberately backfill nothing into it.
+
+        The table is created here rather than in `SCHEMA`, so this one method builds it on
+        a brand-new file and on an upgraded one alike. It is idempotent: both statements
+        are `IF NOT EXISTS`, and running it twice leaves the file as running it once did.
+
+        **Nothing is backfilled, because nothing on disk records a link.** Both relations
+        are statements a caller makes: that one memory adds detail to another, or was
+        inferred from another. No earlier version wrote either anywhere. The one
+        relationship an older store does record, one claim replacing another, is already
+        in `invalidated_by` and is not a link. A backfill would have to invent the
+        statements, and an invented `derives` link asserts an inference nobody made. So
+        an upgraded store starts with no links, and an empty table means "no links
+        recorded since this file was upgraded", never "nothing here was ever derived from
+        anything".
+        """
+        self._db.execute(_LINKS_DDL)
+        self._db.execute(_LINKS_INDEX)
 
     def _migrate_to_v12(self) -> None:
         """Add the project and type columns, re-fold both keys, and rehash both hashes.
@@ -2563,6 +2616,12 @@ class SQLiteStore:
                 # to keep its own source turn alive — and `sources=True` quietly stops
                 # erasing anything.
                 self._db.execute("DELETE FROM claim_sources WHERE claim_id=?", (claim_id,))
+                # Links at either end, in this transaction. A link names two claims and
+                # outlives neither: left behind, it would keep an erased id resolvable
+                # through `claim_links`, and `residue` would refuse the proof.
+                self._db.execute(
+                    "DELETE FROM claim_links WHERE tenant=? AND (from_id=? OR to_id=?)",
+                    (tenant, claim_id, claim_id))
                 # Nothing to test on the existence flag: the row was there one statement ago,
                 # on this connection, under this lock.
                 _, vectors = self._erase_row("claims", "claims_fts", _CLAIM_VECS, claim_id)
@@ -2610,16 +2669,17 @@ class SQLiteStore:
         what is there now, so it can disagree with the delete, which is the one thing that
         makes it evidence.
 
-        Four tables, because those are the four a claim's content can survive in: the row
-        itself, the text index over it, its vector, and its provenance edges. A non-zero
-        anywhere means the erasure did not complete, whatever it reported.
+        Five tables, because those are the five a claim can survive in: the row itself,
+        the text index over it, its vector, its provenance edges, and the typed links
+        that name it. A non-zero anywhere means the erasure did not complete, whatever it
+        reported.
 
         `erasures` is deliberately not among them. It is the record that the erasure
         happened and it is *supposed* to survive; counting it would make every proof fail.
 
         >>> store = SQLiteStore(":memory:")
         >>> store.residue("nothing-was-ever-stored-here")
-        {'claims': 0, 'claims_fts': 0, 'embeddings': 0, 'claim_sources': 0}
+        {'claims': 0, 'claims_fts': 0, 'embeddings': 0, 'claim_sources': 0, 'claim_links': 0}
         >>> store.close()
         """
         with self._lock:
@@ -2633,6 +2693,10 @@ class SQLiteStore:
                     "SELECT COUNT(*) FROM embeddings WHERE claim_id=?"),
                 "claim_sources": count(
                     "SELECT COUNT(*) FROM claim_sources WHERE claim_id=?"),
+                # Every tenant, because the proof is about an id and not about a scope.
+                "claim_links": int(self._db.execute(
+                    "SELECT COUNT(*) FROM claim_links WHERE from_id=? OR to_id=?",
+                    (claim_id, claim_id)).fetchone()[0]),
             }
 
     def erasure_record(self, claim_id: str) -> dict[str, Any] | None:
@@ -2655,6 +2719,48 @@ class SQLiteStore:
                 "erased_at": datetime.fromtimestamp(row["erased_at"], tz=timezone.utc),
                 "sources": int(row["sources"]),
                 "counts": json.loads(row["counts"])}
+
+    def put_link(self, tenant: str, link: Link) -> Link:
+        """Record one typed link. Returns the stored row, which is the earlier one when the
+        same link was already recorded.
+
+        `ON CONFLICT DO NOTHING` on the primary key, so the first row's `created_at` and
+        `by` are the ones kept. See `Store.put_link` for why a repeat must change nothing.
+        Not `INSERT OR IGNORE`: that also swallows the `CHECK` on `relation`, and a link
+        with a relation nothing reads would then be dropped with no error at all.
+        """
+        key = (tenant, link.from_id, link.to_id, link.relation)
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO claim_links "
+                "(tenant, from_id, to_id, relation, created_at, by) VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT (tenant, from_id, to_id, relation) DO NOTHING",
+                (*key, _ts(link.created_at), link.by))
+            # Read back under the same lock and on the same connection as the write, so
+            # the row returned is the row the insert kept.
+            row = self._db.execute(
+                "SELECT created_at, by FROM claim_links WHERE tenant = ? AND from_id = ? "
+                "AND to_id = ? AND relation = ?", key).fetchone()
+            self._maybe_commit()
+        return Link(link.from_id, link.to_id, link.relation,
+                    datetime.fromtimestamp(row["created_at"], tz=timezone.utc), row["by"])
+
+    def claim_links(self, tenant: str, claim_id: str) -> list[Link]:
+        """Every link in `tenant` with `claim_id` at either end, oldest first."""
+        with self._read() as db:
+            rows = db.execute(
+                "SELECT from_id, to_id, relation, created_at, by FROM claim_links "
+                "WHERE tenant = ? AND (from_id = ? OR to_id = ?)",
+                (tenant, claim_id, claim_id)).fetchall()
+        links = [Link(r["from_id"], r["to_id"], r["relation"],
+                      datetime.fromtimestamp(r["created_at"], tz=timezone.utc), r["by"])
+                 for r in rows]
+        # Sorted here rather than by `ORDER BY`, on the far end's id as well as the
+        # instant: two links can share `created_at` (an importer stamping one instant, a
+        # clock with coarse resolution), and a tie left to the btree would make the order
+        # a property of the ids' spelling on one side only.
+        links.sort(key=lambda k: (k.created_at, k.other(claim_id), k.relation))
+        return links
 
     def purge(self, scope: Scope) -> dict[str, int]:
         """Irreversibly erase everything at `scope` and beneath it.
@@ -2718,6 +2824,13 @@ class SQLiteStore:
             self._db.execute(
                 "DELETE FROM claim_sources WHERE claim_id IN "
                 f"(SELECT id FROM claims WHERE {where})", params)
+            # Links at either end, for `erase_claim`'s reason: a link outlives neither
+            # claim it names. A link from a purged claim to one that survives goes too.
+            self._db.execute(
+                "DELETE FROM claim_links WHERE tenant = ? AND ("
+                f"from_id IN (SELECT id FROM claims WHERE {where}) OR "
+                f"to_id IN (SELECT id FROM claims WHERE {where}))",
+                [scope.tenant, *params, *params])
             claims = self._db.execute(f"DELETE FROM claims WHERE {where}", params).rowcount
             episodes = self._db.execute(
                 f"DELETE FROM episodes WHERE {where}", params

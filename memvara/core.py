@@ -34,6 +34,7 @@ from functools import lru_cache
 from typing import (Any, Callable, ClassVar, Collection, Iterable, Literal, Mapping,
                     Sequence, cast, overload)
 
+from .confirm import ConfirmationRefused, Confirmer
 from .consolidate import Consolidator
 from .embed import Embedder, default_embedder
 from .embed.fingerprint import (
@@ -71,6 +72,9 @@ from .types import (
     Derivation,
     Episode,
     ErasureProof,
+    ForgetPreview,
+    ForgetResult,
+    Link,
     MemoryType,
     Profile,
     Provenance,
@@ -84,7 +88,10 @@ from .types import (
     as_utc,
     close_out,
     closure,
+    closure_reason,
+    link_relation,
     owner_key,
+    planned_end,
     time_axes,
     utcnow,
 )
@@ -830,6 +837,7 @@ class Memvara:
         redactor: Redactor | None = None,
         reembed: bool = False,
         advise_replacements: bool = False,
+        confirm_secret: str | bytes | None = None,
         **tuning: Any,
     ) -> None:
         # Present so that a local construction that named them still binds. `__new__`
@@ -896,6 +904,11 @@ class Memvara:
         #: `ReplacementJudge`; with any other backend the flag does nothing.
         self.advise_replacements = advise_replacements
         self._warned_advice = False
+        #: Issues and checks the token `forget_matching` hands out with a preview. Keyed
+        #: by `confirm_secret` when one is given, so every process that shares the key
+        #: accepts every other's tokens; otherwise by a key generated once per process.
+        #: See `memvara.confirm`.
+        self._confirmer = Confirmer(confirm_secret)
         if advise_replacements and (
                 not isinstance(self.llm, ReplacementJudge) or self.llm.is_noop):
             # Refused here rather than skipped at write time: a flag that is read and
@@ -1373,6 +1386,9 @@ class Memvara:
                  sources: Sequence[str | Episode] | None = None,
                  text: str | None = None, extractor: str = "api",
                  close: str = "ended",
+                 until_reason: str | None = None,
+                 replaces: str | None = None,
+                 reason: str | None = None,
                  **meta: Any) -> WriteReceipt:
         """Assert a structured fact directly, bypassing extraction.
 
@@ -1429,6 +1445,23 @@ class Memvara:
         a given row got. It applies to a retraction (`polarity=-1`) the same way — see
         `Reconciler._retract`, where the default is argued from what a negative assertion
         actually says.
+
+        `until_reason` says why a fact written with `valid_to` will stop being true
+        ("the contract runs out on the 30th"). It is recorded on the claim's closure
+        record, where `history()` and `why()` read every ending's reason, and it is a
+        `ValueError` without `valid_to`, because there is no end for it to explain.
+
+        `replaces` names one live claim this fact replaces, and `reason` says why. The
+        write is then handed to `supersede()`, so the named claim is closed out in the same
+        transaction, `invalidated_by` points from it to this claim, and the reason is
+        recorded on the closed claim. This is the way to replace one value of a
+        many-valued predicate: an ordinary write beside it would leave both values live,
+        because nothing in the slot competes. The closure instant, the checks and the
+        errors are `supersede()`'s: `KeyError` if the id names nothing this scope can see,
+        `ValueError` if the claim it names is no longer live, and nothing written either
+        way. `reason` without `replaces` is a `ValueError` too: an automatic displacement
+        has no caller-named claim to attach a reason to. Both reasons are at most 500
+        characters (`types.REASON_CHARS`).
 
         `**meta` is the caller's, with the exception of the keys the engine stores there
         itself — see `RESERVED_META`, and note that two of them are a ranking override.
@@ -1487,6 +1520,14 @@ class Memvara:
                     "as whatever your reader will parse — or, if it belongs on the claim "
                     "rather than beside it, as one of this method's own arguments."
                 ) from exc
+        why_until = closure_reason(until_reason)
+        why_replaced = closure_reason(reason)
+        if why_replaced is not None and replaces is None:
+            raise ValueError(
+                "reason= says why the claim named by replaces= was closed, and no claim "
+                "was named. Pass replaces=<claim id> with it. A value this write displaces "
+                "on its own is closed by the slot's rules rather than by the caller, so "
+                "there is no caller-named closure to attach a reason to.")
         scope = self._scope(tenant, user, agent, session)
         pred = self.registry.normalize(predicate)
         now = utcnow()
@@ -1514,6 +1555,16 @@ class Memvara:
             text=text or "",   # empty means "render the triple"; see `Claim.__post_init__`
             derivation=Derivation.USER, extractor=extractor, meta=meta,
         )
+        if why_until is not None:
+            planned_end(claim, why_until)
+        if replaces is not None:
+            # A named replacement is a supersession, so it is `supersede()`, with its
+            # checks, its closure instant and its one transaction, and not a second copy
+            # of them that can drift. Nothing has been written yet, so a refusal there
+            # leaves the store as it was.
+            return self.supersede(replaces, claim, sources=sources, close=close,
+                                  reason=why_replaced, tenant=tenant, user=user,
+                                  agent=agent, session=session)
         # `memory_type` rather than the resolved type on the claim: passing the resolved
         # one would make every write an assertion, including the ones that only took the
         # predicate's default, and the default is not an opinion. See `Reconciler._retype`.
@@ -1642,7 +1693,8 @@ class Memvara:
                      retire: Claim | None = None,
                      at: datetime | None = None,
                      close: Closure = "ended",
-                     asserted_type: MemoryType | None = None) -> WriteReceipt:
+                     asserted_type: MemoryType | None = None,
+                     reason: str | None = None) -> WriteReceipt:
         """Store new source turns, optionally close out a predecessor, assert the claim.
 
         One transaction over all of it. Separately committed, a crash between the turn
@@ -1657,7 +1709,9 @@ class Memvara:
 
         `close` names the clock that stops on `retire`, and is forwarded to the
         reconciler for anything *it* displaces, so one call cannot say two different
-        things about the same slot.
+        things about the same slot. `reason` is recorded on `retire`'s closure only: it is
+        the caller's reason for closing the claim it named, and says nothing about
+        whatever else the reconciler displaces.
 
         The receipt is completed at the end rather than taken as `assert_claim` returns
         it: the turns stored here and the predecessor closed here both happen outside
@@ -1680,17 +1734,17 @@ class Memvara:
                 self.store.add_episode(ep)
             if retire is not None:
                 # `at` is never actually `None` here — `supersede`, the only caller that
-                # passes `retire`, defaults it to the new claim's `recorded_at` — but the
-                # signature cannot say "these two arrive together" and the consequence of
-                # a `None` slipping through is not a crash: it would reopen an interval
-                # that was already closed, or write a NULL `invalidated_at` that reads as
-                # *not retired* beside an `invalidated_by` saying otherwise. A
-                # supersession that leaves two live values is the exact failure the
-                # transaction below exists to prevent, so the fallback is the same
-                # instant `supersede` computes rather than a cast.
+                # passes `retire`, always computes it — but the signature cannot say
+                # "these two arrive together" and the consequence of a `None` slipping
+                # through is not a crash: it would reopen an interval that was already
+                # closed, or write a NULL `invalidated_at` that reads as *not retired*
+                # beside an `invalidated_by` saying otherwise. A supersession that leaves
+                # two live values is the exact failure the transaction below exists to
+                # prevent, so there is a fallback rather than a cast: the new claim's
+                # `recorded_at`, which is a real instant on either axis.
                 when = at if at is not None else claim.recorded_at
                 began = as_utc(retire.valid_from)
-                close_out(retire, when, claim.id, close)
+                close_out(retire, when, claim.id, close, reason)
                 # One `put_claim` rather than `invalidate` + `set_valid_to`, for the
                 # reason `Reconciler._retire` gives: the Store protocol cannot write
                 # `invalidated_by` without also writing `invalidated_at`, and under
@@ -1747,7 +1801,7 @@ class Memvara:
     def supersede(self, old_claim_id: str, new_claim: Claim, *,
                   at: datetime | None = None,
                   sources: Sequence[str | Episode] | None = None,
-                  close: str = "ended",
+                  close: str = "ended", reason: str | None = None,
                   tenant=None, user=None, agent=None,
                   session=None) -> WriteReceipt:
         """Replace a claim with a new one, recording that that is what happened.
@@ -1776,11 +1830,17 @@ class Memvara:
         UPDATE rows genuinely are the first kind (see `compat/mem0_import.py`), which is
         what the default is calibrated on.
 
-        `at` defaults to the new claim's `recorded_at`, so a replay of historical events
-        needs to state its instant once rather than twice; it is read on whichever axis
-        `close` names. `sources` means what it means on `remember`, and is here for the
-        same reason: a replayed update arrives as a new turn *and* a new value, and the
-        two have to land together.
+        `at` is read on whichever axis `close` names, and has one default per axis, so a
+        replay of historical events states its instant once rather than twice.
+        `"ended"` closes the old claim where the world changed, which is where the new
+        claim begins: its `valid_from`. `"retired"` closes belief in the old claim when
+        the new record was made: its `recorded_at`. `remember(replaces=...)` comes through
+        here and gets the same instants. `sources` means what it means on `remember`, and
+        is here for the same reason: a replayed update arrives as a new turn *and* a new
+        value, and the two have to land together.
+
+        `reason` says why, and is recorded on the old claim's closure record, where
+        `history()` and `why()` show it. At most 500 characters.
 
         The receipt names the predecessor in `closed`, on the axis `close` chose — so
         `retired` under `close="retired"` and `ended` under the default — which is how a
@@ -1788,10 +1848,16 @@ class Memvara:
 
         Raises `KeyError` if `old_claim_id` names nothing this scope can see — the same
         error for "no such claim" as for "not yours", so it cannot be used to test
-        whether an id exists somewhere else. Raising rather than quietly asserting the
+        whether an id exists somewhere else. Raises `ValueError` if the claim it names is
+        already retired, or if `close="ended"` names a claim that is not live now: those
+        have nothing left to close that way, and a second closure would restate what the
+        first already said. Retiring an *ended* claim is allowed, because learning later
+        that a finished value was never true is a real correction. Either way a refusal
+        writes nothing. Raising rather than quietly asserting the
         new value keeps the call all-or-nothing: a supersession that lost its predecessor
         is not a partial success, it is two live answers to one question.
         """
+        how, why = closure(close), closure_reason(reason)
         old = self.get(old_claim_id, tenant=tenant, user=user, agent=agent,
                        session=session)
         if old is None:
@@ -1799,6 +1865,17 @@ class Memvara:
                 f"no claim {old_claim_id!r} in scope "
                 f"{self._scope(tenant, user, agent, session).key()}"
             )
+        # A retired claim has nothing left to replace under either reading. An ended one
+        # can still be retired: the value stopped being true, and later we learn it was
+        # never true at all. That is a correction of history, which is what the replay of
+        # a mutation log this method exists for contains, and the closure witness is a
+        # list for exactly that sequence. What an ended claim cannot be is ended again.
+        if old.invalidated_at is not None or (how == "ended" and not old.is_live()):
+            raise ValueError(
+                f"claim {old_claim_id!r} is already {old.state}, so there is nothing "
+                f"left to {'end' if how == 'ended' else 'retire'}. Nothing was written. "
+                "Write the new value on its own, or name the claim that holds the "
+                "current value.")
         # A replacement that names no scope adopts the one it replaces. `Claim.scope`
         # defaults to `Scope()`, whose tenant is the literal string "default", so a
         # hand-built claim — which is the documented way to call this — retired Alice's
@@ -1814,12 +1891,14 @@ class Memvara:
         # scopes on purpose stays possible, and `_write_claim` still authorizes it.
         if new_claim.scope == Scope():
             new_claim = replace(new_claim, scope=old.scope)
-        return self._write_claim(new_claim, sources, retire=old,
-                                 at=at or new_claim.recorded_at, close=closure(close))
+        if at is None:
+            at = new_claim.valid_from if how == "ended" else new_claim.recorded_at
+        return self._write_claim(new_claim, sources, retire=old, at=at, close=how,
+                                 reason=why)
 
     def forget(self, subject: str, predicate: str, *, tenant=None, user=None, agent=None,
                session=None, at: datetime | None = None,
-               close: str = "retired") -> list[Claim]:
+               close: str = "retired", reason: str | None = None) -> list[Claim]:
         """Retire everything currently believed in one slot.
 
         Retires rather than erases: the claims stop being returned by present-tense
@@ -1852,10 +1931,14 @@ class Memvara:
         has always stamped its objects, which is why `WriteReceipt.invalidated` renders
         correctly and this did not — the same operation, two implementations, one of them
         a half-step behind the database.
+
+        `reason` says why, and is recorded on every claim this closes, where `history()`
+        and `why()` show it. At most 500 characters; see `types.closure_reason`.
         """
         scope = self._scope(tenant, user, agent, session)
         now = at or utcnow()
         how = closure(close)
+        why = closure_reason(reason)
         pred = self.registry.normalize(predicate)
         # The probe has to be keyed the way the claim it is looking for was written, and a
         # globally-declared predicate is written with the project cleared. Skipping this
@@ -1874,15 +1957,34 @@ class Memvara:
         # repository still has to reach it.
         retired = [c for c in self.store.competing_claims(scope.tenant, probe.fact_key)
                    if slot.contains(c.scope)]
-        # One transaction over the whole slot. Committed row by row, a concurrent reader
-        # can see half a slot forgotten — and for the slot operation whose entire point is
-        # that the slot stops answering, a partial answer is worse than either outcome.
+        self._close_all(retired, now, how, why)
+        return retired
+
+    def _close_all(self, claims: Sequence[Claim], at: datetime, how: Closure,
+                   why: str | None) -> None:
+        """Close every claim in `claims` the same way, in one transaction.
+
+        One transaction because the callers close a set that means something as a whole:
+        a slot for `forget()`, a previewed list for `forget_matching()`. Committed row by
+        row, a concurrent reader can see half of it closed, and for an operation whose
+        point is that the set stops answering, a partial answer is worse than either
+        outcome. Nothing displaced these claims, so no successor is named.
+        """
         batch = getattr(self.store, "batch", None)
         with (batch() if batch is not None else nullcontext()):
-            for c in retired:
-                close_out(c, now, None, how)
+            for c in claims:
+                close_out(c, at, None, how, why)
                 self.store.put_claim(c)
-        return retired
+
+    def _visible(self, claim_ids: Sequence[str], scope: Scope) -> dict[str, Claim]:
+        """The claims among `claim_ids` this scope may read, fetched in one call.
+
+        `get()` over a list, without the query per id: one `bulk_claims` and the same
+        `sees()` check `get()` applies. A missing id and one in another scope are both
+        simply absent, as `get()` returns `None` for both.
+        """
+        return {cid: c for cid, c in bulk_claims(self.store, claim_ids).items()
+                if scope.sees(c.scope)}
 
     def purge(self, *, tenant=None, user=None, agent=None, session=None) -> dict[str, int]:
         """Irreversibly erase a scope. The opposite of `forget`, and not undoable.
@@ -2048,7 +2150,7 @@ class Memvara:
         return claim
 
     def delete(self, claim_id: str, *, at: datetime | None = None,
-               close: str = "retired", tenant=None,
+               close: str = "retired", reason: str | None = None, tenant=None,
                user=None, agent=None, session=None) -> bool:
         """Retire one claim by id. Returns whether anything was retired.
 
@@ -2071,13 +2173,148 @@ class Memvara:
 
         Silently false rather than raising for an unknown or out-of-scope id, so the
         method cannot be used as an existence oracle.
+
+        `reason` says why, and is recorded on the claim's closure record, where
+        `history()` and `why()` show it. At most 500 characters; a longer or blank one is
+        a `ValueError` raised before anything is written.
         """
+        how, why = closure(close), closure_reason(reason)
         claim = self.get(claim_id, tenant=tenant, user=user, agent=agent, session=session)
         if claim is None:
             return False
-        close_out(claim, at or utcnow(), None, closure(close))
+        close_out(claim, at or utcnow(), None, how, why)
         self.store.put_claim(claim)
         return True
+
+    def forget_matching(self, query: str, *, close: str, k: int = 20,
+                        reason: str | None = None, confirm: str | None = None,
+                        tenant=None, user=None, agent=None,
+                        session=None) -> ForgetPreview | ForgetResult:
+        """End or retire every live claim that matches a query, in two calls.
+
+        **Without `confirm` this changes nothing.** It runs `search(query, k=k)` and
+        returns a `ForgetPreview`: the matching claim ids with their text, and a token.
+        **With `confirm`** it applies `close` to exactly the ids that token lists, and
+        returns a `ForgetResult` naming what it closed. The query is not run again on the
+        confirming call, so a claim that started matching in between is not swept up
+        with the ones the caller saw.
+
+        `close` has no default, because the two readings are opposite claims about the
+        past and only the caller knows which is true of these memories: `"ended"` says
+        they were true and stopped, `"retired"` says they were never right. Erasure is not
+        one of the choices; it is `erase()` and it is deliberately not reachable from a
+        query. `reason` is recorded on every claim closed, as it is by `delete()`.
+
+        The token is refused with `confirm.ConfirmationRefused`, and nothing is applied,
+        when this store's key did not issue it or it was altered, when it has expired
+        (ten minutes after the preview), when it was issued for the other closure, or
+        when any claim it lists is no longer live or no longer visible to this scope. The
+        last check is the one that makes the preview worth reading: what the caller
+        agreed to close is what is closed, or nothing is.
+
+        `k` is how many matches the preview may list, from 1 to 100. The search is
+        ordinary hybrid retrieval with no score floor, so the preview can list a claim
+        that matched only weakly; reading it before confirming is the whole design.
+
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> _ = mem.remember("user", "works_at", "Acme")
+        >>> preview = mem.forget_matching("Acme", close="ended", k=1)
+        >>> list(preview.matches.values())
+        ['user works at Acme']
+        >>> done = mem.forget_matching("Acme", close="ended", k=1,
+        ...                            reason="left for Globex", confirm=preview.confirm)
+        >>> [c.state for c in done.closed]
+        ['ended']
+        """
+        how, why = closure(close), closure_reason(reason)
+        if not 1 <= k <= 100:
+            raise ValueError(f"k={k} is out of range. A preview lists 1 to 100 matches.")
+        now = utcnow()
+        if confirm is None:
+            hits = self.search(query, k=k, tenant=tenant, user=user, agent=agent,
+                               session=session)
+            matches = {r.claim.id: r.claim.text for r in hits}
+            token, expires = self._confirmer.issue(list(matches), how, now=now)
+            return ForgetPreview(close=how, matches=matches, confirm=token,
+                                 expires_at=expires)
+        ids = self._confirmer.check(confirm, how, now=now)
+        found = self._visible(ids, self._scope(tenant, user, agent, session))
+        doomed: list[Claim] = []
+        for claim_id in ids:
+            claim = found.get(claim_id)
+            if claim is None or not claim.is_live(now):
+                # All or nothing. Closing the rest would close a set the caller never
+                # saw, which is the thing the preview exists to prevent.
+                now_is = "no longer visible here" if claim is None else f"now {claim.state}"
+                raise ConfirmationRefused(
+                    f"claim {claim_id} was live when this preview was made and is "
+                    f"{now_is}. Nothing was changed. Run the call again without confirm "
+                    "to see what matches now.")
+            doomed.append(claim)
+        self._close_all(doomed, now, how, why)
+        return ForgetResult(close=how, closed=doomed, reason=why)
+
+    def link(self, from_id: str, to_id: str, relation: str, *, by: str = "api",
+             tenant=None, user=None, agent=None, session=None) -> Link:
+        """Record that one memory `extends` or `derives` from another. Returns the link.
+
+        Read it as "`from_id` <relation> `to_id`": `link(a, b, "extends")` says `a` adds
+        detail to `b`, and `link(a, b, "derives")` says `a` was inferred from `b`. See
+        `types.LinkRelation`. Supersession is not a link; a claim that replaced another
+        already records it through `invalidated_by`.
+
+        Both ids must name claims this scope can see, in any state. A link is a record
+        about two records, so linking to an ended or retired claim is allowed. Raises
+        `KeyError` for an id that is not visible, with the same message for a missing id
+        and one in another scope, so it cannot be used to test whether an id exists
+        elsewhere. `ValueError` for an unknown relation or a claim linked to itself.
+
+        Recording the same link twice keeps the first one and returns it. Erasing either
+        claim removes the link.
+        """
+        rel = link_relation(relation)
+        if from_id == to_id:
+            raise ValueError(f"cannot link claim {from_id} to itself")
+        scope = self._scope(tenant, user, agent, session)
+        found = self._visible([from_id, to_id], scope)
+        for claim_id in (from_id, to_id):
+            if claim_id not in found:
+                raise KeyError(f"no claim {claim_id!r} in scope {scope.key()}")
+        put = getattr(self.store, "put_link", None)
+        if put is None:
+            # Not a silent no-op: a link reported as recorded and then absent from
+            # `why()` is a write that lied about itself.
+            raise NotImplementedError(
+                f"{type(self.store).__name__} does not implement put_link(), so it cannot "
+                "record links")
+        # The store returns the row it kept, which is the earlier one when this link was
+        # already recorded, so there is nothing to read back and nothing to race with.
+        return cast(Link, put(scope.tenant, Link(from_id, to_id, rel, utcnow(), by)))
+
+    def links(self, claim_id: str, *, tenant=None, user=None, agent=None,
+              session=None) -> list[Link]:
+        """Every link that touches this claim, in either direction, oldest first.
+
+        Empty for an id this scope cannot see, rather than an error, for `get()`'s
+        reason. A link whose other end this scope cannot see is left out: the link would
+        otherwise disclose that id, and ids are not secret but they are not this
+        caller's either.
+        """
+        scope = self._scope(tenant, user, agent, session)
+        claim = self._visible([claim_id], scope).get(claim_id)
+        return [] if claim is None else self._links_of(claim, scope)
+
+    def _links_of(self, claim: Claim, scope: Scope) -> list[Link]:
+        """`links()` for a claim the caller has already fetched and authorized.
+
+        The far ends are checked in one batched read, not one `get()` per link.
+        """
+        read = getattr(self.store, "claim_links", None)
+        if read is None:
+            return []
+        found = read(claim.scope.tenant, claim.id)
+        visible = self._visible([k.other(claim.id) for k in found], scope)
+        return [k for k in found if k.other(claim.id) in visible]
 
     def erase(self, claim_id: str, *, sources: bool = False, tenant=None, user=None,
               agent=None, session=None) -> bool:
@@ -3305,10 +3542,11 @@ class Memvara:
         oracle it is explicitly not allowed to be.
         """
         valid_at, known_at = time_axes(as_of, valid_at, known_at)
+        scope = self._scope(tenant, user, agent, session)
         claim = self.store.get_claim(claim_id)
         if claim is None:
             return None
-        if not self._scope(tenant, user, agent, session).sees(claim.scope):
+        if not scope.sees(claim.scope):
             return None
         found = self.store.get_episodes(claim.sources)
         # Rebuilt in `sources` order, because `get_episodes` returns a mapping and the
@@ -3326,8 +3564,14 @@ class Memvara:
             superseded = [c for c in self.store.slot_history(claim.scope.tenant,
                                                              claim.fact_key)
                           if c.invalidated_by == claim.id]
+        # Links are dated on the belief clock only, like supersessions and for the same
+        # reason: a link is something we recorded, not something that happened in the
+        # world. `known_at` drops a link recorded after it, so the explanation reads as it
+        # did on that day; `valid_at` has nothing to test.
+        links = [k for k in self._links_of(claim, scope)
+                 if known_at is None or k.created_at <= as_utc(known_at)]
         return Provenance(claim=claim, episodes=episodes, derivation=claim.derivation,
-                          extractor=claim.extractor, superseded=superseded)
+                          extractor=claim.extractor, superseded=superseded, links=links)
 
     def produced(self, episode_id: str, *, tenant=None, user=None, agent=None,
                  session=None, as_of: datetime | None = None,
@@ -3811,12 +4055,27 @@ class ScopedMemvara:
         return self._mem.remember(subject, predicate, obj, **self._kw, **kw)
 
     def forget(self, subject: str, predicate: str, *,
-               at: datetime | None = None, close: str = "retired") -> list[Claim]:
-        return self._mem.forget(subject, predicate, at=at, close=close, **self._kw)
+               at: datetime | None = None, close: str = "retired",
+               reason: str | None = None) -> list[Claim]:
+        return self._mem.forget(subject, predicate, at=at, close=close, reason=reason,
+                                **self._kw)
 
     def delete(self, claim_id: str, *, at: datetime | None = None,
-               close: str = "retired") -> bool:
-        return self._mem.delete(claim_id, at=at, close=close, **self._kw)
+               close: str = "retired", reason: str | None = None) -> bool:
+        return self._mem.delete(claim_id, at=at, close=close, reason=reason, **self._kw)
+
+    def forget_matching(self, query: str, *, close: str, k: int = 20,
+                        reason: str | None = None,
+                        confirm: str | None = None) -> ForgetPreview | ForgetResult:
+        return self._mem.forget_matching(query, close=close, k=k, reason=reason,
+                                         confirm=confirm, **self._kw)
+
+    def link(self, from_id: str, to_id: str, relation: str, *,
+             by: str = "api") -> Link:
+        return self._mem.link(from_id, to_id, relation, by=by, **self._kw)
+
+    def links(self, claim_id: str) -> list[Link]:
+        return self._mem.links(claim_id, **self._kw)
 
     def erase(self, claim_id: str, *, sources: bool = False) -> bool:
         return self._mem.erase(claim_id, sources=sources, **self._kw)
@@ -3829,9 +4088,9 @@ class ScopedMemvara:
     def supersede(self, old_claim_id: str, new_claim: Claim, *,
                   at: datetime | None = None,
                   sources: Sequence[str | Episode] | None = None,
-                  close: str = "ended") -> WriteReceipt:
+                  close: str = "ended", reason: str | None = None) -> WriteReceipt:
         return self._mem.supersede(old_claim_id, new_claim, at=at, sources=sources,
-                                   close=close, **self._kw)
+                                   close=close, reason=reason, **self._kw)
 
     def purge(self) -> dict[str, int]:
         return self._mem.purge(**self._kw)

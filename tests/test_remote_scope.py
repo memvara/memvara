@@ -274,6 +274,16 @@ def _answer(request):
                                          "audit_subject_linkable": None})
     if path == "/v1/maintenance/consolidate":
         return httpx.Response(200, json={"id": "job_1", "status": "queued"})
+    if path == "/v1/forget-matching":
+        return httpx.Response(200, json={
+            "close": "ended", "matches": [{"memory_id": "cl_1", "text": "t"}],
+            "confirm": "tok", "expires_at": "2026-01-01T00:10:00Z"})
+    link = {"from_id": "cl_1", "to_id": "cl_2", "relation": "extends",
+            "created_at": "2026-01-01T00:00:00Z", "by": "api"}
+    if path == "/v1/links":
+        return httpx.Response(200, json=link)
+    if path.endswith("/links"):
+        return httpx.Response(200, json={"claim_links": [link]})
     if path == "/v1/facts" or path.endswith("/supersede"):
         return httpx.Response(200, json=_receipt())
     if path == "/v1/memories":
@@ -311,6 +321,10 @@ DELEGATIONS = [
     ("forget", lambda v: v.forget("user", "likes"), "/v1/forget"),
     ("delete", lambda v: v.delete("cl_1"), "/v1/memories/cl_1"),
     ("end", lambda v: v.end(claim_id="cl_1"), "/v1/end"),
+    ("forget_matching", lambda v: v.forget_matching("q", close="ended"),
+     "/v1/forget-matching"),
+    ("link", lambda v: v.link("cl_1", "cl_2", "extends"), "/v1/links"),
+    ("links", lambda v: v.links("cl_1"), "/v1/memories/cl_1/links"),
     ("erase", lambda v: v.erase("cl_1"), "/v1/erasures"),
     ("purge", lambda v: v.purge(), "/v1/erasures"),
     ("consolidate", lambda v: v.consolidate(), "/v1/maintenance/consolidate"),

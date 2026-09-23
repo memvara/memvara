@@ -47,7 +47,7 @@ of a constructor is not something a library does behind your back. The first req
 first method call.
 
 `MEMVARA_MODE=cloud` in `memvara/server/config.py` builds one of these instead of a local
-`Memvara`, and the MCP server serves the same fifteen tools from it. Both classes satisfy
+`Memvara`, and the MCP server serves the same eighteen tools from it. Both classes satisfy
 the `MemoryAPI` protocol in `memvara/server/memory_api.py`, which is what makes that
 substitution safe to make.
 

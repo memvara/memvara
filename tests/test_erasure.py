@@ -63,14 +63,15 @@ def test_a_claim_that_is_still_there_cannot_be_proved_gone(mem):
 
 
 def test_an_erased_claim_is_proved_gone_in_every_table_it_could_survive_in(mem):
-    """Four tables, because those are the four a claim's content can live in: the row,
-    the text index over it, its vector, and its provenance edges."""
+    """Five tables, because those are the five a claim can survive in: the row, the text
+    index over it, its vector, its provenance edges, and the typed links that name it."""
     claim_id = stored(mem)
     assert mem.erase(claim_id) is True
     proof = mem.prove_erased(claim_id)
     assert proof.proven is True
     assert proof.surviving == {}
-    assert set(proof.residue) == {"claims", "claims_fts", "embeddings", "claim_sources"}
+    assert set(proof.residue) == {"claims", "claims_fts", "embeddings", "claim_sources",
+                                  "claim_links"}
 
 
 def test_an_id_nothing_ever_stored_is_proved_gone_rather_than_raising(mem):
@@ -245,9 +246,11 @@ def test_the_erasures_table_is_schema_seven():
     neither reads nor writes `erasures`, so the sentence holds there too. Version 12 added
     a `project` column to `claims` and to `episodes` and rehashed every `fact_key`; it adds
     no table, does not read or write `erasures`, and rewriting a slot key cannot conjure a
-    record of an erasure that happened before the upgrade, so it holds again.
+    record of an erasure that happened before the upgrade, so it holds again. Version 13
+    added a table, `claim_links`, and backfills nothing into it; it neither reads nor
+    writes `erasures`, so the sentence holds.
     """
-    assert SCHEMA_VERSION == 12
+    assert SCHEMA_VERSION == 13
     store = SQLiteStore(":memory:")
     try:
         assert store.erasure_record("anything") is None
@@ -344,7 +347,7 @@ def test_the_shipped_stores_residue_names_every_table_a_claim_can_survive_in():
     store = SQLiteStore(":memory:")
     try:
         assert set(store.residue("cl_anything")) == {
-            "claims", "claims_fts", "embeddings", "claim_sources"}
+            "claims", "claims_fts", "embeddings", "claim_sources", "claim_links"}
     finally:
         store.close()
 

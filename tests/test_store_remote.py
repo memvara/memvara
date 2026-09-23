@@ -22,7 +22,7 @@ import pytest
 from memvara import HashingEmbedder, Memvara, NullLLM
 from memvara.store.base import Store
 from memvara.store.remote import RemoteStore
-from memvara.types import Claim, Derivation, Episode, MemoryType, Scope
+from memvara.types import Claim, Derivation, Episode, Link, MemoryType, Scope
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
@@ -472,6 +472,8 @@ CLAIM = Claim(subject="user", predicate="lives_in", object="Lisbon", scope=SCOPE
     lambda s: s.episodes_near(T0, [SCOPE], 5),
     lambda s: s.residue("clm_1"),
     lambda s: s.erasure_record("clm_1"),
+    lambda s: s.put_link("acme", Link("clm_1", "clm_2", "extends", T0)),
+    lambda s: s.claim_links("acme", "clm_1"),
     lambda s: s.invalidate("clm_1", T0, None),
     lambda s: s.set_valid_to("clm_1", None),
     lambda s: s.reinforce("clm_1", 1.0, 1, []),

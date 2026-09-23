@@ -73,8 +73,9 @@ from .core import (Memvara, Messages, ScopedMemvara, _approx_tokens, _check_k,
 from .embed import Embedder
 from .retrieve import Path, Retrieved
 from .write.reconcile import MergeReport
-from .types import (Answer, Claim, Delta, Episode, ErasureProof, MemoryType,
-                    Profile, Provenance, RecallResult, Result, Scope, WriteReceipt)
+from .types import (Answer, Claim, Delta, Episode, ErasureProof, ForgetPreview,
+                    ForgetResult, Link, MemoryType, Profile, Provenance, RecallResult,
+                    Result, Scope, WriteReceipt)
 
 
 async def _nothing() -> list[Result]:
@@ -169,29 +170,53 @@ class AsyncMemvara:
     async def supersede(self, old_claim_id: str, new_claim: Claim, *,
                         at: datetime | None = None,
                         sources: Sequence[str | Episode] | None = None,
-                        close: str = "ended",
+                        close: str = "ended", reason: str | None = None,
                         tenant=None, user=None, agent=None,
                         session=None) -> WriteReceipt:
         """See `Memvara.supersede`."""
         return await asyncio.to_thread(
             self.memvara.supersede, old_claim_id, new_claim, at=at, sources=sources,
-            close=close, tenant=tenant, user=user, agent=agent, session=session)
+            close=close, reason=reason, tenant=tenant, user=user, agent=agent,
+            session=session)
 
     async def forget(self, subject: str, predicate: str, *, tenant=None, user=None,
                      agent=None, session=None, at: datetime | None = None,
-                     close: str = "retired") -> list[Claim]:
+                     close: str = "retired", reason: str | None = None) -> list[Claim]:
         """See `Memvara.forget`."""
         return await asyncio.to_thread(
             self.memvara.forget, subject, predicate, tenant=tenant, user=user,
-            agent=agent, session=session, at=at, close=close)
+            agent=agent, session=session, at=at, close=close, reason=reason)
 
     async def delete(self, claim_id: str, *, at: datetime | None = None,
-                     close: str = "retired", tenant=None,
+                     close: str = "retired", reason: str | None = None, tenant=None,
                      user=None, agent=None, session=None) -> bool:
         """See `Memvara.delete` — retires, does not erase."""
         return await asyncio.to_thread(
-            self.memvara.delete, claim_id, at=at, close=close, tenant=tenant, user=user,
-            agent=agent, session=session)
+            self.memvara.delete, claim_id, at=at, close=close, reason=reason,
+            tenant=tenant, user=user, agent=agent, session=session)
+
+    async def forget_matching(self, query: str, *, close: str, k: int = 20,
+                              reason: str | None = None, confirm: str | None = None,
+                              tenant=None, user=None, agent=None,
+                              session=None) -> ForgetPreview | ForgetResult:
+        """See `Memvara.forget_matching` — a preview without `confirm`, a closure with it."""
+        return await asyncio.to_thread(
+            self.memvara.forget_matching, query, close=close, k=k, reason=reason,
+            confirm=confirm, tenant=tenant, user=user, agent=agent, session=session)
+
+    async def link(self, from_id: str, to_id: str, relation: str, *, by: str = "api",
+                   tenant=None, user=None, agent=None, session=None) -> Link:
+        """See `Memvara.link`."""
+        return await asyncio.to_thread(
+            self.memvara.link, from_id, to_id, relation, by=by, tenant=tenant,
+            user=user, agent=agent, session=session)
+
+    async def links(self, claim_id: str, *, tenant=None, user=None, agent=None,
+                    session=None) -> list[Link]:
+        """See `Memvara.links`."""
+        return await asyncio.to_thread(
+            self.memvara.links, claim_id, tenant=tenant, user=user, agent=agent,
+            session=session)
 
     async def erase(self, claim_id: str, *, sources: bool = False, tenant=None,
                     user=None, agent=None, session=None) -> bool:
@@ -634,12 +659,27 @@ class AsyncScopedMemvara:
 
     async def forget(self, subject: str, predicate: str, *,
                      at: datetime | None = None,
-                     close: str = "retired") -> list[Claim]:
-        return await self._amem.forget(subject, predicate, at=at, close=close, **self._kw)
+                     close: str = "retired", reason: str | None = None) -> list[Claim]:
+        return await self._amem.forget(subject, predicate, at=at, close=close,
+                                       reason=reason, **self._kw)
 
     async def delete(self, claim_id: str, *, at: datetime | None = None,
-                     close: str = "retired") -> bool:
-        return await self._amem.delete(claim_id, at=at, close=close, **self._kw)
+                     close: str = "retired", reason: str | None = None) -> bool:
+        return await self._amem.delete(claim_id, at=at, close=close, reason=reason,
+                                       **self._kw)
+
+    async def forget_matching(self, query: str, *, close: str, k: int = 20,
+                              reason: str | None = None,
+                              confirm: str | None = None) -> ForgetPreview | ForgetResult:
+        return await self._amem.forget_matching(query, close=close, k=k, reason=reason,
+                                                confirm=confirm, **self._kw)
+
+    async def link(self, from_id: str, to_id: str, relation: str, *,
+                   by: str = "api") -> Link:
+        return await self._amem.link(from_id, to_id, relation, by=by, **self._kw)
+
+    async def links(self, claim_id: str) -> list[Link]:
+        return await self._amem.links(claim_id, **self._kw)
 
     async def erase(self, claim_id: str, *, sources: bool = False) -> bool:
         return await self._amem.erase(claim_id, sources=sources, **self._kw)
@@ -650,9 +690,10 @@ class AsyncScopedMemvara:
     async def supersede(self, old_claim_id: str, new_claim: Claim, *,
                         at: datetime | None = None,
                         sources: Sequence[str | Episode] | None = None,
-                        close: str = "ended") -> WriteReceipt:
+                        close: str = "ended", reason: str | None = None) -> WriteReceipt:
         return await self._amem.supersede(old_claim_id, new_claim, at=at,
-                                          sources=sources, close=close, **self._kw)
+                                          sources=sources, close=close, reason=reason,
+                                          **self._kw)
 
     async def purge(self) -> dict[str, int]:
         return await self._amem.purge(**self._kw)

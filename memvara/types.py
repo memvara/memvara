@@ -267,7 +267,65 @@ def closure(value: str) -> Closure:
     )
 
 
-def close_out(claim: "Claim", at: datetime, by: str | None, close: Closure) -> None:
+#: Longest reason a closure may carry, in characters. A reason says why a fact ended or
+#: was retired ("superseded by /memvara:index", "the contract ran out"). It is stored in
+#: the claim's `meta` and shown by `history()` and `why()`, so it is capped rather than
+#: allowed to grow into a copy of the conversation that caused it.
+REASON_CHARS = 500
+
+
+def closure_reason(value: str | None) -> str | None:
+    """Validate a caller-supplied reason for a closure, or raise saying what is wrong.
+
+    `None` means no reason was given and is always accepted. Surrounding whitespace is
+    removed. A reason that is blank after that is refused rather than stored, because an
+    empty string on the record reads as "a reason was given and it said nothing", which
+    is a different statement from not giving one.
+
+    >>> closure_reason("  the contract ran out ")
+    'the contract ran out'
+    >>> closure_reason(None) is None
+    True
+    >>> closure_reason("x" * 501)                  # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+    ValueError: reason is 501 characters long; the limit is 500...
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"reason must be a string, not {type(value).__name__}")
+    text = value.strip()
+    if not text:
+        raise ValueError(
+            "reason is blank. Leave it unset when there is nothing to say; a blank reason "
+            "would be stored as a reason that says nothing.")
+    if len(text) > REASON_CHARS:
+        raise ValueError(
+            f"reason is {len(text)} characters long; the limit is {REASON_CHARS}. Say "
+            "why the fact ended in a sentence, not the conversation that showed it.")
+    return text
+
+
+def closure_reasons(claim: "Claim") -> list[tuple[str, str]]:
+    """Every reason recorded on this claim's closures, oldest first, as (close, reason).
+
+    Read off the closure witness in `meta[CLOSURE]`. A closure recorded without a reason
+    contributes nothing, and a claim that never closed returns an empty list. It returns
+    all of them rather than the latest, for the reason the witness is a list: a claim can
+    end and later be retired, and each of those can carry its own reason.
+
+    >>> c = Claim(subject="user", predicate="works_at", object="Acme")
+    >>> close_out(c, utcnow(), None, "ended", reason="left for Globex")
+    >>> closure_reasons(c)
+    [('ended', 'left for Globex')]
+    """
+    return [(str(entry.get("close")), str(entry["reason"]))
+            for entry in claim.meta.get(CLOSURE) or []
+            if isinstance(entry, dict) and entry.get("reason")]
+
+
+def close_out(claim: "Claim", at: datetime, by: str | None, close: Closure,
+              reason: str | None = None) -> None:
     """Stamp one end-of-life onto a claim in memory. The caller persists it.
 
     The single implementation of the rule above, shared by every path that ends a claim:
@@ -291,12 +349,17 @@ def close_out(claim: "Claim", at: datetime, by: str | None, close: Closure) -> N
     The object is stamped, not just the database. `forget()` used to hand back claims
     read *before* its update ran, so every claim the call had just closed out reported
     itself live to anyone who logged or rendered the return value.
+
+    `reason` says why, in the caller's words, and is recorded on the witness beside the
+    clock that stopped. The caller validates it first with `closure_reason`. It is
+    written only when given, so a closure without one leaves exactly the record it
+    always did.
     """
     if by is not None:
         claim.invalidated_by = by
     if close == "retired":
         claim.invalidated_at = as_utc(at)
-        _witness(claim, claim.invalidated_at, by, close)
+        _witness(claim, claim.invalidated_at, by, close, reason)
         return
     # Never before the claim's own start: a closure backdated past the fact it closes
     # collapses the interval to zero length rather than inverting it. An interval that
@@ -306,10 +369,31 @@ def close_out(claim: "Claim", at: datetime, by: str | None, close: Closure) -> N
     landed = claim.valid_to
     if landed is None or as_utc(landed) > edge:
         claim.valid_to = landed = edge
-    _witness(claim, as_utc(landed), by, close)
+    _witness(claim, as_utc(landed), by, close, reason)
 
 
-def _witness(claim: "Claim", at: datetime, by: str | None, close: Closure) -> None:
+def planned_end(claim: "Claim", reason: str) -> None:
+    """Record why a claim written with a `valid_to` will stop being true.
+
+    A fact can be written already carrying its end ("the contract runs until the 30th").
+    That end is set on the claim itself rather than applied later by `close_out`, but its
+    reason belongs in the same record every other ending's reason lives in, so that
+    `history()` and `why()` read one place. This appends an `ended` witness at the
+    claim's `valid_to`, naming no displacing claim because nothing displaced it.
+
+    Called only with a reason. A claim written with a `valid_to` and no reason keeps no
+    witness, exactly as before this function existed, so no existing row changes shape.
+    """
+    if claim.valid_to is None:
+        raise ValueError(
+            "until_reason says why a fact will stop being true, and this fact has no end "
+            "date. Pass valid_to (true_until on memory_remember) with it, or leave "
+            "until_reason unset.")
+    _witness(claim, as_utc(claim.valid_to), None, "ended", reason)
+
+
+def _witness(claim: "Claim", at: datetime, by: str | None, close: Closure,
+             reason: str | None = None) -> None:
     """Append the closure to `meta[CLOSURE]`. See that constant for why this exists.
 
     `at` is the instant that actually **landed on the axis**, not the one requested — the
@@ -322,8 +406,10 @@ def _witness(claim: "Claim", at: datetime, by: str | None, close: Closure) -> No
     the *existing* `valid_to`, because that is still where the claim ends. The row says
     a closure was applied and where the axis stands, which is what a reader needs.
     """
-    claim.meta.setdefault(CLOSURE, []).append(
-        {"at": at.timestamp(), "close": close, "by": by})
+    entry: dict[str, Any] = {"at": at.timestamp(), "close": close, "by": by}
+    if reason is not None:
+        entry["reason"] = reason
+    claim.meta.setdefault(CLOSURE, []).append(entry)
 
 
 def _new_id(prefix: str) -> str:
@@ -971,13 +1057,105 @@ class Provenance:
     derivation: Derivation
     extractor: str
     superseded: list["Claim"] = field(default_factory=list)
+    #: The typed links that touch this claim, in either direction: memories that add
+    #: detail to it or that it adds detail to (`extends`), and memories it was inferred
+    #: from or that were inferred from it (`derives`). See `Link`. Appended last so a
+    #: positional construction written before it existed still binds.
+    links: list["Link"] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return (
             f"<Provenance {self.claim.id} {_short(self.claim.text)!r} "
             f"via {self.extractor or '?'} ({self.derivation.value}) "
-            f"sources={len(self.episodes)} superseded={len(self.superseded)}>"
+            f"sources={len(self.episodes)} superseded={len(self.superseded)} "
+            f"links={len(self.links)}>"
         )
+
+
+#: The two kinds of typed link one memory can hold to another. Supersession is not one of
+#: them: a claim that replaced another already points at it through `invalidated_by`, and
+#: a second record of the same fact would be a second place for it to go wrong.
+#:
+#: ``"extends"``  the first memory adds detail to the second. "The migration runs in
+#:                three stages" extends "we are migrating to Postgres".
+#: ``"derives"``  the first memory was inferred from the second: a conclusion written
+#:                from facts already stored. Nothing in the engine writes one today.
+#:                Consolidation's merge is a supersession of near-duplicates, which
+#:                `invalidated_by` already records, and it creates no inferred claim.
+LinkRelation = Literal["extends", "derives"]
+
+#: Every legal `LinkRelation`, for validation and for error messages.
+LINK_RELATIONS: tuple[LinkRelation, ...] = ("extends", "derives")
+
+
+def link_relation(value: str) -> LinkRelation:
+    """Validate a caller-supplied relation, or raise naming both legal ones.
+
+    >>> link_relation("derives")
+    'derives'
+    >>> link_relation("supersedes")               # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+    ValueError: relation='supersedes' is not a link relation...
+    """
+    if value in LINK_RELATIONS:
+        return cast(LinkRelation, value)
+    raise ValueError(
+        f"relation={value!r} is not a link relation. Use 'extends' when the first memory "
+        "adds detail to the second, or 'derives' when the first was inferred from the "
+        "second. A memory that replaced another is recorded by the replacement itself, "
+        "so there is no link for that.")
+
+
+@dataclass(frozen=True, slots=True)
+class Link:
+    """One typed link between two memories, read as "`from_id` <relation> `to_id`".
+
+    `created_at` is when the link was recorded, on the belief clock. `by` names what
+    wrote it: `"api"` by default, or whatever name a caller passes to `Memvara.link(by=)`.
+
+    A link has no valid time and no closure of its own. It records a relationship between
+    two records rather than a fact about the world, so it lives exactly as long as both
+    records do: erasing either claim removes the link in the same transaction.
+    """
+
+    from_id: str
+    to_id: str
+    relation: LinkRelation
+    created_at: datetime
+    by: str = "api"
+
+    def other(self, claim_id: str) -> str:
+        """The id at the far end of this link from `claim_id`."""
+        return self.to_id if claim_id == self.from_id else self.from_id
+
+
+@dataclass(frozen=True, slots=True)
+class ForgetPreview:
+    """What `forget_matching` would close, and the token that confirms it.
+
+    Nothing has changed when you hold one of these. `matches` maps each claim id to its
+    text, in the order the search ranked them. `confirm` is the token to pass back to
+    apply `close` to exactly those ids, and it stops being accepted at `expires_at`.
+    """
+
+    close: Closure
+    matches: dict[str, str]
+    confirm: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ForgetResult:
+    """What a confirmed `forget_matching` closed.
+
+    `closed` holds the claims as they read after the closure, so `Claim.state` on each
+    says which clock stopped. `reason` is the reason recorded on every one of them, or
+    `None` when none was given.
+    """
+
+    close: Closure
+    closed: list[Claim]
+    reason: str | None = None
 
 
 @dataclass(slots=True)

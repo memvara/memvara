@@ -68,7 +68,7 @@ every write. `remember()` is unaffected — a structured write never needed a mo
 MEMVARA_DB=~/.memvara/memory.db python3 -m memvara.server
 ```
 
-JSON-RPC 2.0 over stdio, fifteen tools, no SDK dependency. It refuses to start without
+JSON-RPC 2.0 over stdio, eighteen tools, no SDK dependency. It refuses to start without
 `MEMVARA_DB` and prints the client configuration block instead — so if you have arrived
 here because your client said the server failed, run the command by hand and read what it
 says.
@@ -136,6 +136,7 @@ transport is stdio and the configuration is entirely environment.
 | `MEMVARA_READ_ONLY` | `1` hides every tool that writes. |
 | `MEMVARA_READ_W_GRAPH` | Weight on the graph leg of retrieval, which walks out of the entities the vector and lexical legs just named. Unset means `0.0`, the leg switched off, which is what every deployment has run. Set `1.0` to give it the same weight as the other two legs. A store that holds no relations pays nothing for switching it on, because the walk does not run when there is nothing to walk. A finite number of zero or more; anything else is refused at startup. See [Choosing how this server reads](#choosing-how-this-server-reads). |
 | `MEMVARA_ANCHORED` | `1` makes `anchored` true by default on `memory_recall`, `memory_search` and `memory_ask`, so a question about an entity the store has never heard of returns nothing instead of the nearest memory about somebody else. Each call can still pass `anchored` itself, either way, and the tool descriptions this server offers say which default is in force. Unset means false, which is what every deployment has run. See [Choosing how this server reads](#choosing-how-this-server-reads). |
+| `MEMVARA_CONFIRM_SECRET` | The key that signs the confirmation token `memory_end_matching` and `memory_forget_matching` return with a preview. Set the same value on every process that serves one store, so a preview served by one process can be confirmed by another. Unset, each process generates its own key when it starts, which is right for a single stdio server; a token then does not survive a restart. Treat it as a secret: anyone holding it can mint a token that closes memories they can see without a preview ever being shown. A blank value means unset. Refused under `MEMVARA_MODE=cloud`, where the deployment checks tokens with its own key. |
 
 **There is no variable here that configures a `read_selector`.** `memory_recall`'s
 `ranked` argument (see `memvara.select`) is accepted by this server regardless, and every

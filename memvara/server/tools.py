@@ -1,4 +1,4 @@
-r"""The fifteen tools, their descriptions, and how a stored memory is rendered back.
+r"""The eighteen tools, their descriptions, and how a stored memory is rendered back.
 
 Four things in here are load-bearing and easy to mistake for boilerplate.
 
@@ -49,6 +49,12 @@ would ask the model to overrule the word it had just chosen. Splitting them puts
 where the choice is actually made, and follows the shape `delete`/`erase` and
 `forget`/`purge` already take in `core`: operations that mean different things get
 different names rather than a flag.
+
+The same rule gives the query-addressed closure two tools. `Memvara.forget_matching` takes
+`close=`, as `forget` and `delete` do, and the design for this feature named one tool with
+that argument. The tool surface splits it instead: `memory_end_matching` and
+`memory_forget_matching` share one handler with the closure fixed by the tool's name, so a
+model chooses between them exactly as it chooses between `memory_end` and `memory_forget`.
 """
 
 from __future__ import annotations
@@ -57,14 +63,16 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence, cast
 
+from ..confirm import ConfirmationRefused
 from ..core import Memvara, ScopedMemvara, is_derived, standing_order
 # `_slugify` is private and imported anyway, for `Memvara._safe_line`'s reason a few
 # lines below: it is the store's own spelling rule, and a copy of it here would be a
 # second implementation that can disagree about whether a fold happened.
 from ..schema import _slugify
 from ..select import SelectorBusy
-from ..types import (Accumulation, Claim, Collapse, Dispute, MemoryType, Retype, Row,
-                     WriteReceipt, utcnow)
+from ..types import (LINK_RELATIONS, REASON_CHARS, Accumulation, Claim, Closure, Collapse,
+                     Dispute, ForgetPreview, MemoryType, Retype, Row, WriteReceipt,
+                     closure_reason, closure_reasons, utcnow)
 from .memory_api import MemoryAPI
 from .validate import ToolError, validate
 
@@ -489,6 +497,19 @@ _TRUE_UNTIL = {
         "because a claim true at no instant answers nothing and is the failure "
         "true_since exists to prevent. If the fact was never true at all, that is not "
         "an interval: use memory_forget."
+    ),
+}
+
+#: Why a fact was closed, as memory_end, memory_forget and the two matching tools take
+#: it. One fragment so the four describe the same argument in the same words.
+_REASON: dict[str, Any] = {
+    "type": "string",
+    "maxLength": REASON_CHARS,
+    "description": (
+        "Why, in one sentence: 'the contract ran out', 'misheard: the user said Porto'. "
+        "It is stored on each fact this call closes, and memory_history "
+        "and memory_why show it beside the fact from then on. Optional; at most "
+        f"{REASON_CHARS} characters, and a blank one is refused."
     ),
 }
 
@@ -1348,17 +1369,45 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
                 "stored as nothing rather than as a partial fact.")
     memory_type = args.get("memory_type")
     since, until = _interval(args)
-    receipt = ctx.memory.remember(
-        args["subject"], args["predicate"], args["object"],
-        confidence=args["confidence"],
-        memory_type=MemoryType(memory_type) if memory_type is not None else None,
-        valid_from=since, valid_to=until,
-        extractor=args.get("extractor") or "api",
-        # Ids, never Episode objects. `_cite` stores anything it is handed as an Episode
-        # and merely links a string, so accepting text here would duplicate a turn the
-        # caller has usually just stored through memory_add.
-        sources=args.get("sources") or None,
-    )
+    # Checked here, before anything is written, so each refusal names the argument the
+    # model sent rather than the library keyword it became.
+    if args.get("until_reason") is not None and until is None:
+        raise ToolError(
+            "memory_remember.until_reason says why a fact will stop being true, and no "
+            "true_until was sent, so there is no end for it to explain. Send true_until "
+            "with it, or leave until_reason out.")
+    if args.get("reason") is not None and args.get("replaces") is None:
+        raise ToolError(
+            "memory_remember.reason says why the fact named by replaces was replaced, "
+            "and replaces was not sent. Send replaces=<claim id> with it. To close a "
+            "value with a reason and store nothing new, use memory_end or memory_forget.")
+    until_reason = _reason(args, "until_reason", "memory_remember")
+    reason = _reason(args, "reason", "memory_remember")
+    try:
+        receipt = ctx.memory.remember(
+            args["subject"], args["predicate"], args["object"],
+            confidence=args["confidence"],
+            memory_type=MemoryType(memory_type) if memory_type is not None else None,
+            valid_from=since, valid_to=until,
+            extractor=args.get("extractor") or "api",
+            # Ids, never Episode objects. `_cite` stores anything it is handed as an
+            # Episode and merely links a string, so accepting text here would duplicate
+            # a turn the caller has usually just stored through memory_add.
+            sources=args.get("sources") or None,
+            until_reason=until_reason,
+            replaces=args.get("replaces"),
+            reason=reason,
+        )
+    except KeyError:
+        # Only `replaces` raises this, and the message names no scope on purpose: the
+        # same answer for a missing id and one in another scope.
+        raise ToolError(
+            f"Nothing written: memory_remember.replaces={args.get('replaces')!r} names no "
+            "fact visible here. Run memory_search to get a current id.") from None
+    except ValueError as exc:
+        # A `replaces` claim that is no longer live, or a reason over its limit. The
+        # library's message says which and what to send instead.
+        raise ToolError(f"Nothing written: {exc}") from None
     return "\n".join(filter(None, _receipt_summary(ctx, receipt)
                             + [_fold_note(args["predicate"],
                                            # `added` first: it is where the fact landed.
@@ -1367,6 +1416,21 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
                                            # canonical slot.
                                            list(receipt.added) + list(receipt.closed)),
                                _interval_note(receipt.added), _pending(receipt.closed)]))
+
+
+def _reason(args: Mapping[str, Any], field: str, tool: str) -> str | None:
+    """A reason argument, validated as the library will validate it, or `None`.
+
+    Checked at the boundary so a blank reason is refused as an argument error naming the
+    field, before any write, rather than reaching the model as a library `ValueError`
+    through `mcp.py`'s catch-all. The length is also capped by the schema's `maxLength`;
+    this adds the blank check, which a schema cannot express.
+    """
+    raw = args.get(field)
+    try:
+        return closure_reason(raw)
+    except ValueError as exc:
+        raise ToolError(f"{tool}.{field}: {exc}") from None
 
 
 def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -1379,9 +1443,10 @@ def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
             "memory_forget needs exactly one of: 'predicate' (with optional 'subject'), "
             "to retire every current value of that fact, or 'claim_id', to retire one "
             "specific claim from memory_search.")
+    reason = _reason(args, "reason", "memory_forget")
 
     if claim_id is not None:
-        if not ctx.memory.delete(claim_id):
+        if not ctx.memory.delete(claim_id, reason=reason):
             return (f"Nothing retired: no claim {claim_id!r} is visible here. Run "
                     "memory_search to get a current id.")
         return (f"Retired claim {claim_id}. It no longer answers questions; "
@@ -1392,7 +1457,8 @@ def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
     # two variables rather than a fact about one, so no narrowing can reach it — the
     # suppression is on this line only, and turning the guard into something a checker
     # could follow would mean an unreachable third branch nothing executes.
-    retired = ctx.memory.forget(args["subject"], predicate)  # type: ignore[arg-type]
+    retired = ctx.memory.forget(args["subject"], predicate,  # type: ignore[arg-type]
+                                reason=reason)
     if not retired:
         return (f"Nothing to forget: no live value for {args['subject']}/{predicate}. "
                 "Check the predicate spelling with memory_search.")
@@ -1445,9 +1511,10 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
     # a closure at the wrong time: `_timestamp` raises, and this tool's whole subject is
     # *which* instant a fact stopped being true at.
     at = _timestamp(at_raw, "memory_end.at") if at_raw is not None else None
+    reason = _reason(args, "reason", "memory_end")
 
     if claim_id is not None:
-        if not ctx.memory.delete(claim_id, at=at, close="ended"):
+        if not ctx.memory.delete(claim_id, at=at, close="ended", reason=reason):
             return (f"Nothing ended: no claim {claim_id!r} is visible here. Run "
                     "memory_search to get a current id.")
         # `delete` returned True, so this id is in scope and was just written back; the
@@ -1482,7 +1549,7 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
 
     # Validated string by the guard above, for the reason spelled out in `_forget`.
     ended = ctx.memory.forget(args["subject"], predicate,  # type: ignore[arg-type]
-                              at=at, close="ended")
+                              at=at, close="ended", reason=reason)
     if not ended:
         return (f"Nothing to end: no live value for {args['subject']}/{predicate}. Check "
                 "the predicate spelling with memory_search; if the value you meant is "
@@ -1495,6 +1562,176 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
     return "\n".join(filter(None, lines + [_fold_note(predicate,  # type: ignore[arg-type]
                                                       ended),
                                            _pending(ended)]))
+
+
+#: What differs between `memory_end_matching` and `memory_forget_matching`, and nothing
+#: else. Both tools are built from this by `_matching_tool`, so the text they share is
+#: written once and cannot drift into two versions of one rule. Each entry uses the
+#: vocabulary `.claude/rules/tool-descriptions.md` fixes: `ended` says the world moved,
+#: `retired` says the record was wrong.
+_MATCHING: dict[str, dict[str, str]] = {
+    "ended": {
+        "tool": "memory_end_matching", "single": "memory_end",
+        "other": "memory_forget_matching", "verb": "end", "done": "ended",
+        "intro": (
+            "End every live fact that matches a query, because all of them have stopped "
+            "being true, in two calls. Call it when the user says a whole group of facts "
+            "is over — the project shipped, they left that team, the old cluster is "
+            "gone — and ending them one by one would take many calls. "),
+        "all_of_them": "has stopped being true,",
+        "choice": (
+            "Yes, and the world has moved on since — use this. No, the records were "
+            "wrong — use memory_forget_matching. "),
+        "effect": (
+            "Ended facts answer nothing after now, still answer about the period before, "
+            "and stay visible to memory_history; nothing is erased. "),
+        "examples": "'the old staging cluster', 'Acme contract'",
+    },
+    "retired": {
+        "tool": "memory_forget_matching", "single": "memory_forget",
+        "other": "memory_end_matching", "verb": "retire", "done": "retired",
+        "intro": (
+            "Retire every live fact that matches a query, because all of those records "
+            "were wrong, in two calls. Call it when the user says a whole group of "
+            "stored facts was never right, or asks you to forget everything about one "
+            "topic. "),
+        "all_of_them": ("was never right — misheard, badly inferred, about someone "
+                        "else — or the user asked you to forget all of them,"),
+        "choice": (
+            "No — use this. Yes, and the world has moved on since — use "
+            "memory_end_matching, because retiring asserts the values were always "
+            "errors, and nothing downstream can correct that afterwards. "),
+        "effect": (
+            "Retired facts stop answering questions and stay visible to memory_history; "
+            "this is not erasure, which is an operator action no tool offers, and nothing "
+            "here un-retires a fact. "),
+        "examples": "'the wrong address', 'Acme'",
+    },
+}
+
+
+def _matching(close: Closure) -> Handler:
+    """The handler for `memory_end_matching` or `memory_forget_matching`.
+
+    One implementation behind two tools, for the reason the module docstring gives: the
+    closure is chosen by the tool's name, never by a flag, and the two tools differ in
+    nothing else. The handler never takes `close` from the arguments; it is fixed here.
+    """
+    words = _MATCHING[close]
+    tool, verb, done = words["tool"], words["verb"], words["done"]
+
+    def handler(ctx: ToolContext, args: dict[str, Any]) -> str:
+        confirm = args.get("confirm")
+        query = args.get("query") or ""
+        # Only the preview reads the query. The confirming call closes exactly the ids
+        # its token lists, so refusing a blank query there would refuse a correct call
+        # over an argument nothing uses.
+        if confirm is None and not query.strip():
+            raise ToolError(f"{tool}.query is blank. Say what the memories to {verb} are "
+                            "about, the way you would search for them.")
+        reason = _reason(args, "reason", tool)
+        try:
+            out = ctx.memory.forget_matching(query, close=close, k=args["k"],
+                                             reason=reason, confirm=confirm)
+        except ConfirmationRefused as exc:
+            raise ToolError(str(exc)) from None
+        if isinstance(out, ForgetPreview):
+            if not out.matches:
+                return (f"Nothing matched {safe_line(query)!r}, so there is nothing to "
+                        f"{verb}. Nothing was changed.")
+            lines = [
+                f"Preview: {len(out.matches)} live match(es). Nothing has changed "
+                f"yet. To {verb} exactly these, call {tool} again with confirm set to the "
+                f"token below; it expires at {_stamp(out.expires_at)}. If any of them "
+                f"should not be {done}, do not confirm: {verb} the right ones one at a "
+                f"time with {words['single']} and claim_id. " + STORED_HEADER]
+            lines += [f"{i}. [id={cid}] {safe_line(text)}"
+                      for i, (cid, text) in enumerate(out.matches.items(), 1)]
+            lines.append(f"confirm: {out.confirm}")
+            return "\n".join(lines)
+        if not out.closed:
+            return f"The preview listed nothing, so nothing was {done}."
+        lines = [f"{done.capitalize()} {len(out.closed)} value(s)"
+                 + (f", with the reason {safe_line(out.reason)!r}" if out.reason else "")
+                 + f". memory_history still shows them, marked {done}."]
+        lines += [f"- [{c.id} {_state(c)}] {safe_line(c.text)}" for c in out.closed]
+        return "\n".join(lines)
+
+    return handler
+
+
+def _matching_tool(close: Closure) -> "Tool":
+    """`memory_end_matching` or `memory_forget_matching`: description, schema and handler.
+
+    The two tools share every sentence except the ones in `_MATCHING`, so they are built
+    here from one text rather than written out twice.
+    """
+    w = _MATCHING[close]
+    description = (
+        w["intro"]
+        + "First call it without confirm: it changes nothing, and returns the matching "
+        "facts, each with its id, and a confirm token. Read the list. If every fact on it "
+        f"{w['all_of_them']} call again with the same arguments plus confirm set to that "
+        f"token: exactly the listed facts are {w['done']}, and nothing that started "
+        f"matching since. If any of them should not be {w['done']}, do not confirm; "
+        f"{w['verb']} the right ones one at a time with {w['single']} and claim_id. This "
+        f"is {w['single']} for many facts at once, and the same question decides between "
+        f"it and {w['other']}: back when each fact was written, was it correct? "
+        + w["choice"] + w["effect"]
+        + "The confirm token expires ten minutes after the preview. It is refused, and "
+        f"nothing is {w['done']}, when it has expired, when {w['other']} issued it, or "
+        "when any listed fact has changed since the preview; call again without confirm "
+        "for a new list. The match is a search with no relevance floor, so the list can "
+        "include facts that match only loosely, which is why the preview exists and why "
+        "reading it matters."
+    )
+    return Tool(
+        name=w["tool"],
+        description=description,
+        properties={
+            "query": {
+                "type": "string", "maxLength": 500,
+                "description": (
+                    f"What the facts to {w['verb']} are about, as you would search for "
+                    f"them: {w['examples']}. Required without confirm. With confirm it "
+                    "is not read, because the confirming call closes exactly what the "
+                    "preview listed."),
+            },
+            "k": {
+                "type": "integer", "minimum": 1, "maximum": 100, "default": 20,
+                "description": (
+                    f"Most facts the preview may list. The confirming call {w['verb']}s "
+                    "exactly what the preview listed, whatever k says."),
+            },
+            "reason": _REASON,
+            "confirm": {
+                "type": "string", "maxLength": 4096,
+                "description": ("The token from the preview call. Omit it to get a "
+                                f"preview; nothing is {w['done']} without it."),
+            },
+        },
+        required=(),
+        handler=_matching(close),
+        writes=True,
+        destructive=True,
+    )
+
+
+def _link(ctx: ToolContext, args: dict[str, Any]) -> str:
+    try:
+        link = ctx.memory.link(args["from_id"], args["to_id"], args["relation"])
+    except KeyError:
+        # One message for a missing id and one in another scope, as `memory_why` gives,
+        # and a result rather than an error, as `memory_forget` answers an unknown id.
+        return ("Nothing linked: one of the two ids is not visible here. Ids come from "
+                "memory_search or a write receipt; run memory_search to get current ones.")
+    except ValueError as exc:
+        # A fact linked to itself. The relation is an enum in the schema, so the
+        # validator has already refused any other value.
+        raise ToolError(f"Nothing linked: {exc}.") from None
+    meaning = ("adds detail to" if link.relation == "extends" else "was inferred from")
+    return (f"Linked: {link.from_id} {link.relation} {link.to_id}, meaning the first "
+            f"{meaning} the second. memory_why on either one lists it.")
 
 
 def _walk_axes(args: dict[str, Any], tool: str) -> tuple[Any, Any]:
@@ -1664,12 +1901,40 @@ def _history(ctx: ToolContext, args: dict[str, Any]) -> str:
              f"oldest first by when each was recorded. 'true from' is the other clock — "
              f"when the value held in the world — and it can run in a different order. "
              f"{STORED_HEADER}"]
-    lines += [
-        f"{i}. [id={c.id} recorded {_stamp(c.recorded_at)} "
-        f"true from {_stamp(c.valid_from)} {_state(c)}] {safe_line(c.text)}"
-        for i, c in enumerate(claims, 1)
-    ]
+    for i, c in enumerate(claims, 1):
+        lines.append(f"{i}. [id={c.id} recorded {_stamp(c.recorded_at)} "
+                     f"true from {_stamp(c.valid_from)} {_state(c)}] {safe_line(c.text)}")
+        lines += _reason_lines(c, "   ")
     return "\n".join(lines)
+
+
+def _reason_lines(claim: Claim, indent: str) -> list[str]:
+    """One line per reason recorded on this claim's closures, oldest first.
+
+    A reason is caller-supplied text, so it is flattened like any stored text, and the
+    words before it ("ended because:") are ours. Each reason gets a line of its own below
+    the claim rather than a place on the claim's line, so the claim's text still ends its
+    own line.
+    """
+    return [f"{indent}{close} because: {safe_line(reason)}"
+            for close, reason in closure_reasons(claim)]
+
+
+def _link_lines(ctx: ToolContext, claim_id: str, links: Sequence[Any]) -> list[str]:
+    """The typed links on a claim, each with the text of the memory at its far end."""
+    if not links:
+        return []
+    lines = [f"Linked to {len(links)} other memory(ies). 'extends' means the first adds "
+             "detail to the second; 'derives' means the first was inferred from the "
+             "second."]
+    for link in links:
+        other = ctx.memory.get(link.other(claim_id))
+        text = safe_line(other.text) if other is not None else "(no longer visible)"
+        if link.from_id == claim_id:
+            lines.append(f"  [this {link.relation} {link.to_id}] {text}")
+        else:
+            lines.append(f"  [{link.from_id} {link.relation} this] {text}")
+    return lines
 
 
 def _why(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -1685,6 +1950,7 @@ def _why(ctx: ToolContext, args: dict[str, Any]) -> str:
         f"Derived by {prov.derivation.value} ({prov.extractor or 'unrecorded'}).",
         f"Asserts: {safe_line(claim.text)}",
     ]
+    lines += _reason_lines(claim, "")
     if prov.episodes:
         lines.append(f"From {len(prov.episodes)} source turn(s). {STORED_HEADER}")
         lines += [f"  [{e.role} {_stamp(e.ts)}] {_clip(e.content)}" for e in prov.episodes]
@@ -1693,6 +1959,7 @@ def _why(ctx: ToolContext, args: dict[str, Any]) -> str:
     if prov.superseded:
         lines.append(f"Replaced {len(prov.superseded)} earlier value(s):")
         lines += [f"  {s}" for s in _claim_lines("-", prov.superseded)]
+    lines += _link_lines(ctx, claim.id, prov.links)
     return "\n".join(lines)
 
 
@@ -2288,6 +2555,35 @@ TOOLS: tuple[Tool, ...] = (
             },
             "true_since": _TRUE_SINCE,
             "true_until": _TRUE_UNTIL,
+            "until_reason": {
+                "type": "string", "maxLength": REASON_CHARS,
+                "description": (
+                    "Why the fact stops being true at true_until: 'the contract runs out "
+                    "on the 30th'. Stored on the fact, and memory_history and memory_why "
+                    "show it. Only with true_until; sent without it, the call is refused. "
+                    f"At most {REASON_CHARS} characters."
+                ),
+            },
+            "replaces": {
+                "type": "string",
+                "description": (
+                    "The id of one live fact, from memory_search, that this new fact "
+                    "replaces. The named fact is ended in the same write, at the instant "
+                    "this one begins (true_since, or now), and it records that this fact "
+                    "replaced it, so memory_why on the new fact names it. Use it when the "
+                    "old value would otherwise stay live beside the new one: a predicate "
+                    "that holds several values at once, like uses_tool or likes, keeps "
+                    "every value it is given, and only a named replacement ends one of "
+                    "them. It ends, it does not retire: if the old value was never right, "
+                    "use memory_forget on it instead. Refused, with nothing written, when "
+                    "the id is not visible here or the fact is no longer live."
+                ),
+            },
+            "reason": dict(_REASON, description=(
+                "Why the fact named by replaces was replaced: 'moved from Jest to "
+                "Vitest'. Stored on the replaced fact, and memory_history and memory_why "
+                "show it. Only with replaces; sent without it, the call is refused. "
+                f"At most {REASON_CHARS} characters.")),
             "sources": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -2398,6 +2694,7 @@ TOOLS: tuple[Tool, ...] = (
             "predicate": dict(_PREDICATE, description=(
                 _PREDICATE["description"] + " Omit only when passing claim_id.")),
             "claim_id": _CLAIM_ID,
+            "reason": _REASON,
         },
         required=(),
         handler=_forget,
@@ -2446,11 +2743,48 @@ TOOLS: tuple[Tool, ...] = (
                     "fact is true until then."
                 ),
             },
+            "reason": _REASON,
         },
         required=(),
         handler=_end,
         writes=True,
         destructive=True,
+    ),
+    _matching_tool("ended"),
+    _matching_tool("retired"),
+    Tool(
+        name="memory_link",
+        description=(
+            "Record that one stored fact adds detail to another, or was inferred from "
+            "another. Read it as from_id <relation> to_id. 'extends': from_id adds detail "
+            "to to_id ('the migration runs in three stages' extends 'we are migrating to "
+            "Postgres'). 'derives': from_id was worked out from to_id, so it stands or "
+            "falls with it. Call it when you store a fact that elaborates on or follows "
+            "from one already stored, so memory_why on either fact shows the connection. "
+            "Do not use it for a newer value of the same fact: memory_remember with "
+            "replaces records that, and a fact that replaced another already points to "
+            "it. Both ids come from memory_search or a write receipt and must be visible "
+            "here, and a fact cannot be linked to itself. Recording the same link twice "
+            "changes nothing. A link has no time of its own: it lasts as long as both "
+            "facts are stored, including after either is ended or retired, and it is "
+            "removed only when an operator erases one of them."
+        ),
+        properties={
+            "from_id": dict(_CLAIM_ID, description=(
+                "The fact that adds detail, or that was inferred. " +
+                _CLAIM_ID["description"])),
+            "to_id": dict(_CLAIM_ID, description=(
+                "The fact it adds detail to, or was inferred from. " +
+                _CLAIM_ID["description"])),
+            "relation": {
+                "type": "string", "enum": list(LINK_RELATIONS),
+                "description": ("'extends' when from_id adds detail to to_id; 'derives' "
+                                "when from_id was inferred from to_id."),
+            },
+        },
+        required=("from_id", "to_id", "relation"),
+        handler=_link,
+        writes=True,
     ),
     Tool(
         name="memory_history",
@@ -2458,7 +2792,8 @@ TOOLS: tuple[Tool, ...] = (
             "Show every value one fact has ever held, oldest first by when each was "
             "recorded, with the instant it began holding in the world and how it stopped "
             "being current — 'ended' where a newer value took over, 'retired' where the "
-            "record was withdrawn as wrong. Those are two different clocks and the rows "
+            "record was withdrawn as wrong — with the reason on a line below any value "
+            "that was closed with one. Those are two different clocks and the rows "
             "are ordered by the first, so a value backfilled today about last year is "
             "listed last while being the earliest thing here; read 'true from' rather "
             "than the row number when the question is what came first. Call it when "
@@ -2475,8 +2810,11 @@ TOOLS: tuple[Tool, ...] = (
         name="memory_why",
         description=(
             "Explain why one stored claim is believed: the conversation turns it was "
-            "derived from, whether a rule or a model extracted it, and which earlier "
-            "value it replaced. Call it whenever the user challenges a memory — 'why do "
+            "derived from, whether a rule or a model extracted it, which earlier value it "
+            "replaced, the facts it is linked to by memory_link ('extends' or "
+            "'derives', in either direction), and, if it was ended or "
+            "retired with a reason, that reason. Call it whenever the user challenges a "
+            "memory — 'why do "
             "you think that', 'I never said that', 'where did you get that' — and quote "
             "the source turn back to them instead of defending the claim. Needs a "
             "claim_id from memory_search."

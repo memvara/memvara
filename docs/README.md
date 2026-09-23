@@ -37,7 +37,7 @@ using it. They are independent — read either first. Ninety seconds of it runni
 
 | | |
 |---|---|
-| [MCP](integrations/mcp.md) | The fifteen tools, the three ways to reach them, and which one to pick |
+| [MCP](integrations/mcp.md) | The eighteen tools, the three ways to reach them, and which one to pick |
 | [Frameworks](integrations/frameworks.md) | LangChain, LlamaIndex, LangGraph and CrewAI — and exactly what each adapter preserves and loses |
 
 ## Reference

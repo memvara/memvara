@@ -5,9 +5,9 @@ One tool table serves a local engine and a hosted deployment because both scoped
 protocol. A second table would be two descriptions of the same tools, drifting apart at
 whichever one a change forgets.
 
-**Every member is derived from a call site, not from a wish list.** Eighteen are reached
-as `ctx.memory.<name>`; `connectivity` is reached through a parameter, because `_stats`
-hands `ctx.memory` to `_join_rate`. `tests/test_memory_api_protocol.py` reads
+**Every member is derived from a call site, not from a wish list.** Every member but one
+is reached as `ctx.memory.<name>`; `connectivity` is reached through a parameter, because
+`_stats` hands `ctx.memory` to `_join_rate`. `tests/test_memory_api_protocol.py` reads
 `tools.py` and fails in both directions — a call this does not declare, and a member no
 call uses.
 
@@ -41,8 +41,8 @@ from typing import (TYPE_CHECKING, Any, Collection, Literal, Mapping, Protocol, 
                     runtime_checkable)
 
 from ..retrieve import Path
-from ..types import (Answer, Claim, Delta, MemoryType, Profile, Provenance, Result,
-                     Scope, WriteReceipt)
+from ..types import (Answer, Claim, Delta, ForgetPreview, ForgetResult, Link, MemoryType,
+                     Profile, Provenance, Result, Scope, WriteReceipt)
 
 __all__ = ["MemoryAPI"]
 
@@ -170,10 +170,22 @@ class MemoryAPI(Protocol):
         """
 
     def forget(self, subject: str, predicate: str, *, at: datetime | None = None,
-               close: str = "retired") -> list[Claim]: ...
+               close: str = "retired", reason: str | None = None) -> list[Claim]: ...
 
     def delete(self, claim_id: str, *, at: datetime | None = None,
-               close: str = "retired") -> bool: ...
+               close: str = "retired", reason: str | None = None) -> bool: ...
+
+    def forget_matching(self, query: str, *, close: str, k: int = 20,
+                        reason: str | None = None,
+                        confirm: str | None = None) -> ForgetPreview | ForgetResult:
+        """A preview without `confirm`, the closure with it. `ConfirmationRefused` for a
+        token the view will not honour, from either engine: `ScopedRemoteMemvara`
+        translates the deployment's refusal into the same exception."""
+
+    def link(self, from_id: str, to_id: str, relation: str, *,
+             by: str = "api") -> Link:
+        """Record a typed link. There is no `links` member beside it: `memory_why` reads
+        a claim's links off `why().links`, so no tool calls `links` directly."""
 
     # -- reporting -----------------------------------------------------------
 

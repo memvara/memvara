@@ -1,7 +1,7 @@
 # MCP
 
 Memvara speaks the Model Context Protocol, so an agent that supports MCP gets memory as
-fifteen tools without you writing any code. **There are three ways to reach them, and
+eighteen tools without you writing any code. **There are three ways to reach them, and
 picking the right one takes one question.**
 
 | You want | Use | Setup |
@@ -78,7 +78,7 @@ what lets an anchored read still reach a fact the question reaches only through 
 one. Both ship off; [`docs/DEPLOY.md`](../DEPLOY.md#choosing-how-this-server-reads) has the
 measurements and the case for each.
 
-## The fifteen tools
+## The eighteen tools
 
 | Tool | What it does |
 |---|---|
@@ -91,11 +91,14 @@ measurements and the case for each.
 | `memory_standing` | Every standing preference recorded, with no query and no ranking |
 | `memory_profile` | Standing preferences, recent arrivals, memories grouped into buckets and, with a query, relevant memories, in one call |
 | `memory_add` | Store what the user just said, in their own words |
-| `memory_remember` | Record one exact fact as a triple, skipping extraction entirely |
-| `memory_forget` | Retire a fact **because the record was wrong** |
-| `memory_end` | Close out a fact that **has stopped being true** |
-| `memory_history` | Every value one fact has ever held, with when each began |
-| `memory_why` | Why one claim is believed: the turns it came from, and what extracted it |
+| `memory_remember` | Record one exact fact as a triple, skipping extraction entirely. With `replaces`, it ends one named fact in the same write and records why |
+| `memory_forget` | Retire a fact **because the record was wrong**, with an optional reason |
+| `memory_end` | Close out a fact that **has stopped being true**, with an optional reason |
+| `memory_end_matching` | End every live fact that matches a query: a preview first, then a confirming call that ends exactly the facts it listed |
+| `memory_forget_matching` | Retire every live fact that matches a query, with the same preview and confirmation |
+| `memory_link` | Record that one fact adds detail to another (`extends`) or was inferred from another (`derives`) |
+| `memory_history` | Every value one fact has ever held, with when each began and any reason it was closed |
+| `memory_why` | Why one claim is believed: the turns it came from, what extracted it, the facts it is linked to, and any reason it was closed |
 | `memory_stats` | What this server is bound to, how much it holds, and whether it can extract |
 
 `tests/test_docs.py` pins that list against `memvara/server/tools.py` — every name, once,

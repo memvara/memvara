@@ -33,6 +33,7 @@ What it does differently from mem0 and friends:
 """
 
 from .aio import AsyncMemvara, AsyncScopedMemvara
+from .confirm import ConfirmationRefused
 from .consolidate import Consolidator
 from .entities import ENTITY_KEY_MAX, EntityRegistry, EntityResolution, EntitySpec, entity_key
 from .redact import PatternRedactor, Redactor
@@ -78,6 +79,9 @@ from .types import (
     Episode,
     ErasureProof,
     Explanation,
+    ForgetPreview,
+    ForgetResult,
+    Link,
     MemoryType,
     ObjectKind,
     Profile,
@@ -140,6 +144,13 @@ __all__ = [
     # What `profile()` hands back, and the row inside each of its sections. Exported for
     # the same reason: a caller who annotates the return of `profile()` needs the names.
     "Profile", "Row",
+    # What `forget_matching` returns on its two calls, and what it raises when a
+    # confirmation token is refused, exported for the same reason: they are the return
+    # and error types of four facade methods each.
+    "ForgetPreview", "ForgetResult", "ConfirmationRefused",
+    # One typed link between two memories: what `link()` returns and `links()` and
+    # `why().links` list.
+    "Link",
     # schema
     "PredicateRegistry", "PredicateSpec", "Cardinality", "Volatility",
     # pluggable backends

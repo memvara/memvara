@@ -151,7 +151,7 @@ MEMVARA_DB=~/memory.db memvara-mcp
 memvara-mcp init --agent claude
 ```
 
-JSON-RPC 2.0 over stdio, fifteen tools, no SDK dependency. Claude Code, Claude Desktop,
+JSON-RPC 2.0 over stdio, eighteen tools, no SDK dependency. Claude Code, Claude Desktop,
 Cursor, VS Code, Windsurf and Zed each have their own one-liner at
 [memvara.dev/docs/self-hosted](https://memvara.dev/docs/self-hosted).
 [MCP](https://github.com/memvara/memvara/blob/main/docs/integrations/mcp.md) ·
@@ -494,6 +494,22 @@ afterwards:**
 
 *Served a value that expired* and *served a value that was never true* are one column apart
 and are not the same finding. Only the third deletes anything.
+
+Each closure can also say why. `delete()`, `forget()` and `remember(replaces=...)` take a
+`reason`, `remember(valid_to=..., until_reason=...)` records why a fact will end, and
+`history()` and `why()` return the claim with the reason on it:
+
+```python
+tea = mem.remember("user", "likes", "tea").added[0]
+mem.remember("user", "likes", "coffee", replaces=tea.id, reason="switched to coffee")
+# `likes` holds many values; naming the one replaced ends it, and only it.
+```
+
+To close many memories at once, `forget_matching(query, close="ended")` first returns the
+matches and a token and changes nothing; passing the token back closes exactly those
+matches. Memories can also point at each other: `link(a, b, "extends")` says `a` adds
+detail to `b`, `link(a, b, "derives")` says `a` was inferred from `b`, and `why()` lists
+both directions.
 
 [Provenance](https://github.com/memvara/memvara/blob/main/docs/concepts/provenance.md)
 

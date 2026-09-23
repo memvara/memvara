@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, Any, Collection, Iterable, Iterator, Sequence
 import numpy as np
 
 from ..remote.client import HttpClient
-from ..types import Claim, Derivation, Episode, MemoryType, Scope
+from ..types import Claim, Derivation, Episode, Link, MemoryType, Scope
 
 if TYPE_CHECKING:
     import httpx
@@ -405,6 +405,19 @@ class RemoteStore:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="erasure_record",
             why="No erasure-audit endpoint exists on the data plane today."))
+
+    def put_link(self, tenant: str, link: Link) -> Link:
+        raise NotImplementedError(_NO_ENDPOINT.format(
+            method="put_link",
+            why="The facade records a link through its own route, which checks both ids "
+                "against the credential's scope before writing; there is no route that "
+                "writes a link row as given. Use RemoteMemvara.link()."))
+
+    def claim_links(self, tenant: str, claim_id: str) -> list[Link]:
+        raise NotImplementedError(_NO_ENDPOINT.format(
+            method="claim_links",
+            why="Links are read through the facade's scope-checked route, which drops a "
+                "link whose far end the credential cannot see. Use RemoteMemvara.links()."))
 
     def invalidate(self, claim_id: str, at: datetime, by: str | None) -> None:
         raise NotImplementedError(_NO_ENDPOINT.format(

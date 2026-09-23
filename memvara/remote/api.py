@@ -34,17 +34,19 @@ from copy import copy
 from datetime import datetime
 from typing import Any, Collection, Literal, Mapping, Sequence, overload
 
+from ..confirm import ConfirmationRefused
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import EpisodeResult, Path, Retrieved
 from ..types import (
-    Answer, Claim, Delta, Episode, MemoryType, Profile, Provenance, Result, Scope,
-    SearchResults, WriteReceipt, closure,
+    Answer, Claim, Delta, Episode, ForgetPreview, ForgetResult, Link, MemoryType,
+    Profile, Provenance, Result, Scope, SearchResults, WriteReceipt, closure,
+    closure_reason, link_relation,
 )
 from ..types import PROJECT_META, PROJECT_META_REFUSAL
 from . import hydrate
 from .client import DEFAULT_TIMEOUT, HttpClient
 from .creds import resolve
-from .errors import NotFound
+from .errors import Conflict, NotFound
 
 
 #: The header that carries the bound project to the deployment. The deployment reads it
@@ -686,6 +688,8 @@ class RemoteMemvara:
                  recorded_at: datetime | None = None,
                  sources: Sequence[Episode | Mapping[str, Any] | str] | None = None,
                  text: str | None = None, extractor: str = "api",
+                 until_reason: str | None = None, replaces: str | None = None,
+                 reason: str | None = None,
                  **meta: Any) -> WriteReceipt:
         """State one exact fact, skipping extraction entirely.
 
@@ -694,6 +698,11 @@ class RemoteMemvara:
         under `added`, and both keep their ids forever. Reuse a predicate the store
         already knows — contradiction handling is an exact match on the slot, so a
         synonym opens a second one instead of correcting the first.
+
+        `until_reason`, `replaces` and `reason` mean what they mean on `Memvara.remember`.
+        Both reasons are validated here, before the request, so a blank or overlong one
+        raises `ValueError` without a round trip. The deployment checks `replaces`
+        against the credential's scope, and a refusal arrives as its `RemoteError`.
         """
         _refuse_project_meta(meta, "remember()")
         ids, turns = self._cite(sources)
@@ -707,6 +716,8 @@ class RemoteMemvara:
             "valid_from": _iso(valid_from), "valid_to": _iso(valid_to),
             "recorded_at": _iso(recorded_at),
             "source_ids": ids, "sources": turns, "metadata": meta,
+            "until_reason": closure_reason(until_reason),
+            "replaces": replaces, "reason": closure_reason(reason),
         }
         return hydrate.receipt(self._request(
             "POST", "/v1/facts", params=self._params(), json=_sent(body), write=True))
@@ -719,6 +730,7 @@ class RemoteMemvara:
                   recorded_at: datetime | None = None,
                   sources: Sequence[Episode | Mapping[str, Any] | str] | None = None,
                   text: str | None = None, extractor: str = "api",
+                  reason: str | None = None,
                   **meta: Any) -> WriteReceipt:
         """Replace a named memory with a new value, recording that that is what happened.
 
@@ -738,6 +750,10 @@ class RemoteMemvara:
         diverges from `Memvara.supersede`. The endpoint takes a fact body, and building a
         `Claim` here to take it apart again would put this layer in the business of
         inventing ids and timestamps the server is about to overwrite.
+
+        `reason` is a named argument rather than one more `**meta` key, so it reaches the
+        closure record of the replaced memory instead of being stored as metadata on the
+        new one.
         """
         _refuse_project_meta(meta, "supersede()")
         ids, turns = self._cite(sources)
@@ -746,7 +762,7 @@ class RemoteMemvara:
             "predicate": predicate,
             "object": self._redact(obj, CLAIM_OBJECT),
             "text": self._redact(text, CLAIM_TEXT),
-            "at": _iso(at), "close": closure(close),
+            "at": _iso(at), "close": closure(close), "reason": closure_reason(reason),
             "confidence": confidence, "polarity": polarity, "extractor": extractor,
             "memory_type": _type(memory_type),
             "valid_from": _iso(valid_from), "valid_to": _iso(valid_to),
@@ -758,7 +774,7 @@ class RemoteMemvara:
             json=_sent(body), write=True))
 
     def forget(self, subject: str, predicate: str, *, at: datetime | None = None,
-               close: str = "retired") -> list[Claim]:
+               close: str = "retired", reason: str | None = None) -> list[Claim]:
         """Close every value one fact slot currently answers with.
 
         **Routes on `close`, for `delete`'s reason and with `delete`'s consequences.**
@@ -776,17 +792,23 @@ class RemoteMemvara:
         It reaches **downward**, and a search with the same credential does not: a
         user-scoped call also closes values written inside that user's agents and
         sessions. The returned list is what it actually reached.
+
+        `reason` goes to either route as a body field and is recorded on every value
+        closed. It is validated here first, as `Memvara.forget` validates it.
         """
+        why = closure_reason(reason)
         if closure(close) == "ended":
-            return self._end({"subject": subject, "predicate": predicate, "at": _iso(at)})
+            return self._end({"subject": subject, "predicate": predicate, "at": _iso(at),
+                              "reason": why})
         body = self._request(
             "POST", "/v1/forget", params=self._params(),
-            json=_sent({"subject": subject, "predicate": predicate, "at": _iso(at)}),
+            json=_sent({"subject": subject, "predicate": predicate, "at": _iso(at),
+                        "reason": why}),
             write=True)
         return [hydrate.claim(c) for c in body["retired"]]
 
     def delete(self, claim_id: str, *, at: datetime | None = None,
-               close: str = "retired") -> bool:
+               close: str = "retired", reason: str | None = None) -> bool:
         """Close one memory by id.
 
         **Routes on `close`, and the two destinations are not interchangeable.**
@@ -805,15 +827,73 @@ class RemoteMemvara:
         `False` means nothing moved. It is the answer for an id that never existed and
         for one belonging to another tenant alike, so this cannot be used to test whether
         an id exists elsewhere.
+
+        `reason` travels in a JSON body, on `DELETE` as on `POST /v1/end`, and never in
+        the query string: it is free text about somebody's memory, and a query string is
+        what access logs keep. No body is sent without one, so a deployment that predates
+        the field sees the request it always did.
         """
+        why = closure_reason(reason)
         if closure(close) == "ended":
-            return self.end(claim_id=claim_id, at=at)
+            return self.end(claim_id=claim_id, at=at, reason=why)
         body = self._request("DELETE", f"/v1/memories/{claim_id}",
-                             params=self._params(), write=True)
+                                  params=self._params(),
+                                  json=None if why is None else {"reason": why},
+                                  write=True)
         return bool(body["retired"])
 
+    def forget_matching(self, query: str, *, close: str, k: int = 20,
+                        reason: str | None = None,
+                        confirm: str | None = None) -> ForgetPreview | ForgetResult:
+        """`POST /v1/forget-matching`: `Memvara.forget_matching`, served by the deployment.
+
+        The token is issued and checked server-side, under the deployment's key, so it is
+        opaque here and passed back unchanged. A refusal comes back as a 409 and is raised
+        as `ConfirmationRefused` with the server's reason, the same exception the local
+        engine raises, so a caller handles one refusal whatever serves it.
+        """
+        body = _sent({"query": query, "close": closure(close), "k": k,
+                      "reason": closure_reason(reason), "confirm": confirm})
+        try:
+            out = self._request("POST", "/v1/forget-matching",
+                                     params=self._params(), json=body, write=True)
+        except Conflict as exc:
+            raise ConfirmationRefused(exc.message) from exc
+        if "closed" in out:
+            return hydrate.forget_result(out)
+        return hydrate.forget_preview(out)
+
+    def link(self, from_id: str, to_id: str, relation: str, *,
+             by: str = "api") -> Link:
+        """`POST /v1/links`: record that `from_id` extends or derives from `to_id`.
+
+        `KeyError` when either id is not visible to this credential, matching
+        `Memvara.link`; the deployment answers 404 for a missing id and for one in
+        another tenant alike.
+        """
+        try:
+            out = self._request(
+                "POST", "/v1/links", params=self._params(),
+                json={"from_id": from_id, "to_id": to_id,
+                      "relation": link_relation(relation), "by": by},
+                write=True)
+        except NotFound:
+            raise KeyError(f"no claim {from_id!r} or {to_id!r} is visible here") from None
+        return hydrate.link(out)
+
+    def links(self, claim_id: str) -> list[Link]:
+        """`GET /v1/memories/{id}/links`: every link touching this memory, either
+        direction. Empty for an id that is not visible, as `Memvara.links` is."""
+        try:
+            out = self._request("GET", f"/v1/memories/{claim_id}/links",
+                                     params=self._params())
+        except NotFound:
+            return []
+        return [hydrate.link(k) for k in out["claim_links"]]
+
     def end(self, *, claim_id: str | None = None, subject: str | None = None,
-            predicate: str | None = None, at: datetime | None = None) -> bool:
+            predicate: str | None = None, at: datetime | None = None,
+            reason: str | None = None) -> bool:
         """Close a fact that stopped being true, with nothing replacing it.
 
         Exactly one addressing mode: `claim_id` for one memory, or `predicate` (with
@@ -823,13 +903,13 @@ class RemoteMemvara:
 
         `at` is when the fact stopped being true, and it defaults to now, which is right
         only when it stopped just now. An instant before the fact began is clamped to its
-        start rather than inverting the interval.
+        start rather than inverting the interval. `reason` is recorded on what is ended.
         """
         if (claim_id is None) == (predicate is None):
             raise TypeError(
                 "end() needs exactly one of: claim_id, to end one memory, or predicate "
                 "(with optional subject), to end every current value of that fact.")
-        body: dict[str, Any] = {"at": _iso(at)}
+        body: dict[str, Any] = {"at": _iso(at), "reason": closure_reason(reason)}
         if claim_id is not None:
             body["memory_id"] = claim_id
         else:
@@ -1111,17 +1191,31 @@ class ScopedRemoteMemvara:
         return self._mem.supersede(old_claim_id, subject, predicate, obj, **kw)
 
     def forget(self, subject: str, predicate: str, *, at: datetime | None = None,
-               close: str = "retired") -> list[Claim]:
-        return self._mem.forget(subject, predicate, at=at, close=close)
+               close: str = "retired", reason: str | None = None) -> list[Claim]:
+        return self._mem.forget(subject, predicate, at=at, close=close, reason=reason)
 
     def delete(self, claim_id: str, *, at: datetime | None = None,
-               close: str = "retired") -> bool:
-        return self._mem.delete(claim_id, at=at, close=close)
+               close: str = "retired", reason: str | None = None) -> bool:
+        return self._mem.delete(claim_id, at=at, close=close, reason=reason)
+
+    def forget_matching(self, query: str, *, close: str, k: int = 20,
+                        reason: str | None = None,
+                        confirm: str | None = None) -> ForgetPreview | ForgetResult:
+        return self._mem.forget_matching(query, close=close, k=k, reason=reason,
+                                         confirm=confirm)
+
+    def link(self, from_id: str, to_id: str, relation: str, *,
+             by: str = "api") -> Link:
+        return self._mem.link(from_id, to_id, relation, by=by)
+
+    def links(self, claim_id: str) -> list[Link]:
+        return self._mem.links(claim_id)
 
     def end(self, *, claim_id: str | None = None, subject: str | None = None,
-            predicate: str | None = None, at: datetime | None = None) -> bool:
+            predicate: str | None = None, at: datetime | None = None,
+            reason: str | None = None) -> bool:
         return self._mem.end(claim_id=claim_id, subject=subject, predicate=predicate,
-                             at=at)
+                             at=at, reason=reason)
 
     def erase(self, claim_id: str, *, sources: bool = False) -> bool:
         return self._mem.erase(claim_id, sources=sources)

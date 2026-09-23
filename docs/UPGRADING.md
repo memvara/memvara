@@ -7,6 +7,65 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## The schema is version 13, three MCP tools are new, erasure proofs count a fifth table, and `supersede()` ends where the new value begins
+
+### What changed
+
+`SCHEMA_VERSION` moves from 12 to 13. The migration adds one table, `claim_links`, which
+holds typed links between memories (`extends` and `derives`, written by `Memvara.link()`
+and the new `memory_link` tool). Nothing is copied into it: an
+upgraded store starts with no links, and an empty table means "no links recorded since
+the upgrade", not "no memory was ever derived from another". As with every schema bump,
+a file opened by this build is refused by an older build rather than written to. Take a
+copy first if you may need to go back.
+
+`Store.residue()` on `SQLiteStore` now returns a fifth key, `claim_links`, because erasing
+a claim also erases every link that names it, and a proof has to be able to see a link
+that survived.
+
+The MCP server serves seventeen tools instead of fourteen: `memory_end_matching`,
+`memory_forget_matching` and `memory_link` are new. `memory_end`, `memory_forget` and
+`memory_remember` take new optional arguments (`reason`, and on `memory_remember` also
+`until_reason` and `replaces`). No existing argument changed meaning.
+
+### Who this changes, and in which direction
+
+**If you implement `Store` yourself**, `put_link()` and `claim_links()` are new protocol
+methods. Both are optional: without them `Memvara.link()` raises `NotImplementedError`
+naming your store, and `links()` and `why().links` report none. If your store can erase a
+claim, delete its links in the same transaction, or `prove_erased()` on your store has no
+way to notice a link left behind. `put_link()` returns the row it kept, which is the
+earlier one when the same link was already recorded.
+
+**If you compare `residue()` output against a fixed set of keys**, add `claim_links`.
+
+**If you call `supersede()` without `at`**, a `close="ended"` supersession now closes the
+old claim at the new claim's `valid_from`, where it used to use the new claim's
+`recorded_at`. The two are the same unless you set them apart, which a replay of history
+usually does: the old value now ends where the new one began rather than where it was
+recorded. `close="retired"` is unchanged. **If you call `supersede()` on a claim that is
+already retired, or with `close="ended"` on one that is not live**, it now raises
+`ValueError` and writes nothing. Retiring an ended claim still works.
+
+**If you run more than one server process against one store**, set
+`MEMVARA_CONFIRM_SECRET` to the same value on every one of them. The matching tools hand
+out a confirmation token with each preview, signed with that key. Without it each process
+generates its own key, and a preview served by one process is refused when another one
+receives the confirmation. A single stdio server needs nothing.
+
+**If a client pins the tool list**, it now sees three more tools. A read-only server
+hides all three, as it hides every write tool.
+
+### How to find your instances
+
+Your own stores: `grep -rn "class .*Store" your_code/` and check each for `put_link` and
+`claim_links`. Your deployments: any launch configuration that starts more than one
+`memvara-mcp` process, or more than one worker, against the same `MEMVARA_DB`. Your
+replays: `grep -rn "\.supersede(" your_code/` and check each call that builds the new
+claim with a `valid_from` different from its `recorded_at` and passes no `at`.
+
+---
+
 ## The local MCP server files memory under the repository it starts in
 
 ### What changed

@@ -89,6 +89,10 @@ client, not run interactively. Configured entirely by environment:
                      rather than the nearest memory about somebody else. Each call
                      can still pass anchored itself. See docs/DEPLOY.md for what it
                      costs on a question that names no entity.
+  MEMVARA_CONFIRM_SECRET  the key that signs the confirmation token of
+                     memory_end_matching and memory_forget_matching. Set the same
+                     value on every process serving one store. Unset, each process
+                     generates its own, which suits a single server.
 
 The scope above is bound at startup and cannot be changed by a tool call, which is
 what stops a model reaching another user's memory.
