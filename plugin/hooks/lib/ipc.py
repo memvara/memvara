@@ -443,7 +443,25 @@ def server_env() -> "dict[str, str]":
 
     Empty when no client config names a memvara server. This is discovery, not validation
     — whatever is found goes to `ServerConfig.from_env`, which decides if it is usable.
+
+    Read at most once per process. A client config can be large, and one prompt used to
+    parse it twice: once for the daemon's address and once to decide on a query rewrite.
+    The answer is kept for the config paths it was read from, so a caller that points
+    `_CLIENT_CONFIGS` elsewhere, as the tests do, reads the new files. A copy is returned,
+    so a caller that changes it cannot change the next caller's answer.
     """
+    global _SERVER_ENV
+    if _SERVER_ENV is None or _SERVER_ENV[0] != _CLIENT_CONFIGS:
+        _SERVER_ENV = (_CLIENT_CONFIGS, _read_server_env())
+    return dict(_SERVER_ENV[1])
+
+
+#: `(config paths, env block)` from the first call to `server_env` in this process.
+_SERVER_ENV: "tuple[tuple[str, ...], dict[str, str]] | None" = None
+
+
+def _read_server_env() -> "dict[str, str]":
+    """The client config files' memvara env block, read from disk. See `server_env`."""
     for path in _CLIENT_CONFIGS:
         try:
             with open(path, encoding="utf-8") as fh:
@@ -462,6 +480,19 @@ def server_env() -> "dict[str, str]":
     return {}
 
 
+def client_env() -> "dict[str, str]":
+    """The environment the memvara MCP server would be started with, as a hook sees it.
+
+    The client's server block (`server_env`), with every variable set in this process
+    winning over it. Someone who exports `MEMVARA_DB` to point a session at a scratch store
+    means it. This is the one place that rule is written: the daemon's address
+    (`store_key`), the store a hook opens (`lib.open.open_store`) and the model the recall
+    hook checks before a rewrite (`lib.read_model.configured`) all read it from here, so
+    the three cannot disagree about which store or which model they mean.
+    """
+    return {**server_env(), **os.environ}
+
+
 def store_key() -> str:
     """Identity of the store this process would open, without opening it.
 
@@ -477,7 +508,7 @@ def store_key() -> str:
     store-separation failure again, arriving through a door the rest of this key cannot
     see because it is computed after the host has already chosen where to look.
     """
-    env = {**server_env(), **{k: v for k, v in os.environ.items() if k.startswith("MEMVARA_")}}
+    env = client_env()
     db = env.get("MEMVARA_DB") or ""
     if db and db != ":memory:":
         try:

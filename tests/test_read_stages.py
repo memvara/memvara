@@ -1365,11 +1365,16 @@ DECLARED_ELSEWHERE = {
     "bench/compare.py: base.search": "the mem0-style baseline, not memvara",
     "bench/mem0_real.py: api.search": "mem0 itself",
     "demo/competitors.py: store.search": "a competitor's client",
-    "plugin/hooks/daemon.py: self.store.recall":
-        "the per-prompt recall, whose rewrite is decided by stream P2-H",
-    "plugin/hooks/lib/fast.py: client.recall": "the per-prompt recall, stream P2-H",
-    "plugin/hooks/lib/fast.py: store.recall": "the per-prompt recall, stream P2-H",
+    "plugin/hooks/lib/fast.py: client.recall":
+        "the hooks' own hosted client, which asks for a plain read whenever the server "
+        "offers query_rewrite",
 }
+
+#: The names a `**` argument may have and still declare which kind of read a call is.
+#: `plain_read` and `read_kind` are what `lib.fast.read_kinds` returns in the hooks:
+#: `query_rewrite` for a backend that takes it, and nothing for a library too old to have
+#: it, which never rewrites.
+READ_KIND_NAMES = ("PLAIN_READ", "plain_read", "read_kind")
 
 
 def _undeclared_reads() -> set[str]:
@@ -1390,7 +1395,7 @@ def _undeclared_reads() -> set[str]:
                 if re.fullmatch(r"_[A-Z_]+|re|.*\.pattern", receiver):
                     continue  # a regular expression
                 declared = any(k.arg == "query_rewrite" for k in node.keywords) or any(
-                    k.arg is None and ast.unparse(k.value) in ("PLAIN_READ", "plain_read")
+                    k.arg is None and ast.unparse(k.value) in READ_KIND_NAMES
                     for k in node.keywords)
                 if not declared:
                     found.add(f"{path.relative_to(root).as_posix()}: "
