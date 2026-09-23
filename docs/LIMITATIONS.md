@@ -136,6 +136,16 @@ the date is here to be read, and to be old enough to disbelieve eventually.
   exactly 1.0000 for the right text and 0.87 for a one-digit-different phone number, so
   it is not merely confirmable, it is hill-climbable. Encrypting the text and not the
   vectors would be theatre.
+- **Reading documents has limits you should know before relying on it.**
+  `memvara.ingest.extract` does no OCR, so a PDF made of scanned pages has no text and is
+  refused with `no_text`. It does not run JavaScript, so a web page that builds its content
+  in the browser comes back nearly empty. For video, only the sound is transcribed, and
+  only in the MP4, MPEG and WebM containers that OpenAI's transcription endpoint accepts;
+  frames are not sampled, because that needs a video decoder this package does not ship.
+  `AnthropicLLM` reads images but cannot transcribe, because the Anthropic API takes no
+  audio. A fetched URL is limited to 10 MB and 20 seconds, and a host that resolves to
+  any non-public address is refused, so an intranet page cannot be fetched by URL; pass
+  its content instead.
 - **The built-in redactor is not compliance-grade** and says so in its own docstring. It
   is a default, not a product: the seam is the deliverable, and a serious deployment
   brings its own `Redactor`.

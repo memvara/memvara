@@ -29,7 +29,8 @@ SETTINGS = os.path.join(os.path.expanduser("~"), ".memvara", "settings.json")
 #: `MEMVARA_FEATURE_<NAME>` that is not in it. The hooks cannot import the library, so this
 #: is a copy, and `tests/test_hook_project.py` fails when the two differ.
 FEATURES = ("index_command", "research_agent", "project_scope", "status_line",
-            "recall_mark", "profile", "forget_matching", "end_reason", "links")
+            "recall_mark", "profile", "forget_matching", "end_reason", "links",
+            "ingest_urls", "ingest_media")
 
 #: What an override may say. Anything else is ignored and the file decides, because a typo
 #: in an environment variable should not silently flip a feature the file set.

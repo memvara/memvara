@@ -96,8 +96,13 @@ _DEFAULT_EMBEDDER = "hashing"
 #: `memory_profile` tool is listed. The others belong to the plugin or to tools that are not
 #: in this build yet; they are parsed here so that a typo in any of them is refused at
 #: startup rather than ignored.
+#:
+#: `ingest_urls` and `ingest_media` switch off fetching a URL and reading images, audio and
+#: video when a document is added. `memvara.ingest.extract` takes them as its `allow_urls`
+#: and `allow_media` arguments; no tool in this server adds documents yet.
 FEATURES = ("index_command", "research_agent", "project_scope", "status_line",
-            "recall_mark", "profile", "forget_matching", "end_reason", "links")
+            "recall_mark", "profile", "forget_matching", "end_reason", "links",
+            "ingest_urls", "ingest_media")
 
 _FEATURE_PREFIX = "MEMVARA_FEATURE_"
 
@@ -413,7 +418,7 @@ def unknown_features(names: Iterable[str]) -> str | None:
     exception, so the two cannot disagree about what a feature is.
 
     >>> unknown_features(["profle"])
-    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason and links."
+    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, ingest_urls and ingest_media."
     >>> unknown_features(["profile"]) is None
     True
     """

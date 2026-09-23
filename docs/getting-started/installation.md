@@ -73,11 +73,12 @@ bare install stays a two-package install.
 | `local-embed` | `pip install 'memvara[local-embed]'` | A real sentence-transformers embedder, run locally |
 | `rerank` | `pip install 'memvara[rerank]'` | The cross-encoder reranker |
 | `cloud` | `pip install 'memvara[cloud]'` | `Memvara(api_key=…)` against a hosted deployment, and the `memvara login`, `logout` and `whoami` commands |
+| `ingest` | `pip install 'memvara[ingest]'` | Reading PDFs in `memvara.ingest.extract`, through `pypdf`. Text, HTML and URLs need nothing extra; images, audio and video need the `anthropic` or `openai` extra |
 | `langchain` | `pip install 'memvara[langchain]'` | The LangChain retriever and chat-message-history adapters |
 | `llama-index` | `pip install 'memvara[llama-index]'` | The LlamaIndex retriever |
 | `langgraph` | `pip install 'memvara[langgraph]'` | The LangGraph `BaseStore` adapter |
 | `crewai` | `pip install 'memvara[crewai]'` | The CrewAI storage adapter |
-| `dev` | `pip install -e '.[dev,cloud]'` | pytest, coverage, mypy — what CI installs |
+| `dev` | `pip install -e '.[dev,cloud,ingest]'` | pytest, coverage, mypy — what CI installs |
 | `bench` | `pip install 'memvara[bench]'` | Only for `bench/mem0_real.py`, the head-to-head against the real `mem0ai` |
 
 `memvara[http]` is **reserved, not wired**: it names FastAPI, uvicorn and pydantic for a
