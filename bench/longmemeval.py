@@ -186,6 +186,25 @@ class Instance:
         return ek.ABSTENTION_TYPE if self.is_abstention else self.question_type
 
     @property
+    def anchor(self) -> datetime | None:
+        """The instant retrieval is handed as `valid_at`: the last second of the question's
+        day, not the question's own clock time.
+
+        `valid_at` is the world clock every leg filters on, so a session dated after it
+        is unreachable by any leg. The `s` file dates 1,475 haystack sessions, in 76
+        questions, later on the question's day than the question's clock time and never
+        on a later day; 75 of them are evidence sessions, and for 20 temporal-reasoning
+        questions they are the whole of the evidence. Anchoring on the clock time would
+        score those 20 at zero for a reason that has nothing to do with retrieval. The
+        day is the dataset's own granularity for "before the question", and its last
+        second is the instant that keeps every session of a question's own haystack
+        reachable while a shared store still drops other questions' later sessions.
+        """
+        if self.asked_on is None:
+            return None
+        return self.asked_on.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    @property
     def haystack(self) -> str:
         return "\n".join(t.text for s in self.sessions for t in s)
 
@@ -377,9 +396,20 @@ def answer_one(
     source: ek.ContextSource,
     read_stats: ek.RetrievalStats,
     stem: Callable[[str], str] | None,
+    anchor: bool = True,
 ) -> ek.QuestionResult:
+    """One question answered from memory.
+
+    `anchor` hands the question's day to retrieval as `valid_at` (`Instance.anchor`), the
+    same day the reader's prompt is told it is. Until it did, retrieval ran with the wall
+    clock as its instant, so the temporal leg measured every 2023 turn as years away and
+    abstained on every question; the reader was told the date and the memory was not.
+    `anchor=False` reproduces that, which is what makes a before/after row a measurement
+    of the anchor.
+    """
     haystack = item.haystack
-    context, ms, hits = ek.retrieve(mem, item.question, budget, source, haystack)
+    context, ms, hits = ek.retrieve(mem, item.question, budget, source, haystack,
+                                    valid_at=item.anchor if anchor else None)
     read_stats.record(ms, len(context), hits, len(haystack))
     prompt = ek.build_prompt(item.question, context, asked_on=item.asked_on_raw or None)
     out = reader.answer(SYSTEM, prompt)
@@ -424,16 +454,24 @@ def run(
     share_store: bool = False,
     embedder: Any = None,
     w_graph: float = 0.0,
+    w_temporal: float = 0.0,
     reranker: Any = None,
     rerank_top_n: int = 0,
+    anchor: bool = True,
 ) -> tuple[list[ek.QuestionResult], ek.IngestStats, ek.RetrievalStats, ek.TokenLedger]:
+    """The answer pipeline, on the same read-path configuration as `run_retrieval`.
+
+    `w_temporal` and `anchor` are parameters here for the reason `embedder` and
+    `reranker` are on `locomo.run`: `--w-temporal` was accepted on this path and reached
+    the store never, so an answer-quality run could print a weight it had not applied.
+    """
     budget = budget or ek.RetrievalBudget()
     ledger = ledger or ek.TokenLedger()
     totals, read_stats, results = ek.IngestStats(), ek.RetrievalStats(), []
 
     if share_store:
         shared = build_memory("shared", budget, llm, embedder=embedder,
-                              w_graph=w_graph, reranker=reranker,
+                              w_graph=w_graph, w_temporal=w_temporal, reranker=reranker,
                               rerank_top_n=rerank_top_n)
         # Sessions are deduplicated by their dataset id, so a session that appears in
         # several questions' haystacks is written once. Whether that actually saves
@@ -455,14 +493,15 @@ def run(
             for item in items:
                 results.append(answer_one(
                     shared, item, reader=reader, judge=judge, ledger=ledger,
-                    budget=budget, source=source, read_stats=read_stats, stem=stem))
+                    budget=budget, source=source, read_stats=read_stats, stem=stem,
+                    anchor=anchor))
         finally:
             shared.close()
         return results, totals, read_stats, ledger
 
     for item in items:
         mem = build_memory(item.qid, budget, llm, embedder=embedder,
-                           w_graph=w_graph, reranker=reranker,
+                           w_graph=w_graph, w_temporal=w_temporal, reranker=reranker,
                            rerank_top_n=rerank_top_n)
         try:
             stats = ek.ingest(mem, item.sessions)
@@ -470,7 +509,7 @@ def run(
             totals.merge(stats)
             results.append(answer_one(
                 mem, item, reader=reader, judge=judge, ledger=ledger, budget=budget,
-                source=source, read_stats=read_stats, stem=stem))
+                source=source, read_stats=read_stats, stem=stem, anchor=anchor))
         finally:
             mem.close()
     return results, totals, read_stats, ledger
@@ -485,13 +524,20 @@ def score_one(
     labels: dict[str, str],
     read_stats: ek.RetrievalStats,
     excluded: Counter,
+    anchor: bool = True,
 ) -> ek.RetrievalScore:
-    """One question's retrieval, scored with no reader. See `ek.score_retrieval`."""
+    """One question's retrieval, scored with no reader. See `ek.score_retrieval`.
+
+    Both reads get the question's day as `valid_at` when `anchor` is set — the budgeted
+    one the report charges and the deeper one the curve is drawn from — so the curve and
+    the context come from retrievals that ran under the same clock. See `answer_one`.
+    """
     haystack = item.haystack
+    at = item.anchor if anchor else None
     context, ms, hits = ek.retrieve(
-        mem, item.question, budget, ek.ContextSource.MEMORY, haystack)
+        mem, item.question, budget, ek.ContextSource.MEMORY, haystack, valid_at=at)
     read_stats.record(ms, len(context), hits, len(haystack))
-    items, _ = ek.retrieval_pass(mem, item.question, plan, budget, labels)
+    items, _ = ek.retrieval_pass(mem, item.question, plan, budget, labels, valid_at=at)
 
     wanted = frozenset(item.answer_session_ids)
     ingested = frozenset(t.label for s in item.sessions for t in s if t.label)
@@ -532,6 +578,7 @@ def run_retrieval(
     w_temporal: float = 0.0,
     reranker: Any = None,
     rerank_top_n: int = 0,
+    anchor: bool = True,
 ) -> tuple[list[ek.RetrievalScore], ek.IngestStats, ek.RetrievalStats, Counter]:
     """`run()`'s ingest and retrieval, scored with no reader and no judge."""
     budget = budget or ek.RetrievalBudget()
@@ -560,7 +607,7 @@ def run_retrieval(
             for item in items:
                 scores.append(score_one(shared, item, budget=budget, plan=plan,
                                         labels=labels, read_stats=read_stats,
-                                        excluded=excluded))
+                                        excluded=excluded, anchor=anchor))
         finally:
             shared.close()
         return scores, totals, read_stats, excluded
@@ -577,7 +624,7 @@ def run_retrieval(
             totals.merge(stats)
             scores.append(score_one(mem, item, budget=budget, plan=plan,
                                     labels=per_item, read_stats=read_stats,
-                                    excluded=excluded))
+                                    excluded=excluded, anchor=anchor))
         finally:
             mem.close()
     return scores, totals, read_stats, excluded
@@ -683,6 +730,11 @@ def main(argv: Sequence[str] | None = None,
     parser.add_argument("--share-store", action="store_true",
                         help="one store for every question — cheaper, and a different "
                              "task. Not a LongMemEval result.")
+    parser.add_argument("--no-anchor", action="store_true",
+                        help="withhold the question date from retrieval. The temporal "
+                             "leg then has no instant to measure from and abstains on "
+                             "this archive; every row published before the anchor "
+                             "existed was produced this way")
     args = parser.parse_args(argv)
     spec = DATASET_ALIASES[args.dataset]
 
@@ -735,13 +787,24 @@ def main(argv: Sequence[str] | None = None,
            f"({getattr(reranker, 'name', type(reranker).__name__)}) over the top "
            f"{args.rerank} fused candidates, cut to k afterwards"
            if reranker is not None else "off (the shipped default)"))
+    # The temporal leg's weight and its anchor, printed for the same reason: a row that
+    # does not say whether retrieval was given the question date is not comparable to
+    # the row above it, because the date is both the instant the leg measures from and
+    # the world clock every leg filters on.
+    out(ek.temporal_weight_line(args.w_temporal))
+    out("  anchor: "
+        + ("withheld (--no-anchor). Retrieval runs with the wall clock as its instant, "
+           "so the\n  temporal leg abstains on every question of this archive"
+           if args.no_anchor else
+           "the last second of each question's day is passed as valid_at. The temporal "
+           "leg\n  measures from it, and every leg reads the store as of that day"))
 
     if args.score == "retrieval":
         plan = ek.build_plan(args)
         scores, ingest_stats, read_stats, excluded = run_retrieval(
             items, budget=budget, plan=plan, share_store=args.share_store,
             embedder=embedder, w_graph=args.w_graph, w_temporal=args.w_temporal,
-            reranker=reranker, rerank_top_n=args.rerank)
+            reranker=reranker, rerank_top_n=args.rerank, anchor=not args.no_anchor)
         out(ek.retrieval_report(
             scores, ingest_stats, read_stats,
             title=f"LongMemEval ({args.dataset})", plan=plan, budget=budget,
@@ -764,7 +827,8 @@ def main(argv: Sequence[str] | None = None,
         source=ek.ContextSource(args.context),
         ledger=ek.build_ledger(args, reader), stem=ek.build_stemmer(args),
         share_store=args.share_store, embedder=embedder, w_graph=args.w_graph,
-        reranker=reranker, rerank_top_n=args.rerank,
+        w_temporal=args.w_temporal, reranker=reranker, rerank_top_n=args.rerank,
+        anchor=not args.no_anchor,
     )
     if getattr(reader, "dumping", False):
         # No answers exist yet, so every result is empty. Printing the table would

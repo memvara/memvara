@@ -1448,6 +1448,8 @@ def retrieve(
     budget: RetrievalBudget,
     source: ContextSource,
     haystack: str,
+    *,
+    valid_at: datetime | None = None,
 ) -> tuple[str, float, int]:
     """Build the reader's context. Returns (context, milliseconds, result count).
 
@@ -1455,13 +1457,23 @@ def retrieve(
     call a real integration makes, so the measured latency is the real end-to-end read
     cost including rendering, and the context carries memvara's own prompt framing —
     which is part of what is being evaluated.
+
+    `valid_at` is the instant the question was asked, when the dataset records one. It
+    reaches `recall()` as the world clock, which does two things at once: it is the
+    anchor the temporal leg measures proximity from, and it is the bound every leg
+    filters on, so a turn dated after it had not happened yet and is not returned.
+    `None` leaves the instant at the wall clock. On an archived transcript that puts
+    every turn years from the anchor, so the temporal leg abstains on every question;
+    that is the configuration every row published before the anchor existed was
+    produced under.
     """
     if source is ContextSource.NONE:
         return "", 0.0, 0
     if source is ContextSource.FULL:
         return clip(haystack, budget.full_max_chars), 0.0, 0
     start = time.perf_counter()
-    context = mem.recall(question, k=budget.k, include_episodes=budget.include_episodes)
+    context = mem.recall(question, k=budget.k, include_episodes=budget.include_episodes,
+                         valid_at=valid_at)
     elapsed = (time.perf_counter() - start) * 1000
     context = clip(context, budget.max_chars)
     # `recall()` renders one "- " line per result under a header, so counting them is
@@ -1800,17 +1812,21 @@ class RetrievalPlan:
 
 
 def retrieval_pass(mem: Any, question: str, plan: RetrievalPlan, budget: RetrievalBudget,
-                   labels: Mapping[str, str]) -> tuple[list[RetrievedItem], float]:
+                   labels: Mapping[str, str], *,
+                   valid_at: datetime | None = None) -> tuple[list[RetrievedItem], float]:
     """The ranked list the curve is drawn from, and what it cost in milliseconds.
 
     `search()` rather than `recall()`, because ranks are needed and `recall()` returns a
     rendered string. The runners call `retrieve()` as well, at the budget, so that the
     context and the latency they report stay the ones a real integration would see —
     this deeper pass is diagnostic and its cost is not charged to the read path.
+
+    `valid_at` is the same instant `retrieve()` was given, so the curve is drawn from a
+    retrieval that ran under the same clock as the context it is reported beside.
     """
     start = time.perf_counter()
     results = mem.search(question, k=plan.depth(budget),
-                         include_episodes=budget.include_episodes)
+                         include_episodes=budget.include_episodes, valid_at=valid_at)
     return as_items(results, labels), (time.perf_counter() - start) * 1000
 
 
@@ -2453,6 +2469,18 @@ def build_reranker(args: Any) -> Any:
         # states a fact about a person.
         return CrossEncoderReranker(args.rerank_model or DEFAULT_MODEL)
     return CoverageReranker()
+
+
+def temporal_weight_line(weight: float) -> str:
+    """The `--w-temporal` line both runners print above every table.
+
+    It lives here, beside the flag's own definition, because the two runners printed it
+    in identical words. Two copies of one sentence is how a later change to the wording,
+    or to the threshold it reports on, ends up in one runner's report and not the other's.
+    """
+    state = ("temporal leg over raw turns, fused at that weight" if weight > 0
+             else "temporal leg off (the shipped default)")
+    return f"  --w-temporal {weight:g}: {state}"
 
 
 def build_plan(args: Any) -> RetrievalPlan:

@@ -9,6 +9,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Changed
+
+- **The LongMemEval harness now hands each question's day to retrieval, so the temporal
+  leg has an anchor to measure from.** `bench/longmemeval.py` passes the last second of
+  the question's day as `valid_at` on both reads a question makes: the budgeted
+  `recall()` the report charges and the deeper `search()` the recall curve is drawn from.
+  Before this change the date went into the reader's prompt and nowhere else, so
+  retrieval ran with the wall clock as its instant, every archived turn sat years outside
+  the leg's thirty-day half-life, and the leg abstained on every one of the 500 questions;
+  that abstention is now a counted number rather than an inference. The day rather than
+  the clock time, because the `s` file dates 1,475 haystack sessions later on the
+  question's day than the question itself, and 75 of them are evidence; the clock time
+  would have made them unreachable by every leg. `valid_at` is also the world clock, so
+  an anchored run also stops reading other questions' later sessions out of a shared
+  store; `docs/BENCHMARKS.md` separates the two effects. `--no-anchor` withholds the date
+  and reproduces every row published before this change. `--w-temporal` now reaches the
+  store on every path of both runners; it was parsed by `bench/locomo.py` and by
+  LongMemEval's answer path and applied by neither. LOCOMO questions carry no date, so
+  that runner has no anchor to pass and says so in its report. The library is unchanged;
+  `w_temporal` still ships at `0.0`.
+
 ### Fixed
 
 - **A question that says one relation two ways is a lookup again, and the intent gate

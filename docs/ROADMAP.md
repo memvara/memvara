@@ -242,8 +242,13 @@ list.
   finding is the abstention rather than the leg: without one it cost 2.4 points of
   LongMemEval temporal-reasoning R@12, because a query with no instant anchors on *now*,
   an archival corpus scores every turn at ~0.005, and fusion reads positions. With the
-  guard the other two legs already had, the loss goes to zero — and so does the gain, on an
-  instrument that never passes `valid_at`.
+  guard the other two legs already had, the loss goes to zero. The instrument now passes
+  an instant — `bench/longmemeval.py` hands retrieval the question's own day — and that
+  turned the abstention into a count (0 of 500 questions without it, 447 of 500 with it at
+  weight 1.0) and the leg into a measured loss: overall R@12 falls from 40.9 to 28.3 as the
+  weight rises from 0 to 1.0. The day itself is worth 5.8 points with the leg off, and that
+  is the world clock filtering, not the leg. So the default stays where it is; see
+  [`docs/BENCHMARKS.md`](BENCHMARKS.md#the-anchor-the-leg-never-had-measured).
 - **Query-intent gating** — `retrieve/intent.py`, deterministic and model-free, four
   classes matching the categories LOCOMO reports separately. It is what makes the graph
   leg affordable to switch on: `lookup` and `temporal` queries skip the walk before the
@@ -1015,27 +1020,42 @@ queued.
    first measurement of this configuration.
 
 
-2. **Give the temporal leg an anchor.** The leg ships at zero because no benchmark passes
-   `valid_at`: `bench/evalkit.py` calls `search(question, k)`, and `bench/longmemeval.py`
-   puts the question date into the reader's prompt and nowhere else. So the anchor is always
-   *now*, every archival turn is more than a half-life, thirty days, from it, and the leg
-   abstains on every question. The first rung needs no parser: pass `valid_at=item.asked_on`
-   and measure what the anchor alone buys, with the match changed from proximity to a point
-   to overlap with an interval. Hindsight's temporal channel then parses the query into a
-   range, with a small seq2seq model as the fallback. The fallback is out (invariant 1). What
-   is left for the rule-based half is relative expressions: item 1 already gives the text
-   legs "June 2024" and "in 2019", but "last month" needs the anchor shifted, and
-   `write/when.py` is the one place allowed to say by how much. `docs/INTERNALS.md`'s
-   fourth-leg contract says the anchor is "given, never parsed", because a parser on the
-   read path is a second extractor with its own locale bugs. Reusing the one the write path
-   already trusts, gated on `intent.classify()` returning `temporal`, is a narrower thing
-   than that sentence forbids, and it would still amend the sentence, so it should be
-   written as an amendment. Measured on 2026-09-06 against the anchor 2023-06-01, `resolve`
-   handles "last month", "yesterday", "three weeks ago" and "in 2019", and returns `None`
-   for "last weekend", "in March", "June 2024" and for any whole sentence, so it needs a
-   phrase locator before it can read a question. Cost: at `w_temporal > 0` every temporal
-   or open query runs `episodes_near`, whose `ORDER BY ABS(ts - ?)` sorts everything the
-   scope matched, and today no query pays that.
+2. **Give the temporal leg an anchor — built, measured, and the leg still does not pay.**
+   The leg shipped at zero because no benchmark passed `valid_at`: `bench/evalkit.py`
+   called `search(question, k)`, and `bench/longmemeval.py` put the question date into the
+   reader's prompt and nowhere else, so the anchor was always *now*, every archival turn
+   was more than a half-life from it, and the leg abstained on every question. That was an
+   inference until 2026-09-14. `bench/longmemeval.py` now passes the last second of each
+   question's day as `valid_at` on both reads a question makes, `--no-anchor` reproduces
+   every row published before it, and `--w-temporal` reaches the store on every path of
+   both runners, which it did not before. The table is in
+   [`docs/BENCHMARKS.md`](BENCHMARKS.md#the-anchor-the-leg-never-had-measured); the short
+   version is that the abstention is a count (0 of 500 without the anchor, at any weight),
+   that the anchor alone is worth 5.8 points of overall R@12 and 15.8 on
+   temporal-reasoning with the leg still off, and that the leg costs mean reciprocal rank
+   as soon as it can vote. Most of the anchor's gain is the world clock filtering a shared
+   store rather than the leg ranking, so a per-question run would show less of it.
+
+   **The interval was left as a point, deliberately.** The rung above said to change the
+   match from proximity to a point to overlap with an interval. With only the question's
+   date to go on, the two are the same thing: a turn on the question's day scores 0.977
+   against a point at the day's end, and the widest interval the dataset offers is that
+   day. An interval only means something once the query names a range, which needs the
+   phrase locator below, so nothing in `retrieve/temporal.py` changed.
+
+   What is still not built is the relative half. Hindsight's temporal channel parses the
+   query into a range with a small seq2seq model as the fallback; the fallback is out
+   (invariant 1). `docs/INTERNALS.md`'s fourth-leg contract says the anchor is "given,
+   never parsed", because a parser on the read path is a second extractor with its own
+   locale bugs. Reusing `write/when.py`, gated on `intent.classify()` returning
+   `temporal`, is narrower than that sentence forbids and would still amend it, so it
+   should be written as an amendment. Measured on 2026-09-06 against the anchor
+   2023-06-01, `resolve` handles "last month", "yesterday", "three weeks ago" and "in
+   2019", and returns `None` for "last weekend", "in March", "June 2024" and for any whole
+   sentence, so it needs a phrase locator before it can read a question. The cost is now
+   measured too: at `w_temporal > 0` every temporal or open query runs `episodes_near`,
+   whose `ORDER BY ABS(ts - ?)` sorts everything the scope matched, and scoring 500
+   questions took 17% longer at weight 1.0 than with the leg off.
 
 3. **Ask the extractor for the why, after measuring extraction at all.** Hindsight's
    extraction prompt demands motivations, preferences and emotional context on every fact,
