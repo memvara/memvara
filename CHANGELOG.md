@@ -60,16 +60,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` on the MCP server. A turn over 6,000 characters
   is cut at paragraph and sentence ends into pieces of at most 6,000 characters, and each
   piece is one extraction call, counted in `llm_calls`. Every claim still cites the whole
-  episode, and a claim that two pieces both produce, with the same slot and value, is
-  merged into one before reconciliation. If any piece's call fails, the batch is deferred
+  episode. A fact stated in two pieces reaches the reconciler twice, exactly as it would
+  if the turn had stated it twice, so it is stored once with both observations counted.
+  If any piece's call fails, the batch is deferred
   and nothing from the other pieces is kept, so `reextract()` reads the whole turn again.
   This reverses a declined ROADMAP entry. It is off by default because its release bar,
   5 of 5 key facts with 0 duplicates on a long turn, has not been met: the one measured
   chunked run found 4 of 5. `extraction_chunks` is the first feature switch that is off by
   default, so `ServerConfig().features_off` is now `{"extraction_chunks"}` rather than
   empty, and `memory_stats` on a default server says `features switched off:
-  extraction_chunks`.
+  extraction_chunks`. Each feature's default is recorded once, in
+  `memvara.server.config.FEATURE_DEFAULTS`, and `FEATURES` and `FEATURES_OFF_BY_DEFAULT`
+  are derived from it.
 
+- **Four predicates in the `engineering` pack for what `/memvara:index` records about a
+  repository.** `purpose` is single-valued, so a restated purpose ends the old one.
+  `convention`, `entry_point` and `runs_with` are many-valued, because a repository
+  follows several conventions, has several entry points and is run with several commands,
+  and a second value is another true fact rather than a change. All four are slow to go
+  stale, take a component as subject and a value as object, and are not graph relations.
+  They join the `engineering` bucket of `profile()`. Before this they fell to the
+  unregistered default, so a changed purpose was kept beside the old one.
 - **End or retire every memory that matches a query, after seeing exactly which.**
   `Memvara.forget_matching(query, close=, k=20, reason=None, confirm=None)` without
   `confirm` changes nothing and returns a `ForgetPreview`: the matching claim ids with
