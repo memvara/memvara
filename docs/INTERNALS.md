@@ -1019,7 +1019,11 @@ claims whose predicate it names. A caller's bucket predicate is kept when the re
 knows it (its canonical spelling is added), a shipped pack declares it, or a live claim in
 the scope uses it; anything else goes to `Profile.warnings`. Python 3.10 has no
 `tomllib`, so there the pack names come from `_scan_pack_names`, a line reader for the
-shipped packs' fixed layout; a test holds it to the TOML reader on every shipped pack. A
+shipped packs' fixed layout. On every Python version a test compares its output with
+`tests/fixtures/pack_predicate_names.json`, and on 3.11 and later another test checks
+that list against the TOML reader, so the list cannot go stale. The reader refuses a
+`[[predicate]]` header or a `name =` line it does not understand, such as a header with
+a comment after it or a name with an escaped quote, instead of returning fewer names. A
 pack that cannot be read at all is reported in `warnings`, before any "nothing declares"
 warning it caused.
 

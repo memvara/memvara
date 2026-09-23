@@ -1,0 +1,33 @@
+{
+  "decisions": [
+    "decided",
+    "observed"
+  ],
+  "engineering": [
+    "deploys_to",
+    "current_host",
+    "git_state",
+    "build_status",
+    "version",
+    "endpoint",
+    "owner",
+    "depends_on",
+    "rejected",
+    "known_defect",
+    "blocked_by"
+  ],
+  "events": [
+    "ran",
+    "walked",
+    "exercised",
+    "bought",
+    "spent",
+    "visited",
+    "attended",
+    "completed",
+    "started",
+    "watched",
+    "read",
+    "met"
+  ]
+}

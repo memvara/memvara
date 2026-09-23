@@ -671,17 +671,30 @@ def _pack_predicates(pack: str) -> tuple[str, ...]:
 
 
 #: A `name = "..."` line at the top level of a `[[predicate]]` table, as the shipped
-#: packs write it, with an optional trailing comment.
+#: packs write it, with an optional trailing comment. The name may not contain a quote or a
+#: backslash, so an escape, which this reader does not interpret, cannot match.
 _PACK_NAME_LINE = re.compile(r'^name\s*=\s*"([^"\\]+)"\s*(?:#.*)?$')
+
+#: Any line assigning the `name` key, understood or not. A line this matches and
+#: `_PACK_NAME_LINE` does not is refused, rather than skipped.
+_NAME_KEY = re.compile(r"^name\s*=")
+
+#: The one table header the shipped packs use, written exactly as they write it.
+_PREDICATE_HEADER = "[[predicate]]"
 
 
 def _scan_pack_names(pack: str) -> tuple[str, ...]:
     """The predicate names in a shipped pack, read line by line without a TOML parser.
 
     Only for the packs this package ships, whose layout it controls: a flat list of
-    `[[predicate]]` tables, each with one `name = "..."` line. Anything else in the file
-    is skipped rather than parsed. A pack that cannot be read, or in which no name is
-    found, raises `PredicatePackError`, which `profile()` reports as a warning.
+    `[[predicate]]` tables, each with one `name = "..."` line. Other keys and other tables
+    are skipped. A line the reader cannot be sure about is refused with
+    `PredicatePackError` instead of skipped, because skipping it would return fewer names
+    with nothing said: a header that mentions `predicate` but is not exactly
+    `[[predicate]]` (for example with a comment after it), or a `name =` line inside a
+    predicate table that is not one plain double-quoted value (for example with an
+    escaped quote). A pack that cannot be read, or in which no name is found, raises the
+    same error. `profile()` reports it as a warning.
     """
     path = PACKS_DIR / f"{pack}.toml"
     try:
@@ -690,11 +703,22 @@ def _scan_pack_names(pack: str) -> tuple[str, ...]:
         raise PredicatePackError(f"{path} could not be read: {exc}") from None
     names: list[str] = []
     table = ""
-    for line in text.splitlines():
+    for number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if stripped.startswith("["):
+            if "predicate" in stripped and stripped != _PREDICATE_HEADER:
+                raise PredicatePackError(
+                    f"{path}, line {number}: {stripped!r} is not a predicate table header "
+                    f"this reader understands. Write it as {_PREDICATE_HEADER} on a line "
+                    "of its own.")
             table = stripped
-        elif table == "[[predicate]]" and (found := _PACK_NAME_LINE.match(stripped)):
+        elif table == _PREDICATE_HEADER and _NAME_KEY.match(stripped):
+            found = _PACK_NAME_LINE.match(stripped)
+            if found is None:
+                raise PredicatePackError(
+                    f"{path}, line {number}: {stripped!r} is not a name line this reader "
+                    'understands. Write it as name = "..." with no quote or backslash '
+                    "inside the value.")
             names.append(found.group(1))
     if not names:
         raise PredicatePackError(f"{path} declares no predicate names this reader can see.")
