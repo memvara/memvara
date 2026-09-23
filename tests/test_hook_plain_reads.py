@@ -76,3 +76,31 @@ def test_the_daemon_warms_the_hosted_client_as_before(monkeypatch):
     monkeypatch.setattr(daemon.Daemon, "run", lambda self: 0)
     assert daemon.main() == 0
     assert store.asked == [{"k": 1}]
+
+
+class _OlderStore:
+    """A store from a library released before query rewrite, which never rewrites."""
+
+    def __init__(self) -> None:
+        self.asked: list[dict] = []
+
+    def recall(self, query, k=6, budget=700, header=None, include_episodes=False,
+               memory_types=None) -> str:
+        self.asked.append({"k": k})
+        return ""
+
+
+def test_session_start_asks_an_older_library_without_the_argument(monkeypatch):
+    """Passing `query_rewrite` to a library that predates it raises `TypeError`, which the
+    hook would report as a store it could not ask."""
+    store = _OlderStore()
+    _run_session_start(monkeypatch, store, None)
+    assert len(store.asked) == 2
+
+
+def test_the_daemon_warms_an_older_library_without_the_argument(monkeypatch):
+    store = _OlderStore()
+    monkeypatch.setattr(daemon, "open_store", lambda: store)
+    monkeypatch.setattr(daemon.Daemon, "run", lambda self: 0)
+    assert daemon.main() == 0
+    assert store.asked == [{"k": 1}]

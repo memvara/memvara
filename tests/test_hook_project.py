@@ -478,6 +478,7 @@ def test_an_unreadable_settings_file_means_the_default(body):
 # -- parity with the library's copy ----------------------------------------------------
 
 import memvara.project as library  # noqa: E402
+from memvara.server.config import FEATURE_DEFAULTS as LIBRARY_FEATURE_DEFAULTS  # noqa: E402
 from memvara.server.config import FEATURES as LIBRARY_FEATURES  # noqa: E402
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "project_vectors.json"
@@ -549,8 +550,12 @@ def test_both_copies_name_a_real_worktree_the_same(tmp_path, remote):
 
 def test_the_hooks_know_the_same_features_as_the_library():
     """`ServerConfig` refuses an unknown `MEMVARA_FEATURE_<NAME>`; the hooks must accept
-    exactly the names it accepts, or one side ignores a switch the other honours."""
+    exactly the names it accepts, or one side ignores a switch the other honours. The
+    defaults must agree too, because `/memvara:setup` shows the hooks' copy as the default
+    and reads a missing switch through it."""
     assert settings.FEATURES == LIBRARY_FEATURES
+    assert settings.FEATURE_DEFAULTS == dict(LIBRARY_FEATURE_DEFAULTS)
+    assert tuple(settings.FEATURE_DEFAULTS) == tuple(LIBRARY_FEATURE_DEFAULTS)
 
 
 def test_asking_for_a_feature_that_does_not_exist_is_a_bug_the_tests_catch():

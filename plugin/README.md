@@ -81,8 +81,9 @@ Seven repositories vendor this one tree and each registers a different
 client, so a `hooks.json` committed here would be one of them shipped to all
 of them. This repository ignores that path for exactly that reason.
 
-Three hook features can be switched off in `~/.memvara/settings.json`, a
-flat object of `feature_name: true|false` where a missing key means on.
+Four hook features can be switched off in `~/.memvara/settings.json`, a
+flat object of `feature_name: true|false` where a missing key means the
+feature's default. Each of these four is on by default.
 `MEMVARA_FEATURE_<NAME>=0|1` overrides the file for one process.
 
 - `project_scope`: the hooks work out the project from the repository's
@@ -94,6 +95,24 @@ flat object of `feature_name: true|false` where a missing key means on.
 - `status_line`: the hooks count, per session, the memory lines recalled,
   the read-only memory tools called and the facts captured, in
   `~/.memvara/.hooks/counts/<session>.json`.
+- `query_rewrite`: lets the recall hook ask the local store's model to
+  rewrite each prompt's query before it searches. On its own the switch
+  does nothing. The hook asks for a rewrite only after
+  `/memvara:setup verify-key` has made one test call to the configured
+  model and the model answered it, and only while that same model is
+  configured. A rewrite is one model call per prompt, billed by your
+  provider. The hook waits at most 5 seconds for it and otherwise uses the
+  plain result, so a slow or failing model never costs you your memories.
+  A hosted install is always asked for a plain read, because the hosted
+  service would use your organisation's key, which setup cannot check.
+  The result of the check is kept in `~/.memvara/.hooks/read_model.json`.
+  If the provider rejects the key during a later prompt, that prompt gets
+  the plain result and the hook stops rewriting until the key is checked
+  again.
+
+The file lists the library's other switches too, with the same defaults as
+the MCP server. `extraction_chunks` is the one that is off by default. No
+hook reads those; the MCP server reads them from `MEMVARA_FEATURE_<NAME>`.
 
 ## Your own agent
 

@@ -42,6 +42,16 @@ already seen is still valid after the mark was introduced.
 **It says which project it is asking for.** `lib.project.bind` works out the project from
 the remote of the session's repository, and the hosted client sends it with every call.
 
+**It asks a model to rewrite the query only when setup verified a key.** A local store whose
+model can chat can rewrite each query before it searches, at one model call per prompt.
+This hook asks for that only when `lib.read_model.allowed()` says `/memvara:setup
+verify-key` checked the configured model and the `query_rewrite` switch is on, and only when
+enough of its budget is left to wait `REWRITE_WAIT_SEC` for it. Every other prompt is a
+plain read. A rewrite that fails, is refused or runs past the wait serves the plain read, so
+the prompt gets its memories either way. The episode-widening retry is always plain, and
+this hook never asks for a summary (`synthesis`): both would be further model calls on the
+same prompt.
+
 It does not write memory. Recording what was said is the `Stop` hook's job, over the prompt
 and the reply together, in one run: two runs per turn cost twice as much and each saw half
 the evidence. It does add the number of lines it injected to the session's `recalled`
@@ -63,6 +73,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core.envelope import read_event, write  # noqa: E402
 from core.host import Reply, active  # noqa: E402
 from lib import counts, state_file  # noqa: E402
+from lib.fast import REWRITE_WAIT_SEC  # noqa: E402
 from lib.fast import recall as fast_recall  # noqa: E402
 from lib.ipc import (  # noqa: E402
     due_alert_for_model, due_capture_alert, log_line, payload, plural, status,
@@ -73,6 +84,7 @@ from lib.mark import marked  # noqa: E402
 from lib.mark import on as mark_on  # noqa: E402
 from lib.mark import unmark_block  # noqa: E402
 from lib.project import bind as bind_project  # noqa: E402
+from lib.read_model import allowed as rewrite_allowed  # noqa: E402
 
 #: The client this process is answering, resolved once. `run.py` binds it before importing
 #: this module; a bare `python3 recall.py` gets Claude Code, which is what that invocation
@@ -811,9 +823,16 @@ def main() -> int:
     # of blindness for another. The carried text goes first because it is the topic.
     query = f"{carried} {prompt}".strip() if (anaphoric and carried) else prompt
 
+    # A rewrite is started only when the hook can afford to wait for it: the model call may
+    # take `REWRITE_WAIT_SEC` before the plain read is served, and the harness kills the
+    # hook at 10 seconds with nothing printed. The clock is compared first: it is free,
+    # and the decision reads files.
+    rewrite = (time.monotonic() - start + REWRITE_WAIT_SEC < OVERALL_BUDGET_SEC
+               and rewrite_allowed())
     try:
         block, ok, why = fast_recall(query, k=K, budget=BUDGET, header=HEADER,
-                                     min_score=_min_score())
+                                     min_score=_min_score(), query_rewrite=rewrite,
+                                     rewrite_wait=REWRITE_WAIT_SEC)
     except Exception:
         # A retrieval failure must not become a failed prompt.
         block, ok, why = "", False, ""
@@ -853,9 +872,11 @@ def main() -> int:
         # fixed, with no release here.
         if time.monotonic() - start < OVERALL_BUDGET_SEC:
             try:
+                # Plain: a rewrite here would be a second model call on one prompt.
                 wider, wider_ok, _ = fast_recall(query, k=EPISODE_K, budget=EPISODE_BUDGET,
                                                  header=HEADER, include_episodes=True,
-                                                 min_score=_min_score())
+                                                 min_score=_min_score(),
+                                                 query_rewrite=False)
             except Exception:
                 wider, wider_ok = "", False
             if wider_ok and wider:
