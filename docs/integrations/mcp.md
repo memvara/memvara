@@ -71,6 +71,9 @@ derivation off.
 profile tool listed below, `MEMVARA_FEATURE_FORGET_MATCHING=0` hides the two `_matching`
 tools, `MEMVARA_FEATURE_LINKS=0` hides the link tool, and `MEMVARA_FEATURE_END_REASON=0`
 removes the `reason` and `until_reason` arguments from every tool that has them.
+`MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` (off by default) makes the extraction model read a
+turn over 6,000 characters in pieces, one call per piece. A feature marked (off by default)
+stays off until its variable says `1`; every other feature is on until its variable says `0`.
 
 With `MEMVARA_LLM` set to a model, the search and recall tools also ask that model for a
 few other phrasings of each query and for the dates it names, before searching. That is one

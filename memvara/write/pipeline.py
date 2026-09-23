@@ -11,6 +11,8 @@ needed it.
              the unambiguous statement forms                          -- 0 calls
     Tier 2   whatever survived both, batched into one extract()       -- 1 call per add()
              plus one resolve_predicate() per *novel surface form*, ever
+             (under `extraction_chunks`, a turn over 6,000 characters is
+             extracted in pieces instead                               -- 1 call per piece)
 
 Reconciliation, deduplication and contradiction resolution sit below all of this and
 never call a model at all.
@@ -50,15 +52,16 @@ from __future__ import annotations
 import re
 import warnings
 from contextlib import nullcontext
+from dataclasses import replace
 from datetime import datetime
 from time import perf_counter
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 
 from ..embed.base import Embedder
 from ..llm._shape import finite_amount
 from ..llm.base import LLM, Usage
 from ..redact import Redactor, redact_claim, redact_episode
-from . import pollution
+from . import pollution, split
 from ..schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
 from ..store.base import Store
 from ..telemetry import (
@@ -192,6 +195,18 @@ _GROUNDING_CHUNK_CHARS = 1200
 _Reinforcement = tuple[Claim, list[str], datetime]
 
 
+
+class _Call(NamedTuple):
+    """One `llm.extract()` call that tier 2 plans when some turn is cut into pieces."""
+
+    #: The turns the model is shown: every turn short enough to go whole, or one piece
+    #: of a long turn.
+    shown: list[Episode]
+    #: The position in the batch of each turn in `shown`, so a `source_index` the model
+    #: gives within this call can be mapped back to the batch.
+    positions: list[int]
+
+
 class UnembeddableTextWarning(UserWarning):
     """A claim was stored with an all-zero vector and can never be found by meaning.
 
@@ -215,7 +230,8 @@ class WritePipeline:
                  reject_ungrounded: bool | str = "auto",
                  extraction_deferred: bool = False,
                  reject_polluted: bool = True,
-                 closed_vocabulary: bool = False) -> None:
+                 closed_vocabulary: bool = False,
+                 extraction_chunks: bool = False) -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
@@ -254,6 +270,15 @@ class WritePipeline:
         #: thing an invented one adds is noise in every recall. `remember()` and the fast
         #: path never reach this check: a caller asserting a fact is trusted to spell it.
         self.closed_vocabulary = bool(closed_vocabulary)
+        #: Off by default. On, a turn longer than `split.EXTRACTION_CHUNK_CHARS` (6,000
+        #: characters) is sent to the model in pieces cut at paragraph and sentence ends,
+        #: one call per piece, instead of whole in the batch's one call. Every claim from
+        #: a piece still cites the whole episode, so `why()` shows the turn the user
+        #: wrote, and a fact two pieces both state is reconciled as a repeat, exactly as
+        #: if the turn had stated it twice. Off because the release bar in
+        #: `docs/ROADMAP.md` has not been met: the one measured chunked run on a long turn
+        #: found 4 of 5 key facts where the whole turn found 5 of 5.
+        self.extraction_chunks = bool(extraction_chunks)
         if not (reject_ungrounded is True or reject_ungrounded is False
                 or reject_ungrounded == "auto"):
             raise TypeError(
@@ -731,41 +756,38 @@ class WritePipeline:
             return out
 
         # One call for the whole batch, not one per turn. Turns share context, and the
-        # per-request overhead dominates at this size.
+        # per-request overhead dominates at this size. The exception is a turn cut into
+        # pieces under `extraction_chunks`, which costs one call per piece.
         rec, extract_t0 = self.telemetry, perf_counter()
         # One accumulator for the whole batch, allocated only for a backend that says it
         # will fill it — an older three-argument implementation must not be handed a
         # keyword it does not accept. Not gated on `rec`: tokens land on the receipt too,
         # and a caller who never configured telemetry still gets to see what they spent.
         usage = Usage() if getattr(self.llm, "reports_usage", False) else None
-        try:
-            if usage is None:
-                raw = self.llm.extract(episodes, self.registry.prompt_vocabulary())
-            else:
-                raw = self.llm.extract(episodes, self.registry.prompt_vocabulary(),
-                                       usage=usage)
-        except Exception:
-            if rec is not None:
-                rec.timing(WRITE_EXTRACT_MS, (perf_counter() - extract_t0) * 1000.0)
-            # A call that raised may still have burned tokens — a provider that timed out
-            # after generating, or a response rejected while being parsed. Publishing
-            # what it reported is the difference between an outage that shows up on the
-            # bill and one that shows up in the metrics too.
-            self._report_usage(receipt, usage)
-            # A provider 429 is not a reason to lose a transcript. Episodes are already
-            # committed and are the source of truth every provenance guarantee rests on,
-            # and the same batch's fast-path claims are still in hand and still correct —
-            # letting the failure propagate would discard those too and leave the caller
-            # with an exception instead of a receipt saying what was lost. The same guard
-            # already wraps predicate acquisition; it was missing on the expensive call,
-            # which is the one that actually fails.
-            receipt.llm_calls += 1
-            receipt.deferred = True
-            receipt.unextracted = len(episodes)
-            return out
+        # Once per batch, not once per piece: every call is offered the same vocabulary.
+        vocabulary = self.registry.prompt_vocabulary()
+        calls = self._plan_calls(episodes)
+        if calls is None:
+            try:
+                raw = self._extract(episodes, vocabulary, usage)
+            except Exception:
+                return self._extraction_failed(receipt, usage, 1, len(episodes),
+                                               extract_t0)
+            made = 1
+        else:
+            raw, failed, made = self._extract_in_pieces(calls, vocabulary, usage)
+            if len(failed) == len(episodes):
+                return self._extraction_failed(receipt, usage, made, len(episodes),
+                                               extract_t0)
+            if failed:
+                # Some turns lost a call and the rest did not. The rest keep their
+                # claims; the turns with a failed call keep none, are deferred, and are
+                # counted on `unextracted` below because nothing cites them.
+                receipt.deferred = True
+                raw = [item for item in raw if item["source_index"] not in failed]
         if rec is not None:
             rec.timing(WRITE_EXTRACT_MS, (perf_counter() - extract_t0) * 1000.0)
-        receipt.llm_calls += 1
+        receipt.llm_calls += made
         if self.reject_polluted:
             # Before acquisition, deliberately: a predicate that only ever appeared on a
             # claim R1 refused as a duplicate of a known one must not be acquired — that
@@ -783,12 +805,101 @@ class WritePipeline:
         receipt.llm_calls += self._acquire_predicates(raw, episodes, usage)
         self._report_usage(receipt, usage)
 
+        # A fact stated in two pieces of a cut turn is not merged here. Both statements
+        # reach `Reconciler.apply`, which stores the first and reinforces it with the
+        # second, exactly as it does when one call states a fact twice. One rule for
+        # repeats, whichever way the turn was read.
         for item in raw:
             claim = self._claim_from_dict(item, episodes, now, receipt)
             if claim is not None:
                 out.setdefault(claim.sources[0], []).append(claim)
         receipt.unextracted = sum(1 for ep in episodes if ep.id not in out)
         return out
+
+    def _extraction_failed(self, receipt: WriteReceipt, usage: Usage | None, made: int,
+                           turns: int, extract_t0: float) -> dict[str, list[Claim]]:
+        """Report a tier 2 that got no answer for any turn, and return no claims."""
+        if self.telemetry is not None:
+            self.telemetry.timing(WRITE_EXTRACT_MS, (perf_counter() - extract_t0) * 1000.0)
+        # A call that raised may still have burned tokens — a provider that timed out
+        # after generating, or a response rejected while being parsed. Publishing
+        # what it reported is the difference between an outage that shows up on the
+        # bill and one that shows up in the metrics too.
+        self._report_usage(receipt, usage)
+        # A provider 429 is not a reason to lose a transcript. Episodes are already
+        # committed and are the source of truth every provenance guarantee rests on,
+        # and the same batch's fast-path claims are still in hand and still correct —
+        # letting the failure propagate would discard those too and leave the caller
+        # with an exception instead of a receipt saying what was lost. The same guard
+        # already wraps predicate acquisition; it was missing on the expensive call,
+        # which is the one that actually fails.
+        receipt.llm_calls += made
+        receipt.deferred = True
+        receipt.unextracted = turns
+        return {}
+
+    def _extract_in_pieces(self, calls: Sequence[_Call], vocabulary: Sequence[str],
+                           usage: Usage | None
+                           ) -> tuple[list[dict[str, Any]], set[int], int]:
+        """Make the planned calls: the claim dicts, the turns that failed, the calls made.
+
+        A turn is extracted whole or not at all. When any call carrying a turn raises,
+        that turn's position goes into the failed set, its remaining pieces are not sent,
+        and the caller drops whatever its earlier pieces returned. `reextract()` skips a
+        turn that already has claims, so keeping part of a turn's claims would mean the
+        missing piece is never read. The other turns in the batch are not affected.
+
+        One call after another, not in parallel, because every call adds its tokens to
+        the same `usage` accumulator. Running them concurrently would need an accumulator
+        per call and a sum afterwards; that is not done here.
+        """
+        raw: list[dict[str, Any]] = []
+        failed: set[int] = set()
+        made = 0
+        for call in calls:
+            if failed.issuperset(call.positions):
+                continue
+            made += 1
+            try:
+                answer = self._extract(call.shown, vocabulary, usage)
+            except Exception:
+                failed.update(call.positions)
+                continue
+            raw.extend(_mapped(answer, call.positions))
+        return raw, failed, made
+
+    def _extract(self, episodes: Sequence[Episode], vocabulary: Sequence[str],
+                 usage: Usage | None) -> list[dict[str, Any]]:
+        """One `llm.extract()` call, passing `usage` only to a backend that fills it."""
+        if usage is None:
+            return self.llm.extract(episodes, vocabulary)
+        return self.llm.extract(episodes, vocabulary, usage=usage)
+
+    def _plan_calls(self, episodes: Sequence[Episode]) -> list[_Call] | None:
+        """The extraction calls tier 2 makes for `episodes`, or `None` for one call.
+
+        `None`, meaning one call for the whole batch as always, unless `extraction_chunks`
+        is on and some turn is longer than `split.EXTRACTION_CHUNK_CHARS`. Then the turns
+        short enough to go whole share one call, and each long turn is cut into pieces,
+        one call per piece. A piece is a copy of the episode with the same id and only
+        its text cut, so the model reads it as that turn.
+        """
+        if not self.extraction_chunks:
+            return None
+        whole = _Call([], [])
+        cut: list[_Call] = []
+        for position, ep in enumerate(episodes):
+            pieces = split.split_for_extraction(ep.content)
+            # No pieces at all is a long turn of nothing but whitespace. It goes whole, so
+            # no turn of the batch can be left out of every call.
+            if len(pieces) <= 1:
+                whole.shown.append(ep)
+                whole.positions.append(position)
+                continue
+            cut.extend(_Call([replace(ep, content=text)], [position]) for text in pieces)
+        if not cut:
+            return None
+        return ([whole] if whole.shown else []) + cut
 
     # -- predicate identity ---------------------------------------------------
 
@@ -1206,6 +1317,26 @@ class WritePipeline:
                         "not be reachable by vector search until re-embedded",
                         RuntimeWarning, stacklevel=2,
                     )
+
+
+def _mapped(raw: Sequence[dict[str, Any]],
+            positions: Sequence[int]) -> list[dict[str, Any]]:
+    """Copies of one call's claim dicts, with `source_index` pointing into the batch.
+
+    A call is shown only some of the batch's turns, so the model's `source_index` counts
+    within the call. `positions` maps it back. An index that names no turn in the call is
+    replaced by `None`, which `_claim_from_dict` drops as having no source, rather than
+    left as a number that would now name a different turn of the batch.
+    """
+    out = []
+    for item in raw:
+        idx = item.get("source_index")
+        mapped = None
+        if (isinstance(idx, int) and not isinstance(idx, bool)
+                and 0 <= idx < len(positions)):
+            mapped = positions[idx]
+        out.append({**item, "source_index": mapped})
+    return out
 
 
 def _coerce(enum_cls, raw: Any, fallback):

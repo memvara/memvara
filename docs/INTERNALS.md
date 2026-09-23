@@ -515,7 +515,8 @@ class WritePipeline:
                  near_dup_threshold: float = 0.97,
                  reinforce_bump: float = 0.25,
                  reject_ungrounded: bool | str = "auto",
-                 closed_vocabulary: bool = False) -> None
+                 closed_vocabulary: bool = False,
+                 extraction_chunks: bool = False) -> None
 
     def add(self, episodes: Sequence[Episode]) -> WriteReceipt
     def reextract(self, episodes: Sequence[Episode]) -> WriteReceipt
@@ -586,6 +587,30 @@ suggestion must not turn it into an exception the caller retries.
   2,555 claims under about a hundred invented predicates in one afternoon, every one
   unregistered, multi-valued and retiring nothing, and recall for a short query about a
   repository's CI returned five commit hashes ahead of the note that answered it.
+- **`extraction_chunks`** (default `False`) extracts a long turn in pieces. A turn longer
+  than `write/split.EXTRACTION_CHUNK_CHARS` (6,000 characters) is cut by
+  `split_for_extraction()` into pieces of at most that size. Whole paragraphs go into a
+  piece where they fit, a longer paragraph is cut after a sentence or at a line break, and
+  only a single sentence longer than a piece is cut mid-sentence. Turns under the limit
+  still share the batch's one call, and each piece of a long turn is a call of its own, so
+  `llm_calls` counts one per piece. A piece is a copy of the episode with the same id, and
+  `source_index` from a piece's call is mapped back to the long turn's position in the
+  batch, so every claim cites the whole episode and `why()` shows what the user wrote. An
+  index that names no turn in its call is dropped, not moved. Nothing merges repeats
+  across pieces: a fact stated in two pieces reaches `Reconciler.apply` twice and is
+  stored once and reinforced, exactly as when one call states it twice. The calls run one
+  after another because they share one `Usage` accumulator. A turn is extracted whole or
+  not at all: when a call carrying a turn fails, that turn's later pieces are not sent,
+  what its earlier pieces returned is dropped, and the turn is deferred, because
+  `reextract()` skips a turn that has claims and would never read the missing piece. The
+  other turns of the batch keep their claims; only when every turn failed is the batch
+  reported as a failed extraction. A turn of only whitespace, which the splitter returns
+  as no pieces, goes in the call for whole turns. The predicate vocabulary is built once
+  per batch, not once per call. Off by default because its release bar is not met: see
+  the "Reversed" list in `docs/ROADMAP.md` and `tests/test_extraction_chunks.py`. The MCP
+  server turns it on with `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1`; the feature is marked off
+  by default in `FEATURE_DEFAULTS` in `server/config.py`, the one table of features and
+  their defaults.
 
 `reextract()` is `add()` with tier 0 removed, for turns already in the store: a
 deployment that ran without a model, or a batch a provider failure left `deferred` — or

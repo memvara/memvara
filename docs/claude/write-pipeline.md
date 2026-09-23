@@ -23,6 +23,9 @@ A write starts as an `Episode` — one raw turn, stored verbatim — and ends as
   `backfill_predicates()`.
 - Fabrication guard: `memvara/write/pollution.py` — `guard()`, applied only to
   model-proposed claims.
+- Cutting a long turn for extraction: `memvara/write/split.py` —
+  `split_for_extraction()` and `EXTRACTION_CHUNK_CHARS`, used only when
+  `extraction_chunks` is on.
 - Temporal expressions: `memvara/write/when.py` — `resolve()` turns "last March" into an
   instant and a `Precision`.
 - Model backends: `memvara/llm/base.py` — the `LLM` and `Chat` protocols, `ReplacementJudge`,
@@ -30,7 +33,7 @@ A write starts as an `Episode` — one raw turn, stored verbatim — and ends as
   `memvara/llm/anthropic.py` (`AnthropicLLM`) and `memvara/llm/openai.py` (`OpenAILLM`).
 - Tests: `tests/test_pipeline.py`, `tests/test_gate.py`, `tests/test_fast.py`,
   `tests/test_reconcile.py`, `tests/test_pollution.py`, `tests/test_when.py`,
-  `tests/test_llm.py`, `tests/test_advisory.py`.
+  `tests/test_llm.py`, `tests/test_advisory.py`, `tests/test_extraction_chunks.py`.
 - Documentation: [INTERNALS.md](../INTERNALS.md), section *`memvara/write/`*, which carries
   the tier-by-tier contract and the measured constants.
 
@@ -49,7 +52,12 @@ A write starts as an `Episode` — one raw turn, stored verbatim — and ends as
    produced no fast-path claim are batched into one `llm.extract()` call. A predicate the
    registry has not seen costs one `llm.resolve_predicate()` per new surface form, and the
    answer is learned, persisted through `store.put_spec()` and never asked again, including
-   after a restart and including by another process.
+   after a restart and including by another process. With `extraction_chunks=True`, a turn
+   over 6,000 characters is the exception to the one call: it is cut into pieces at
+   paragraph and sentence ends and each piece is its own call. The claims still cite the
+   whole episode, and a fact two pieces both state reaches the reconciler twice, as it
+   would if the turn had stated it twice. The option is off by default, because the release bar recorded in the
+   "Reversed" list of `docs/ROADMAP.md` has not been met.
 
 Every claim that reaches the store passes through `Reconciler.apply()`, which decides one of
 four outcomes against the claims already in that slot: exact duplicate (do not insert),
@@ -98,6 +106,11 @@ exception the caller retries.
   content was accepted and nothing will ever extract from it. `extraction_deferred=True`
   counts it on `receipt.deferred` instead, for a deployment where a worker calls
   `reextract()` later. The option changes what is said, not what is stored.
+- **A long turn is extracted whole or not at all.** Under `extraction_chunks`, if the call
+  for any piece of a turn fails, that turn keeps no claim from its other pieces and is
+  deferred. `reextract()` skips any turn that already has claims, so keeping part of a
+  turn's claims would mean the missing piece is never read. The other turns in the batch
+  keep their claims.
 
 ## Read next
 
