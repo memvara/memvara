@@ -29,6 +29,54 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **End or retire every memory that matches a query, after seeing exactly which.**
+  `Memvara.forget_matching(query, close=, k=20, reason=None, confirm=None)` without
+  `confirm` changes nothing and returns a `ForgetPreview`: the matching claim ids with
+  their text, and a confirmation token. The same call with `confirm=<token>` applies
+  `close` to exactly the ids the token lists and returns a `ForgetResult`. The query is
+  not run again, so a memory that started matching in between is not closed with the
+  others. `close` has no default and takes `"ended"` or `"retired"`; erasure is not
+  offered. The token is an HMAC-SHA256 over the sorted ids, the closure and an expiry ten
+  minutes after the preview. It is refused with `ConfirmationRefused`, and nothing is
+  applied, when it was not issued under this store's key or was altered, when it has
+  expired, when it was issued for the other closure, or when any listed claim is no longer
+  live or no longer visible. The key is `confirm_secret=` on `Memvara` and
+  `MEMVARA_CONFIRM_SECRET` on a server, so several processes can share one; with neither,
+  each process generates its own. On the MCP server this is two tools,
+  `memory_end_matching` and `memory_forget_matching`, one per closure, for the reason
+  `memory_end` and `memory_forget` are two tools. `RemoteMemvara.forget_matching` calls
+  `POST /v1/forget-matching` and raises the same `ConfirmationRefused` for a 409.
+- **A reason on every closure, and on a planned end.** `delete()`, `forget()` and
+  `forget_matching()` take `reason=` (at most 500 characters), recorded on each closed
+  claim's closure record in `meta["closure"]`. `remember(valid_to=..., until_reason=...)`
+  records why a fact will stop being true. `history()` and `why()` return the claim with
+  the reason on it, `types.closure_reasons()` reads it off, and `memory_history` and
+  `memory_why` print it on a line of its own. The MCP tools take the same arguments:
+  `memory_end(reason=)`, `memory_forget(reason=)` and `memory_remember(until_reason=)`.
+  A blank reason is refused rather than stored.
+- **`remember(replaces=<claim id>, reason=...)` ends one named value and records why.**
+  It builds the new claim and hands it to `supersede()`, so the named claim is closed in
+  the same transaction as the new one is written, `invalidated_by` links the old claim to
+  the new one, and `why()` on the new claim lists it. This is how a caller replaces one
+  value of a many-valued predicate, which an ordinary write leaves live beside the new
+  value. `memory_remember` takes `replaces` and `reason`, and always ends the named value.
+  `supersede()` and the remote clients' `supersede()` take `reason=` too.
+- **Typed links between memories.** `Memvara.link(from_id, to_id, relation)` records that
+  one memory adds detail to another (`"extends"`) or was inferred from another
+  (`"derives"`), and `Memvara.links(claim_id)` lists every link that touches a claim, in
+  either direction. `why()` returns them as `Provenance.links`, and `memory_why` prints
+  each with the text at its far end. The new `memory_link` tool records one. Both ids must
+  be visible to the caller, and a link whose far end the caller cannot see is left out of
+  `links()`. Nothing in the engine writes a link on its own. The design for this feature
+  had consolidation write a `derives` link from a merge survivor to each claim it absorbed;
+  that relationship is a supersession, which `invalidated_by` already records and
+  `why().superseded` reports, and consolidation creates no inferred claim for `derives` to
+  describe, so it writes none. Erasing a claim, by `erase()` or `purge()`, removes its
+  links in the same transaction, and `SQLiteStore.residue()` counts a fifth table, `claim_links`, so a proof
+  of erasure sees a link left behind. `RemoteMemvara.link` and `.links` call
+  `POST /v1/links` and `GET /v1/memories/{id}/links`.
+- **SQLite schema version 13**, which adds the `claim_links` table. Nothing is backfilled;
+  `docs/UPGRADING.md` says why and what an upgraded store starts with.
 - **The local MCP server scopes memory to the repository it runs in.** A new
   `memvara.project.canonical_project(cwd)` turns a working directory into one project name:
   the `origin` remote normalised to `host/owner/repo`, read from the repository's common
@@ -59,8 +107,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   The names are `index_command`, `research_agent`, `project_scope`, `status_line`,
   `recall_mark`, `profile`, `forget_matching`, `end_reason` and `links`
   (`memvara.server.config.FEATURES`). In this release `PROJECT_SCOPE=0` stops the project
-  being derived, and `PROFILE=0` hides `memory_profile`; the rest are accepted for the
-  plugin and for tools a later release adds. An unknown name, or a value that is not a
+  being derived, `PROFILE=0` hides `memory_profile`, `FORGET_MATCHING=0` hides
+  `memory_end_matching` and `memory_forget_matching`, `LINKS=0` hides `memory_link`, and
+  `END_REASON=0` removes the `reason` and `until_reason` arguments from every tool (reasons
+  already stored are still shown). The rest are accepted for the plugin. An unknown name, or a value that is not a
   boolean, stops the server at startup with a message naming the variable and the feature
   it probably meant.
   `MemvaraMCPServer(features_off=...)` is the same switch for a server built in Python,
@@ -161,6 +211,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Changed
 
+- **`supersede()` ends the old claim where the new one begins, and refuses a claim with
+  nothing left to close.** With no `at`, `close="ended"` now closes the old claim at the new claim's
+  `valid_from`, the instant the world changed; it used to close it at the new claim's
+  `recorded_at`, which is wrong whenever a replayed value began before it was recorded.
+  `close="retired"` still closes at `recorded_at`. An explicit `at` is unchanged. Naming a
+  claim that is already retired, or ending one that is not live, now raises `ValueError`
+  and writes nothing, where it used to add a second closure. Retiring a claim that has
+  ended is still allowed, because that is a correction of a finished value. `docs/UPGRADING.md` says how to find affected callers.
 - **The LongMemEval harness now hands each question's day to retrieval, so the temporal
   leg has an anchor to measure from.** `bench/longmemeval.py` passes the last second of
   the question's day as `valid_at` on both reads a question makes: the budgeted

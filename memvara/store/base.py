@@ -26,7 +26,7 @@ from typing import (TYPE_CHECKING, Any, Collection, Iterable, Literal, Protocol,
 
 import numpy as np
 
-from ..types import Claim, Episode, Scope
+from ..types import Claim, Episode, Link, Scope
 
 if TYPE_CHECKING:
     # Only for annotations: a `Store` implementation should not have to import
@@ -321,9 +321,9 @@ def bulk_claims(store: "Store", claim_ids: Sequence[str]) -> dict[str, Claim]:
 #: Members a backend may leave out, and what it costs to leave each one out.
 #:
 #: `Store` is `@runtime_checkable`, and `isinstance` on a Protocol is **all or nothing**:
-#: it asks whether every one of the 44 members is present, so it cannot answer "can this
+#: it asks whether every one of the 46 members is present, so it cannot answer "can this
 #: store walk a graph". A backend that implements everything a memory needs and skips the
-#: six below is a perfectly good store and `isinstance(x, Store)` is `False` for it.
+#: eight below is a perfectly good store and `isinstance(x, Store)` is `False` for it.
 #:
 #: So the capability check in this codebase is `getattr(store, name, None)`, per member,
 #: at the call site that needs it — and each of those call sites degrades in a way it
@@ -349,6 +349,9 @@ OMITTABLE: dict[str, str] = {
     "connectivity": "memory_stats cannot report a join rate, so an operator deciding "
                     "whether to turn the graph leg on has to guess. Nothing else "
                     "reads it; retrieval is unaffected.",
+    "put_link": "Memvara.link() raises NotImplementedError naming the store, rather "
+                "than reporting a link it did not keep.",
+    "claim_links": "links() and why().links report no links. Nothing else reads them.",
 }
 
 
@@ -833,6 +836,40 @@ class Store(Protocol):
         correct for a memory that *is* its source text, wrong for a fact extracted from
         a conversation turn that holds much else besides. Those turns are what `episodes`
         counts, so it is 0 without the flag.
+        """
+        ...
+
+    # --- typed links ------------------------------------------------------
+    def put_link(self, tenant: str, link: "Link") -> "Link":
+        """Record one typed link between two claims. Returns the link as stored.
+
+        Idempotent on `(tenant, from_id, to_id, relation)`: recording the same link twice
+        keeps the first row, including its `created_at` and `by`, and returns that first
+        row rather than the one offered. Returning the row means a caller never has to
+        read it back to learn which one is on record, and a read-back is a second query
+        that can see a different store than the write did.
+
+        The store does not check that the ids name claims or that the caller may see
+        them. `Memvara.link` does both before it gets here, because only it knows the
+        caller's scope. What the store does guarantee is the other end of the contract:
+        erasing a claim, by `erase_claim` or `purge`, removes every link that touches it
+        in the same transaction, so a link never outlives either claim it names.
+
+        Optional. A store without it cannot record links, and `Memvara.link` raises
+        `NotImplementedError` naming the store rather than reporting a link it did not
+        keep.
+        """
+        ...
+
+    def claim_links(self, tenant: str, claim_id: str) -> list["Link"]:
+        """Every link that touches `claim_id` in `tenant`, in either direction.
+
+        Ordered by `created_at` and then by the far end's id, so two reads of the same
+        rows agree. The caller filters by scope: a link to a claim the reader cannot see
+        is still returned here, and `Memvara.links` drops it.
+
+        Optional, like `put_link`. A store without it has no links to report, and
+        `Memvara.links` and `why()` report none.
         """
         ...
 

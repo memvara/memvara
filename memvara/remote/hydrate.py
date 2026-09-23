@@ -9,10 +9,12 @@ on the first call rather than hand back a claim carrying a plausible zero, which
 downstream can tell from a real one. Every field indexed here is required on the wire model
 it comes from (present, even when its value may be `null`) — `.get()` is used only where the
 wire model genuinely has no such field at all, so a default is the honest answer rather than
-a guess about a key that could be missing. One exception, and it is named at the call:
+a guess about a key that could be missing. Two exceptions, each named at the call:
 `anchor` on a ranking is `.get()` because the client has to read results from a server
-that predates the field, and for that field alone a missing key means the server did not
-say, which is what `None` on `Explanation.anchor` is documented to mean on a hosted result.
+that predates the field, and for that field a missing key means the server did not say,
+which is what `None` on `Explanation.anchor` is documented to mean on a hosted result.
+`claim_links` on a provenance body is `.get()` for the same reason: a server that
+predates typed links sends no such field, and for it a missing key means none recorded.
 
 **Instants are parsed by two functions, and which one a field gets is read off the wire
 model.** `_dt` is for fields that may legitimately be null; `_required_dt` is for the ones
@@ -39,13 +41,13 @@ from ..retrieve.traverse import Edge, Path
 from ..select.base import Selection
 from ..types import (
     LAST_OBSERVED, SALIENCE_BASE, Answer, Claim, Delta, Derivation, Episode,
-    Explanation, MemoryType, Profile, Provenance, Reading, Result, Row, Scope,
-    WriteReceipt,
+    Explanation, ForgetPreview, ForgetResult, Link, MemoryType, Profile, Provenance,
+    Reading, Result, Row, Scope, WriteReceipt, closure, link_relation,
 )
 
 __all__ = ["claim", "episode", "result", "explanation", "receipt", "provenance",
            "reading", "answer", "delta", "profile", "edge", "path", "scope",
-           "selection"]
+           "selection", "link", "forget_preview", "forget_result"]
 
 
 def _dt(value: Any) -> datetime | None:
@@ -222,13 +224,44 @@ def receipt(body: dict[str, Any]) -> WriteReceipt:
 
 
 def provenance(body: dict[str, Any]) -> Provenance:
+    """`render.provenance`, backwards.
+
+    `claim_links` is read with `.get()`; the module docstring says why. The field is not
+    called `links` because a memory body already uses that name for the routes it can be
+    reached at.
+    """
     return Provenance(
         claim=claim(body["memory"]),
         episodes=[episode(e) for e in body["sources"]],
         derivation=Derivation(body["derivation"]),
         extractor=body["extractor"] or "",
         superseded=[claim(c) for c in body["superseded"]],
+        links=[link(k) for k in body.get("claim_links") or []],
     )
+
+
+def link(body: dict[str, Any]) -> Link:
+    """One typed link, as `POST /v1/links` returns it and `claim_links` lists it."""
+    return Link(from_id=body["from_id"], to_id=body["to_id"],
+                relation=link_relation(body["relation"]),
+                created_at=_required_dt("created_at", body["created_at"]),
+                by=body["by"])
+
+
+def forget_preview(body: dict[str, Any]) -> ForgetPreview:
+    """The preview half of `POST /v1/forget-matching`: matches, token, expiry."""
+    return ForgetPreview(
+        close=closure(body["close"]),
+        matches={m["memory_id"]: m["text"] for m in body["matches"]},
+        confirm=body["confirm"],
+        expires_at=_required_dt("expires_at", body["expires_at"]))
+
+
+def forget_result(body: dict[str, Any]) -> ForgetResult:
+    """The confirmed half of `POST /v1/forget-matching`: what was closed, and why."""
+    return ForgetResult(close=closure(body["close"]),
+                        closed=[claim(c) for c in body["closed"]],
+                        reason=body["reason"])
 
 
 def reading(body: dict[str, Any]) -> Reading:

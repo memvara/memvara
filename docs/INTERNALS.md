@@ -280,9 +280,10 @@ def prove_erased(self, claim_id: str) -> ErasureProof        # Memvara
 
 `erase()` reported success from `erase_claim`'s return code, which proves the code took
 the branch it thought it took — the same statement the return value already made, and one
-that cannot disagree with it. `residue` is a **live query**: four `SELECT COUNT(*)`s over
-the tables a claim's content can survive in (`claims`, `claims_fts`, `embeddings`,
-`claim_sources`). A re-hash of what was returned, or a cached count, would not be evidence.
+that cannot disagree with it. `residue` is a **live query**: five `SELECT COUNT(*)`s over
+the tables a claim can survive in (`claims`, `claims_fts`, `embeddings`, `claim_sources`,
+and since schema 13 `claim_links`). A re-hash of what was returned, or a cached count,
+would not be evidence.
 
 `prove_erased` fails closed. A store with no `residue`, or one whose `residue` raises —
 `RemoteStore`, which a `getattr` guard cannot see — yields `proven=False` with a reason,
@@ -1220,6 +1221,93 @@ of `_live_clause` and is held to the same wording clause for clause. Three copie
 predicate is three chances to disagree; `tests/test_bitemporal.py` checks the Python one
 against the SQL one row for row.
 
+### Why a claim was closed
+
+The reason for a closure is stored on the closure witness, `meta["closure"]`, which
+`close_out` already appends to every time a claim ends or is retired. An entry gains a
+`reason` key only when a caller gave one, so every closure written without a reason has
+exactly the record it had before, and no existing row changes shape. The reason is at
+most 500 characters (`types.REASON_CHARS`), stripped, and refused when blank, because an
+empty reason on the record reads as a reason that said nothing. `types.closure_reason`
+validates it and `types.closure_reasons(claim)` reads every one back, oldest first.
+
+The reason lives in `meta` and not in a column, so it needs no migration, and the read
+path never consults it: like the rest of the witness, it is evidence about a closure and
+never an input to which rows a query returns.
+
+A fact written with its end already known (`remember(valid_to=..., until_reason=...)`)
+gets an `ended` witness at its `valid_to` when it is written, through
+`types.planned_end`. Nothing else writes a witness for a `valid_to` set at write time, so
+a planned end with no reason still has none.
+
+`remember(replaces=<id>, reason=...)` builds the new claim and hands it to `supersede()`,
+so there is one implementation of a named replacement and not two that can drift.
+`invalidated_by` points from the old claim to the new one and the reason lands on the old
+claim's witness. `supersede()` refuses, before anything is written, an id the caller
+cannot see (`KeyError`), a claim already retired, and, under `close="ended"`, a claim
+that is not live now (`ValueError`). Retiring an ended claim is allowed: a finished value
+later found never to have been true is a correction, and the closure witness is a list so
+that it can hold both events.
+
+**The closure instant of a supersession has one rule.** An explicit `at` wins. Otherwise
+`"ended"` closes the old claim where the world changed, which is where the new claim
+begins: its `valid_from`, which `remember()` sets from `valid_from`, else `recorded_at`,
+else now. `"retired"` closes belief in the old claim when the new record was made: its
+`recorded_at`. This is the rule ending follows everywhere else, where a closure lands on
+the axis its word names. Before this, `supersede()` closed both readings at the new
+claim's `recorded_at`, so a replay whose new value began earlier than it was recorded
+ended the old value at the recording instant instead of the instant the value changed.
+
+### Closing everything that matches a query
+
+`Memvara.forget_matching` is two calls, and the first one writes nothing. Without
+`confirm` it runs an ordinary `search()` and returns the matching ids with their text and
+a token. With `confirm` it checks the token, re-reads each listed claim through `get()`,
+and closes them all in one `batch()` only if every one is still live and visible;
+otherwise it raises `ConfirmationRefused` and writes nothing. The query is not run again
+on the confirming call, so the set closed is the set the caller saw.
+
+The token (`memvara/confirm.py`) is the sorted ids, the closure and an expiry ten minutes
+out, serialised as JSON and followed by an HMAC-SHA256 of those bytes. The ids travel in
+the token, which is what lets the confirming call avoid a second search. The key is
+`Memvara(confirm_secret=...)`, which a server fills from `MEMVARA_CONFIRM_SECRET`; with
+none, every `Memvara` in the process shares one key generated at import. So a token
+survives neither a restart nor a hop to a process with another key, and that is the safe
+direction to fail in. Scope is not in the token. It does not need to be: the confirming
+call re-reads every id through `get()` in the caller's own scope, so a token minted for one
+user closes nothing another user cannot see.
+
+The MCP surface offers this as two tools, `memory_end_matching` and
+`memory_forget_matching`, one per closure. The module docstring of `server/tools.py`
+explains why a closure is chosen by a tool's name and never by an argument.
+
+### Typed links between claims
+
+`claim_links` (schema 13) holds one row per link: `tenant`, `from_id`, `to_id`,
+`relation`, `created_at` and `by`, keyed on the first four. `relation` is `extends` (the
+first claim adds detail to the second) or `derives` (the first was inferred from the
+second), enforced by a `CHECK`. Supersession is not a relation here, because the
+replacing claim is already recorded in `invalidated_by`.
+
+The table has no `REFERENCES` clause. This connection does not turn on
+`PRAGMA foreign_keys`, and a clause SQLite does not enforce would read as a guarantee it
+is not. Both halves of the guarantee are kept in code instead. `Memvara.link` refuses an
+id the caller cannot see. `erase_claim` and `purge` delete every link that touches an
+erased claim in the same transaction as the claim, and `residue()` counts `claim_links`,
+so a proof of erasure fails if one survives.
+
+`put_link` writes with `ON CONFLICT DO NOTHING` rather than `INSERT OR IGNORE`. The second
+also ignores `CHECK` failures, so a link with an unknown relation would have been dropped
+without an error.
+
+Links carry a creation instant and no closure. They record a relationship between two
+records rather than a fact about the world, so they last exactly as long as both claims
+are stored, including after either is ended or retired. `why()` dates them on the belief
+clock only: `known_at` drops a link recorded after it.
+
+`Memvara.links(claim_id)` returns both directions, and leaves out a link whose far end
+the caller cannot see, because the link would otherwise disclose that id.
+
 ### Erasure removes the bytes, not just the rows
 
 Two settings, covering two different halves, and neither is SQLite's default.
@@ -1407,7 +1495,11 @@ class Consolidator:
 - `merge_duplicates` finds live claims sharing a `fact_key` whose embeddings exceed
   `threshold`, keeps the one with the highest `observation_count` (ties broken by earliest
   `recorded_at` for determinism), folds the others' `sources` and `observation_count` into
-  it, and invalidates them with `invalidated_by` pointing at the survivor.
+  it, and invalidates them with `invalidated_by` pointing at the survivor. It writes no
+  typed link. A merge is a supersession of near-duplicates, `invalidated_by` already
+  records it, and `why(survivor).superseded` reports it; a `derives` link would be a
+  second record of the same fact. `derives` is for a claim inferred from other claims,
+  and nothing in consolidation creates one.
 - `promote` turns a repeatedly-observed `EPISODIC` claim into a `SEMANTIC` one: seeing
   something happen once is an event, seeing it `min_observations` times is a pattern.
   The promoted claim gets `derivation=Derivation.CONSOLIDATION`.

@@ -200,7 +200,8 @@ def test_no_tool_can_erase_anything():
         "memory_recall", "memory_search", "memory_neighborhood", "memory_paths",
         "memory_ask", "memory_since", "memory_standing", "memory_profile", "memory_add",
         "memory_remember", "memory_forget",
-        "memory_end", "memory_history", "memory_why", "memory_stats",
+        "memory_end", "memory_end_matching", "memory_forget_matching", "memory_link",
+        "memory_history", "memory_why", "memory_stats",
     }
     forbidden = ("purge", "reset", "consolidate", "reembed", "erase", "delete")
     for tool in TOOLS:
@@ -268,6 +269,12 @@ _FORWARDING_CASES = {
     # with the slot form because it is optional on both.
     "memory_end": [{"predicate": "lives_in", "at": "2024-03-01"},
                    {"claim_id": "cl_absent"}],
+    # The preview call. The confirming call reads the same properties, and a token the
+    # empty store never issued would be refused before anything is read that the
+    # preview has not already read.
+    "memory_end_matching": [{"query": "anything", "k": 5, "reason": "it ended"}],
+    "memory_forget_matching": [{"query": "anything", "k": 5, "reason": "misheard"}],
+    "memory_link": [{"from_id": "cl_a", "to_id": "cl_b", "relation": "extends"}],
     "memory_history": [{"predicate": "lives_in"}],
     "memory_why": [{"claim_id": "cl_absent"}],
     "memory_stats": [{}],

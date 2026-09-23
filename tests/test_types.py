@@ -493,7 +493,7 @@ def test_provenance_repr_summarises_the_trail_without_dumping_it():
                    derivation=Derivation.FAST_PATH, extractor="fast/v1",
                    superseded=[mk(object="Lisbon")])
     assert repr(p) == (f"<Provenance {c.id} 'user lives in Berlin' via fast/v1 "
-                       "(fast_path) sources=1 superseded=1>")
+                       "(fast_path) sources=1 superseded=1 links=0>")
 
 
 def test_provenance_repr_survives_an_unattributed_claim():

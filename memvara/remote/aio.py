@@ -24,18 +24,20 @@ from copy import copy
 from datetime import datetime
 from typing import Any, Collection, Literal, Mapping, Sequence, overload
 
+from ..confirm import ConfirmationRefused
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import Path, Retrieved
 from ..types import (
-    Answer, Claim, Delta, Episode, MemoryType, Profile, Provenance, Result, Scope,
-    SearchResults, WriteReceipt, closure,
+    Answer, Claim, Delta, Episode, ForgetPreview, ForgetResult, Link, MemoryType,
+    Profile, Provenance, Result, Scope, SearchResults, WriteReceipt, closure,
+    closure_reason, link_relation,
 )
 from . import hydrate
 from .api import (PROJECT_HEADER, _hit, _iso, _refuse_project_meta, _sent, _states,
                   _type, _types)
 from .client import DEFAULT_TIMEOUT, AsyncHttpClient
 from .creds import resolve
-from .errors import NotFound
+from .errors import Conflict, NotFound
 
 
 class AsyncRemoteMemvara:
@@ -389,6 +391,8 @@ class AsyncRemoteMemvara:
                        recorded_at: datetime | None = None,
                        sources: Sequence[Episode | Mapping[str, Any] | str] | None = None,
                        text: str | None = None, extractor: str = "api",
+                       until_reason: str | None = None, replaces: str | None = None,
+                       reason: str | None = None,
                        **meta: Any) -> WriteReceipt:
         _refuse_project_meta(meta, "remember()")
         ids, turns = self._cite(sources)
@@ -402,6 +406,8 @@ class AsyncRemoteMemvara:
             "valid_from": _iso(valid_from), "valid_to": _iso(valid_to),
             "recorded_at": _iso(recorded_at),
             "source_ids": ids, "sources": turns, "metadata": meta,
+            "until_reason": closure_reason(until_reason),
+            "replaces": replaces, "reason": closure_reason(reason),
         }
         return hydrate.receipt(await self._request(
             "POST", "/v1/facts", params=self._params(), json=_sent(body), write=True))
@@ -415,6 +421,7 @@ class AsyncRemoteMemvara:
                         recorded_at: datetime | None = None,
                         sources: Sequence[Episode | Mapping[str, Any] | str] | None = None,
                         text: str | None = None, extractor: str = "api",
+                        reason: str | None = None,
                         **meta: Any) -> WriteReceipt:
         _refuse_project_meta(meta, "supersede()")
         ids, turns = self._cite(sources)
@@ -423,7 +430,7 @@ class AsyncRemoteMemvara:
             "predicate": predicate,
             "object": self._redact(obj, CLAIM_OBJECT),
             "text": self._redact(text, CLAIM_TEXT),
-            "at": _iso(at), "close": closure(close),
+            "at": _iso(at), "close": closure(close), "reason": closure_reason(reason),
             "confidence": confidence, "polarity": polarity, "extractor": extractor,
             "memory_type": _type(memory_type),
             "valid_from": _iso(valid_from), "valid_to": _iso(valid_to),
@@ -435,31 +442,72 @@ class AsyncRemoteMemvara:
             json=_sent(body), write=True))
 
     async def forget(self, subject: str, predicate: str, *, at: datetime | None = None,
-                     close: str = "retired") -> list[Claim]:
+                     close: str = "retired", reason: str | None = None) -> list[Claim]:
+        why = closure_reason(reason)
         if closure(close) == "ended":
             return await self._end(
-                {"subject": subject, "predicate": predicate, "at": _iso(at)})
+                {"subject": subject, "predicate": predicate, "at": _iso(at),
+                 "reason": why})
         body = await self._request(
             "POST", "/v1/forget", params=self._params(),
-            json=_sent({"subject": subject, "predicate": predicate, "at": _iso(at)}),
+            json=_sent({"subject": subject, "predicate": predicate, "at": _iso(at),
+                        "reason": why}),
             write=True)
         return [hydrate.claim(c) for c in body["retired"]]
 
     async def delete(self, claim_id: str, *, at: datetime | None = None,
-                     close: str = "retired") -> bool:
+                     close: str = "retired", reason: str | None = None) -> bool:
+        why = closure_reason(reason)
         if closure(close) == "ended":
-            return await self.end(claim_id=claim_id, at=at)
+            return await self.end(claim_id=claim_id, at=at, reason=why)
         body = await self._request("DELETE", f"/v1/memories/{claim_id}",
-                                   params=self._params(), write=True)
+                                        params=self._params(),
+                                        json=None if why is None else {"reason": why},
+                                        write=True)
         return bool(body["retired"])
 
+    async def forget_matching(self, query: str, *, close: str, k: int = 20,
+                              reason: str | None = None,
+                              confirm: str | None = None) -> ForgetPreview | ForgetResult:
+        body = _sent({"query": query, "close": closure(close), "k": k,
+                      "reason": closure_reason(reason), "confirm": confirm})
+        try:
+            out = await self._request("POST", "/v1/forget-matching",
+                                           params=self._params(), json=body, write=True)
+        except Conflict as exc:
+            raise ConfirmationRefused(exc.message) from exc
+        if "closed" in out:
+            return hydrate.forget_result(out)
+        return hydrate.forget_preview(out)
+
+    async def link(self, from_id: str, to_id: str, relation: str, *,
+                   by: str = "api") -> Link:
+        try:
+            out = await self._request(
+                "POST", "/v1/links", params=self._params(),
+                json={"from_id": from_id, "to_id": to_id,
+                      "relation": link_relation(relation), "by": by},
+                write=True)
+        except NotFound:
+            raise KeyError(f"no claim {from_id!r} or {to_id!r} is visible here") from None
+        return hydrate.link(out)
+
+    async def links(self, claim_id: str) -> list[Link]:
+        try:
+            out = await self._request("GET", f"/v1/memories/{claim_id}/links",
+                                           params=self._params())
+        except NotFound:
+            return []
+        return [hydrate.link(k) for k in out["claim_links"]]
+
     async def end(self, *, claim_id: str | None = None, subject: str | None = None,
-                 predicate: str | None = None, at: datetime | None = None) -> bool:
+                 predicate: str | None = None, at: datetime | None = None,
+                 reason: str | None = None) -> bool:
         if (claim_id is None) == (predicate is None):
             raise TypeError(
                 "end() needs exactly one of: claim_id, to end one memory, or predicate "
                 "(with optional subject), to end every current value of that fact.")
-        body: dict[str, Any] = {"at": _iso(at)}
+        body: dict[str, Any] = {"at": _iso(at), "reason": closure_reason(reason)}
         if claim_id is not None:
             body["memory_id"] = claim_id
         else:
@@ -691,17 +739,32 @@ class AsyncScopedRemoteMemvara:
         return await self._mem.supersede(old_claim_id, subject, predicate, obj, **kw)
 
     async def forget(self, subject: str, predicate: str, *, at: datetime | None = None,
-                     close: str = "retired") -> list[Claim]:
-        return await self._mem.forget(subject, predicate, at=at, close=close)
+                     close: str = "retired", reason: str | None = None) -> list[Claim]:
+        return await self._mem.forget(subject, predicate, at=at, close=close,
+                                      reason=reason)
 
     async def delete(self, claim_id: str, *, at: datetime | None = None,
-                     close: str = "retired") -> bool:
-        return await self._mem.delete(claim_id, at=at, close=close)
+                     close: str = "retired", reason: str | None = None) -> bool:
+        return await self._mem.delete(claim_id, at=at, close=close, reason=reason)
+
+    async def forget_matching(self, query: str, *, close: str, k: int = 20,
+                              reason: str | None = None,
+                              confirm: str | None = None) -> ForgetPreview | ForgetResult:
+        return await self._mem.forget_matching(query, close=close, k=k, reason=reason,
+                                               confirm=confirm)
+
+    async def link(self, from_id: str, to_id: str, relation: str, *,
+                   by: str = "api") -> Link:
+        return await self._mem.link(from_id, to_id, relation, by=by)
+
+    async def links(self, claim_id: str) -> list[Link]:
+        return await self._mem.links(claim_id)
 
     async def end(self, *, claim_id: str | None = None, subject: str | None = None,
-                 predicate: str | None = None, at: datetime | None = None) -> bool:
+                 predicate: str | None = None, at: datetime | None = None,
+                 reason: str | None = None) -> bool:
         return await self._mem.end(claim_id=claim_id, subject=subject,
-                                   predicate=predicate, at=at)
+                                   predicate=predicate, at=at, reason=reason)
 
     async def erase(self, claim_id: str, *, sources: bool = False) -> bool:
         return await self._mem.erase(claim_id, sources=sources)

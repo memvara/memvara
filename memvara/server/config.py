@@ -271,6 +271,12 @@ class ServerConfig:
     #: Features switched off with `MEMVARA_FEATURE_<NAME>=0`. Empty means every feature in
     #: `FEATURES` is on, which is the default.
     features_off: frozenset[str] = frozenset()
+    #: The key that signs the confirmation token `memory_end_matching` and
+    #: `memory_forget_matching` hand out with a preview. Set the same value on every
+    #: process that serves one store, so a preview served by one can be confirmed by
+    #: another. Unset, each process generates its own, which is right for a single stdio
+    #: server. Kept out of `repr` because it is a secret.
+    confirm_secret: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None, *,
@@ -382,6 +388,9 @@ class ServerConfig:
             anchored=_flag(env.get("MEMVARA_ANCHORED"), "MEMVARA_ANCHORED"),
             project=project,
             features_off=features_off,
+            # `_optional` strips it and reads blank as unset. A blank key would otherwise
+            # reach `Confirmer`, which refuses an empty key; unset is the intended reading.
+            confirm_secret=_optional(env.get("MEMVARA_CONFIRM_SECRET")),
         )
 
     @property
@@ -888,7 +897,7 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
     table can serve either. It is **not** a `Memvara` over a `RemoteStore`, and that
     distinction is the whole decision — the engine calls `put_claim`, `lexical_search`
     and `competing_claims` on every turn and the facade has an endpoint for none of them,
-    so a server built that way would start, list fifteen tools and fail on the first one
+    so a server built that way would start, list eighteen tools and fail on the first one
     a model reached for. See `docs/OPEN-CORE.md` for which side of the line each seam is
     on.
     """
@@ -915,6 +924,14 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
                     "read the setting and never use it. Unset it, or use "
                     "MEMVARA_MODE=local with MEMVARA_DB if you want this machine to do "
                     f"the work. \"memory_stats\" reports the deployment's own {noun}.")
+        if config.confirm_secret is not None:
+            # Refused for the same reason as the table above, and kept out of it because
+            # that message echoes the value it refuses, and this value is a secret.
+            raise ConfigError(
+                "MEMVARA_CONFIRM_SECRET is set, and it does not apply under "
+                "MEMVARA_MODE=cloud. The deployment issues and checks the confirmation "
+                "tokens of memory_end_matching and memory_forget_matching with its own "
+                "key, so this process would read the setting and never use it. Unset it.")
 
         return RemoteMemvara(
             api_key=config.api_key,
@@ -950,5 +967,6 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         # with, and a reader of this function should not have to know that
         # `HybridRetriever`'s own default happens to agree.
         read_w_graph=config.read_w_graph,
+        confirm_secret=config.confirm_secret,
         **config.scope_kwargs,
     )

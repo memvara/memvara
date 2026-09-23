@@ -17,7 +17,10 @@ landing beside them unnoticed.
 
 - Primary: `memvara/types.py` — `Claim`, `Scope`, `Episode`, `WriteReceipt`, `Result`,
   `Explanation`, `ErasureProof`, `MemoryType`, `Derivation`, `CLOSURES`, `close_out()`,
+  `closure_reason()`, `closure_reasons()`, `Link`, `ForgetPreview`, `ForgetResult`,
   `fact_key_for()`, `owner_key()`.
+- The confirmation token behind `forget_matching`: `memvara/confirm.py` — `Confirmer`,
+  `ConfirmationRefused`, `CONFIRM_TTL`.
 - Primary: `memvara/core.py` — `Memvara`, the whole public API, plus `ScopedMemvara` for a
   view narrowed to one tenant, user, agent or session.
 - Storage: `memvara/store/base.py` — the `Store` protocol, `resolve_states()`,
@@ -38,7 +41,8 @@ landing beside them unnoticed.
 
 `Memvara` in `memvara/core.py` is the only class most callers touch. It owns a `Store`, an
 `Embedder`, a `PredicateRegistry` and an `LLM`, and it exposes the writes (`add()`,
-`remember()`, `forget()`, `supersede()`, `delete()`, `erase()`), the reads (`search()`,
+`remember()`, `forget()`, `forget_matching()`, `supersede()`, `delete()`, `link()`,
+`erase()`), the reads (`search()`,
 `recall()`, `ask()`, `get()`, `get_all()`, `since()`, `history()`, `why()`, `produced()`,
 `neighborhood()`, `paths_between()`) and the maintenance calls (`consolidate()`, `stats()`,
 `connectivity()`, `reembed()`, `merge_predicate()`).
@@ -81,6 +85,14 @@ in the same commit.
 `CLOSURES` in `memvara/types.py` is the pair `("ended", "retired")`, and `close_out()` is the
 one function that applies either. Choosing the wrong one records a false reason for the
 change, and nothing downstream can detect it afterwards.
+
+A closure can also carry the caller's own reason, at most 500 characters, which
+`close_out()` writes onto the closure witness in `meta["closure"]` beside the clock that
+stopped. `history()` and `why()` return it; nothing on the read path filters on it.
+`forget_matching()` applies either closure to every claim a query matched, in two calls
+bound by a signed token, and never erases. Links between claims (`extends`, `derives`) are
+records about two records rather than a third state: they have no closure, and erasing
+either claim removes them. `docs/INTERNALS.md` has all three under *`memvara/store/`*.
 
 ## Invariants and assumptions
 
