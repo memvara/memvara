@@ -33,7 +33,8 @@ needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not i
 def _isolated(monkeypatch, tmp_path):
     """Keep every test away from the real `~/.memvara` and from the caller's switches."""
     monkeypatch.setattr(settings, "SETTINGS", str(tmp_path / "settings.json"))
-    monkeypatch.setattr(project, "CACHE", str(tmp_path / "hooks" / "projects.json"))
+    monkeypatch.setattr(project, "CACHE_DIR", str(tmp_path / "projects"))
+    monkeypatch.setattr(settings, "_LOADED", None)
     for name in list(os.environ):
         if name.startswith("MEMVARA_FEATURE_"):
             monkeypatch.delenv(name)
@@ -63,6 +64,29 @@ def _repo(path: pathlib.Path, remote: "str | None" = None) -> pathlib.Path:
 def test_every_remote_in_the_shared_vectors_normalises_as_recorded(row):
     """The rows are the contract with the library's copy, so they are read, not restated."""
     assert project.normalise_remote(row["remote"]) == row["project"], row["rule"]
+
+
+@pytest.mark.parametrize("row", VECTORS["check_project"]["rows"], ids=lambda r: r["rule"])
+def test_every_value_in_the_shared_check_rows_is_judged_as_recorded(row):
+    """The server's `check_project` rule, which the hooks must apply before sending."""
+    assert project.is_canonical(row["value"]) is row["valid"], row["rule"]
+
+
+@pytest.mark.parametrize("length, valid", [(512, True), (513, False)])
+def test_a_project_name_is_at_most_512_characters(length, valid):
+    value = "example.com/" + "a" * (length - len("example.com/"))
+    assert project.is_canonical(value) is valid
+
+
+@needs_git
+@pytest.mark.parametrize("remote", ["https://example.com/team/../repo",
+                                    "git@host_name:team/repo.git"])
+def test_a_remote_the_server_would_refuse_falls_back_to_the_path_form(tmp_path, remote):
+    """The library's copy does this, and the server answers a refused header with 400."""
+    main = _repo(tmp_path / "main", remote)
+    assert project.normalise_remote(remote) is not None, "it normalises; the check refuses it"
+    assert project.canonical_project(str(main)) == project.path_identity(
+        os.path.realpath(str(main)))
 
 
 def test_the_vectors_cover_every_rule_the_spec_names():
@@ -153,7 +177,7 @@ def test_resolve_is_none_when_the_project_scope_switch_is_off(monkeypatch):
 
 
 def test_resolve_caches_per_directory_so_a_prompt_does_not_pay_for_git(monkeypatch):
-    """Two git calls cost about 30ms, which is the whole per-prompt budget of `recall.py`."""
+    """A lookup costs up to 30ms, which is the whole per-prompt budget of `recall.py`."""
     calls: list[str] = []
 
     def fake(cwd: str) -> "str | None":
@@ -170,21 +194,80 @@ def test_resolve_caches_per_directory_so_a_prompt_does_not_pay_for_git(monkeypat
     later = 1000.0 + project.CACHE_TTL_SECONDS + 10
     assert project.resolve("/a", now=later) == "github.com/o/r"
     assert calls == ["/a", "/b", "/a"], "a stale entry is recomputed"
-    cached = json.loads(pathlib.Path(project.CACHE).read_text(encoding="utf-8"))
-    assert "/b" not in cached, "entries past their lifetime are pruned on write"
+
+
+def test_each_directory_has_its_own_cache_file(monkeypatch):
+    """One shared file meant a whole-file rewrite, unlocked, by every repository's hooks."""
+    monkeypatch.setattr(project, "canonical_project", lambda cwd: f"example.com/o/{cwd[1:]}")
+    project.resolve("/a", now=1.0)
+    project.resolve("/b", now=1.0)
+    files = sorted(pathlib.Path(project.CACHE_DIR).glob("*.json"))
+    assert len(files) == 2
+    entries = sorted(json.loads(f.read_text(encoding="utf-8"))["cwd"] for f in files)
+    assert entries == ["/a", "/b"]
+
+
+def test_a_cache_entry_for_another_directory_is_a_miss(monkeypatch):
+    """The entry repeats its directory, so a hash collision cannot answer for another one."""
+    monkeypatch.setattr(project, "canonical_project", lambda cwd: "example.com/o/right")
+    path = pathlib.Path(project._cache_path("/a"))
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"cwd": "/elsewhere", "project": "example.com/o/wrong",
+                                "at": 1.0}), encoding="utf-8")
+    assert project.resolve("/a", now=2.0) == "example.com/o/right"
 
 
 def test_resolve_survives_a_corrupt_or_unwritable_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(project, "canonical_project", lambda cwd: "github.com/o/r")
-    pathlib.Path(project.CACHE).parent.mkdir(parents=True)
-    pathlib.Path(project.CACHE).write_text("not json", encoding="utf-8")
+    path = pathlib.Path(project._cache_path("/a"))
+    path.parent.mkdir(parents=True)
+    path.write_text("not json", encoding="utf-8")
     assert project.resolve("/a") == "github.com/o/r"
-    pathlib.Path(project.CACHE).write_text('["a list"]', encoding="utf-8")
+    path.write_text('["a list"]', encoding="utf-8")
     assert project.resolve("/a", now=5.0) == "github.com/o/r"
     blocker = tmp_path / "file-not-dir"
     blocker.write_text("", encoding="utf-8")
-    monkeypatch.setattr(project, "CACHE", str(blocker / "projects.json"))
+    monkeypatch.setattr(project, "CACHE_DIR", str(blocker / "projects"))
     assert project.resolve("/a") == "github.com/o/r"
+
+
+def test_prune_removes_cache_files_past_their_lifetime(monkeypatch):
+    monkeypatch.setattr(project, "canonical_project", lambda cwd: None)
+    project.resolve("/a")
+    old = pathlib.Path(project._cache_path("/a"))
+    stale = old.stat().st_mtime - project.CACHE_TTL_SECONDS - 60
+    os.utime(old, (stale, stale))
+    project.resolve("/b")
+    project.prune()
+    assert not old.exists()
+    assert pathlib.Path(project._cache_path("/b")).exists()
+
+
+@needs_git
+def test_a_repository_with_a_remote_costs_one_git_process(monkeypatch, tmp_path):
+    """The common-dir lookup is only needed for the path form."""
+    main = _repo(tmp_path / "main", "https://github.com/memvara/memvara")
+    calls: list[list[str]] = []
+    real = project._git
+    monkeypatch.setattr(project, "_git", lambda args: calls.append(args) or real(args))
+    assert project.canonical_project(str(main)) == "github.com/memvara/memvara"
+    assert len(calls) == 1 and "remote" in calls[0]
+
+
+@needs_git
+@pytest.mark.skipif(os.name == "nt", reason="git arguments are bytes only on POSIX")
+def test_a_remote_that_is_not_utf8_means_no_project_rather_than_a_crash(tmp_path):
+    """Git hands back raw bytes, and decoding them as text inside `subprocess.run` raised
+    `UnicodeDecodeError` from a place nothing caught: every hook in such a repository failed
+    its turn. A hook must never fail a turn, so this degrades to no project scope."""
+    main = _repo(tmp_path / "main")
+    subprocess.run([b"git", b"config", b"remote.origin.url", b"https://h.example/\xff/r"],
+                   cwd=main, check=True, capture_output=True)
+    assert project.canonical_project(str(main)) is None
+
+
+def test_a_directory_with_a_nul_byte_means_no_project():
+    assert project.canonical_project("/tmp/a\0b") is None
 
 
 def test_resolve_with_no_directory_uses_the_process_directory(monkeypatch):
@@ -321,6 +404,25 @@ def test_an_unreadable_override_falls_back_to_the_file(monkeypatch, raw):
     pathlib.Path(settings.SETTINGS).write_text(json.dumps({"recall_mark": False}),
                                                encoding="utf-8")
     monkeypatch.setenv("MEMVARA_FEATURE_RECALL_MARK", raw)
+    assert settings.enabled("recall_mark") is False
+
+
+def test_the_settings_file_is_read_once_per_process(monkeypatch):
+    """Three hooks each ask several switches; one small file should be parsed once."""
+    pathlib.Path(settings.SETTINGS).write_text(json.dumps({"recall_mark": False}),
+                                               encoding="utf-8")
+    opened: list[str] = []
+    real_open = open
+
+    def counting_open(path, *args, **kwargs):
+        if str(path) == settings.SETTINGS:
+            opened.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", counting_open)
+    for name in ("recall_mark", "status_line", "project_scope", "recall_mark"):
+        settings.enabled(name)
+    assert len(opened) == 1
     assert settings.enabled("recall_mark") is False
 
 

@@ -39,6 +39,7 @@ from core.host import Reply, active  # noqa: E402
 from lib.ipc import (  # noqa: E402
     due_capture_alert, payload, plural, status, under_extraction, with_alert,
 )
+from lib import counts, project  # noqa: E402
 from lib.mark import count as count_memories  # noqa: E402
 from lib.mark import mark_block  # noqa: E402
 from lib.mark import on as mark_on  # noqa: E402
@@ -194,6 +195,10 @@ def main() -> int:
     cwd = read_event(host, "session_start", payload()).cwd
     # Before the store is opened: the hosted client sends this project with every call.
     bind_project(cwd)
+    # Once per session rather than on every write: the per-session counters and the
+    # per-directory project cache only grow, and this hook runs once when a session opens.
+    counts.prune()
+    project.prune()
     store, close = open_writer()
     if store is None:
         _emit(Reply("session_start", status=status("not configured")))

@@ -10,13 +10,13 @@ in front of the user. Three hooks keep the numbers, one file per session, in
   (`captured`).
 
 The file holds `{"recalled": int, "searched": int, "captured": int, "updated_at": str}`,
-where `updated_at` is an ISO-8601 UTC time. Files untouched for 14 days are removed, as the
-recall hook's per-session state is.
+where `updated_at` is an ISO-8601 UTC time. `session_start.py` removes files untouched for
+14 days, once per session, as it opens.
 
-**This module imports nothing from the rest of the hooks.** The status-line script in the
+**`read()` imports nothing from the rest of the hooks.** The status-line script in the
 plugin repository vendors this one file and calls `read()`, and it must finish in under
-50ms, so this file cannot pull in the rest of the tree. `read()` has no side effects. The
-callers decide whether counting is switched on, through the `status_line` setting.
+50ms. The writing side (`bump`, `prune`, `enabled`) imports `lib.state_file` and
+`lib.settings` when it is first called, so a script that only reads never needs them.
 """
 
 from __future__ import annotations
@@ -33,14 +33,21 @@ COUNTS_DIR = os.path.join(os.path.expanduser("~"), ".memvara", ".hooks", "counts
 #: The counters, in the order the status line prints them.
 FIELDS = ("recalled", "searched", "captured")
 
+#: The switch in `~/.memvara/settings.json` that turns counting off.
+FEATURE = "status_line"
+
 #: A session nobody has touched in a fortnight will not be resumed. The same lifetime as
 #: the recall hook's `SEEN_TTL_SECONDS`.
 TTL_SECONDS = 14 * 24 * 3600
 
 
 def _path(session_id: str) -> "str | None":
-    """The session's file, or `None` for an id that could name a file outside the directory."""
-    if (not session_id or "/" in session_id or "\\" in session_id
+    """The session's file, or `None` for an id that could name a file outside the directory.
+
+    A NUL byte is refused as well: every `os` call raises `ValueError` on one, which is not
+    the `OSError` a file operation is normally guarded against.
+    """
+    if (not session_id or "/" in session_id or "\\" in session_id or "\0" in session_id
             or session_id in (".", "..")):
         return None
     return os.path.join(COUNTS_DIR, f"{session_id}.json")
@@ -74,57 +81,41 @@ def read(session_id: str) -> dict:
     return out
 
 
-def _prune(now: float) -> None:
-    try:
-        names = os.listdir(COUNTS_DIR)
-    except OSError:
-        return
-    for name in names:
-        if not name.endswith(".json"):
-            continue
-        path = os.path.join(COUNTS_DIR, name)
-        try:
-            if now - os.path.getmtime(path) > TTL_SECONDS:
-                os.unlink(path)
-        except OSError:
-            continue
+def enabled() -> bool:
+    """Whether the hooks should count at all: the `status_line` setting."""
+    from .settings import enabled as setting
+
+    return setting(FEATURE)
 
 
 def bump(session_id: str, field: str, n: int = 1, now: "float | None" = None) -> None:
     """Add `n` to one counter for this session. Silent on every failure.
 
-    The write goes through a temporary file and a rename, so the status line never reads a
-    half-written file. Two hooks for one session can run at the same moment, for example
-    two tool calls approved in parallel, so the read and the write are held under an
-    exclusive lock where the platform has one. Without it the second write would replace
-    the first and one count would be lost.
+    The read and the write happen under one lock, because two hooks for one session can run
+    at the same moment, for example two tool calls approved in parallel, and without it
+    the second write would replace the first and lose a count. The write is atomic, so the
+    status line never reads half a file. See `lib.state_file`.
     """
     path = _path(session_id)
     if path is None or field not in FIELDS or n <= 0:
         return
-    import tempfile
+    from .state_file import update_json
 
-    now = time.time() if now is None else now
-    try:
-        os.makedirs(COUNTS_DIR, exist_ok=True)
-        with open(os.path.join(COUNTS_DIR, ".lock"), "a", encoding="utf-8") as lock:
-            try:
-                import fcntl
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                          time.gmtime(time.time() if now is None else now))
 
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            except (ImportError, OSError):
-                # No `fcntl` on Windows. A lost count there is the cost, not a failed hook.
-                pass
-            counts = read(session_id)
-            counts[field] += n
-            counts["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
-            fd, tmp = tempfile.mkstemp(dir=COUNTS_DIR, prefix=".counts-")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    json.dump(counts, fh)
-                os.replace(tmp, path)
-            except OSError:
-                os.unlink(tmp)
-        _prune(now)
-    except OSError:
-        pass
+    def change(_: object) -> dict:
+        counts = read(session_id)
+        counts[field] += n
+        counts["updated_at"] = stamp
+        return counts
+
+    update_json(path, change, lock_path=os.path.join(COUNTS_DIR, ".lock"),
+                prefix=".counts-")
+
+
+def prune(now: "float | None" = None) -> None:
+    """Remove the files of sessions untouched for `TTL_SECONDS`. Called once per session."""
+    from .state_file import prune as prune_dir
+
+    prune_dir(COUNTS_DIR, TTL_SECONDS, time.time() if now is None else now)

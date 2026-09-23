@@ -62,7 +62,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.envelope import read_event, write  # noqa: E402
 from core.host import Reply, active  # noqa: E402
-from lib import counts  # noqa: E402
+from lib import counts, state_file  # noqa: E402
 from lib.fast import recall as fast_recall  # noqa: E402
 from lib.ipc import (  # noqa: E402
     due_alert_for_model, due_capture_alert, log_line, payload, plural, status,
@@ -71,8 +71,8 @@ from lib.ipc import (  # noqa: E402
 from lib.mark import count as count_memories  # noqa: E402
 from lib.mark import marked  # noqa: E402
 from lib.mark import on as mark_on  # noqa: E402
+from lib.mark import unmark_block  # noqa: E402
 from lib.project import bind as bind_project  # noqa: E402
-from lib.settings import enabled  # noqa: E402
 
 #: The client this process is answering, resolved once. `run.py` binds it before importing
 #: this module; a bare `python3 recall.py` gets Claude Code, which is what that invocation
@@ -313,12 +313,14 @@ def _digest(line: str) -> str:
 
 def _count_recalled(session: str, n: int) -> None:
     """Add `n` injected memory lines to this session's status-line count."""
-    if n and enabled("status_line"):
+    if n and counts.enabled():
         counts.bump(session, "recalled", n)
 
 
 def _seen_path(session: str) -> "str | None":
-    if not session or "/" in session or session in (".", ".."):
+    # A NUL byte makes every `os` call raise `ValueError`, not the `OSError` the state
+    # functions below are written to absorb, so such an id gets no state file at all.
+    if not session or "/" in session or "\0" in session or session in (".", ".."):
         return None
     return os.path.join(SEEN_DIR, f"{session}.json")
 
@@ -337,6 +339,11 @@ def _state_json(session: str) -> dict:
             data = json.load(fh)
     except (OSError, ValueError):
         return {}
+    return _normalised(data)
+
+
+def _normalised(data: object) -> dict:
+    """A state file's contents as a dict, reading the old bare-list format too."""
     if isinstance(data, list):
         return {"seen": [h for h in data if isinstance(h, str)]}
     return data if isinstance(data, dict) else {}
@@ -373,18 +380,7 @@ def _prune_seen(now: float) -> None:
     the one event that already writes to this directory, and a failure is ignored, because
     a tidy directory is worth strictly less than an answered prompt.
     """
-    try:
-        for name in os.listdir(SEEN_DIR):
-            if not name.endswith(".json"):
-                continue
-            path = os.path.join(SEEN_DIR, name)
-            try:
-                if now - os.path.getmtime(path) > SEEN_TTL_SECONDS:
-                    os.unlink(path)
-            except OSError:
-                continue
-    except OSError:
-        pass
+    state_file.prune(SEEN_DIR, SEEN_TTL_SECONDS, now)
 
 
 def _write_state(session: str, hashes: "list[str]", query: str,
@@ -396,22 +392,35 @@ def _write_state(session: str, hashes: "list[str]", query: str,
     with the standing set. Passing None from those would silently reset the refresh clock
     on every turn and re-inject the whole standing block each time -- the failure this is
     supposed to prevent, arriving through the tidier-looking signature.
+
+    The read and the write happen under one lock and the write is atomic (see
+    `lib.state_file`). Two prompts in one session can be answered at the same moment, and a
+    plain rewrite let the second drop the hashes the first had just added. Hashes already
+    in the file and missing from `hashes` are therefore kept, ahead of the caller's, so the
+    newest survive the `MAX_SEEN` cut.
+
+    Dedup and carry-forward are both optimisations. Losing them repeats a memory or weakens
+    one query; failing the prompt over it would be the larger bug, so nothing here raises.
     """
     path = _seen_path(session)
     if path is None:
         return
-    was_digest, was_at = _read_standing(session)
-    digest, at = standing if standing is not None else (was_digest, was_at)
-    try:
-        os.makedirs(SEEN_DIR, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"seen": hashes[-MAX_SEEN:], "query": query[:MAX_CARRY_CHARS],
-                       "standing": digest, "standing_at": at}, fh)
+
+    def change(raw: object) -> dict:
+        was = _normalised(raw)
+        kept = set(hashes)
+        earlier = [h for h in was.get("seen") or [] if isinstance(h, str) and h not in kept]
+        was_digest = was.get("standing")
+        was_at = was.get("standing_at")
+        digest, at = standing if standing is not None else (
+            was_digest if isinstance(was_digest, str) else "",
+            float(was_at) if isinstance(was_at, (int, float)) else 0.0)
+        return {"seen": (earlier + list(hashes))[-MAX_SEEN:],
+                "query": query[:MAX_CARRY_CHARS], "standing": digest, "standing_at": at}
+
+    if state_file.update_json(path, change, lock_path=os.path.join(SEEN_DIR, ".lock"),
+                              prefix=".recalled-"):
         _prune_seen(time.time())
-    except OSError:
-        # Dedup and carry-forward are both optimisations. Losing them repeats a memory or
-        # weakens one query; failing the prompt over it would be the larger bug.
-        pass
 
 
 def _anaphoric(prompt: str) -> bool:
@@ -608,7 +617,10 @@ def _standing_refresh(session: str, now: float, cwd: str = "") -> "tuple[str, tu
         # the next one either.
         return "", (digest, now)
 
-    fresh = _digest(block)
+    # Hashed without the recall mark, as `_digest` promises: the mark is presentation, and
+    # hashing it made every running session report "standing preferences updated" once
+    # after the upgrade and again each time the `recall_mark` switch changed.
+    fresh = _digest(unmark_block(block))
     if not block.strip() or fresh == digest:
         return "", (digest or fresh, now)
     return block.rstrip(), (fresh, now)

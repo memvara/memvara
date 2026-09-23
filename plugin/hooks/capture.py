@@ -68,7 +68,6 @@ from lib import counts  # noqa: E402
 from lib.extract import project_subject, triples  # noqa: E402
 from lib.ipc import payload  # noqa: E402
 from lib.project import bind as bind_project  # noqa: E402
-from lib.settings import enabled  # noqa: E402
 from lib.transcript import last_turn_with_injections  # noqa: E402
 from lib.write import (EPISODE_ROLE, log, open_writer, store_facts,  # noqa: E402
                        turn_ids)
@@ -285,7 +284,7 @@ def main() -> int:
     log(f"turn={len(turn)}c facts={len(facts)} stored={stored} "
         f"episode={'yes' if kept else 'no'}"
         + ("; failed=" + "; ".join(failed) if failed else ""))
-    if stored and enabled("status_line"):
+    if stored and counts.enabled():
         counts.bump(event.session, "captured", stored)
 
     return 0

@@ -13,23 +13,29 @@ The normalisation rules both copies must agree on are written down once, as data
 
 How the value reaches the server: a hook calls `bind(cwd)` once, near the top of its run.
 That puts the project in the environment variable named by `ENV`, and three things read it
-from there. `lib.hosted` sends it as the `Memvara-Project` header on every call. `lib.ipc`
+from there. `lib.hosted` sends it as the `memvara-project` header on every call (header
+names are case-insensitive, so the spec's `Memvara-Project` is the same header). `lib.ipc`
 puts it into the daemon's address, so one resident daemon answers for one project. And the
 daemon that a hook spawns inherits the variable, so it sends the same header as the hook
 that started it. An environment variable is used rather than an argument because the
 per-prompt path must not import `lib.hosted`, and because a spawned process inherits it
 without any extra plumbing.
+
+`subprocess` and `urllib.parse` are imported inside the functions that need them, and only
+run on a cache miss. Together they cost about 4.7ms to import, measured, and this module is
+imported on every prompt, where the whole budget is about 30ms.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import os.path
 import time
 
 from .settings import enabled
+from .state_file import prune as prune_dir
+from .state_file import read_json, write_json
 
 #: The channel between `bind` and everything that sends or keys on the project. Private to
 #: the hooks: the library reads `MEMVARA_PROJECT`, and a user who sets that for the
@@ -49,18 +55,28 @@ CASE_INSENSITIVE_HOSTS = frozenset({"github.com", "gitlab.com", "bitbucket.org"}
 #: makes an accidental collision between two repositories on one machine negligible.
 PATH_HEX_CHARS = 16
 
-#: Where `resolve` remembers each directory's answer. Beside the other hook state, not in
-#: the plugin, which is replaced on update.
-CACHE = os.path.join(os.path.expanduser("~"), ".memvara", ".hooks", "projects.json")
+#: Where `resolve` remembers each directory's answer: one small file per directory, named
+#: by a hash of its absolute path. One file per directory rather than one shared file, so
+#: two sessions in different repositories never rewrite each other's entry. Beside the other
+#: hook state, not in the plugin, which is replaced on update.
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".memvara", ".hooks", "projects")
 
-#: How long a cached answer is trusted. Working out a project costs two `git` processes,
-#: measured at about 15ms each, and the recall hook has a budget of roughly 30ms per prompt.
-#: An hour means a changed remote is noticed within the hour, at the cost of one lookup per
-#: directory per hour.
+#: How long a cached answer is trusted. Working out a project costs one or two `git`
+#: processes, measured at about 15ms each, and the recall hook has a budget of roughly 30ms
+#: per prompt. An hour means a changed remote is noticed within the hour, at the cost of one
+#: lookup per directory per hour. `session_start` removes older files.
 CACHE_TTL_SECONDS = 60 * 60
 
 #: Seconds to wait for `git` before treating the directory as having no project.
 GIT_TIMEOUT_SEC = 5
+
+#: Longest project name the server accepts. The library's `check_project` uses the same
+#: number.
+MAX_PROJECT_LENGTH = 512
+
+#: Characters a host name may hold, before its optional `:port`.
+_HOST_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789.-")
+_HEX = frozenset("0123456789abcdef")
 
 
 def normalise_remote(url: str) -> "str | None":
@@ -112,6 +128,35 @@ def normalise_remote(url: str) -> "str | None":
     return "/".join([netloc, *segments])
 
 
+def is_canonical(value: str) -> bool:
+    """Whether `value` is a project name the server accepts in the `memvara-project` header.
+
+    The same rules as the library's `check_project`, which the hosted deployment applies
+    and answers with a 400 when they fail: either `path:` and exactly 16 lower-case hex
+    characters, or a lower-case host with an optional port of up to five digits, then at
+    least one path segment, where no segment is empty, `.` or `..`, nothing is whitespace
+    or a control character, and the whole is at most `MAX_PROJECT_LENGTH` characters.
+    Written without `re`, which this per-prompt module does not otherwise import.
+    """
+    if not value or len(value) > MAX_PROJECT_LENGTH:
+        return False
+    if value.startswith("path:"):
+        digits = value[len("path:"):]
+        return len(digits) == PATH_HEX_CHARS and all(c in _HEX for c in digits)
+    if any(c.isspace() or not c.isprintable() for c in value):
+        return False
+    host, _, rest = value.partition("/")
+    if not rest:
+        return False
+    name, colon, port = host.partition(":")
+    if colon and not (1 <= len(port) <= 5 and port.isascii() and port.isdigit()):
+        return False
+    if (not name or any(c not in _HOST_CHARS for c in name)
+            or name[0] in ".-" or name[-1] in ".-"):
+        return False
+    return all(segment not in ("", ".", "..") for segment in rest.split("/"))
+
+
 def path_identity(root: str) -> str:
     """The project for a repository with no usable remote: a digest of its root's path.
 
@@ -124,102 +169,94 @@ def path_identity(root: str) -> str:
 
 
 def _git(args: "list[str]") -> "str | None":
-    """One `git` command's output, or `None` for any failure, including no `git` at all."""
+    """One `git` command's output, or `None` when git failed or is not installed.
+
+    The output is read as bytes and decoded as strict UTF-8, so bytes that are not UTF-8,
+    in a remote URL or a directory name, raise `UnicodeDecodeError`. `canonical_project`
+    catches that and answers `None`. Decoding as text inside `subprocess.run` raised the
+    same error from a place nothing caught, and every hook in such a repository crashed.
+    """
     import subprocess
 
     try:
-        done = subprocess.run(["git", *args], capture_output=True, text=True,
-                              timeout=GIT_TIMEOUT_SEC)
+        done = subprocess.run(["git", *args], capture_output=True, timeout=GIT_TIMEOUT_SEC)
     except (OSError, subprocess.SubprocessError):
         return None
-    out = done.stdout.strip()
-    return out if done.returncode == 0 and out else None
+    if done.returncode != 0:
+        return None
+    return done.stdout.decode("utf-8").strip() or None
 
 
 def canonical_project(cwd: str) -> "str | None":
-    """The project `cwd` belongs to, or `None` when it is not inside a git repository.
+    """The project `cwd` belongs to, or `None` when it has none. Never raises.
 
-    The remote is read through the repository's *common* git directory, which a linked
-    worktree shares with its main repository, so every worktree resolves to one project.
-    For the same reason, the path form hashes the main repository's root rather than the
-    worktree's own directory.
+    The remote is asked for first, which is one `git` process for the usual repository. The
+    common git directory is looked up only when there is no usable remote, for the path
+    form. A linked worktree shares its main repository's config and common directory, so
+    every worktree resolves to one project either way, and the path form hashes the main
+    repository's root rather than the worktree's own directory.
 
-    Needs git 2.31 or later for `--path-format`. An older git fails that call, and the
-    answer is then `None`: no project scope, which is how the hooks behaved before this.
+    A remote that normalises to a name the server would refuse (see `is_canonical`) also
+    falls back to the path form, exactly as the library's copy does.
+
+    Anything git prints that is not UTF-8, and a `cwd` holding a NUL byte, give `None`: no
+    project scope, which is how the hooks behaved before this module existed. The path
+    form needs git 2.31 or later for `--path-format`; an older git also gives `None` there.
     """
     if not cwd:
         return None
-    common = _git(["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+    try:
+        remote = _git(["-C", cwd, "remote", "get-url", "origin"])
+        if remote is not None:
+            named = normalise_remote(remote)
+            # Checked as well as normalised, as the library does, so the hooks never send a
+            # header the server refuses: a remote with a `..` segment or an underscore in
+            # its host falls back to the path form in both copies.
+            if named is not None and is_canonical(named):
+                return named
+        common = _git(["-C", cwd, "rev-parse", "--path-format=absolute",
+                       "--git-common-dir"])
+    except ValueError:
+        return None
     if common is None:
         return None
-    remote = _git(["--git-dir", common, "remote", "get-url", "origin"])
-    if remote is not None:
-        named = normalise_remote(remote)
-        if named is not None:
-            return named
     # `<root>/.git` for an ordinary repository; a bare repository is its own root.
     root = os.path.dirname(common) if os.path.basename(common) == ".git" else common
     return path_identity(os.path.realpath(root))
 
 
-def _fresh(entry: object, now: float) -> bool:
-    """Whether a cache entry is well formed and younger than `CACHE_TTL_SECONDS`."""
-    if not isinstance(entry, dict):
-        return False
-    at = entry.get("at")
-    return isinstance(at, (int, float)) and now - at <= CACHE_TTL_SECONDS
-
-
-def _read_cache() -> dict:
-    try:
-        with open(CACHE, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _write_cache(data: dict, now: float) -> None:
-    """Write the cache through a temporary file and a rename, dropping expired entries.
-
-    Silent on failure: a lost cache costs one more `git` lookup, never a prompt.
-    """
-    import tempfile
-
-    fresh = {key: entry for key, entry in data.items() if _fresh(entry, now)}
-    try:
-        directory = os.path.dirname(CACHE)
-        os.makedirs(directory, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".projects-")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(fresh, fh)
-            os.replace(tmp, CACHE)
-        except OSError:
-            os.unlink(tmp)
-    except OSError:
-        pass
+def _cache_path(key: str) -> str:
+    digest = hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()[:32]
+    return os.path.join(CACHE_DIR, f"{digest}.json")
 
 
 def resolve(cwd: str, now: "float | None" = None) -> "str | None":
     """The project to send for `cwd`, or `None` when the switch is off or there is none.
 
     Cached per directory for `CACHE_TTL_SECONDS`, including a `None` answer, because the
-    recall hook calls this on every prompt and a cache miss costs two `git` processes.
+    recall hook calls this on every prompt and a cache miss costs up to two `git` processes.
+    The entry repeats the directory it is for, so a hash collision reads as a miss rather
+    than as another directory's project.
     """
     if not enabled(FEATURE):
         return None
     now = time.time() if now is None else now
     key = os.path.abspath(cwd or os.getcwd())
-    cache = _read_cache()
-    entry = cache.get(key)
-    if _fresh(entry, now):
+    path = _cache_path(key)
+    entry = read_json(path)
+    at = entry.get("at")
+    if (entry.get("cwd") == key and isinstance(at, (int, float))
+            and 0 <= now - at <= CACHE_TTL_SECONDS):
         value = entry.get("project")
         return value if isinstance(value, str) else None
     value = canonical_project(key)
-    cache[key] = {"project": value, "at": now}
-    _write_cache(cache, now)
+    write_json(path, {"cwd": key, "project": value, "at": now}, prefix=".project-")
     return value
+
+
+def prune(now: "float | None" = None) -> None:
+    """Remove cache files older than `CACHE_TTL_SECONDS`. Called once per session."""
+    prune_dir(CACHE_DIR, CACHE_TTL_SECONDS, time.time() if now is None else now)
 
 
 def bind(cwd: str) -> "str | None":

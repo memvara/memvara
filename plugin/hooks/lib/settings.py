@@ -9,9 +9,9 @@ run can pin a value without writing to the user's home directory. The library's 
 reads the same variable names in `ServerConfig.from_env`, so one variable means the same
 thing on both sides.
 
-The file is read on every call rather than once per process. It is a few bytes, a hook
-process lives for one event, and a switch changed during a session should take effect on
-the next prompt rather than after a restart nobody knows to do.
+The file is read at most once per process. A hook process lives for one event, so a switch
+changed during a session still takes effect on the next prompt. The long-lived recall daemon
+does not read switches at all; the hook that spawns it does.
 """
 
 from __future__ import annotations
@@ -29,6 +29,23 @@ SETTINGS = os.path.join(os.path.expanduser("~"), ".memvara", "settings.json")
 _ON = frozenset({"1", "true", "on", "yes"})
 _OFF = frozenset({"0", "false", "off", "no"})
 
+#: `(path, parsed file)` from the first read in this process. Keyed on the path so that a
+#: caller pointing `SETTINGS` somewhere else, as the tests do, reads the new file.
+_LOADED: "tuple[str, dict] | None" = None
+
+
+def _file() -> dict:
+    """The settings file as a dict, `{}` when it is missing or unreadable. Read once."""
+    global _LOADED
+    if _LOADED is None or _LOADED[0] != SETTINGS:
+        try:
+            with open(SETTINGS, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            data = {}
+        _LOADED = (SETTINGS, data if isinstance(data, dict) else {})
+    return _LOADED[1]
+
 
 def enabled(name: str) -> bool:
     """Whether the feature `name` is on. Never raises; an unreadable setting means on.
@@ -43,14 +60,7 @@ def enabled(name: str) -> bool:
             return True
         if value in _OFF:
             return False
-    try:
-        with open(SETTINGS, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return True
-    if not isinstance(data, dict):
-        return True
-    value = data.get(name)
+    value = _file().get(name)
     # Only a real boolean counts. `/memvara:setup` writes true or false, and a string such
     # as "no" is more likely a hand edit that went wrong than a decision.
     return value if isinstance(value, bool) else True

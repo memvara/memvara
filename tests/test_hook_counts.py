@@ -33,7 +33,8 @@ def _isolated(monkeypatch, tmp_path):
     """Every file a hook writes goes under `tmp_path`, and every switch starts at its default."""
     monkeypatch.setattr(counts, "COUNTS_DIR", str(tmp_path / "counts"))
     monkeypatch.setattr(settings, "SETTINGS", str(tmp_path / "settings.json"))
-    monkeypatch.setattr(project, "CACHE", str(tmp_path / "projects.json"))
+    monkeypatch.setattr(project, "CACHE_DIR", str(tmp_path / "projects"))
+    monkeypatch.setattr(settings, "_LOADED", None)
     for name in list(os.environ):
         if name.startswith("MEMVARA_FEATURE_"):
             monkeypatch.delenv(name)
@@ -64,7 +65,7 @@ def test_bump_leaves_no_temporary_file_behind():
     assert names == [".lock", f"{SESSION}.json"]
 
 
-@pytest.mark.parametrize("session", ["", ".", "..", "../escape", "a/b", "a\\b"])
+@pytest.mark.parametrize("session", ["", ".", "..", "../escape", "a/b", "a\\b", "a\0b"])
 def test_a_session_id_that_could_name_another_file_is_ignored(session):
     counts.bump(session, "recalled", 1)
     assert counts.read(session)["recalled"] == 0
@@ -102,9 +103,25 @@ def test_files_untouched_for_fourteen_days_are_pruned():
     stale = time.time() - counts.TTL_SECONDS - 60
     os.utime(old, (stale, stale))
     counts.bump(SESSION, "recalled", 1)
+    assert old.exists(), "a bump does not prune; that is once per session"
+    counts.prune()
     assert not old.exists()
     assert recent.exists()
     assert pathlib.Path(counts.COUNTS_DIR, f"{SESSION}.json").exists()
+
+
+def test_session_start_prunes_the_counters_and_the_project_cache(monkeypatch, tmp_path):
+    import session_start
+
+    pruned: list[str] = []
+    monkeypatch.setattr(counts, "prune", lambda: pruned.append("counts"))
+    monkeypatch.setattr(project, "prune", lambda: pruned.append("projects"))
+    monkeypatch.setattr(session_start, "payload", lambda: {"session_id": SESSION, "cwd": ""})
+    monkeypatch.setattr(session_start, "write", lambda host, reply: None)
+    monkeypatch.setattr(session_start, "due_capture_alert", lambda: "")
+    monkeypatch.setattr(session_start, "open_writer", lambda: (None, None))
+    assert session_start.main() == 0
+    assert pruned == ["counts", "projects"]
 
 
 def test_a_directory_that_cannot_be_created_fails_silently(monkeypatch, tmp_path):
@@ -115,10 +132,43 @@ def test_a_directory_that_cannot_be_created_fails_silently(monkeypatch, tmp_path
     assert counts.read(SESSION)["recalled"] == 0
 
 
-def test_the_reader_imports_nothing_from_the_rest_of_the_hooks():
-    """The status-line script vendors this one file; it must stand on its own."""
-    source = (HOOKS / "lib" / "counts.py").read_text(encoding="utf-8")
-    assert "from ." not in source and "from lib" not in source and "from core" not in source
+def test_the_reader_imports_nothing_from_the_rest_of_the_hooks(tmp_path):
+    """The status-line script vendors this one file and calls `read`; it must stand alone.
+
+    Proven by loading the file on its own, outside its package, and reading a real file.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("counts_alone", HOOKS / "lib" / "counts.py")
+    alone = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(alone)
+    alone.COUNTS_DIR = str(tmp_path)
+    (tmp_path / "s.json").write_text(json.dumps({"recalled": 4}), encoding="utf-8")
+    assert alone.read("s")["recalled"] == 4
+    top_level = [line for line in (HOOKS / "lib" / "counts.py").read_text().splitlines()
+                 if line.startswith(("from ", "import "))]
+    assert all(".settings" not in l and ".state_file" not in l for l in top_level)
+
+
+def test_a_session_id_with_a_nul_byte_never_raises():
+    """`os` calls raise `ValueError` on a NUL, which the old guard did not catch."""
+    counts.bump("a\0b", "recalled", 1)
+    assert counts.read("a\0b")["recalled"] == 0
+
+
+def test_parallel_bumps_lose_no_count(tmp_path):
+    """Two tool calls approved at once must both be counted."""
+    import subprocess
+
+    script = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "from lib import counts\n"
+        "counts.COUNTS_DIR = %r\n"
+        "for _ in range(50): counts.bump(%r, 'searched')\n"
+    ) % (str(HOOKS), counts.COUNTS_DIR, SESSION)
+    procs = [subprocess.Popen([sys.executable, "-c", script]) for _ in range(4)]
+    assert all(p.wait(timeout=60) == 0 for p in procs)
+    assert counts.read(SESSION)["searched"] == 200
 
 
 # -- the hooks that keep them -----------------------------------------------------------

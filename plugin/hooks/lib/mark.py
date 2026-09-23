@@ -61,13 +61,18 @@ def is_memory(line: str) -> bool:
 def mark_block(text: str, mark: bool = True) -> str:
     """Put the mark on every memory line of a block. Headers and notes are left alone.
 
-    Safe to apply twice: a line that already carries the mark does not start with a bullet,
-    so it is not marked again.
+    Uses `is_memory` to decide which lines are memories, the same test `count` and capture
+    use, so the three cannot drift apart. Safe to apply twice, because `marked` does not
+    mark a line that already carries the mark.
     """
     if not mark or not text:
         return text
-    return "\n".join(marked(line) if line.startswith(BULLET) else line
-                     for line in text.split("\n"))
+    return "\n".join(marked(line) if is_memory(line) else line for line in text.split("\n"))
+
+
+def unmark_block(text: str) -> str:
+    """The block with the mark removed from every line, for hashing what it says."""
+    return "\n".join(unmarked(line) for line in text.split("\n"))
 
 
 def count(text: str) -> int:

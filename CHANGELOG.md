@@ -213,18 +213,22 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   for every clone and every worktree of one repository, or `path:` and 16 hex characters
   of a hash of the repository root when there is no remote, or nothing outside a
   repository. The hosted client sends it as a `Memvara-Project` header on every call. The
-  answer is cached per directory for an hour in `~/.memvara/.hooks/projects.json`, because
-  working it out costs two `git` processes and the recall hook runs on every prompt. A
+  answer is cached for an hour, one small file per directory in
+  `~/.memvara/.hooks/projects/`, because working it out costs one or two `git` processes
+  and the recall hook runs on every prompt. A
   resident recall daemon now serves one project, so a daemon started in one repository
   never answers for another. The hooks cannot import the library, so this is a second copy
   of the library's own function; the normalisation rules both copies must agree on are in
-  `plugin/hooks/lib/project_vectors.json`. A server that does not read the header ignores
-  it.
+  `plugin/hooks/lib/project_vectors.json`, including which names the server accepts: a
+  remote that normalises to a name the server would refuse, such as one with a `..`
+  segment, falls back to the path form in both copies. A server that does not read the
+  header ignores it.
 - **The hooks keep per-session counts for a status line.**
   `~/.memvara/.hooks/counts/<session>.json` holds how many memory lines the recall hook
   injected (`recalled`), how many read-only memory tools the model called (`searched`) and
-  how many facts capture stored after a successful write (`captured`). Writes go through a
-  temporary file and a rename, and files untouched for 14 days are removed.
+  how many facts capture stored after a successful write (`captured`). Each update is a
+  locked read-modify-write with an atomic rename, and the session-start hook removes files
+  untouched for 14 days.
   `plugin/hooks/lib/counts.py` has `read(session_id)` for the status-line script, which
   ships in the plugin repository.
 - **Every memory line the hooks inject starts with `⋈ `.** A memory the server renders as
@@ -277,6 +281,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **Two prompts in one session no longer drop each other's dedup record.** The recall
+  hook's per-session state file was rewritten whole, without a lock, so a prompt answered at
+  the same moment as another could remove the hashes the other had just added, and those
+  memories were injected again on the next turn. The file is now updated under a lock,
+  hashes already in it are kept, and the write is atomic.
 - **The memory-research tools no longer stop at a permission prompt.** The pre-tool hook
   approves every read-only memory tool without asking, and its list was missing
   `memory_standing` and `memory_ask`. Both are on it now, with `memory_profile` for when

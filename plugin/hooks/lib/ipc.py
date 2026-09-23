@@ -36,6 +36,7 @@ import os.path
 import socket
 
 from .project import ENV as PROJECT_ENV
+from .state_file import read_json, write_json
 
 # `pathlib` is deliberately absent. Importing it costs 10.5ms measured, against a client
 # whose entire budget is ~30ms, and every path here is a string join and a stat. `open.py`
@@ -109,14 +110,9 @@ def _read_json_file(path: str) -> dict:
     """A dict from a JSON file, or `{}` for anything short of one -- missing, unreadable,
     corrupt, or holding some other JSON shape entirely. Shared by `_read_alert` and
     `_read_notified_alert`: same file shape, same failure handling, same reason for it --
-    only the path differs.
+    only the path differs. The reading itself is `lib.state_file.read_json`.
     """
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return read_json(path)
 
 
 def _write_json_file_atomic(path: str, data: dict, tmp_prefix: str,
@@ -138,26 +134,12 @@ def _write_json_file_atomic(path: str, data: dict, tmp_prefix: str,
     saying why it stopped working. Omitted (empty string) for `_write_alert`, unchanged from
     before this helper existed, since that failure mode was already reviewed and accepted
     on its own terms.
-    """
-    import tempfile
 
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=tmp_prefix)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(data, fh)
-            os.replace(tmp, path)
-        except OSError:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            if log_name:
-                log_line(log_name, f"write failed: {os.path.basename(path)}")
-    except OSError:
-        if log_name:
-            log_line(log_name, f"write failed: {os.path.basename(path)}")
+    The write itself is `lib.state_file.write_json`, which the other hook state files use
+    too; it removes its temporary file when the rename fails.
+    """
+    if not write_json(path, data, tmp_prefix) and log_name:
+        log_line(log_name, f"write failed: {os.path.basename(path)}")
 
 
 def _read_alert() -> dict:

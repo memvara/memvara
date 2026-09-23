@@ -32,7 +32,8 @@ MARK = "⋈ "
 def _isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(counts, "COUNTS_DIR", str(tmp_path / "counts"))
     monkeypatch.setattr(settings, "SETTINGS", str(tmp_path / "settings.json"))
-    monkeypatch.setattr(project, "CACHE", str(tmp_path / "projects.json"))
+    monkeypatch.setattr(project, "CACHE_DIR", str(tmp_path / "projects"))
+    monkeypatch.setattr(settings, "_LOADED", None)
     for name in list(os.environ):
         if name.startswith("MEMVARA_FEATURE_"):
             monkeypatch.delenv(name)
@@ -237,3 +238,66 @@ def test_capture_hands_the_extractor_a_turn_without_the_injected_block(monkeypat
     assert capture.main() == 0
     assert handed and "billing uses postgres" not in handed[0]
     assert "Then postgres it is." in handed[0]
+
+
+# -- the standing digest ---------------------------------------------------------------
+
+
+def test_switching_the_mark_does_not_make_the_standing_set_look_changed(monkeypatch, tmp_path):
+    """The digest must be taken over what the block says, not how it is dressed.
+
+    Hashing the marked block made every running session report "standing preferences
+    updated" once after the upgrade, and again each time `recall_mark` was switched.
+    """
+    from lib import standing as standing_mod
+    from lib import write as write_mod
+
+    notes = [standing_mod.Note(text="always open a PR", subject="user", inferred=False,
+                               confidence=1.0, recorded="2026-09-01", ident="c1")]
+    monkeypatch.setattr(standing_mod, "standing_block",
+                        lambda *a, **k: standing_mod.render(notes, "Standing:", 1000))
+    monkeypatch.setattr(write_mod, "open_writer", lambda: (object(), None))
+    monkeypatch.setattr(recall, "SEEN_DIR", str(tmp_path / "recalled"))
+
+    # Before the upgrade: an unmarked block, digested as it was then.
+    old_digest = recall._digest("Standing:\n- always open a PR")
+    later = recall.STANDING_REFRESH_SECONDS + 10.0
+
+    monkeypatch.setenv("MEMVARA_FEATURE_RECALL_MARK", "1")
+    recall._write_state(SESSION, [], "", (old_digest, 0.0))
+    block, state = recall._standing_refresh(SESSION, later)
+    assert block == "", "the mark alone must not count as a change"
+    assert state == (old_digest, later)
+
+    monkeypatch.setenv("MEMVARA_FEATURE_RECALL_MARK", "0")
+    block, _ = recall._standing_refresh(SESSION, later * 2)
+    assert block == "", "switching the mark off must not count as a change either"
+
+
+# -- the two ways capture recognises injected memory -----------------------------------
+
+
+@pytest.mark.parametrize("name, text", [
+    ("header and marks", f"{recall.HEADER}\n{MARK}- billing uses postgres\n"
+                         f"{MARK}- deploys go to fly.io"),
+    ("header without marks", f"{recall.HEADER}\n- billing uses postgres\n"
+                             "- deploys go to fly.io"),
+    ("marks without header", f"{MARK}- billing uses postgres\n{MARK}- deploys go to fly.io"),
+    ("truncated header with marks", f"Recalled from Mem\n{MARK}- billing uses postgres\n"
+                                    f"{MARK}- deploys go to fly.io"),
+    ("standing header and marks", f"{session_start.STANDING_HEADER}\n"
+                                  f"{MARK}- billing uses postgres\n"
+                                  f"{MARK}- deploys go to fly.io"),
+])
+def test_header_and_mark_detection_agree_on_every_shape_of_block(name, text):
+    """Whichever rule recognises a block, the echo filter and the mining filter must agree.
+
+    `_injected_lines` tells the extractor what it was shown; `_clean` decides what is mined.
+    A memory reported as injected but still mined, or mined without being reported, is the
+    gap these two rules must not leave between them.
+    """
+    memories = ["billing uses postgres", "deploys go to fly.io"]
+    assert transcript._injected_lines(text) == memories, name
+    kept = transcript._clean(text)
+    for memory in memories:
+        assert memory not in kept, f"{name}: mined {memory!r}"

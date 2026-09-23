@@ -23,7 +23,7 @@ from typing import Any
 
 from core.host import active
 
-from .mark import BULLET, MARK, unmarked
+from .mark import BULLET, MARK, is_memory, unmarked
 
 #: The client whose transcript this module reads. Resolved once, at import: `run.py`
 #: binds the host before importing any hook body, and a body is what pulls this in.
@@ -80,9 +80,8 @@ def _injected_lines(text: str) -> list[str]:
         line = line.strip()
         if not (headed or line.startswith(MARK)):
             continue
-        line = unmarked(line)
-        if line.startswith(BULLET) and len(line) > 4:
-            out.append(line[len(BULLET):].strip())
+        if is_memory(line) and len(unmarked(line)) > 4:
+            out.append(unmarked(line)[len(BULLET):].strip())
     return out
 
 

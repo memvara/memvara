@@ -20,7 +20,6 @@ from core.envelope import read_event, write  # noqa: E402
 from core.host import Reply, active  # noqa: E402
 from lib import counts  # noqa: E402
 from lib.ipc import payload  # noqa: E402
-from lib.settings import enabled  # noqa: E402
 
 #: Every memory_* tool the server marks `readOnlyHint`. A read that prompts is a read the
 #: model learns to avoid, and the two graph tools were missing for no reason other than
@@ -62,7 +61,7 @@ def main() -> int:
         return 0
     write(host, Reply("approve", decision=host.approve.allow,
                       reason="Memvara recall is read-only."))
-    if enabled("status_line"):
+    if counts.enabled():
         counts.bump(event.session, "searched")
     return 0
 
