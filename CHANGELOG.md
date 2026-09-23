@@ -89,6 +89,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     or `Memvara(retrieval_chunks=False)`, stores each document as one chunk.
   - SQLite schema 14 adds the `documents` and `document_chunks` tables. See
     `docs/UPGRADING.md`.
+- **Four predicates in the `engineering` pack for what `/memvara:index` records about a
+  repository.** `purpose` is single-valued, so a restated purpose ends the old one.
+  `convention`, `entry_point` and `runs_with` are many-valued, because a repository
+  follows several conventions, has several entry points and is run with several commands,
+  and a second value is another true fact rather than a change. All four are slow to go
+  stale, take a component as subject and a value as object, and are not graph relations.
+  They join the `engineering` bucket of `profile()`. Before this they fell to the
+  unregistered default, so a changed purpose was kept beside the old one.
 - **End or retire every memory that matches a query, after seeing exactly which.**
   `Memvara.forget_matching(query, close=, k=20, reason=None, confirm=None)` without
   `confirm` changes nothing and returns a `ForgetPreview`: the matching claim ids with

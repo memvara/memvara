@@ -77,9 +77,11 @@ load_all_specs("engineering,decisions")
 ```
 
 - **`engineering`** — `deploys_to`, `current_host`, `git_state`, `build_status`,
-  `version`, `endpoint`, `owner` (all single-valued), plus `depends_on`, `rejected`,
-  `known_defect`, `blocked_by` (multi-valued — a project having several dependencies, or
-  several known defects, is normal, and a later one doesn't make an earlier one untrue).
+  `version`, `endpoint`, `owner`, `purpose` (all single-valued), plus `depends_on`,
+  `rejected`, `known_defect`, `blocked_by`, `convention`, `entry_point`, `runs_with`
+  (multi-valued — a project having several dependencies, conventions or entry points is
+  normal, and a later one doesn't make an earlier one untrue). `purpose`, `convention`,
+  `entry_point` and `runs_with` are what `/memvara:index` records about a repository.
 - **`decisions`** — `decided` and `observed`, both multi-valued, for recording what an
   agent decided during its own work and why.
 
