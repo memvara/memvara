@@ -346,3 +346,180 @@ def test_text_is_redacted_on_its_way_out_and_not_after_it_has_left(recorded):
     assert fact["object"] == f"[{CLAIM_OBJECT}:alice]"
     assert fact["text"] == f"[{CLAIM_TEXT}:alice]"
     assert fact["predicate"] == "lives_in", "a predicate is a schema term, not free text"
+
+
+
+# -- a purge never widens past a bound project ------------------------------------------
+
+APP = "github.com/acme/app"
+
+
+@pytest.mark.parametrize("purge", [
+    lambda m: m.purge(),
+    lambda m: m.purge(confirm_tenant="acme"),
+    lambda m: m.scope(user="alice").purge(),
+    lambda m: m.scope(project="github.com/acme/web").purge(),
+])
+def test_a_purge_with_a_project_bound_is_refused_before_anything_is_sent(recorded, purge):
+    """`POST /v1/erasures` takes a user, an agent and a session but no project. A purge
+    sent from a client bound to one project would erase the user's memory in every
+    project, and erasure cannot be undone, so nothing is sent."""
+    mem = recorded(user="alice", project=APP)
+    with pytest.raises(ValueError, match="every project"):
+        purge(mem)
+    assert recorded.calls == []
+
+
+def test_a_view_that_binds_a_project_refuses_a_purge_too(recorded):
+    mem = recorded(user="alice")
+    with pytest.raises(ValueError, match="every project"):
+        mem.scope(project=APP).purge()
+    assert recorded.calls == []
+
+
+def test_a_purge_with_no_project_bound_is_still_sent(recorded):
+    mem = recorded({"counts": {"claims": 1}}, user="alice")
+    assert mem.purge() == {"claims": 1}
+    assert [r.url.path for r in recorded.calls] == ["/v1/erasures"]
+
+
+
+# -- the hosted clients raise what the local engine raises -------------------------------
+
+def _refusing(status, code, message):
+    def handler(request):
+        return httpx.Response(status, json={"error": {"code": code, "message": message,
+                                                      "retryable": False}})
+    return handler
+
+
+def _clients(handler):
+    from memvara.remote.aio import AsyncRemoteMemvara
+    sync = RemoteMemvara(api_key="k", base_url="https://example.test", user="alice")
+    sync._http._client._transport = httpx.MockTransport(handler)
+    aio = AsyncRemoteMemvara(api_key="k", base_url="https://example.test", user="alice")
+    aio._http._client = httpx.AsyncClient(base_url="https://example.test",
+                                          transport=httpx.MockTransport(handler))
+    return sync, aio
+
+
+WRITES = [
+    ("remember", lambda m: m.remember("user", "lives_in", "Lisbon", replaces="cl_x")),
+    ("supersede", lambda m: m.supersede("cl_x", "user", "lives_in", "Lisbon")),
+]
+
+
+@pytest.mark.parametrize("name, write", WRITES, ids=[w[0] for w in WRITES])
+def test_a_replaced_id_that_is_not_visible_raises_key_error_like_the_local_engine(
+        name, write):
+    """`memory_remember` turns a `KeyError` into "Nothing written: replaces names no fact
+    visible here". Left as the transport's `NotFound`, a hosted deployment gave the model
+    a generic failure instead."""
+    import asyncio
+    sync, aio = _clients(_refusing(404, "not_found", "no such memory"))
+    with pytest.raises(KeyError, match="cl_x"):
+        write(sync)
+    with pytest.raises(KeyError, match="cl_x"):
+        asyncio.run(write(aio))
+
+
+@pytest.mark.parametrize("name, write", WRITES, ids=[w[0] for w in WRITES])
+def test_a_replaced_id_that_is_already_closed_raises_value_error_like_the_local_engine(
+        name, write):
+    import asyncio
+    sync, aio = _clients(_refusing(409, "conflict", "claim 'cl_x' is already retired"))
+    with pytest.raises(ValueError, match="already retired"):
+        write(sync)
+    with pytest.raises(ValueError, match="already retired"):
+        asyncio.run(write(aio))
+
+
+def test_linking_a_fact_to_itself_is_refused_before_anything_is_sent():
+    """The same refusal the local engine gives, so `memory_link` answers with its own
+    "Nothing linked" message rather than a transport error from the deployment."""
+    import asyncio
+    sent = []
+
+    def handler(request):
+        sent.append(request)
+        return httpx.Response(200, json={})
+
+    sync, aio = _clients(handler)
+    with pytest.raises(ValueError, match="to itself"):
+        sync.link("cl_1", "cl_1", "extends")
+    with pytest.raises(ValueError, match="to itself"):
+        asyncio.run(aio.link("cl_1", "cl_1", "extends"))
+    assert sent == []
+
+
+
+@pytest.mark.parametrize("k", [0, -1])
+def test_a_profile_asking_for_fewer_than_one_row_is_refused_before_anything_is_sent(k):
+    """`Memvara.profile` refuses `k < 1` with `ValueError`; the hosted clients refuse it
+    the same way rather than sending a request the deployment would reject."""
+    import asyncio
+    sent = []
+
+    def handler(request):
+        sent.append(request)
+        return httpx.Response(200, json={})
+
+    sync, aio = _clients(handler)
+    with pytest.raises(ValueError, match="at least 1"):
+        sync.profile(k=k)
+    with pytest.raises(ValueError, match="at least 1"):
+        sync.scope(agent="a1").profile(k=k)
+    with pytest.raises(ValueError, match="at least 1"):
+        asyncio.run(aio.profile(k=k))
+    with pytest.raises(ValueError, match="at least 1"):
+        asyncio.run(aio.scope(agent="a1").profile(k=k))
+    assert sent == []
+
+
+
+def test_a_404_on_a_write_that_names_no_replaced_claim_is_not_renamed():
+    """Only a refusal of the claim named by `replaces` is the local engine's `KeyError`.
+    Another 404 on the same route, such as a cited source that does not exist, reaches
+    the caller as the deployment's own error, with its own message."""
+    import asyncio
+    from memvara.remote.errors import NotFound
+    sync, aio = _clients(_refusing(404, "not_found", "no such source turn"))
+    with pytest.raises(NotFound, match="no such source turn"):
+        sync.remember("user", "lives_in", "Lisbon", sources=["ep_missing"])
+    with pytest.raises(NotFound, match="no such source turn"):
+        asyncio.run(aio.remember("user", "lives_in", "Lisbon", sources=["ep_missing"]))
+
+
+def test_a_self_link_is_refused_with_the_local_engines_own_message():
+    from memvara import HashingEmbedder, Memvara, NullLLM
+    local = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM())
+    sync, _ = _clients(lambda request: httpx.Response(200, json={}))
+    with pytest.raises(ValueError) as here:
+        local.link("cl_1", "cl_1", "extends")
+    with pytest.raises(ValueError) as there:
+        sync.link("cl_1", "cl_1", "extends")
+    assert str(here.value) == str(there.value)
+
+
+def test_every_hosted_purge_refuses_a_project_with_one_message():
+    """Three hosted purges and one rule. They share one refusal, so its wording cannot
+    drift between them again."""
+    import asyncio
+    from memvara.remote.aio import AsyncRemoteMemvara
+    from memvara.store.remote import RemoteStore
+    from memvara.types import Scope
+    project = "github.com/acme/app"
+    messages = []
+    for purge in (
+        lambda: RemoteStore(base_url="https://example.test", api_key="k").purge(
+            Scope("acme", "alice", project=project)),
+        lambda: RemoteMemvara(api_key="k", base_url="https://example.test",
+                              user="alice", project=project).purge(),
+        lambda: asyncio.run(AsyncRemoteMemvara(
+            api_key="k", base_url="https://example.test", user="alice",
+            project=project).purge()),
+    ):
+        with pytest.raises(ValueError) as refused:
+            purge()
+        messages.append(str(refused.value))
+    assert len(set(messages)) == 1 and project in messages[0]

@@ -31,25 +31,27 @@ its per-table counts as evidence inside the erasure response itself.
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager, nullcontext
 from copy import copy
 from datetime import datetime
-from typing import Any, Callable, Collection, Literal, Mapping, Sequence, overload
+from typing import Any, Callable, Collection, Iterator, Literal, Mapping, Sequence, overload
 from urllib.parse import quote
 
 from ..confirm import ConfirmationRefused
+from ..core import _check_k
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import EpisodeResult, Path, Retrieved
 from ..types import (
     Answer, Claim, DeleteResult, Delta, Document, DocumentStatus, Episode,
     ForgetPreview, ForgetResult, Link, MemoryType, Page, Profile, Provenance, Result,
     Scope, SearchResults, WriteReceipt, closure, closure_reason, link_relation,
-    one_source,
+    one_source, refuse_self_link,
 )
 from ..types import PROJECT_META, PROJECT_META_REFUSAL
 from . import hydrate
 from .client import DEFAULT_TIMEOUT, HttpClient
 from .creds import resolve
-from .errors import Conflict, InvalidRequest, NotFound
+from .errors import Conflict, InvalidRequest, NotFound, refuse_project_purge
 
 
 #: The header that carries the bound project to the deployment. The deployment reads it
@@ -66,6 +68,28 @@ def _refuse_project_meta(meta: Mapping[str, Any], method: str) -> None:
     """
     if PROJECT_META in meta:
         raise TypeError(PROJECT_META_REFUSAL.format(method=method))
+
+
+@contextmanager
+def _as_local_refusal(claim_id: str) -> Iterator[None]:
+    """Raise the local engine's exceptions for the deployment's refusal of a named claim.
+
+    `Memvara.remember(replaces=...)` and `Memvara.supersede` raise `KeyError` when the
+    named claim is not visible and `ValueError` when it has nothing left to close, and
+    `memory_remember` answers each with its own "Nothing written" message. The facade
+    refuses the same two cases as 404 and 409, so they are translated here and a caller
+    handles one set of exceptions whatever serves it.
+
+    Only around a call that names a claim. A 404 from a write that names none, such as
+    one citing a source turn that does not exist, is the deployment's own error and
+    reaches the caller unchanged.
+    """
+    try:
+        yield
+    except NotFound:
+        raise KeyError(f"no claim {claim_id!r} is visible here") from None
+    except Conflict as exc:
+        raise ValueError(exc.message) from None
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -729,7 +753,11 @@ class RemoteMemvara:
         answers with `standing`, `recent` and `relevant` as lists of rows, `buckets` as
         an object of bucket name to a list of rows, and `warnings` as a list of strings.
         A row is `{"claim_id", "text", "inferred"}`.
+
+        `k` below 1 raises `ValueError` before anything is sent, as `Memvara.profile`
+        does.
         """
+        _check_k(k)
         body = self._request(
             "POST", "/v1/profile", params=self._params(),
             json=_sent({"query": query, "k": k, "since": _iso(since),
@@ -801,8 +829,10 @@ class RemoteMemvara:
             "until_reason": closure_reason(until_reason),
             "replaces": replaces, "reason": closure_reason(reason),
         }
-        return hydrate.receipt(self._request(
-            "POST", "/v1/facts", params=self._params(), json=_sent(body), write=True))
+        with _as_local_refusal(replaces) if replaces is not None else nullcontext():
+            out = self._request(
+                "POST", "/v1/facts", params=self._params(), json=_sent(body), write=True)
+        return hydrate.receipt(out)
 
     def supersede(self, old_claim_id: str, subject: str, predicate: str, obj: str, *,
                   at: datetime | None = None, close: str = "ended",
@@ -851,9 +881,11 @@ class RemoteMemvara:
             "recorded_at": _iso(recorded_at),
             "source_ids": ids, "sources": turns, "metadata": meta,
         }
-        return hydrate.receipt(self._request(
-            "POST", f"/v1/memories/{old_claim_id}/supersede", params=self._params(),
-            json=_sent(body), write=True))
+        with _as_local_refusal(old_claim_id):
+            out = self._request(
+                "POST", f"/v1/memories/{old_claim_id}/supersede", params=self._params(),
+                json=_sent(body), write=True)
+        return hydrate.receipt(out)
 
     def forget(self, subject: str, predicate: str, *, at: datetime | None = None,
                close: str = "retired", reason: str | None = None) -> list[Claim]:
@@ -951,8 +983,10 @@ class RemoteMemvara:
 
         `KeyError` when either id is not visible to this credential, matching
         `Memvara.link`; the deployment answers 404 for a missing id and for one in
-        another tenant alike.
+        another tenant alike. `ValueError`, without a request, for a claim linked to
+        itself, as `Memvara.link` raises.
         """
+        refuse_self_link(from_id, to_id)
         try:
             out = self._request(
                 "POST", "/v1/links", params=self._params(),
@@ -1111,8 +1145,13 @@ class RemoteMemvara:
         that without `confirm_tenant` equal to the tenant's own name — an empty scope
         object is too easy to send by accident. `confirm_tenant` cannot widen anything:
         the credential decides the tenant, and any other value is refused.
+
+        A client bound to a project refuses, with `ValueError` and without sending
+        anything: the erasure route cannot express a project yet, so the request would
+        erase the user's memory in every project.
         """
         scope = self.default_scope
+        refuse_project_purge(scope.project)
         body = self._request(
             "POST", "/v1/erasures", params=self._params(),
             json=_sent({"scope": _sent({"user": scope.user, "agent": scope.agent,

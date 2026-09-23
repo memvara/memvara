@@ -3289,3 +3289,125 @@ def test_binding_a_narrower_view_keeps_the_project():
         assert view.scope.agent == "worker"
     finally:
         mem.close()
+
+
+
+# -- replaying a supersession ------------------------------------------------------------
+#
+# A replay is the same supersession again: the same old claim, closed the same way, by a
+# successor with the same value, the same start date and the same project. Anything else
+# is a correction or a conflict, and is refused rather than absorbed.
+
+_JAN = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_FEB = datetime(2026, 2, 1, tzinfo=timezone.utc)
+
+
+def _replay_store():
+    from memvara import Claim, HashingEmbedder, Memvara, NullLLM
+    mem = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+    old = mem.remember("user", "lives_in", "Berlin", valid_from=_JAN,
+                       recorded_at=_JAN).added[0]
+    return mem, old, Claim
+
+
+def _lisbon(Claim, **kw):
+    kw.setdefault("valid_from", _FEB)
+    return Claim(subject="user", predicate="lives_in", object="Lisbon", **kw)
+
+
+@pytest.mark.parametrize("close", ["ended", "retired"])
+def test_replaying_the_same_supersession_changes_nothing_and_names_the_successor(close):
+    """Importing a mutation log twice replays each update twice. The second replay names
+    a claim the first already closed with the same new value, so it writes nothing and
+    reports the value that already replaced it, instead of failing the import."""
+    mem, old, Claim = _replay_store()
+    successor = mem.supersede(old.id, _lisbon(Claim), close=close).added[0]
+    before = mem.stats()
+    again = mem.supersede(old.id, _lisbon(Claim), close=close)
+    assert again.added == [] and again.closed == []
+    assert [c.id for c in again.reinforced] == [successor.id]
+    assert mem.get(successor.id).salience == successor.salience, "a replay bumps nothing"
+    assert mem.stats() == before
+    assert [c.object for c in mem.get_all()] == ["Lisbon"]
+
+
+def test_a_supersession_that_conflicts_with_the_recorded_one_is_still_refused():
+    """A different new value, or the other closure, is not a replay: the old claim was
+    closed by something else, and closing it again would restate history."""
+    mem, old, Claim = _replay_store()
+    mem.supersede(old.id, _lisbon(Claim))
+    with pytest.raises(ValueError, match="already ended"):
+        mem.supersede(old.id, Claim(subject="user", predicate="lives_in", object="Oslo",
+                                    valid_from=_FEB))
+    mem2, old2, _ = _replay_store()
+    mem2.supersede(old2.id, _lisbon(Claim), close="retired")
+    with pytest.raises(ValueError, match="already retired"):
+        mem2.supersede(old2.id, _lisbon(Claim), close="ended")
+
+
+def test_the_same_value_from_a_different_date_is_a_correction_not_a_replay():
+    """Only the start date differs, so the caller is saying something new about when the
+    value began. Absorbing it as a replay would drop that silently."""
+    mem, old, Claim = _replay_store()
+    mem.supersede(old.id, _lisbon(Claim))
+    with pytest.raises(ValueError, match="already ended"):
+        mem.supersede(old.id, _lisbon(Claim, valid_from=_FEB + timedelta(days=3)))
+
+
+def test_the_same_value_in_another_project_is_not_a_replay():
+    """`value_key` leaves the project out, so without comparing it a write meant for
+    project B would be reported as already done by project A's successor, and B would
+    be left with nothing."""
+    from memvara.types import Scope
+    mem, old, Claim = _replay_store()
+    app = Scope("default", "alice", project="github.com/acme/app")
+    web = Scope("default", "alice", project="github.com/acme/web")
+    # Through project A's view, which sees both the user-wide claim and A's successor.
+    view = mem.scope(project=app.project)
+    view.supersede(old.id, Claim(subject="user", predicate="home_city", object="Lisbon",
+                                 valid_from=_FEB, scope=app))
+    with pytest.raises(ValueError, match="already ended"):
+        view.supersede(old.id, Claim(subject="user", predicate="home_city", object="Lisbon",
+                                     valid_from=_FEB, scope=web))
+
+
+def test_a_replay_whose_successor_was_erased_is_refused_as_a_conflict():
+    """Without the successor there is nothing to compare the replayed value with, so the
+    call cannot show it is a replay and is refused like any other second closure."""
+    mem, old, Claim = _replay_store()
+    successor = mem.supersede(old.id, _lisbon(Claim)).added[0]
+    mem.erase(successor.id)
+    with pytest.raises(ValueError, match="already ended"):
+        mem.supersede(old.id, _lisbon(Claim))
+
+
+def test_remember_with_replaces_replays_the_same_way():
+    """`remember(replaces=...)` goes through `supersede`, so a replayed import that uses
+    it also completes instead of failing on the second run."""
+    mem, old, _ = _replay_store()
+    successor = mem.remember("user", "lives_in", "Lisbon", valid_from=_FEB,
+                             replaces=old.id).added[0]
+    again = mem.remember("user", "lives_in", "Lisbon", valid_from=_FEB, replaces=old.id)
+    assert again.added == [] and [c.id for c in again.reinforced] == [successor.id]
+    with pytest.raises(ValueError, match="already ended"):
+        mem.remember("user", "lives_in", "Oslo", valid_from=_FEB, replaces=old.id)
+
+
+def test_memory_remember_reports_a_replayed_replacement_as_already_known():
+    from memvara.server import MemvaraMCPServer
+    mem, old, _ = _replay_store()
+    server = MemvaraMCPServer(mem, user="alice")
+
+    def remember():
+        reply = server.handle_message({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "memory_remember", "arguments": {
+                "predicate": "lives_in", "object": "Lisbon",
+                "true_since": "2026-02-01T00:00:00Z", "replaces": old.id}}})
+        return reply["result"]["content"][0]["text"], reply["result"]["isError"]
+
+    first, error = remember()
+    assert not error and "added 1" in first
+    second, error = remember()
+    assert not error, second
+    assert "added 0" in second and "already-known 1" in second
