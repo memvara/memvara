@@ -1283,7 +1283,7 @@ MODEL_CALLS = {
     "memvara/core.py::_advise_replacements: judge.judge_replacement",
     "memvara/compat/mem0_import.py::_extract: llm.extract",
     "memvara/write/pipeline.py::_tier1: self.fast.extract",
-    "memvara/write/pipeline.py::_tier2: self.llm.extract",
+    "memvara/write/pipeline.py::_extract: self.llm.extract",
     "memvara/write/pipeline.py::_acquire: self.llm.classify_predicate",
 }
 _MODEL_METHODS = {"chat", "extract", "resolve_predicate", "classify_predicate",
